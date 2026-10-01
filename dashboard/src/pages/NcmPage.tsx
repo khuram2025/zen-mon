@@ -1,599 +1,544 @@
-import { ConnectionAccessGuide } from '@/components/ncm/ConnectionAccessGuide'
-import { NcmHealth } from '@/components/ncm/NcmReadiness'
-import { useMemo, useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  FileCode, RefreshCw, Save, Eye, X, KeyRound, Settings2, DownloadCloud, Download,
-  Plus, Trash2, Pencil, Search, ChevronLeft, ChevronRight, Clock, GitCompare,
+  ArrowRight, Clock, Download, DownloadCloud, FileCode, KeyRound, ListChecks, RefreshCw, Search, Settings2, X,
 } from 'lucide-react'
 import { useCan } from '@/stores/auth'
 import { api } from '@/lib/api'
-import { relativeTime, apiErrorMessage } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { Input } from '@/components/ui/Input'
-import { Textarea } from '@/components/ui/Textarea'
-import { Switch } from '@/components/ui/Switch'
-import { FormField } from '@/components/ui/FormField'
-import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
+import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
+import { NcmHealth } from '@/components/ncm/NcmReadiness'
+import { Ago, EmptyState, Kpi, Pagination, StaleBanner, StateBadge, ToneIcon } from '@/components/ncm/ui'
+import {
+  STATES, RISK_ORDER, TONE_BG, categoryLabel, download, ncmError, pct, scheduleSummary, stateOf, toCsv, type Tone,
+} from '@/components/ncm/model'
+import { AssignProfileDialog, BulkBackupDialog, BulkSettingsDialog, SelectionReviewDialog } from '@/components/ncm/BulkDialogs'
+import { ProfilesDialog } from '@/components/ncm/ProfilesDialog'
+import { ComplianceWorkspace } from '@/components/ncm/ComplianceWorkspace'
+import { JobsWorkspace } from '@/components/ncm/OperationsWorkspace'
+import { AuditWorkspace } from '@/components/ncm/AuditWorkspace'
+import { ArchiveSearch, CrossDeviceCompare, SupportMatrix } from '@/components/ncm/ArchiveTools'
 
-const PAGE_SIZES = [10, 25, 50, 100]
-const WEEKDAYS = [['Sun', 0], ['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6]] as const
-type Filter = { key: 'status' | 'type' | 'location' | 'vendor'; value: string } | null
-
-function statusKey(d: any): string { return d?.backup_state || 'pending' }
-
-const STATUS_META: Record<string, { label: string; cls: string; badge: any }> = {
-  unknown: { label: 'Unknown', cls: 'bg-warning', badge: 'warning' },
-  fresh: { label: 'Fresh / validated', cls: 'bg-success', badge: 'success' },
-  stale: { label: 'Stale', cls: 'bg-warning', badge: 'warning' },
-  unverified: { label: 'Unverified', cls: 'bg-warning', badge: 'warning' },
-  excluded: { label: 'Excluded', cls: 'bg-border', badge: undefined },
-  disabled: { label: 'Disabled', cls: 'bg-border', badge: undefined },
-  backed_up: { label: 'Backed up', cls: 'bg-success', badge: 'success' },
-  failed: { label: 'Failed', cls: 'bg-danger', badge: 'danger' },
-  pending: { label: 'Pending', cls: 'bg-warning', badge: 'warning' },
-  unconfigured: { label: 'Not configured', cls: 'bg-border', badge: undefined },
+const PAGE_SIZES = [25, 50, 100, 200]
+const FACET_KEYS = ['status', 'vendor', 'device_type', 'location'] as const
+type FacetKey = typeof FACET_KEYS[number]
+const FACET_LABEL: Record<FacetKey, string> = { status: 'Protection', vendor: 'Vendor', device_type: 'Type', location: 'Site' }
+const FLAG_LABEL: Record<string, string> = {
+  review: 'Needs scope review', unsupported: 'No collector', overdue: 'Schedule overdue', incident: 'Open incident',
+  compliance: 'Failing compliance', never_captured: 'Never captured', outside_scope: 'Enrolled outside scope',
 }
+const TABS = ['overview', 'devices', 'jobs', 'compliance', 'archive', 'audit', 'collectors'] as const
 
-function StatusBadge({ d }: { d: any }) {
-  const m = STATUS_META[statusKey(d)] || STATUS_META.unknown
-  return m.badge ? <Badge variant={m.badge}>{m.label}{d.versions ? ` · ${d.versions}v` : ''}</Badge> : <span className="text-xs text-muted">{m.label}</span>
-}
-
-function Facet({ title, items, active, onPick }: { title: string; items: [string, number][]; active?: string; onPick: (v: string) => void }) {
-  if (!items.length) return null
-  const max = Math.max(...items.map((i) => i[1]), 1)
-  return (
-    <div className="space-y-1.5">
-      <div className="text-xs font-semibold uppercase tracking-wider text-muted">{title}</div>
-      {items.map(([label, n]) => (
-        <button key={label} onClick={() => onPick(label)}
-          className={`group w-full rounded px-2 py-1 text-left text-xs transition-colors ${active === label ? 'bg-primary/10 ring-1 ring-primary/40' : 'hover:bg-surface2'}`}>
-          <div className="flex items-center justify-between">
-            <span className="truncate">{label}</span>
-            <span className="ml-2 tabular-nums text-muted">{n}</span>
-          </div>
-          <div className="mt-1 h-1 overflow-hidden rounded-full bg-surface2">
-            <div className="h-full rounded-full bg-primary/60" style={{ width: `${(n / max) * 100}%` }} />
-          </div>
-        </button>
-      ))}
-    </div>
-  )
+function useUrlState() {
+  const [params, setParams] = useSearchParams()
+  const get = (k: string) => params.get(k) || ''
+  const list = (k: string) => (params.get(k) || '').split(',').filter(Boolean)
+  const update = (patch: Record<string, string | string[] | null>, resetPage = true) => {
+    const next = new URLSearchParams(params)
+    for (const [k, v] of Object.entries(patch)) {
+      const value = Array.isArray(v) ? v.join(',') : v
+      if (value) next.set(k, value); else next.delete(k)
+    }
+    if (resetPage && !('page' in patch)) next.delete('page')
+    setParams(next, { replace: true })
+  }
+  return { params, get, list, update }
 }
 
 export function NcmPage() {
   const can = useCan()
   const qc = useQueryClient()
-  const navigate = useNavigate()
-  const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState<Filter>(null)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(50)
-  const [customSize, setCustomSize] = useState('')
+  const url = useUrlState()
+  const tab = (TABS as readonly string[]).includes(url.get('tab')) ? url.get('tab') : 'overview'
   const [profilesOpen, setProfilesOpen] = useState(false)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [assignOpen, setAssignOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const openDevice = (d: any) => navigate(`/ncm/${d.device_id}`)
+  const refreshAll = () => qc.invalidateQueries({ queryKey: ['ncm'] })
 
-  const { data: overview, isFetching, isPending, isError, refetch } = useQuery<any>({
-    queryKey: ['ncm', 'overview'], queryFn: async () => (await api.get('/ncm/overview')).data, refetchInterval: 30000,
-  })
-  const { data: creds, isError: profilesError } = useQuery<any>({ queryKey: ['ncm', 'credentials'], queryFn: async () => (await api.get('/ncm/credentials')).data })
-  const { data: platforms } = useQuery<any>({ queryKey: ['ncm', 'platforms'], queryFn: async () => (await api.get('/ncm/platforms')).data })
-  const devices: any[] = overview?.data || []
-  const credentials: any[] = creds?.data || []
-  const platformList: any[] = platforms?.data || [{ value: 'autodetect', label: 'Auto-detect' }]
-
+  const summary = useQuery<any>({ queryKey: ['ncm', 'overview', 'summary'], queryFn: async () => (await api.get('/ncm/overview', { params: { page_size: 1 } })).data, refetchInterval: 30000 })
   const runScheduled = useMutation({
-    mutationFn: async () => (await api.post('/ncm/run-scheduled', null, { timeout: 600000 })).data,
-    onSuccess: (d: any) => { toast.success(`Scheduled run: ${d.queued} queued, ${d.already_active} already active (${d.due} due)`); qc.invalidateQueries({ queryKey: ['ncm'] }) },
-    onError: (e: any) => toast.error('Run failed', apiErrorMessage(e)),
-  })
-
-  const facets = useMemo(() => {
-    const by = (fn: (d: any) => string | null | undefined) => {
-      const m = new Map<string, number>()
-      for (const d of devices) { const k = fn(d); if (k) m.set(k, (m.get(k) || 0) + 1) }
-      return [...m.entries()].sort((a, b) => b[1] - a[1])
-    }
-    return {
-      status: by((d) => (STATUS_META[statusKey(d)] || STATUS_META.unknown).label),
-      type: by((d) => d.device_type || 'unknown'),
-      location: by((d) => d.location || 'unassigned'),
-      vendor: by((d) => d.vendor || 'unknown'),
-    }
-  }, [devices])
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    return devices.filter((d) => {
-      if (q && ![d.hostname, d.ip, d.vendor, d.device_type, d.location, d.credential_name, d.platform]
-        .some((v) => (v || '').toString().toLowerCase().includes(q))) return false
-      if (filter) {
-        if (filter.key === 'status' && (STATUS_META[statusKey(d)] || STATUS_META.unknown).label !== filter.value) return false
-        if (filter.key === 'type' && (d.device_type || 'unknown') !== filter.value) return false
-        if (filter.key === 'location' && (d.location || 'unassigned') !== filter.value) return false
-        if (filter.key === 'vendor' && (d.vendor || 'unknown') !== filter.value) return false
-      }
-      return true
-    })
-  }, [devices, search, filter])
-
-  useEffect(() => { setPage(1) }, [search, filter, pageSize])
-  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
-  const pageRows = filtered.slice((page - 1) * pageSize, page * pageSize)
-  const coverage = overview ? Math.round((overview.fresh / Math.max(1, overview.eligible)) * 100) : 0
-  const pick = (key: Filter extends null ? never : NonNullable<Filter>['key'], value: string) =>
-    setFilter((f) => (f && f.key === key && f.value === value ? null : { key, value }))
-
-  // ---- bulk selection ----
-  const toggleOne = (id: string) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
-  const pageIds = pageRows.map((d) => d.device_id)
-  const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
-  const togglePage = () => setSelected((s) => {
-    const n = new Set(s)
-    if (allPageSelected) pageIds.forEach((id) => n.delete(id)); else pageIds.forEach((id) => n.add(id))
-    return n
-  })
-  const selectedDevices = useMemo(() => devices.filter((d) => selected.has(d.device_id)), [devices, selected])
-  const clearSelection = () => setSelected(new Set())
-
-  const bulkBackup = useMutation({
-    mutationFn: async () => {
-      const ids = selectedDevices.filter((d) => d.enrolled).map((d) => d.device_id)
-      const results = await Promise.allSettled(
-        ids.map((id) => api.post(`/devices/${id}/ncm-jobs`)),
-      )
-      const ok = results.filter((r) => r.status === 'fulfilled').length
-      return { ok, failed: results.length - ok, skipped: selectedDevices.length - ids.length }
+    mutationFn: async () => (await api.post('/ncm/run-scheduled', null, { timeout: 120000 })).data,
+    onSuccess: (d: any) => {
+      const text = `${d.queued} queued, ${d.already_active} already active, ${d.blocked || 0} blocked (${d.due} due)`
+      ;(d.blocked ? toast.warning : toast.success)('Due schedules processed', text)
+      refreshAll()
     },
-    onSuccess: (r) => {
-      toast.success(`Bulk backup: ${r.ok} accepted, ${r.failed} failed to queue${r.skipped ? `, ${r.skipped} skipped (no profile)` : ''}`)
-      qc.invalidateQueries({ queryKey: ['ncm'] })
-    },
-    onError: (e: any) => toast.error('Bulk backup failed', apiErrorMessage(e)),
+    onError: (e: any) => toast.error('Could not process schedules', ncmError(e)),
   })
-
-  if (isError) return <div role="alert" className="space-y-3"><h1 className="text-xl font-semibold">NCCM unavailable</h1><p>Could not load backup coverage. Availability and device counts are unknown.</p><Button onClick={() => refetch()}>Retry</Button></div>
-  if (isPending) return <p className="p-4 text-muted">Loading NCCM coverage…</p>
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
+    <div className="min-w-0 space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
           <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-            <FileCode className="h-5 w-5 shrink-0 text-primary" /> Network Configuration &amp; Compliance Manager (NCCM)
+            <FileCode className="h-5 w-5 shrink-0 text-primary" aria-hidden /> Network Configuration &amp; Compliance
           </h1>
-          <p className="text-xs text-muted">Device configuration backups, change tracking and compliance</p>
+          <p className="text-sm text-muted">What is protected, what is at risk, what changed and what needs action.</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => runScheduled.mutate()} disabled={!can('ncm.manage') || runScheduled.isPending}><Clock className="h-3.5 w-3.5" /> Run scheduled</Button>
-          <Button variant="outline" size="sm" disabled={!can('ncm.credentials')} onClick={() => setProfilesOpen(true)}><KeyRound className="h-3.5 w-3.5" /> Connection Profiles</Button>
-          <Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className={`h-3.5 w-3.5 ${isFetching ? 'animate-spin' : ''}`} /> Refresh</Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => runScheduled.mutate()} disabled={!can('ncm.manage') || runScheduled.isPending}
+            title="Queue backups for every schedule that is due now (the scheduler also does this every minute)"><Clock className="h-3.5 w-3.5" /> Run due schedules</Button>
+          <Button variant="outline" size="sm" disabled={!can('ncm.credentials')} onClick={() => setProfilesOpen(true)}><KeyRound className="h-3.5 w-3.5" /> Connection profiles</Button>
+          <Button variant="outline" size="sm" onClick={refreshAll} aria-label="Refresh all NCCM data"><RefreshCw className={cn('h-3.5 w-3.5', qc.isFetching({ queryKey: ['ncm'] }) > 0 && 'animate-spin')} /> Refresh</Button>
         </div>
       </div>
 
       <NcmHealth />
-      <p className="text-xs text-muted">{devices.filter((d) => d.eligible && d.support?.state === 'unsupported').length} eligible devices lack an implemented collector · {devices.filter((d) => d.eligibility_review).length} devices need eligibility review. Open a device for setup checks. Eligibility is separate from collector support; validated means format-checked, not restore-certified.</p>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {[
-          { label: 'Eligible devices', value: overview?.eligible ?? 0, cls: 'text-text' },
-          { label: 'Enrolled', value: overview?.enrolled ?? 0, cls: 'text-primary' },
-          { label: 'Fresh / validated', value: overview?.fresh ?? 0, cls: 'text-success' },
-          { label: 'Coverage', value: overview?.eligible ? `${coverage}%` : 'N/A', cls: 'text-text' },
-        ].map((c) => (
-          <Card key={c.label}><CardContent className="py-3"><div className="text-xs text-muted">{c.label}</div><div className={`text-2xl font-semibold ${c.cls}`}>{c.value}</div></CardContent></Card>
-        ))}
-      </div>
 
-      {profilesError && <p role="alert" className="text-sm text-warning">Connection profiles could not be loaded. Refresh before creating or assigning profiles.</p>}
-      {creds && !credentials.length && (
-        <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-          No connection profiles yet. Create one (<span className="font-medium">Connection Profiles</span>) with the device CLI/SSH username &amp; password, then add devices to backup.
+      <Tabs value={tab} onValueChange={(v) => url.update({ tab: v === 'overview' ? null : v }, false)}>
+        <div className="-mx-1 overflow-x-auto px-1">
+          <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="devices">Devices</TabsTrigger>
+            <TabsTrigger value="jobs">Jobs &amp; delivery</TabsTrigger>
+            <TabsTrigger value="compliance">Compliance</TabsTrigger>
+            <TabsTrigger value="archive">Search &amp; compare</TabsTrigger>
+            {(can('ncm.manage') || can('audit.view')) && <TabsTrigger value="audit">Audit</TabsTrigger>}
+            <TabsTrigger value="collectors">Collectors</TabsTrigger>
+          </TabsList>
         </div>
-      )}
+        <TabsContent value="overview"><ManagementOverview query={summary} goDevices={(patch) => url.update({ tab: 'devices', ...patch })} /></TabsContent>
+        <TabsContent value="devices"><DevicesWorkspace url={url} /></TabsContent>
+        <TabsContent value="jobs"><JobsWorkspace /></TabsContent>
+        <TabsContent value="compliance"><ComplianceWorkspace /></TabsContent>
+        <TabsContent value="archive" className="space-y-4"><ArchiveSearch /><CrossDeviceCompare /></TabsContent>
+        <TabsContent value="audit"><AuditWorkspace /></TabsContent>
+        <TabsContent value="collectors"><SupportMatrix /></TabsContent>
+      </Tabs>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_280px]">
-        {/* main */}
-        <Card>
-          <CardContent className="space-y-3 pt-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative min-w-[220px] flex-1">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-                <Input className="pl-8" placeholder="Search hostname, IP, vendor, location, profile…" value={search} onChange={(e) => setSearch(e.target.value)} />
-              </div>
-              {filter && (
-                <button onClick={() => setFilter(null)} className="flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-xs text-primary">
-                  {filter.key}: {filter.value} <X className="h-3 w-3" />
-                </button>
-              )}
-              <span className="text-xs text-muted">{filtered.length} device{filtered.length === 1 ? '' : 's'}</span>
-              <div className="ml-auto flex items-center gap-1.5">
-                <span className="text-xs text-muted">Show</span>
-                <Select
-                  value={PAGE_SIZES.includes(pageSize) ? String(pageSize) : 'custom'}
-                  onValueChange={(v) => { if (v === 'custom') { setCustomSize(String(pageSize)) } else { setPageSize(Number(v)); setCustomSize('') } }}>
-                  <SelectTrigger className="h-8 w-[92px]"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {PAGE_SIZES.map((n) => <SelectItem key={n} value={String(n)}>{n} / page</SelectItem>)}
-                    <SelectItem value="custom">Custom…</SelectItem>
-                  </SelectContent>
-                </Select>
-                {!PAGE_SIZES.includes(pageSize) || customSize ? (
-                  <Input className="h-8 w-[72px]" type="number" min={1} max={1000} placeholder="rows"
-                    value={customSize} onChange={(e) => setCustomSize(e.target.value)}
-                    onBlur={() => { const n = Math.max(1, Math.min(1000, Number(customSize) || 50)); setPageSize(n); setCustomSize(String(n)) }}
-                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />
-                ) : null}
-              </div>
-            </div>
-
-            {selected.size > 0 && (
-              <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
-                <span className="font-medium text-primary">{selected.size} selected</span>
-                  <Button variant="outline" size="sm" disabled={!credentials.length || !can('ncm.manage')} onClick={() => setAssignOpen(true)}>
-                  <KeyRound className="h-3.5 w-3.5" /> Assign profile
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                    disabled={!can('ncm.manage') || !selectedDevices.some((d) => d.enrolled)}
-                    onClick={() => setSettingsOpen(true)}
-                >
-                  <Clock className="h-3.5 w-3.5" /> Backup settings
-                </Button>
-                <Button variant="outline" size="sm" disabled={!can('ncm.manage') || bulkBackup.isPending || !selectedDevices.some((d) => d.enrolled)} onClick={() => bulkBackup.mutate()}>
-                  <DownloadCloud className={`h-3.5 w-3.5 ${bulkBackup.isPending ? 'animate-pulse' : ''}`} /> {bulkBackup.isPending ? 'Backing up…' : 'Run backup now'}
-                </Button>
-                <button onClick={clearSelection} className="ml-auto flex items-center gap-1 text-muted hover:text-text">Clear <X className="h-3 w-3" /></button>
-              </div>
-            )}
-
-            <div className="overflow-hidden rounded-md border border-border">
-              <Table>
-                <THead className="bg-surface2/50">
-                  <Tr>
-                    <Th className="w-8">
-                      <input type="checkbox" className="h-3.5 w-3.5 cursor-pointer accent-primary" checked={allPageSelected} onChange={togglePage} title="Select page" />
-                    </Th>
-                    <Th>Device</Th><Th>Type / Vendor</Th><Th>Location</Th><Th>Backup profile</Th><Th>Status</Th><Th className="text-right">Actions</Th>
-                  </Tr>
-                </THead>
-                <TBody>
-                  {pageRows.map((d) => (
-                    <Tr key={d.device_id} className={`cursor-pointer ${selected.has(d.device_id) ? 'bg-primary/5' : ''}`} onClick={() => openDevice(d)}>
-                      <Td onClick={(e) => e.stopPropagation()}>
-                        <input type="checkbox" className="h-3.5 w-3.5 cursor-pointer accent-primary" checked={selected.has(d.device_id)} onChange={() => toggleOne(d.device_id)} />
-                      </Td>
-                      <Td><div className="font-medium">{d.hostname}</div><div className="font-mono text-xs text-muted">{d.ip}</div></Td>
-                      <Td className="text-xs text-muted">{d.device_type || '—'}{d.vendor ? ` · ${d.vendor}` : ''}</Td>
-                      <Td className="text-xs text-muted">{d.location || '—'}</Td>
-                      <Td className="text-xs">{d.enrolled ? <div><div>{d.credential_name || <span className="text-warning">no profile</span>}</div><div className="text-muted">{d.platform}{d.schedule_enabled ? ` · ${d.schedule_interval_hours}h` : ''}</div></div> : <span className="text-muted">not configured</span>}</Td>
-                      <Td><StatusBadge d={d} /><div className="mt-1 max-w-64 text-[11px] text-muted" title={d.eligibility_reason}>{d.eligibility_review ? 'Review inventory / backup scope' : !d.eligible ? d.eligibility_reason : d.support?.state === 'unsupported' ? d.support.message : d.support?.state === 'needs_detection' ? 'Collector needs verification' : 'Collector implemented; pilot pending'}</div></Td>
-                      <Td onClick={(e) => e.stopPropagation()}>
-                        <div className="flex justify-end">
-                          <Button variant="ghost" size="sm" onClick={() => openDevice(d)}><Settings2 className="h-3.5 w-3.5" /> Details</Button>
-                        </div>
-                      </Td>
-                    </Tr>
-                  ))}
-                  {!pageRows.length && <Tr><Td colSpan={7} className="py-10 text-center text-muted">No matching devices.</Td></Tr>}
-                </TBody>
-              </Table>
-            </div>
-
-            {filtered.length > 0 && (
-              <div className="flex items-center justify-between text-xs text-muted">
-                <span>{(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)} of {filtered.length}</span>
-                {pageCount > 1 && (
-                  <div className="flex items-center gap-1">
-                    <Button variant="outline" size="icon" className="h-7 w-7" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}><ChevronLeft className="h-4 w-4" /></Button>
-                    {Array.from({ length: pageCount }).slice(0, 7).map((_, i) => (
-                      <Button key={i} variant={page === i + 1 ? 'default' : 'outline'} size="icon" className="h-7 w-7" onClick={() => setPage(i + 1)}>{i + 1}</Button>
-                    ))}
-                    {pageCount > 7 && <span className="px-1">…{pageCount}</span>}
-                    <Button variant="outline" size="icon" className="h-7 w-7" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}><ChevronRight className="h-4 w-4" /></Button>
-                  </div>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* right breakdown */}
-        <Card>
-          <CardContent className="space-y-4 pt-4">
-            <div className="text-sm font-semibold">Breakdown</div>
-            <Facet title="By status" items={facets.status} active={filter?.key === 'status' ? filter.value : undefined} onPick={(v) => pick('status', v)} />
-            <Facet title="By category" items={facets.type} active={filter?.key === 'type' ? filter.value : undefined} onPick={(v) => pick('type', v)} />
-            <Facet title="By location" items={facets.location} active={filter?.key === 'location' ? filter.value : undefined} onPick={(v) => pick('location', v)} />
-            <Facet title="By vendor" items={facets.vendor} active={filter?.key === 'vendor' ? filter.value : undefined} onPick={(v) => pick('vendor', v)} />
-          </CardContent>
-        </Card>
-      </div>
-
-      <ProfilesDialog open={profilesOpen} onOpenChange={setProfilesOpen} credentials={credentials} />
-      <AssignProfileDialog
-        open={assignOpen} onOpenChange={setAssignOpen}
-        credentials={credentials} platforms={platformList}
-        devices={selectedDevices}
-        onDone={() => { clearSelection(); qc.invalidateQueries({ queryKey: ['ncm'] }) }}
-      />
-      <BulkBackupSettingsDialog
-        open={settingsOpen}
-        onOpenChange={setSettingsOpen}
-        devices={selectedDevices}
-        onDone={() => { qc.invalidateQueries({ queryKey: ['ncm'] }) }}
-      />
+      <ProfilesDialog open={profilesOpen} onOpenChange={setProfilesOpen} />
     </div>
   )
 }
 
-function BulkBackupSettingsDialog({
-  open,
-  onOpenChange,
-  devices,
-  onDone,
-}: {
-  open: boolean
-  onOpenChange: (o: boolean) => void
-  devices: any[]
-  onDone: () => void
-}) {
-  const enrolled = devices.filter((d) => d.enrolled)
-  const [scheduleEnabled, setScheduleEnabled] = useState(true)
-  const [scheduleType, setScheduleType] = useState('interval')
-  const [scheduleIntervalHours, setScheduleIntervalHours] = useState(24)
-  const [scheduleTime, setScheduleTime] = useState('02:00')
-  const [scheduleDays, setScheduleDays] = useState<number[]>([1, 2, 3, 4, 5])
-  const [keepVersions, setKeepVersions] = useState(5)
-  const [alertOnChange, setAlertOnChange] = useState(true)
-
-  useEffect(() => {
-    if (!open) return
-    const sample = devices.find((d) => d.enrolled)
-    setScheduleEnabled(sample?.schedule_enabled ?? true)
-    setScheduleType(sample?.schedule_type || 'interval')
-    setScheduleIntervalHours(sample?.schedule_interval_hours || 24)
-    setScheduleTime(sample?.schedule_time || '02:00')
-    setScheduleDays(sample?.schedule_days?.length ? [...sample.schedule_days] : [1, 2, 3, 4, 5])
-    setKeepVersions(sample?.keep_versions || 5)
-    setAlertOnChange(sample?.alert_on_change !== false)
-    // Only seed defaults when the dialog opens — not on every devices refresh.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
-
-  const toggleDay = (d: number) =>
-    setScheduleDays((days) => (days.includes(d) ? days.filter((x) => x !== d) : [...days, d].sort()))
-
-  const apply = useMutation({
-    mutationFn: async () => (await api.post('/ncm/bulk-settings', {
-      device_ids: enrolled.map((d) => d.device_id),
-      schedule_enabled: scheduleEnabled,
-      schedule_type: scheduleType,
-      schedule_interval_hours: scheduleIntervalHours,
-      schedule_time: scheduleTime,
-      schedule_days: scheduleDays,
-      keep_versions: keepVersions,
-      alert_on_change: alertOnChange,
-    })).data,
-    onSuccess: (r: any) => {
-      const skipped = r.skipped ? `, ${r.skipped} skipped (not enrolled)` : ''
-      toast.success(`Backup settings applied to ${r.updated} device${r.updated === 1 ? '' : 's'}${skipped}`)
-      onOpenChange(false)
-      onDone()
-    },
-    onError: (e: any) => toast.error('Apply failed', apiErrorMessage(e)),
-  })
-
+// --------------------------------------------------------------------------- //
+// Management overview
+// --------------------------------------------------------------------------- //
+function ManagementOverview({ query, goDevices }: { query: any; goDevices: (patch: Record<string, string | null>) => void }) {
+  const { data, isPending, isError, refetch, isFetching, dataUpdatedAt } = query
+  const outcomes = useQuery<any>({ queryKey: ['ncm', 'outcomes', 14], queryFn: async () => (await api.get('/ncm/outcomes', { params: { days: 14 } })).data, refetchInterval: 60000 })
+  const health = useQuery<any>({ queryKey: ['ncm', 'health'], queryFn: async () => (await api.get('/ncm/health')).data, refetchInterval: 30000 })
+  if (isError && !data) {
+    return (
+      <div role="alert" className="space-y-3 rounded-md border border-danger/40 bg-danger/5 p-4">
+        <h2 className="font-semibold">Protection status unavailable</h2>
+        <p className="text-sm">The NCCM overview could not be loaded. Device counts and protection are unknown — this is not the same as “no devices”.</p>
+        <Button onClick={() => refetch()}>Retry</Button>
+      </div>
+    )
+  }
+  if (isPending) return <p className="text-sm text-muted">Loading protection status…</p>
+  const eligible = data.eligible as number
+  const fresh = data.fresh as number
+  const a = data.attention
+  const actions: { key: string; count: number; label: string; hint: string; tone: Tone; go: Record<string, string | null> }[] = [
+    { key: 'failed', count: a.failed, label: 'Backups failing', hint: 'Last attempt failed; open for the cause and fix.', tone: 'danger', go: { status: 'failed' } },
+    { key: 'blocked', count: a.blocked, label: 'Blocked by a missing prerequisite', hint: 'Scheduled backups are skipped until setup is fixed (e.g. SSH trust).', tone: 'danger', go: { status: 'blocked' } },
+    { key: 'never', count: a.never_captured, label: 'Enrolled but never captured', hint: 'Run the first backup to prove access.', tone: 'warning', go: { flag: 'never_captured' } },
+    { key: 'unenrolled', count: a.eligible_not_enrolled, label: 'Eligible but not enrolled', hint: `In scope with no backup configured${a.unsupported_eligible ? ` (${a.unsupported_eligible} of all eligible have no collector yet)` : ''}.`, tone: 'warning', go: { status: 'unconfigured' } },
+    { key: 'stale', count: a.stale, label: 'Stale', hint: 'Validated copy older than the freshness limit.', tone: 'warning', go: { status: 'stale' } },
+    { key: 'overdue', count: a.overdue, label: 'Schedules overdue', hint: 'A due backup has not started for 15+ minutes.', tone: 'warning', go: { flag: 'overdue' } },
+    { key: 'unsupported', count: a.unsupported_eligible, label: 'Eligible without a collector', hint: 'No implemented driver (e.g. F5); they stay in the coverage denominator.', tone: 'warning', go: { flag: 'unsupported' } },
+    { key: 'review', count: a.eligibility_review, label: 'Need scope review', hint: 'Network vendors whose inventory type/address is outside automatic scope.', tone: 'neutral', go: { flag: 'review' } },
+    { key: 'compliance', count: a.compliance_failing, label: 'Failing compliance checks', hint: 'At least one failed rule on the latest validated configuration.', tone: 'warning', go: { flag: 'compliance' } },
+  ]
+  const states = RISK_ORDER.filter((k) => data.eligible_states?.[k]).map((k) => ({ key: k, n: data.eligible_states[k], ...STATES[k] }))
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader><DialogTitle>Bulk backup settings</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <p className="text-xs text-muted">
-            Apply schedule and retention settings to{' '}
-            <span className="font-medium text-text">{enrolled.length}</span> enrolled device
-            {enrolled.length === 1 ? '' : 's'}
-            {devices.length > enrolled.length && (
-              <span className="text-warning"> ({devices.length - enrolled.length} not enrolled will be skipped)</span>
-            )}
-            .
-          </p>
-          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
-            <span className="flex items-center gap-1 text-xs font-medium uppercase tracking-wider text-muted">
-              <Clock className="h-3.5 w-3.5" /> Scheduled backup
-            </span>
-            <Switch checked={scheduleEnabled} onCheckedChange={setScheduleEnabled} />
+    <div className="space-y-4">
+      {isError && <StaleBanner what="protection status" updatedAt={dataUpdatedAt} onRetry={() => refetch()} retrying={isFetching} />}
+      <Card>
+        <CardContent className="space-y-4 pt-5">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <div className="text-sm text-muted">Protected devices</div>
+              <div className={cn('text-4xl font-semibold tabular-nums', !eligible ? 'text-muted' : fresh === eligible ? 'text-success' : fresh === 0 ? 'text-danger' : 'text-warning')}>
+                {fresh} <span className="text-2xl text-muted">of {eligible}</span> <span className="text-2xl">{pct(fresh, eligible)}</span>
+              </div>
+              <p className="mt-1 max-w-2xl text-sm text-muted">
+                {eligible
+                  ? fresh === 0
+                    ? 'No eligible device has a fresh, validated configuration backup. Recovery is not currently possible from NCCM.'
+                    : `${eligible - fresh} eligible device${eligible - fresh === 1 ? ' is' : 's are'} not protected.`
+                  : 'No device is in the automatic backup scope; coverage cannot be measured.'}{' '}
+                Protected = fresh, complete and format-validated for every required type. {data.restore_tested} of {eligible} have a passed restore test.
+              </p>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
+              <div><dt className="text-xs text-muted">Inventory</dt><dd className="font-semibold tabular-nums">{data.total_devices}</dd></div>
+              <div><dt className="text-xs text-muted">Eligible (in scope)</dt><dd className="font-semibold tabular-nums">{eligible}</dd></div>
+              <div><dt className="text-xs text-muted">Eligible enrolled</dt><dd className="font-semibold tabular-nums">{data.eligible_enrolled} of {eligible}</dd></div>
+              <div><dt className="text-xs text-muted">Enrolled outside scope</dt><dd className="font-semibold tabular-nums"><button type="button" className="underline-offset-2 hover:underline" onClick={() => goDevices({ flag: 'outside_scope' })}>{data.enrolled_outside_scope}</button></dd></div>
+            </dl>
           </div>
-          {scheduleEnabled && (
-            <div className="space-y-2 rounded-md border border-border p-2">
-              <FormField label="Frequency">
-                <Select value={scheduleType} onValueChange={setScheduleType}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="interval">Every N hours</SelectItem>
-                    <SelectItem value="daily">Daily at a time</SelectItem>
-                    <SelectItem value="weekly">Weekly on days</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FormField>
-              {scheduleType === 'interval' && (
-                <FormField label="Every (hours)">
-                  <Input
-                    type="number"
-                    min={1}
-                    max={720}
-                    value={scheduleIntervalHours}
-                    onChange={(e) => setScheduleIntervalHours(Number(e.target.value))}
-                  />
-                </FormField>
-              )}
-              {(scheduleType === 'daily' || scheduleType === 'weekly') && (
-                <FormField label="At (server time, 24h)">
-                  <Input type="time" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} />
-                </FormField>
-              )}
-              {scheduleType === 'weekly' && (
-                <div>
-                  <div className="mb-1 text-xs text-muted">On days</div>
-                  <div className="flex flex-wrap gap-1">
-                    {WEEKDAYS.map(([lbl, d]) => (
-                      <button
-                        key={d}
-                        type="button"
-                        onClick={() => toggleDay(d as number)}
-                        className={`rounded px-2 py-1 text-xs font-medium ${
-                          scheduleDays.includes(d) ? 'bg-primary text-white' : 'border border-border text-muted hover:text-text'
-                        }`}
-                      >
-                        {lbl}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <p className="text-[11px] text-muted">A job runs hourly and backs up devices when their schedule is due.</p>
+          {eligible > 0 && (
+            <div>
+              <div className="flex h-4 w-full overflow-hidden rounded-full bg-surface2" role="img" aria-label={states.map((s) => `${s.label} ${s.n}`).join(', ')}>
+                {states.map((s) => (
+                  <button key={s.key} type="button" title={`${s.label}: ${s.n}`} aria-label={`Show ${s.label} devices (${s.n})`} onClick={() => goDevices({ status: s.key })}
+                    className={cn('h-full border-r border-surface last:border-0', TONE_BG[s.tone])} style={{ width: `${(s.n / eligible) * 100}%` }} />
+                ))}
+              </div>
+              <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                {states.map((s) => (
+                  <li key={s.key}><button type="button" onClick={() => goDevices({ status: s.key })} className="inline-flex items-center gap-1 hover:underline"><ToneIcon tone={s.tone} />{s.label} <strong className="tabular-nums">{s.n}</strong></button></li>
+                ))}
+              </ul>
             </div>
           )}
-          <FormField label="Keep versions" hint="Older versions beyond this are auto-deleted from the server.">
-            <Input
-              type="number"
-              min={1}
-              max={100}
-              value={keepVersions}
-              onChange={(e) => setKeepVersions(Number(e.target.value))}
-            />
-          </FormField>
-          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
-            <span className="text-xs font-medium uppercase tracking-wider text-muted">Alert on config change</span>
-            <Switch checked={alertOnChange} onCheckedChange={setAlertOnChange} />
-          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <Card className="min-w-0">
+          <CardContent className="space-y-2 pt-4">
+            <h2 className="font-semibold">Needs action</h2>
+            <p className="text-xs text-muted">Counts can overlap (a failing device may also be overdue). Select a row to see the devices.</p>
+            <ul className="divide-y divide-border">
+              {actions.map((x) => (
+                <li key={x.key}>
+                  <button type="button" onClick={() => goDevices(x.go)} disabled={!x.count}
+                    className="flex w-full items-center gap-3 px-1 py-2 text-left hover:bg-surface2/60 disabled:cursor-default disabled:hover:bg-transparent">
+                    <ToneIcon tone={x.count ? x.tone : 'success'} className="h-4 w-4" />
+                    <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{x.label}</span><span className="block text-xs text-muted">{x.hint}</span></span>
+                    <span className={cn('text-lg font-semibold tabular-nums', x.count ? '' : 'text-muted')}>{x.count}</span>
+                    {x.count > 0 && <ArrowRight className="h-4 w-4 text-muted" aria-hidden />}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+        <div className="min-w-0 space-y-4">
+          <Card><CardContent className="pt-4"><OutcomeTrend query={outcomes} /></CardContent></Card>
+          <Card>
+            <CardContent className="space-y-2 pt-4">
+              <h2 className="font-semibold">Evidence quality</h2>
+              <ul className="space-y-1.5 text-sm">
+                <li className="flex items-center gap-2"><ToneIcon tone={health.data?.time_sync === 'synchronized' ? 'success' : health.data?.time_sync === 'unsynchronized' ? 'danger' : 'warning'} />Appliance clock {health.data?.time_sync === 'synchronized' ? 'NTP-synchronized' : health.data?.time_sync === 'unsynchronized' ? 'NOT synchronized — timestamps may be wrong' : 'sync state unknown'}</li>
+                <li className="flex items-center gap-2"><ToneIcon tone="info" />Status refreshed <Ago iso={data.server_time} /></li>
+                <li className="flex items-center gap-2"><ToneIcon tone={data.restore_tested ? 'success' : 'warning'} />{data.restore_tested} eligible device{data.restore_tested === 1 ? '' : 's'} restore-tested</li>
+                {data.legacy_plaintext > 0 && <li className="flex items-center gap-2"><ToneIcon tone="warning" />{data.legacy_plaintext} stored version(s) awaiting archive encryption</li>}
+              </ul>
+            </CardContent>
+          </Card>
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={!enrolled.length || apply.isPending} onClick={() => apply.mutate()}>
-            <Save className="h-3.5 w-3.5" /> {apply.isPending ? 'Applying…' : `Apply to ${enrolled.length}`}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      </div>
+
+      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+        <CoverageTable title="Coverage by vendor" rows={data.coverage_by?.vendor || []} onPick={(name) => goDevices({ vendor: name })} />
+        <CoverageTable title="Coverage by site" rows={data.coverage_by?.location || []} onPick={(name) => goDevices({ location: name })} />
+      </div>
+    </div>
   )
 }
 
-function AssignProfileDialog({ open, onOpenChange, credentials, platforms, devices, onDone }:
-  { open: boolean; onOpenChange: (o: boolean) => void; credentials: any[]; platforms: any[]; devices: any[]; onDone: () => void }) {
-  const [credId, setCredId] = useState('')
-  const [platform, setPlatform] = useState('__keep__')
-
-  useEffect(() => { if (open) { setCredId(credentials.find((c) => c.is_default)?.id || credentials[0]?.id || ''); setPlatform('__keep__') } }, [open, credentials])
-
-  const assign = useMutation({
-    mutationFn: async () => (await api.post('/ncm/bulk-assign', {
-      device_ids: devices.map((d) => d.device_id),
-      credential_id: credId,
-      platform: platform === '__keep__' ? null : platform,
-    })).data,
-    onSuccess: (r: any) => { toast.success(`Assigned profile to ${r.assigned} device${r.assigned === 1 ? '' : 's'}`); onOpenChange(false); onDone() },
-    onError: (e: any) => toast.error('Assign failed', apiErrorMessage(e)),
-  })
-
+function OutcomeTrend({ query }: { query: any }) {
+  const { data, isPending, isError, refetch } = query
+  if (isError) return <div role="alert" className="text-sm text-warning">Backup outcomes could not be loaded. <Button size="sm" variant="outline" onClick={() => refetch()}>Retry</Button></div>
+  if (isPending) return <p className="text-sm text-muted">Loading outcomes…</p>
+  const points: any[] = data.data
+  const max = Math.max(1, ...points.map((p) => p.succeeded + p.failed))
+  const totals = points.reduce((t, p) => ({ ok: t.ok + p.succeeded, bad: t.bad + p.failed }), { ok: 0, bad: 0 })
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader><DialogTitle>Assign connection profile</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <p className="text-xs text-muted">Apply a CLI/SSH profile to <span className="font-medium text-text">{devices.length}</span> selected device{devices.length === 1 ? '' : 's'} and enable backup. Existing schedules are preserved.</p>
-          <FormField label="Connection profile">
-            <Select value={credId} onValueChange={setCredId}>
-              <SelectTrigger><SelectValue placeholder="Choose a profile" /></SelectTrigger>
-              <SelectContent>
-                {credentials.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}{c.is_default ? ' (default)' : ''}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </FormField>
-          <FormField label="Platform">
-            <Select value={platform} onValueChange={setPlatform}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__keep__">Keep current / auto-detect</SelectItem>
-                {platforms.map((p) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </FormField>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={!credId || assign.isPending} onClick={() => assign.mutate()}>
-            <KeyRound className="h-3.5 w-3.5" /> {assign.isPending ? 'Assigning…' : `Assign to ${devices.length}`}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function ProfilesDialog({ open, onOpenChange, credentials }: { open: boolean; onOpenChange: (o: boolean) => void; credentials: any[] }) {
-  const qc = useQueryClient()
-  const empty = { name: '', username: '', password: '', enable_password: '', port: 22, protocol: 'ssh', is_default: false }
-  const [form, setForm] = useState<any>(empty)
-  const [editing, setEditing] = useState<any>(null)
-
-  const save = useMutation({
-    mutationFn: async () => {
-      const body = { ...form, password: form.password || (editing ? undefined : ''), enable_password: form.enable_password || undefined }
-      if (editing) return (await api.put(`/ncm/credentials/${editing.id}`, body)).data
-      return (await api.post('/ncm/credentials', body)).data
-    },
-    onSuccess: () => { toast.success(editing ? 'Profile updated' : 'Profile created'); qc.invalidateQueries({ queryKey: ['ncm'] }); setForm(empty); setEditing(null) },
-    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
-  })
-  const del = useMutation({ mutationFn: async (id: string) => api.delete(`/ncm/credentials/${id}`), onSuccess: () => { toast.success('Profile deleted'); qc.invalidateQueries({ queryKey: ['ncm'] }) }, onError: (e: any) => toast.error('Delete failed', apiErrorMessage(e)) })
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) { setForm(empty); setEditing(null) } onOpenChange(o) }}>
-      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
-        <DialogHeader><DialogTitle>Connection profiles (CLI credentials)</DialogTitle></DialogHeader>
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-1">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted">Profiles</div>
-            {credentials.map((c) => (
-              <div key={c.id} className="flex items-center justify-between rounded border border-border px-2 py-1.5 text-xs">
-                <div><div className="font-medium">{c.name}{c.is_default && <Badge variant="info" className="ml-1">default</Badge>}</div><div className="text-muted">{c.protocol}:{c.port} · {c.username} · used by {c.used_by}</div></div>
-                <div className="flex gap-0.5">
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditing(c); setForm({ name: c.name, username: c.username, password: '', enable_password: '', port: c.port, protocol: c.protocol, is_default: c.is_default }) }}><Pencil className="h-3.5 w-3.5" /></Button>
-                  <Button variant="ghost" size="icon" className="h-7 w-7 text-danger" onClick={() => del.mutate(c.id)}><Trash2 className="h-3.5 w-3.5" /></Button>
-                </div>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="font-semibold">Backup outcomes · last {data.days} days</h2>
+        <span className="text-xs text-muted"><span className="text-success">{totals.ok} validated</span> · <span className="text-danger">{totals.bad} failed attempts</span></span>
+      </div>
+      {!totals.ok && !totals.bad ? <p className="text-sm text-muted">No backup attempts in this period.</p> : (
+        <>
+          <div className="flex h-28 items-end gap-1" role="img" aria-label={`Daily outcomes: ${points.map((p) => `${p.day} ${p.succeeded} validated ${p.failed} failed`).join('; ')}`}>
+            {points.map((p) => (
+              <div key={p.day} className="flex h-full flex-1 flex-col justify-end" title={`${p.day}: ${p.succeeded} validated, ${p.failed} failed (UTC day)`}>
+                <div className="w-full rounded-t-sm bg-danger/80" style={{ height: `${(p.failed / max) * 100}%` }} />
+                <div className="w-full bg-success/80" style={{ height: `${(p.succeeded / max) * 100}%` }} />
               </div>
             ))}
-            {!credentials.length && <div className="text-xs text-muted">No profiles yet.</div>}
           </div>
-          <div className="space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted">{editing ? 'Edit profile' : 'New profile'}</div>
-            <ConnectionAccessGuide />
-            <FormField label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Core switches SSH" /></FormField>
-            <div className="grid grid-cols-2 gap-2">
-              <FormField label="Username"><Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></FormField>
-              <FormField label="Port"><Input type="number" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} /></FormField>
-            </div>
-            <FormField label={editing ? 'Password (blank = keep)' : 'Password'}><Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></FormField>
-            <FormField label="Enable / secret (optional)"><Input type="password" value={form.enable_password} onChange={(e) => setForm({ ...form, enable_password: e.target.value })} /></FormField>
-            <div className="flex items-center justify-between rounded-md border border-border px-3 py-2"><span className="text-xs font-medium uppercase tracking-wider text-muted">Default profile</span><Switch checked={form.is_default} onCheckedChange={(v) => setForm({ ...form, is_default: v })} /></div>
-            <div className="flex justify-end gap-2">
-              {editing && <Button variant="outline" onClick={() => { setEditing(null); setForm(empty) }}>New</Button>}
-              <Button disabled={!form.name.trim() || !form.username.trim() || (!editing && !form.password) || save.isPending} onClick={() => save.mutate()}><Plus className="h-3.5 w-3.5" /> {editing ? 'Update' : 'Create'}</Button>
-            </div>
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+          <div className="flex justify-between text-[11px] text-muted"><span>{points[0]?.day}</span><span>{points[points.length - 1]?.day} (UTC)</span></div>
+        </>
+      )}
+    </div>
   )
 }
+
+function CoverageTable({ title, rows, onPick }: { title: string; rows: any[]; onPick: (name: string) => void }) {
+  return (
+    <Card className="min-w-0">
+      <CardContent className="space-y-2 pt-4">
+        <h2 className="font-semibold">{title}</h2>
+        {!rows.length ? <p className="text-sm text-muted">No eligible devices.</p> : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-xs text-muted"><th className="py-1 pr-2 font-medium">Name</th><th className="py-1 pr-2 text-right font-medium">Protected / eligible</th><th className="w-2/5 py-1 font-medium"><span className="sr-only">Coverage</span></th></tr></thead>
+              <tbody>
+                {rows.slice(0, 10).map((r) => (
+                  <tr key={r.name} className="border-t border-border">
+                    <td className="py-1.5 pr-2"><button type="button" className="text-left hover:underline" onClick={() => onPick(r.name)}>{r.name}</button>{r.unsupported > 0 && <span className="ml-1 text-xs text-warning">({r.unsupported} no collector)</span>}</td>
+                    <td className="py-1.5 pr-2 text-right tabular-nums">{r.protected} / {r.eligible} <span className="text-muted">({pct(r.protected, r.eligible)})</span></td>
+                    <td className="py-1.5"><div className="h-2 overflow-hidden rounded-full bg-surface2" aria-hidden><div className={cn('h-full', r.protected === r.eligible ? 'bg-success' : r.protected ? 'bg-warning' : 'bg-danger')} style={{ width: `${(r.protected / r.eligible) * 100}%` }} /></div></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// --------------------------------------------------------------------------- //
+// Devices workspace
+// --------------------------------------------------------------------------- //
+function DevicesWorkspace({ url }: { url: ReturnType<typeof useUrlState> }) {
+  const can = useCan()
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const q = url.get('q')
+  const [searchText, setSearchText] = useState(q)
+  useEffect(() => { setSearchText(q) }, [q])
+  useEffect(() => {
+    const t = setTimeout(() => { if (searchText !== q) url.update({ q: searchText || null }) }, 350)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchText])
+  const filters: Record<FacetKey, string[]> = { status: url.list('status'), vendor: url.list('vendor'), device_type: url.list('device_type'), location: url.list('location') }
+  const flag = url.get('flag')
+  const attention = url.get('attention') === '1'
+  const sort = url.get('sort') || 'risk'
+  const pageSize = PAGE_SIZES.includes(Number(url.get('size'))) ? Number(url.get('size')) : 50
+  const page = Math.max(1, Number(url.get('page')) || 1)
+  const params = {
+    q: q || undefined, status: filters.status.join(',') || undefined, vendor: filters.vendor.join(',') || undefined,
+    device_type: filters.device_type.join(',') || undefined, location: filters.location.join(',') || undefined,
+    flag: flag || undefined, attention: attention || undefined, sort, page, page_size: pageSize,
+  }
+  const overview = useQuery<any>({
+    queryKey: ['ncm', 'overview', 'devices', params],
+    queryFn: async () => (await api.get('/ncm/overview', { params })).data,
+    refetchInterval: 30000, placeholderData: keepPreviousData,
+  })
+  const { data, isPending, isError, refetch, isFetching, dataUpdatedAt } = overview
+  const rows: any[] = data?.data || []
+  const pageCount = data ? Math.max(1, Math.ceil(data.filtered_total / pageSize)) : 1
+  // B20: the server clamps the page; mirror it so the URL never points past the end.
+  useEffect(() => { if (data && data.page !== page) url.update({ page: data.page > 1 ? String(data.page) : null }, false) }, [data?.page]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- selection (B11): ids with last-known rows, reconciled with the server ----
+  const [selected, setSelected] = useState<Map<string, any>>(new Map())
+  const ids = useMemo(() => [...selected.keys()].sort(), [selected])
+  const selectionCheck = useQuery<any>({
+    queryKey: ['ncm', 'overview', 'selection', ids],
+    queryFn: async () => (await api.get('/ncm/overview', { params: { ids: ids.join(','), page_size: 1000 } })).data,
+    enabled: ids.length > 0, refetchInterval: 30000,
+  })
+  useEffect(() => {
+    if (!selectionCheck.data) return
+    const fresh = new Map<string, any>(selectionCheck.data.data.map((d: any) => [d.device_id, d]))
+    const gone = ids.filter((id) => !fresh.has(id))
+    setSelected((cur) => {
+      const next = new Map<string, any>()
+      for (const id of cur.keys()) if (fresh.has(id)) next.set(id, fresh.get(id))
+      return next
+    })
+    if (gone.length) toast.info(`${gone.length} selected device${gone.length === 1 ? ' is' : 's are'} no longer available`, 'Removed from the selection (deleted or outside your scope).')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectionCheck.data])
+  const visibleIds = new Set(rows.map((d) => d.device_id))
+  const hiddenIds = new Set(ids.filter((id) => !visibleIds.has(id)))
+  const selectedDevices = [...selected.values()]
+  const allPage = rows.length > 0 && rows.every((d) => selected.has(d.device_id))
+  const toggle = (d: any) => setSelected((cur) => { const n = new Map(cur); n.has(d.device_id) ? n.delete(d.device_id) : n.set(d.device_id, d); return n })
+  const togglePage = () => setSelected((cur) => { const n = new Map(cur); rows.forEach((d) => (allPage ? n.delete(d.device_id) : n.set(d.device_id, d))); return n })
+  const [dialog, setDialog] = useState<'' | 'review' | 'assign' | 'settings' | 'backup'>('')
+  const creds = useQuery<any>({ queryKey: ['ncm', 'credentials'], queryFn: async () => (await api.get('/ncm/credentials')).data, enabled: dialog === 'assign' })
+  const platforms = useQuery<any>({ queryKey: ['ncm', 'platforms'], queryFn: async () => (await api.get('/ncm/platforms')).data, enabled: dialog === 'assign' })
+  const stale = isError && !!data
+  const afterBulk = () => qc.invalidateQueries({ queryKey: ['ncm'] })
+
+  const activeChips = [
+    ...FACET_KEYS.flatMap((k) => filters[k].map((v) => ({ key: k, value: v, label: `${FACET_LABEL[k]}: ${k === 'status' ? STATES[v]?.label || v : v}` }))),
+    ...(flag ? [{ key: 'flag', value: flag, label: FLAG_LABEL[flag] || flag }] : []),
+    ...(attention ? [{ key: 'attention', value: '1', label: 'Needs attention' }] : []),
+  ]
+  const removeChip = (c: { key: string; value: string }) => {
+    if (c.key === 'flag' || c.key === 'attention') url.update({ [c.key]: null })
+    else url.update({ [c.key]: filters[c.key as FacetKey].filter((v) => v !== c.value) })
+  }
+  const toggleFacet = (k: FacetKey, v: string) => url.update({ [k]: filters[k].includes(v) ? filters[k].filter((x) => x !== v) : [...filters[k], v] })
+
+  const exportCsv = async () => {
+    try {
+      const all = (await api.get('/ncm/overview', { params: { ...params, page: 1, page_size: 1000 } })).data.data
+      download(`nccm-devices-${new Date().toISOString().slice(0, 10)}.csv`, toCsv([
+        ['Hostname', 'IP', 'Vendor', 'Type', 'Site', 'Coverage', 'Protection', 'Latest validated capture (UTC)', 'Last attempt (UTC)', 'Last failure', 'Schedule', 'Next due (UTC)', 'Collector'],
+        ...all.map((d: any) => [d.hostname, d.ip, d.vendor, d.device_type, d.location, d.coverage, stateOf(d).label, d.validated_at, d.last_attempt_at,
+          d.last_failure_category ? categoryLabel(d.last_failure_category) : '', d.enrolled ? scheduleSummary(d) : '', d.next_due, d.platform_label || d.support?.state]),
+      ]), 'text/csv')
+    } catch (e: any) { toast.error('Export failed', ncmError(e)) }
+  }
+
+  if (isError && !data) {
+    return <div role="alert" className="space-y-3 rounded-md border border-danger/40 bg-danger/5 p-4"><p className="text-sm">The device list could not be loaded. Nothing is assumed about device protection until it loads.</p><Button onClick={() => refetch()}>Retry</Button></div>
+  }
+  return (
+    <div className="min-w-0 space-y-3">
+      {stale && <StaleBanner what="the device list" updatedAt={dataUpdatedAt} onRetry={() => refetch()} retrying={isFetching} />}
+      <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_260px] lg:items-start">
+        <Card className="min-w-0">
+          <CardContent className="min-w-0 space-y-3 pt-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative min-w-[200px] flex-1">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" aria-hidden />
+                <Input className="pl-8" aria-label="Search devices" placeholder="Search hostname, IP, vendor, site, profile…" value={searchText} onChange={(e) => setSearchText(e.target.value)} />
+              </div>
+              <Button size="sm" variant={attention ? 'default' : 'outline'} aria-pressed={attention} onClick={() => url.update({ attention: attention ? null : '1' })}>Needs attention</Button>
+              <Select value={sort} onValueChange={(v) => url.update({ sort: v === 'risk' ? null : v })}>
+                <SelectTrigger aria-label="Sort devices" className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="risk">Sort: highest risk</SelectItem><SelectItem value="hostname">Sort: hostname</SelectItem><SelectItem value="last_capture">Sort: latest capture</SelectItem><SelectItem value="next_due">Sort: next due</SelectItem></SelectContent>
+              </Select>
+              <Button size="sm" variant="outline" onClick={exportCsv}><Download className="h-3.5 w-3.5" /> CSV</Button>
+            </div>
+            {activeChips.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {activeChips.map((c) => (
+                  <button key={`${c.key}:${c.value}`} type="button" onClick={() => removeChip(c)} aria-label={`Remove filter ${c.label}`}
+                    className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-xs text-primary hover:bg-primary/20">{c.label}<X className="h-3 w-3" aria-hidden /></button>
+                ))}
+                <Button size="sm" variant="link" className="h-auto px-1 text-xs" onClick={() => url.update({ q: null, status: null, vendor: null, device_type: null, location: null, flag: null, attention: null })}>Reset all</Button>
+              </div>
+            )}
+
+            {selected.size > 0 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs" role="region" aria-label="Bulk actions">
+                <span className="font-medium text-primary">{selected.size} selected</span>
+                {hiddenIds.size > 0 && <span className="text-warning">({hiddenIds.size} hidden by filters or on other pages)</span>}
+                <Button size="sm" variant="ghost" onClick={() => setDialog('review')}><ListChecks className="h-3.5 w-3.5" /> Review selection</Button>
+                <span className="flex-1" />
+                <Button size="sm" variant="outline" disabled={!can('ncm.manage') || stale} onClick={() => setDialog('assign')}><KeyRound className="h-3.5 w-3.5" /> Assign profile</Button>
+                <Button size="sm" variant="outline" disabled={!can('ncm.manage') || stale || !selectedDevices.some((d) => d.enrolled)} onClick={() => setDialog('settings')}><Clock className="h-3.5 w-3.5" /> Backup settings</Button>
+                <Button size="sm" variant="outline" disabled={!can('ncm.manage') || stale || !selectedDevices.some((d) => d.enrolled)} onClick={() => setDialog('backup')}><DownloadCloud className="h-3.5 w-3.5" /> Run backup now</Button>
+                <Button size="sm" variant="ghost" onClick={() => setSelected(new Map())} aria-label="Clear selection"><X className="h-3.5 w-3.5" /> Clear</Button>
+              </div>
+            )}
+
+            {isPending ? <p className="py-8 text-center text-sm text-muted">Loading devices…</p> : !rows.length ? (
+              <EmptyState>{data.total_devices ? 'No devices match these filters.' : 'No devices in your inventory scope.'}</EmptyState>
+            ) : (
+              <>
+                {/* Cards on narrow screens, table from md up (B18). */}
+                <ul className="space-y-2 md:hidden">
+                  {rows.map((d) => (
+                    <li key={d.device_id} className={cn('rounded-md border p-3', selected.has(d.device_id) ? 'border-primary/50 bg-primary/5' : 'border-border')}>
+                      <div className="flex items-start gap-2">
+                        <input type="checkbox" className="mt-1 h-4 w-4 accent-primary" aria-label={`Select ${d.hostname}`} checked={selected.has(d.device_id)} onChange={() => toggle(d)} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center justify-between gap-2"><Link to={`/ncm/${d.device_id}`} className="truncate font-medium hover:underline">{d.hostname}</Link><StateBadge device={d} /></div>
+                          <div className="font-mono text-xs text-muted">{d.ip}</div>
+                          <div className="mt-1 text-xs text-muted"><ReasonLine d={d} /></div>
+                          <div className="mt-1 flex flex-wrap gap-x-3 text-xs"><span>Valid: <Ago iso={d.validated_at} /></span><span>{d.enrolled ? scheduleSummary(d) : 'Not enrolled'}</span></div>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <div className="hidden overflow-hidden rounded-md border border-border md:block">
+                  <Table>
+                    <THead className="bg-surface2/50">
+                      <Tr>
+                        <Th className="w-8"><input type="checkbox" className="h-4 w-4 cursor-pointer accent-primary" checked={allPage} onChange={togglePage} aria-label="Select all devices on this page" /></Th>
+                        <Th>Device</Th><Th>Site</Th><Th>Protection</Th><Th>Latest valid capture</Th><Th>Last attempt</Th><Th>Schedule</Th><Th>Collector</Th><Th><span className="sr-only">Actions</span></Th>
+                      </Tr>
+                    </THead>
+                    <TBody>
+                      {rows.map((d) => (
+                        <Tr key={d.device_id} className={cn('cursor-pointer', selected.has(d.device_id) && 'bg-primary/5')} onClick={() => navigate(`/ncm/${d.device_id}`)}>
+                          <Td onClick={(e) => e.stopPropagation()}><input type="checkbox" className="h-4 w-4 cursor-pointer accent-primary" aria-label={`Select ${d.hostname}`} checked={selected.has(d.device_id)} onChange={() => toggle(d)} /></Td>
+                          <Td><div className="font-medium">{d.hostname}</div><div className="font-mono text-xs text-muted">{d.ip}</div></Td>
+                          <Td className="text-sm">{d.location || <span className="text-muted">—</span>}<div className="text-xs text-muted">{[d.vendor, d.device_type].filter(Boolean).join(' · ')}</div></Td>
+                          <Td><StateBadge device={d} />{d.coverage === 'excluded' && d.enrolled && <Badge variant="outline" className="ml-1">outside scope</Badge>}<div className="mt-1 max-w-64 text-xs text-muted"><ReasonLine d={d} /></div></Td>
+                          <Td className="text-sm"><Ago iso={d.validated_at} /></Td>
+                          <Td className="text-sm">{d.last_attempt_at ? <><Ago iso={d.last_attempt_at} /><div className={cn('text-xs', d.last_status === 'success' ? 'text-success' : d.last_status ? 'text-danger' : 'text-muted')}>{d.last_status === 'success' ? 'Succeeded' : d.last_failure_category ? categoryLabel(d.last_failure_category) : d.last_status || ''}</div></> : <span className="text-muted">never</span>}</Td>
+                          <Td className="text-sm">{d.enrolled ? <><div>{scheduleSummary(d)}</div>{d.next_due && d.ncm_enabled && <div className={cn('text-xs', d.overdue ? 'text-warning' : 'text-muted')}>{d.overdue ? 'Overdue since ' : 'Next '}<Ago iso={d.next_due} /></div>}</> : <span className="text-muted">Not enrolled</span>}</Td>
+                          <Td className="text-xs">{d.platform_label || (d.support?.state === 'unsupported' ? <span className="text-warning">No collector</span> : <span className="text-muted">Auto-detect</span>)}</Td>
+                          <Td onClick={(e) => e.stopPropagation()}><Button variant="ghost" size="sm" asChild><Link to={`/ncm/${d.device_id}`} aria-label={`Open ${d.hostname}`}><Settings2 className="h-3.5 w-3.5" /> Details</Link></Button></Td>
+                        </Tr>
+                      ))}
+                    </TBody>
+                  </Table>
+                </div>
+              </>
+            )}
+            {data && (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Pagination page={data.page} pageCount={pageCount} total={data.filtered_total} pageSize={pageSize} label="devices" onPage={(p) => url.update({ page: p > 1 ? String(p) : null }, false)} />
+                <Select value={String(pageSize)} onValueChange={(v) => url.update({ size: v === '50' ? null : v })}>
+                  <SelectTrigger aria-label="Devices per page" className="h-8 w-[120px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>{PAGE_SIZES.map((n) => <SelectItem key={n} value={String(n)}>{n} per page</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="min-w-0">
+          <CardContent className="space-y-4 pt-4">
+            <div><h2 className="text-sm font-semibold">Breakdown</h2><p className="text-xs text-muted">Entire inventory in your scope ({data?.total_devices ?? '—'} devices); counts do not change with filters. Select values to filter; several can be combined.</p></div>
+            {data && FACET_KEYS.map((k) => {
+              const items: [string, number][] = (data.facets?.[k === 'device_type' ? 'type' : k] || [])
+              if (!items.length) return null
+              const max = Math.max(...items.map((i) => i[1]), 1)
+              return (
+                <div key={k} className="space-y-1">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">{FACET_LABEL[k]}</h3>
+                  {items.slice(0, 12).map(([value, n]) => {
+                    const on = filters[k].includes(value)
+                    const tone: Tone = k === 'status' ? (STATES[value]?.tone || 'neutral') : 'info'
+                    return (
+                      <button key={value} type="button" aria-pressed={on} onClick={() => toggleFacet(k, value)}
+                        className={cn('w-full rounded px-2 py-1 text-left text-xs transition-colors', on ? 'bg-primary/10 ring-1 ring-primary/40' : 'hover:bg-surface2')}>
+                        <div className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-1 truncate">{k === 'status' && <ToneIcon tone={tone} />}{k === 'status' ? STATES[value]?.label || value : value}</span><span className="tabular-nums text-muted">{n}</span></div>
+                        <div className="mt-1 h-1 overflow-hidden rounded-full bg-surface2"><div className={cn('h-full rounded-full', k === 'status' ? TONE_BG[tone] : 'bg-primary/50')} style={{ width: `${(n / max) * 100}%` }} /></div>
+                      </button>
+                    )
+                  })}
+                </div>
+              )
+            })}
+          </CardContent>
+        </Card>
+      </div>
+
+      <SelectionReviewDialog open={dialog === 'review'} onOpenChange={(o) => setDialog(o ? 'review' : '')} devices={selectedDevices} hiddenIds={hiddenIds}
+        onRemove={(id) => setSelected((cur) => { const n = new Map(cur); n.delete(id); return n })} onClear={() => setSelected(new Map())} />
+      <AssignProfileDialog open={dialog === 'assign'} onOpenChange={(o) => setDialog(o ? 'assign' : '')} credentials={creds.data?.data || []}
+        platforms={(platforms.data?.data || []).filter((p: any) => p.value !== 'autodetect')} devices={selectedDevices} hiddenIds={hiddenIds} onDone={afterBulk} />
+      <BulkSettingsDialog open={dialog === 'settings'} onOpenChange={(o) => setDialog(o ? 'settings' : '')} devices={selectedDevices} hiddenIds={hiddenIds} onDone={afterBulk} />
+      <BulkBackupDialog open={dialog === 'backup'} onOpenChange={(o) => setDialog(o ? 'backup' : '')} devices={selectedDevices.filter((d) => d.enrolled)} hiddenIds={hiddenIds} onDone={afterBulk}
+        onPrune={(gone) => setSelected((cur) => { const n = new Map(cur); gone.forEach((id) => n.delete(id)); return n })} />
+    </div>
+  )
+}
+
+function ReasonLine({ d }: { d: any }) {
+  if (d.backup_state === 'failed' || d.backup_state === 'blocked') {
+    return <span title={d.last_error || ''}>{d.last_failure_category ? categoryLabel(d.last_failure_category) : 'Failed'}{d.open_incident ? ` · ${d.open_incident.occurrences}× since ` : ''}{d.open_incident && <Ago iso={d.open_incident.opened_at} />}</span>
+  }
+  if (d.eligibility_review) return <>Review inventory type/address before deciding backup scope</>
+  if (!d.eligible && !d.enrolled) return <>{d.eligibility_reason}</>
+  if (d.support?.state === 'unsupported') return <>{d.support.message}</>
+  if (d.backup_state === 'unconfigured') return <>In scope — enroll with a connection profile</>
+  if (d.backup_state === 'pending') return <>Run the first backup</>
+  if (d.backup_state === 'stale') return <>Older than {d.freshness_hours} h freshness limit</>
+  if (d.backup_state === 'fresh') return <>{d.last_restore_test?.result === 'passed' ? 'Restore-tested ' : 'Not restore-tested'}{d.last_restore_test?.result === 'passed' && <Ago iso={d.last_restore_test.tested_at} />}</>
+  return <>{STATES[d.backup_state]?.description || ''}</>
+}
+
+

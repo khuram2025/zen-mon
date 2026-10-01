@@ -65,6 +65,8 @@ export const SECTION_REPORT_TYPES = [
   { id: 'apm_performance', label: 'Application Performance' },
   { id: 'usage', label: 'Application Usage' },
   { id: 'inventory', label: 'Asset Inventory' },
+  { id: 'rum_usage', label: 'Digital Experience' },
+  { id: 'ncm_protection', label: 'Configuration Protection' },
 ] as const
 
 export const REPORT_TYPE_LABELS: Record<string, string> = Object.fromEntries(

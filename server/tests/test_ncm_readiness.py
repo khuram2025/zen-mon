@@ -20,7 +20,7 @@ def test_readiness_does_not_confuse_prerequisites_with_capture():
 
 
 @pytest.mark.parametrize('runtime,trust',[
-    (dict(worker='unknown',scheduler='active',delivery='active',encryption='configured'),dict(state='pass',message='saved')),
+    (dict(worker='inactive',scheduler='active',delivery='active',encryption='configured'),dict(state='pass',message='saved')),
     (dict(worker='active',scheduler='active',delivery='active',encryption='missing'),dict(state='pass',message='saved')),
     (dict(worker='active',scheduler='active',delivery='active',encryption='configured'),dict(state='blocked',message='missing')),
 ])
@@ -29,7 +29,8 @@ def test_missing_required_prerequisite_blocks_attempt(runtime,trust):
 
 
 def test_driver_is_separate_from_eligibility():
-    assert readiness.support_details('Aruba',None)['state']=='unsupported'
+    assert readiness.support_details('Aruba',None)['state']=='needs_detection'
+    assert readiness.support_details('Aruba','aruba_aoscx')['state']=='implemented'
     assert readiness.support_details('F5','autodetect')['state']=='unsupported'
     assert readiness.support_details('Fortinet','fortinet',['startup'])['state']=='unsupported'
     assert readiness.support_details('Fortinet','fortinet')['state']=='implemented'

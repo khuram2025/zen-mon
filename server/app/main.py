@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.gzip_request import GzipRequestMiddleware
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, roles, auth_settings, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization, udt, netpath, tags
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, roles, auth_settings, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, ncm_compliance, host_alert_rules, link_utilization, udt, netpath, tags
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
 from app.api.v1 import security_settings as security_api
@@ -122,6 +122,8 @@ def create_app() -> FastAPI:
     app.include_router(ncm.device_router, prefix="/api/v1")
     # Fixed /service-checks/{report,bulk,import} paths must precede /{check_id}.
     app.include_router(service_checks_ops.router, prefix="/api/v1")
+    app.include_router(ncm_compliance.router, prefix="/api/v1")
+    app.include_router(ncm_compliance.device_router, prefix="/api/v1")
     app.include_router(service_checks.router, prefix="/api/v1")
     app.include_router(service_checks.groups_router, prefix="/api/v1")
     app.include_router(service_checks.maintenance_router, prefix="/api/v1")

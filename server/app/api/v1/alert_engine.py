@@ -1681,6 +1681,18 @@ async def evaluate_trap(
         hostname = (dev.hostname if dev else "") or ""
         device_ip = (dev.ip if dev else "") or ""
 
+        # NCCM: a configuration-change trap schedules a debounced backup. It is
+        # recorded before maintenance/dependency suppression on purpose —
+        # changes made in a maintenance window are exactly what must be kept.
+        try:
+            from app.services import ncm_changes
+            if ncm_changes.change_trap(event.trap_oid):
+                async with db.begin_nested():
+                    await ncm_changes.record_trap(db, did, event.trap_oid, event.event_id)
+                await db.commit()
+        except Exception:
+            pass  # never let backup bookkeeping affect trap alerting
+
         # Planned downtime: traps from a device in maintenance don't raise alerts.
         if await _device_in_maintenance(db, did):
             return {"alerts_created": 0, "suppressed": "maintenance"}

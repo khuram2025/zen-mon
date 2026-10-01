@@ -32,7 +32,7 @@ async def env(monkeypatch):
     engine=create_async_engine(os.environ['DATABASE_URL'],poolclass=NullPool)
     sessions=async_sessionmaker(engine,expire_on_commit=False)
     async with sessions() as db:
-        await db.execute(text('TRUNCATE devices,ncm_credentials,notification_channels,ncm_audit CASCADE'))
+        await db.execute(text('TRUNCATE devices,ncm_credentials,notification_channels,ncm_audit,ncm_host_keys,ncm_incidents,ncm_change_events,ncm_policies,network_events,alerts CASCADE'))
         await db.commit()
         actor=NS(id=uuid4(),username='fixture',role='admin',scope_tags=[])
         async def permissions(db,role):
@@ -48,8 +48,13 @@ async def env(monkeypatch):
 async def device(db,tag='a',**settings):
     did=uuid4()
     await db.execute(text("INSERT INTO devices(id,hostname,ip_address,device_type,tags) VALUES(:id,'fixture','192.0.2.1','router',CAST(:tags AS jsonb))"),{'id':did,'tags':'["'+tag+'"]'})
-    cred=(await db.execute(text("INSERT INTO ncm_credentials(name,username) VALUES('fixture','fixture') RETURNING id"))).scalar()
+    from app.core import crypto
+    cred=(await db.execute(text("INSERT INTO ncm_credentials(name,username,password_enc) VALUES('fixture','fixture',:pw) RETURNING id"),{'pw':crypto.encrypt('fixture-password')})).scalar()
     await db.execute(text("INSERT INTO device_ncm(device_id,credential_id,platform,keep_versions) VALUES(:id,:cred,'cisco_ios',2)"),{'id':did,'cred':cred})
+    # Managed SSH trust for the fixture address, so the trust gate passes.
+    await db.execute(text('''INSERT INTO ncm_host_keys(device_id,host,port,key_type,key_base64,fingerprint_sha256,verification_method,verification_note,registered_by_name)
+        VALUES(:id,'192.0.2.1',22,'ssh-ed25519','AAAAC3NzaC1lZDI1NTE5AAAAIFixture','SHA256:fixture','console','fixture','fixture')
+        ON CONFLICT DO NOTHING'''),{'id':did})
     await db.commit()
     return did
 
@@ -103,7 +108,7 @@ async def test_failed_capture_keeps_previous_artifact(env,monkeypatch):
     db,_,actor=env
     did=await device(db)
     prior=await capture(db,did,1,actor=actor,validated=True)
-    def fail(*args): raise ncm.CaptureError('Incomplete capture: device prompt did not return')
+    def fail(*args,**kw): raise ncm.CaptureError('Incomplete capture: device prompt did not return')
     monkeypatch.setattr(ncm,'_netmiko_fetch',fail)
     with pytest.raises(ncm._FetchError): await ncm._do_fetch(db,did,actor=actor)
     assert (await db.execute(text('SELECT id FROM device_configs WHERE device_id=:id'),{'id':did})).scalar()==prior
@@ -115,7 +120,7 @@ async def test_failed_capture_keeps_previous_artifact(env,monkeypatch):
 async def test_success_run_refreshes_coverage_without_new_snapshot(env,monkeypatch):
     db,_,actor=env
     did=await device(db)
-    monkeypatch.setattr(ncm,'_netmiko_fetch',lambda *a:('cisco_ios','hostname edge\nend\n'))
+    monkeypatch.setattr(ncm,'_netmiko_fetch',lambda *a,**k:('cisco_ios','hostname edge\nend\n'))
     first=await ncm._do_fetch(db,did,actor=actor)
     again=await ncm._do_fetch(db,did,actor=actor)
     assert first['version_id']==again['version_id'] and again['deduplicated']
@@ -236,7 +241,7 @@ async def test_job_dedup_restart_lease_and_retry(env,monkeypatch):
     await db.commit()
     recovered=await ncm_jobs.claim(db)
     assert recovered.id==job.id and recovered.lease_token!=job.lease_token and recovered.attempts==2
-    monkeypatch.setattr(ncm,'_netmiko_fetch',lambda *a:('cisco_ios','hostname edge\nend\n'))
+    monkeypatch.setattr(ncm,'_netmiko_fetch',lambda *a,**k:('cisco_ios','hostname edge\nend\n'))
     await ncm_jobs.execute(sessions,recovered)
     row=(await db.execute(text('SELECT status,results FROM ncm_jobs'))).first()
     assert row.status=='success' and len(row.results)==1
@@ -249,7 +254,7 @@ async def test_failed_jobs_retry_then_finish_and_cancel_queue(env,monkeypatch):
     did=await device(db)
     queued=await ncm_jobs.enqueue(db,did,actor=actor)
     await db.commit()
-    def fail(*a): raise ncm.CaptureError('Device rejected the configuration command')
+    def fail(*a,**k): raise ncm.CaptureError('Device rejected the configuration command')
     monkeypatch.setattr(ncm,'_netmiko_fetch',fail)
     for attempt in range(1,4):
         job=await ncm_jobs.claim(db)
@@ -295,7 +300,7 @@ async def test_scheduler_scopes_and_enqueues_only_once(env):
     await db.commit()
     actor.role='operator'; actor.scope_tags=['a']
     result=await ncm._run_scheduled(db,actor)
-    assert result=={'due':1,'queued':1,'already_active':0}
+    assert result=={'due':1,'queued':1,'blocked':0,'already_active':0}
     assert (await ncm._run_scheduled(db,actor))['due']==0
     assert (await db.execute(text('SELECT device_id FROM ncm_jobs'))).scalar()==a
 

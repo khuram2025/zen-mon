@@ -1,4 +1,11 @@
-"""Durable, bounded backup execution with leases and per-device serialization."""
+"""Durable, bounded backup execution with leases and per-device serialization.
+
+A job captures each required configuration type. Permanent failures (trust,
+authentication, driver, privilege, credentials) end the job at once; transient
+ones retry with backoff up to max_attempts, resuming only the types that have
+not yet succeeded. The final outcome opens or closes the device's correlated
+backup-failure incident; individual attempts stay in ncm_backup_runs.
+"""
 import asyncio
 import json
 from types import SimpleNamespace
@@ -51,45 +58,64 @@ async def heartbeat(sessions,job,stop):
 
 
 async def execute(sessions,job):
-    from app.api.v1.ncm import _do_fetch
+    from app.api.v1.ncm import _do_fetch, _FetchError
     stop=asyncio.Event()
     pulse=asyncio.create_task(heartbeat(sessions,job,stop))
     actor=SimpleNamespace(id=job.actor_id,username=job.actor_name)
-    results=[]
+    # Types captured by an earlier attempt of this job are not repeated.
+    results=[r for r in (job.results or []) if r.get('version_id')]
+    done={r['config_type'] for r in results}
     status='success'
-    error=None
+    error=category=None
+    max_attempts=getattr(job,'max_attempts',None) or 3
+    last_run=None
     try:
-        if job.attempts>3:
-            status,error='failed','Retry budget exhausted after worker interruption'
+        if job.attempts>max_attempts:
+            status,error,category='failed','Retry budget exhausted after worker interruption','interrupted'
         else:
             for config_type in job.config_types:
+                if config_type in done:
+                    continue
                 async with sessions() as db:
                     current=(await db.execute(text('SELECT cancel_requested,lease_token FROM ncm_jobs WHERE id=:id'),{'id':job.id})).first()
                     if not current or current.lease_token!=job.lease_token:
                         return
                     if current.cancel_requested:
-                        status='cancelled'
+                        status,category='cancelled','cancelled'
                         break
-                    result=await _do_fetch(db,job.device_id,actor=actor,trigger=job.trigger,config_type=config_type)
+                    result=await _do_fetch(db,job.device_id,actor=actor,trigger=job.trigger,config_type=config_type,job_id=job.id)
+                    last_run=result.get('run_id')
                     results.append({'config_type':config_type,**result})
                     await db.execute(text('UPDATE ncm_jobs SET results=CAST(:results AS jsonb) WHERE id=:id AND lease_token=:token'),{'results':json.dumps(results),'id':job.id,'token':job.lease_token})
                     await db.commit()
+    except _FetchError as exc:
+        category=exc.category
+        error=str(exc)
+        status='queued' if exc.retryable and job.attempts<max_attempts else 'failed'
     except Exception:
-        status='failed' if job.attempts>=3 else 'queued'
-        error='Backup attempt failed; see device backup history'
+        category='unknown'
+        error='Backup attempt failed unexpectedly; see the attempt history for the device.'
+        status='queued' if job.attempts<max_attempts else 'failed'
     finally:
         stop.set()
         await pulse
     async with sessions() as db:
-        updated=(await db.execute(text('''UPDATE ncm_jobs SET status=:status,error_code=:error,
+        updated=(await db.execute(text('''UPDATE ncm_jobs SET status=:status,error_code=:error,failure_category=:category,
             finished_at=CASE WHEN :status='queued' THEN NULL ELSE now() END,
             available_at=now()+make_interval(secs=>:delay),lease_until=NULL,lease_token=NULL,
             results=CAST(:results AS jsonb)
             WHERE id=:id AND lease_token=:token RETURNING id'''),
-            {'status':status,'error':error,'delay':60*job.attempts,'results':json.dumps(results),
+            {'status':status,'error':error,'category':category if status!='success' else None,
+             'delay':60*job.attempts,'results':json.dumps(results),
              'id':job.id,'token':job.lease_token})).first()
         if updated:
-            await ncm_events.audit(db,actor,'job.'+status,device_id=job.device_id,resource_id=job.id)
+            await ncm_events.audit(db,actor,'job.'+status,device_id=job.device_id,resource_id=job.id,
+                                   metadata={'attempt':job.attempts,'category':category})
+            if status=='failed':
+                await ncm_events.open_incident(db,job.device_id,category=category or 'unknown',message=error,job_id=job.id)
+            elif status=='success':
+                from uuid import UUID
+                await ncm_events.resolve_incident(db,job.device_id,run_id=UUID(last_run) if last_run else None)
         await db.commit()
 
 

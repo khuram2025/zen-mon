@@ -57,6 +57,24 @@ def config_diff(before: str, after: str, *, raw: bool = False, normalized: bool 
             'sensitive_changed': sensitive, 'redacted': not raw, 'normalized': normalized}
 
 
+_NESTED_QUANTIFIER = re.compile(r'\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d*,)')
+_BACKREFERENCE = re.compile(r'\\[1-9]')
+
+
+def safe_pattern(pattern: str, *, max_length: int = 300):
+    """Compile an operator-supplied regular expression, rejecting shapes that
+    can backtrack catastrophically on large configurations (nested
+    quantifiers, back-references). Raises ValueError with a safe message."""
+    if not pattern or len(pattern) > max_length:
+        raise ValueError(f'Pattern must be 1-{max_length} characters')
+    if _NESTED_QUANTIFIER.search(pattern) or _BACKREFERENCE.search(pattern):
+        raise ValueError('Pattern is too complex (nested quantifiers or back-references are not allowed)')
+    try:
+        return re.compile(pattern, re.I | re.M)
+    except re.error as exc:
+        raise ValueError(f'Invalid regular expression: {exc.msg}') from None
+
+
 def checked_content(content: str) -> str:
     content = content.replace('\r\n', '\n')
     if not content.strip():

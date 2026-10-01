@@ -1409,11 +1409,192 @@ async def _sec_inventory_servers(ctx: SectionCtx) -> dict:
                              "rows": rows_out}])
 
 
+# ─── NCCM (configuration protection) sections ──────────────────────────────
+
+async def _ncm_devices(ctx: SectionCtx) -> list[dict]:
+    """Current per-device NCCM state (same computation as the NCCM overview)."""
+    if "ncm_devices" not in ctx._cache:
+        from app.api.v1.ncm import _overview_rows, _device_row
+        now = datetime.now(timezone.utc)
+        rows = [_device_row(r, now) for r in await _overview_rows(ctx.db, None)]
+        ids = set(ctx.device_ids or [])
+        ctx._cache["ncm_devices"] = [d for d in rows if not ids or d["device_id"] in ids]
+    return ctx._cache["ncm_devices"]
+
+
+def _ncm_when(iso: Optional[str]) -> str:
+    return iso[:16].replace("T", " ") + " UTC" if iso else "never"
+
+
+async def _sec_ncm_protection(ctx: SectionCtx) -> dict:
+    devices = await _ncm_devices(ctx)
+    eligible = [d for d in devices if d["eligible"]]
+    fresh = sum(d["fresh"] for d in eligible)
+    pct = f"{fresh / len(eligible) * 100:.0f}%" if eligible else "N/A"
+    failed = sum(d["backup_state"] in ("failed", "blocked") for d in eligible)
+    unsupported = sum(d["support"]["state"] == "unsupported" for d in eligible)
+    restored = sum(bool(d["last_restore_test"] and d["last_restore_test"]["result"] == "passed") for d in eligible)
+    sec = _section(
+        "ncm_protection", "Configuration Protection",
+        kpis=[
+            {"label": "Protected (fresh & validated)", "value": f"{fresh} of {len(eligible)}",
+             "accent": "success" if eligible and fresh == len(eligible) else "danger" if not fresh else "warning"},
+            {"label": "Coverage", "value": pct, "accent": "primary"},
+            {"label": "Failed / blocked", "value": str(failed), "accent": "danger" if failed else "success"},
+            {"label": "Eligible without collector", "value": str(unsupported), "accent": "warning" if unsupported else "success"},
+            {"label": "Restore-tested", "value": f"{restored} of {len(eligible)}", "accent": "info"},
+        ])
+    sec["notes"].append("Coverage = eligible devices with fresh, format-validated captures of every required "
+                        "configuration type, divided by all eligible devices (unsupported devices stay in the denominator). "
+                        "Validated means complete and format-checked; only a recorded restore test demonstrates recovery.")
+    if not eligible:
+        sec["notes"].append("No devices are in the automatic backup scope; coverage is not measurable.")
+    return sec
+
+
+async def _sec_ncm_breakdown(ctx: SectionCtx) -> dict:
+    devices = [d for d in await _ncm_devices(ctx) if d["eligible"]]
+
+    def table(key, label):
+        groups: dict[str, list] = {}
+        for d in devices:
+            groups.setdefault(d.get(key) or "unassigned", []).append(d)
+        rows = []
+        for name, members in sorted(groups.items(), key=lambda i: -len(i[1])):
+            ok = sum(m["fresh"] for m in members)
+            rows.append([name, str(len(members)), str(ok), f"{ok / len(members) * 100:.0f}%"])
+        return {"title": f"By {label}", "headers": [label.capitalize(), "Eligible", "Protected", "Coverage"],
+                "styles": ["text", "num", "num", "num"], "rows": rows}
+    return _section("ncm_breakdown", "Coverage by Vendor and Site",
+                    tables=[table("vendor", "vendor"), table("location", "site")],
+                    notes=["Each row shows its own denominator; site percentages are never averaged."])
+
+
+async def _sec_ncm_outcomes(ctx: SectionCtx) -> dict:
+    ids = ctx.device_ids
+    cond = " AND device_id::text = ANY(:ids)" if ids else ""
+    params: dict[str, Any] = {"f": ctx.frm, "t": ctx.to}
+    if ids:
+        params["ids"] = ids
+    rows = (await ctx.db.execute(text(f"""
+        SELECT date_trunc('day', COALESCE(finished_at, started_at)) AS day,
+               count(*) FILTER (WHERE status='success' AND validated) AS ok,
+               count(*) FILTER (WHERE status='failed') AS failed
+        FROM ncm_backup_runs WHERE COALESCE(finished_at, started_at) BETWEEN :f AND :t{cond}
+        GROUP BY 1 ORDER BY 1"""), params)).fetchall()
+    ts = [r.day for r in rows]
+    oks = [r.ok for r in rows]
+    fails = [r.failed for r in rows]
+    cats = (await ctx.db.execute(text(f"""
+        SELECT COALESCE(failure_category, 'unknown') AS cat, count(*) AS n FROM ncm_backup_runs
+        WHERE status='failed' AND COALESCE(finished_at, started_at) BETWEEN :f AND :t{cond}
+        GROUP BY 1 ORDER BY 2 DESC"""), params)).fetchall()
+    charts = [
+        {"title": "Validated captures per day", "png": _make_time_bar_chart(ts, oks, color=HEX_SUCCESS, ylabel="captures", w_mm=85, h_mm=52),
+         "series": {"kind": "bars", "unit": "captures", "color": "success",
+                    "points": [{"t": t.isoformat(), "v": v} for t, v in zip(ts, oks)]}},
+        {"title": "Failed attempts per day", "png": _make_time_bar_chart(ts, fails, color=HEX_WARNING, ylabel="attempts", w_mm=85, h_mm=52),
+         "series": {"kind": "bars", "unit": "attempts", "color": "warning",
+                    "points": [{"t": t.isoformat(), "v": v} for t, v in zip(ts, fails)]}},
+    ]
+    sec = _section("ncm_outcomes", "Backup Outcomes", charts=charts,
+                   tables=[{"title": "Failed attempts by cause", "headers": ["Cause", "Attempts"],
+                            "styles": ["text", "num"], "rows": [[r.cat.replace("_", " "), str(r.n)] for r in cats]}])
+    if not rows:
+        sec["notes"].append("No backup attempts were recorded in this period.")
+    return sec
+
+
+async def _sec_ncm_at_risk(ctx: SectionCtx) -> dict:
+    order = ["failed", "blocked", "stale", "unverified", "pending", "unconfigured"]
+    risky = [d for d in await _ncm_devices(ctx) if d["eligible"] and d["backup_state"] in order]
+    risky.sort(key=lambda d: (order.index(d["backup_state"]), d["hostname"] or ""))
+    rows = [[d["hostname"] or d["ip"], d["backup_state"].replace("_", " "), _ncm_when(d["validated_at"]),
+             (d["last_error"] or d["support"]["message"] if d["backup_state"] in ("failed", "blocked", "unconfigured") else "")[:80],
+             _ncm_when(d["next_due"]) if d["next_due"] else "not scheduled"] for d in risky[:50]]
+    return _section("ncm_at_risk", "Devices Needing Action",
+                    tables=[{"headers": ["Device", "State", "Last valid capture", "Reason", "Next due"],
+                             "styles": ["text", "status", "num", "text", "num"], "rows": rows}],
+                    notes=[] if rows else ["Every eligible device has a fresh validated capture."])
+
+
+async def _sec_ncm_compliance(ctx: SectionCtx) -> dict:
+    ids = ctx.device_ids
+    cond = " AND r.device_id::text = ANY(:ids)" if ids else ""
+    params: dict[str, Any] = {"ids": ids} if ids else {}
+    policies = (await ctx.db.execute(text(f"""
+        SELECT p.name, count(DISTINCT r.device_id) AS devices,
+               count(*) FILTER (WHERE r.status='pass') AS pass, count(*) FILTER (WHERE r.status='fail') AS fail,
+               count(*) FILTER (WHERE r.status='unknown') AS unknown, count(*) FILTER (WHERE r.status='excepted') AS excepted
+        FROM ncm_compliance_results r JOIN ncm_policies p ON p.id=r.policy_id WHERE TRUE{cond}
+        GROUP BY p.name ORDER BY fail DESC, p.name"""), params)).fetchall()
+    top = (await ctx.db.execute(text(f"""
+        SELECT ru.title, ru.severity, count(*) AS n FROM ncm_compliance_results r JOIN ncm_policy_rules ru ON ru.id=r.rule_id
+        WHERE r.status='fail'{cond} GROUP BY ru.title, ru.severity
+        ORDER BY array_position(ARRAY['critical','high','medium','low','info'], ru.severity), n DESC LIMIT 10"""), params)).fetchall()
+    fails = sum(p.fail for p in policies)
+    sec = _section("ncm_compliance", "Configuration Compliance",
+                   kpis=[{"label": "Failed checks", "value": str(fails), "accent": "danger" if fails else "success"},
+                         {"label": "Excepted checks", "value": str(sum(p.excepted for p in policies)), "accent": "warning"},
+                         {"label": "Not assessable", "value": str(sum(p.unknown for p in policies)), "accent": "info"}],
+                   tables=[{"title": "By policy", "headers": ["Policy", "Devices", "Pass", "Fail", "Unknown", "Excepted"],
+                            "styles": ["text", "num", "num", "num", "num", "num"],
+                            "rows": [[p.name, str(p.devices), str(p[2]), str(p.fail), str(p.unknown), str(p.excepted)] for p in policies]},
+                           {"title": "Most frequent failures", "headers": ["Rule", "Severity", "Devices"],
+                            "styles": ["text", "severity", "num"], "rows": [[t.title, t.severity.upper(), str(t.n)] for t in top]}])
+    sec["notes"].append("Results reflect the latest validated running configuration of each device. "
+                        "Unknown means no validated configuration was available to assess.")
+    return sec
+
+
+async def _sec_ncm_changes(ctx: SectionCtx) -> dict:
+    ids = ctx.device_ids
+    cond = " AND c.device_id::text = ANY(:ids)" if ids else ""
+    params: dict[str, Any] = {"f": ctx.frm, "t": ctx.to}
+    if ids:
+        params["ids"] = ids
+    changes = (await ctx.db.execute(text(f"""
+        SELECT d.hostname, count(*) AS n, max(c.captured_at) AS last FROM device_configs c JOIN devices d ON d.id=c.device_id
+        WHERE c.is_change AND c.validated AND c.captured_at BETWEEN :f AND :t{cond}
+        GROUP BY d.hostname ORDER BY n DESC LIMIT 20"""), params)).fetchall()
+    base = (await ctx.db.execute(text("""
+        SELECT b.device_id::text AS device_id, d.hostname, b.name, b.config_type,
+               (SELECT norm_hash FROM device_configs l WHERE l.device_id=b.device_id AND l.config_type=b.config_type
+                ORDER BY l.captured_at DESC, l.id DESC LIMIT 1) <> c.norm_hash AS drifted
+        FROM ncm_baselines b JOIN device_configs c ON c.id=b.version_id JOIN devices d ON d.id=b.device_id
+        WHERE b.retired_at IS NULL ORDER BY d.hostname"""))).fetchall()
+    allowed = {d["device_id"] for d in await _ncm_devices(ctx)}
+    base = [b for b in base if b.device_id in allowed]
+    return _section("ncm_changes", "Configuration Changes and Baseline Drift",
+                    kpis=[{"label": "Changed configurations", "value": str(sum(c.n for c in changes)), "accent": "primary"},
+                          {"label": "Baselines drifted", "value": f"{sum(bool(b.drifted) for b in base)} of {len(base)}",
+                           "accent": "warning" if any(b.drifted for b in base) else "success"}],
+                    tables=[{"title": "Most changed devices", "headers": ["Device", "Changes", "Last change"],
+                             "styles": ["text", "num", "num"],
+                             "rows": [[c.hostname, str(c.n), c.last.strftime("%Y-%m-%d %H:%M")] for c in changes]},
+                            {"title": "Active baselines", "headers": ["Device", "Baseline", "Type", "State"],
+                             "styles": ["text", "text", "text", "status"],
+                             "rows": [[b.hostname, b.name, b.config_type, "drifted" if b.drifted else "in sync"] for b in base]}])
+
+
 # ─── Registry + presets ─────────────────────────────────────────────────────
 
 SectionFn = Callable[[SectionCtx], Awaitable[dict]]
 
 SECTION_REGISTRY: dict[str, dict[str, Any]] = {
+    # NCCM
+    "ncm_protection": {"fn": _sec_ncm_protection, "title": "Configuration Protection", "category": "Configuration",
+                       "description": "Fresh validated coverage of eligible devices, failures and restore evidence."},
+    "ncm_breakdown": {"fn": _sec_ncm_breakdown, "title": "Coverage by Vendor and Site", "category": "Configuration",
+                      "description": "Protected vs eligible devices per vendor and site, with denominators."},
+    "ncm_outcomes": {"fn": _sec_ncm_outcomes, "title": "Backup Outcomes", "category": "Configuration",
+                     "description": "Validated captures and failed attempts per day, failures by cause."},
+    "ncm_at_risk": {"fn": _sec_ncm_at_risk, "title": "Devices Needing Action", "category": "Configuration",
+                    "description": "Failed, blocked, stale and never-captured eligible devices."},
+    "ncm_compliance": {"fn": _sec_ncm_compliance, "title": "Configuration Compliance", "category": "Configuration",
+                       "description": "Policy pass/fail/exception status and most frequent failures."},
+    "ncm_changes": {"fn": _sec_ncm_changes, "title": "Configuration Changes and Baseline Drift", "category": "Configuration",
+                    "description": "Devices with the most changes and drift from approved baselines."},
     # Availability
     "availability_kpis": {"fn": _sec_availability_kpis, "title": "Availability Summary",
                           "category": "Availability",
@@ -1566,6 +1747,12 @@ REPORT_PRESETS: dict[str, dict[str, Any]] = {
         "category": "Applications",
         "sections": ["rum_audience", "rum_experience", "rum_top_pages",
                      "rum_segments", "rum_reliability"],
+    },
+    "ncm_protection": {
+        "title": "Configuration Protection Report",
+        "description": "NCCM backup coverage, outcomes, devices needing action, compliance and baseline drift.",
+        "category": "Operations",
+        "sections": ["ncm_protection", "ncm_breakdown", "ncm_outcomes", "ncm_at_risk", "ncm_compliance", "ncm_changes"],
     },
     "inventory": {
         "title": "Inventory Report",

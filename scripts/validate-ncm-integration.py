@@ -15,12 +15,17 @@ sys.path.insert(0,str(root/'server'))
 psql=['/usr/lib/postgresql/16/bin/psql','-X','-v','ON_ERROR_STOP=1','-h',str(root/'pgsocket'),'-p','15433','-U','ncm_fixture','-d','ncm_fixture']
 base='''CREATE TABLE IF NOT EXISTS devices(id uuid PRIMARY KEY,hostname text,ip_address inet,device_type text,tags jsonb,vendor text,location text);
 CREATE TABLE IF NOT EXISTS notification_channels(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),type text,config jsonb,gateway_id uuid,enabled bool);
-CREATE TABLE IF NOT EXISTS alerts(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),device_id uuid,rule_id uuid,status text,severity text,message text,triggered_at timestamptz,metadata jsonb);
+CREATE TABLE IF NOT EXISTS alerts(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),device_id uuid,rule_id uuid,status text,severity text,message text,triggered_at timestamptz,metadata jsonb,acknowledged_at timestamptz,resolved_at timestamptz);
+CREATE TABLE IF NOT EXISTS report_schedules(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),report_type text);
+CREATE TABLE IF NOT EXISTS network_events(id uuid PRIMARY KEY,received_at timestamptz NOT NULL DEFAULT now(),source_ip inet,device_id uuid,facility smallint DEFAULT 1,severity smallint DEFAULT 5,reported_hostname text,application text,message text NOT NULL,metadata jsonb DEFAULT '{}');
+ALTER TABLE notification_channels ADD COLUMN IF NOT EXISTS name text;
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS acknowledged_at timestamptz;
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS resolved_at timestamptz;
 '''
 subprocess.run(psql,input=base,text=True,check=True,stdout=subprocess.DEVNULL)
-for pattern in ('023-ncm','024-ncm','025-ncm','026-ncm','027-ncm','028-ncm','029-ncm','117-ncm','117-ncm','118-ncm','118-ncm'):
+for pattern in ('023-ncm','024-ncm','025-ncm','026-ncm','027-ncm','028-ncm','029-ncm','117-ncm','117-ncm','118-ncm','118-ncm','130-ncm','130-ncm','131-ncm','131-ncm'):
     filename=next((root/'scripts').glob('migrate-'+pattern+'*.sql'))
     subprocess.run(psql+['-f',str(filename)],check=True,stdout=subprocess.DEVNULL)
 os.chdir(root/'server')
 import pytest
-raise SystemExit(pytest.main(['tests/integration/test_ncm_contracts.py','tests/test_ncm_assurance.py','tests/test_ncm_readiness.py','-q','--disable-warnings','--tb=short',*sys.argv[1:]]))
+raise SystemExit(pytest.main(['tests/integration/test_ncm_contracts.py','tests/test_ncm_assurance.py','tests/test_ncm_readiness.py','tests/test_ncm_review.py','tests/integration/test_ncm_review_contracts.py','-q','--disable-warnings','--tb=short',*sys.argv[1:]]))

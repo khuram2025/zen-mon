@@ -1,9 +1,9 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-type ToastKind = 'success' | 'error' | 'info'
+type ToastKind = 'success' | 'error' | 'warning' | 'info'
 type Toast = { id: number; kind: ToastKind; title: string; description?: string }
 
 type ToastState = {
@@ -32,6 +32,8 @@ toast.success = (title: string, description?: string) =>
   useToastStore.getState().push({ kind: 'success', title, description })
 toast.error = (title: string, description?: string) =>
   useToastStore.getState().push({ kind: 'error', title, description })
+toast.warning = (title: string, description?: string) =>
+  useToastStore.getState().push({ kind: 'warning', title, description })
 toast.info = (title: string, description?: string) =>
   useToastStore.getState().push({ kind: 'info', title, description })
 
@@ -44,16 +46,19 @@ export function ToastViewport() {
       {toasts.map((t) => (
         <div
           key={t.id}
+          role={t.kind === 'error' || t.kind === 'warning' ? 'alert' : 'status'}
           className={cn(
             'pointer-events-auto flex items-start gap-3 rounded-lg border bg-surface p-3 shadow-elevated animate-slide-up',
             t.kind === 'success' && 'border-success/30',
             t.kind === 'error' && 'border-danger/30',
+            t.kind === 'warning' && 'border-warning/40',
             t.kind === 'info' && 'border-info/30',
           )}
         >
           <div className="mt-0.5 shrink-0">
             {t.kind === 'success' && <CheckCircle2 className="h-4 w-4 text-success" />}
             {t.kind === 'error' && <AlertCircle className="h-4 w-4 text-danger" />}
+            {t.kind === 'warning' && <AlertTriangle className="h-4 w-4 text-warning" />}
             {t.kind === 'info' && <Info className="h-4 w-4 text-info" />}
           </div>
           <div className="min-w-0 flex-1">

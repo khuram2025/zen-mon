@@ -50,7 +50,21 @@ async def run(mode):
             if mode=='deliver':
                 return await ncm_events.deliver_due(db)
             from app.api.v1.ncm import _run_scheduled
-            return await _run_scheduled(db)
+            from app.services import ncm_changes, ncm_compliance
+            result = await _run_scheduled(db)
+            # Event-triggered backups and the daily compliance pass ride on the
+            # same one-minute timer; a failure in either never blocks schedules.
+            for name, step in (('events', ncm_changes.scan_syslog), ('event_jobs', ncm_changes.process_pending),
+                               ('compliance', ncm_compliance.daily)):
+                try:
+                    outcome = await step(db)
+                    await db.commit()
+                    if outcome:
+                        result[name] = outcome
+                except Exception:
+                    await db.rollback()
+                    result[name] = 'failed'
+            return result
     finally:
         await engine.dispose()
 

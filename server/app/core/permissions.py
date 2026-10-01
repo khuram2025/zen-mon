@@ -53,6 +53,8 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         ("ncm.credentials", "Credentials", "Administer shared NCM connection profiles"),
         ("ncm.export", "Export raw", "Read and export configurations including secrets"),
         ("ncm.baseline", "Baselines", "Pin and approve configuration recovery points"),
+        ("ncm.trust", "SSH trust", "Register and retire verified device SSH host keys"),
+        ("ncm.compliance", "Compliance", "Manage compliance policies, rules and exceptions"),
     ]),
     ("apm", "APM & Servers", [
         ("apm.view", "View", "View APM services, traces, and server metrics"),
