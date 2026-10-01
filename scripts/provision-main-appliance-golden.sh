@@ -334,8 +334,12 @@ configure_firewall() {
   ufw allow OpenSSH >/dev/null 2>&1 || true
   ufw allow 80/tcp >/dev/null
   ufw allow 443/tcp >/dev/null
+  # Flow exporters: NetFlow v5/v9 and IPFIX on UDP 2055, sFlow on UDP 6343
+  # (zenplus-netflow-collector.service).
+  ufw allow 2055/udp >/dev/null
+  ufw allow 6343/udp >/dev/null
   ufw --force enable >/dev/null
-  record_check "security" "firewall enabled" "PASS" "OpenSSH, 80, 443 allowed"
+  record_check "security" "firewall enabled" "PASS" "OpenSSH, 80, 443, UDP 2055/6343 (flows) allowed"
 }
 
 configure_first_boot() {
