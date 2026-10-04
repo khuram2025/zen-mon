@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import require_admin_user
+from app.core.security import require_admin_user, require_permission
 from app.models.user import User
 
 router = APIRouter(prefix="/audit-logs", tags=["Audit Logs"])
@@ -36,7 +36,7 @@ async def list_audit_logs(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("audit.view")),
 ):
     where = []
     params: dict = {"skip": skip, "limit": limit}

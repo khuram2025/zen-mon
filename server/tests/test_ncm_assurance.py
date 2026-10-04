@@ -104,7 +104,7 @@ def test_capture_without_final_prompt_fails(monkeypatch):
         collection.run_command(Session(['hostname edge\nend\n']), 'show running-config','edge#',idle_timeout=2)
 
 
-def test_fortios_connection_never_changes_console(monkeypatch):
+def test_fortios_connection_never_changes_console(monkeypatch, tmp_path):
     from netmiko.fortinet.fortinet_ssh import FortinetSSH
     commands=[]
     def init(self,**kwargs):
@@ -117,7 +117,15 @@ def test_fortios_connection_never_changes_console(monkeypatch):
     monkeypatch.setattr(FortinetSSH,'disconnect',lambda self:self.cleanup())
     monkeypatch.setattr(FortinetSSH,'send_multiline',lambda *a,**k:pytest.fail('Persistent commands attempted'))
     monkeypatch.setattr(collection,'run_command',lambda *a,**k:'config system global\n set hostname edge\nend\n')
-    platform,result=collection.fetch_config('192.0.2.1','fortinet','test','test','',22)
+    # The connection now requires verified trust before selecting algorithms.
+    # Keep this command-safety fixture trusted; actual SSH negotiation has its
+    # own loopback regression tests.
+    import paramiko
+    key = paramiko.RSAKey.generate(2048)
+    trust = tmp_path / 'known_hosts'
+    trust.write_text('192.0.2.1 ssh-rsa ' + key.get_base64() + '\n')
+    platform,result=collection.fetch_config('192.0.2.1','fortinet','test','test','',22,
+                                            known_hosts=str(trust))
     assert platform=='fortinet' and commands==['exit\r']
 
 
@@ -136,9 +144,13 @@ def test_coverage_requires_all_types_and_validated_runs():
     assert not state(config_types=['running','startup'])['fresh']
     assert not state(verified_types={})['fresh']
     assert not state(ncm_enabled=False)['fresh']
-    assert state(ip='127.0.0.1')['backup_state']=='excluded'
-    assert state(ip=None)['backup_state']=='excluded'
-    assert state(device_type='server')['backup_state']=='excluded'
+    # Enrolled devices outside the automatic scope keep their operational state
+    # but are excluded from coverage; unenrolled ones read as excluded.
+    assert state(ip='127.0.0.1')['coverage']=='excluded' and not state(ip='127.0.0.1')['eligible']
+    assert state(ip=None,platform=None)['backup_state']=='excluded'
+    assert state(device_type='server',platform=None)['backup_state']=='excluded'
+    assert state(device_type='server')['backup_state']=='fresh' and state(device_type='server')['coverage']=='excluded'
+    assert state(last_status='blocked',verified_types={})['backup_state']=='blocked'
     assert not state(verified_types={'running':(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()})['fresh']
 
 

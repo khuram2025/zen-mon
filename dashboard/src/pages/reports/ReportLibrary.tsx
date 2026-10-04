@@ -7,6 +7,7 @@ import {
   AppWindow,
   BarChart3,
   Boxes,
+  FileCode,
   Briefcase,
   CalendarClock,
   Clock,
@@ -19,6 +20,7 @@ import {
   PieChart,
   Plus,
   Trash2,
+  Lock,
   Users,
   Wrench,
   type LucideIcon,
@@ -50,6 +52,7 @@ const TYPE_ICONS: Record<string, LucideIcon> = {
   apm_performance: AppWindow,
   usage: PieChart,
   inventory: Boxes,
+  ncm_protection: FileCode,
 }
 
 const CATEGORY_ORDER = ['Personas', 'Operations', 'Applications', 'Assets']
@@ -86,7 +89,8 @@ type ReportRun = {
   title: string
   report_type: string
   period: string
-  token: string
+  /** Null when withheld: only the schedule owner and reports.manage holders get share links. */
+  token: string | null
   status: string
   delivered_to: string[]
   generated_at: string | null
@@ -331,14 +335,20 @@ export default function ReportLibrary() {
                     <span className="text-sm text-text2">{run.generated_at ? relativeTime(run.generated_at) : '—'}</span>
                   </Td>
                   <Td className="text-right">
-                    <a
-                      href={`${window.location.origin}/api/v1/reports/shared/${run.token}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                    >
-                      <ExternalLink className="h-3 w-3" /> View
-                    </a>
+                    {run.token ? (
+                      <a
+                        href={`${window.location.origin}/api/v1/reports/shared/${run.token}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                      >
+                        <ExternalLink className="h-3 w-3" /> View
+                      </a>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-xs text-muted" title="Report links are shown to the schedule owner and to users who manage reports">
+                        <Lock className="h-3 w-3" aria-hidden /> Restricted
+                      </span>
+                    )}
                   </Td>
                 </Tr>
               ))}

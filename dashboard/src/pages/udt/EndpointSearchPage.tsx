@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, Eye, RadioTower, ScanSearch, Search, ShieldAlert, Sparkles, Users } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
+import { Button } from '@/components/ui/Button'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Badge } from '@/components/ui/Badge'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -54,6 +55,23 @@ export function EndpointSearchPage() {
   const [qInput, setQInput] = useState(q)
   const [page, setPage] = useState(0)
   const limit = 50
+
+  useEffect(() => { setQInput(q); setPage(0) }, [q])
+
+  useEffect(() => {
+    const term = qInput.trim()
+    if (term === q) return
+    const timer = window.setTimeout(() => {
+      setParams((current) => {
+        const next = new URLSearchParams(current)
+        if (term) next.set('q', term)
+        else next.delete('q')
+        return next
+      }, { replace: true })
+      setPage(0)
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [qInput, q, setParams])
 
   function patch(next: Record<string, string | null>) {
     const p = new URLSearchParams(params)
@@ -114,16 +132,22 @@ export function EndpointSearchPage() {
       <Card>
         <CardContent className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center">
           <form
-            className="relative flex-1"
+            className="flex flex-1 items-center gap-2"
             onSubmit={(e) => { e.preventDefault(); patch({ q: qInput.trim() || null }) }}
           >
+            <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
             <Input
               className="pl-9"
+              aria-label="Search endpoints"
               placeholder="Search MAC, IP, hostname, user or vendor…"
               value={qInput}
               onChange={(e) => setQInput(e.target.value)}
             />
+            </div>
+            <Button type="submit" size="sm">Search</Button>
+            {qInput && <Button type="button" variant="secondary" size="sm"
+              onClick={() => { setQInput(''); patch({ q: null }) }}>Clear</Button>}
           </form>
           <div className="flex flex-wrap items-center gap-1">
             {FLAG_TABS.map((t) => (
@@ -168,7 +192,12 @@ export function EndpointSearchPage() {
       {/* Results table */}
       <Card>
         <CardContent className="p-0">
-          {list.isLoading ? (
+          {list.isError ? (
+            <div role="alert" className="flex items-center justify-center gap-2 py-12 text-sm text-danger">
+              <AlertTriangle className="h-4 w-4" /> Unable to load endpoints. Please try again.
+              <Button size="sm" variant="secondary" onClick={() => list.refetch()}>Retry</Button>
+            </div>
+          ) : list.isLoading ? (
             <div className="space-y-2 p-4">
               {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-9 w-full" />)}
             </div>

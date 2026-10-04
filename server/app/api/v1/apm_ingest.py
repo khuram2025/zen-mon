@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.apm import authenticate_ingest_key
 from app.core.database import get_ch_client, get_db
-from app.core.security import require_operator_user
+from app.core.security import require_permission
 
 logger = logging.getLogger("zenplus.apm.ingest")
 
@@ -640,7 +640,7 @@ async def otlp_traces(
 
 
 @router.get("/v1/apm/ingest-stats")
-async def ingest_stats(user=Depends(require_operator_user)):
+async def ingest_stats(user=Depends(require_permission("apm.view"))):
     """Per-process liveness/counters for the ingest path (operator+).
 
     Cluster-wide, restart-surviving counters live in zenplus.apm_ingest_stats

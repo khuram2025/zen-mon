@@ -1,16 +1,31 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { transformWithEsbuild } from 'vite'
+import path from 'node:path'
+import { build } from 'esbuild'
 
 const source = fs.readFileSync('src/components/forms/AlertRuleWizardDialog.tsx', 'utf8')
 const start = source.indexOf('const TEMPLATE_FIELDS =')
 const end = source.indexOf('export function AlertRuleWizardDialog(')
 assert(start >= 0 && end > start)
-const code = `const INTERFACE_METRICS = new Set(['if_util_pct','if_in_bps','if_out_bps','if_errors','if_discards','if_oper_status']);
+// The extracted slice calls the NetFlow rule helpers the wizard imports, so the
+// slice is bundled together with the real module rather than evaluated alone.
+const code = `import { defaultNetflowForm, formFromRule, isNetflowMetric, netflowPayload } from './src/components/forms/netflowAlertRule';
+const INTERFACE_METRICS = new Set(['if_util_pct','if_in_bps','if_out_bps','if_errors','if_discards','if_oper_status']);
 ${source.slice(start, end)}
 export {ruleToState,stateToPayload};`
-const compiled = await transformWithEsbuild(code, 'network-contracts.ts', {loader:'ts',format:'esm'})
-const {ruleToState,stateToPayload} = await import(`data:text/javascript;base64,${Buffer.from(compiled.code).toString('base64')}`)
+const src = path.join(process.cwd(), 'src')
+const aliasPlugin = {
+  name: 'app-alias',
+  setup(b) {
+    b.onResolve({ filter: /^@\// }, (args) => b.resolve(`./${args.path.slice(2)}`, { resolveDir: src, kind: args.kind }))
+  },
+}
+const compiled = await build({
+  stdin: { contents: code, resolveDir: process.cwd(), loader: 'ts' },
+  bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
+  plugins: [aliasPlugin], logLevel: 'silent',
+})
+const {ruleToState,stateToPayload} = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`)
 const condition = {metric:'cpu',operator:'>',threshold:90,reset_threshold:80}
 let payload = stateToPayload(ruleToState({name:'CPU',metric:'cpu',conditions:[condition]}))
 assert.deepEqual(payload.conditions, [condition])

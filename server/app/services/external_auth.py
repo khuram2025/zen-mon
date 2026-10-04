@@ -24,6 +24,7 @@ so every other part of the app (audit, FKs, sessions) works unchanged.
 from __future__ import annotations
 
 import logging
+import re
 import ssl
 from pathlib import Path
 from typing import Optional
@@ -54,6 +55,10 @@ LDAP_DEFAULTS: dict = {
     "group_mappings": [],   # [{"group": "CN=NetAdmins,...", "role": "admin"}]
     "default_role": "",
     "auto_provision": True,
+    # Server-managed metadata (not part of the editable form).
+    "revision": 0,
+    "updated_at": "",
+    "updated_by": "",
 }
 
 RADIUS_DEFAULTS: dict = {
@@ -65,9 +70,18 @@ RADIUS_DEFAULTS: dict = {
     "retries": 3,
     "nas_identifier": "zenplus",
     "class_mappings": [],   # [{"value": "netadmins", "role": "admin"}]
-    "default_role": "viewer",
+    # Empty = deny users that match no mapping. A privilege must be chosen on
+    # purpose, never inherited from a default.
+    "default_role": "",
     "auto_provision": True,
+    "revision": 0,
+    "updated_at": "",
+    "updated_by": "",
 }
+
+# Upper bound for timeout x retries: the browser request budget is 30 s and a
+# synchronous provider attempt cannot be cancelled once started.
+RADIUS_MAX_TOTAL_SECONDS = 30
 
 _RADIUS_DICT_PATH = Path(__file__).with_name("radius_dictionary")
 
@@ -85,23 +99,48 @@ def merge_config(defaults: dict, stored: Optional[dict]) -> dict:
 
 # ── LDAP ──────────────────────────────────────────────────────────────────────
 
+_DN_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{2}|.)", re.S)
+
+
+def _unescape_dn_value(value: str) -> str:
+    """RFC 4514 un-escaping: ``\\,`` -> ``,`` and ``\\2C`` -> ``,``."""
+    def repl(m: "re.Match[str]") -> str:
+        g = m.group(1)
+        return chr(int(g, 16)) if len(g) == 2 and all(c in "0123456789abcdefABCDEF" for c in g) else g
+    return _DN_ESCAPE_RE.sub(repl, value)
+
+
 def _ldap_cn(dn: str) -> str:
-    """First RDN value of a DN: 'CN=Net Admins,OU=...' -> 'net admins'."""
-    head = dn.split(",", 1)[0]
-    return (head.split("=", 1)[1] if "=" in head else head).strip().lower()
+    """First RDN value of a DN, un-escaped and lower-cased:
+    'CN=Net Admins,OU=...' -> 'net admins'; 'CN=Ops\\, East,OU=...' -> 'ops, east'."""
+    try:
+        from ldap3.utils.dn import parse_dn
+        first = parse_dn(dn, escape=False, strip=True)[0]
+        return _unescape_dn_value(first[1]).strip().lower()
+    except Exception:
+        head = dn.split(",", 1)[0]
+        return (head.split("=", 1)[1] if "=" in head else head).strip().lower()
 
 
-def map_ldap_role(cfg: dict, groups: list[str]) -> Optional[str]:
+def explain_ldap_role(cfg: dict, groups: list[str]) -> tuple[Optional[str], Optional[dict]]:
+    """(role, matched rule). The rule is {'kind': 'mapping', 'index': i, 'match': text}
+    for a mapping row, {'kind': 'default'} for the fallback, or None when nothing matched."""
     lowered = [g.lower() for g in groups]
     cns = {_ldap_cn(g) for g in groups}
-    for mapping in cfg.get("group_mappings") or []:
+    for i, mapping in enumerate(cfg.get("group_mappings") or []):
         wanted = str(mapping.get("group", "")).strip().lower()
         role = mapping.get("role")
         if not wanted or not role:
             continue
         if wanted in lowered or wanted in cns:
-            return role
-    return cfg.get("default_role") or None
+            return role, {"kind": "mapping", "index": i, "match": mapping.get("group")}
+    if cfg.get("default_role"):
+        return cfg["default_role"], {"kind": "default"}
+    return None, None
+
+
+def map_ldap_role(cfg: dict, groups: list[str]) -> Optional[str]:
+    return explain_ldap_role(cfg, groups)[0]
 
 
 def ldap_open(cfg: dict, user: Optional[str], password: Optional[str]):
@@ -209,16 +248,37 @@ def ldap_authenticate(cfg: dict, username: str, password: str) -> Optional[dict]
 
 # ── RADIUS ────────────────────────────────────────────────────────────────────
 
-def map_radius_role(cfg: dict, reply_values: list[str]) -> Optional[str]:
+RADIUS_ATTRIBUTES = ("Class", "Filter-Id", "Reply-Message")
+
+
+def explain_radius_role(cfg: dict, reply_values: list[str],
+                        attributes: Optional[list[tuple[str, str]]] = None) -> tuple[Optional[str], Optional[dict]]:
+    """Match mapping rows against the reply. A row may name the attribute it
+    applies to ('Class', 'Filter-Id', 'Reply-Message'); without one it matches
+    any returned value (the original behaviour). ``attributes`` carries
+    (attribute, value) pairs so named rows can be honoured."""
     lowered = [v.lower() for v in reply_values]
-    for mapping in cfg.get("class_mappings") or []:
+    for i, mapping in enumerate(cfg.get("class_mappings") or []):
         wanted = str(mapping.get("value", "")).strip().lower()
         role = mapping.get("role")
         if not wanted or not role:
             continue
-        if wanted in lowered:
-            return role
-    return cfg.get("default_role") or None
+        attr = (mapping.get("attribute") or "").strip()
+        if attr and attributes is not None:
+            pool = [v.lower() for a, v in attributes if a.lower() == attr.lower()]
+        else:
+            pool = lowered
+        if wanted in pool:
+            return role, {"kind": "mapping", "index": i, "match": mapping.get("value"),
+                          "attribute": attr or None}
+    if cfg.get("default_role"):
+        return cfg["default_role"], {"kind": "default"}
+    return None, None
+
+
+def map_radius_role(cfg: dict, reply_values: list[str],
+                    attributes: Optional[list[tuple[str, str]]] = None) -> Optional[str]:
+    return explain_radius_role(cfg, reply_values, attributes)[0]
 
 
 def radius_authenticate(cfg: dict, username: str, password: str) -> Optional[dict]:
@@ -243,8 +303,13 @@ def radius_authenticate(cfg: dict, username: str, password: str) -> Optional[dic
             secret=str(cfg["secret"]).encode(),
             dict=Dictionary(str(_RADIUS_DICT_PATH)),
         )
-        client.timeout = float(cfg.get("timeout") or 5)
-        client.retries = int(cfg.get("retries") or 3)
+        timeout = float(cfg.get("timeout") or 5)
+        retries = int(cfg.get("retries") or 3)
+        # Never exceed the total budget even if an older stored config does.
+        while timeout * retries > RADIUS_MAX_TOTAL_SECONDS and retries > 1:
+            retries -= 1
+        client.timeout = min(timeout, float(RADIUS_MAX_TOTAL_SECONDS))
+        client.retries = retries
 
         req = client.CreateAuthPacket(code=packet.AccessRequest, User_Name=username)
         req["User-Password"] = req.PwCrypt(password)
@@ -270,10 +335,13 @@ def radius_authenticate(cfg: dict, username: str, password: str) -> Optional[dic
         return None
 
     values: list[str] = []
-    for attr in ("Class", "Filter-Id", "Reply-Message"):
+    attributes: list[tuple[str, str]] = []
+    for attr in RADIUS_ATTRIBUTES:
         try:
             for v in reply[attr]:
-                values.append(v.decode() if isinstance(v, (bytes, bytearray)) else str(v))
+                text_value = (v.decode("utf-8", errors="replace") if isinstance(v, (bytes, bytearray)) else str(v))
+                values.append(text_value)
+                attributes.append((attr, text_value))
         except KeyError:
             continue
-    return {"reply_values": values}
+    return {"reply_values": values, "reply_attributes": attributes}

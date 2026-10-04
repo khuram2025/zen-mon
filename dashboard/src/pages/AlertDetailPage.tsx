@@ -1,661 +1,496 @@
-import { useEffect, useState } from 'react'
+/**
+ * Alert detail — the investigation page for one incident.
+ *
+ * Alerts development review A03, A06, A09, A18–A24, A26; F01, F02, F04, F05,
+ * F07, F08:
+ *  - Workflow status and condition are shown separately; a suppressed alert
+ *    is "Suppressed — condition still active", only an evaluator recovery is
+ *    green, and durations are "time to recover" only for real recoveries.
+ *  - Ages use the appliance clock (response server_time), never Date.now().
+ *  - Cached content stays on screen when a background refresh fails.
+ *  - Triage and policy controls follow the user's permissions; policy changes
+ *    live in their own card with impact confirmation.
+ */
+import { useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import {
-  AlertCircle,
-  AlertTriangle,
-  ArrowLeft,
-  Check,
-  CheckCircle2,
-  Clock,
-  Eye,
-  Info,
-  Loader2,
-  Pencil,
-  Power,
-  Route,
-  Server,
-  ShieldAlert,
-  Trash2,
-  Wrench,
-  X,
+  ArrowLeft, Check, Clock, Eye, Loader2, MessageSquare, RefreshCw, Repeat, ShieldAlert, Timer, TriangleAlert,
+  UserCheck, UserPlus, Waves, XCircle,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, formatDuration, relativeTime } from '@/lib/utils'
-import { Card, CardContent } from '@/components/ui/Card'
-import { Badge } from '@/components/ui/Badge'
+import { apiErrorMessage, cn } from '@/lib/utils'
+import { useAuth, useCan } from '@/stores/auth'
 import { Button } from '@/components/ui/Button'
-import { Input } from '@/components/ui/Input'
-import { Label } from '@/components/ui/Label'
+import { Card, CardContent } from '@/components/ui/Card'
+import { Skeleton } from '@/components/ui/Skeleton'
 import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
-} from '@/components/ui/Dialog'
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/Select'
-import { toast } from '@/components/ui/Toast'
-import {
-  AlertChannel, ChannelIcons, cleanAlertMessage, SnoozeMenu,
+  AssignDialog, ENTITY_ICON, ENTITY_KIND_LABEL, EntityCell, ResolveDialog, SeverityBadge, SnoozeMenu, StatusChip,
+  cleanAlertMessage, entityOf, focusRing, isOpen, severityMeta, statusKey, useAlertActions,
 } from '@/components/alerts/AlertBits'
-
-type AlertStatus = 'active' | 'acknowledged' | 'resolved'
-type AlertSeverity = 'critical' | 'warning' | 'info'
-
-type AlertDetail = {
-  id: string
-  rule_id: string | null
-  device_id: string | null
-  device_hostname: string | null
-  device_ip: string | null
-  service_check_id: string | null
-  service_check_name: string | null
-  status: AlertStatus
-  severity: AlertSeverity
-  message: string
-  triggered_at: string
-  acknowledged_at: string | null
-  resolved_at: string | null
-  metadata?: Record<string, any>
-  rule?: AlertRuleInfo | null
-  entity?: { kind: string; id: string | null; name: string }
-  related_alerts?: AlertDetail[]
-  channels?: AlertChannel[]
-  snoozed?: boolean
-  snoozed_until?: string | null
-}
-
-type AlertRuleInfo = {
-  id: string
-  name: string
-  metric: string
-  operator: string
-  threshold: number | null
-  duration: number
-  cooldown: number
-  enabled: boolean
-  severity?: string
-  target?: string | null
-  min_duration?: number
-  notify_channels?: string[]
-  trigger_on?: string
-  recovery_alert?: boolean
-  conditions?: { metric: string; operator: string; threshold: number }[] | null
-}
+import { AlertTimeline } from '@/components/alerts/AlertTimeline'
+import { PolicyCard } from '@/components/alerts/PolicyCard'
+import { RoutingCard } from '@/components/alerts/RoutingCard'
+import {
+  ageOf, fmtAgo, fmtAlertDate, fmtClock, fmtDur, parseTs, spanSeconds, useApplianceNow,
+} from '@/components/alerts/format'
+import type { AlertDetail, AlertRow, RelatedAlert } from '@/components/alerts/types'
 
 export function AlertDetailPage() {
   const { id = '' } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const qc = useQueryClient()
+  const can = useCan()
+  const me = useAuth((s) => s.user)
+  const commentRef = useRef<HTMLTextAreaElement>(null)
+  const [dialog, setDialog] = useState<'resolve' | 'assign' | null>(null)
 
-  const { data: alert, isLoading, error } = useQuery<AlertDetail>({
+  const q = useQuery<AlertDetail>({
     queryKey: ['alerts', 'detail', id],
     queryFn: async () => (await api.get(`/alerts/${id}`)).data,
     enabled: !!id,
     refetchInterval: 15_000,
+    retry: 1,
   })
+  const alert = q.data
+  const now = useApplianceNow(alert?.server_time ?? null)
+  const actions = useAlertActions()
 
-  const ack = useMutation({
-    mutationFn: async () => api.post(`/alerts/${id}/acknowledge`),
-    onSuccess: () => {
-      toast.success('Alert acknowledged')
-      qc.invalidateQueries({ queryKey: ['alerts'] })
-    },
-    onError: (e: any) => toast.error('Acknowledge failed', apiErrorMessage(e)),
-  })
+  const goBack = () => {
+    if (window.history.length > 1) navigate(-1)
+    else navigate('/alerts')
+  }
 
-  const resolve = useMutation({
-    mutationFn: async () => api.post(`/alerts/${id}/resolve`),
-    onSuccess: () => {
-      toast.success('Alert resolved')
-      qc.invalidateQueries({ queryKey: ['alerts'] })
-    },
-    onError: (e: any) => toast.error('Resolve failed', apiErrorMessage(e)),
-  })
+  if (q.isLoading) {
+    return (
+      <div className="space-y-4" aria-busy="true">
+        <Skeleton className="h-6 w-40" />
+        <Skeleton className="h-9 w-2/3" />
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-5">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-20" />)}</div>
+        <Skeleton className="h-64 w-full" />
+      </div>
+    )
+  }
 
-  if (isLoading) return <div className="py-12 text-center text-sm text-muted">Loading alert...</div>
-  if (error || !alert) {
+  if (!alert) {
+    const notFound = (q.error as { response?: { status?: number } } | null)?.response?.status === 404
     return (
       <Card>
-        <CardContent className="p-6 text-sm text-danger">
-          Failed to load alert: {apiErrorMessage(error)}
+        <CardContent className="space-y-3 p-6">
+          <button onClick={goBack} className={cn('inline-flex items-center gap-1 text-sm text-muted hover:text-text', focusRing)}>
+            <ArrowLeft className="h-4 w-4" /> Back
+          </button>
+          <p className="text-sm text-danger">
+            {notFound ? 'This alert does not exist or is outside your visible scope.' : `Failed to load alert: ${apiErrorMessage(q.error)}`}
+          </p>
+          {!notFound && (
+            <Button size="sm" variant="outline" className={focusRing} onClick={() => q.refetch()} disabled={q.isFetching}>
+              {q.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Retry
+            </Button>
+          )}
         </CardContent>
       </Card>
     )
   }
 
-  const duration = alert.resolved_at
-    ? formatDuration(Math.max(0, (Date.parse(alert.resolved_at) - Date.parse(alert.triggered_at)) / 1000))
-    : formatDuration(Math.max(0, (Date.now() - Date.parse(alert.triggered_at)) / 1000))
+  const perms = alert.permissions
+  const canTriage = can('alerts.acknowledge') && (perms?.can_triage ?? true)
+  const open = isOpen(alert)
+  const suppressed = !!alert.suppression || alert.snoozed
+  const msg = cleanAlertMessage(alert.message)
+  const entity = entityOf(alert)
+  const key = statusKey(alert)
+  const staleSince = q.isError ? q.dataUpdatedAt : null
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <button onClick={() => navigate(-1)} className="mb-2 inline-flex items-center gap-1 text-xs text-muted hover:text-text">
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Back
-          </button>
-          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-            <SeverityIcon severity={alert.severity} compact />
-            Alert Detail
-            {alert.snoozed && (
-              <Badge variant="outline" title={alert.snoozed_until ? `Snoozed until ${new Date(alert.snoozed_until).toLocaleString()}` : 'Muted until cleared'}>
-                snoozed
-              </Badge>
-            )}
-          </h1>
-          <p className="max-w-4xl text-sm text-muted">{cleanAlertMessage(alert.message)}</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {alert.status === 'active' && (
-            <Button variant="outline" onClick={() => ack.mutate()} disabled={ack.isPending}>
-              <Check className="h-4 w-4" />
-              Acknowledge
-            </Button>
-          )}
-          {(alert.status === 'active' || alert.status === 'acknowledged') && (
-            <Button variant="outline" onClick={() => resolve.mutate()} disabled={resolve.isPending}>
-              <X className="h-4 w-4" />
-              Resolve
-            </Button>
-          )}
-          {((alert.device_id && alert.rule_id) || alert.metadata?.dedupe != null) && (
-            <SnoozeMenu alertId={alert.id} snoozed={alert.snoozed} size="default" />
-          )}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Summary label="Severity" value={alert.severity} icon={ShieldAlert} tone={alert.severity} />
-        <Summary label="Status" value={alert.status} icon={CheckCircle2} tone={alert.status === 'resolved' ? 'success' : alert.status === 'acknowledged' ? 'warning' : 'critical'} />
-        <Summary label={alert.resolved_at ? 'Time to Resolve' : 'Open For'} value={duration} icon={Clock} tone="info" />
-        <Summary label="Source" value={alert.entity?.kind || 'system'} icon={Route} tone="info" />
-      </div>
-
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="space-y-4">
-          <Card>
-            <CardContent className="p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-sm font-semibold">Investigation Context</h2>
-                <StatusBadge status={alert.status} />
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                <InfoRow label="Triggered" value={`${formatDateTime(alert.triggered_at)} (${relativeTime(alert.triggered_at)})`} />
-                <InfoRow label="Acknowledged" value={alert.acknowledged_at ? `${formatDateTime(alert.acknowledged_at)} (${relativeTime(alert.acknowledged_at)})` : 'Not acknowledged'} />
-                <InfoRow label="Resolved" value={alert.resolved_at ? `${formatDateTime(alert.resolved_at)} (${relativeTime(alert.resolved_at)})` : 'Not resolved'} />
-                <InfoRow label="Alert ID" value={alert.id} mono />
-              </div>
-              <div className="mt-4 rounded-md border border-border bg-surface2/30 p-3">
-                <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">Lifecycle Timeline</div>
-                <div className="space-y-2 text-xs">
-                  <TimelineRow icon={AlertTriangle} label="Triggered" at={alert.triggered_at} />
-                  {alert.acknowledged_at && <TimelineRow icon={Check} label="Acknowledged" at={alert.acknowledged_at} />}
-                  {alert.resolved_at && <TimelineRow icon={CheckCircle2} label="Resolved" at={alert.resolved_at} />}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardContent className="p-4">
-              <h2 className="mb-3 text-sm font-semibold">Related Alerts</h2>
-              <div className="space-y-2">
-                {alert.related_alerts?.length ? alert.related_alerts.map((item) => (
-                  <Link
-                    key={item.id}
-                    to={`/alerts/${item.id}`}
-                    className="flex items-start gap-2 rounded-md border border-border bg-surface2/30 p-2 transition-colors hover:border-primary/50 hover:bg-primary/5"
-                  >
-                    <SeverityIcon severity={item.severity} />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-xs font-medium">{cleanAlertMessage(item.message)}</div>
-                      <div className="text-[10px] text-muted">{relativeTime(item.triggered_at)} · {item.status}</div>
-                    </div>
-                  </Link>
-                )) : (
-                  <div className="rounded-md border border-dashed border-border p-5 text-center text-xs text-muted">
-                    No related alerts found for this entity.
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="space-y-4">
-          <Card>
-            <CardContent className="p-4">
-              <h2 className="mb-3 text-sm font-semibold">Affected Entity</h2>
-              {alert.device_id ? (
-                <EntityLink to={`/devices/${alert.device_id}`} icon={Server} title={alert.device_hostname || 'Device'} subtitle={alert.device_ip || 'device'} />
-              ) : alert.service_check_id ? (
-                <EntityLink to={`/services/${alert.service_check_id}`} icon={ActivityIcon} title={alert.service_check_name || 'Service check'} subtitle="service check" />
-              ) : (
-                <div className="text-sm text-muted">System-level alert</div>
-              )}
-            </CardContent>
-          </Card>
-
-          <RuleCard rule={alert.rule ?? null} />
-
-          <ChannelsCard rule={alert.rule ?? null} channels={alert.channels} />
-
-          {alert.rule && <MessagePreviewCard ruleId={alert.rule.id} />}
-
-          <Card>
-            <CardContent className="p-4">
-              <h2 className="mb-3 text-sm font-semibold">Raw Metadata</h2>
-              <pre className="max-h-64 overflow-auto rounded-md bg-bg p-3 text-[10px] text-muted">
-                {JSON.stringify(alert.metadata || {}, null, 2)}
-              </pre>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function Summary({ label, value, icon: Icon, tone }: { label: string; value: string; icon: React.ComponentType<{ className?: string }>; tone: AlertSeverity | 'success' | 'info' }) {
-  const color = tone === 'critical' ? 'text-danger bg-danger/10' : tone === 'warning' ? 'text-warning bg-warning/10' : tone === 'success' ? 'text-success bg-success/10' : 'text-info bg-info/10'
-  return (
-    <Card>
-      <CardContent className="flex items-center gap-3 p-4">
-        <span className={`flex h-10 w-10 items-center justify-center rounded-md ${color}`}>
-          <Icon className="h-4 w-4" />
-        </span>
-        <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
-          <div className="truncate text-lg font-semibold capitalize">{value}</div>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function EntityLink({ to, icon: Icon, title, subtitle }: { to: string; icon: React.ComponentType<{ className?: string }>; title: string; subtitle: string }) {
-  return (
-    <Link to={to} className="flex items-center gap-3 rounded-md border border-border bg-surface2/30 p-3 hover:border-primary/50 hover:bg-primary/5">
-      <span className="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 text-primary">
-        <Icon className="h-4 w-4" />
-      </span>
-      <span className="min-w-0">
-        <span className="block truncate text-sm font-medium">{title}</span>
-        <span className="block truncate text-xs text-muted">{subtitle}</span>
-      </span>
-    </Link>
-  )
-}
-
-function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
-      <div className={`mt-0.5 text-sm ${mono ? 'font-mono text-xs' : ''}`}>{value}</div>
-    </div>
-  )
-}
-
-function TimelineRow({ icon: Icon, label, at }: { icon: React.ComponentType<{ className?: string }>; label: string; at: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-primary">
-        <Icon className="h-3 w-3" />
-      </span>
-      <span className="font-medium">{label}</span>
-      <span className="ml-auto font-mono text-[10px] text-muted">{formatDateTime(at)}</span>
-    </div>
-  )
-}
-
-function SeverityIcon({ severity, compact = false }: { severity: AlertSeverity; compact?: boolean }) {
-  const Icon = severity === 'critical' ? AlertCircle : severity === 'warning' ? AlertTriangle : Info
-  const cls = severity === 'critical' ? 'bg-danger/10 text-danger' : severity === 'warning' ? 'bg-warning/10 text-warning' : 'bg-info/10 text-info'
-  return <span className={`flex shrink-0 items-center justify-center rounded-md ${compact ? 'h-8 w-8' : 'h-7 w-7'} ${cls}`}><Icon className="h-4 w-4" /></span>
-}
-
-function StatusBadge({ status }: { status: AlertStatus }) {
-  const variant = status === 'resolved' ? 'success' : status === 'acknowledged' ? 'warning' : 'danger'
-  return <Badge variant={variant}>{status}</Badge>
-}
-
-function formatDateTime(value: string) {
-  const date = new Date(value)
-  if (!Number.isFinite(date.getTime())) return '—'
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
-}
-
-const ActivityIcon = Wrench
-
-/* ════════════════════════════════════════════════════════════
-   Rule / Policy — full CRUD on the owning alert rule
-   ════════════════════════════════════════════════════════════ */
-
-function RuleCard({ rule }: { rule: AlertRuleInfo | null }) {
-  const qc = useQueryClient()
-  const navigate = useNavigate()
-  const [editOpen, setEditOpen] = useState(false)
-  const compound = (rule?.conditions?.length || 0) > 1
-
-  const toggle = useMutation({
-    mutationFn: async () => (await api.post(`/alert-rules/${rule!.id}/toggle`)).data,
-    onSuccess: (d: any) => {
-      toast.success(d?.enabled ? 'Rule enabled' : 'Rule disabled')
-      qc.invalidateQueries({ queryKey: ['alerts'] })
-      qc.invalidateQueries({ queryKey: ['alert-rules'] })
-    },
-    onError: (e: any) => toast.error('Toggle failed', apiErrorMessage(e)),
-  })
-
-  const remove = useMutation({
-    mutationFn: async () => api.delete(`/alert-rules/${rule!.id}`),
-    onSuccess: () => {
-      toast.success('Alert rule deleted — no new alerts will be raised by it')
-      qc.invalidateQueries({ queryKey: ['alerts'] })
-      qc.invalidateQueries({ queryKey: ['alert-rules'] })
-      navigate('/alert-rules')
-    },
-    onError: (e: any) => toast.error('Delete failed', apiErrorMessage(e)),
-  })
-
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="mb-3 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">Rule / Policy</h2>
-          {rule && (
-            <div className="flex items-center gap-0.5">
-              <Button
-                size="sm" variant="ghost" className="h-7 w-7 p-0"
-                title={rule.enabled ? 'Disable rule' : 'Enable rule'}
-                disabled={toggle.isPending}
-                onClick={() => toggle.mutate()}
-              >
-                <Power className={`h-3.5 w-3.5 ${rule.enabled ? 'text-success' : 'text-muted'}`} />
-              </Button>
-              {compound ? (
-                <Button size="sm" variant="ghost" className="h-7 w-7 p-0" title="Compound rule — edit in Alert Rules" asChild>
-                  <Link to="/alert-rules"><Pencil className="h-3.5 w-3.5" /></Link>
+      {/* Header */}
+      <div className="space-y-3">
+        <button onClick={goBack} className={cn('inline-flex items-center gap-1 text-sm text-muted hover:text-text', focusRing)}>
+          <ArrowLeft className="h-4 w-4" /> Back
+        </button>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 space-y-2">
+            <h1 className="break-words text-xl font-semibold tracking-tight sm:text-2xl">{msg}</h1>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <SeverityBadge severity={alert.severity} />
+              <StatusChip alert={alert} />
+              <EntityCell entity={entity} compact className="max-w-[280px]" />
+              <span className="text-muted" title={fmtAlertDate(alert.triggered_at, { seconds: true, year: 'always' })}>
+                Opened {fmtAgo(alert.triggered_at, now)}
+              </span>
+              <span className="text-muted">·</span>
+              <span className={cn(!alert.assigned_to && open && alert.severity === 'critical' ? 'font-medium text-danger' : 'text-text2')}>
+                Owner: {alert.assigned_to?.name ?? 'Unassigned'}
+              </span>
+            </div>
+          </div>
+          {canTriage && (
+            <div className="flex flex-wrap gap-2 lg:justify-end">
+              {alert.status === 'active' && (
+                <Button
+                  size="sm" className={focusRing}
+                  onClick={() => actions.acknowledge.mutate({ id: alert.id })}
+                  disabled={actions.acknowledge.isPending}
+                  aria-label={`Acknowledge alert: ${msg}`}
+                >
+                  {actions.acknowledge.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} Acknowledge
                 </Button>
-              ) : (
-                <Button size="sm" variant="ghost" className="h-7 w-7 p-0" title="Edit rule" onClick={() => setEditOpen(true)}>
-                  <Pencil className="h-3.5 w-3.5" />
+              )}
+              {open && me && alert.assigned_to?.id !== me.id && (
+                <Button size="sm" variant="outline" className={focusRing} onClick={() => actions.assign.mutate({ id: alert.id, user_id: me.id })} disabled={actions.assign.isPending}>
+                  <UserCheck className="h-3.5 w-3.5" /> Assign to me
+                </Button>
+              )}
+              {open && (
+                <Button size="sm" variant="outline" className={focusRing} onClick={() => setDialog('assign')}>
+                  <UserPlus className="h-3.5 w-3.5" /> Assign…
+                </Button>
+              )}
+              {(open || suppressed) && !alert.is_notice && (
+                <SnoozeMenu alertId={alert.id} snoozed={suppressed} alertLabel={msg} />
+              )}
+              {open && (
+                <Button size="sm" variant="outline" className={focusRing} onClick={() => setDialog('resolve')} aria-label={`Close incident: ${msg}`}>
+                  <XCircle className="h-3.5 w-3.5" /> Close…
                 </Button>
               )}
               <Button
-                size="sm" variant="ghost" className="h-7 w-7 p-0" title="Delete rule"
-                disabled={remove.isPending}
-                onClick={() => {
-                  if (window.confirm(`Delete alert rule "${rule.name}"? Existing alerts stay in history; no new ones will fire.`)) remove.mutate()
-                }}
+                size="sm" variant="ghost" className={focusRing}
+                onClick={() => { commentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }); commentRef.current?.focus({ preventScroll: true }) }}
               >
-                <Trash2 className="h-3.5 w-3.5 text-danger" />
+                <MessageSquare className="h-3.5 w-3.5" /> Comment
               </Button>
             </div>
           )}
         </div>
-        {rule ? (
-          <div className="space-y-2 text-xs">
-            <InfoRow label="Rule" value={rule.name} />
-            <InfoRow
-              label="Condition"
-              value={compound
-                ? `${rule.conditions!.length} conditions`
-                : `${rule.metric} ${rule.operator} ${rule.threshold ?? '—'}`}
-            />
-            <InfoRow label="Severity" value={rule.severity || 'warning'} />
-            <InfoRow label="Scope" value={rule.target ? `interface “${rule.target}”` : 'device-wide'} />
-            <InfoRow label="Sustained" value={rule.min_duration ? formatDuration(rule.min_duration) : 'Immediate'} />
-            <InfoRow label="Cooldown" value={formatDuration(rule.cooldown)} />
-            <InfoRow label="State" value={rule.enabled ? 'Enabled' : 'Disabled'} />
-          </div>
-        ) : (
-          <div className="text-xs text-muted">No rule metadata linked.</div>
-        )}
-      </CardContent>
-      {rule && (
-        <RuleEditDialog open={editOpen} onOpenChange={setEditOpen} rule={rule} />
-      )}
-    </Card>
-  )
-}
+      </div>
 
-function RuleEditDialog({
-  open, onOpenChange, rule,
-}: { open: boolean; onOpenChange: (v: boolean) => void; rule: AlertRuleInfo }) {
-  const qc = useQueryClient()
-  const [name, setName] = useState(rule.name)
-  const [operator, setOperator] = useState(rule.operator || '>')
-  const [threshold, setThreshold] = useState(String(rule.threshold ?? ''))
-  const [severity, setSeverity] = useState(rule.severity || 'warning')
-  const [minutes, setMinutes] = useState(String(Math.round((rule.min_duration || 0) / 60)))
-
-  useEffect(() => {
-    if (!open) return
-    setName(rule.name)
-    setOperator(rule.operator || '>')
-    setThreshold(String(rule.threshold ?? ''))
-    setSeverity(rule.severity || 'warning')
-    setMinutes(String(Math.round((rule.min_duration || 0) / 60)))
-  }, [open, rule])
-
-  const save = useMutation({
-    mutationFn: async () => {
-      const body: Record<string, unknown> = {
-        name,
-        operator,
-        threshold: Number(threshold),
-        severity,
-        min_duration: Math.round(Number(minutes) * 60),
-      }
-      // Keep a stored single-condition mirror in step with the flat fields.
-      if (rule.conditions?.length === 1) {
-        body.conditions = [{ metric: rule.metric, operator, threshold: Number(threshold) }]
-      }
-      return (await api.put(`/alert-rules/${rule.id}`, body)).data
-    },
-    onSuccess: () => {
-      toast.success('Alert rule updated')
-      qc.invalidateQueries({ queryKey: ['alerts'] })
-      qc.invalidateQueries({ queryKey: ['alert-rules'] })
-      onOpenChange(false)
-    },
-    onError: (e: any) => toast.error('Update failed', apiErrorMessage(e)),
-  })
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Pencil className="h-4 w-4 text-primary" /> Edit rule · {rule.name}
-          </DialogTitle>
-        </DialogHeader>
-        <div className="space-y-3 text-sm">
-          <div>
-            <Label>Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <div className="col-span-1">
-              <Label>Metric</Label>
-              <Input value={rule.metric} disabled className="opacity-70" />
-            </div>
-            <div>
-              <Label>Operator</Label>
-              <Select value={operator} onValueChange={setOperator}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {['>', '>=', '<', '<=', '==', '!='].map((op) => (
-                    <SelectItem key={op} value={op}>{op}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>Threshold</Label>
-              <Input type="number" value={threshold} onChange={(e) => setThreshold(e.target.value)} />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label>Severity</Label>
-              <Select value={severity} onValueChange={setSeverity}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="critical">Critical</SelectItem>
-                  <SelectItem value="warning">Warning</SelectItem>
-                  <SelectItem value="info">Info</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>Sustained (min)</Label>
-              <Input type="number" value={minutes} onChange={(e) => setMinutes(e.target.value)} />
-            </div>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={() => save.mutate()} disabled={save.isPending}>
-            {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save changes'}
+      {staleSince != null && (
+        <div role="status" className="flex flex-wrap items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+          <TriangleAlert className="h-4 w-4" aria-hidden />
+          Showing data from {fmtClock(staleSince)} — refresh failed ({apiErrorMessage(q.error)}).
+          <Button size="sm" variant="outline" className={cn('ml-auto h-7', focusRing)} onClick={() => q.refetch()} disabled={q.isFetching}>
+            {q.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Retry
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      )}
+
+      {suppressed && open && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-muted/40 bg-muted/10 px-3 py-2 text-sm text-text2">
+          Notifications for this condition are suppressed
+          {alert.suppression?.forever ? ' indefinitely' : (alert.suppression?.until ?? alert.snoozed_until) ? ` until ${fmtAlertDate(alert.suppression?.until ?? alert.snoozed_until)}` : ''}
+          {alert.suppression?.by ? ` by ${alert.suppression.by.name}` : ''}
+          {alert.suppression?.reason ? ` — “${alert.suppression.reason}”` : ''}.
+          <span className="text-muted">The incident is not resolved and the condition is still active.</span>
+        </div>
+      )}
+
+      <SummaryTiles alert={alert} now={now} statusKeyValue={key} />
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
+        <div className="min-w-0 space-y-4">
+          <AlertTimeline ref={commentRef} alert={alert} now={now} canComment={canTriage} />
+          <EvidenceCard alert={alert} />
+          <RelatedCard alert={alert} now={now} />
+          <RecurrenceCard alert={alert} now={now} />
+        </div>
+        <div className="min-w-0 space-y-4">
+          <EntityCard alert={alert} />
+          <PolicyCard rule={alert.rule} snapshot={alert.policy_snapshot} />
+          <RoutingCard alert={alert} now={now} />
+          {alert.rule && <MessagePreviewCard ruleId={alert.rule.id} />}
+        </div>
+      </div>
+
+      <ResolveDialog
+        open={dialog === 'resolve'}
+        onOpenChange={(v) => { if (!v) setDialog(null) }}
+        alertLabel={msg}
+        pending={actions.resolve.isPending}
+        onConfirm={(reason) => actions.resolve.mutate({ id: alert.id, reason }, { onSettled: () => setDialog(null) })}
+      />
+      <AssignDialog
+        open={dialog === 'assign'}
+        onOpenChange={(v) => { if (!v) setDialog(null) }}
+        current={alert.assigned_to}
+        pending={actions.assign.isPending}
+        onAssign={(uid) => actions.assign.mutate({ id: alert.id, user_id: uid }, { onSettled: () => setDialog(null) })}
+      />
+    </div>
   )
 }
 
-/* ════════════════════════════════════════════════════════════
-   Notification Channels — attached channels + routing editor
-   ════════════════════════════════════════════════════════════ */
+/* ── Summary tiles ────────────────────────────────────────────────────── */
 
-function ChannelsCard({ rule, channels }: { rule: AlertRuleInfo | null; channels?: AlertChannel[] }) {
-  const [editOpen, setEditOpen] = useState(false)
+function Tile({ label, value, sub, icon: Icon, tone = 'neutral' }: {
+  label: string
+  value: React.ReactNode
+  sub?: React.ReactNode
+  icon: typeof Clock
+  tone?: 'danger' | 'warning' | 'info' | 'success' | 'muted' | 'neutral'
+}) {
+  const cls = {
+    danger: 'bg-danger/10 text-danger', warning: 'bg-warning/10 text-warning', info: 'bg-primary/10 text-primary',
+    success: 'bg-success/10 text-success', muted: 'bg-muted/10 text-text2', neutral: 'bg-surface2 text-text2',
+  }[tone]
+  return (
+    <Card>
+      <CardContent className="flex items-start gap-3 p-3">
+        <span className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-md', cls)}><Icon className="h-4 w-4" aria-hidden /></span>
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-muted">{label}</div>
+          <div className="text-base font-semibold">{value}</div>
+          {sub && <div className="text-xs text-muted">{sub}</div>}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function SummaryTiles({ alert, now, statusKeyValue }: { alert: AlertDetail; now: number; statusKeyValue: string }) {
+  const open = isOpen(alert)
+  const recovered = alert.closure?.reason === 'recovered'
+  const sev = severityMeta(alert.severity)
+
+  const condition = alert.status === 'pending'
+    ? { text: 'Breaching — within hold time', tone: 'warning' as const }
+    : statusKeyValue === 'suppressed'
+      ? { text: 'Still active (suppressed)', tone: 'muted' as const }
+      : open
+        ? { text: 'Still firing (not recovered)', tone: 'danger' as const }
+        : recovered
+          ? { text: 'Recovered', tone: 'success' as const }
+          : { text: 'Unknown — closed without recovery', tone: 'neutral' as const }
+
+  const age = ageOf(alert.triggered_at, now)
+  const span = spanSeconds(alert.triggered_at, alert.resolved_at)
+  const durLabel = open ? 'Open for' : recovered ? 'Time to recover' : 'Time to close'
+  const durValue = open ? (age.future ? 'Future timestamp' : fmtDur(age.seconds)) : fmtDur(span)
+
+  let target: { value: string; sub?: string; tone: 'danger' | 'warning' | 'neutral' | 'info' }
+  const ackSpan = spanSeconds(alert.triggered_at, alert.acknowledged_at)
+  if (alert.acknowledged_at) {
+    target = { value: `Acknowledged in ${fmtDur(ackSpan)}`, sub: alert.acknowledged_by ? `by ${alert.acknowledged_by.name}` : undefined, tone: 'info' }
+  } else if (!alert.ack_due_at) {
+    target = { value: open ? 'No target' : 'Not acknowledged', sub: open ? 'No response target for this severity' : undefined, tone: 'neutral' }
+  } else {
+    const due = parseTs(alert.ack_due_at) ?? 0
+    const delta = Math.abs(due - now) / 1000
+    target = alert.ack_overdue || due < now
+      ? { value: `Overdue by ${fmtDur(delta)}`, sub: `Ack was due ${fmtAlertDate(alert.ack_due_at)}`, tone: 'danger' }
+      : { value: `Ack due in ${fmtDur(delta)}`, sub: fmtAlertDate(alert.ack_due_at), tone: 'warning' }
+  }
+
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      <Tile label="Severity" value={sev.label} icon={ShieldAlert} tone={alert.severity === 'critical' ? 'danger' : alert.severity === 'warning' ? 'warning' : 'info'} />
+      <Tile
+        label="Status · Condition"
+        value={<StatusChip alert={alert} />}
+        sub={<span className={cn(condition.tone === 'success' && 'text-success', condition.tone === 'danger' && 'text-danger')}>{condition.text}</span>}
+        icon={Waves}
+        tone={condition.tone === 'success' ? 'success' : condition.tone === 'muted' ? 'muted' : open ? 'danger' : 'neutral'}
+      />
+      <Tile
+        label={durLabel}
+        value={durValue}
+        sub={open ? `since ${fmtAlertDate(alert.triggered_at)}` : `closed ${fmtAlertDate(alert.resolved_at)}${alert.closure ? ` · ${alert.closure.label}` : ''}`}
+        icon={Clock}
+        tone={age.future && open ? 'warning' : 'neutral'}
+      />
+      <Tile
+        label="Owner"
+        value={alert.assigned_to?.name ?? 'Unassigned'}
+        sub={alert.assigned_at ? `since ${fmtAlertDate(alert.assigned_at)}` : open ? 'Nobody owns this yet' : undefined}
+        icon={UserCheck}
+        tone={!alert.assigned_to && open && alert.severity === 'critical' ? 'danger' : alert.assigned_to ? 'info' : 'neutral'}
+      />
+      <Tile label="Response target" value={target.value} sub={target.sub} icon={Timer} tone={target.tone} />
+    </div>
+  )
+}
+
+/* ── Evidence (F05) ───────────────────────────────────────────────────── */
+
+function EvidenceCard({ alert }: { alert: AlertDetail }) {
+  const ev = alert.evidence ?? []
   return (
     <Card>
       <CardContent className="p-4">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">Notification Channels</h2>
-          {rule && (
-            <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setEditOpen(true)}>
-              <Pencil className="h-3 w-3" /> Edit
-            </Button>
-          )}
-        </div>
-        {!rule ? (
-          <div className="text-xs text-muted">No rule linked — routing is configured on the alert rule.</div>
-        ) : !channels || channels.length === 0 ? (
-          <div className="rounded-md border border-dashed border-warning/40 bg-warning/5 p-3 text-xs text-warning">
-            No channels attached — this rule records alerts but notifies nobody.
-          </div>
-        ) : (
-          <div className="space-y-1.5">
-            {channels.map((c) => (
-              <div key={c.id} className={`flex items-center gap-2 rounded-md border border-border/60 bg-surface2/30 px-2.5 py-1.5 ${c.enabled ? '' : 'opacity-60'}`}>
-                <ChannelIcons channels={[c]} />
-                <span className="min-w-0 flex-1 truncate text-xs font-medium">{c.name}</span>
-                <span className="text-[10px] uppercase tracking-wider text-muted">{c.type}</span>
-                {!c.enabled && <Badge variant="outline" className="text-[9px]">disabled</Badge>}
+        <h2 className="mb-2 text-base font-semibold">Evidence</h2>
+        {ev.length ? (
+          <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-2">
+            {ev.map((e, i) => (
+              <div key={`${e.label}-${i}`} className="min-w-0 rounded-md border border-border/60 bg-surface2/30 px-3 py-2">
+                <dt className="text-xs font-medium text-muted">{e.label}</dt>
+                <dd className="break-words text-sm font-medium">{e.value == null || e.value === '' ? <span className="text-muted">Unknown</span> : String(e.value)}</dd>
               </div>
+            ))}
+          </dl>
+        ) : (
+          <p className="text-sm text-muted">No structured readings were recorded with this alert.</p>
+        )}
+        <dl className="mt-3 grid gap-x-4 gap-y-1 text-sm sm:grid-cols-2">
+          <div><dt className="inline text-muted">Triggered: </dt><dd className="inline">{fmtAlertDate(alert.triggered_at, { seconds: true, year: 'always' })}</dd></div>
+          <div><dt className="inline text-muted">Alert ID: </dt><dd className="inline break-all font-mono text-xs">{alert.id}</dd></div>
+        </dl>
+        <details className="mt-3 rounded-md border border-border">
+          <summary className={cn('cursor-pointer px-3 py-2 text-sm text-muted hover:text-text', focusRing)}>Raw metadata (JSON)</summary>
+          <pre className="max-h-72 overflow-auto border-t border-border bg-bg p-3 text-xs text-text2">
+            {JSON.stringify(alert.metadata || {}, null, 2)}
+          </pre>
+        </details>
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── Related (A03) ────────────────────────────────────────────────────── */
+
+const RELATION_FALLBACK: Record<string, string> = {
+  same_entity: 'Other alerts on the same entity',
+  same_rule_window: 'Same rule fired on other targets around the same time',
+  dependency_parent: 'Upstream dependency alert',
+}
+
+function RelatedCard({ alert, now }: { alert: AlertDetail; now: number }) {
+  const related: RelatedAlert[] = alert.related?.length
+    ? alert.related
+    : (alert.related_alerts ?? []).map((r) => ({ ...r, relation: 'same_entity', relation_label: RELATION_FALLBACK.same_entity }))
+  const groups = new Map<string, { label: string; items: RelatedAlert[] }>()
+  for (const r of related) {
+    const g = groups.get(r.relation) ?? { label: r.relation_label || RELATION_FALLBACK[r.relation] || r.relation, items: [] }
+    g.items.push(r)
+    groups.set(r.relation, g)
+  }
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <h2 className="mb-2 text-base font-semibold">Related incidents</h2>
+        {groups.size === 0 ? (
+          <p className="rounded-md border border-dashed border-border p-4 text-center text-sm text-muted">No related incidents found.</p>
+        ) : (
+          <div className="space-y-4">
+            {[...groups.entries()].map(([rel, g]) => (
+              <section key={rel} aria-label={g.label}>
+                <h3 className="mb-1.5 text-sm font-semibold text-text2">{g.label} <span className="font-normal text-muted">({g.items.length})</span></h3>
+                <ul className="space-y-1.5">
+                  {g.items.map((r) => <RelatedItem key={r.id} r={r} now={now} />)}
+                </ul>
+              </section>
             ))}
           </div>
         )}
       </CardContent>
-      {rule && (
-        <ChannelsEditDialog open={editOpen} onOpenChange={setEditOpen} rule={rule} />
-      )}
     </Card>
   )
 }
 
-function ChannelsEditDialog({
-  open, onOpenChange, rule,
-}: { open: boolean; onOpenChange: (v: boolean) => void; rule: AlertRuleInfo }) {
-  const qc = useQueryClient()
-  const [selected, setSelected] = useState<Set<string>>(new Set(rule.notify_channels || []))
-
-  useEffect(() => {
-    if (open) setSelected(new Set(rule.notify_channels || []))
-  }, [open, rule])
-
-  const { data, error, isLoading } = useQuery<{ data: AlertChannel[] }>({
-    queryKey: ['channels'],
-    queryFn: async () => (await api.get('/settings/channels')).data,
-    enabled: open,
-  })
-  const all = data?.data || []
-
-  const save = useMutation({
-    mutationFn: async () =>
-      (await api.put(`/alert-rules/${rule.id}`, { notify_channels: Array.from(selected) })).data,
-    onSuccess: () => {
-      toast.success('Notification routing updated')
-      qc.invalidateQueries({ queryKey: ['alerts'] })
-      qc.invalidateQueries({ queryKey: ['alert-rules'] })
-      onOpenChange(false)
-    },
-    onError: (e: any) => toast.error('Update failed', apiErrorMessage(e)),
-  })
-
+function RelatedItem({ r, now }: { r: AlertRow; now: number }) {
+  const e = entityOf(r)
+  const Icon = ENTITY_ICON[e.kind]
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>Notification routing · {rule.name}</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-2 text-sm">
-          {isLoading && <div className="py-4 text-center text-xs text-muted"><Loader2 className="mx-auto h-4 w-4 animate-spin" /></div>}
-          {error != null && (
-            <div className="rounded-md border border-danger/30 bg-danger/5 p-3 text-xs text-danger">
-              Could not load channels: {apiErrorMessage(error)}. Managing channels requires admin access.
-            </div>
-          )}
-          {!isLoading && !error && all.length === 0 && (
-            <div className="text-xs text-muted">
-              No notification channels exist yet — create one under{' '}
-              <Link to="/settings/notifications" className="text-primary hover:underline" onClick={() => onOpenChange(false)}>Settings → Notifications</Link>.
-            </div>
-          )}
-          {all.map((c) => (
-            <label key={c.id} className={`flex cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2 ${selected.has(c.id) ? 'border-primary/50 bg-primary/5' : 'border-border bg-surface2/30'}`}>
-              <input
-                type="checkbox"
-                checked={selected.has(c.id)}
-                onChange={(e) => {
-                  const next = new Set(selected)
-                  if (e.target.checked) next.add(c.id); else next.delete(c.id)
-                  setSelected(next)
-                }}
-              />
-              <ChannelIcons channels={[c]} />
-              <span className="min-w-0 flex-1 truncate text-xs font-medium">{c.name}</span>
-              <span className="text-[10px] uppercase tracking-wider text-muted">{c.type}</span>
-              {!c.enabled && <Badge variant="outline" className="text-[9px]">disabled</Badge>}
-            </label>
-          ))}
+    <li>
+      <Link
+        to={`/alerts/${r.id}`}
+        className={cn('flex flex-wrap items-start gap-2 rounded-md border border-border bg-surface2/30 p-2 transition-colors hover:border-primary/50 hover:bg-primary/5', focusRing)}
+      >
+        <SeverityBadge severity={r.severity} />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium" title={cleanAlertMessage(r.message)}>{cleanAlertMessage(r.message)}</div>
+          <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted">
+            {Icon && <Icon className="h-3 w-3" aria-hidden />}
+            <span>{ENTITY_KIND_LABEL[e.kind]}: {e.name}</span>
+            <span>· {fmtAgo(r.triggered_at, now)}</span>
+          </div>
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={() => save.mutate()} disabled={save.isPending || !!error}>
-            {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save routing'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        <StatusChip alert={r} />
+      </Link>
+    </li>
   )
 }
 
-/* ════════════════════════════════════════════════════════════
-   Message preview — what the channels would actually receive
-   ════════════════════════════════════════════════════════════ */
+/* ── Recurrence (F02) ─────────────────────────────────────────────────── */
+
+function RecurrenceCard({ alert, now }: { alert: AlertDetail; now: number }) {
+  const rc = alert.recurrence
+  if (!rc) return null
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <h2 className="text-base font-semibold">Recurrence</h2>
+          {rc.flapping && (
+            <span className="inline-flex items-center gap-1 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-xs font-medium text-warning">
+              <Repeat className="h-3.5 w-3.5" aria-hidden /> Flapping
+            </span>
+          )}
+        </div>
+        <p className="text-sm">
+          Same condition fired <b>{rc.same_condition_24h.toLocaleString()}</b> time{rc.same_condition_24h === 1 ? '' : 's'} in 24 h and{' '}
+          <b>{rc.same_condition_7d.toLocaleString()}</b> in 7 days
+          {rc.flapping ? ' — it keeps opening and clearing; consider a hold time or reset threshold rather than closing it.' : '.'}
+        </p>
+        {rc.previous?.length > 0 && (
+          <ul className="mt-2 space-y-1">
+            {rc.previous.map((p) => (
+              <li key={p.id} className="flex flex-wrap items-center gap-2 text-sm">
+                <Link to={`/alerts/${p.id}`} className={cn('text-primary hover:underline', focusRing)}>{fmtAlertDate(p.triggered_at)}</Link>
+                <span className="text-muted">({fmtAgo(p.triggered_at, now)})</span>
+                <StatusChip alert={{ status: p.status }} />
+                {p.resolved_at && <span className="text-xs text-muted">lasted {fmtDur(spanSeconds(p.triggered_at, p.resolved_at))}</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── Affected entity (A09) ────────────────────────────────────────────── */
+
+function EntityCard({ alert }: { alert: AlertDetail }) {
+  const e = entityOf(alert)
+  const Icon = ENTITY_ICON[e.kind]
+  const facts: Array<[string, string | null]> = e.kind === 'device'
+    ? [['Hostname', alert.device_hostname], ['IP address', alert.device_ip]]
+    : e.kind === 'server' ? [['Hostname', alert.server_hostname]]
+      : e.kind === 'service_check' ? [['Service check', alert.service_check_name]]
+        : e.kind === 'sensor' ? [['Sensor', alert.sensor_name]]
+          : []
+  const body = (
+    <>
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary"><Icon className="h-4 w-4" aria-hidden /></span>
+      <span className="min-w-0">
+        <span className="block truncate text-sm font-semibold">{e.name}</span>
+        <span className="block truncate text-xs text-muted">{ENTITY_KIND_LABEL[e.kind]}{e.subtitle ? ` · ${e.subtitle}` : ''}</span>
+      </span>
+    </>
+  )
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <h2 className="mb-2 text-base font-semibold">Affected entity</h2>
+        {e.href ? (
+          <Link to={e.href} className={cn('flex items-center gap-3 rounded-md border border-border bg-surface2/30 p-3 hover:border-primary/50 hover:bg-primary/5', focusRing)}>{body}</Link>
+        ) : (
+          <div className="flex items-center gap-3 rounded-md border border-border bg-surface2/30 p-3">{body}</div>
+        )}
+        {facts.some(([, v]) => v) && (
+          <dl className="mt-2 space-y-0.5 text-sm">
+            {facts.filter(([, v]) => v).map(([k, v]) => (
+              <div key={k} className="flex gap-2"><dt className="w-24 shrink-0 text-muted">{k}</dt><dd className="min-w-0 break-all font-mono text-xs leading-5">{v}</dd></div>
+            ))}
+          </dl>
+        )}
+        {!e.href && e.kind === 'system' && <p className="mt-2 text-xs text-muted">System-level alert — not tied to a monitored entity.</p>}
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── Message preview ──────────────────────────────────────────────────── */
 
 function MessagePreviewCard({ ruleId }: { ruleId: string }) {
   const [show, setShow] = useState(false)
@@ -675,14 +510,15 @@ function MessagePreviewCard({ ruleId }: { ruleId: string }) {
     <Card>
       <CardContent className="p-4">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">Message Preview</h2>
+          <h2 className="text-base font-semibold">Message preview</h2>
           {show && (
-            <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5">
+            <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5" role="group" aria-label="Preview format">
               {(['email', 'sms'] as const).map((t) => (
                 <button
                   key={t}
+                  aria-pressed={tab === t}
                   onClick={() => setTab(t)}
-                  className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${tab === t ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text'}`}
+                  className={cn('rounded px-2 py-0.5 text-xs font-semibold uppercase', focusRing, tab === t ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text')}
                 >
                   {t}
                 </button>
@@ -691,43 +527,34 @@ function MessagePreviewCard({ ruleId }: { ruleId: string }) {
           )}
         </div>
         {!show ? (
-          <Button size="sm" variant="outline" onClick={() => setShow(true)}>
+          <Button size="sm" variant="outline" className={focusRing} onClick={() => setShow(true)}>
             <Eye className="h-3.5 w-3.5" /> Preview notification
           </Button>
         ) : isFetching ? (
-          <div className="py-4 text-center text-xs text-muted"><Loader2 className="mx-auto h-4 w-4 animate-spin" /></div>
+          <div className="py-4 text-center text-muted"><Loader2 className="mx-auto h-4 w-4 animate-spin" /></div>
         ) : error != null ? (
-          <div className="text-xs text-danger">Preview failed: {apiErrorMessage(error)}</div>
+          <div className="text-sm text-danger">Preview failed: {apiErrorMessage(error)}</div>
         ) : data ? (
           tab === 'email' ? (
             <div className="space-y-2">
-              <div className="rounded-md border border-border bg-surface2/40 px-3 py-2 text-xs">
-                <span className="mr-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Subject</span>
+              <div className="rounded-md border border-border bg-surface2/40 px-3 py-2 text-sm">
+                <span className="mr-1.5 text-xs font-semibold text-muted">Subject</span>
                 {data.alert.subject}
               </div>
-              <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-md bg-bg p-3 text-[11px] leading-relaxed text-text/90">
-                {data.alert.email_body}
-              </pre>
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-md bg-bg p-3 text-xs leading-relaxed text-text/90">{data.alert.email_body}</pre>
               {data.recovery && (
-                <details className="text-xs">
-                  <summary className="cursor-pointer text-muted hover:text-text">Recovery message</summary>
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-bg p-3 text-[11px] text-text/90">
-                    {data.recovery.email_body}
-                  </pre>
+                <details className="text-sm">
+                  <summary className={cn('cursor-pointer text-muted hover:text-text', focusRing)}>Recovery message</summary>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-bg p-3 text-xs text-text/90">{data.recovery.email_body}</pre>
                 </details>
               )}
             </div>
           ) : (
-            <div className="rounded-md border border-border bg-surface2/40 p-3 font-mono text-[11px] leading-relaxed">
-              {data.alert.sms_body}
-            </div>
+            <div className="rounded-md border border-border bg-surface2/40 p-3 font-mono text-xs leading-relaxed">{data.alert.sms_body}</div>
           )
         ) : null}
-        <p className="mt-2 text-[10px] text-muted">
-          Rendered with sample values — edit templates on the rule in Alert Rules.
-        </p>
+        <p className="mt-2 text-xs text-muted">Rendered with sample values — edit templates on the rule in Alert Rules.</p>
       </CardContent>
     </Card>
   )
 }
-

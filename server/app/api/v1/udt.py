@@ -64,12 +64,13 @@ from app.services.udt_history import address_history, address_periods, address_e
 from app.core.database import get_db
 from app.core.hostnames import normalize_host
 from app.core.security import (
-    require_admin_user, require_operator_user, require_permission,
+    require_admin_user, require_permission,
     user_has_permission,
 )
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 from app.services.udt_service import (
+    endpoint_search_condition,
     ENDPOINT_TYPES, TYPE_SLUG_RE, apply_class_rules, classify_endpoint,
     normalize_mac, rule_condition,
 )
@@ -294,20 +295,9 @@ async def list_endpoints(
     if not include_ignored:
         where.append("NOT e.ignored")
     if q:
-        term = q.strip()
-        mac = normalize_mac(term)
-        if mac:
-            where.append("e.mac = CAST(:mac AS macaddr)")
-            params["mac"] = mac
-        else:
-            # Searching user_name is itself a disclosure — it turns the list
-            # into an oracle for "does this person exist" — so callers who may
-            # not see usernames may not search them either.
-            user_clause = "OR e.user_name ILIKE :q " if see_users else ""
-            where.append(f"(e.hostname ILIKE :q OR e.vendor ILIKE :q {user_clause}"
-                         "OR host(e.ip_address) ILIKE :q OR e.mac::text ILIKE :q "
-                         "OR EXISTS (SELECT 1 FROM udt_ip_history h WHERE h.endpoint_id=e.id AND host(h.ip) ILIKE :q))")
-            params["q"] = f"%{term}%"
+        condition = endpoint_search_condition(q, params, see_users)
+        if condition:
+            where.append(condition)
     if status == "active":
         where.append("e.last_seen > NOW() - INTERVAL '15 minutes'")
     elif status == "inactive":
@@ -462,7 +452,7 @@ async def endpoint_ip_evidence(
 @router.patch("/endpoints/{endpoint_id}")
 async def update_endpoint(
     endpoint_id: str, payload: EndpointUpdate,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
     sets, params = [], {"id": endpoint_id}
     if payload.endpoint_type is not None:
@@ -600,7 +590,7 @@ async def list_ports(
 @router.patch("/ports/{device_id}/{if_index}")
 async def update_port(
     device_id: str, if_index: int, payload: PortUpdate,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
     # Ensure the port-state row exists.
     await db.execute(text(
@@ -633,7 +623,7 @@ async def update_port(
 @router.post("/ports/{device_id}/{if_index}/action")
 async def port_action(
     device_id: str, if_index: int, payload: PortAction,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
     if payload.action in ("monitor", "unmonitor"):
         await db.execute(text(
@@ -746,7 +736,7 @@ async def udt_settings(db: AsyncSession = Depends(get_db), user: User = Depends(
 @router.put("/settings")
 async def update_udt_settings(
     payload: UdtGlobalSettingsUpdate,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
     # Merge so future keys under 'udt' survive an interval change. The
     # poller re-reads this on its device-sync cadence (~1 min).
@@ -799,7 +789,7 @@ async def udt_device_settings(db: AsyncSession = Depends(get_db), user: User = D
 @router.put("/settings/devices/{device_id}")
 async def update_udt_device_settings(
     device_id: str, payload: UdtDeviceSettingsUpdate,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
     dev = (await db.execute(text(
         "SELECT id FROM devices WHERE id = :id AND snmp_enabled = TRUE"
@@ -829,7 +819,7 @@ async def update_udt_device_settings(
 @router.post("/settings/devices/bulk")
 async def bulk_udt_device_settings(
     payload: UdtBulkDeviceSettings,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
     if payload.set_enabled is None and not payload.set_credential and not payload.set_interval:
         raise HTTPException(status_code=400, detail="no fields to update")
@@ -871,7 +861,7 @@ async def bulk_udt_device_settings(
 @router.post("/devices/{device_id}/ports/bulk-monitor")
 async def bulk_port_monitor(
     device_id: str, payload: PortBulkMonitor,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
     dev = (await db.execute(text("SELECT id FROM devices WHERE id = :id"), {"id": device_id})).first()
     if not dev:
@@ -915,7 +905,7 @@ async def list_rules(list_type: Optional[str] = None,
 
 @router.post("/rules")
 async def create_rule(payload: RuleCreate, db: AsyncSession = Depends(get_db),
-                      user: User = Depends(require_operator_user)):
+                      user: User = Depends(require_permission("udt.manage"))):
     from app.services.udt_service import rule_condition
     if rule_condition({"match_type": payload.match_type, "pattern": payload.pattern}, {}, 0) is None:
         raise HTTPException(status_code=400, detail="pattern does not parse for the chosen match_type")
@@ -933,7 +923,7 @@ async def create_rule(payload: RuleCreate, db: AsyncSession = Depends(get_db),
 
 @router.patch("/rules/{rule_id}")
 async def update_rule(rule_id: str, payload: RuleUpdate, db: AsyncSession = Depends(get_db),
-                      user: User = Depends(require_operator_user)):
+                      user: User = Depends(require_permission("udt.manage"))):
     sets, params = [], {"id": rule_id}
     if payload.pattern is not None:
         sets.append("pattern = :p"); params["p"] = payload.pattern
@@ -953,7 +943,7 @@ async def update_rule(rule_id: str, payload: RuleUpdate, db: AsyncSession = Depe
 
 @router.delete("/rules/{rule_id}")
 async def delete_rule(rule_id: str, db: AsyncSession = Depends(get_db),
-                      user: User = Depends(require_operator_user)):
+                      user: User = Depends(require_permission("udt.manage"))):
     res = await db.execute(text("DELETE FROM udt_rules WHERE id = :id RETURNING id"), {"id": rule_id})
     if not res.first():
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -990,7 +980,7 @@ async def list_class_rules(db: AsyncSession = Depends(get_db), user: User = Depe
 
 @router.post("/class-rules")
 async def create_class_rule(payload: ClassRuleCreate, db: AsyncSession = Depends(get_db),
-                            user: User = Depends(require_operator_user)):
+                            user: User = Depends(require_permission("udt.manage"))):
     if rule_condition({"match_type": payload.match_type, "pattern": payload.pattern}, {}, 0) is None:
         raise HTTPException(status_code=400, detail="pattern does not parse for the chosen match_type")
     row = (await db.execute(text(
@@ -1009,7 +999,7 @@ async def create_class_rule(payload: ClassRuleCreate, db: AsyncSession = Depends
 
 @router.patch("/class-rules/{rule_id}")
 async def update_class_rule(rule_id: str, payload: ClassRuleUpdate, db: AsyncSession = Depends(get_db),
-                            user: User = Depends(require_operator_user)):
+                            user: User = Depends(require_permission("udt.manage"))):
     sets, params = [], {"id": rule_id}
     for col, key, val in (("priority", "pr", payload.priority), ("match_type", "mt", payload.match_type),
                           ("pattern", "p", payload.pattern), ("set_type", "st", payload.set_type),
@@ -1037,7 +1027,7 @@ async def update_class_rule(rule_id: str, payload: ClassRuleUpdate, db: AsyncSes
 
 @router.delete("/class-rules/{rule_id}")
 async def delete_class_rule(rule_id: str, db: AsyncSession = Depends(get_db),
-                            user: User = Depends(require_operator_user)):
+                            user: User = Depends(require_permission("udt.manage"))):
     res = await db.execute(text("DELETE FROM udt_class_rules WHERE id = :id RETURNING id"), {"id": rule_id})
     if not res.first():
         raise HTTPException(status_code=404, detail="Rule not found")

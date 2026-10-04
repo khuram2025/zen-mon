@@ -45,6 +45,9 @@ import { api } from '@/lib/api'
 import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { relativeTime } from '@/lib/utils'
+import { useCan } from '@/stores/auth'
+import { serverNow } from '@/lib/serverClock'
+import { buildNetflowLink, hostPath } from '@/lib/netflow/links'
 import { RingGauge } from '@/components/dashboard/RingGauge'
 import { Sparkline } from '@/components/dashboard/Sparkline'
 import { fmtMs, fmtPct } from '@/components/apm/shared'
@@ -89,6 +92,8 @@ type TopTalker = {
 
 type ProtocolRow = {
   protocol: number; name: string; bytes: number; flows: number
+  /** Share of the whole filtered scope (all protocols), percent. */
+  share_pct?: number | null
   ports?: Array<{ port: number; service: string; application: string; bytes: number }>
 }
 
@@ -129,6 +134,20 @@ const RANGES: Array<{ key: RangeKey; label: string; minutes: number; hours: numb
   { key: '24h', label: '24H', minutes: 1440, hours: 24, days: 1 },
   { key: '7d', label: '7D', minutes: 10080, hours: 168, days: 7 },
 ]
+
+/**
+ * A NetFlow page link for the dashboard range: rolling presets keep their key; 6H (no NetFlow
+ * preset) is sent as explicit bounds on the appliance clock, so the page opens on the same window.
+ */
+function netflowLink(path: string, range: { key: RangeKey; minutes: number }): string {
+  if (range.key !== '6h') return buildNetflowLink(path, { extra: { range: range.key } })
+  const end = Math.floor(serverNow() / 60_000) * 60_000
+  return buildNetflowLink(path, {
+    extra: { range: 'custom', from: new Date(end - range.minutes * 60_000).toISOString(), to: new Date(end).toISOString() },
+  })
+}
+
+const NO_NETFLOW_ACCESS = 'No access to NetFlow data (needs the NetFlow view permission)'
 
 /* ── Page ───────────────────────────────────────────────────────────────── */
 
@@ -189,34 +208,44 @@ export function DashboardPage() {
     refetchInterval: 30_000,
   }).data
 
+  // NetFlow widgets need `netflow.view`: without it nothing is requested (no 403s) and each
+  // NetFlow widget says so instead of showing an empty "no traffic" state.
+  const canNetflow = useCan()('netflow.view')
+
   const nfOverview = useQuery<NetflowOverview>({
     queryKey: ['noc', 'nf-overview', range.minutes],
     queryFn: async () => (await api.get(`/netflow/overview?minutes=${range.minutes}`)).data,
     refetchInterval: 30_000,
+    enabled: canNetflow,
   }).data
 
   const nfSeries = useQuery<NetflowPoint[]>({
     queryKey: ['noc', 'nf-series', range.minutes],
     queryFn: async () => (await api.get(`/netflow/timeseries?minutes=${range.minutes}&points=48`)).data,
     refetchInterval: 30_000,
+    enabled: canNetflow,
   }).data
 
+  // Ranked by all traffic a host took part in (sent + received), stated in the card header.
   const talkers = useQuery<TopTalker[]>({
-    queryKey: ['noc', 'nf-talkers', range.minutes],
-    queryFn: async () => (await api.get(`/netflow/top-talkers?minutes=${range.minutes}&limit=6`)).data,
+    queryKey: ['noc', 'nf-talkers', range.minutes, 'total'],
+    queryFn: async () => (await api.get(`/netflow/top-talkers?minutes=${range.minutes}&limit=6&by=total`)).data,
     refetchInterval: 60_000,
+    enabled: canNetflow,
   }).data
 
   const protocols = useQuery<ProtocolRow[]>({
     queryKey: ['noc', 'nf-protocols', range.minutes],
     queryFn: async () => (await api.get(`/netflow/protocols?minutes=${range.minutes}`)).data,
     refetchInterval: 60_000,
+    enabled: canNetflow,
   }).data
 
   const nfIfaces = useQuery<NetflowInterface[]>({
     queryKey: ['noc', 'nf-ifaces', range.minutes],
     queryFn: async () => (await api.get(`/netflow/interfaces?minutes=${range.minutes}&limit=6`)).data,
     refetchInterval: 60_000,
+    enabled: canNetflow,
   }).data
 
   const services = useQuery<ServiceSummary>({
@@ -276,11 +305,17 @@ export function DashboardPage() {
     return rows.slice(0, 5)
   }, [devices, alertCounts])
 
+  // Shares of ALL protocol traffic in the window (not of the five listed), with the rest as "Other".
   const protoMix = useMemo(() => {
-    const rows = (protocols || []).slice(0, 5)
-    const sum = rows.reduce((s, r) => s + r.bytes, 0) || 1
+    const all = protocols || []
+    const scope = all.reduce((s, r) => s + r.bytes, 0)
+    if (!(scope > 0)) return []
+    const rows = all.slice(0, 5)
     const colors = ['#22d3ee', '#a78bfa', '#f59e0b', '#34d399', '#f472b6']
-    return rows.map((r, i) => ({ ...r, pct: (r.bytes / sum) * 100, color: colors[i % colors.length] }))
+    const out = rows.map((r, i) => ({ key: String(r.protocol), name: r.name, bytes: r.bytes, pct: (r.bytes / scope) * 100, color: colors[i % colors.length] }))
+    const rest = scope - rows.reduce((s, r) => s + r.bytes, 0)
+    if (rest > 0) out.push({ key: 'other', name: 'Other', bytes: rest, pct: (rest / scope) * 100, color: '#a8a29e' })
+    return out
   }, [protocols])
 
   const topApps = useMemo(() => {
@@ -380,7 +415,7 @@ export function DashboardPage() {
             </span>
           </div>
           <p className="mt-0.5 text-xs text-muted">
-            {nfOverview ? <>{fmtCount(nfOverview.flows)} flows · {fmtCount(nfOverview.src_hosts)} active hosts · {nfOverview.exporters} exporters</> : 'Live infrastructure & traffic overview'}
+            {canNetflow && nfOverview ? <>{fmtCount(nfOverview.flows)} flows · {fmtCount(nfOverview.src_hosts)} active hosts · {nfOverview.exporters} exporters</> : 'Live infrastructure & traffic overview'}
             {' · '}refreshes every 15s
           </p>
         </div>
@@ -406,10 +441,12 @@ export function DashboardPage() {
           </span>}
           foot={<div className="text-[10px] text-muted">{alertStats?.resolved_today ?? 0} resolved today</div>}
         />
-        <KpiCard to="/netflow" label="Traffic Now" icon={<Waves className="h-4 w-4" />} accent="info"
-          value={fmtBps(nfOverview?.current_bps ?? 0)}
-          sub={<span className="text-[10.5px] text-muted">peak {fmtBps(trafficStats.peak)}</span>}
-          foot={<Sparkline values={trafficSpark.slice(-30)} color="#22d3ee" width={250} height={30} />}
+        <KpiCard to={canNetflow ? netflowLink('/netflow', range) : '/netflow'} label="Traffic Now" icon={<Waves className="h-4 w-4" />} accent="info"
+          value={canNetflow ? (nfOverview ? fmtBps(nfOverview.current_bps) : '—') : '—'}
+          sub={canNetflow
+            ? <span className="text-[10.5px] text-muted">peak {nfSeries ? fmtBps(trafficStats.peak) : '—'}</span>
+            : <span className="text-[10.5px] text-muted">No NetFlow access</span>}
+          foot={canNetflow ? <Sparkline values={trafficSpark.slice(-30)} color="#22d3ee" width={250} height={30} /> : null}
         />
         <KpiCard to="/availability" label="Availability" icon={<HeartPulse className="h-4 w-4" />}
           accent={(exec?.kpis?.availability_pct ?? 100) >= 99.5 ? 'success' : 'warning'}
@@ -467,15 +504,16 @@ export function DashboardPage() {
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
         <Card className="xl:col-span-8">
           <SectionHeader icon={<Activity className="h-3.5 w-3.5" />} title="Network Traffic"
-            hint={`NetFlow · ${range.label} · ${nfOverview ? fmtBytes(nfOverview.bytes) + ' total' : ''}`}
-            right={nfOverview?.top_protocol && (
+            hint={`NetFlow · ${range.label}${nfOverview ? ' · ' + fmtBytes(nfOverview.bytes) + ' total' : ''}`}
+            right={canNetflow && nfOverview?.top_protocol && (
               <span className="rounded-md bg-surface2/80 px-2 py-0.5 font-mono text-[10px] text-text2">
                 top: {nfOverview.top_protocol.name} · {fmtBytes(nfOverview.top_protocol.bytes)}
               </span>
             )}
           />
+          {!canNetflow ? <div className="flex h-[280px] items-center justify-center px-4"><Empty text={NO_NETFLOW_ACCESS} /></div> : <>
           <div className="grid grid-cols-4 gap-2 px-4 pt-3 text-center">
-            <MiniStat label="Current" value={fmtBps(nfOverview?.current_bps ?? 0)} tone="text-info" />
+            <MiniStat label="Current" value={nfOverview ? fmtBps(nfOverview.current_bps) : '—'} tone="text-info" />
             <MiniStat label="Average" value={fmtBps(trafficStats.avg)} tone="text-text" />
             <MiniStat label="95th pct" value={fmtBps(trafficStats.p95)} tone="text-accent" />
             <MiniStat label="Peak" value={fmtBps(trafficStats.peak)} tone="text-warning" />
@@ -501,6 +539,7 @@ export function DashboardPage() {
               </AreaChart>
             </ResponsiveContainer>
           </div>
+          </>}
         </Card>
 
         <Card className="xl:col-span-4">
@@ -537,19 +576,21 @@ export function DashboardPage() {
       {/* Talkers · Interfaces · Protocols */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-12">
         <Card className="xl:col-span-4">
-          <SectionHeader icon={<Globe className="h-3.5 w-3.5" />} title="Top Talkers" hint={range.label}
-            right={<Link to="/netflow" className="text-xs text-primary hover:underline">NetFlow →</Link>} />
+          <SectionHeader icon={<Globe className="h-3.5 w-3.5" />} title="Top Talkers" hint={`${range.label} · sent + received`}
+            right={canNetflow ? <Link to={netflowLink('/netflow/top-endpoints', range)} className="text-xs text-primary hover:underline">NetFlow →</Link> : undefined} />
           <div className="space-y-2.5 px-4 pb-4 pt-3">
-            {!talkers?.length && <Empty text="No flow records in this window" />}
-            {(talkers || []).map((t, i) => {
+            {!canNetflow && <Empty text={NO_NETFLOW_ACCESS} />}
+            {canNetflow && talkers && !talkers.length && <Empty text="No flow records in this window" />}
+            {canNetflow && (talkers || []).map((t, i) => {
               const max = talkers![0].bytes || 1
               const app = t.ports?.[0]?.application || t.ports?.[0]?.service
               return (
                 <div key={t.ip}>
-                  <div className="flex items-baseline justify-between text-xs">
-                    <span className="flex items-center gap-1.5 font-mono font-medium text-text">
-                      <span className="w-3 text-[9px] text-muted">{i + 1}</span>{t.ip}
-                      {app && <span className="rounded bg-surface2 px-1 py-px text-[8.5px] font-sans text-muted">{app}</span>}
+                  <div className="flex items-baseline justify-between gap-2 text-xs">
+                    <span className="flex min-w-0 items-center gap-1.5 font-mono font-medium text-text">
+                      <span className="w-3 shrink-0 text-[9px] text-muted">{i + 1}</span>
+                      <Link to={netflowLink(hostPath(t.ip), range)} className="break-all hover:text-primary hover:underline" title={`Host profile for ${t.ip}`}>{t.ip}</Link>
+                      {app && <span className="truncate rounded bg-surface2 px-1 py-px text-[8.5px] font-sans text-muted">{app}</span>}
                     </span>
                     <span className="font-mono text-[11px] font-semibold tabular-nums text-text2">{fmtBytes(t.bytes)}</span>
                   </div>
@@ -563,8 +604,9 @@ export function DashboardPage() {
         <Card className="xl:col-span-4">
           <SectionHeader icon={<Network className="h-3.5 w-3.5" />} title="Busiest Interfaces" hint={range.label} />
           <div className="space-y-2.5 px-4 pb-4 pt-3">
-            {!nfIfaces?.length && <Empty text="Awaiting interface telemetry" />}
-            {(nfIfaces || []).map((f) => {
+            {!canNetflow && <Empty text={NO_NETFLOW_ACCESS} />}
+            {canNetflow && nfIfaces && !nfIfaces.length && <Empty text="No interface traffic in this window" />}
+            {canNetflow && (nfIfaces || []).map((f) => {
               const max = nfIfaces![0].bytes || 1
               return (
                 <div key={`${f.exporter_ip}-${f.ifindex}`}>
@@ -579,7 +621,7 @@ export function DashboardPage() {
                 </div>
               )
             })}
-            {!!nfIfaces?.length && (
+            {canNetflow && !!nfIfaces?.length && (
               <div className="flex items-center gap-3 pt-1 text-[9.5px] text-muted">
                 <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full bg-sky-400" /> inbound</span>
                 <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full bg-fuchsia-400" /> outbound</span>
@@ -589,19 +631,21 @@ export function DashboardPage() {
         </Card>
 
         <Card className="xl:col-span-4">
-          <SectionHeader icon={<Radio className="h-3.5 w-3.5" />} title="Protocols & Applications" hint={range.label} />
-          <div className="px-4 pb-4 pt-3">
-            {/* stacked share bar */}
-            <div className="flex h-3 w-full overflow-hidden rounded-full bg-surface2">
+          <SectionHeader icon={<Radio className="h-3.5 w-3.5" />} title="Protocols & Applications" hint={`${range.label} · % of all bytes`}
+            right={canNetflow ? <Link to={netflowLink('/netflow/protocols', range)} className="text-xs text-primary hover:underline">Details →</Link> : undefined} />
+          {!canNetflow ? <div className="px-4 pb-4 pt-3"><Empty text={NO_NETFLOW_ACCESS} /></div> : <div className="px-4 pb-4 pt-3">
+            {/* stacked share bar: listed protocols + "Other" add up to all traffic in the window */}
+            <div className="flex h-3 w-full gap-[2px] overflow-hidden rounded-full bg-surface2">
               {protoMix.map((p) => (
-                <div key={p.protocol} title={`${p.name} ${p.pct.toFixed(1)}%`} style={{ width: `${Math.max(1.5, p.pct)}%`, background: p.color }} />
+                <div key={p.key} title={`${p.name} ${p.pct.toFixed(1)}%`} style={{ flexGrow: p.pct, flexBasis: 0, minWidth: 2, background: p.color }} />
               ))}
             </div>
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+              {protocols && !protoMix.length && <Empty text="No flow records in this window" />}
               {protoMix.map((p) => (
-                <span key={p.protocol} className="flex items-center gap-1.5 text-[10.5px] text-text2">
+                <span key={p.key} className="flex items-center gap-1.5 text-[10.5px] text-text2">
                   <span className="h-2 w-2 rounded-sm" style={{ background: p.color }} />
-                  {p.name} <span className="font-mono text-muted">{p.pct.toFixed(0)}%</span>
+                  {p.name} <span className="font-mono text-muted" title={`${fmtBytes(p.bytes)}`}>{p.pct > 0 && p.pct < 1 ? '<1' : p.pct.toFixed(0)}%</span>
                 </span>
               ))}
             </div>
@@ -623,7 +667,7 @@ export function DashboardPage() {
                 })}
               </div>
             </div>
-          </div>
+          </div>}
         </Card>
       </div>
 
@@ -699,8 +743,8 @@ function SectionHeader({ icon, title, hint, right }: { icon?: React.ReactNode; t
     <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-2.5">
       <div className="flex min-w-0 items-center gap-2">
         {icon && <span className="text-muted">{icon}</span>}
-        <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
-        {hint && <span className="truncate text-[10px] uppercase tracking-wider text-muted">{hint}</span>}
+        <h3 className="shrink-0 whitespace-nowrap text-sm font-semibold tracking-tight">{title}</h3>
+        {hint && <span className="truncate text-[10px] uppercase tracking-wider text-muted" title={hint}>{hint}</span>}
       </div>
       {right}
     </div>

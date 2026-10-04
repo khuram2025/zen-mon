@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.apm_slo_service import compute_slo_series, compute_slo_status
 
@@ -117,7 +117,7 @@ async def list_slos(
 async def create_slo(
     data: SloCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     _validate(data.sli_type, data.latency_threshold_ms, data.window_days)
     service_id = await _resolve_service(db, data.service_name.strip(), data.env.strip())
@@ -143,7 +143,7 @@ async def update_slo(
     slo_id: UUID,
     data: SloUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
@@ -175,7 +175,7 @@ async def update_slo(
 async def delete_slo(
     slo_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     res = await db.execute(text("DELETE FROM apm_slos WHERE id = :id"), {"id": slo_id})
     await db.commit()

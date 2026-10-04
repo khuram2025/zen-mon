@@ -106,12 +106,17 @@ export interface User {
   full_name: string | null
   role: string
   is_active?: boolean
-  auth_source?: 'local' | 'ldap' | 'radius'
+  auth_source?: 'local' | 'ldap' | 'radius' | 'oidc'
   /** Visibility scope: tag names this user is limited to. Empty = unrestricted. */
   scope_tags?: string[]
   last_login: string | null
   created_at?: string
   updated_at?: string
+  must_change_password?: boolean
+  mfa_enabled?: boolean
+  locked?: boolean
+  locked_until?: string | null
+  password_changed_at?: string | null
 }
 
 export interface Role {
@@ -122,12 +127,30 @@ export interface Role {
   permissions: string[]
   is_system: boolean
   user_count: number
+  /** Optimistic-concurrency token; send it back as expected_revision on save. */
+  revision?: number
+  /** True when the role can change other people's access. */
+  privileged?: boolean
+  created_at?: string | null
+  updated_at?: string | null
+  updated_by?: string | null
+}
+
+export type PermissionRisk = 'standard' | 'sensitive' | 'privileged' | 'critical'
+
+export interface PermissionCatalogPermission {
+  id: string
+  label: string
+  description: string
+  risk?: PermissionRisk
+  /** Permissions the editor offers to add together with this one. */
+  implies?: string[]
 }
 
 export interface PermissionCatalogModule {
   module: string
   label: string
-  permissions: { id: string; label: string; description: string }[]
+  permissions: PermissionCatalogPermission[]
 }
 
 export interface SubscriptionInfo {
@@ -151,10 +174,13 @@ export interface SubscriptionInfo {
 }
 
 export interface LoginResponse {
-  access_token: string
+  access_token?: string
   token_type: string
   expires_in: number
-  user: User
+  user?: User
+  /** Set (instead of a token) when the account needs a second factor. */
+  mfa_required?: boolean
+  challenge?: string | null
 }
 
 export type ServiceCheckType = 'http' | 'tcp' | 'tls' | 'icmp' | 'dns'
@@ -231,6 +257,15 @@ export interface ServiceMaintenanceWindow {
   reason: string | null
   active: boolean
   created_at: string
+  /** Lifecycle (newer appliances): ending early records ended_at; a window
+   *  that never started is cancelled. Records are kept for SLA history. */
+  ended_at?: string | null
+  ended_by_name?: string | null
+  end_reason?: string | null
+  cancelled_at?: string | null
+  effective_ends_at?: string | null
+  state?: 'scheduled' | 'active' | 'ended' | 'cancelled' | 'expired'
+  created_by_name?: string | null
 }
 
 export interface ServiceCheck {

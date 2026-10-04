@@ -19,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, get_ch_client
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.apm_synthetic_service import execute_and_record, MAX_STEPS
 
@@ -181,7 +181,7 @@ async def list_monitors(
 async def create_monitor(
     body: MonitorCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     monitor_id = str(uuid.uuid4())
     await db.execute(text("""
@@ -223,7 +223,7 @@ async def update_monitor(
     monitor_id: uuid.UUID,
     body: MonitorUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     res = await db.execute(text("""
         UPDATE apm_synthetic_monitors
@@ -248,7 +248,7 @@ async def update_monitor(
 async def delete_monitor(
     monitor_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     res = await db.execute(text(
         "DELETE FROM apm_synthetic_monitors WHERE id = :id"), {"id": str(monitor_id)})
@@ -262,7 +262,7 @@ async def delete_monitor(
 async def run_monitor_now(
     monitor_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     """Execute the scenario immediately and return full step-level detail."""
     row = (await db.execute(text("""

@@ -6,9 +6,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.netflow import access as nf_access
 from app.core import scoping
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.schemas.device import (
     DeviceCreate, DeviceUpdate, DeviceResponse, DeviceSummary, DeviceGroupResponse,
@@ -17,6 +18,7 @@ from app.schemas.device import (
 )
 from app.schemas.metric import MetricResponse, StatusChangeEvent
 from app.services import device_service, metric_service
+from app.services.audit_service import write_audit_log
 from app.api.v1.snmp import (
     _snmpget,
     _snmpget_detail,
@@ -32,6 +34,36 @@ import time
 import asyncio
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
+
+
+async def _device_in_scope(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    """404 for a device outside the caller's tag scope, on every
+    ``/devices/{device_id}/...`` route (reads and writes alike), the same
+    answer GET /devices/{id} gives -- a scoped operator must not read or
+    change another team's device by id (interface speeds feed that team's
+    utilization, interface alerts and NetFlow capacity)."""
+    scope = await scoping.visible_tags(db, user)
+    if scope is None:
+        return
+    row = (await db.execute(text("SELECT tags FROM devices WHERE id = :id"), {"id": device_id})).first()
+    if row is None or not scoping.entity_visible(row[0], scope):
+        raise HTTPException(status_code=404, detail="Device not found")
+
+
+async def _ids_in_scope(db: AsyncSession, user: User, ids) -> None:
+    """404 unless every device id is visible to the caller (bulk writes)."""
+    scope = await scoping.visible_tags(db, user)
+    if scope is None or not ids:
+        return
+    rows = (await db.execute(text("SELECT id::text, tags FROM devices WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                             {"ids": [str(i) for i in ids]})).all()
+    seen = {r[0]: r[1] for r in rows}
+    if any(str(i) not in seen or not scoping.entity_visible(seen[str(i)], scope) for i in ids):
+        raise HTTPException(status_code=404, detail="Device not found")
 
 SYS_UPTIME_OID = "1.3.6.1.2.1.1.3.0"
 
@@ -150,19 +182,44 @@ def _ping_uptime_sql(table: str, where: str) -> str:
 @router.get("/dashboard/uptime-stats")
 async def dashboard_uptime_stats(
     hours: int = Query(default=24, ge=1, le=8760),
+    from_: Optional[datetime] = Query(default=None, alias="from"),
+    to: Optional[datetime] = Query(default=None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Get uptime percentages per device over a time range from ClickHouse metrics."""
+    """Get uptime percentages per device over a time range from ClickHouse metrics.
+
+    Explicit `from`/`to` bound the window exactly (so a historical range is not
+    answered with one ending now); otherwise it is the last `hours`.
+    """
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
 
-    to_time = datetime.utcnow()
-    from_time = to_time - timedelta(hours=hours)
+    def naive_utc(ts: datetime) -> datetime:
+        return ts.astimezone(timezone.utc).replace(tzinfo=None) if ts.tzinfo else ts
+
+    to_time = naive_utc(to) if to else datetime.now(timezone.utc).replace(tzinfo=None)
+    from_time = naive_utc(from_) if from_ else to_time - timedelta(hours=hours)
+    if from_time >= to_time:
+        raise HTTPException(status_code=400, detail="'from' must be before 'to'")
+    span_hours = (to_time - from_time).total_seconds() / 3600
+
+    # Tag visibility scope, as on the device list: a scoped user only gets
+    # uptime for devices they can see; unscoped users are unrestricted.
+    where = "timestamp >= %(from)s AND timestamp <= %(to)s"
+    params: dict = {"from": from_time, "to": to_time}
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        visible = (await db.execute(
+            text(f"SELECT d.id::text FROM devices d WHERE {scoping.jsonb_tags_visible('d.tags')}"),
+            {scoping.SCOPE_PARAM: scope},
+        )).scalars().all()
+        params["ids"] = [str(i) for i in visible]
+        where += " AND toString(device_id) IN %(ids)s"
 
     # Coarsest-but-longest-lived table that covers the window, then finer ones
     # as a fallback for installs whose rollups have not caught up yet.
-    preferred = ping_table_for_hours(hours)
+    preferred = ping_table_for_hours(span_hours)
     tables_to_try = [preferred] + [
         t for t in ("ping_metrics_5m", "ping_metrics") if t != preferred
     ]
@@ -171,11 +228,10 @@ async def dashboard_uptime_stats(
     counts: dict[str, list[float]] = {}
     chosen_table: str | None = None
     for table in tables_to_try:
+        if scope is not None and not params["ids"]:
+            break
         try:
-            result = client.query(
-                _ping_uptime_sql(table, "timestamp >= %(from)s AND timestamp <= %(to)s"),
-                parameters={"from": from_time, "to": to_time},
-            )
+            result = client.query(_ping_uptime_sql(table, where), parameters=params)
             if len(result.result_rows) > 0:
                 for row in result.result_rows:
                     up, total = float(row[1] or 0), float(row[2] or 0)
@@ -396,12 +452,17 @@ async def list_device_types(
 async def bulk_delete_devices(
     data: dict,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     ids = data.get("device_ids", [])
     if not ids:
         raise HTTPException(status_code=400, detail="No device IDs provided")
-    deleted = await device_service.bulk_delete_devices(db, [UUID(i) for i in ids])
+    try:
+        uuids = [UUID(str(i)) for i in ids]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid device id") from None
+    await _ids_in_scope(db, user, uuids)
+    deleted = await device_service.bulk_delete_devices(db, uuids)
     return {"deleted": deleted}
 
 
@@ -415,12 +476,23 @@ class BulkTagRequest(BaseModel):
 async def bulk_tag_devices(
     data: BulkTagRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     if not data.device_ids:
         raise HTTPException(status_code=400, detail="No device IDs provided")
     if not data.add and not data.remove:
         raise HTTPException(status_code=400, detail="Provide tags to add and/or remove")
+    await _ids_in_scope(db, user, data.device_ids)
+    if await scoping.visible_tags(db, user) is not None:
+        # Each device's resulting tags must stay in the caller's scope and
+        # take no other team's scope tag (see scoping.assert_tags_assignable).
+        remove = {t.strip().lower() for t in data.remove if t and t.strip()}
+        rows = (await db.execute(text("SELECT tags FROM devices WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                                 {"ids": [str(i) for i in data.device_ids]})).scalars().all()
+        for tags in rows:
+            current = list(tags or [])
+            result = [t for t in current + list(data.add) if str(t).strip().lower() not in remove]
+            await scoping.assert_tags_assignable(db, user, result, previous=current)
     updated = await device_service.bulk_tag_devices(db, data.device_ids, data.add, data.remove)
     return {"updated": updated}
 
@@ -429,8 +501,13 @@ async def bulk_tag_devices(
 async def create_device(
     data: DeviceCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
+    # A scoped operator may only create devices inside its own scope, and not
+    # with a management address that is another team's (or an unowned) flow
+    # exporter: ownership follows the management IP (NF-04).
+    await scoping.assert_tags_assignable(db, user, data.tags)
+    await nf_access.authorize_device_address(db, user, data.ip_address)
     device = await device_service.create_device(db, data, user.id)
     return _device_to_response(device)
 
@@ -439,8 +516,15 @@ async def create_device(
 async def bulk_import_devices(
     data: BulkImportRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
+    if await scoping.visible_tags(db, user) is not None:
+        for i, item in enumerate(data.devices):
+            try:
+                await scoping.assert_tags_assignable(db, user, item.tags)
+                await nf_access.authorize_device_address(db, user, item.ip_address)
+            except HTTPException as exc:
+                raise HTTPException(status_code=exc.status_code, detail=f"Row {i + 1}: {exc.detail}") from None
     return await device_service.bulk_import_devices(db, data.devices, user.id)
 
 
@@ -508,16 +592,21 @@ async def get_device(
     return _device_to_response(device, await _profile_name_map(db), parent_names, child_counts)
 
 
-@router.put("/{device_id}", response_model=DeviceResponse)
+@router.put("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(_device_in_scope)])
 async def update_device(
     device_id: UUID,
     data: DeviceUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     current = await device_service.get_device(db, device_id)
     if not current:
         raise HTTPException(status_code=404, detail="Device not found")
+    if data.tags is not None:
+        await scoping.assert_tags_assignable(db, user, data.tags, previous=current.tags)
+    if data.ip_address is not None and nf_access.canonical_ip(data.ip_address) != nf_access.canonical_ip(
+            str(current.ip_address) if current.ip_address else None):
+        await nf_access.authorize_device_address(db, user, data.ip_address)
 
     # Controller-reported children can be IP-less; direct polling needs one.
     new_ip = data.ip_address if data.ip_address is not None else (
@@ -546,18 +635,18 @@ async def update_device(
     return _device_to_response(device, await _profile_name_map(db), parent_names, child_counts)
 
 
-@router.delete("/{device_id}", status_code=204)
+@router.delete("/{device_id}", status_code=204, dependencies=[Depends(_device_in_scope)])
 async def delete_device(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     deleted = await device_service.delete_device(db, device_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Device not found")
 
 
-@router.get("/{device_id}/metrics", response_model=MetricResponse)
+@router.get("/{device_id}/metrics", response_model=MetricResponse, dependencies=[Depends(_device_in_scope)])
 async def get_device_metrics(
     device_id: UUID,
     from_time: datetime | None = Query(default=None, alias="from"),
@@ -574,7 +663,7 @@ async def get_device_metrics(
     return metric_service.get_device_metrics(device_id, from_time, to_time, granularity)
 
 
-@router.get("/{device_id}/ping-series")
+@router.get("/{device_id}/ping-series", dependencies=[Depends(_device_in_scope)])
 async def get_device_ping_series(
     device_id: UUID,
     minutes: int = Query(default=60, ge=5, le=1440),
@@ -633,7 +722,7 @@ async def get_device_ping_series(
     }
 
 
-@router.get("/{device_id}/interfaces")
+@router.get("/{device_id}/interfaces", dependencies=[Depends(_device_in_scope)])
 async def get_device_interfaces(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -672,23 +761,32 @@ class InterfaceBulkSpeedUpdate(BaseModel):
     )
 
 
-@router.patch("/{device_id}/interfaces/{if_index}")
+@router.patch("/{device_id}/interfaces/{if_index}", dependencies=[Depends(_device_in_scope)])
 async def update_device_interface_speed(
     device_id: UUID,
     if_index: int,
     payload: InterfaceSpeedUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Set or clear manual speed/bandwidth for a single interface."""
+    # The override is the utilization denominator for link utilization,
+    # interface alert thresholds and NetFlow capacity, so every change is
+    # audited with its previous value. The old value is read in the same
+    # statement (the CTE sees the pre-update row) so the pair is consistent.
     row = (await db.execute(
         text("""
+            WITH prev AS (
+                SELECT configured_speed_bps FROM device_interfaces
+                WHERE device_id = :device_id AND if_index = :if_index
+            )
             UPDATE device_interfaces
             SET configured_speed_bps = :speed
             WHERE device_id = :device_id AND if_index = :if_index
             RETURNING id, if_index, if_name, if_descr, if_alias, if_type, if_speed,
                       configured_speed_bps, mac_address::text AS mac_address,
-                      admin_status, oper_status, monitored, first_seen, last_seen
+                      admin_status, oper_status, monitored, first_seen, last_seen,
+                      (SELECT configured_speed_bps FROM prev) AS previous_speed_bps
         """),
         {
             "device_id": device_id,
@@ -698,24 +796,37 @@ async def update_device_interface_speed(
     )).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Interface not found")
+    out = dict(row)
+    previous = out.pop("previous_speed_bps")
+    await write_audit_log(
+        db, actor=user, action="device_interface.speed.update",
+        resource_type="device_interface", resource_id=f"{device_id}:{if_index}",
+        metadata={"device_id": str(device_id), "if_index": if_index,
+                  "configured_speed_bps": {"old": previous, "new": payload.configured_speed_bps}},
+    )
     await db.commit()
-    return dict(row)
+    return out
 
 
-@router.post("/{device_id}/interfaces/bulk-speed")
+@router.post("/{device_id}/interfaces/bulk-speed", dependencies=[Depends(_device_in_scope)])
 async def bulk_update_device_interface_speed(
     device_id: UUID,
     payload: InterfaceBulkSpeedUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Apply manual speed/bandwidth to multiple interfaces at once."""
     result = await db.execute(
         text("""
-            UPDATE device_interfaces
+            WITH prev AS (
+                SELECT if_index, configured_speed_bps FROM device_interfaces
+                WHERE device_id = :device_id AND if_index = ANY(:indexes)
+            )
+            UPDATE device_interfaces di
             SET configured_speed_bps = :speed
-            WHERE device_id = :device_id AND if_index = ANY(:indexes)
-            RETURNING if_index
+            FROM prev
+            WHERE di.device_id = :device_id AND di.if_index = prev.if_index
+            RETURNING di.if_index, prev.configured_speed_bps AS previous_speed_bps
         """),
         {
             "device_id": device_id,
@@ -723,9 +834,20 @@ async def bulk_update_device_interface_speed(
             "speed": payload.configured_speed_bps,
         },
     )
-    updated = [int(r[0]) for r in result.fetchall()]
+    rows = sorted(((int(r[0]), r[1]) for r in result.fetchall()), key=lambda t: t[0])
+    updated = [idx for idx, _ in rows]
     if not updated:
         raise HTTPException(status_code=404, detail="No matching interfaces found")
+    # One audit entry per interface, keyed "<device>:<ifIndex>" exactly like a
+    # single change, with that interface's previous value: an interface's
+    # speed history (NetFlow capacity trends) must see a bulk change too.
+    for idx, old in rows:
+        await write_audit_log(
+            db, actor=user, action="device_interface.speed.bulk_update",
+            resource_type="device_interface", resource_id=f"{device_id}:{idx}",
+            metadata={"device_id": str(device_id), "if_index": idx, "bulk_size": len(updated),
+                      "configured_speed_bps": {"old": old, "new": payload.configured_speed_bps}},
+        )
     await db.commit()
     return {
         "updated": len(updated),
@@ -734,7 +856,7 @@ async def bulk_update_device_interface_speed(
     }
 
 
-@router.get("/{device_id}/entities")
+@router.get("/{device_id}/entities", dependencies=[Depends(_device_in_scope)])
 async def get_device_entities(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -752,7 +874,7 @@ async def get_device_entities(
     return [dict(r) for r in rows]
 
 
-@router.get("/{device_id}/sensors")
+@router.get("/{device_id}/sensors", dependencies=[Depends(_device_in_scope)])
 async def get_device_sensors(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -770,7 +892,7 @@ async def get_device_sensors(
     return [dict(r) for r in rows]
 
 
-@router.get("/{device_id}/snmp-metrics")
+@router.get("/{device_id}/snmp-metrics", dependencies=[Depends(_device_in_scope)])
 async def get_device_snmp_metrics(
     device_id: UUID,
     hours: int = Query(default=24, ge=1, le=2160),
@@ -870,7 +992,7 @@ async def get_device_snmp_metrics(
     return out
 
 
-@router.get("/{device_id}/snmp-if-metrics")
+@router.get("/{device_id}/snmp-if-metrics", dependencies=[Depends(_device_in_scope)])
 async def get_device_snmp_if_metrics(
     device_id: UUID,
     hours: int = Query(default=1, ge=1, le=720),
@@ -943,7 +1065,7 @@ async def get_device_snmp_if_metrics(
     return out
 
 
-@router.get("/{device_id}/interfaces/{if_index}/metrics")
+@router.get("/{device_id}/interfaces/{if_index}/metrics", dependencies=[Depends(_device_in_scope)])
 async def get_interface_detail_metrics(
     device_id: UUID,
     if_index: int,
@@ -1066,7 +1188,7 @@ async def get_interface_detail_metrics(
     return {"traffic": traffic, "errors": errors, "summary": summary}
 
 
-@router.get("/{device_id}/traps")
+@router.get("/{device_id}/traps", dependencies=[Depends(_device_in_scope)])
 async def get_device_traps(
     device_id: UUID,
     limit: int = Query(default=100, ge=1, le=1000),
@@ -1195,7 +1317,7 @@ async def _passive_snmp_evidence(device_id: UUID) -> dict | None:
     }
 
 
-@router.get("/{device_id}/test-runs")
+@router.get("/{device_id}/test-runs", dependencies=[Depends(_device_in_scope)])
 async def get_device_test_runs(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -1284,7 +1406,7 @@ async def get_device_test_runs(
     }
 
 
-@router.get("/{device_id}/status-history", response_model=list[StatusChangeEvent])
+@router.get("/{device_id}/status-history", response_model=list[StatusChangeEvent], dependencies=[Depends(_device_in_scope)])
 async def get_status_history(
     device_id: UUID,
     from_time: datetime | None = Query(default=None, alias="from"),
@@ -1300,11 +1422,11 @@ async def get_status_history(
     return metric_service.get_status_history(device_id, from_time, to_time, limit)
 
 
-@router.post("/{device_id}/ping-test")
+@router.post("/{device_id}/ping-test", dependencies=[Depends(_device_in_scope)])
 async def test_device_ping(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Run an on-demand ICMP probe (3 packets) and return whether the device
     replied, along with an approximate round-trip time."""
@@ -1373,11 +1495,11 @@ async def test_device_ping(
         return result
 
 
-@router.post("/{device_id}/snmp-test")
+@router.post("/{device_id}/snmp-test", dependencies=[Depends(_device_in_scope)])
 async def test_device_snmp(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Run an on-demand SNMP probe against the device and return whether it
     responded, plus the sysDescr/sysName/sysObjectID/sysUpTime values we got."""
@@ -1576,7 +1698,7 @@ def _metric_display(metric: dict, value_num, value_text: str) -> str:
     return value_text or ""
 
 
-@router.get("/{device_id}/template-insights")
+@router.get("/{device_id}/template-insights", dependencies=[Depends(_device_in_scope)])
 async def device_template_insights(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -1898,7 +2020,7 @@ async def list_device_maintenance(
 async def create_device_maintenance(
     data: DeviceMaintenanceCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     from app.models.device import DeviceMaintenance
     from app.services.audit_service import write_audit_log
@@ -1960,7 +2082,7 @@ async def create_device_maintenance(
 async def delete_device_maintenance(
     maintenance_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     from sqlalchemy import select
     from app.models.device import DeviceMaintenance
@@ -2007,7 +2129,7 @@ async def delete_device_maintenance(
     await db.commit()
 
 
-@router.get("/{device_id}/maintenance")
+@router.get("/{device_id}/maintenance", dependencies=[Depends(_device_in_scope)])
 async def get_device_maintenance(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),

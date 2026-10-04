@@ -1,19 +1,21 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Play, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, CheckCircle2, Copy, Loader2, Play, X } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage } from '@/lib/utils'
+import { apiErrorMessage, cn } from '@/lib/utils'
 import type { ServiceCheckGroup, ServiceCredential, ServiceWorkflowStep } from '@/types'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Input } from '@/components/ui/Input'
-import { FormField } from '@/components/ui/FormField'
+import { Label } from '@/components/ui/Label'
 import { Switch } from '@/components/ui/Switch'
 import {
   Select,
@@ -61,6 +63,86 @@ type State = {
   check_interval: number
   timeout: number
   description: string
+  // Availability objective (blank target = appliance default policy)
+  sla_target_pct: string
+  criticality: '' | ServiceCriticality
+  business_owner: string
+  // Ownership
+  owner_team: string
+  runbook_url: string
+}
+
+type ServiceCriticality = 'critical' | 'high' | 'medium' | 'low'
+
+const CRITICALITY_OPTIONS: Array<{ value: ServiceCriticality; label: string }> = [
+  { value: 'critical', label: 'Critical' },
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+]
+
+/** Returns an error message, or null when the target is blank or valid. */
+function slaTargetError(raw: string): string | null {
+  const text = raw.trim()
+  if (!text) return null
+  const value = Number(text)
+  if (!Number.isFinite(value) || value <= 0 || value > 100) {
+    return 'Enter a percentage greater than 0 and at most 100, or leave blank to use the default.'
+  }
+  return null
+}
+
+/** Runbook links must be absolute http(s) URLs; blank is allowed. */
+function runbookError(raw: string): string | null {
+  const text = raw.trim()
+  if (!text) return null
+  try {
+    const u = new URL(text)
+    if (u.protocol === 'http:' || u.protocol === 'https:') return null
+  } catch { /* fall through */ }
+  return 'Enter a full http:// or https:// link, or leave blank.'
+}
+
+/**
+ * Form field with a real <label for> association and described-by wiring.
+ * Pass `group` for composite controls (no single focusable input).
+ */
+function Field({ id, label, required, hint, error, className, group, children }: {
+  id: string
+  label: string
+  required?: boolean
+  hint?: ReactNode
+  error?: string | null
+  className?: string
+  group?: boolean
+  children: ReactNode
+}) {
+  const labelNode = (
+    <>
+      {label}
+      {required && <span aria-hidden className="ml-0.5 text-danger">*</span>}
+      {required && <span className="sr-only"> (required)</span>}
+    </>
+  )
+  return (
+    <div className={cn('space-y-1.5', className)}>
+      {group
+        ? <span id={`${id}-label`} className="block text-xs font-medium uppercase leading-none tracking-wider text-muted">{labelNode}</span>
+        : <Label htmlFor={id}>{labelNode}</Label>}
+      {group ? <div role="group" aria-labelledby={`${id}-label`} aria-describedby={error ? `${id}-err` : hint ? `${id}-hint` : undefined}>{children}</div> : children}
+      {hint && !error && <p id={`${id}-hint`} className="text-[11px] text-muted">{hint}</p>}
+      {error && <p id={`${id}-err`} role="alert" className="text-[11px] text-danger">{error}</p>}
+    </div>
+  )
+}
+
+/** aria props for an input inside <Field id=…>. */
+function described(id: string, opts: { hint?: boolean; error?: string | null }) {
+  return {
+    id,
+    'aria-invalid': opts.error ? true : undefined,
+    'aria-describedby': opts.error ? `${id}-err` : opts.hint ? `${id}-hint` : undefined,
+  } as const
 }
 
 type ServiceTestStep = {
@@ -156,6 +238,15 @@ const empty: State = {
   check_interval: 60,
   timeout: 10,
   description: '',
+  sla_target_pct: '',
+  criticality: '',
+  business_owner: '',
+  owner_team: '',
+  runbook_url: '',
+}
+
+const TYPE_NAMES: Record<State['check_type'], string> = {
+  icmp: 'ICMP ping', tcp: 'TCP port', http: 'HTTP(S)', tls: 'TLS certificate', dns: 'DNS',
 }
 
 function ServiceTestResultPanel({ result }: { result: ServiceTestResult }) {
@@ -222,35 +313,61 @@ function ServiceTestResultPanel({ result }: { result: ServiceTestResult }) {
   )
 }
 
+
 export function ServiceCheckFormDialog({
   open,
   onOpenChange,
   check,
+  mode = 'edit',
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
   check?: any
+  /** 'duplicate' opens a create form prefilled from `check` (type may be changed). */
+  mode?: 'edit' | 'duplicate'
 }) {
-  const isEdit = !!check?.id
+  const hasSource = !!check?.id
+  const [duplicating, setDuplicating] = useState(false)
+  const isDuplicate = hasSource && (mode === 'duplicate' || duplicating)
+  const isEdit = hasSource && !isDuplicate
   const qc = useQueryClient()
   const [s, setS] = useState<State>(empty)
+  const baseline = useRef<State | null>(null)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [parentError, setParentError] = useState<string | null>(null)
   const normalizedTargetUrl = s.target_url.trim().toLowerCase()
   const isHttpTarget = normalizedTargetUrl.startsWith('http://')
   const isHttpsTarget = normalizedTargetUrl.startsWith('https://')
   const [testResult, setTestResult] = useState<ServiceTestResult | null>(null)
   const credentialSelectionTouched = useRef(false)
 
-  // Always hydrate edits from the detail endpoint. List rows and long-lived
+  // Always hydrate from the detail endpoint. List rows and long-lived
   // query cache entries can omit newly-linked credential metadata.
   const { data: freshCheck } = useQuery<any>({
     queryKey: ['service-check-edit-source', check?.id, open],
     queryFn: async () => (await api.get(`/service-checks/${check.id}`)).data,
-    enabled: open && isEdit,
-    initialData: open && isEdit ? check : undefined,
+    enabled: open && hasSource,
+    initialData: open && hasSource ? check : undefined,
     staleTime: 0,
     refetchOnMount: 'always',
   })
   const sourceCheck = freshCheck || check
+
+  // Default objective shown as the placeholder for a blank per-service target.
+  // Older appliances have no policy endpoint; the hint then omits the value.
+  const { data: availabilityPolicy } = useQuery<{ default_target_pct?: number | null }>({
+    queryKey: ['availability-policy'],
+    queryFn: async () => (await api.get('/reports/availability-policy')).data,
+    enabled: open,
+    retry: false,
+    staleTime: 5 * 60_000,
+  })
+  const defaultTargetPct = typeof availabilityPolicy?.default_target_pct === 'number'
+    ? availabilityPolicy.default_target_pct
+    : null
+  const targetError = slaTargetError(s.sla_target_pct)
+  const runbookErr = runbookError(s.runbook_url)
 
   const { data: groups = [] } = useQuery<ServiceCheckGroup[]>({
     queryKey: ['service-check-groups'],
@@ -263,7 +380,7 @@ export function ServiceCheckFormDialog({
     queryFn: async () => (await api.get('/service-checks?limit=200')).data,
     enabled: open,
   })
-  const parentOptions = (allChecksResp?.data || []).filter((c) => c.id !== check?.id)
+  const parentOptions = (allChecksResp?.data || []).filter((c) => !isEdit || c.id !== check?.id)
 
   const { data: credentials = [] } = useQuery<ServiceCredential[]>({
     queryKey: ['service-credentials'],
@@ -278,37 +395,42 @@ export function ServiceCheckFormDialog({
   )
   const credentialHydrating = Boolean(
     open &&
-    isEdit &&
+    hasSource &&
     sourceCheck?.credential_id &&
     !s.credential_id &&
     !credentialSelectionTouched.current,
   )
 
   useEffect(() => {
-    if (open) credentialSelectionTouched.current = false
+    if (open) {
+      credentialSelectionTouched.current = false
+      setSaveError(null)
+      setParentError(null)
+      setConfirmDiscard(false)
+    } else {
+      setDuplicating(false)
+    }
   }, [open])
 
   // Credential metadata can arrive after the editable service object. Rejoin
   // by ID (or safe metadata name fallback) without overriding a user's choice.
+  // The rejoin is part of hydration, so it also moves the unsaved-changes baseline.
   useEffect(() => {
-    if (!open || !isEdit || credentialSelectionTouched.current || !persistedCredential) return
-    setS((current) => current.credential_id === persistedCredential.id
-      ? current
-      : {
-          ...current,
-          credential_id: persistedCredential.id,
-          credential_auth_type: persistedCredential.auth_type,
-        })
-  }, [open, isEdit, persistedCredential?.id, persistedCredential?.auth_type, s.credential_id])
+    if (!open || !hasSource || credentialSelectionTouched.current || !persistedCredential) return
+    const patch = { credential_id: persistedCredential.id, credential_auth_type: persistedCredential.auth_type }
+    if (baseline.current) baseline.current = { ...baseline.current, ...patch }
+    setS((current) => current.credential_id === persistedCredential.id ? current : { ...current, ...patch })
+  }, [open, hasSource, persistedCredential?.id, persistedCredential?.auth_type, s.credential_id])
 
   useEffect(() => {
     if (!open) return
     setTestResult(null)
+    let next: State
     if (sourceCheck) {
       const cfg = (sourceCheck.config as Record<string, any>) || {}
-      setS({
+      next = {
         ...empty,
-        name: sourceCheck.name || '',
+        name: mode === 'duplicate' ? `${sourceCheck.name || ''} (copy)` : sourceCheck.name || '',
         check_type: sourceCheck.check_type || 'http',
         enabled: sourceCheck.enabled ?? true,
         group_id: sourceCheck.group_id || '',
@@ -341,22 +463,36 @@ export function ServiceCheckFormDialog({
         check_interval: sourceCheck.check_interval || 60,
         timeout: sourceCheck.timeout || 10,
         description: sourceCheck.description || '',
-      })
+        sla_target_pct: sourceCheck.sla_target_pct != null && sourceCheck.sla_target_pct !== ''
+          ? String(Number(sourceCheck.sla_target_pct))
+          : '',
+        criticality: CRITICALITY_OPTIONS.some((option) => option.value === sourceCheck.criticality)
+          ? sourceCheck.criticality
+          : '',
+        business_owner: sourceCheck.business_owner || '',
+        owner_team: sourceCheck.owner_team || '',
+        runbook_url: sourceCheck.runbook_url || '',
+      }
     } else {
-      setS(empty)
+      next = empty
     }
+    baseline.current = next
+    setS(next)
   }, [
     open,
     sourceCheck?.id,
     sourceCheck?.updated_at,
     sourceCheck?.credential_id,
+    mode,
   ])
 
   useEffect(() => {
     setTestResult(null)
+    setSaveError(null)
   }, [s])
 
   const [tagDraft, setTagDraft] = useState('')
+  useEffect(() => { if (open) setTagDraft('') }, [open])
   function addTag(raw: string) {
     const t = raw.trim().toLowerCase()
     if (!t) return
@@ -371,26 +507,41 @@ export function ServiceCheckFormDialog({
     setS({ ...s, tags: s.tags.filter((x) => x !== t) })
   }
 
+  const dirty = (!!baseline.current && JSON.stringify(s) !== JSON.stringify(baseline.current)) || tagDraft.trim() !== '' || (isDuplicate && mode !== 'duplicate')
+
   const save = useMutation({
     mutationFn: async (payload: any) => {
       if (isEdit) return (await api.put(`/service-checks/${check.id}`, payload)).data
       return (await api.post('/service-checks', payload)).data
     },
     onSuccess: () => {
-      toast.success(isEdit ? 'Service check updated' : 'Service check created')
+      toast.success(isEdit ? 'Service check updated' : isDuplicate ? 'Duplicate monitor created' : 'Service check created')
       qc.invalidateQueries({ queryKey: ['service-checks'] })
       qc.invalidateQueries({ queryKey: ['service-check-groups'] })
+      if (isEdit) {
+        qc.invalidateQueries({ queryKey: ['service-check', check.id] })
+        qc.invalidateQueries({ queryKey: ['service-check-history', check.id] })
+      }
+      baseline.current = s
       onOpenChange(false)
     },
-    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
+    onError: (e: any) => {
+      const message = apiErrorMessage(e)
+      // Validation failures are shown next to the form, where they can be fixed.
+      if (/cycle|depend|parent/i.test(message)) setParentError(message)
+      setSaveError(message)
+      toast.error('Save failed', message)
+    },
   })
 
   function buildPayload() {
     const httpHost = hostFromUrl(s.target_url)
+    const journey = s.check_type === 'http' && s.workflow_enabled && s.workflow_steps.length > 0
     const base: any = {
       name: s.name.trim(),
       check_type: s.check_type,
-      level: LEVEL_BY_TYPE[s.check_type],
+      // Informational: the appliance derives the level on save.
+      level: journey ? 3 : LEVEL_BY_TYPE[s.check_type],
       enabled: s.enabled,
       group_id: s.group_id || null,
       parent_check_id: s.parent_check_id || null,
@@ -403,6 +554,13 @@ export function ServiceCheckFormDialog({
       timeout: s.timeout,
       description: s.description || null,
       config: { ...(sourceCheck?.config || {}) },
+      sla_target_pct: s.sla_target_pct.trim() && !slaTargetError(s.sla_target_pct)
+        ? Number(s.sla_target_pct.trim())
+        : null,
+      criticality: s.criticality || null,
+      business_owner: s.business_owner.trim() || null,
+      owner_team: s.owner_team.trim() || null,
+      runbook_url: s.runbook_url.trim() || null,
     }
     if (s.check_type === 'http') {
       base.config.ip_version = s.ip_version
@@ -447,8 +605,19 @@ export function ServiceCheckFormDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    setSaveError(null)
+    setParentError(null)
+    const targetError = slaTargetError(s.sla_target_pct)
+    if (targetError) {
+      setSaveError(`Availability target: ${targetError}`)
+      return
+    }
+    if (runbookError(s.runbook_url)) {
+      setSaveError(`Runbook link: ${runbookError(s.runbook_url)}`)
+      return
+    }
     if (s.check_type === 'http' && !hostFromUrl(s.target_url)) {
-      toast.error('Invalid URL', 'Enter a complete URL beginning with http:// or https://')
+      setSaveError('Enter a complete URL beginning with http:// or https://')
       return
     }
     if (
@@ -458,75 +627,120 @@ export function ServiceCheckFormDialog({
       effectiveCredentialAuthType !== 'ntlm' &&
       !s.http_allow_insecure_auth
     ) {
-      toast.error('Trusted HTTP confirmation required', 'Enable trusted HTTP credential transmission below, or use HTTPS.')
+      setSaveError('Trusted HTTP confirmation required: enable trusted HTTP credential transmission below, or use HTTPS.')
       return
     }
-    save.mutate(buildPayload())
+    const payload = buildPayload()
+    if (isEdit) {
+      // The type is immutable and the level is derived by the appliance.
+      delete payload.check_type
+      delete payload.level
+    }
+    save.mutate(payload)
   }
 
+  /** Close, asking first when there are unsaved edits. */
+  const requestClose = () => {
+    if (dirty && !save.isPending) setConfirmDiscard(true)
+    else onOpenChange(false)
+  }
+
+  const startDuplicate = () => {
+    setDuplicating(true)
+    setS((cur) => ({ ...cur, name: cur.name.endsWith(' (copy)') ? cur.name : `${cur.name} (copy)` }))
+  }
+
+  const level = s.check_type === 'http' && s.workflow_enabled && s.workflow_steps.length > 0 ? 3 : LEVEL_BY_TYPE[s.check_type]
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : requestClose())}>
       <DialogContent className="max-h-[92vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{isEdit ? 'Edit service check' : 'New service check'}</DialogTitle>
+          <DialogTitle>{isEdit ? 'Edit service check' : isDuplicate ? 'Duplicate as new monitor' : 'New service check'}</DialogTitle>
+          <DialogDescription className="text-xs">
+            {isEdit
+              ? 'Changes apply from the next scheduled probe. Results already recorded, incidents and SLA history are not changed.'
+              : isDuplicate
+                ? 'Creates a separate monitor from these settings. The original monitor and its history are unchanged.'
+                : 'Creates a monitor that is probed on the next scheduling cycle.'}
+          </DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} className="space-y-4">
+        <form onSubmit={submit} className="space-y-4" noValidate>
           <div className="grid grid-cols-2 gap-3">
-            <FormField label="Name" required className="col-span-2">
+            <Field id="svc-name" label="Name" required className="col-span-2">
               <Input
+                {...described('svc-name', {})}
                 required
                 value={s.name}
                 onChange={(e) => setS({ ...s, name: e.target.value })}
                 placeholder="Production API health"
               />
-            </FormField>
-            <FormField label="Type" required>
-              <Select value={s.check_type} onValueChange={(v: any) => setS({ ...s, check_type: v })}>
-                <SelectTrigger>
+            </Field>
+            <Field
+              id="svc-type"
+              label="Type"
+              required
+              hint={isEdit
+                ? 'The type of an existing monitor cannot be changed. Duplicate it to create a monitor of another type.'
+                : `Level L${level}: ${level === 1 ? 'reachability' : level === 2 ? 'single request / protocol check' : 'multi-step journey'}`}
+            >
+              <Select value={s.check_type} onValueChange={(v: any) => setS({ ...s, check_type: v })} disabled={isEdit}>
+                <SelectTrigger {...described('svc-type', { hint: true })}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="icmp">ICMP ping · L1</SelectItem>
                   <SelectItem value="tcp">TCP port · L1</SelectItem>
-                  <SelectItem value="http">HTTP(S) · L2</SelectItem>
+                  <SelectItem value="http">HTTP(S) · L2 (L3 with a journey)</SelectItem>
                   <SelectItem value="tls">TLS certificate · L2</SelectItem>
                   <SelectItem value="dns">DNS · L2</SelectItem>
                 </SelectContent>
               </Select>
-            </FormField>
-            <div className="flex items-center justify-between rounded-md border border-border px-3">
-              <span className="text-xs font-medium uppercase tracking-wider text-muted">Enabled</span>
-              <Switch checked={s.enabled} onCheckedChange={(v) => setS({ ...s, enabled: v })} />
+              {isEdit && (
+                <Button type="button" variant="outline" size="sm" className="mt-1.5 h-7" onClick={startDuplicate}>
+                  <Copy className="h-3 w-3" /> Duplicate as new monitor
+                </Button>
+              )}
+            </Field>
+            <div className="flex items-center justify-between self-start rounded-md border border-border px-3 py-2">
+              <Label htmlFor="svc-enabled">Enabled</Label>
+              <Switch id="svc-enabled" checked={s.enabled} onCheckedChange={(v) => setS({ ...s, enabled: v })} />
             </div>
           </div>
+          {isDuplicate && (
+            <p className="rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-[11px] text-muted">
+              Duplicating {sourceCheck?.name ? `“${sourceCheck.name}”` : 'this monitor'} as a new {TYPE_NAMES[s.check_type]} monitor. Fields that do not apply to the chosen type are not saved.
+            </p>
+          )}
 
           {s.check_type !== 'http' && (
-            <FormField label="Target host" required>
+            <Field id="svc-host" label={s.check_type === 'dns' ? 'Name to resolve' : 'Target host'} required>
               <Input
+                {...described('svc-host', {})}
                 required
                 value={s.target_host}
                 onChange={(e) => setS({ ...s, target_host: e.target.value })}
                 placeholder="api.example.com"
               />
-            </FormField>
+            </Field>
           )}
 
           {s.check_type === 'http' && (
           <div className="space-y-3 rounded-md border border-border p-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-muted">HTTP options</div>
-            <FormField label="IP version">
+            <Field id="svc-ipver" label="IP version" hint="Use IPv4 only when the monitoring network has no IPv6 route. DNS resolution and certificate verification still apply.">
               <Select value={s.ip_version} onValueChange={(value) => setS({ ...s, ip_version: value as State['ip_version'] })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger {...described('svc-ipver', { hint: true })}><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="auto">Auto (IPv4 / IPv6)</SelectItem>
                   <SelectItem value="ipv4">IPv4 only</SelectItem>
                   <SelectItem value="ipv6">IPv6 only</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="mt-1 text-xs text-muted">Use IPv4 only when the monitoring network has no IPv6 route. DNS resolution and certificate verification still apply.</p>
-            </FormField>
-              <FormField label="URL" required>
+            </Field>
+              <Field id="svc-url" label="URL" required hint={hostFromUrl(s.target_url) ? `Host detected automatically: ${hostFromUrl(s.target_url)}` : undefined}>
                 <Input
+                  {...described('svc-url', { hint: !!hostFromUrl(s.target_url) })}
                   required
                   type="url"
                   value={s.target_url}
@@ -552,17 +766,14 @@ export function ServiceCheckFormDialog({
                   }}
                   placeholder="https://api.example.com/health"
                 />
-                {hostFromUrl(s.target_url) && (
-                  <div className="mt-1 text-[11px] text-muted">Host detected automatically: {hostFromUrl(s.target_url)}</div>
-                )}
-              </FormField>
+              </Field>
               <div className="grid grid-cols-2 gap-3">
-                <FormField label="Method">
+                <Field id="svc-method" label="Method">
                   <Select
                     value={s.http_method}
                     onValueChange={(v) => setS({ ...s, http_method: v })}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id="svc-method">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -572,25 +783,27 @@ export function ServiceCheckFormDialog({
                       <SelectItem value="PUT">PUT</SelectItem>
                     </SelectContent>
                   </Select>
-                </FormField>
-                <FormField label="Expected status">
+                </Field>
+                <Field id="svc-expected" label="Expected status" group>
                   <ExpectedStatusInput
                     compact
                     value={s.http_expected_statuses}
                     onChange={(v) => setS({ ...s, http_expected_statuses: v })}
                   />
-                </FormField>
+                </Field>
               </div>
-              <FormField label="Response must contain">
+              <Field id="svc-content" label="Response must contain">
                 <Input
+                  id="svc-content"
                   value={s.http_content_match}
                   onChange={(e) => setS({ ...s, http_content_match: e.target.value })}
                   placeholder='"status": "ok"'
                 />
-              </FormField>
+              </Field>
               <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
-                <span className="text-xs font-medium uppercase tracking-wider text-muted">Follow redirects</span>
+                <Label htmlFor="svc-redirects">Follow redirects</Label>
                 <Switch
+                  id="svc-redirects"
                   checked={s.http_follow_redirects}
                   onCheckedChange={(v) => setS({ ...s, http_follow_redirects: v })}
                 />
@@ -599,10 +812,12 @@ export function ServiceCheckFormDialog({
                 <>
                   <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
                     <div>
-                      <div className="text-xs font-medium uppercase tracking-wider text-muted">Ignore TLS/certificate errors</div>
-                      <div className="mt-0.5 text-[11px] text-muted">Allow self-signed, expired, or hostname-mismatched certificates.</div>
+                      <Label htmlFor="svc-ignore-tls">Ignore TLS/certificate errors</Label>
+                      <div id="svc-ignore-tls-hint" className="mt-0.5 text-[11px] text-muted">Allow self-signed, expired, or hostname-mismatched certificates.</div>
                     </div>
                     <Switch
+                      id="svc-ignore-tls"
+                      aria-describedby="svc-ignore-tls-hint"
                       checked={s.http_ignore_tls_errors}
                       onCheckedChange={(v) => setS({ ...s, http_ignore_tls_errors: v })}
                     />
@@ -658,10 +873,11 @@ export function ServiceCheckFormDialog({
                 <div className="space-y-2 rounded-md border border-danger/30 bg-danger/5 px-3 py-2">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <div className="text-xs font-semibold text-danger">Allow credentials over trusted HTTP</div>
+                      <Label htmlFor="svc-insecure-auth" className="normal-case text-danger">Allow credentials over trusted HTTP</Label>
                       <div className="mt-0.5 text-[11px] text-muted">Required only for this clear-text HTTP target.</div>
                     </div>
                     <Switch
+                      id="svc-insecure-auth"
                       checked={s.http_allow_insecure_auth}
                       onCheckedChange={(http_allow_insecure_auth) => setS((current) => ({ ...current, http_allow_insecure_auth }))}
                     />
@@ -675,8 +891,9 @@ export function ServiceCheckFormDialog({
           )}
 
           {s.check_type === 'tcp' && (
-            <FormField label="TCP port" required>
+            <Field id="svc-port" label="TCP port" required>
               <Input
+                id="svc-port"
                 type="number"
                 min={1}
                 max={65535}
@@ -684,13 +901,14 @@ export function ServiceCheckFormDialog({
                 onChange={(e) => setS({ ...s, target_port: Number(e.target.value) || '' })}
                 placeholder="443"
               />
-            </FormField>
+            </Field>
           )}
 
           {s.check_type === 'tls' && (
             <div className="grid grid-cols-3 gap-3">
-              <FormField label="Port">
+              <Field id="svc-tls-port" label="Port">
                 <Input
+                  id="svc-tls-port"
                   type="number"
                   min={1}
                   max={65535}
@@ -698,40 +916,43 @@ export function ServiceCheckFormDialog({
                   onChange={(e) => setS({ ...s, target_port: Number(e.target.value) || '' })}
                   placeholder="443"
                 />
-              </FormField>
-              <FormField label="Warn (days)">
+              </Field>
+              <Field id="svc-tls-warn" label="Warn (days)">
                 <Input
+                  id="svc-tls-warn"
                   type="number"
                   min={1}
                   max={365}
                   value={s.tls_warn_days}
                   onChange={(e) => setS({ ...s, tls_warn_days: Number(e.target.value) })}
                 />
-              </FormField>
-              <FormField label="Critical (days)">
+              </Field>
+              <Field id="svc-tls-crit" label="Critical (days)">
                 <Input
+                  id="svc-tls-crit"
                   type="number"
                   min={1}
                   max={365}
                   value={s.tls_critical_days}
                   onChange={(e) => setS({ ...s, tls_critical_days: Number(e.target.value) })}
                 />
-              </FormField>
+              </Field>
             </div>
           )}
 
           {s.check_type === 'icmp' && (
             <div className="space-y-3 rounded-md border border-border p-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-muted">ICMP options</div>
-              <FormField label="Packets per probe">
+              <Field id="svc-icmp-count" label="Packets per probe">
                 <Input
+                  id="svc-icmp-count"
                   type="number"
                   min={1}
                   max={10}
                   value={s.icmp_count}
                   onChange={(e) => setS({ ...s, icmp_count: Math.max(1, Math.min(10, Number(e.target.value) || 1)) })}
                 />
-              </FormField>
+              </Field>
             </div>
           )}
 
@@ -739,12 +960,12 @@ export function ServiceCheckFormDialog({
             <div className="space-y-3 rounded-md border border-border p-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-muted">DNS options</div>
               <div className="grid grid-cols-2 gap-3">
-                <FormField label="Record type">
+                <Field id="svc-dns-type" label="Record type">
                   <Select
                     value={s.dns_record_type}
                     onValueChange={(v: any) => setS({ ...s, dns_record_type: v })}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id="svc-dns-type">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -756,25 +977,26 @@ export function ServiceCheckFormDialog({
                       <SelectItem value="NS">NS</SelectItem>
                     </SelectContent>
                   </Select>
-                </FormField>
-                <FormField label="Expected (optional)">
+                </Field>
+                <Field id="svc-dns-expected" label="Expected (optional)" hint="Substring the answer must contain.">
                   <Input
+                    {...described('svc-dns-expected', { hint: true })}
                     value={s.dns_expected}
                     onChange={(e) => setS({ ...s, dns_expected: e.target.value })}
                     placeholder="substring match"
                   />
-                </FormField>
+                </Field>
               </div>
             </div>
           )}
 
           <div className="grid grid-cols-2 gap-3">
-            <FormField label="Group">
+            <Field id="svc-group" label="Group">
               <Select
                 value={s.group_id || 'none'}
                 onValueChange={(v) => setS({ ...s, group_id: v === 'none' ? '' : v })}
               >
-                <SelectTrigger>
+                <SelectTrigger id="svc-group">
                   <SelectValue placeholder="No group" />
                 </SelectTrigger>
                 <SelectContent>
@@ -786,8 +1008,8 @@ export function ServiceCheckFormDialog({
                   ))}
                 </SelectContent>
               </Select>
-            </FormField>
-            <FormField label="Tags">
+            </Field>
+            <Field id="svc-tags" label="Tags" hint="Press Enter or comma to add a tag.">
               <div className="flex min-h-[40px] flex-wrap items-center gap-1 rounded-md border border-border bg-surface2/40 px-2 py-1.5">
                 {s.tags.map((t) => (
                   <span
@@ -798,6 +1020,7 @@ export function ServiceCheckFormDialog({
                     <button
                       type="button"
                       className="hover:text-danger"
+                      aria-label={`Remove tag ${t}`}
                       onClick={() => removeTag(t)}
                     >
                       <X className="h-3 w-3" />
@@ -805,6 +1028,7 @@ export function ServiceCheckFormDialog({
                   </span>
                 ))}
                 <input
+                  {...described('svc-tags', { hint: true })}
                   value={tagDraft}
                   onChange={(e) => setTagDraft(e.target.value)}
                   onKeyDown={(e) => {
@@ -821,28 +1045,108 @@ export function ServiceCheckFormDialog({
                   className="flex-1 min-w-[60px] bg-transparent text-xs outline-none"
                 />
               </div>
-            </FormField>
+            </Field>
+          </div>
+
+          <div className="space-y-3 rounded-md border border-border p-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+              Ownership & availability objective
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field id="svc-owner-team" label="Owner / team" hint="Who responds when this monitor fails.">
+                <Input
+                  {...described('svc-owner-team', { hint: true })}
+                  maxLength={255}
+                  placeholder="e.g. Payments on-call"
+                  value={s.owner_team}
+                  onChange={(e) => setS({ ...s, owner_team: e.target.value })}
+                />
+              </Field>
+              <Field id="svc-runbook" label="Runbook link" error={runbookErr} hint="Shown on the monitor so responders can follow the procedure.">
+                <Input
+                  {...described('svc-runbook', { hint: true, error: runbookErr })}
+                  type="url"
+                  inputMode="url"
+                  placeholder="https://wiki.example.com/runbooks/api"
+                  value={s.runbook_url}
+                  onChange={(e) => setS({ ...s, runbook_url: e.target.value })}
+                />
+              </Field>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <Field
+                id="svc-target"
+                label="Target availability (%)"
+                error={targetError}
+                hint={defaultTargetPct != null
+                  ? `Blank uses the default target (${defaultTargetPct}%).`
+                  : 'Blank uses the appliance default target.'}
+              >
+                <Input
+                  {...described('svc-target', { hint: true, error: targetError })}
+                  type="number"
+                  inputMode="decimal"
+                  min={0.001}
+                  max={100}
+                  step="any"
+                  placeholder={defaultTargetPct != null ? String(defaultTargetPct) : 'Default'}
+                  value={s.sla_target_pct}
+                  onChange={(e) => setS({ ...s, sla_target_pct: e.target.value })}
+                />
+              </Field>
+              <Field id="svc-criticality" label="Business criticality" hint="Used to rank exposure on the Availability page.">
+                <Select
+                  value={s.criticality || 'none'}
+                  onValueChange={(v) => setS({ ...s, criticality: v === 'none' ? '' : v as ServiceCriticality })}
+                >
+                  <SelectTrigger {...described('svc-criticality', { hint: true })}>
+                    <SelectValue placeholder="Not classified" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Not classified</SelectItem>
+                    {CRITICALITY_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field id="svc-business-owner" label="Business owner">
+                <Input
+                  id="svc-business-owner"
+                  maxLength={255}
+                  placeholder="Team or person accountable"
+                  value={s.business_owner}
+                  onChange={(e) => setS({ ...s, business_owner: e.target.value })}
+                />
+              </Field>
+            </div>
+            <p className="text-xs text-muted">
+              Target compliance is judged on confirmed incidents. Customer impact is assessed only for services with a
+              business group and criticality.
+            </p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            <FormField label="Normal check interval (seconds)">
+            <Field id="svc-interval" label="Normal check interval (seconds)">
               <Input
+                id="svc-interval"
                 type="number"
                 min={10}
                 max={3600}
                 value={s.check_interval}
                 onChange={(e) => setS({ ...s, check_interval: Number(e.target.value) })}
               />
-            </FormField>
-            <FormField label="Timeout (seconds)">
+            </Field>
+            <Field id="svc-timeout" label="Timeout (seconds)">
               <Input
+                id="svc-timeout"
                 type="number"
                 min={1}
                 max={60}
                 value={s.timeout}
                 onChange={(e) => setS({ ...s, timeout: Number(e.target.value) })}
               />
-            </FormField>
+            </Field>
           </div>
 
           <div className="space-y-3 rounded-md border border-border p-3">
@@ -850,8 +1154,9 @@ export function ServiceCheckFormDialog({
               Failure confirmation
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <FormField label="Consecutive failures to confirm Down">
+              <Field id="svc-retry-count" label="Consecutive failures to confirm Down">
                 <Input
+                  id="svc-retry-count"
                   type="number"
                   min={1}
                   max={10}
@@ -860,9 +1165,10 @@ export function ServiceCheckFormDialog({
                     setS({ ...s, retry_count: Math.max(1, Math.min(10, Number(e.target.value) || 1)) })
                   }
                 />
-              </FormField>
-              <FormField label="Delay between confirmation attempts (seconds)">
+              </Field>
+              <Field id="svc-retry-delay" label="Delay between confirmation attempts (seconds)">
                 <Input
+                  id="svc-retry-delay"
                   type="number"
                   min={1}
                   max={600}
@@ -871,7 +1177,7 @@ export function ServiceCheckFormDialog({
                     setS({ ...s, retry_delay_s: Math.max(1, Math.min(600, Number(e.target.value) || 10)) })
                   }
                 />
-              </FormField>
+              </Field>
             </div>
             <p className="text-xs text-muted">
               {s.retry_count === 1 ? 'Down is confirmed on the first failed check.' : `The initial failed check plus ${s.retry_count - 1} ${s.retry_count === 2 ? 'retry' : 'retries'}, waiting ${s.retry_delay_s}s after each failed attempt. Any success resets confirmation.`}
@@ -879,18 +1185,17 @@ export function ServiceCheckFormDialog({
             </p>
             <div className="border-t border-border pt-3">
               <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted">Recovery</div>
-              <FormField label="Check interval while Down (seconds)">
-                <Input type="number" min={10} max={3600} value={s.down_check_interval}
+              <Field id="svc-down-interval" label="Check interval while Down (seconds)" hint="The first successful check closes the incident and restores the normal schedule. Checks never overlap.">
+                <Input {...described('svc-down-interval', { hint: true })} type="number" min={10} max={3600} value={s.down_check_interval}
                   onChange={(e) => setS({ ...s, down_check_interval: Math.max(10, Math.min(3600, Number(e.target.value) || 30)) })} />
-              </FormField>
-              <p className="mt-2 text-xs text-muted">The first successful check closes the incident and restores the normal schedule. Checks never overlap.</p>
+              </Field>
             </div>
-            <FormField label="Depends on (parent)">
+            <Field id="svc-parent" label="Depends on (parent)" error={parentError} hint="Child is skipped while its parent is Down — prevents duplicate alerts. A monitor cannot depend on itself or on one of its dependents.">
               <Select
                 value={s.parent_check_id || 'none'}
-                onValueChange={(v) => setS({ ...s, parent_check_id: v === 'none' ? '' : v })}
+                onValueChange={(v) => { setParentError(null); setS({ ...s, parent_check_id: v === 'none' ? '' : v }) }}
               >
-                <SelectTrigger>
+                <SelectTrigger {...described('svc-parent', { hint: true, error: parentError })}>
                   <SelectValue placeholder="No dependency" />
                 </SelectTrigger>
                 <SelectContent>
@@ -902,13 +1207,17 @@ export function ServiceCheckFormDialog({
                   ))}
                 </SelectContent>
               </Select>
-            </FormField>
-            <div className="text-[11px] text-muted">
-              Child is skipped while its parent is Down — prevents duplicate alerts.
-            </div>
+            </Field>
           </div>
 
           {testResult && <ServiceTestResultPanel result={testResult} />}
+
+          {saveError && (
+            <div role="alert" className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{saveError}</span>
+            </div>
+          )}
 
           <DialogFooter className="justify-between">
             <div>
@@ -938,17 +1247,27 @@ export function ServiceCheckFormDialog({
               )}
             </div>
             <div className="flex gap-2">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="outline" onClick={requestClose}>
               Cancel
             </Button>
             <Button type="submit" disabled={save.isPending}>
               {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-              {isEdit ? 'Save changes' : 'Create check'}
+              {isEdit ? 'Save changes' : isDuplicate ? 'Create duplicate' : 'Create check'}
             </Button>
             </div>
           </DialogFooter>
         </form>
       </DialogContent>
+      <ConfirmDialog
+        open={confirmDiscard}
+        onOpenChange={setConfirmDiscard}
+        title="Discard unsaved changes?"
+        description="Your edits to this monitor have not been saved. Closing now discards them."
+        confirmText="Discard changes"
+        cancelText="Keep editing"
+        destructive
+        onConfirm={() => { setConfirmDiscard(false); onOpenChange(false) }}
+      />
     </Dialog>
   )
 }

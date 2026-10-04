@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.core.database import get_db, get_clickhouse_client
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 from app.services.sensor_service_checks import supports_service_auth
@@ -144,7 +144,7 @@ async def get_monitoring_sites(kind: TargetType, target_id: UUID, db: AsyncSessi
 
 @router.put('/{kind}/{target_id}')
 async def set_monitoring_sites(kind: TargetType, target_id: UUID, data: MonitoringSelection,
-                               db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user)):
+                               db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("devices.manage", "service_checks.manage"))):
     target = await target_row(kind, target_id, db, user)
     existing = {s['sensor_id'] for s in await selected_rows(kind, target_id, db)}
     scope = await scoping.visible_tags(db, user)

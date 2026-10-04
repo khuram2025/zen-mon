@@ -46,7 +46,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/Select'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
-import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
+import { TimeRangePicker, useTimeRange, type TimeRange } from '@/components/TimeRangePicker'
+import { netflowInterfaceLinks } from '@/lib/netflow/interfaceLinks'
 import { toast } from '@/components/ui/Toast'
 import { TagBadge } from '@/components/tags/TagBadge'
 import { TagPicker } from '@/components/tags/TagPicker'
@@ -1006,7 +1007,7 @@ function LinkDetailPanel({
   link, range, onClose, onAlert, onEditAlert,
 }: {
   link: LinkRow
-  range: { hours: number; fromISO: string; toISO: string; isCustom: boolean; label: string }
+  range: TimeRange
   onClose: () => void
   onAlert: () => void
   onEditAlert: (rule: AlertRule) => void
@@ -1044,6 +1045,10 @@ function LinkDetailPanel({
     bucket_seconds?: number
     netflow: {
       has_flows: boolean
+      /** The device's flow exporters the caller may see. */
+      exporters?: string[]
+      /** Exporters whose flows crossed this ifIndex in the window, busiest first (X-19). */
+      interface_exporters?: { exporter: string; bytes: number }[]
       timeseries: { ts: number; in_bps: number; out_bps: number; bytes: number }[]
       top_talkers: { ip: string; bytes: number; packets: number; flows: number }[]
       protocols: { protocol: number; bytes: number }[]
@@ -1061,6 +1066,13 @@ function LinkDetailPanel({
 
   const traffic = data?.traffic || []
   const nf = data?.netflow
+  // NetFlow names an interface by exporter + ifIndex: link the exporter(s) whose flows crossed it
+  // (not the management address) in this panel's window (X-19).
+  const nfLinks = useMemo(
+    () => netflowInterfaceLinks(link.if_index, nf?.interface_exporters, range, nf?.exporters),
+    [link.if_index, nf?.interface_exporters, nf?.exporters, range],
+  )
+  const nfExporter = nfLinks[0]?.exporter ?? nf?.exporters?.[0] ?? link.device_ip
   const sum = data?.summary || {}
   const health = data?.health
   const speed = link.effective_speed_bps
@@ -1412,12 +1424,18 @@ function LinkDetailPanel({
                 <Layers className="h-4 w-4 text-info" />
                 NetFlow overlay
               </h3>
-              <Link
-                to={`/netflow?exporter=${encodeURIComponent(link.device_ip)}&iface=${link.if_index}`}
-                className="text-xs text-info hover:underline"
-              >
-                Open in NetFlow explorer →
-              </Link>
+              {nfLinks.length > 0 && (
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                  <Link to={nfLinks[0].to} className="text-info hover:underline" title={`ifIndex ${link.if_index} on exporter ${nfLinks[0].exporter}, ${rangeLabel}`}>
+                    Open in NetFlow explorer →
+                  </Link>
+                  {nfLinks.length > 1 && nfLinks.slice(1).map((l) => (
+                    <Link key={l.exporter} to={l.to} className="text-info hover:underline" title={`ifIndex ${link.if_index} on exporter ${l.exporter}`}>
+                      via {l.exporter}
+                    </Link>
+                  ))}
+                </div>
+              )}
             </div>
 
             {!nf?.has_flows ? (
@@ -1480,7 +1498,7 @@ function LinkDetailPanel({
           </Button>
           {link.has_netflow && (
             <Button size="sm" variant="outline" asChild>
-              <Link to={`/netflow/devices/${encodeURIComponent(link.device_ip)}`}>
+              <Link to={`/netflow/devices/${encodeURIComponent(nfExporter)}`}>
                 <Network className="h-3.5 w-3.5" /> NetFlow device
               </Link>
             </Button>

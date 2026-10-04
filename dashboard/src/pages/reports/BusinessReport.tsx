@@ -73,7 +73,7 @@ export default function BusinessReport() {
         <KpiTile
           label="Customer-Impact"
           value={fmtMin(data.customer_impact_minutes)}
-          accent={data.customer_impact_minutes > 30 ? 'danger' : 'success'}
+          accent={data.customer_impact_minutes == null ? 'info' : data.customer_impact_minutes > 30 ? 'danger' : 'success'}
           icon={<Users className="h-4 w-4" />}
           subtitle="Downtime minutes (grouped services)"
         />
@@ -256,7 +256,7 @@ export default function BusinessReport() {
                 header: 'Duration',
                 align: 'right',
                 render: (r) => fmtMin(r.duration_minutes),
-                sortValue: (r) => r.duration_minutes,
+                sortValue: (r) => r.duration_minutes ?? -1,
               },
             ]}
             defaultSortKey="started_at"

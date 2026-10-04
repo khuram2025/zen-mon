@@ -74,6 +74,13 @@ SUPERSEDED_CHECKSUMS: dict[str, set[str]] = {
     "migrate-126-device-identity-and-interface-baseline.sql": {
         "f43aadd2d2f608de695d327328a86a6aed769d47dfcefe27b93d6447a38518e1",
     },
+    # 138 was revised before it first shipped (1.23.25), when merging with the
+    # 1.23.24 release: private/shared views use that release's is_shared column,
+    # so this file no longer adds a "visibility" column. No appliance ever
+    # applied the first cut, so nothing is left to reconcile.
+    "migrate-138-netflow-governance.sql": {
+        "18ff598ed2374b18a3d94f4e98e37cd17167f7454c4b50b16494762f51b14c75",
+    },
 }
 
 

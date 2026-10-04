@@ -137,7 +137,8 @@ def maint_client():
         yield db
 
     app.dependency_overrides[get_db] = fake_db
-    with TestClient(app) as test_client:
+    # The engine only answers the local poller (loopback, not proxied).
+    with TestClient(app, client=("127.0.0.1", 50000)) as test_client:
         yield test_client, db
     app.dependency_overrides.pop(get_db, None)
 
@@ -176,3 +177,16 @@ def test_trap_alert_suppressed_during_maintenance(maint_client):
     assert body.get("suppressed") == "maintenance"
     assert body.get("alerts_created") == 0
     assert not any("INSERT INTO alerts" in q for q in db.executed)
+
+
+def test_engine_refuses_proxied_or_remote_callers(maint_client):
+    """Unauthenticated engine endpoints must not be reachable through nginx
+    (X-Real-IP / X-Forwarded-For) or from a non-loopback address."""
+    client, _db = maint_client
+    body = {"device_id": str(uuid4()), "hostname": "sw", "ip_address": "10.0.0.1",
+            "old_status": "down", "new_status": "up"}
+    relayed = client.post("/api/v1/alert-engine/evaluate", json=body,
+                          headers={"X-Real-IP": "203.0.113.9"})
+    assert relayed.status_code == 404
+    with TestClient(app, client=("203.0.113.9", 4000)) as remote:
+        assert remote.post("/api/v1/alert-engine/evaluate", json=body).status_code == 404

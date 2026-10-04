@@ -292,6 +292,8 @@ class HoldDB:
 
     async def execute(self, statement, params=None):
         sql = str(statement)
+        if "alert_silences" in sql and "FROM alerts a WHERE a.id" in sql:
+            return _Result([(False,)])  # condition not snoozed
         if "FROM alerts a" in sql:
             return _Result([self.row])
         if "SET status = :status" in sql:

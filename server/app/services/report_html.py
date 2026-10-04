@@ -108,7 +108,8 @@ def _kpi_cards(data: dict) -> list[dict]:
             "label": "Availability",
             "value": _num(avail, "%"),
             "delta": _delta_badge(k.get("availability_delta_pct")),
-            "tone": _GOOD if (avail or 0) >= 99 else (_WARN if (avail or 0) >= 95 else _BAD),
+            "tone": (_MUTED if avail is None else
+                     _GOOD if avail >= 99 else _WARN if avail >= 95 else _BAD),
         },
         {
             "label": "Devices Monitored",
@@ -138,7 +139,8 @@ def _kpi_cards(data: dict) -> list[dict]:
             "label": "SLA Attained",
             "value": _num(k.get("sla_attained_pct"), "%"),
             "delta": "",
-            "tone": _GOOD if (k.get("sla_attained_pct") or 0) >= (k.get("sla_target_pct") or 99.9) else _WARN,
+            "tone": (_MUTED if k.get("sla_attained_pct") is None else
+                     _GOOD if k["sla_attained_pct"] >= (k.get("sla_target_pct") or 99.9) else _WARN),
         },
     ]
 
@@ -214,7 +216,7 @@ def _locations_html(data: dict) -> str:
     ]
     for lc in locs[:10]:
         av = lc.get("availability_pct")
-        av_color = _GOOD if (av or 0) >= 99 else (_WARN if (av or 0) >= 95 else _BAD)
+        av_color = _MUTED if av is None else (_GOOD if av >= 99 else (_WARN if av >= 95 else _BAD))
         rows.append(
             f'<tr style="border-top:1px solid {_BORDER};">'
             f'<td style="padding:9px 12px;font-size:13px;font-weight:600;color:{_INK};">{_esc(lc.get("location","Unknown"))}</td>'

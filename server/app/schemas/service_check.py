@@ -1,9 +1,29 @@
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlsplit
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+Criticality = Literal["critical", "high", "medium", "low"]
+
+
+def _blank_to_none(value: Optional[str]) -> Optional[str]:
+    return (value or "").strip() or None
+
+
+def _validate_runbook_url(value: Optional[str]) -> Optional[str]:
+    """Runbook links must be absolute http(s) URLs (no javascript:/data: links)."""
+    value = _blank_to_none(value)
+    if value is None:
+        return None
+    if len(value) > 2048:
+        raise ValueError("Runbook URL must be at most 2048 characters")
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Runbook URL must be an absolute http:// or https:// URL")
+    return value
 
 
 _STATUS_PATTERN_RE = re.compile(r"^\s*([1-5][0-9xX]{2}|[1-5][0-9]{2}-[1-5][0-9]{2})\s*$")
@@ -164,11 +184,26 @@ class ServiceCheckCreate(NetworkConfigMixin):
     check_interval: int = Field(default=60, ge=10, le=3600)
     timeout: int = Field(default=10, ge=1, le=60)
     description: Optional[str] = None
+    sla_target_pct: Optional[float] = Field(default=None, gt=0, le=100)
+    criticality: Optional[Criticality] = None
+    business_owner: Optional[str] = Field(default=None, max_length=255)
+    owner_team: Optional[str] = Field(default=None, max_length=255)
+    runbook_url: Optional[str] = None
 
     @field_validator("http_expected_statuses")
     @classmethod
     def _check_statuses(cls, v):
         return _validate_statuses(v)
+
+    @field_validator("business_owner", "owner_team")
+    @classmethod
+    def _blank_owner(cls, v):
+        return _blank_to_none(v)
+
+    @field_validator("runbook_url")
+    @classmethod
+    def _check_runbook(cls, v):
+        return _validate_runbook_url(v)
 
     @model_validator(mode="after")
     def _check_workflow(self):
@@ -179,6 +214,9 @@ class ServiceCheckCreate(NetworkConfigMixin):
 
 
 class ServiceCheckUpdate(NetworkConfigMixin):
+    # Accepted only so a changed type can be rejected explicitly (422) rather
+    # than silently ignored; the type of an existing monitor is immutable.
+    check_type: Optional[str] = None
     name: Optional[str] = Field(default=None, max_length=255)
     group_id: Optional[UUID] = None
     parent_check_id: Optional[UUID] = None
@@ -209,11 +247,27 @@ class ServiceCheckUpdate(NetworkConfigMixin):
     check_interval: Optional[int] = Field(default=None, ge=10, le=3600)
     timeout: Optional[int] = Field(default=None, ge=1, le=60)
     description: Optional[str] = None
+    # Explicit null clears the objective back to the policy default.
+    sla_target_pct: Optional[float] = Field(default=None, gt=0, le=100)
+    criticality: Optional[Criticality] = None
+    business_owner: Optional[str] = Field(default=None, max_length=255)
+    owner_team: Optional[str] = Field(default=None, max_length=255)
+    runbook_url: Optional[str] = None
 
     @field_validator("http_expected_statuses")
     @classmethod
     def _check_statuses(cls, v):
         return _validate_statuses(v)
+
+    @field_validator("business_owner", "owner_team")
+    @classmethod
+    def _blank_owner(cls, v):
+        return _blank_to_none(v)
+
+    @field_validator("runbook_url")
+    @classmethod
+    def _check_runbook(cls, v):
+        return _validate_runbook_url(v)
 
 
 class ServiceCheckResponse(BaseModel):
@@ -263,6 +317,15 @@ class ServiceCheckResponse(BaseModel):
     tls_issuer: Optional[str] = None
     tls_subject: Optional[str] = None
     description: Optional[str] = None
+    sla_target_pct: Optional[float] = None
+    criticality: Optional[str] = None
+    business_owner: Optional[str] = None
+    owner_team: Optional[str] = None
+    runbook_url: Optional[str] = None
+    # Evidence freshness against the appliance clock: enabled checks whose last
+    # result is older than 3x the effective interval + timeout + 60 s.
+    stale: bool = False
+    evidence_age_sec: Optional[float] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -276,6 +339,10 @@ class ServiceCheckSummary(BaseModel):
     warning: int
     degraded: int
     unknown: int
+    paused: int = 0
+    stale: int = 0
+    in_maintenance: int = 0
+    server_time: Optional[datetime] = None
 
 
 class ServiceMetricPoint(BaseModel):
@@ -286,6 +353,14 @@ class ServiceMetricPoint(BaseModel):
     status_code: Optional[int] = None
     tls_days_remaining: Optional[int] = None
     error_message: Optional[str] = None
+    # Bucketed points only (null for raw probes): exact per-bucket evidence.
+    uptime_pct: Optional[float] = None
+    sample_count: Optional[int] = None
+    failed_count: Optional[int] = None
+    p95_response_ms: Optional[float] = None
+    max_response_ms: Optional[float] = None
+    # latest-probes only: True for an on-demand "Test now" probe (poller_id api-test).
+    manual: Optional[bool] = None
 
 
 class ServiceMetricResponse(BaseModel):
@@ -294,6 +369,10 @@ class ServiceMetricResponse(BaseModel):
     from_time: datetime
     to_time: datetime
     points: list[ServiceMetricPoint]
+    bucket_sec: Optional[int] = None
+    truncated: bool = False
+    total_samples: int = 0
+    percentile_basis: str = "per_probe"
 
 
 class ServiceCheckGroupCreate(BaseModel):
@@ -325,9 +404,38 @@ class ServiceMaintenanceCreate(BaseModel):
     scope_check_id: Optional[UUID] = None
     scope_group_id: Optional[UUID] = None
     scope_tag: Optional[str] = Field(default=None, max_length=120)
-    starts_at: datetime
-    ends_at: datetime
-    reason: Optional[str] = None
+    # starts_at omitted -> appliance "now". Either ends_at or duration_minutes.
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    duration_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ServiceMaintenanceEnd(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ServiceMaintenancePatch(BaseModel):
+    ends_at: Optional[datetime] = None
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ServiceCheckNoteCreate(BaseModel):
+    body: str = Field(..., min_length=1, max_length=4000)
+    incident_started_at: Optional[datetime] = None
+    assignee: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("body")
+    @classmethod
+    def _body_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Note body must not be blank")
+        return v
+
+    @field_validator("assignee")
+    @classmethod
+    def _blank_assignee(cls, v):
+        return _blank_to_none(v)
 
 
 class ServiceCheckTemplateCreate(BaseModel):
@@ -428,11 +536,20 @@ class ServiceMaintenanceResponse(BaseModel):
     scope_check_id: Optional[UUID] = None
     scope_group_id: Optional[UUID] = None
     scope_tag: Optional[str] = None
-    scope_label: Optional[str] = None  # human label for UI ("All checks", group name, etc.)
+    scope_label: Optional[str] = None  # human label for UI ("All monitors", group name, etc.)
     starts_at: datetime
     ends_at: datetime
     reason: Optional[str] = None
     active: bool = False
     created_at: datetime
+    created_by_name: Optional[str] = None
+    ended_at: Optional[datetime] = None
+    ended_by_name: Optional[str] = None
+    end_reason: Optional[str] = None
+    cancelled_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    # LEAST(ends_at, ended_at) — the end SLA exclusion actually uses.
+    effective_ends_at: Optional[datetime] = None
+    state: str = "scheduled"  # scheduled|active|ended|cancelled|expired
 
     model_config = {"from_attributes": True}

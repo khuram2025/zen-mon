@@ -62,7 +62,7 @@ function usePermittedGroups(): NavGroup[] {
   const user = useAuth((s) => s.user)
   return useMemo(() => {
     const keep = (n: NavNode): NavNode | null => {
-      if (n.permission && !hasPermission(user, n.permission)) return null
+      if (n.permission && !(Array.isArray(n.permission) ? n.permission : [n.permission as string]).some((p) => hasPermission(user, p))) return null
       const children = (n.children || []).map(keep).filter(Boolean) as NavNode[]
       if (n.children && children.length === 0) return null
       return n.children ? { ...n, children } : n

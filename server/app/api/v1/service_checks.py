@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.core.database import get_db
-from app.core.security import get_current_user, require_admin_user, require_operator_user
+from app.core.security import get_current_user, require_admin_user, require_permission
 from app.models.user import User
 from app.schemas.service_check import (
     ServiceCheckCreate,
@@ -23,6 +23,8 @@ from app.schemas.service_check import (
     ServiceCheckGroupUpdate,
     ServiceCheckGroupResponse,
     ServiceMaintenanceCreate,
+    ServiceMaintenanceEnd,
+    ServiceMaintenancePatch,
     ServiceMaintenanceResponse,
     ServiceCheckTemplateCreate,
     ServiceCheckTemplateUpdate,
@@ -33,7 +35,37 @@ from app.schemas.service_check import (
     ServiceCredentialUpdate,
     ServiceCredentialResponse,
 )
-from app.services import audit_service, service_check_service, service_metric_service
+from app.services import audit_service, service_check_service, service_maintenance, service_metric_service
+from app.services.service_check_service import ServiceCheckValidationError
+
+
+async def _scope(db: AsyncSession, user: User) -> list[str] | None:
+    return await scoping.visible_tags(db, user)
+
+
+async def visible_check_or_404(db: AsyncSession, check_id: UUID, user: User):
+    """The ORM row inside the caller's scope; out-of-scope ids are 404 (B02)."""
+    sc = await service_check_service.get_visible_check(db, check_id, await _scope(db, user))
+    if sc is None:
+        raise HTTPException(status_code=404, detail="Service check not found")
+    return sc
+
+
+def _maintenance_http(exc: "service_maintenance.MaintenanceError"):
+    return HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+async def _audit_maintenance(db, user, action: str, m, extra: dict | None = None) -> None:
+    await audit_service.write_audit_log(
+        db, actor=user, action=f"service_check_maintenance.{action}",
+        resource_type="service_check_maintenance", resource_id=str(m.id),
+        metadata={"scope_type": m.scope_type,
+                  "scope_check_id": str(m.scope_check_id) if m.scope_check_id else None,
+                  "scope_group_id": str(m.scope_group_id) if m.scope_group_id else None,
+                  "scope_tag": m.scope_tag,
+                  "starts_at": str(m.starts_at), "ends_at": str(m.ends_at),
+                  "reason": m.reason, **(extra or {})},
+    )
 
 def _status_matches(code: int, patterns: str) -> bool:
     """Match an HTTP status against a comma list of patterns: 200, 2xx, 200-299."""
@@ -163,7 +195,7 @@ async def list_service_check_templates(
 async def create_service_check_template(
     data: ServiceCheckTemplateCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     return await service_check_service.create_template(db, data, current_user.id)
 
@@ -185,7 +217,7 @@ async def update_service_check_template(
     template_id: UUID,
     data: ServiceCheckTemplateUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     t = await service_check_service.update_template(db, template_id, data)
     if not t:
@@ -197,7 +229,7 @@ async def update_service_check_template(
 async def delete_service_check_template(
     template_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     ok = await service_check_service.delete_template(db, template_id)
     if not ok:
@@ -210,10 +242,13 @@ async def apply_service_check_template(
     template_id: UUID,
     data: ServiceCheckTemplateApply,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     try:
-        return await service_check_service.apply_template(db, template_id, data, current_user.id)
+        return await service_check_service.apply_template(
+            db, template_id, data, current_user.id, visible_tags=await _scope(db, current_user))
+    except ServiceCheckValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -223,27 +258,77 @@ async def list_service_check_maintenance(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return await service_check_service.list_maintenance(db)
+    return await service_check_service.list_maintenance(db, visible_tags=await _scope(db, current_user))
 
 
 @maintenance_router.post("", response_model=ServiceMaintenanceResponse, status_code=201)
 async def create_service_check_maintenance(
     data: ServiceMaintenanceCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
-    return await service_check_service.create_maintenance(db, data, current_user.id)
+    try:
+        m = await service_maintenance.create_window(db, data, current_user.id, await _scope(db, current_user))
+    except service_maintenance.MaintenanceError as exc:
+        raise _maintenance_http(exc)
+    await _audit_maintenance(db, current_user, "create", m)
+    await db.commit()
+    service_check_service.clear_fleet_cache()
+    return (await service_maintenance.responses(db, [m]))[0]
+
+
+@maintenance_router.post("/{maintenance_id}/end", response_model=ServiceMaintenanceResponse)
+async def end_service_check_maintenance(
+    maintenance_id: UUID,
+    data: ServiceMaintenanceEnd | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("service_checks.manage")),
+):
+    """Active -> ended now; scheduled -> cancelled. The record is kept (B04)."""
+    reason = data.reason if data else None
+    try:
+        m, prior_state = await service_maintenance.end_window(
+            db, maintenance_id, current_user.id, reason, await _scope(db, current_user))
+    except service_maintenance.MaintenanceError as exc:
+        raise _maintenance_http(exc)
+    await _audit_maintenance(db, current_user, "end" if prior_state == "active" else "cancel", m,
+                             {"end_reason": reason, "prior_state": prior_state})
+    await db.commit()
+    service_check_service.clear_fleet_cache()
+    return (await service_maintenance.responses(db, [m]))[0]
+
+
+@maintenance_router.patch("/{maintenance_id}", response_model=ServiceMaintenanceResponse)
+async def patch_service_check_maintenance(
+    maintenance_id: UUID,
+    data: ServiceMaintenancePatch,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("service_checks.manage")),
+):
+    try:
+        m, changes = await service_maintenance.patch_window(db, maintenance_id, data, await _scope(db, current_user))
+    except service_maintenance.MaintenanceError as exc:
+        raise _maintenance_http(exc)
+    await _audit_maintenance(db, current_user, "update", m, {"changes": changes})
+    await db.commit()
+    service_check_service.clear_fleet_cache()
+    return (await service_maintenance.responses(db, [m]))[0]
 
 
 @maintenance_router.delete("/{maintenance_id}", status_code=204)
 async def delete_service_check_maintenance(
     maintenance_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
-    ok = await service_check_service.delete_maintenance(db, maintenance_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Maintenance window not found")
+    """Cancel a window that has not started (record kept). Started windows: 409."""
+    try:
+        m = await service_maintenance.cancel_window(db, maintenance_id, current_user.id, await _scope(db, current_user))
+    except service_maintenance.MaintenanceError as exc:
+        raise _maintenance_http(exc)
+    await _audit_maintenance(db, current_user, "cancel", m)
+    await db.commit()
+    service_check_service.clear_fleet_cache()
     return None
 
 
@@ -256,16 +341,25 @@ async def list_service_checks(
     group_id: UUID | None = None,
     tag: str | None = None,
     level: int | None = Query(default=None, ge=1, le=3),
+    sort: Literal["name", "-name", "status", "last_check", "type"] = Query(default="name"),
+    enabled: bool | None = None,
+    stale: bool | None = None,
+    in_maintenance: bool | None = None,
+    has_credential: bool | None = None,
+    sensor_id: UUID | None = None,
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """`status` accepts a comma-separated set (e.g. warning,degraded)."""
     return await service_check_service.get_service_checks(
         db, device_id=device_id, check_type=check_type, status=status,
         search=search, group_id=group_id, tag=tag, level=level,
         skip=skip, limit=limit,
         visible_tags=await scoping.visible_tags(db, current_user),
+        sort=sort, enabled=enabled, stale=stale, in_maintenance=in_maintenance,
+        has_credential=has_credential, sensor_id=sensor_id,
     )
 
 
@@ -274,7 +368,7 @@ async def list_service_check_tags(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return await service_check_service.list_tags(db)
+    return await service_check_service.list_tags(db, visible_tags=await _scope(db, current_user))
 
 
 # ── Groups (mounted at /service-check-groups) ───────────────────────────────
@@ -284,14 +378,14 @@ async def list_service_check_groups(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return await service_check_service.list_groups(db)
+    return await service_check_service.list_groups(db, visible_tags=await _scope(db, current_user))
 
 
 @groups_router.post("", response_model=ServiceCheckGroupResponse, status_code=201)
 async def create_service_check_group(
     data: ServiceCheckGroupCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     return await service_check_service.create_group(db, data)
 
@@ -301,7 +395,7 @@ async def update_service_check_group(
     group_id: UUID,
     data: ServiceCheckGroupUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     out = await service_check_service.update_group(db, group_id, data)
     if not out:
@@ -313,7 +407,7 @@ async def update_service_check_group(
 async def delete_service_check_group(
     group_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     ok = await service_check_service.delete_group(db, group_id)
     if not ok:
@@ -341,56 +435,8 @@ async def service_check_uptime_stats(
     if basis == "confirmed":
         return await service_check_service.get_confirmed_uptime_all(
             db, hours=hours, visible_tags=await scoping.visible_tags(db, current_user))
-    from app.core.database import get_clickhouse_client
-    client = get_clickhouse_client()
-
-    to_time = datetime.utcnow()
-    from_time = to_time - timedelta(hours=hours)
-
-    tables_to_try = []
-    if hours <= 6:
-        tables_to_try = ["service_metrics"]
-    elif hours <= 168:
-        tables_to_try = ["service_metrics_5m", "service_metrics"]
-    else:
-        tables_to_try = ["service_metrics_5m", "service_metrics"]
-
-    uptime_map = {}
-    for table in tables_to_try:
-        if table == "service_metrics":
-            query = f"""
-                SELECT service_check_id,
-                       countIf(is_up = 1) AS up_count,
-                       count() AS total_count
-                FROM zenplus.{table}
-                WHERE timestamp >= %(from)s AND timestamp <= %(to)s
-                GROUP BY service_check_id
-            """
-        else:
-            query = f"""
-                SELECT service_check_id,
-                       sum(uptime_pct * sample_count) AS weighted_up,
-                       sum(sample_count) AS total_count
-                FROM zenplus.{table}
-                WHERE timestamp >= %(from)s AND timestamp <= %(to)s
-                GROUP BY service_check_id
-            """
-        try:
-            result = client.query(query, parameters={"from": from_time, "to": to_time})
-            if len(result.result_rows) > 0:
-                for row in result.result_rows:
-                    check_id = str(row[0])
-                    up = row[1]
-                    total = row[2]
-                    if table == "service_metrics":
-                        uptime_map[check_id] = round((up / total * 100) if total > 0 else 0, 2)
-                    else:
-                        uptime_map[check_id] = round((up / total * 100) if total > 0 else 0, 2)
-                break
-        except Exception:
-            continue
-
-    return {"hours": hours, "from": from_time.isoformat(), "to": to_time.isoformat(), "checks": uptime_map}
+    return await service_check_service.get_observed_uptime_all(
+        db, hours, visible_tags=await scoping.visible_tags(db, current_user))
 
 
 @router.get("/daily-uptime")
@@ -410,26 +456,42 @@ async def service_check_daily_uptime(
             raise HTTPException(status_code=422, detail="Invalid reporting timezone")
         return await service_check_service.get_confirmed_uptime_all(
             db, days=days, tz_name=timezone, visible_tags=await scoping.visible_tags(db, current_user))
-    return await service_check_service.get_daily_uptime_all(db, days)
+    return await service_check_service.get_daily_uptime_all(
+        db, days, visible_tags=await scoping.visible_tags(db, current_user))
 
 
 @router.post("", response_model=ServiceCheckResponse, status_code=201)
 async def create_service_check(
     data: ServiceCheckCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     try:
-        return await service_check_service.create_service_check(db, data, current_user.id)
+        out = await service_check_service.create_service_check(
+            db, data, current_user.id, visible_tags=await _scope(db, current_user))
+    except ServiceCheckValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    def field(key):
+        return out.get(key) if isinstance(out, dict) else getattr(out, key, None)
+
+    await audit_service.write_audit_log(
+        db, actor=current_user, action="service_check.create", resource_type="service_check",
+        resource_id=str(field("id")),
+        metadata={"name": field("name"), "check_type": field("check_type"), "level": field("level"),
+                  "tags": list(field("tags") or [])},
+    )
+    await db.commit()
+    service_check_service.clear_fleet_cache()
+    return out
 
 
 @router.post("/test-config")
 async def test_service_check_configuration(
     data: ServiceCheckCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """Test an unsaved HTTP configuration without persisting it or its response body."""
     if data.check_type != "http":
@@ -465,11 +527,9 @@ async def get_service_check(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    sc = await service_check_service.get_service_check(db, check_id)
+    # 404, not 403: out-of-scope ids must not be confirmable.
+    sc = await service_check_service.get_service_check(db, check_id, visible_tags=await _scope(db, current_user))
     if not sc:
-        raise HTTPException(status_code=404, detail="Service check not found")
-    if not scoping.entity_visible(sc.tags, await scoping.visible_tags(db, current_user)):
-        # 404, not 403: out-of-scope ids must not be confirmable.
         raise HTTPException(status_code=404, detail="Service check not found")
     return sc
 
@@ -479,14 +539,25 @@ async def update_service_check(
     check_id: UUID,
     data: ServiceCheckUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
+    changes: dict = {}
     try:
-        sc = await service_check_service.update_service_check(db, check_id, data)
+        sc = await service_check_service.update_service_check(
+            db, check_id, data, visible_tags=await _scope(db, current_user), changes_out=changes)
+    except ServiceCheckValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not sc:
         raise HTTPException(status_code=404, detail="Service check not found")
+    if changes:
+        await audit_service.write_audit_log(
+            db, actor=current_user, action="service_check.update", resource_type="service_check",
+            resource_id=str(check_id), metadata={"name": sc.name, "changes": changes},
+        )
+        await db.commit()
+    service_check_service.clear_fleet_cache()
     return sc
 
 
@@ -494,11 +565,19 @@ async def update_service_check(
 async def delete_service_check(
     check_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
+    sc = await visible_check_or_404(db, check_id, current_user)
+    name = sc.name
     deleted = await service_check_service.delete_service_check(db, check_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Service check not found")
+    await audit_service.write_audit_log(
+        db, actor=current_user, action="service_check.delete", resource_type="service_check",
+        resource_id=str(check_id), metadata={"name": name},
+    )
+    await db.commit()
+    service_check_service.clear_fleet_cache()
 
 
 class BulkDeleteRequest(BaseModel):
@@ -509,18 +588,39 @@ class BulkDeleteRequest(BaseModel):
 async def bulk_delete_service_checks(
     data: BulkDeleteRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
-    count = await service_check_service.bulk_delete_service_checks(db, data.check_ids)
+    """All-or-nothing: any missing/out-of-scope id -> 404 and nothing is deleted."""
+    rows = await service_check_service.get_visible_checks(db, data.check_ids, await _scope(db, current_user))
+    if rows is None:
+        raise HTTPException(status_code=404, detail="Service check not found")
+    names = {str(r.id): r.name for r in rows}
+    count = await service_check_service.bulk_delete_service_checks(
+        db, data.check_ids, await _scope(db, current_user))
+    if count is None:
+        raise HTTPException(status_code=404, detail="Service check not found")
+    for cid, name in names.items():
+        await audit_service.write_audit_log(
+            db, actor=current_user, action="service_check.delete", resource_type="service_check",
+            resource_id=cid, metadata={"name": name, "bulk": True},
+        )
+    await db.commit()
+    service_check_service.clear_fleet_cache()
     return {"deleted": count}
 
 
 @router.get("/export/json")
 async def export_service_checks(
+    format: Literal["summary", "portable"] = Query(default="summary"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    checks = await service_check_service.export_service_checks(db)
+    """Default: the legacy list (summary, additive fields). `format=portable`:
+    versioned schema_version 2 definition document for import."""
+    scope = await _scope(db, current_user)
+    if format == "portable":
+        return JSONResponse(content=await service_check_service.export_portable(db, scope))
+    checks = await service_check_service.export_service_checks(db, scope)
     return JSONResponse(content=checks)
 
 
@@ -532,7 +632,8 @@ async def get_related_service_checks(
     current_user: User = Depends(get_current_user),
 ):
     """Parent, dependents, and checks that share this device, host, or group."""
-    out = await service_check_service.get_related_service_checks(db, check_id, limit=limit)
+    out = await service_check_service.get_related_service_checks(
+        db, check_id, limit=limit, visible_tags=await _scope(db, current_user))
     if out is None:
         raise HTTPException(status_code=404, detail="Service check not found")
     return out
@@ -543,11 +644,21 @@ async def get_service_check_metrics(
     check_id: UUID,
     from_time: datetime | None = Query(default=None, alias="from"),
     to_time: datetime | None = Query(default=None, alias="to"),
-    granularity: str = Query(default="auto"),
+    granularity: Literal["auto", "raw", "5m", "1h"] = Query(default="auto"),
+    limit: int = Query(default=5000, ge=1, le=20000),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return service_metric_service.get_service_metrics(
+    """raw: newest `limit` probes (ascending) + truncated/total_samples.
+    5m/1h: exact per-bucket counts, success ratio and p95 from raw probes."""
+    import asyncio
+    sc = await visible_check_or_404(db, check_id, current_user)
+    if from_time is not None and to_time is not None and to_time <= from_time:
+        raise HTTPException(status_code=422, detail="'to' must be after 'from'")
+    return await asyncio.to_thread(
+        service_metric_service.get_service_metrics,
         check_id, from_time=from_time, to_time=to_time, granularity=granularity,
+        limit=limit, interval_sec=sc.check_interval or 60,
     )
 
 
@@ -557,8 +668,10 @@ async def get_service_check_status_history(
     from_time: datetime | None = Query(default=None, alias="from"),
     to_time: datetime | None = Query(default=None, alias="to"),
     limit: int = Query(default=100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    await visible_check_or_404(db, check_id, current_user)
     return service_metric_service.get_service_status_history(
         check_id, from_time=from_time, to_time=to_time, limit=limit,
     )
@@ -573,7 +686,11 @@ async def get_service_check_hourly_uptime(
     current_user: User = Depends(get_current_user),
 ):
     """Hourly uptime % for the last N days (default 30). Powers the calendar."""
-    return await service_check_service.get_hourly_uptime(db, check_id, days, basis=basis)
+    out = await service_check_service.get_hourly_uptime(
+        db, check_id, days, basis=basis, visible_tags=await _scope(db, current_user))
+    if out.get("error") == "not_found":
+        raise HTTPException(status_code=404, detail="Service check not found")
+    return out
 
 
 @router.get("/{check_id}/sla")
@@ -592,7 +709,11 @@ async def get_service_check_sla(
     together to score an explicit span instead — `hours` alone always ends at now, which
     is the wrong window for a historical range.
     """
-    out = await service_check_service.get_service_sla(db, check_id, hours, from_time, to_time, basis=basis)
+    try:
+        out = await service_check_service.get_service_sla(
+            db, check_id, hours, from_time, to_time, basis=basis, visible_tags=await _scope(db, current_user))
+    except ServiceCheckValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     if out.get("error") == "not_found":
         raise HTTPException(status_code=404, detail="Service check not found")
     return out
@@ -602,7 +723,7 @@ async def get_service_check_sla(
 async def test_service_check(
     check_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """Run an on-demand test of a service check and return the result."""
     import socket
@@ -610,6 +731,7 @@ async def test_service_check(
     import time
     import httpx
 
+    await visible_check_or_404(db, check_id, current_user)
     try:
         check, runtime_credential = await service_check_service.get_runtime_service_check(db, check_id)
     except ValueError as exc:
@@ -784,6 +906,11 @@ async def test_service_check(
         sql_update(ServiceCheckModel)
         .where(ServiceCheckModel.id == check_id)
         .values(**update_values)
+    )
+    await audit_service.write_audit_log(
+        db, actor=current_user, action="service_check.test", resource_type="service_check",
+        resource_id=str(check_id),
+        metadata={"name": check.name, "status": result["status"], "error": result["error"] or None},
     )
     await db.commit()
 

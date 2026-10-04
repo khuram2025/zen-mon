@@ -52,9 +52,42 @@ class RowResult:
         return [self.row]
 
 
+class _NullTransaction:
+    """Async context manager standing in for ``AsyncSession.begin_nested()``."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _RolePermsRow:
+    def __init__(self, perms):
+        self.perms = perms
+
+    def __getitem__(self, idx):
+        return self.perms
+
+
 class FakeDB:
+    # Opt-in marker: this double answers the roles lookup itself, so the real
+    # get_role_permissions stays under test (see the autouse shim below).
+    answers_role_lookup = True
+
+    def begin_nested(self):
+        return _NullTransaction()
+
+    async def rollback(self):
+        return None
+
     async def execute(self, statement, params=None):
         sql = str(statement)
+        if "SELECT permissions FROM roles" in sql:
+            # Models a migrated appliance: the four built-in roles are seeded.
+            from app.core.permissions import BUILTIN_ROLE_DEFINITIONS
+            perms = BUILTIN_ROLE_DEFINITIONS.get((params or {}).get("name"))
+            return RowResult(_RolePermsRow(list(perms))) if perms is not None else ScalarResult(None)
         if "INSERT INTO alert_rules" in sql:
             return RowResult(
                 SimpleNamespace(
@@ -168,3 +201,24 @@ def as_operator():
     app.dependency_overrides[get_current_user] = override
     yield
     app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture(autouse=True)
+def _builtin_roles_for_minimal_fake_dbs(monkeypatch):
+    """Authorization now fails closed when the roles lookup yields nothing.
+    Many tests drive routes with a minimal fake DB that cannot answer
+    ``SELECT permissions FROM roles``; model a migrated appliance for them by
+    resolving the four built-in roles from their code definitions. Doubles
+    that set ``answers_role_lookup`` (FakeDB, RbacFakeDB) answer the query
+    themselves, so the real lookup stays under test."""
+    from app.core import security
+    from app.core.permissions import BUILTIN_ROLE_DEFINITIONS
+
+    real = security.get_role_permissions
+
+    async def shim(db, role_name):
+        if not getattr(db, "answers_role_lookup", False):
+            return list(BUILTIN_ROLE_DEFINITIONS.get(role_name, []))
+        return await real(db, role_name)
+
+    monkeypatch.setattr(security, "get_role_permissions", shim)

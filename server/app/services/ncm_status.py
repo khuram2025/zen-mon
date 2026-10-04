@@ -26,7 +26,14 @@ def backup_status(row,now=None):
             pass  # Malformed evidence is unknown, never fresh coverage.
     checked=min(times) if len(times)==len(types) else None
     fresh=bool(row.ncm_enabled and checked and checked <= now and now-checked <= timedelta(hours=row.freshness_hours or 24))
-    state='excluded' if not eligible else 'unconfigured' if not row.platform else 'disabled' if not row.ncm_enabled else 'failed' if row.last_status=='failed' else 'fresh' if fresh else 'stale' if row.validated_at else 'unverified' if row.versions else 'pending'
+    # An enrolled device outside the coverage scope still shows its real
+    # operational state (a failing backup must stay visible); it is simply not
+    # counted in the coverage denominator. Only unenrolled out-of-scope
+    # devices read as "excluded".
+    state=('excluded' if not eligible and not row.platform else 'unconfigured' if not row.platform
+           else 'disabled' if not row.ncm_enabled else 'failed' if row.last_status=='failed'
+           else 'blocked' if row.last_status=='blocked' else 'fresh' if fresh
+           else 'stale' if row.validated_at else 'unverified' if row.versions else 'pending')
     review=bool(row.eligible_override is None and not candidate and
                 (getattr(row,'vendor','') or '').strip().lower().startswith(('f5','aruba','fortinet','palo alto','cisco','juniper','arista')))
     reason=('Explicitly included in backup scope.' if eligible else 'Explicitly excluded from backup scope.') if row.eligible_override is not None else (
@@ -34,4 +41,4 @@ def backup_status(row,now=None):
         'Review inventory type and address before including this network vendor in backup scope.' if review else
         'Inventory type or address is outside automatic network backup scope.')
     return {'eligible':bool(eligible),'eligibility_review':review,'eligibility_reason':reason,
-            'fresh':fresh,'backup_state':state,'validated_at':row.validated_at.isoformat() if row.validated_at else None}
+            'fresh':fresh,'backup_state':state,'coverage':'included' if eligible else 'excluded','validated_at':row.validated_at.isoformat() if row.validated_at else None}

@@ -69,6 +69,22 @@ BACKUP_STALE_AFTER_H = 3
 EXCLUDED_TABLES = {"schema_migrations"}
 EXCLUDED_PREFIXES = ("capture_", "network_capture")
 
+# NetFlow tables that hold state rather than a time series: flow templates and
+# NBAR application names stay valid however old their first_seen/updated_at is
+# (a template advertised once at boot is used for months), so they must never
+# get a TTL or lose partitions to a purge.
+STATE_TABLES = {"flow_templates", "flow_app_names"}
+
+# NetFlow tables kept longer by design (90-400 days) than the category their
+# name would give them (raw metrics, or 5-minute rollups): per-interface
+# capacity history for trends and forecasts, exporter delivery coverage and
+# sFlow interface counters.
+TABLE_CATEGORIES = {
+    "flow_interface_5m": "flow_history",
+    "flow_exporter_minutes": "flow_history",
+    "flow_if_counters": "flow_history",
+}
+
 CATEGORIES: dict[str, dict[str, Any]] = {
     "raw_metrics": {
         "label": "Raw metrics",
@@ -89,6 +105,11 @@ CATEGORIES: dict[str, dict[str, Any]] = {
         "label": "NetFlow records",
         "description": "Raw flow records from the NetFlow collector",
         "default_days": 30, "min_days": 3,
+    },
+    "flow_history": {
+        "label": "NetFlow history",
+        "description": "Per-interface capacity, exporter delivery coverage and sFlow interface counters",
+        "default_days": 400, "min_days": 30,
     },
     "apm": {
         "label": "APM traces",
@@ -121,10 +142,12 @@ DEFAULT_BACKUP_SCHEDULE = {
 
 def classify_table(name: str) -> Optional[str]:
     """Map a ClickHouse table to a retention category (None = unmanaged)."""
-    if name in EXCLUDED_TABLES or name.endswith("_mv"):
+    if name in EXCLUDED_TABLES or name in STATE_TABLES or name.endswith("_mv"):
         return None
     if any(name.startswith(p) for p in EXCLUDED_PREFIXES):
         return None
+    if name in TABLE_CATEGORIES:
+        return TABLE_CATEGORIES[name]
     if name.endswith("_5m"):
         return "rollups_5m"
     if name.endswith("_1h"):

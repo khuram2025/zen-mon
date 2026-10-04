@@ -21,73 +21,70 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.api.v1.netflow import (  # noqa: E402
-    _application_for_flow,
-    _application_for_port,
-    _NET_CLASS_RANGES,
-    _resolve_window,
-    _scope,
-)
+from app.api.v1.netflow import filters as F  # noqa: E402
+from app.api.v1.netflow.common import NetflowError, resolve_window  # noqa: E402
+from app.api.v1.netflow.sql import NET_CLASS_NAMES, NET_CLASSES  # noqa: E402
+from app.services import netflow_classify as nc  # noqa: E402
 
 API = os.environ.get("ZENPLUS_API", "http://localhost:8000")
 ADMIN_USER = os.environ.get("ZENPLUS_ADMIN", "admin")
 ADMIN_PASS = os.environ.get("ZENPLUS_ADMIN_PASS", "admin123")
 
 
-# ── Unit: application classification ─────────────────────────────────────────
+# ── Unit: application classification (one classifier, services/netflow_classify) ──
 
-def test_application_for_flow_uses_protocol_for_tunnels():
-    assert _application_for_flow(0, 50) == "VPN / Tunneling"   # ESP
-    assert _application_for_flow(0, 47) == "VPN / Tunneling"   # GRE
-    assert _application_for_flow(0, 51) == "VPN / Tunneling"   # AH
-    assert _application_for_flow(0, 1) == "ICMP"
-    assert _application_for_flow(0, 58) == "ICMP"
+def _app(protocol: int, dst_port: int, src_port: int = 40000) -> str:
+    return nc.classify(protocol, src_port, dst_port, rules=nc.build_rules()).application
 
 
-def test_application_for_flow_falls_back_to_port():
-    assert _application_for_flow(443, 6) == "Web (HTTP/HTTPS)"
-    assert _application_for_flow(0, 6) == "Other"
-    assert _application_for_port(53) == "DNS"
-    assert _application_for_port(49152) == "Other"
-    assert _application_for_port(515) == "System Services"
+def test_portless_protocols_classify_by_protocol():
+    assert _app(50, 0) == nc.APP_VPN    # ESP
+    assert _app(47, 0) == nc.APP_VPN    # GRE
+    assert _app(51, 0) == nc.APP_VPN    # AH
+    assert _app(1, 0) == nc.APP_ICMP
+    assert _app(58, 0) == nc.APP_ICMP   # ICMPv6
 
 
-def test_scope_app_filter_partitions_by_protocol():
-    sql, _ = _scope(application="VPN / Tunneling")
-    assert "protocol IN (47,50,51)" in sql
-    sql, _ = _scope(application="ICMP")
-    assert "protocol IN (1,58)" in sql
-    # Port buckets must exclude protocol-derived traffic so filters partition.
-    sql, _ = _scope(application="Web (HTTP/HTTPS)")
-    assert "protocol NOT IN" in sql
-    sql, _ = _scope(application="Other")
-    assert "protocol NOT IN" in sql
+def test_port_protocols_classify_by_the_service_port():
+    assert _app(6, 443) == nc.APP_WEB
+    assert _app(17, 53) == "DNS"
+    assert _app(6, 515) == nc.APP_SYSTEM
+    assert _app(6, 49152, 49153) == nc.APP_OTHER
+
+
+def test_app_filter_compares_the_shared_classifier():
+    # The app filter compares the classifier's application expression, so
+    # filtered totals partition exactly like the /applications breakdown.
+    for app in (nc.APP_VPN, nc.APP_ICMP, nc.APP_WEB, nc.APP_OTHER):
+        sql, params = F.compile_filter(F.parse_flow_filter({"app": app}), "flow_records", F.UNRESTRICTED)
+        assert sql.endswith("= %(nf_app)s") and params["nf_app"] == app
 
 
 # ── Unit: window resolution ──────────────────────────────────────────────────
 
 def test_resolve_window_minutes_beats_hours():
-    start, end = _resolve_window(24, None, None, minutes=90)
-    assert abs((end - start) - timedelta(minutes=90)) < timedelta(seconds=2)
+    w = resolve_window(24, 90, None, None, None, max_span=timedelta(days=93))
+    assert abs((w.end - w.start) - timedelta(minutes=90)) < timedelta(seconds=2)
 
 
 def test_resolve_window_custom_bounds():
-    start, end = _resolve_window(24, "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z")
-    assert start == datetime(2026, 8, 1, tzinfo=timezone.utc)
-    assert end == datetime(2026, 8, 2, tzinfo=timezone.utc)
+    w = resolve_window(24, None, "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", None, max_span=timedelta(days=93))
+    assert w.start == datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert w.end == datetime(2026, 8, 2, tzinfo=timezone.utc)
 
 
 def test_resolve_window_rejects_inverted_bounds():
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException):
-        _resolve_window(24, "2026-08-02T00:00:00Z", "2026-08-01T00:00:00Z")
+    with pytest.raises(NetflowError) as exc:
+        resolve_window(24, None, "2026-08-02T00:00:00Z", "2026-08-01T00:00:00Z", None, max_span=timedelta(days=93))
+    assert exc.value.status_code == 400
 
 
-def test_net_class_ranges_are_valid_cidrs():
+def test_net_classes_are_valid_cidrs():
     import ipaddress
-    for label, cidr in _NET_CLASS_RANGES.items():
-        net = ipaddress.ip_network(cidr)
-        assert int(net.network_address) <= int(net.broadcast_address), label
+    for label, cidrs in NET_CLASSES.items():
+        for cidr in cidrs:
+            net = ipaddress.ip_network(cidr)
+            assert int(net.network_address) <= int(net.broadcast_address), label
 
 
 # ── Live smoke tests ─────────────────────────────────────────────────────────
@@ -177,7 +174,7 @@ def test_application_filter_partitions(auth):
 @live
 def test_network_classes_labels(auth):
     rows = requests.get(f"{API}/api/v1/netflow/network-classes?hours=1", headers=auth, timeout=120).json()
-    valid = set(_NET_CLASS_RANGES) | {"Public"}
+    valid = set(NET_CLASS_NAMES)
     for row in rows:
         assert row["name"] in valid
 

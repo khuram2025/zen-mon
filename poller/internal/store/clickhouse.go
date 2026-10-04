@@ -483,14 +483,31 @@ func (s *ClickHouseStore) insertTrapBatch(ctx context.Context, traps []snmp.Trap
 	return batch.Send()
 }
 
+// serviceStatusLogInsert is the service_status_log insert. Values are bound by
+// the native batch protocol, never formatted into the SQL text, so reasons
+// containing quotes, backslashes or newlines are stored verbatim.
+const serviceStatusLogInsert = `INSERT INTO service_status_log (service_check_id, device_id, timestamp, check_type, old_status, new_status, reason, duration_sec)`
+
+// serviceStatusLogRow returns the column values for one service_status_log
+// row, in serviceStatusLogInsert column order. A check without a device is
+// stored with the nil UUID (as before); timestamp is the writer's clock.
+func serviceStatusLogRow(sc *checker.ServiceStatusChange, durationSec uint64, now time.Time) []any {
+	deviceID := uuid.Nil
+	if sc.DeviceID != nil {
+		deviceID = *sc.DeviceID
+	}
+	return []any{sc.ServiceCheckID, deviceID, now.UTC(), sc.CheckType, sc.OldStatus, sc.NewStatus, sc.Reason, durationSec}
+}
+
 // WriteServiceStatusChange logs a service check status transition.
 func (s *ClickHouseStore) WriteServiceStatusChange(ctx context.Context, sc *checker.ServiceStatusChange, durationSec uint64) error {
-	deviceIDStr := uuid.Nil.String()
-	if sc.DeviceID != nil {
-		deviceIDStr = sc.DeviceID.String()
+	batch, err := s.conn.PrepareBatch(ctx, serviceStatusLogInsert)
+	if err != nil {
+		return fmt.Errorf("prepare service status log: %w", err)
 	}
-
-	query := fmt.Sprintf(`INSERT INTO service_status_log (service_check_id, device_id, timestamp, check_type, old_status, new_status, reason, duration_sec) VALUES ('%s', '%s', now(), '%s', '%s', '%s', '%s', %d)`,
-		sc.ServiceCheckID.String(), deviceIDStr, sc.CheckType, sc.OldStatus, sc.NewStatus, sc.Reason, durationSec)
-	return s.conn.Exec(ctx, query)
+	if err := batch.Append(serviceStatusLogRow(sc, durationSec, time.Now())...); err != nil {
+		_ = batch.Abort()
+		return fmt.Errorf("append service status log: %w", err)
+	}
+	return batch.Send()
 }

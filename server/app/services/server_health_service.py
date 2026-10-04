@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import logging
 from typing import Any, Optional
 
@@ -43,6 +44,8 @@ AGENT_STALE_AFTER_S = 120
 AGENT_OFFLINE_AFTER_S = 600
 SERVER_STALE_AFTER_S = 300
 SWEEP_INTERVAL_S = 60
+
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
 # ── Server-scoped alert helpers ──────────────────────────────────────
@@ -88,12 +91,31 @@ async def create_server_alert(
     meta = dict(metadata or {})
     meta["source"] = source
     meta["dedupe"] = dedupe
+    # Host-metric rules pass their rule id in metadata; link it on the row as
+    # well (the FK is ON DELETE SET NULL). Without it the Alert Center showed
+    # no rule and no routing for server alerts, and escalation never saw them.
+    rule_id = meta.get("rule_id")
+    if not (isinstance(rule_id, str) and _UUID_RE.fullmatch(rule_id)):
+        rule_id = None
     await db.execute(
-        text("""INSERT INTO alerts (server_id, severity, message, status, metadata)
-                VALUES (:sid, :sev, :msg, 'active', CAST(:meta AS jsonb))"""),
-        {"sid": server_id, "sev": severity, "msg": message, "meta": json.dumps(meta)},
+        text("""INSERT INTO alerts (server_id, rule_id, severity, message, status, metadata)
+                VALUES (:sid, (SELECT id FROM alert_rules WHERE id = CAST(:rid AS uuid)),
+                        :sev, :msg, 'active', CAST(:meta AS jsonb))"""),
+        {"sid": server_id, "rid": rule_id, "sev": severity, "msg": message,
+         "meta": json.dumps(meta)},
     )
     return True
+
+
+async def server_condition_silenced(db: AsyncSession, server_id: str, dedupe: str) -> bool:
+    """Whether an active silence covers this server condition."""
+    return (await db.execute(
+        text("""SELECT 1 FROM alert_silences
+                WHERE server_id = :sid AND dedupe = :dedupe
+                  AND (until IS NULL OR until > NOW())
+                LIMIT 1"""),
+        {"sid": server_id, "dedupe": dedupe},
+    )).first() is not None
 
 
 async def resolve_server_alerts(db: AsyncSession, server_id: str, dedupe: str) -> int:

@@ -18,7 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_ch_client, get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 
@@ -239,7 +239,7 @@ async def get_error(
 @router.patch("/errors/{group_id}", response_model=ErrorIssue)
 async def triage_error(
     group_id: str, body: TriageUpdate,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("apm.manage")),
 ):
     if body.status and body.status not in VALID_STATUS:
         raise HTTPException(400, f"Invalid status; must be one of {sorted(VALID_STATUS)}")

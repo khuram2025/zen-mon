@@ -69,6 +69,8 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
+import { useCan } from '@/stores/auth'
+import { buildNetflowLink } from '@/lib/netflow/links'
 import { apiErrorMessage, axisRightPad, cn, formatBps, formatBpsAxis, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTicks, timeTooltipLabelFormatter } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
@@ -507,7 +509,7 @@ type DeviceAlert = {
 
 type NetflowSeriesPoint = { ts: number; bps: number; bytes: number; packets: number; flows: number }
 type NetflowApplication = { name: string; bytes: number; packets: number; flows: number }
-type NetflowConversation = { src: string; dst: string; protocol_name: string; dst_port: number; service: string; bytes: number; packets: number; flows: number }
+type NetflowConversation = { src: string; dst: string; orientation?: 'client_server' | 'address_order' | 'mixed'; protocol_name: string; dst_port: number; service: string; bytes: number; packets: number; flows: number }
 
 function DashboardSection({
   device, deviceId, range, rangePicker,
@@ -611,6 +613,9 @@ function DashboardSection({
     refetchInterval: 30_000,
   })
 
+  // NetFlow widgets need `netflow.view`; without it nothing is requested (no 403 loop) and the
+  // NetFlow widget stays hidden, as it does for a device that exports no flows.
+  const canNetflow = useCan()('netflow.view')
   const netflowExporter = normalizeIp(device.ip_address)
   const netflowQS = useMemo(() => {
     const params = new URLSearchParams({ hours: String(Math.max(1, Math.round(range.hours))) })
@@ -626,9 +631,9 @@ function DashboardSection({
     queryKey: ['device', deviceId, 'netflow-overview', netflowQS],
     queryFn: async () => (await api.get(`/netflow/overview?${netflowQS}`)).data,
     refetchInterval: range.isCustom ? false : 30_000,
-    enabled: !!netflowExporter,
+    enabled: !!netflowExporter && canNetflow,
   })
-  const hasNetflow = (netflowOverview?.flows || 0) > 0
+  const hasNetflow = canNetflow && (netflowOverview?.flows || 0) > 0
   const { data: netflowSeries } = useQuery<NetflowSeriesPoint[]>({
     queryKey: ['device', deviceId, 'netflow-timeseries', netflowQS],
     queryFn: async () => (await api.get(`/netflow/timeseries?${netflowQS}`)).data,
@@ -823,7 +828,7 @@ function DashboardSection({
     ...(perfSeries.length > 0 ? [{ id: 'performance', title: 'Performance overview', width: 8, height: 10, minWidth: 3, minHeight: 8, compact: false, content: (<PerformanceOverviewCard series={perfSeries} stats={perfStats} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} />) }] : []),
     ...(uptimeSec != null ? [{ id: 'boot-time', title: 'Time since reboot', width: 2, height: 2, minWidth: 1, minHeight: 2, compact: true, content: (<div className="device-boot-time rounded-lg border border-border bg-surface text-sm"><div className="device-boot-label text-muted"><Clock className="h-3.5 w-3.5 shrink-0" /><span>Time since reboot</span></div><span className="device-boot-value font-medium">{uptimeDaysCompact}</span></div>) }] : []),
     ...(snmp ? [{ id: 'interfaces', title: 'Interface status', width: 12, height: 10, minWidth: 3, minHeight: 6, compact: false, content: (<InterfaceStatusCard ifs={ifs || []} ifMetrics={ifMetrics || {}} deviceId={deviceId} />) }] : []),
-    ...(hasNetflow ? [{ id: 'netflow', title: 'NetFlow', width: 12, height: 11, minWidth: 3, minHeight: 7, compact: false, content: (<DeviceNetflowCard exporterIp={netflowExporter} overview={netflowOverview!} series={netflowSeries || []} applications={netflowApplications || []} conversations={netflowConversations || []} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} />) }] : []),
+    ...(hasNetflow ? [{ id: 'netflow', title: 'NetFlow', width: 12, height: 11, minWidth: 3, minHeight: 7, compact: false, content: (<DeviceNetflowCard exporterIp={netflowExporter} overview={netflowOverview!} series={netflowSeries || []} applications={netflowApplications || []} conversations={netflowConversations || []} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} openHref={netflowDeviceLink(netflowExporter, range)} />) }] : []),
   ]
 
   return (
@@ -1088,9 +1093,18 @@ function LegendDot({ color, label }: { color: string; label: string }) {
    NetFlow — shown only when this device exports flow records
    ════════════════════════════════════════════════════════════ */
 
+/** The exporter's NetFlow page for the same window the device page shows (FE-02). */
+function netflowDeviceLink(exporterIp: string, range: { hours: number; fromISO: string; toISO: string; isCustom: boolean }): string {
+  const rolling: Record<number, string> = { 1: '1h', 24: '24h', 168: '7d', 720: '1M' }
+  const key = range.isCustom ? null : rolling[Math.round(range.hours)]
+  const extra = key ? { range: key } : { range: 'custom', from: range.fromISO, to: range.toISO }
+  return buildNetflowLink(`/netflow/devices/${encodeURIComponent(exporterIp)}`, { extra })
+}
+
 function DeviceNetflowCard({
-  exporterIp, overview, series, applications, conversations, rangeLabel, rangeHours, fromTs, toTs,
+  exporterIp, overview, series, applications, conversations, rangeLabel, rangeHours, fromTs, toTs, openHref,
 }: {
+  openHref: string
   exporterIp: string
   overview: NetflowOverview
   series: NetflowSeriesPoint[]
@@ -1121,7 +1135,7 @@ function DeviceNetflowCard({
           <div className="flex items-center gap-3">
             <span className="text-[11px] font-medium text-muted">{rangeLabel}</span>
             <Link
-              to={`/netflow/devices/${encodeURIComponent(exporterIp)}`}
+              to={openHref}
               className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
             >
               Open NetFlow
@@ -1205,8 +1219,8 @@ function DeviceNetflowCard({
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Top Conversation</div>
               {topConversation ? (
                 <>
-                  <div className="mt-1 truncate font-mono text-[11px] text-text" title={`${topConversation.src} → ${topConversation.dst}`}>
-                    {topConversation.src} → {topConversation.dst}
+                  <div className="mt-1 truncate font-mono text-[11px] text-text" title={topConversation.orientation === 'client_server' ? `Client ${topConversation.src} → server ${topConversation.dst}` : `${topConversation.src} ↔ ${topConversation.dst}`}>
+                    {topConversation.src} {topConversation.orientation === 'client_server' ? '→' : '↔'} {topConversation.dst}
                   </div>
                   <div className="mt-1 text-muted">
                     {topConversation.service} · {formatBytes(topConversation.bytes)} · {topConversation.flows.toLocaleString()} flows

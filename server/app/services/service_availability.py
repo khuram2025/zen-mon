@@ -116,7 +116,69 @@ def read_fleet_segments(ch, checks, start, end, basis="confirmed"):
             yield cid, segments, count, observed_start
 
 
-def summarize(segments, start, end):
+def merge_intervals(intervals):
+    """Sort and merge (lo, hi) intervals so overlapping windows count once."""
+    out = []
+    for lo, hi in sorted((aware(lo), aware(hi)) for lo, hi in intervals or []):
+        if hi <= lo:
+            continue
+        if out and lo <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return [(lo, hi) for lo, hi in out]
+
+
+def subtract_intervals(segments, excluded):
+    """Remove merged `excluded` intervals from (lo, hi, fraction) segments.
+
+    Excluded time (planned maintenance) is neither up, down nor unknown: it
+    simply leaves the evidence and the denominator.
+    """
+    if not excluded:
+        return list(segments)
+    out = []
+    for lo, hi, fraction in segments:
+        cursor = lo
+        for elo, ehi in excluded:
+            if ehi <= cursor:
+                continue
+            if elo >= hi:
+                break
+            if elo > cursor:
+                out.append((cursor, min(elo, hi), fraction))
+            cursor = max(cursor, ehi)
+            if cursor >= hi:
+                break
+        if cursor < hi:
+            out.append((cursor, hi, fraction))
+    return out
+
+
+def overlap_seconds(intervals, start, end):
+    """Seconds of merged `intervals` inside [start, end)."""
+    return sum(max(0., (min(hi, end) - max(lo, start)).total_seconds()) for lo, hi in intervals or [])
+
+
+def _bridged(previous_end, lo, excluded):
+    """Two pieces are contiguous when nothing but excluded time separates them."""
+    if previous_end == lo:
+        return True
+    if previous_end is None or lo < previous_end:
+        return False
+    return any(elo <= previous_end and lo <= ehi for elo, ehi in excluded or [])
+
+
+def summarize(segments, start, end, excluded=None):
+    """Aggregate segments over [start, end).
+
+    `excluded` (maintenance) intervals are removed from both the evidence and
+    the span; they are reported as maintenance_sec. An outage interrupted only
+    by maintenance stays one incident.
+    """
+    excluded = merge_intervals(excluded) if excluded else []
+    if excluded:
+        segments = subtract_intervals(segments, excluded)
     covered = up = longest = outage = 0.
     incidents = 0
     previous_end = None
@@ -128,7 +190,7 @@ def summarize(segments, start, end):
         covered += duration
         up += duration * fraction
         if fraction < 1:
-            if outage == 0 or previous_end != lo:
+            if outage == 0 or not _bridged(previous_end, lo, excluded):
                 incidents += 1
                 outage = 0.
             outage += duration * (1 - fraction)
@@ -136,30 +198,107 @@ def summarize(segments, start, end):
         else:
             outage = 0.
         previous_end = hi
-    span = max(0., (end - start).total_seconds())
+    maintenance = overlap_seconds(excluded, start, end)
+    span = max(0., (end - start).total_seconds() - maintenance)
     return {"uptime_pct": up * 100 / covered if covered else None,
             "covered_sec": covered, "coverage_pct": covered * 100 / span if span else 0.,
             "unknown_sec": max(0., span - covered), "total_downtime_sec": covered - up,
-            "incident_count": incidents, "longest_incident_sec": longest}
+            "incident_count": incidents, "longest_incident_sec": longest,
+            "maintenance_sec": maintenance}
 
 
-def daily_summaries(segments, start, end, zone):
-    """Split observed coverage at local midnights, including DST boundaries."""
+def daily_summaries(segments, start, end, zone, excluded=None):
+    """Split observed coverage at local midnights, including DST boundaries.
+
+    Days that hold only maintenance still get a row (uptime null) so the
+    calendar can shade them rather than show "no data".
+    """
+    excluded = merge_intervals(excluded) if excluded else []
     bins = {}
-    for lo, hi, fraction in segments:
+
+    def local_days(lo, hi):
         while lo < hi:
             local_day = lo.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
             boundary = (local_day + timedelta(days=1)).astimezone(timezone.utc)
             stop = min(hi, boundary)
-            bins.setdefault(local_day, []).append((lo, stop, fraction))
+            yield local_day, lo, stop
             lo = stop
+
+    for lo, hi, fraction in segments:
+        for day, a, b in local_days(lo, hi):
+            bins.setdefault(day, []).append((a, b, fraction))
+    for lo, hi in excluded:
+        for day, _a, _b in local_days(max(lo, start), min(hi, end)):
+            bins.setdefault(day, [])
     out = []
     for day, values in sorted(bins.items()):
         stats = summarize(values, max(start, day.astimezone(timezone.utc)),
-                          min(end, (day + timedelta(days=1)).astimezone(timezone.utc)))
+                          min(end, (day + timedelta(days=1)).astimezone(timezone.utc)), excluded)
         out.append({"date": day.date().isoformat(), "uptime_pct": stats["uptime_pct"],
-                    "covered_sec": stats["covered_sec"], "sample_count": 0})
+                    "covered_sec": stats["covered_sec"], "sample_count": 0,
+                    "maintenance_sec": stats["maintenance_sec"],
+                    "downtime_sec": stats["total_downtime_sec"]})
     return out
+
+
+def incident_intervals(segments, start, end, excluded=None, merge_gap_sec=0., now=None):
+    """Down runs inside [start, end) with explicit boundary semantics.
+
+    A run continues across excluded (maintenance) time and across an
+    unknown/coverage gap no longer than `merge_gap_sec`; any Up evidence ends
+    it. Returned dicts: start, end (None unless recovered inside the window),
+    ongoing (reaches the window end and the window end is "now"),
+    starts_before_window, ends_after_window, downtime_sec, duration_sec.
+    """
+    excluded = merge_intervals(excluded) if excluded else []
+    pieces = subtract_intervals(segments, excluded) if excluded else list(segments)
+    runs = []
+    current = None
+    for lo, hi, fraction in pieces:
+        lo, hi = max(lo, start), min(hi, end)
+        if hi <= lo:
+            continue
+        if fraction >= 1:
+            if current:
+                runs.append(current)
+                current = None
+            continue
+        if current and (_bridged(current["hi"], lo, excluded)
+                        or (lo - current["hi"]).total_seconds() <= merge_gap_sec):
+            current["hi"] = hi
+            current["down"] += (hi - lo).total_seconds() * (1 - fraction)
+        else:
+            if current:
+                runs.append(current)
+            current = {"lo": lo, "hi": hi, "down": (hi - lo).total_seconds() * (1 - fraction)}
+    if current:
+        runs.append(current)
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for run in runs:
+        reaches_end = run["hi"] >= end
+        ongoing = reaches_end and end >= now - timedelta(seconds=1)
+        out.append({
+            "start": run["lo"],
+            "end": None if reaches_end else run["hi"],
+            "ongoing": ongoing,
+            "starts_before_window": run["lo"] <= start,
+            "ends_after_window": reaches_end and not ongoing,
+            "downtime_sec": run["down"],
+            "duration_sec": None if reaches_end else (run["hi"] - run["lo"]).total_seconds(),
+        })
+    return out
+
+
+def up_seconds_between(segments, lo, hi, excluded=None):
+    """Observed Up time (excluding unknown and maintenance) inside [lo, hi)."""
+    pieces = subtract_intervals(segments, merge_intervals(excluded)) if excluded else segments
+    total = 0.
+    for a, b, fraction in pieces:
+        a, b = max(a, lo), min(b, hi)
+        if b > a:
+            total += (b - a).total_seconds() * fraction
+    return total
 
 
 def recovery_start(rows, now, last_check, interval, status):

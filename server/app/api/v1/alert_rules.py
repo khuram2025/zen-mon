@@ -12,9 +12,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
+from app.services import alert_rule_scope as rs
+from app.services.audit_service import write_audit_log
+
+# Rule and routing changes are policy administration, separate from triage
+# (Alerts review A05): alerts.manage, plus the tag-scope guard per rule.
+require_rule_manager = require_permission("alerts.manage")
 from app.models.user import User
 from app.services import alert_phrasing as ap
+from app.services import netflow_alert_service as nfa
 
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
 
@@ -54,6 +61,33 @@ def _merge_condition_update(current, fields):
         merged['recovery_alert'] = False
         merged['min_duration'] = 0
     return merged
+
+
+# NetFlow rules keep their scope in flow_scope; the device-family scope
+# columns mean nothing for them and would confuse the tag-scope guard.
+_NETFLOW_CLEARED = ("device_id", "group_id", "service_check_id", "service_check_group_id",
+                    "device_type", "location", "scope_tag", "trap_oid", "target")
+
+
+async def _netflow_definition(metric, operator, threshold, flow_scope, flow_params):
+    """(operator, threshold, canonical scope, stored params) for a NetFlow rule;
+    422 with the reason otherwise. Finding rules are on/off: == 1."""
+    if metric == nfa.FINDING:
+        operator, threshold = "==", 1.0
+    try:
+        scope, params = await nfa.validate_definition(metric, operator, threshold, flow_scope, flow_params)
+    except nfa.RuleDefinitionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ap.normalize_operator(operator), float(threshold), scope, params
+
+
+def _json_value(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return None
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +130,12 @@ _NETPATH_METRICS = (
 # any series a template emits (tpl_<metric key>), evaluated per device by
 # network_alert_service._eval_template against ALL matching instance series.
 _TPL_METRICS = r"tpl_[a-z0-9_]{1,60}"
-_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}|{_NETPATH_METRICS}|{_TPL_METRICS}"
+# NetFlow metric keys (migrate-143 CHECK), evaluated by netflow_alert_service.
+# Scope = alert_rules.flow_scope (FlowFilter, canonical keys); parameters
+# (window, band, hold/clear evaluations, flap suppression, per-metric options)
+# = alert_rules.flow_params. One condition per rule (no compound conditions).
+_NETFLOW_METRICS = nfa.METRIC_PATTERN
+_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}|{_NETPATH_METRICS}|{_TPL_METRICS}|{_NETFLOW_METRICS}"
 
 
 class ConditionItem(BaseModel):
@@ -177,6 +216,10 @@ class AlertRuleCreate(BaseModel):
     # SLA escalation tiers (see EscalationLevel). None/empty = no escalation.
     escalation_levels: Optional[list[EscalationLevel]] = None
 
+    # NetFlow rules only (metric netflow_*): FlowFilter scope and parameters.
+    flow_scope: Optional[dict] = None
+    flow_params: Optional[dict] = None
+
     schedule_start: Optional[str] = None  # HH:MM
     schedule_end: Optional[str] = None    # HH:MM
     schedule_days: Optional[list[int]] = None  # 1-7 (Mon-Sun)
@@ -222,6 +265,9 @@ class AlertRuleUpdate(BaseModel):
     max_repeat: Optional[int] = Field(None, ge=0)
 
     escalation_levels: Optional[list[EscalationLevel]] = None
+
+    flow_scope: Optional[dict] = None
+    flow_params: Optional[dict] = None
 
     schedule_start: Optional[str] = None
     schedule_end: Optional[str] = None
@@ -269,6 +315,8 @@ class AlertRuleDraft(BaseModel):
     service_check_group_id: Optional[str] = None
     target: Optional[str] = None
     trap_oid: Optional[str] = None
+    flow_scope: Optional[dict] = None
+    flow_params: Optional[dict] = None
     email_subject: Optional[str] = None
     email_body: Optional[str] = None
     sms_template: Optional[str] = None
@@ -301,7 +349,7 @@ _RULE_COLUMNS = (
     "schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
-    "conditions, condition_logic, trap_oid, target, "
+    "conditions, condition_logic, trap_oid, target, flow_scope, flow_params, "
     "created_at, updated_at, created_by"
 )
 
@@ -351,6 +399,11 @@ def _row_to_dict(row) -> dict:
         "condition_logic": getattr(row, "condition_logic", None) or "AND",
         "trap_oid": getattr(row, "trap_oid", None),
         "target": getattr(row, "target", None),
+        "flow_scope": getattr(row, "flow_scope", None),
+        "flow_params": getattr(row, "flow_params", None),
+        "family": rs.family({"metric": row.metric,
+                             "service_check_id": row.service_check_id,
+                             "service_check_group_id": row.service_check_group_id}),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "created_by": str(row.created_by) if row.created_by else None,
@@ -401,6 +454,83 @@ async def get_template_defaults(user: User = Depends(get_current_user)):
     return {kind: ap.default_templates(kind) for kind in ("device", "service", "trap", "syslog")}
 
 
+# ---------------------------------------------------------------------------
+# NetFlow rule family (CR-07)
+# ---------------------------------------------------------------------------
+
+@router.get("/netflow/catalog")
+async def netflow_rule_catalog(user: User = Depends(get_current_user)):
+    """What the wizard offers for NetFlow rules: metrics with their units,
+    operators, defaults and which FlowFilter keys each may be scoped by, plus
+    the application and IP-group names a scope may name."""
+    from app.services import netflow_classify, netflow_groups
+
+    applications: list[str] = []
+    groups: list[str] = []
+    try:
+        await netflow_classify.load_rules()
+        await netflow_groups.load_groups()
+        applications = sorted(netflow_classify.known_applications())
+        groups = sorted(netflow_groups.group_names())
+    except Exception:  # names are suggestions; the server still validates
+        pass
+    return {
+        "applications": applications,
+        "groups": groups,
+        "metrics": [
+            {"metric": key, **info, "scope_keys": sorted(nfa._SCOPE_KEYS_BY_METRIC[key])}
+            for key, info in nfa.METRIC_INFO.items()
+        ],
+        "finding_severities": list(nfa.FINDING_SEVERITIES),
+        "finding_confidences": list(nfa.FINDING_CONFIDENCES),
+        "eval_interval_s": nfa.EVAL_INTERVAL_S,
+    }
+
+
+class NetflowRuleDraft(BaseModel):
+    """A NetFlow rule condition to test against live flow data."""
+    model_config = ConfigDict(extra="ignore")
+
+    metric: str = Field(..., pattern=f"^({nfa.METRIC_PATTERN})$")
+    operator: str = Field(">", pattern="^(>|<|>=|<=|==|!=|eq|neq|gt|lt|gte|lte)$")
+    threshold: float = Field(0, allow_inf_nan=False)
+    flow_scope: Optional[dict] = None
+    flow_params: Optional[dict] = None
+
+
+async def _netflow_visibility(db: AsyncSession, user: User):
+    from app.api.v1.netflow.access import VIEW_PERMISSION, visibility_for_user
+
+    vis = await visibility_for_user(db, user)
+    if not vis.can(VIEW_PERMISSION):
+        raise HTTPException(status_code=403, detail="Viewing NetFlow data needs the netflow.view permission")
+    return vis
+
+
+@router.post("/netflow/evaluate")
+async def evaluate_netflow_rule_draft(
+    draft: NetflowRuleDraft,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Dry-run a NetFlow condition against live flow data -- the readings the
+    evaluator would see now, restricted to the caller's flow visibility.
+    Nothing is stored and no alert is raised."""
+    vis = await _netflow_visibility(db, user)
+    op, thr, scope, params = await _netflow_definition(
+        draft.metric, draft.operator, draft.threshold, draft.flow_scope, draft.flow_params)
+    for key in ("exporter",):
+        if scope.get(key) and not vis.allows(scope[key]):
+            raise HTTPException(status_code=404, detail="Exporter not found")
+    iface = scope.get("iface") or ""
+    if "@" in iface and not vis.allows(iface.split("@", 1)[1]):
+        raise HTTPException(status_code=404, detail="Exporter not found")
+    rule = nfa.rule_from_row({"id": "draft", "name": "Draft", "metric": draft.metric, "operator": op,
+                              "threshold": thr, "flow_scope": scope, "flow_params": params})
+    ev = await nfa.evaluate(rule, vis=vis, db=db)
+    return nfa.evaluation_payload(rule, ev)
+
+
 @router.get("")
 async def list_alert_rules(
     db: AsyncSession = Depends(get_db),
@@ -417,9 +547,10 @@ async def list_alert_rules(
 async def create_alert_rule(
     data: AlertRuleCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
     now = datetime.now(timezone.utc)
+    await rs.guard_rule_change(db, user, data.model_dump())
 
     # E1: when compound conditions are supplied, they are authoritative and the
     # flat metric/operator/threshold columns mirror conditions[0] (those columns
@@ -435,6 +566,18 @@ async def create_alert_rule(
     if metric == 'syslog':
         _merge_condition_update({'metric': metric, 'threshold': threshold}, {})
 
+    flow_scope = flow_params = None
+    cleared: set[str] = set()
+    if nfa.is_netflow_metric(metric) or any(nfa.is_netflow_metric(c["metric"]) for c in conditions or []):
+        if conditions:
+            raise HTTPException(status_code=422,
+                                detail="NetFlow rules take a single condition (no compound conditions)")
+        operator, threshold, flow_scope, flow_params = await _netflow_definition(
+            metric, operator, threshold, data.flow_scope, data.flow_params)
+        cleared = set(_NETFLOW_CLEARED)
+    elif data.flow_scope or data.flow_params:
+        raise HTTPException(status_code=422, detail="flow_scope and flow_params only apply to NetFlow metrics")
+
     params: dict = {
         "name": data.name,
         "description": data.description,
@@ -446,6 +589,8 @@ async def create_alert_rule(
         "condition_logic": data.condition_logic or "AND",
         "trap_oid": (data.trap_oid or None),
         "target": (data.target or None),
+        "flow_scope": json.dumps(flow_scope) if flow_scope is not None else None,
+        "flow_params": json.dumps(flow_params) if flow_params is not None else None,
         "duration": 0 if metric == 'syslog' else data.min_duration,
         "device_id": data.device_id,
         "group_id": data.group_id,
@@ -479,12 +624,16 @@ async def create_alert_rule(
         "updated_at": now,
         "created_by": user.id,
     }
+    for key in cleared:
+        params[key] = None
+    if cleared:
+        params["trigger_on"] = "any"
 
     result = await db.execute(
         text(
             "INSERT INTO alert_rules "
             "(name, description, enabled, metric, operator, threshold, duration, "
-            "conditions, condition_logic, trap_oid, target, "
+            "conditions, condition_logic, trap_oid, target, flow_scope, flow_params, "
             "device_id, group_id, service_check_id, service_check_group_id, "
             "severity, notify_channels, cooldown, "
             "device_type, location, scope_tag, trigger_on, recovery_alert, "
@@ -496,6 +645,7 @@ async def create_alert_rule(
             "VALUES "
             "(:name, :description, :enabled, :metric, :operator, :threshold, :duration, "
             "CAST(:conditions AS jsonb), :condition_logic, :trap_oid, :target, "
+            "CAST(:flow_scope AS jsonb), CAST(:flow_params AS jsonb), "
             ":device_id, :group_id, :service_check_id, :service_check_group_id, "
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
             ":device_type, :location, :scope_tag, :trigger_on, :recovery_alert, "
@@ -509,11 +659,17 @@ async def create_alert_rule(
         ),
         params,
     )
-    await db.commit()
     row = result.first()
     if not row:
         raise HTTPException(status_code=500, detail="Failed to create alert rule")
-    return _with_templates(_row_to_dict(row))
+    created = _row_to_dict(row)
+    await write_audit_log(db, actor=user, action="alert_rule.create", resource_type="alert_rule",
+                          resource_id=created["id"],
+                          metadata={"name": created["name"],
+                                    "scope": rs.describe_scope(created)["label"],
+                                    "fields": rs.rule_changes({}, created)})
+    await db.commit()
+    return _with_templates(created)
 
 
 @router.get("/{rule_id}")
@@ -537,11 +693,15 @@ async def update_alert_rule(
     rule_id: UUID,
     data: AlertRuleUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+    before = await rs.rule_row(db, rule_id)
+    if not before:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    await rs.guard_rule_change(db, user, before, {**before, **fields})
 
     # E1: keep flat metric/operator/threshold mirrored to conditions[0] when a
     # non-empty conditions array is supplied (empty array reverts to legacy).
@@ -558,6 +718,43 @@ async def update_alert_rule(
         if not current_rule:
             raise HTTPException(status_code=404, detail='Alert rule not found')
         fields = _merge_condition_update(current_rule, fields)
+
+    # NetFlow rules: validate the merged definition; a changed definition
+    # makes the old subjects meaningless, so their state and open alerts go.
+    netflow_reset = False
+    merged_metric = fields.get("metric", before.get("metric"))
+    was_netflow = nfa.is_netflow_metric(before.get("metric"))
+    if nfa.is_netflow_metric(merged_metric):
+        if fields.get("conditions"):
+            raise HTTPException(status_code=422,
+                                detail="NetFlow rules take a single condition (no compound conditions)")
+        op, thr, scope, nf_params = await _netflow_definition(
+            merged_metric,
+            fields.get("operator", before.get("operator")),
+            fields.get("threshold", before.get("threshold")),
+            fields["flow_scope"] if "flow_scope" in fields else _json_value(before.get("flow_scope")),
+            fields["flow_params"] if "flow_params" in fields else _json_value(before.get("flow_params")),
+        )
+        new_def = (merged_metric, op, thr, scope, nf_params)
+        old_def = (before.get("metric"), ap.normalize_operator(before.get("operator")),
+                   float(before.get("threshold") or 0), _json_value(before.get("flow_scope")) or {},
+                   _json_value(before.get("flow_params")) or {})
+        fields.update({"metric": merged_metric, "operator": op, "threshold": thr,
+                       "flow_scope": scope, "flow_params": nf_params, "conditions": None,
+                       "trigger_on": "any"})
+        for key in _NETFLOW_CLEARED:
+            fields[key] = None
+        netflow_reset = was_netflow and new_def != old_def
+        if fields.get("enabled") is False and before.get("enabled"):
+            netflow_reset = True
+    else:
+        if fields.get("flow_scope") or fields.get("flow_params"):
+            raise HTTPException(status_code=422,
+                                detail="flow_scope and flow_params only apply to NetFlow metrics")
+        if was_netflow:
+            fields["flow_scope"] = None
+            fields["flow_params"] = None
+            netflow_reset = True
 
     # Templates equal to the built-in default are stored as NULL, so a rule
     # keeps tracking the wording rather than freezing a copy the editor merely
@@ -586,7 +783,7 @@ async def update_alert_rule(
     params: dict = {"id": rule_id, "updated_at": datetime.now(timezone.utc)}
 
     # Special-case columns that need casts
-    _jsonb_cols = {"notify_channels", "schedule_days"}
+    _jsonb_cols = {"notify_channels", "schedule_days", "flow_scope", "flow_params"}
     _time_cols = {"schedule_start", "schedule_end"}
 
     for key, value in fields.items():
@@ -635,10 +832,18 @@ async def update_alert_rule(
         ),
         params,
     )
-    await db.commit()
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert rule not found")
+    closed = await nfa.reset_rule(db, str(rule_id)) if netflow_reset else 0
+    after = await rs.rule_row(db, rule_id)
+    await write_audit_log(db, actor=user, action="alert_rule.update", resource_type="alert_rule",
+                          resource_id=str(rule_id),
+                          metadata={"name": after.get("name") if after else None,
+                                    "changes": rs.rule_changes(before, after),
+                                    "affected": await rs.affected(db, after or before),
+                                    **({"netflow_alerts_closed": closed} if netflow_reset else {})})
+    await db.commit()
     return _with_templates(_row_to_dict(row))
 
 
@@ -646,36 +851,97 @@ async def update_alert_rule(
 async def delete_alert_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
+    before = await rs.rule_row(db, rule_id)
+    if not before:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    await rs.guard_rule_change(db, user, before)
+    affected = await rs.affected(db, before)
+    if nfa.is_netflow_metric(before.get("metric")):
+        # Nothing would ever evaluate (and so resolve) them once the rule is gone.
+        await nfa.reset_rule(db, str(rule_id), reason="rule_deleted")
     result = await db.execute(
         text("DELETE FROM alert_rules WHERE id = :id RETURNING id"),
         {"id": rule_id},
     )
-    await db.commit()
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert rule not found")
+    await write_audit_log(db, actor=user, action="alert_rule.delete", resource_type="alert_rule",
+                          resource_id=str(rule_id),
+                          metadata={"name": before.get("name"), "affected": affected,
+                                    "rule": rs.rule_changes({}, before)})
+    await db.commit()
+
+
+class ToggleBody(BaseModel):
+    """Explicit target state (a stale page cannot flip a rule the wrong way)
+    and an optional reason for the audit trail."""
+    enabled: Optional[bool] = None
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.get("/{rule_id}/impact")
+async def alert_rule_impact(
+    rule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Who a change to this rule affects: scope, target count, open alerts."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    return await rs.impact(db, rule)
+
+
+@router.get("/{rule_id}/netflow-status")
+async def netflow_rule_status(
+    rule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Last evaluation of a NetFlow rule per subject (value, streaks, flapping,
+    unknown reasons), restricted to the caller's flow visibility."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule or not nfa.is_netflow_metric(rule.get("metric")):
+        raise HTTPException(status_code=404, detail="NetFlow alert rule not found")
+    vis = await _netflow_visibility(db, user)
+    return await nfa.rule_status(db, str(rule_id), vis)
 
 
 @router.post("/{rule_id}/toggle")
 async def toggle_alert_rule(
     rule_id: UUID,
+    body: Optional[ToggleBody] = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
+    before = await rs.rule_row(db, rule_id)
+    if not before:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    await rs.guard_rule_change(db, user, before)
+    target = (not before["enabled"]) if body is None or body.enabled is None else body.enabled
     result = await db.execute(
         text(
-            "UPDATE alert_rules SET enabled = NOT enabled, updated_at = :now "
+            "UPDATE alert_rules SET enabled = :enabled, updated_at = :now "
             "WHERE id = :id "
             "RETURNING id, name, enabled"
         ),
-        {"id": rule_id, "now": datetime.now(timezone.utc)},
+        {"id": rule_id, "now": datetime.now(timezone.utc), "enabled": target},
     )
-    await db.commit()
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert rule not found")
+    if not row.enabled and before["enabled"] and nfa.is_netflow_metric(before.get("metric")):
+        await nfa.reset_rule(db, str(rule_id), reason="rule_disabled")
+    if bool(before["enabled"]) != bool(row.enabled):
+        await write_audit_log(db, actor=user, action="alert_rule.toggle", resource_type="alert_rule",
+                              resource_id=str(rule_id),
+                              metadata={"name": row.name, "enabled": row.enabled,
+                                        "reason": body.reason if body else None,
+                                        "affected": await rs.affected(db, before)})
+    await db.commit()
     return {
         "id": str(row.id),
         "name": row.name,
@@ -721,6 +987,8 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         hostname = "app-server-01"
     elif metric == "service_status" or rule_dict.get("service_check_id"):
         hostname = "Dashboard HTTPS"
+    elif metric.startswith("netflow_"):
+        hostname = "edge-router-01"
     else:
         hostname = "core-router-01"
     reading = ap.sample_reading(metric, operator, threshold, recovered=is_recovery)
@@ -751,6 +1019,12 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         **ap.rule_phrasing(rule_dict, hostname=hostname, is_recovery=is_recovery,
                            reading=reading, duration=sample_duration),
     }
+
+    # NetFlow rules phrase their sample reading exactly as the evaluator does
+    # (bands, windows, exporter silence vs device reachability).
+    nf_vars = nfa.preview_phrasing(rule_dict, is_recovery=is_recovery, duration=sample_duration)
+    if nf_vars:
+        variables.update(nf_vars)
 
     if metric == 'syslog':
         variables.update(event_message='Interface uplink changed state', syslog_severity=int(threshold or 0),
@@ -836,6 +1110,7 @@ def _preview_email_ctx(rule_dict: dict, msg: dict, is_recovery: bool,
             ("Location", rule_dict.get("location")),
             ("Device type", rule_dict.get("device_type")),
             ("Tag", rule_dict.get("scope_tag")),
+            ("Flow scope", variables.get("flow_scope_label")),
         ]),
         "action_url": action_url,
         "timestamp": msg.get("iso_timestamp"),
@@ -952,7 +1227,7 @@ async def preview_alert_rule(
 async def simulate_alert_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
     import httpx
     import smtplib

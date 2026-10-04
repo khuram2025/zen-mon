@@ -207,9 +207,16 @@ PARTITION BY toYYYYMM(timestamp)
 ORDER BY (device_id, timestamp)
 TTL toDateTime(timestamp) + INTERVAL 365 DAY DELETE;
 
--- ─── NetFlow/IPFIX/sFlow foundation: raw normalized flow records ───
--- Phase 1 collector supports NetFlow v5. The schema is protocol-neutral enough
--- for NetFlow v9/IPFIX/sFlow decoders to write into the same analytics model.
+-- ─── NetFlow/IPFIX/sFlow: raw normalized flow records ───
+-- One row per flow record from any export protocol (NetFlow v5/v9, IPFIX,
+-- sFlow v5). Columns after dst_mask are schema v2 (migrate-137): they sit at the
+-- end, in exactly the order migrate-137's ALTER appends them, so a fresh
+-- install and an upgraded appliance end with the same table. IPv4 flows use the
+-- IPv4 columns and leave the *6 columns at '::'; IPv6 flows do the reverse.
+-- fields_present is the field-presence bitmask (0 = legacy row, unknown).
+-- The hourly conversation/QoS rollups, the per-interface and per-exporter
+-- rollups and the collector evidence tables are created by migrate-071, 072
+-- and 137, which install.sh runs after this file.
 CREATE TABLE IF NOT EXISTS zenplus.flow_records (
     timestamp          DateTime64(3, 'UTC'),
     received_at        DateTime64(3, 'UTC'),
@@ -237,13 +244,31 @@ CREATE TABLE IF NOT EXISTS zenplus.flow_records (
     src_as             UInt32,
     dst_as             UInt32,
     src_mask           UInt8,
-    dst_mask           UInt8
+    dst_mask           UInt8,
+    input_if            UInt32 DEFAULT input_snmp,
+    output_if           UInt32 DEFAULT output_snmp,
+    ip_version          UInt8 DEFAULT 4,
+    exporter_ip6        IPv6,
+    src_addr6           IPv6,
+    dst_addr6           IPv6,
+    next_hop6           IPv6,
+    fields_present      UInt32 DEFAULT 0,
+    observation_domain  UInt32 DEFAULT 0,
+    flow_direction      UInt8 DEFAULT 255,
+    export_protocol     LowCardinality(String) DEFAULT '',
+    app_id              UInt64 DEFAULT 0,
+    fw_event            UInt8 DEFAULT 0,
+    xlate_src_addr6     IPv6,
+    xlate_dst_addr6     IPv6,
+    xlate_src_port      UInt16 DEFAULT 0,
+    xlate_dst_port      UInt16 DEFAULT 0,
+    flow_end_reason     UInt8 DEFAULT 0
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(timestamp)
 ORDER BY (timestamp, exporter_ip, src_addr, dst_addr, protocol, dst_port)
 TTL toDateTime(timestamp) + INTERVAL 30 DAY DELETE
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 1000;
 
 CREATE TABLE IF NOT EXISTS zenplus.flow_traffic_5m (
     timestamp     DateTime64(3, 'UTC'),
@@ -259,15 +284,27 @@ PARTITION BY toYYYYMM(timestamp)
 ORDER BY (timestamp, exporter_ip, protocol, dst_port)
 TTL toDateTime(timestamp) + INTERVAL 90 DAY DELETE;
 
+-- Identical to the view migrate-137 installs (volume guard, see there).
 CREATE MATERIALIZED VIEW IF NOT EXISTS zenplus.flow_traffic_5m_mv
 TO zenplus.flow_traffic_5m
 AS SELECT
-    toStartOfFiveMinutes(timestamp) AS timestamp,
+    slot_bucket AS timestamp,
     exporter_ip,
     protocol,
     dst_port,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
+    sum(raw_bytes) AS bytes,
+    sum(raw_packets) AS packets,
     count() AS flow_count
-FROM zenplus.flow_records
-GROUP BY timestamp, exporter_ip, protocol, dst_port;
+FROM (
+    SELECT
+        toStartOfFiveMinutes(timestamp) AS slot_bucket,
+        exporter_ip,
+        protocol,
+        dst_port,
+        bytes AS raw_bytes,
+        packets AS raw_packets
+    FROM zenplus.flow_records
+    WHERE bytes / greatest(sampling_interval, 1) <= 1000000000000
+      AND fw_event NOT IN (1, 3)
+)
+GROUP BY slot_bucket, exporter_ip, protocol, dst_port;

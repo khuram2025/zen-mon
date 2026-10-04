@@ -121,3 +121,78 @@ async def visible_apm_service_names(db: AsyncSession, scope: list[str]) -> set[s
         {SCOPE_PARAM: scope},
     )).scalars().all()
     return set(rows)
+
+
+# A UUID no row can carry. Filters treat an empty id list as "no filter", so a
+# scope that matches nothing must be expressed as a list that matches nothing.
+NO_MATCH_ID = "00000000-0000-0000-0000-000000000000"
+
+
+async def visible_device_ids(db: AsyncSession, scope: list[str]) -> list[str]:
+    """Device ids in scope (devices sharing at least one scope tag)."""
+    rows = (await db.execute(
+        text(f"SELECT id::text FROM devices d WHERE {jsonb_tags_visible('d.tags')}"),
+        {SCOPE_PARAM: scope},
+    )).scalars().all()
+    return list(rows)
+
+
+async def scoped_device_filter(
+    db: AsyncSession, user: User, requested: list[str] | None
+) -> tuple[bool, list[str] | None]:
+    """Resolve a caller-supplied device filter against the user's scope.
+
+    Returns ``(scoped, ids)``. For an unrestricted user ``ids`` is the request
+    unchanged. For a scoped user it is the request narrowed to visible devices
+    (or every visible device when none was requested); a client filter can
+    never widen visibility, and an empty result is expressed as ``[NO_MATCH_ID]``.
+    """
+    scope = await visible_tags(db, user)
+    if scope is None:
+        return False, requested
+    visible = set(await visible_device_ids(db, scope))
+    ids = [i for i in (requested or sorted(visible)) if str(i) in visible]
+    return True, ids or [NO_MATCH_ID]
+
+
+async def other_scope_tags(db: AsyncSession, exclude: list[str] | None = None) -> set[str]:
+    """Tags that define some active user's visibility scope (lowercased),
+    minus ``exclude``. Assigning one of them to an entity publishes it into
+    that team's view."""
+    rows = (await db.execute(text(
+        "SELECT scope_tags FROM users WHERE is_active AND scope_tags IS NOT NULL "
+        "AND jsonb_typeof(scope_tags) = 'array' AND jsonb_array_length(scope_tags) > 0"
+    ))).scalars().all()
+    out: set[str] = set()
+    for r in rows:
+        out |= tag_set(r)
+    return out - set(exclude or ())
+
+
+async def assert_tags_assignable(db: AsyncSession, user: User, tags, *, previous=None) -> None:
+    """Tag writes by a scoped user (403 otherwise):
+
+    * the entity must keep at least one of the user's scope tags -- a scoped
+      user cannot create or re-tag an entity into invisibility;
+    * a tag newly added must not be another team's scope tag -- a scoped
+      user cannot push an entity (and with a device, the flow exporter its
+      address owns) into another team's view.
+
+    Other tags (classification such as a site or role) stay free. Unscoped
+    users and administrators are not limited.
+    """
+    scope = await visible_tags(db, user)
+    if scope is None:
+        return
+    from fastapi import HTTPException
+
+    wanted = tag_set(list(tags or []))
+    if not wanted & set(scope):
+        raise HTTPException(status_code=403, detail=(
+            "The device must carry at least one of your scope tags: " + ", ".join(scope)))
+    added = wanted - tag_set(list(previous or []))
+    foreign = sorted(added & (await other_scope_tags(db, exclude=scope)))
+    if foreign:
+        raise HTTPException(status_code=403, detail=(
+            "These tags define another team's scope and can only be assigned by an administrator: "
+            + ", ".join(foreign)))

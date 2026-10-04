@@ -68,7 +68,7 @@ export type NavNode = {
   /** Active only on an exact pathname match (for section landing pages). */
   end?: boolean
   /** Hidden unless the signed-in role grants this permission. */
-  permission?: string
+  permission?: string | readonly string[]
   /** Live counter rendered as a pill on the right of the row. */
   badge?: 'alerts'
   /** Extra path prefixes this node also owns (detail routes that have no row). */
@@ -88,7 +88,7 @@ export type NavGroup = {
 }
 
 /** Settings is one page with tabs, so its children match on `?tab=`. */
-function settingsTab(tab: string, label: string, icon: NavIcon, permission?: string): NavNode {
+function settingsTab(tab: string, label: string, icon: NavIcon, permission?: string | readonly string[]): NavNode {
   return {
     to: tab === 'company' ? '/settings/general' : `/settings/general?tab=${tab}`,
     label,
@@ -148,12 +148,16 @@ export const NAV_GROUPS: NavGroup[] = [
         label: 'NetFlow',
         icon: Network,
         hint: 'Traffic analysis and conversations',
+        permission: 'netflow.view',
         children: [
-          { to: '/netflow', label: 'Overview', icon: Network, end: true },
+          // Exporter deep dives, host profiles and the top-N section pages belong to the overview.
+          { to: '/netflow', label: 'Overview', icon: Network, match: ({ pathname }) => isNetflowOverviewPath(pathname) },
           { to: '/netflow/forensics', label: 'Forensics', icon: Fingerprint },
           { to: '/netflow/anomalies', label: 'Anomalies', icon: AlertTriangle },
           { to: '/netflow/capacity', label: 'Capacity', icon: TrendingUp },
           { to: '/netflow/saved-views', label: 'Saved Views', icon: ListChecks },
+          { to: '/netflow/health', label: 'Collector health', icon: HeartPulse, extra: ['/netflow/setup'] },
+          { to: '/netflow/settings', label: 'Settings', icon: SlidersHorizontal },
         ],
       },
       {
@@ -298,7 +302,7 @@ export const NAV_GROUPS: NavGroup[] = [
           settingsTab('company', 'Company', Building2, 'settings.manage'),
           settingsTab('smtp', 'SMTP / Email', Mail, 'settings.manage'),
           settingsTab('appearance', 'Appearance', Palette),
-          settingsTab('users', 'Users & Access', Users, 'users.view'),
+          settingsTab('users', 'Users & Access', Users, ['users.view', 'users.manage', 'roles.view', 'roles.manage', 'system.admin']),
           settingsTab('security', 'Security & TLS', ShieldCheck, 'system.admin'),
           settingsTab('licenses', 'Licenses', KeyRound, 'system.admin'),
           settingsTab('updates', 'Updates', Download, 'system.admin'),
@@ -320,6 +324,15 @@ export const NAV_GROUPS: NavGroup[] = [
 /* ------------------------------------------------------------------ */
 
 /** Does this node itself point at the current location? */
+/** NetFlow pages that have their own menu entry; every other /netflow/* page is part of the overview. */
+const NETFLOW_OWN_PAGES = ['forensics', 'anomalies', 'capacity', 'saved-views', 'health', 'setup', 'settings']
+
+function isNetflowOverviewPath(pathname: string): boolean {
+  if (pathname === '/netflow' || pathname === '/netflow/') return true
+  if (!pathname.startsWith('/netflow/')) return false
+  return !NETFLOW_OWN_PAGES.includes(pathname.slice('/netflow/'.length).split('/')[0])
+}
+
 export function isNodeActive(node: NavNode, pathname: string, params: URLSearchParams): boolean {
   if (node.match) return node.match({ pathname, params })
   if (node.extra?.some((p) => pathname.startsWith(p))) return true

@@ -144,7 +144,7 @@ def test_operator_can_create_device_without_exposing_snmp_passphrases(client, as
 def test_service_check_create_validates_and_normalizes_status_patterns(client, as_operator, monkeypatch):
     captured = {}
 
-    async def fake_create_service_check(db, data, user_id):
+    async def fake_create_service_check(db, data, user_id, **kwargs):
         captured["http_expected_statuses"] = data.http_expected_statuses
         return _service_check(http_expected_statuses=data.http_expected_statuses)
 

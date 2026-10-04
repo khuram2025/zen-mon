@@ -60,11 +60,14 @@ export const SECTION_REPORT_TYPES = [
   { id: 'availability', label: 'Availability & SLA' },
   { id: 'performance', label: 'Network Performance' },
   { id: 'traffic', label: 'Traffic & NetFlow' },
+  { id: 'netflow_executive', label: 'NetFlow Executive Summary' },
   { id: 'alerts', label: 'Alerts & Incidents' },
   { id: 'capacity', label: 'Capacity Planning' },
   { id: 'apm_performance', label: 'Application Performance' },
   { id: 'usage', label: 'Application Usage' },
   { id: 'inventory', label: 'Asset Inventory' },
+  { id: 'rum_usage', label: 'Digital Experience' },
+  { id: 'ncm_protection', label: 'Configuration Protection' },
 ] as const
 
 export const REPORT_TYPE_LABELS: Record<string, string> = Object.fromEntries(

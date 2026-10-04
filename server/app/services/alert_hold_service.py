@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services import alert_notify_state as ns
 from app.services import alert_phrasing as ap
 from app.services.alert_schedule import get_configured_timezone, notifications_allowed
+from app.services.alert_workflow import suppressed_sql
 
 logger = logging.getLogger("zenplus.alert_hold")
 
@@ -139,6 +140,7 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         "action_url": await _dashboard_url(db, "/services" if is_service else "/alerts"),
         "rule_id": str(row.rule_id),
         "is_recovery": False,
+        "alert_id": str(row.id),
     })
 
 
@@ -189,6 +191,11 @@ async def sweep_pending_holds(db: AsyncSession) -> dict[str, int]:
             # of dispatch — exactly as they would on a rule with no hold.
             allowed = notifications_allowed(
                 row.schedule_start, row.schedule_end, row.schedule_days, tz)
+            # A condition snoozed during its hold is recorded but stays quiet.
+            if allowed and (await db.execute(text(
+                    "SELECT " + suppressed_sql("a") + " FROM alerts a WHERE a.id = :id"),
+                    {"id": row.id})).scalar():
+                allowed = False
             if allowed:
                 rule_ref = SimpleNamespace(id=row.rule_id, cooldown=row.cooldown)
                 if await _within_cooldown(

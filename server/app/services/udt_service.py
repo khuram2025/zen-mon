@@ -48,6 +48,51 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
+
+def endpoint_search_condition(raw: str, params: dict, see_users: bool) -> str | None:
+    """Search endpoint identifiers without interpreting IPv4 digits as a MAC.
+
+    IPs match current and observed historical addresses. User searches include
+    login history only when the caller can view user identities.
+    """
+    term = raw.strip()
+    if not term:
+        return None
+    try:
+        address = str(ipaddress.ip_address(term))
+    except ValueError:
+        address = None
+    if address:
+        params['search_ip'] = address
+        return """(e.ip_address = CAST(:search_ip AS inet)
+            OR EXISTS (SELECT 1 FROM udt_ip_history h
+                       WHERE h.endpoint_id=e.id AND h.ip=CAST(:search_ip AS inet))
+            OR EXISTS (SELECT 1 FROM udt_ip_evidence ev
+                       WHERE ev.endpoint_id=e.id AND ev.ip=CAST(:search_ip AS inet)))"""
+
+    params['q'] = '%' + _like_escape(term) + '%'
+    clauses = ['e.hostname ILIKE :q', 'e.vendor ILIKE :q', 'e.mac::text ILIKE :q',
+               'host(e.ip_address) ILIKE :q',
+               'EXISTS (SELECT 1 FROM udt_ip_history h WHERE h.endpoint_id=e.id AND host(h.ip) ILIKE :q)',
+               'EXISTS (SELECT 1 FROM udt_ip_evidence ev WHERE ev.endpoint_id=e.id AND host(ev.ip) ILIKE :q)']
+    # Only conventional MAC syntax qualifies. Do not strip arbitrary letters,
+    # dots and digits from a hostname, username or vendor and call it a MAC.
+    if re.fullmatch(r'(?:[0-9a-fA-F]{12}|(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}|(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}|(?:[0-9a-fA-F]{4}\.){2}[0-9a-fA-F]{4})', term):
+        params['search_mac'] = normalize_mac(term)
+        clauses.append('e.mac = CAST(:search_mac AS macaddr)')
+    elif re.fullmatch(r'[0-9a-fA-F]{6,11}|[0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){1,4}|[0-9a-fA-F]{4}(?:\.[0-9a-fA-F]{4})?', term):
+        params['search_mac_prefix'] = re.sub(r'[:.\-]', '', term).lower() + '%'
+        clauses.append("replace(e.mac::text, ':', '') LIKE :search_mac_prefix")
+    if see_users:
+        clauses.extend(['e.user_name ILIKE :q', 'e.user_domain ILIKE :q',
+                        "concat(e.user_domain, chr(92), e.user_name) ILIKE :q",
+                        "concat(e.user_name, '@', e.user_domain) ILIKE :q",
+                        """EXISTS (SELECT 1 FROM udt_user_logins u WHERE u.endpoint_id=e.id
+                            AND (u.user_name ILIKE :q OR u.user_domain ILIKE :q
+                            OR concat(u.user_domain, chr(92), u.user_name) ILIKE :q
+                            OR concat(u.user_name, '@', u.user_domain) ILIKE :q))"""])
+    return '(' + ' OR '.join(clauses) + ')'
+
 def wildcard_to_like(pattern: str) -> str:
     """Convert a user glob (* and ?) into a SQL LIKE pattern."""
     return _like_escape(pattern).replace("*", "%").replace("?", "_")

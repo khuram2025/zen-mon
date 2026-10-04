@@ -18,7 +18,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
+from app.services import alert_rule_scope as rs
+from app.services.audit_service import write_audit_log
+
+require_rule_manager = require_permission("alerts.manage")
 from app.models.user import User
 
 router = APIRouter(prefix="/host-alert-rules", tags=["Host Alert Rules"])
@@ -107,10 +111,11 @@ async def list_host_rules(
 async def create_host_rule(
     data: HostRuleCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
     if data.metric in ("host_process_down", "host_service_down") and not data.target:
         raise HTTPException(400, f"target is required for {data.metric}")
+    await rs.guard_rule_change(db, user, data.model_dump())
     row = (await db.execute(text(
         "INSERT INTO alert_rules "
         "(name, description, enabled, metric, operator, threshold, severity, "
@@ -125,6 +130,10 @@ async def create_host_rule(
         "notify_channels": json.dumps([str(c) for c in data.notify_channels]),
         "server_id": data.server_id, "target": data.target, "created_by": user.id,
     })).first()
+    await write_audit_log(db, actor=user, action="alert_rule.create", resource_type="alert_rule",
+                          resource_id=str(row.id),
+                          metadata={"name": data.name, "metric": data.metric,
+                                    "server_id": str(data.server_id) if data.server_id else None})
     await db.commit()
     return _row(row)
 
@@ -134,11 +143,15 @@ async def update_host_rule(
     rule_id: UUID,
     data: HostRuleUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(400, "no fields to update")
+    before = await rs.rule_row(db, rule_id)
+    if not before or not str(before.get("metric") or "").startswith("host_"):
+        raise HTTPException(404, "host alert rule not found")
+    await rs.guard_rule_change(db, user, before, {**before, **fields})
     sets, params = [], {"id": rule_id}
     for k, v in fields.items():
         if k == "notify_channels":
@@ -152,9 +165,12 @@ async def update_host_rule(
         f"UPDATE alert_rules SET {', '.join(sets)} WHERE id = :id AND metric LIKE 'host\\_%' "
         f"RETURNING {_COLUMNS}"
     ), params)).first()
-    await db.commit()
     if not row:
         raise HTTPException(404, "host alert rule not found")
+    await write_audit_log(db, actor=user, action="alert_rule.update", resource_type="alert_rule",
+                          resource_id=str(rule_id),
+                          metadata={"changes": rs.rule_changes(before, await rs.rule_row(db, rule_id))})
+    await db.commit()
     return _row(row)
 
 
@@ -162,15 +178,20 @@ async def update_host_rule(
 async def toggle_host_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
+    before = await rs.rule_row(db, rule_id)
+    if before:
+        await rs.guard_rule_change(db, user, before)
     row = (await db.execute(text(
         "UPDATE alert_rules SET enabled = NOT enabled, updated_at = NOW() "
         f"WHERE id = :id AND metric LIKE 'host\\_%' RETURNING {_COLUMNS}"
     ), {"id": rule_id})).first()
-    await db.commit()
     if not row:
         raise HTTPException(404, "host alert rule not found")
+    await write_audit_log(db, actor=user, action="alert_rule.toggle", resource_type="alert_rule",
+                          resource_id=str(rule_id), metadata={"enabled": row.enabled})
+    await db.commit()
     return _row(row)
 
 
@@ -178,12 +199,19 @@ async def toggle_host_rule(
 async def delete_host_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
+    before = await rs.rule_row(db, rule_id)
+    if before:
+        await rs.guard_rule_change(db, user, before)
     res = await db.execute(text(
         "DELETE FROM alert_rules WHERE id = :id AND metric LIKE 'host\\_%'"
     ), {"id": rule_id})
-    await db.commit()
     if not res.rowcount:
         raise HTTPException(404, "host alert rule not found")
+    await write_audit_log(db, actor=user, action="alert_rule.delete", resource_type="alert_rule",
+                          resource_id=str(rule_id),
+                          metadata={"name": (before or {}).get("name"),
+                                    "rule": rs.rule_changes({}, before)})
+    await db.commit()
     return {"deleted": True}

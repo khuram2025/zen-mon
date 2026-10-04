@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_admin_user
+from app.core.security import get_current_user, require_admin_user, require_permission
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 
@@ -113,10 +113,10 @@ async def _get_system_setting(db: AsyncSession, key: str) -> Optional[dict]:
     )
     row = result.first()
     value = row[0] if row else None
-    if value and key in ('auth.ldap', 'auth.radius'):
+    if value and key in ('auth.ldap', 'auth.radius', 'auth.oidc'):
         from app.core.crypto import decrypt_secret
         value = dict(value)
-        field = 'bind_password' if key == 'auth.ldap' else 'secret'
+        field = {'auth.ldap': 'bind_password', 'auth.radius': 'secret', 'auth.oidc': 'client_secret'}[key]
         value[field] = decrypt_secret(value.get(field)) or ''
     return decrypt_config(value) if value and key in ("smtp", "sms") else value
 
@@ -200,7 +200,7 @@ class MonitoringSettings(BaseModel):
 @router.get("/monitoring")
 async def get_monitoring_settings(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.view")),
 ):
     raw = await _get_system_setting(db, "monitoring")
     return MonitoringSettings(**(raw or {})).model_dump()
@@ -210,7 +210,7 @@ async def get_monitoring_settings(
 async def update_monitoring_settings(
     data: MonitoringSettings,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     await _upsert_system_setting(db, "monitoring", data.model_dump())
     await write_audit_log(
@@ -228,7 +228,7 @@ async def update_monitoring_settings(
 @router.get("/integrations/grafana")
 async def get_grafana_settings(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("settings.view", "maps.view")),
 ):
     """Operator-readable so the manual-map page can decide whether to show
     'Open in Grafana' affordances. Editing remains admin-only below."""
@@ -240,7 +240,7 @@ async def get_grafana_settings(
 async def update_grafana_settings(
     data: GrafanaSettings,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     await _upsert_system_setting(db, "integrations.grafana", data.model_dump())
     await write_audit_log(
@@ -257,7 +257,7 @@ async def update_grafana_settings(
 @router.get("/company")
 async def get_company_settings(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.view")),
 ):
     raw = await _get_system_setting(db, "company")
     if raw:
@@ -269,7 +269,7 @@ async def get_company_settings(
 async def update_company_settings(
     data: CompanySettings,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     await _upsert_system_setting(db, "company", data.model_dump())
     await write_audit_log(
@@ -287,7 +287,7 @@ async def update_company_settings(
 async def upload_company_logo(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     if file.content_type not in ("image/png", "image/jpeg", "image/svg+xml", "image/webp"):
         raise HTTPException(status_code=400, detail="Only PNG, JPEG, SVG, or WebP images are allowed")
@@ -530,7 +530,7 @@ async def _clear_default_gateways(db: AsyncSession, gateway_type: str, keep_id=N
 @router.get("/gateways", response_model=GatewaysResponse)
 async def get_gateways(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     smtp_raw = await _get_system_setting(db, "smtp")
     sms_raw = await _get_system_setting(db, "sms")
@@ -544,7 +544,7 @@ async def get_gateways(
 async def update_smtp_legacy(
     data: SmtpConfig,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     await _upsert_system_setting(db, "smtp", data.model_dump())
     await _sync_default_notification_gateway(db, "smtp", "Default SMTP", data.model_dump())
@@ -564,7 +564,7 @@ async def update_smtp_legacy(
 async def update_sms_legacy(
     data: SmsConfig,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     await _upsert_system_setting(db, "sms", data.model_dump())
     await _sync_default_notification_gateway(db, "sms", "Default SMS", data.model_dump())
@@ -584,7 +584,7 @@ async def update_sms_legacy(
 async def test_smtp_legacy(
     data: SmtpTestRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     smtp_raw = await _get_system_setting(db, "smtp")
     if not smtp_raw:
@@ -596,7 +596,7 @@ async def test_smtp_legacy(
 async def test_sms_legacy(
     data: SmsTestRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     sms_raw = await _get_system_setting(db, "sms")
     if not sms_raw:
@@ -611,7 +611,7 @@ async def test_sms_legacy(
 @router.get("/gateways/list")
 async def list_gateways(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     result = await db.execute(
         text("SELECT id, name, type, config, is_default, enabled, created_at, updated_at FROM notification_gateways ORDER BY type, name")
@@ -623,7 +623,7 @@ async def list_gateways(
 async def create_gateway(
     data: dict,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     now = datetime.now(timezone.utc)
     gw_type = data.get("type", "smtp")
@@ -670,7 +670,7 @@ async def update_gateway(
     gateway_id: UUID,
     data: dict,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     fields = {k: v for k, v in data.items() if k in ("name", "type", "config", "is_default", "enabled")}
     if not fields:
@@ -739,7 +739,7 @@ async def update_gateway(
 async def delete_gateway(
     gateway_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     result = await db.execute(
         text("DELETE FROM notification_gateways WHERE id = :id"), {"id": gateway_id}
@@ -762,7 +762,7 @@ async def test_gateway(
     gateway_id: UUID,
     data: GatewayTestRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("settings.manage")),
 ):
     """Send a test message through a specific saved gateway (not just the default)."""
     row = (await db.execute(
@@ -787,7 +787,7 @@ async def test_gateway(
 @router.get("/channels")
 async def list_channels(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("alerts.manage", "settings.manage")),
 ):
     result = await db.execute(
         text("SELECT c.id, c.name, c.type, c.config, c.enabled, c.created_at, c.updated_at, "
@@ -804,7 +804,7 @@ async def list_channels(
 async def create_channel(
     data: ChannelCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("alerts.manage", "settings.manage")),
 ):
     now = datetime.now(timezone.utc)
     gateway_id = (data.config.get("gateway_id") or None) if data.config else None
@@ -845,7 +845,7 @@ async def update_channel(
     channel_id: UUID,
     data: ChannelUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("alerts.manage", "settings.manage")),
 ):
     # Build dynamic SET clause from provided fields
     fields = data.model_dump(exclude_unset=True)
@@ -896,7 +896,7 @@ async def update_channel(
 async def delete_channel(
     channel_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("alerts.manage", "settings.manage")),
 ):
     result = await db.execute(
         text("DELETE FROM notification_channels WHERE id = :id RETURNING id"),
@@ -920,7 +920,7 @@ async def delete_channel(
 async def test_channel(
     channel_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("alerts.manage", "settings.manage")),
 ):
     import httpx
     import smtplib
