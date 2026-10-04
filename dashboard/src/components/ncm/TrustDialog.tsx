@@ -22,7 +22,7 @@ type TrustEntry = {
 }
 type TrustView = {
   host: string; port: number
-  state: { state: 'pass' | 'blocked'; source: 'managed' | 'appliance_file' | null; message: string; fingerprint?: string }
+  state: { state: 'pass' | 'pending' | 'blocked'; source: 'managed' | 'appliance_file' | 'first_use' | null; message: string; fingerprint?: string }
   entries: TrustEntry[]
 }
 type Probe = {
@@ -35,8 +35,8 @@ const METHODS: [string, string][] = [
   ['inventory_record', 'Inventory record'],
   ['vendor_portal', 'Vendor portal'],
 ]
-const METHOD_LABEL = Object.fromEntries(METHODS)
-const SOURCE_LABEL: Record<string, string> = { managed: 'Managed trust', appliance_file: 'Appliance trust file' }
+const METHOD_LABEL = { ...Object.fromEntries(METHODS), first_use: 'Automatically learned—not console verified' }
+const SOURCE_LABEL: Record<string, string> = { managed: 'Managed trust', appliance_file: 'Appliance trust file', first_use: 'Automatic first-use trust' }
 
 /** "MD5 aa:bb…" / "md5:aa…" → "MD5:aa:bb…" so the server strips the prefix instead of reading its hex-looking letters. */
 function canonicalFp(value: string): string {
@@ -203,9 +203,11 @@ export function TrustDialog({ deviceId, open, onOpenChange }: { deviceId: string
           <div className="min-w-0 space-y-5">
             {/* Current state */}
             <section aria-label="Current trust state" className={cn('rounded-md border p-3 text-sm',
-              state.state === 'pass' ? 'border-success/40 bg-success/5' : 'border-danger/40 bg-danger/5')}>
+              state.source === 'first_use' ? 'border-warning/40 bg-warning/5' : state.state === 'pass' ? 'border-success/40 bg-success/5' : 'border-danger/40 bg-danger/5')}>
               <div className="flex flex-wrap items-center gap-2">
-                {state.state === 'pass'
+                {state.source === 'first_use' && state.state !== 'blocked'
+                  ? <Badge variant="warning"><ShieldAlert className="h-3 w-3" aria-hidden /> {state.state === 'pending' ? 'Will learn on first backup' : 'Automatically learned'}</Badge>
+                  : state.state === 'pass'
                   ? <Badge variant="success"><ShieldCheck className="h-3 w-3" aria-hidden /> Trusted</Badge>
                   : <Badge variant="danger"><ShieldAlert className="h-3 w-3" aria-hidden /> Not trusted</Badge>}
                 {state.source && <Badge variant="outline">{SOURCE_LABEL[state.source] || state.source}</Badge>}

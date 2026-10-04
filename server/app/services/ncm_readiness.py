@@ -40,31 +40,49 @@ def saved_trust(host, port=22, path=None):
         name = str(host) if int(port or 22) == 22 else f'[{host}]:{int(port)}'
         if keys.lookup(name):
             return {'state': 'pass', 'source': 'appliance_file', 'message': 'A saved SSH host-key entry exists in the appliance trust file. The collector will verify the actual peer when connecting.'}
-        return {'state': 'blocked', 'source': None, 'message': 'No saved SSH host key for this address and port. Read the fingerprint from the device console, then register it under SSH trust (or ask an appliance administrator).'}
+        return {'state': 'blocked', 'source': None, 'missing': True, 'message': 'No saved SSH host key for this address and port. Read the fingerprint from the device console, then register it under SSH trust (or ask an appliance administrator).'}
     except FileNotFoundError:
-        return {'state': 'blocked', 'source': None, 'message': 'No SSH trust is registered for this device. Read the fingerprint from the device console, then register it under SSH trust.'}
+        return {'state': 'blocked', 'source': None, 'missing': True, 'message': 'No SSH trust is registered for this device. Read the fingerprint from the device console, then register it under SSH trust.'}
     except Exception:
         # Key parser exceptions can contain file contents; never expose them.
         return {'state': 'blocked', 'source': None, 'message': 'The appliance SSH trust file cannot be read or parsed. Register the device key under SSH trust or ask an administrator to repair the file.'}
 
 
 async def managed_keys(db, host, port):
-    rows = (await db.execute(text('''SELECT id,key_type,key_base64,fingerprint_sha256,registered_by_name,created_at
+    rows = (await db.execute(text('''SELECT id,key_type,key_base64,fingerprint_sha256,registered_by_name,created_at,verification_method
         FROM ncm_host_keys WHERE host=:host AND port=:port AND retired_at IS NULL'''),
         {'host': str(host), 'port': int(port or 22)})).fetchall()
     return rows
 
 
-async def trust_state(db, host, port):
+async def trust_state(db, host, port, *, auto_trust=False):
     """Managed (database) trust first, then the appliance trust file."""
     if host:
         rows = await managed_keys(db, host, port)
-        if rows:
-            r = rows[0]
+        accepted = [r for r in rows if auto_trust or r.verification_method != 'first_use']
+        if accepted:
+            r = accepted[0]
+            if all(k.verification_method == 'first_use' for k in accepted):
+                return {'state': 'pass', 'source': 'first_use', 'fingerprint': r.fingerprint_sha256,
+                        'message': f'Automatically learned—not console verified ({r.fingerprint_sha256}). Future connections must match the saved key; changed keys are blocked.'}
             return {'state': 'pass', 'source': 'managed', 'fingerprint': r.fingerprint_sha256,
                     'message': f'Managed SSH trust registered by {r.registered_by_name} ({r.fingerprint_sha256}). The collector verifies the actual peer when connecting.'}
     import asyncio
-    return await asyncio.to_thread(saved_trust, host, port)
+    saved = await asyncio.to_thread(saved_trust, host, port)
+    if saved['state'] == 'pass' or not saved.get('missing') or not host:
+        return saved
+    if rows:
+        return {'state': 'blocked', 'source': 'first_use',
+                'message': 'This key was automatically learned. Strict verification requires independent fingerprint registration under SSH trust.'}
+    history = (await db.execute(text('SELECT 1 FROM ncm_host_keys WHERE host=:h AND port=:p LIMIT 1'),
+                               {'h': str(host), 'p': int(port or 22)})).first()
+    if history:
+        return {'state': 'blocked', 'source': None,
+                'message': 'SSH trust was retired for this address and port. Register a verified key under SSH trust; automatic relearning is blocked.'}
+    if auto_trust:
+        return {'state': 'pending', 'source': 'first_use',
+                'message': 'Automatically trust new devices is enabled. The first backup will save the presented key without independent verification. Changed keys will be blocked.'}
+    return saved
 
 
 @lru_cache(maxsize=2)
