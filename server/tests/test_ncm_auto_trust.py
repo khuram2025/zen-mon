@@ -158,6 +158,12 @@ def test_first_use_persistence_strict_login_rotation_retirement_and_verification
                 await db.commit()  # failed captures retain first-use pin
                 assert server['authentications'] == 2
                 assert (await readiness.managed_keys(db, '127.0.0.1', port))[0].key_base64 == first.key_base64
+                # A new algorithm is not an excuse to learn a replacement key.
+                server['key'] = paramiko.RSAKey.generate(2048)
+                await learn()
+                with pytest.raises(Exception) as error: await capture()
+                assert classify(error.value, 'collection').category == 'negotiation'
+                assert server['authentications'] == 2
                 # Verify the original pin independently through the normal API.
                 actor = NS(id=uuid4(), username='fixture administrator')
                 with patch.object(ncm, '_device_access', AsyncMock()), \
@@ -177,4 +183,42 @@ def test_first_use_persistence_strict_login_rotation_retirement_and_verification
                 system.write_text('host ssh-rsa invalid-base64\n')
                 assert (await readiness.trust_state(db, '127.0.0.1', port + 1, auto_trust=True))['state'] == 'blocked'
         await engine.dispose()
+    asyncio.run(run())
+
+
+def test_concurrent_first_use_shares_one_host_pin(first_use_server, tmp_path, monkeypatch):
+    dsn = os.environ.get('UDT_TEST_DSN')
+    if not dsn: pytest.skip('UDT_TEST_DSN disposable fixture required')
+    port, server = first_use_server
+    system = tmp_path / 'missing'
+    monkeypatch.setattr(readiness, 'KNOWN_HOSTS', str(system))
+    async def run():
+        engine = create_async_engine(dsn.replace('postgresql://', 'postgresql+asyncpg://', 1))
+        schema = 'fixture_ncm_race_' + uuid4().hex
+        async with engine.begin() as conn:
+            await conn.execute(text(f'CREATE SCHEMA {schema}'))
+            await conn.execute(text(f'''CREATE TABLE {schema}.ncm_host_keys
+                (id uuid DEFAULT gen_random_uuid(),device_id uuid,host text,port int,key_type text,
+                 key_base64 text,fingerprint_sha256 text,verification_method text,verification_note text,
+                 registered_by_name text,created_at timestamptz DEFAULT now(),retired_at timestamptz)'''))
+            await conn.execute(text(f'''CREATE UNIQUE INDEX race_trust ON {schema}.ncm_host_keys(host,port,key_type)
+                WHERE retired_at IS NULL'''))
+            await conn.execute(text(f'''CREATE TABLE {schema}.ncm_audit(actor_id uuid,actor_name text,
+                action text,device_id uuid,resource_id text,metadata jsonb)'''))
+        try:
+            async def learn():
+                async with engine.connect() as conn:
+                    await conn.execute(text(f'SET search_path TO {schema}')); await conn.commit()
+                    async with AsyncSession(bind=conn) as db:
+                        await ensure_trust(db, '127.0.0.1', port, device_id=uuid4(),
+                                           credential_id=uuid4(), auto_trust=True)
+                        await db.commit()
+            await asyncio.gather(learn(), learn())
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(f'SELECT count(*) FROM {schema}.ncm_host_keys'))).scalar() == 1
+                assert (await conn.execute(text(f'SELECT count(*) FROM {schema}.ncm_audit'))).scalar() == 1
+            assert server['connections'] == 1 and server['authentications'] == 0
+        finally:
+            async with engine.begin() as conn: await conn.execute(text(f'DROP SCHEMA {schema} CASCADE'))
+            await engine.dispose()
     asyncio.run(run())

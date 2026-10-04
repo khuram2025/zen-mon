@@ -35,7 +35,7 @@ const METHODS: [string, string][] = [
   ['inventory_record', 'Inventory record'],
   ['vendor_portal', 'Vendor portal'],
 ]
-const METHOD_LABEL = { ...Object.fromEntries(METHODS), first_use: 'Automatically learned—not console verified' }
+const METHOD_LABEL: Record<string, string> = { ...Object.fromEntries(METHODS), first_use: 'Automatically learned—not console verified' }
 const SOURCE_LABEL: Record<string, string> = { managed: 'Managed trust', appliance_file: 'Appliance trust file', first_use: 'Automatic first-use trust' }
 
 /** "MD5 aa:bb…" / "md5:aa…" → "MD5:aa:bb…" so the server strips the prefix instead of reading its hex-looking letters. */
