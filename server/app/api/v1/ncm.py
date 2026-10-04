@@ -198,6 +198,7 @@ class CredentialIn(BaseModel):
     enable_password: Optional[str] = None
     clear_enable_password: bool = False
     ssh_legacy_compat: bool = False
+    ssh_auto_trust: bool = False
     private_key: Optional[str] = Field(default=None, max_length=16384)
     key_passphrase: Optional[str] = Field(default=None, max_length=1024)
     is_default: bool = False
@@ -253,7 +254,7 @@ async def list_credentials(db: AsyncSession = Depends(get_db), user: User = Depe
     # Scoped users can reuse only profiles already assigned to visible devices.
     restriction = f"WHERE EXISTS (SELECT 1 FROM device_ncm n JOIN devices d ON d.id=n.device_id WHERE n.credential_id=c.id {allowed})" if scope else ''
     rows = (await db.execute(text(f"""
-        SELECT c.id,c.name,c.description,c.protocol,c.port,c.username,c.is_default,c.auth_method,c.ssh_legacy_compat,
+        SELECT c.id,c.name,c.description,c.protocol,c.port,c.username,c.is_default,c.auth_method,c.ssh_legacy_compat,c.ssh_auto_trust,
           (c.password_enc IS NOT NULL) AS has_password,
           (c.enable_password_enc IS NOT NULL) AS has_enable,
           (c.private_key_enc IS NOT NULL) AS has_private_key,
@@ -273,6 +274,7 @@ async def list_credentials(db: AsyncSession = Depends(get_db), user: User = Depe
             "protocol": r.protocol, "port": r.port, "username": r.username,
             "is_default": r.is_default, "auth_method": r.auth_method or 'password',
             "ssh_legacy_compat": r.ssh_legacy_compat,
+            "ssh_auto_trust": r.ssh_auto_trust,
             "has_password": r.has_password, "has_enable": r.has_enable,
             "has_private_key": r.has_private_key, "has_passphrase": r.has_passphrase,
             "key_type": r.key_type, "key_fingerprint": r.key_fingerprint,
@@ -297,6 +299,8 @@ async def credential_usage(cred_id: UUID, db: AsyncSession = Depends(get_db), us
 async def create_credential(data: CredentialIn, db: AsyncSession = Depends(get_db),
                             user: User = Depends(require_permission("ncm.credentials"))):
     await _global_credentials_access(db, user)
+    if data.ssh_auto_trust and not await user_has_permission(db, user, 'ncm.trust'):
+        raise HTTPException(403, 'Automatically trusting new devices requires SSH trust administration permission')
     key_type = key_fp = None
     if data.auth_method == 'key':
         if not data.private_key:
@@ -307,20 +311,20 @@ async def create_credential(data: CredentialIn, db: AsyncSession = Depends(get_d
         text("""INSERT INTO ncm_credentials
                 (name, description, protocol, port, username, password_enc, enable_password_enc, is_default,
                  auth_method, private_key_enc, key_passphrase_enc, key_type, key_fingerprint, rotation_days,
-                 secret_rotated_at, ssh_legacy_compat)
+                 secret_rotated_at, ssh_legacy_compat, ssh_auto_trust)
                 VALUES (:n, :d, :p, :port, :u, :pw, :en, :def, :am, :pk, :pp, :kt, :kf, :rot,
-                        CASE WHEN :secret THEN now() ELSE NULL END, :legacy)
+                        CASE WHEN :secret THEN now() ELSE NULL END, :legacy, :auto_trust)
                 RETURNING id"""),
         {"n": data.name, "d": data.description, "p": data.protocol, "port": data.port,
          "u": data.username, "pw": crypto.encrypt(data.password),
          "en": crypto.encrypt(data.enable_password), "def": data.is_default,
          "am": data.auth_method, "pk": crypto.encrypt(data.private_key) if data.auth_method == 'key' else None,
          "pp": crypto.encrypt(data.key_passphrase) if data.auth_method == 'key' else None,
-         "kt": key_type, "kf": key_fp, "rot": data.rotation_days, "secret": secret_set, "legacy": data.ssh_legacy_compat},
+         "kt": key_type, "kf": key_fp, "rot": data.rotation_days, "secret": secret_set, "legacy": data.ssh_legacy_compat, "auto_trust": data.ssh_auto_trust},
     )).first()
     if data.is_default:
         await db.execute(text("UPDATE ncm_credentials SET is_default = (id = :id)"), {"id": row.id})
-    await ncm_events.audit(db, user, "credential.create", resource_id=row.id, metadata={'auth_method': data.auth_method})
+    await ncm_events.audit(db, user, "credential.create", resource_id=row.id, metadata={'auth_method': data.auth_method, 'ssh_auto_trust': data.ssh_auto_trust})
     await db.commit()
     return {"id": str(row.id)}
 
@@ -329,14 +333,16 @@ async def create_credential(data: CredentialIn, db: AsyncSession = Depends(get_d
 async def update_credential(cred_id: UUID, data: CredentialIn, db: AsyncSession = Depends(get_db),
                             user: User = Depends(require_permission("ncm.credentials"))):
     await _global_credentials_access(db, user)
-    current = (await db.execute(text('SELECT private_key_enc FROM ncm_credentials WHERE id=:id'), {'id': cred_id})).first()
+    current = (await db.execute(text('SELECT private_key_enc,ssh_auto_trust FROM ncm_credentials WHERE id=:id'), {'id': cred_id})).first()
     if not current:
         raise HTTPException(status_code=404, detail="Credential not found")
+    if data.ssh_auto_trust != current.ssh_auto_trust and not await user_has_permission(db, user, 'ncm.trust'):
+        raise HTTPException(403, 'Changing automatic SSH trust requires SSH trust administration permission')
     sets = ["name=:n", "description=:d", "protocol=:p", "port=:port", "username=:u",
-            "is_default=:def", "auth_method=:am", "rotation_days=:rot", "ssh_legacy_compat=:legacy", "updated_at=NOW()"]
+            "is_default=:def", "auth_method=:am", "rotation_days=:rot", "ssh_legacy_compat=:legacy", "ssh_auto_trust=:auto_trust", "updated_at=NOW()"]
     params = {"id": cred_id, "n": data.name, "d": data.description, "p": data.protocol,
               "port": data.port, "u": data.username, "def": data.is_default, "am": data.auth_method,
-              "rot": data.rotation_days, "legacy": data.ssh_legacy_compat}
+              "rot": data.rotation_days, "legacy": data.ssh_legacy_compat, "auto_trust": data.ssh_auto_trust}
     changed = []
     # Blank means keep: secrets are only overwritten when a new value is supplied.
     if data.password:
@@ -357,7 +363,8 @@ async def update_credential(cred_id: UUID, data: CredentialIn, db: AsyncSession 
     await db.execute(text(f"UPDATE ncm_credentials SET {', '.join(sets)} WHERE id=:id"), params)
     if data.is_default:
         await db.execute(text("UPDATE ncm_credentials SET is_default = (id = :id)"), {"id": cred_id})
-    await ncm_events.audit(db, user, "credential.update", resource_id=cred_id, metadata={'secrets': changed})
+    await ncm_events.audit(db, user, "credential.update", resource_id=cred_id, metadata={'secrets': changed,
+                           'ssh_auto_trust': {'before': current.ssh_auto_trust, 'after': data.ssh_auto_trust}})
     await db.commit()
     return {"id": str(cred_id)}
 
@@ -753,7 +760,7 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
         raise _FetchError('A backup is already running for this device', 'busy', True)
     row = (await db.execute(text("""SELECT host(d.ip_address) AS ip,n.platform,n.credential_id,
         n.enabled,c.username,c.password_enc,c.enable_password_enc,c.port,c.auth_method,
-        c.private_key_enc,c.key_passphrase_enc,c.ssh_legacy_compat FROM devices d
+        c.private_key_enc,c.key_passphrase_enc,c.ssh_legacy_compat,c.ssh_auto_trust FROM devices d
         LEFT JOIN device_ncm n ON n.device_id=d.id LEFT JOIN ncm_credentials c ON c.id=n.credential_id
         WHERE d.id=:id"""), {'id': device_id})).first()
     if not row:
@@ -766,12 +773,11 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
     stage = 'prerequisites'
     kh_path = None
     try:
-        from app.services.ncm_readiness import trust_state, managed_keys
+        from app.services.ncm_readiness import managed_keys
+        from app.services.ncm_trust import ensure_trust
         port = row.port or 22
-        trust = await trust_state(db, row.ip, port)
-        if trust['state'] != 'pass':
-            # Known missing trust never costs a network attempt or a retry.
-            raise PrerequisiteError('SSH host key is not trusted: register the device fingerprint under SSH trust before collecting.', 'host_key_untrusted')
+        await ensure_trust(db, row.ip, port, device_id=device_id, credential_id=row.credential_id,
+                           actor=actor, auto_trust=row.ssh_auto_trust, legacy_compat=row.ssh_legacy_compat)
         stage = 'credentials'
         password = crypto.decrypt(row.password_enc) if row.password_enc else ''
         enable = crypto.decrypt(row.enable_password_enc) if row.enable_password_enc else ''
@@ -781,7 +787,8 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
                 raise ValueError('missing key')
             pkey = load_private_key(crypto.decrypt(row.private_key_enc),
                                     crypto.decrypt(row.key_passphrase_enc) if row.key_passphrase_enc else None)
-        managed = [(row.ip, port, k.key_type, k.key_base64) for k in await managed_keys(db, row.ip, port)]
+        managed = [(row.ip, port, k.key_type, k.key_base64) for k in await managed_keys(db, row.ip, port)
+                   if row.ssh_auto_trust or k.verification_method != 'first_use']
         kh_path = await asyncio.to_thread(known_hosts_file, managed)
         stage = 'collection'
         await db.execute(text("UPDATE ncm_backup_runs SET stage='collection' WHERE id=:id"), {'id': run.id})
@@ -1024,7 +1031,7 @@ _OVERVIEW_SQL = """
            n.keep_versions, n.alert_on_change, n.notify_channels, n.freshness_hours, n.eligible_override, n.config_types,
            n.last_status, n.last_error, n.last_attempt_at, n.last_success_at, n.last_scheduled_at,
            n.last_failure_category, n.event_backup,
-           cr.name AS credential_name, cr.port AS credential_port, cr.auth_method,
+           cr.name AS credential_name, cr.port AS credential_port, cr.auth_method, cr.ssh_auto_trust,
            (coalesce(cr.username,'')<>'' AND (coalesce(octet_length(cr.password_enc),0)>0
              OR (cr.auth_method='key' AND cr.private_key_enc IS NOT NULL))) AS profile_configured,
            c.versions, c.last_capture, c.last_by, c.validated_at, c.legacy_plaintext,
@@ -1075,6 +1082,7 @@ def _device_row(r, now):
         "credential_id": str(r.credential_id) if r.credential_id else None,
         "credential_name": r.credential_name, "auth_method": r.auth_method,
         "credential_port": r.credential_port or 22, "profile_configured": bool(r.profile_configured),
+        "ssh_auto_trust": bool(r.ssh_auto_trust),
         "support": support_details(r.vendor, r.platform, r.config_types),
         "platform": r.platform,
         "platform_label": DRIVERS.get(r.platform, {}).get('label') if r.platform else None,
@@ -1289,7 +1297,7 @@ async def ncm_health(user: User = Depends(require_permission('ncm.view'))):
 async def _readiness(db, device, runtime=None):
     from app.services.ncm_readiness import runtime_health, trust_state, device_readiness
     runtime = runtime or await asyncio.to_thread(runtime_health)
-    trust = await trust_state(db, device['ip'], device['credential_port'])
+    trust = await trust_state(db, device['ip'], device['credential_port'], auto_trust=device.get('ssh_auto_trust', False))
     return device_readiness(device, runtime, trust)
 
 
@@ -1713,9 +1721,10 @@ async def get_trust(device_id: UUID, db: AsyncSession = Depends(get_db), user: U
     await _device_access(db, user, device_id)
     from app.services.ncm_readiness import trust_state
     host, port, _ = await _trust_target(db, device_id)
+    auto_trust = (await db.execute(text('SELECT COALESCE(c.ssh_auto_trust,false) FROM device_ncm n LEFT JOIN ncm_credentials c ON c.id=n.credential_id WHERE n.device_id=:id'), {'id': device_id})).scalar() or False
     rows = (await db.execute(text('''SELECT * FROM ncm_host_keys WHERE host=:h AND port=:p ORDER BY created_at DESC'''),
                              {'h': host, 'p': port})).mappings().all()
-    return {'host': host, 'port': port, 'state': await trust_state(db, host, port),
+    return {'host': host, 'port': port, 'state': await trust_state(db, host, port, auto_trust=auto_trust),
             'entries': [{'id': str(r['id']), 'key_type': r['key_type'], 'fingerprint_sha256': r['fingerprint_sha256'],
                          'verification_method': r['verification_method'], 'verification_note': r['verification_note'],
                          'registered_by_name': r['registered_by_name'], 'created_at': r['created_at'].isoformat(),
@@ -1781,9 +1790,19 @@ async def register_trust(device_id: UUID, data: TrustIn, db: AsyncSession = Depe
     md5 = hashlib.md5(blob).hexdigest()
     if _normalize_fp(data.expected_fingerprint) not in (sha, md5):
         raise HTTPException(422, 'The fingerprint you entered does not match this key. Do not register it; re-check the device console.')
-    active = (await db.execute(text('SELECT id,key_base64 FROM ncm_host_keys WHERE host=:h AND port=:p AND key_type=:kt AND retired_at IS NULL FOR UPDATE'),
+    from app.services.ncm_trust import lock_target
+    await lock_target(db, host, port)
+    active = (await db.execute(text('SELECT id,key_base64,verification_method FROM ncm_host_keys WHERE host=:h AND port=:p AND key_type=:kt AND retired_at IS NULL FOR UPDATE'),
                                {'h': host, 'p': port, 'kt': key_type})).first()
     if active and active.key_base64 == key_b64:
+        if active.verification_method == 'first_use':
+            await db.execute(text('''UPDATE ncm_host_keys SET verification_method=:vm,verification_note=:vn,
+                registered_by=:u,registered_by_name=:un WHERE id=:id'''),
+                {'vm': data.verification_method, 'vn': data.verification_note, 'u': user.id, 'un': user.username, 'id': active.id})
+            await ncm_events.audit(db, user, 'trust.verify', device_id=device_id, resource_id=active.id,
+                                   metadata={'host': host, 'port': port, 'fingerprint': sha, 'method': data.verification_method})
+            await db.commit()
+            return {'id': str(active.id), 'fingerprint_sha256': sha, 'unchanged': False}
         return {'id': str(active.id), 'fingerprint_sha256': sha, 'unchanged': True}
     if active:
         if not data.replace_reason or len(data.replace_reason.strip()) < 5:
@@ -1805,6 +1824,8 @@ async def register_trust(device_id: UUID, data: TrustIn, db: AsyncSession = Depe
 async def retire_trust(device_id: UUID, key_id: UUID, data: RetireIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_permission('ncm.trust'))):
     await _device_access(db, user, device_id)
     host, port, _ = await _trust_target(db, device_id)
+    from app.services.ncm_trust import lock_target
+    await lock_target(db, host, port)
     row = (await db.execute(text('''UPDATE ncm_host_keys SET retired_at=now(),retired_by_name=:u,retire_reason=:r
         WHERE id=:id AND host=:h AND port=:p AND retired_at IS NULL RETURNING id'''),
         {'id': key_id, 'h': host, 'p': port, 'u': user.username, 'r': data.reason})).first()
