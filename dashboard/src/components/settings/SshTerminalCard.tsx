@@ -21,6 +21,10 @@ const END_TEXT: Record<string, string> = {
   lost: 'The terminal service lost this session.',
 }
 
+const DIM = '\x1b[90m'
+const RESET = '\x1b[0m'
+const IDLE_BANNER = `${DIM}Not connected. Enter a host, username and password above and click Connect.${RESET}`
+
 const toBase64 = (text: string) => {
   const bytes = new TextEncoder().encode(text)
   let bin = ''
@@ -30,7 +34,7 @@ const toBase64 = (text: string) => {
 const fromBase64 = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
 
 /**
- * Interactive SSH shell for testing reachability and logins from the appliance.
+ * PuTTY-style SSH shell for testing reachability and logins from the appliance.
  * Credentials are sent once to open the session and are never stored. The
  * device host key is not checked.
  */
@@ -38,7 +42,6 @@ export function SshTerminalCard() {
   const [form, setForm] = useState({ host: '', port: '22', username: '', password: '' })
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState('')
-  const [status, setStatus] = useState('')
   const screen = useRef<HTMLDivElement>(null)
   const term = useRef<Terminal | null>(null)
   const fit = useRef<FitAddon | null>(null)
@@ -73,7 +76,48 @@ export function SshTerminalCard() {
     if (close && id) api.delete(`${BASE}/${id}`).catch(() => undefined)
   }, [])
 
-  useEffect(() => () => { teardown(true); term.current?.dispose(); term.current = null }, [teardown])
+  // The terminal window exists from the start, like an empty PuTTY window.
+  useEffect(() => {
+    if (!screen.current) return
+    const t = new Terminal({
+      cursorBlink: true, cursorStyle: 'block', fontSize: 14, scrollback: 5000,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace',
+      theme: { background: '#000000', foreground: '#bbbbbb', cursor: '#bbbbbb', selectionBackground: '#3b5ba5' },
+    })
+    const f = new FitAddon()
+    t.loadAddon(f)
+    t.open(screen.current)
+    t.writeln(IDLE_BANNER)
+    term.current = t
+    fit.current = f
+    const fitNow = () => { try { f.fit() } catch { /* hidden tab */ } }
+    fitNow()
+    const data = t.onData((d) => {
+      if (!sessionId.current) return
+      pending.current += d
+      if (!flushTimer.current) flushTimer.current = window.setTimeout(flush, 15)
+    })
+    let resizeTimer: number | undefined
+    const resize = t.onResize(({ cols, rows }) => {
+      window.clearTimeout(resizeTimer)
+      resizeTimer = window.setTimeout(() => send('resize', { cols, rows }), 150)
+    })
+    const ro = new ResizeObserver(fitNow)
+    ro.observe(screen.current)
+    return () => {
+      ro.disconnect(); data.dispose(); resize.dispose()
+      window.clearTimeout(resizeTimer)
+      teardown(true)
+      t.dispose()
+      term.current = null
+    }
+  }, [flush, send, teardown])
+
+  const finish = useCallback((reason: string) => {
+    sessionId.current = null
+    term.current?.writeln(`\r\n${DIM}[${END_TEXT[reason] ?? 'Session closed.'}]${RESET}`)
+    setPhase('ended')
+  }, [])
 
   const readStream = useCallback(async (id: string) => {
     let after = '0'
@@ -102,57 +146,26 @@ export function SshTerminalCard() {
             const msg = JSON.parse(line)
             if (msg.id) after = msg.id
             if (msg.d) term.current?.write(fromBase64(msg.d))
-            if (msg.e === 'closed') {
-              sessionId.current = null
-              setStatus(END_TEXT[msg.r] ?? 'Session closed.')
-              setPhase('ended')
-              return
-            }
+            if (msg.e === 'closed') { finish(msg.r); return }
           }
         }
       } catch {
         if (controller.signal.aborted) return
-        if (++retries > 5) {
-          sessionId.current = null
-          setStatus('Connection to the appliance was lost.')
-          setPhase('ended')
-          return
-        }
+        if (++retries > 5) { finish('lost'); return }
         await new Promise((r) => setTimeout(r, 1000 * retries))
       }
     }
-  }, [])
+  }, [finish])
 
   const connect = async (e: FormEvent) => {
     e.preventDefault()
+    const t = term.current
+    if (!t) return
     setError('')
-    setStatus('')
     setPhase('connecting')
-    // The terminal element exists only while connecting/open; wait for it.
-    await new Promise((r) => requestAnimationFrame(() => r(null)))
-    if (!screen.current) return
-    term.current?.dispose()
-    const t = new Terminal({
-      cursorBlink: true, fontSize: 13, scrollback: 5000, convertEol: false,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-      theme: { background: '#0b0f17', foreground: '#e5e7eb' },
-    })
-    const f = new FitAddon()
-    t.loadAddon(f)
-    t.open(screen.current)
-    f.fit()
-    term.current = t
-    fit.current = f
-    t.onData((d) => {
-      pending.current += d
-      if (!flushTimer.current) flushTimer.current = window.setTimeout(flush, 15)
-    })
-    let resizeTimer: number | undefined
-    t.onResize(({ cols, rows }) => {
-      window.clearTimeout(resizeTimer)
-      resizeTimer = window.setTimeout(() => send('resize', { cols, rows }), 150)
-    })
-    t.writeln(`Connecting to ${form.username}@${form.host}:${form.port} …`)
+    t.reset()
+    t.writeln(`${DIM}Connecting to ${form.username}@${form.host}:${form.port} …${RESET}`)
+    fit.current?.fit()
     try {
       const res = await api.post(BASE, {
         host: form.host.trim(), port: Number(form.port) || 22, username: form.username,
@@ -161,28 +174,20 @@ export function SshTerminalCard() {
       sessionId.current = res.data.session_id
       setForm((s) => ({ ...s, password: '' }))
       setPhase('open')
+      t.reset()
       t.focus()
       void readStream(res.data.session_id)
     } catch (err) {
-      t.dispose()
-      term.current = null
+      const message = apiErrorMessage(err)
+      t.writeln(`\x1b[31m${message}${RESET}`)
+      setError(message)
       setPhase('idle')
-      setError(apiErrorMessage(err))
     }
   }
 
-  useEffect(() => {
-    const el = screen.current
-    if (!el || phase !== 'open') return
-    const ro = new ResizeObserver(() => { try { fit.current?.fit() } catch { /* hidden */ } })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [phase])
-
   const disconnect = () => {
     teardown(true)
-    setStatus(END_TEXT.user_closed)
-    setPhase('ended')
+    finish('user_closed')
   }
 
   const active = phase === 'connecting' || phase === 'open'
@@ -196,41 +201,33 @@ export function SshTerminalCard() {
           The username and password are used once to sign in and are not stored. The device&apos;s host key is not checked.
           Sessions close after 10 minutes without input and are recorded in the audit log (who, which host and account — never the password).
         </p>
-        {!active && (
-          <form onSubmit={connect} className="grid grid-cols-1 gap-3 md:grid-cols-4" autoComplete="off">
-            <FormField label="Host or IP address">
-              <Input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="10.0.0.1" required autoComplete="off" />
-            </FormField>
-            <FormField label="Port">
-              <Input type="number" min={1} max={65535} value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} required />
-            </FormField>
-            <FormField label="Username">
-              <Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required autoComplete="off" />
-            </FormField>
-            <FormField label="Password">
-              <Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required autoComplete="new-password" />
-            </FormField>
-            <div className="flex items-center gap-3 md:col-span-4">
-              <Button type="submit"><PlugZap className="h-4 w-4" /> Connect</Button>
-              {error && <span role="alert" className="text-sm text-danger">{error}</span>}
-              {phase === 'ended' && status && <span className="text-sm text-muted">{status}</span>}
-            </div>
-          </form>
-        )}
-        {(active || phase === 'ended') && (
-          <div className="space-y-2">
-            {active && (
-              <div className="flex items-center justify-between gap-3">
-                <span className="flex items-center gap-2 text-sm text-muted">
-                  {phase === 'connecting' ? <Loader2 className="h-4 w-4 animate-spin" /> : <span className="h-2 w-2 rounded-full bg-success" />}
-                  {form.username}@{form.host}:{form.port}
-                </span>
-                <Button variant="outline" size="sm" onClick={disconnect}><Power className="h-4 w-4" /> Disconnect</Button>
-              </div>
-            )}
-            <div ref={screen} className="h-[420px] w-full overflow-hidden rounded-md border border-border bg-[#0b0f17] p-2" aria-label="SSH terminal" />
-          </div>
-        )}
+        <form onSubmit={connect} className="grid grid-cols-1 items-end gap-3 md:grid-cols-[2fr_1fr_1.5fr_1.5fr_auto]" autoComplete="off">
+          <FormField label="Host or IP address">
+            <Input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="10.0.0.1" required disabled={active} autoComplete="off" />
+          </FormField>
+          <FormField label="Port">
+            <Input type="number" min={1} max={65535} value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} required disabled={active} />
+          </FormField>
+          <FormField label="Username">
+            <Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required disabled={active} autoComplete="off" />
+          </FormField>
+          <FormField label="Password">
+            <Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required disabled={active} autoComplete="new-password" />
+          </FormField>
+          {active ? (
+            <Button type="button" variant="outline" onClick={disconnect}><Power className="h-4 w-4" /> Disconnect</Button>
+          ) : (
+            <Button type="submit"><PlugZap className="h-4 w-4" /> Connect</Button>
+          )}
+        </form>
+        <div className="flex items-center gap-2 text-xs text-muted" aria-live="polite">
+          {phase === 'connecting' && <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Connecting…</>}
+          {phase === 'open' && <><span className="h-2 w-2 rounded-full bg-success" /> Connected to {form.username}@{form.host}:{form.port}</>}
+          {phase === 'idle' && !error && 'Not connected'}
+          {phase === 'ended' && 'Disconnected'}
+          {error && <span role="alert" className="text-danger">{error}</span>}
+        </div>
+        <div ref={screen} className="h-[480px] w-full overflow-hidden rounded-md border border-border bg-black p-2" aria-label="SSH terminal" />
       </CardContent>
     </Card>
   )
