@@ -211,14 +211,15 @@ def key_fingerprint(key_type: str, key_b64: str) -> str:
     return 'SHA256:' + base64.b64encode(digest).decode().rstrip('=')
 
 
-def probe_host_key(host, port=22, timeout=10):
+def probe_host_key(host, port=22, timeout=10, *, legacy_compat=False):
     """Read the SSH host key a device presents. No authentication is attempted
     and nothing is saved: the operator must confirm the fingerprint against an
     independent source before registering it."""
     import socket
     import paramiko
     sock = socket.create_connection((str(host), int(port or 22)), timeout=timeout)
-    transport = paramiko.Transport(sock, disabled_algorithms={'keys': ['ssh-rsa']})
+    disabled = {} if legacy_compat else {'keys': ['ssh-rsa'], 'kex': list(LEGACY_KEX)}
+    transport = paramiko.Transport(sock, disabled_algorithms=disabled)
     try:
         transport.start_client(timeout=timeout)
         key = transport.get_remote_server_key()
@@ -259,12 +260,42 @@ def load_private_key(text, passphrase=None):
     raise ValueError('Unsupported or invalid private key (use an OpenSSH/PEM Ed25519, ECDSA or RSA key)')
 
 
-def fetch_config(host, platform, username, password, enable, port, config_type='running', *, pkey=None, known_hosts=None):
+LEGACY_KEX = ('diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
+              'diffie-hellman-group-exchange-sha1')
+
+
+def verified_ssh_algorithms(host, port, known_hosts, *, legacy_compat=False):
+    """Constrain host-key negotiation to independently verified key types.
+
+    RSA key material is named ssh-rsa in known_hosts even when its signature
+    uses RSA SHA2. Preserve SHA2 variants while excluding an unverified
+    Ed25519/EC key. SHA1 requires explicit opt-in on this connection profile.
+    """
+    import paramiko
+    name = str(host) if int(port or 22) == 22 else f'[{host}]:{int(port)}'
+    try:
+        keys = paramiko.HostKeys(known_hosts or KNOWN_HOSTS).lookup(name)
+    except OSError:
+        keys = None
+    if not keys:
+        raise paramiko.SSHException('Server not found in known_hosts')
+    allowed = set(keys.keys()) - {'ssh-rsa'}
+    if 'ssh-rsa' in keys:
+        allowed.update(('rsa-sha2-512', 'rsa-sha2-256'))
+        if legacy_compat:
+            allowed.add('ssh-rsa')
+    return {'keys': [key for key in paramiko.Transport._preferred_keys if key not in allowed],
+            'pubkeys': [] if legacy_compat else ['ssh-rsa'],
+            'kex': [] if legacy_compat else list(LEGACY_KEX)}
+
+
+def fetch_config(host, platform, username, password, enable, port, config_type='running', *, pkey=None, known_hosts=None, legacy_compat=False):
     from netmiko import ConnectHandler, SSHDetect
     if platform not in (None, '', 'autodetect') and platform not in DRIVERS:
         raise CaptureError('Unsupported device platform', 'driver')
     base = dict(host=host, username=username, password=password or '', port=port or 22,
-                fast_cli=False, ssh_strict=True, disabled_algorithms={'keys': ['ssh-rsa'], 'pubkeys': ['ssh-rsa']},
+                fast_cli=False, ssh_strict=True,
+                disabled_algorithms=verified_ssh_algorithms(host, port, known_hosts, legacy_compat=legacy_compat),
                 alt_host_keys=True, alt_key_file=known_hosts or KNOWN_HOSTS, conn_timeout=20, timeout=60,
                 allow_agent=False)
     if pkey is not None:
@@ -301,12 +332,9 @@ def fetch_config(host, platform, username, password, enable, port, config_type='
                 # Base cleanup may call inherited configuration mode methods;
                 # close the SSH transport without any configuration commands.
                 self.write_channel(command + '\r')
-        # FortinetSSH replaces disabled_algorithms wholesale when no 'kex' key
-        # is given, silently dropping the SHA-1 host-key restriction. Supply
-        # its FortiOS key-exchange policy ourselves so both survive.
-        import paramiko
-        base['disabled_algorithms'] = {**base['disabled_algorithms'],
-                                       'kex': sorted(set(paramiko.Transport._preferred_kex) - FortinetSSH.preferred_kex)}
+        # The explicit 'kex' entry above keeps FortinetSSH from replacing the
+        # verified host-key and profile compatibility policy. Negotiate any
+        # modern algorithm supported by both peers; legacy use is opt-in.
         conn = ReadOnlyFortinet(**base, device_type=resolved)
     else:
         conn = ConnectHandler(**base, device_type=resolved)

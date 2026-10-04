@@ -521,6 +521,7 @@ def test_every_flow_query_is_scoped_for_restricted_users(fake_ch, monkeypatch, p
 
 def test_countries_and_ip_groups_are_scoped(fake_ch, monkeypatch):
     from app.services import geoip
+    from app.api.v1.netflow import breakdowns
 
     async def no_refresh(*a, **kw):
         return None
@@ -528,6 +529,12 @@ def test_countries_and_ip_groups_are_scoped(fake_ch, monkeypatch):
     monkeypatch.setattr(netflow_classify, "load_rules", no_refresh)
     monkeypatch.setattr(netflow_groups, "load_groups", no_refresh)
     monkeypatch.setattr(geoip, "available", lambda: True)
+    # Country queries gate on the country reader specifically. CI deliberately
+    # has no installed GeoIP database; supply that status for this scope test.
+    monkeypatch.setattr(breakdowns, "_geoip_status", lambda: {
+        "country_db": True, "asn_db": False,
+        "country_db_version": None, "asn_db_version": None,
+    })
     netflow_groups.set_groups_for_tests([
         netflow_groups.Group(id="g1", name="DC A", cidrs=(netflow_groups.parse_network("10.20.0.0/16"),)),
     ])
