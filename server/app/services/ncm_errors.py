@@ -54,6 +54,15 @@ STAGES = {
 }
 
 
+def exception_chain(exc):
+    """Follow Netmiko wrappers without exposing third-party exception text."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
 def classify(exc, stage='collection') -> Failure:
     if isinstance(exc, PrerequisiteError):
         return Failure(exc.category, str(exc), False)
@@ -61,6 +70,22 @@ def classify(exc, stage='collection') -> Failure:
         return Failure('credentials', 'Credentials unavailable: verify the saved profile and appliance encryption key.', False)
     if stage == 'archive':
         return Failure('archive', 'Archive failed: inspect database/storage health and encryption; the previous validated snapshot is preserved.', True)
+    chain = list(exception_chain(exc))
+    # Netmiko wraps handshake and trust errors in NetmikoTimeoutException.
+    # Resolve permanent causes before allowing the wrapper to trigger retries.
+    for error in chain:
+        if isinstance(error, BadHostKeyException):
+            return Failure('host_key_changed', 'SSH host key changed: independently verify device identity before updating managed SSH trust.', False)
+        if isinstance(error, AuthenticationException):
+            return Failure('authentication', 'Authentication rejected: verify the dedicated account, password, SSH access and source-address restrictions.', False)
+        if isinstance(error, NoValidConnectionsError):
+            return Failure('unreachable', 'SSH unreachable: verify the management address, port, routing and access rules.', True)
+        if isinstance(error, SSHException) and not isinstance(error, (NetmikoTimeoutException, ReadTimeout)):
+            message = str(error).lower()
+            if 'not found in known_hosts' in message:
+                return Failure('host_key_untrusted', 'SSH host key is not trusted: independently verify the fingerprint and register the address and port.', False)
+            if 'no existing session' not in message and 'error reading ssh protocol banner' not in message:
+                return Failure('negotiation', 'SSH negotiation failed: verify managed host keys and supported SSH algorithms.', False)
     if isinstance(exc, BadHostKeyException):
         return Failure('host_key_changed', 'SSH host key changed: independently verify device identity before updating managed SSH trust.', False)
     if isinstance(exc, AuthenticationException):

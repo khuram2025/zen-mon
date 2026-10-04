@@ -138,7 +138,9 @@ export function TrustDialog({ deviceId, open, onOpenChange }: { deviceId: string
   })
 
   const entries = trust.data?.entries || []
-  const active = entries.find((e) => !e.retired_at) || null
+  const activeEntries = entries.filter((e) => !e.retired_at)
+  const candidateType = mode === 'probe' ? probe?.key_type : parsedPaste?.type
+  const active = activeEntries.find((e) => e.key_type === candidateType) || null
 
   // Candidate key under consideration.
   const publicKey = mode === 'probe' ? (probe ? `${probe.key_type} ${probe.key_base64}` : '') : pasted.trim()
@@ -210,12 +212,12 @@ export function TrustDialog({ deviceId, open, onOpenChange }: { deviceId: string
                 <span className="font-mono text-xs text-muted">{trust.data.host}:{trust.data.port}</span>
               </div>
               {state.message && <p className="mt-2 break-words text-xs text-muted">{state.message}</p>}
-              {active && (
-                <div className="mt-2 text-xs">
+              {activeEntries.map((entry) => (
+                <div key={entry.id} className="mt-2 text-xs">
                   <span className="text-muted">Active managed key: </span>
-                  <span className="font-mono">{active.key_type}</span> <Mono>{active.fingerprint_sha256}</Mono>
+                  <span className="font-mono">{entry.key_type}</span> <Mono>{entry.fingerprint_sha256}</Mono>
                 </div>
-              )}
+              ))}
             </section>
 
             {!canTrust ? (
@@ -279,7 +281,7 @@ export function TrustDialog({ deviceId, open, onOpenChange }: { deviceId: string
                   <p className="text-xs text-muted">
                     Read the host key fingerprint from a source an attacker on the network cannot alter: a console or out-of-band session,
                     your inventory record, or the vendor portal. For example: Cisco IOS <code className="font-mono">show ip ssh</code> or{' '}
-                    <code className="font-mono">show crypto key mypubkey rsa</code>; FortiOS <code className="font-mono">get system ssh-host-key</code> (command names vary by release);
+                    <code className="font-mono">show crypto key mypubkey rsa</code>; FortiOS <code className="font-mono">get system info admin ssh</code> (command names vary by release);
                     on Linux-based systems <code className="font-mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>.
                   </p>
                   <FormField label="Fingerprint you read on the independent source" required>
@@ -309,12 +311,15 @@ export function TrustDialog({ deviceId, open, onOpenChange }: { deviceId: string
                   {unchanged && (
                     <p className="text-xs text-muted">This key is already the active trusted key; registering again changes nothing.</p>
                   )}
+                  {!!candidateSha && !active && activeEntries.length > 0 && (
+                    <p className="text-xs text-muted">This is an additional key algorithm. Independently verify its fingerprint before adding it to the verified key set.</p>
+                  )}
                   {replacing && (
                     <div className="space-y-2">
                       <div role="alert" className="flex gap-2 rounded-md border border-danger/50 bg-danger/10 p-3 text-xs text-danger">
                         <ShieldAlert className="h-4 w-4 shrink-0" aria-hidden />
                         <span>
-                          <strong>The device key changed.</strong> Only replace after the device owner confirms a hardware/OS change; otherwise treat it as a possible interception.
+                          <strong>The trusted {candidateType} key changed.</strong> Confirm the replacement with the device owner and independently verify its fingerprint.
                         </span>
                       </div>
                       <FormField label="Replacement reason" required error={reason.trim() && reason.trim().length < 5 ? 'At least 5 characters.' : null}

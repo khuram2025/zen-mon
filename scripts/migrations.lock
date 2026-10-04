@@ -148,3 +148,4 @@ f6da397879469c92d9c7f915a00fc8e47fa1b11a35c16e2c5e90748ff9a93076  migrate-138-ne
 9392fc00c2da6ae60d3dcef216088574a365f21bca6cd4367fe518760713979d  migrate-143-netflow-alert-metrics.sql
 4a87f0a3fc278ecd01db61a9be8d00277ca5009296a42faab4b8d3b94aee3bbd  migrate-144-netflow-rollup-dedup-clickhouse.sql
 e3033856d20cd2da99ed0cb417a183db20c4bdcff565083932c5bac0a292718f  migrate-140-netflow-exception-scope.sql
+8b1b0f4411cb3de3a35bd99f533b2d63862d8a945b0d40ec620e6d51ce5f42dd  migrate-151-ncm-ssh-compatibility.sql

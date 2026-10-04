@@ -70,6 +70,7 @@ from app.core.security import (
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 from app.services.udt_service import (
+    endpoint_search_condition,
     ENDPOINT_TYPES, TYPE_SLUG_RE, apply_class_rules, classify_endpoint,
     normalize_mac, rule_condition,
 )
@@ -294,20 +295,9 @@ async def list_endpoints(
     if not include_ignored:
         where.append("NOT e.ignored")
     if q:
-        term = q.strip()
-        mac = normalize_mac(term)
-        if mac:
-            where.append("e.mac = CAST(:mac AS macaddr)")
-            params["mac"] = mac
-        else:
-            # Searching user_name is itself a disclosure — it turns the list
-            # into an oracle for "does this person exist" — so callers who may
-            # not see usernames may not search them either.
-            user_clause = "OR e.user_name ILIKE :q " if see_users else ""
-            where.append(f"(e.hostname ILIKE :q OR e.vendor ILIKE :q {user_clause}"
-                         "OR host(e.ip_address) ILIKE :q OR e.mac::text ILIKE :q "
-                         "OR EXISTS (SELECT 1 FROM udt_ip_history h WHERE h.endpoint_id=e.id AND host(h.ip) ILIKE :q))")
-            params["q"] = f"%{term}%"
+        condition = endpoint_search_condition(q, params, see_users)
+        if condition:
+            where.append(condition)
     if status == "active":
         where.append("e.last_seen > NOW() - INTERVAL '15 minutes'")
     elif status == "inactive":

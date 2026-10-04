@@ -104,7 +104,7 @@ def test_capture_without_final_prompt_fails(monkeypatch):
         collection.run_command(Session(['hostname edge\nend\n']), 'show running-config','edge#',idle_timeout=2)
 
 
-def test_fortios_connection_never_changes_console(monkeypatch):
+def test_fortios_connection_never_changes_console(monkeypatch, tmp_path):
     from netmiko.fortinet.fortinet_ssh import FortinetSSH
     commands=[]
     def init(self,**kwargs):
@@ -117,7 +117,15 @@ def test_fortios_connection_never_changes_console(monkeypatch):
     monkeypatch.setattr(FortinetSSH,'disconnect',lambda self:self.cleanup())
     monkeypatch.setattr(FortinetSSH,'send_multiline',lambda *a,**k:pytest.fail('Persistent commands attempted'))
     monkeypatch.setattr(collection,'run_command',lambda *a,**k:'config system global\n set hostname edge\nend\n')
-    platform,result=collection.fetch_config('192.0.2.1','fortinet','test','test','',22)
+    # The connection now requires verified trust before selecting algorithms.
+    # Keep this command-safety fixture trusted; actual SSH negotiation has its
+    # own loopback regression tests.
+    import paramiko
+    key = paramiko.RSAKey.generate(2048)
+    trust = tmp_path / 'known_hosts'
+    trust.write_text('192.0.2.1 ssh-rsa ' + key.get_base64() + '\n')
+    platform,result=collection.fetch_config('192.0.2.1','fortinet','test','test','',22,
+                                            known_hosts=str(trust))
     assert platform=='fortinet' and commands==['exit\r']
 
 
