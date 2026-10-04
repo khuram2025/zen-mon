@@ -1053,6 +1053,12 @@ def build_package(version: str, changelog: str, severity: str,
         steps.append({"type": "install_systemd",
                        "source": "code/poller/systemd/zenplus-netflow-collector.service",
                        "enable": True})
+        # net.core.rmem_max >= the unit's NETFLOW_RCVBUF, or the kernel caps
+        # the collector's receive buffer at ~208 KiB and drops flow bursts.
+        # Idempotent, never lowers a larger value, exits 0 when the host
+        # refuses (the collector's /health then flags the smaller buffer).
+        if (Path(build_dir) / "code" / "scripts" / "setup-netflow-sysctl.sh").exists():
+            steps.append({"type": "run_hook", "script": "code/scripts/setup-netflow-sysctl.sh", "timeout": 30})
 
     steps.append({"type": "install_systemd", "source": "code/scripts/systemd/zenplus-syslog.service", "enable": False})
     # NCM uses a local service identity; the HTTP scheduler requires RBAC.

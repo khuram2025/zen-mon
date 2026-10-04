@@ -35,7 +35,7 @@ def test_builtin_definitions_are_valid_and_least_privilege_ordered():
 
 def test_new_netflow_permissions_are_not_granted_to_read_only_roles():
     for name in ("viewer", "read_only"):
-        assert not {"netflow.manage", "netflow.manage_shared"} & set(BUILTIN_ROLE_DEFINITIONS[name])
+        assert not {"netflow.manage", "netflow.manage_shared", "netflow.export"} & set(BUILTIN_ROLE_DEFINITIONS[name])
 
 
 def test_exceeds_expands_full_administration():

@@ -1,18 +1,24 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight } from 'lucide-react'
+import { ArrowLeftRight, ArrowRight } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { useCan } from '@/stores/auth'
 import type { MapShape } from '../core'
 
 /* Live "Top Conversations" panel placed on the map as an annotation. Polls
  * real NetFlow data (optionally scoped to one exporter/device) and renders
- * ranked conversation bars that re-sort and re-scale as traffic shifts. */
+ * ranked conversation bars that re-sort and re-scale as traffic shifts.
+ * Viewers without `netflow.view` see a no-access note instead of a 403 loop. */
 
 type Conversation = {
   src: string
   dst: string
+  /** 'client_server' when the service side is known; otherwise src/dst are in address order. */
+  orientation?: 'client_server' | 'address_order' | 'mixed'
+  protocol: number
   protocol_name: string
-  service: string
+  dst_port: number
+  service: string | null
   application: string
   bytes: number
   flows: number
@@ -25,6 +31,7 @@ export function ConversationsWidget({ shape }: { shape: MapShape }) {
   const limit = m.limit || 5
   const hours = m.hours || 1
   const exporter = m.exporter || null
+  const allowed = useCan()('netflow.view')
 
   const q = useQuery<Conversation[]>({
     queryKey: ['map-conversations', exporter, limit, hours],
@@ -34,6 +41,7 @@ export function ConversationsWidget({ shape }: { shape: MapShape }) {
     },
     refetchInterval: 30_000,
     retry: 1,
+    enabled: allowed,
   })
 
   const rows = q.data || []
@@ -57,16 +65,20 @@ export function ConversationsWidget({ shape }: { shape: MapShape }) {
       </div>
 
       <div className="min-h-0 flex-1 space-y-[5px] overflow-hidden px-2.5 py-2">
-        {q.isLoading && <div className="py-3 text-center text-[10px] text-muted">Loading flows…</div>}
-        {!q.isLoading && !rows.length && <div className="py-3 text-center text-[10px] text-muted">No flow records{exporter ? ' for this device' : ''}</div>}
-        {rows.map((c, i) => (
-          <div key={`${c.src}-${c.dst}-${c.service}`} className="group">
+        {!allowed && <div className="py-3 text-center text-[10px] text-muted">No access to NetFlow data (needs the NetFlow view permission)</div>}
+        {allowed && q.isLoading && <div className="py-3 text-center text-[10px] text-muted">Loading flows…</div>}
+        {allowed && q.isError && !rows.length && <div className="py-3 text-center text-[10px] text-muted">Flow data is unavailable right now</div>}
+        {allowed && !q.isLoading && !q.isError && !rows.length && <div className="py-3 text-center text-[10px] text-muted">No flow records{exporter ? ' for this device' : ''}</div>}
+        {allowed && rows.map((c, i) => (
+          <div key={`${c.src}-${c.dst}-${c.protocol}-${c.dst_port}`} className="group">
             <div className="flex items-baseline justify-between gap-1.5">
               <span className="flex min-w-0 items-center gap-1 font-mono text-[9.5px] font-medium leading-tight text-text">
                 <span className="w-2.5 shrink-0 text-[8px] text-muted">{i + 1}</span>
-                <span className="truncate">{c.src}</span>
-                <ArrowRight className="h-2.5 w-2.5 shrink-0 text-muted" />
-                <span className="truncate">{c.dst}</span>
+                <span className="truncate" title={c.orientation === 'client_server' ? `Client ${c.src}` : c.src}>{c.src}</span>
+                {c.orientation === 'client_server'
+                  ? <ArrowRight className="h-2.5 w-2.5 shrink-0 text-muted" aria-label="client to server" />
+                  : <ArrowLeftRight className="h-2.5 w-2.5 shrink-0 text-muted" aria-label="between" />}
+                <span className="truncate" title={c.orientation === 'client_server' ? `Server ${c.dst}` : c.dst}>{c.dst}</span>
               </span>
               <span className="shrink-0 font-mono text-[9px] font-semibold tabular-nums" style={{ color: RANK_COLORS[i % RANK_COLORS.length] }}>
                 {fmtBytes(c.bytes)}

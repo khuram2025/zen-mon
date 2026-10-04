@@ -240,9 +240,10 @@ export function Layout() {
             <Breadcrumbs />
           </div>
 
-          <div className="relative ml-auto flex max-w-xs flex-1 items-center">
-            <Search className="absolute left-2.5 h-3.5 w-3.5 text-muted" />
+          <div role="search" aria-label="Device search" className="relative ml-auto flex max-w-xs flex-1 items-center">
+            <Search className="absolute left-2.5 h-3.5 w-3.5 text-muted" aria-hidden />
             <input
+              aria-label="Search devices by name or address"
               placeholder="Search devices..."
               className="h-7 w-full rounded-md border border-border bg-bg pl-8 pr-3 text-xs placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
               onKeyDown={(e) => {
@@ -254,8 +255,15 @@ export function Layout() {
             />
           </div>
 
-          <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-text" onClick={toggle}>
-            {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-muted hover:text-text"
+            onClick={toggle}
+            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          >
+            {theme === 'dark' ? <Sun className="h-3.5 w-3.5" aria-hidden /> : <Moon className="h-3.5 w-3.5" aria-hidden />}
           </Button>
 
           <HeaderAlertCenter />

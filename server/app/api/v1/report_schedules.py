@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core import scoping
-from app.core.security import get_current_user, require_admin_user, require_permission
+from app.core.permissions import has_permission
+from app.core.security import get_current_user, get_role_permissions, require_admin_user, require_permission
 from app.models.user import User
 from app.services.alert_schedule import get_configured_timezone
 from app.services.report_scheduler import compute_next_run, generate_and_deliver
@@ -40,7 +41,7 @@ async def _refuse_scoped(db: AsyncSession, user: User) -> None:
 
 _REPORT_TYPES = ("executive_summary|device_health|service_health|alert_analysis|full_report"
                  "|availability|performance|traffic|usage|apm_performance"
-                 "|capacity|alerts|inventory|rum_usage|ncm_protection|custom")
+                 "|capacity|alerts|inventory|rum_usage|ncm_protection|netflow_executive|custom")
 _PERIODS = "last_24h|last_7d|last_30d|last_90d"
 _FORMATS = "pdf|excel|csv|none"
 _FREQS = "daily|weekly|monthly"
@@ -109,13 +110,72 @@ def _row_to_dict(row) -> dict:
 _SELECT = "SELECT * FROM report_schedules"
 
 
+async def _validated_filters(filters: dict | None) -> dict:
+    """``filters`` with its NetFlow scope validated and canonical (400 for an
+    invalid scope or unknown key): a schedule can never store a scope its run
+    would reject, and run as "success" with every NetFlow section blank."""
+    out = dict(filters or {})
+    if "netflow" not in out:
+        return out
+    from app.api.v1.netflow.common import NetflowError
+    from app.services import netflow_classify, netflow_groups, netflow_report
+
+    await netflow_classify.load_rules()
+    await netflow_groups.load_groups()
+    try:
+        scope = netflow_report.scope_from_mapping(out["netflow"])
+    except NetflowError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid NetFlow scope: {exc.detail}") from None
+    if scope:
+        out["netflow"] = scope
+    else:
+        out.pop("netflow")
+    return out
+
+
+_HOST_KEYS = ("talker", "src", "dst", "not_talker", "not_src", "not_dst")
+
+
+def _netflow_scope_visible(scope, vis) -> bool:
+    """Whether a caller may see a schedule's NetFlow scope: it needs
+    netflow.view; a tag-scoped caller only sees scopes whose exporters it can
+    see, and host filters only when they are pinned to such an exporter."""
+    from app.api.v1.netflow.access import VIEW_PERMISSION
+
+    if not vis.can(VIEW_PERMISSION):
+        return False
+    if vis.exporters is None:
+        return True
+    if not isinstance(scope, dict):
+        return False
+    named = [str(scope["exporter"])] if scope.get("exporter") else []
+    iface = str(scope.get("iface") or "")
+    if "@" in iface:
+        named.append(iface.split("@", 1)[1])
+    if any(not vis.allows(e) for e in named):
+        return False
+    return bool(named) or not any(scope.get(k) for k in _HOST_KEYS)
+
+
 @router.get("")
 async def list_report_schedules(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("reports.view")),
 ):
+    from app.api.v1.netflow.access import visibility_for_user
+
     rows = (await db.execute(text(f"{_SELECT} ORDER BY created_at DESC"))).fetchall()
-    return {"data": [_row_to_dict(r) for r in rows]}
+    vis = await visibility_for_user(db, user)
+    out = []
+    for r in rows:
+        item = _row_to_dict(r)
+        filters = item.get("filters") or {}
+        if isinstance(filters, dict) and "netflow" in filters and not _netflow_scope_visible(filters["netflow"], vis):
+            # The scope names hosts or exporters the caller may not see (or
+            # the caller has no NetFlow access): withhold it, say so.
+            item["filters"] = {**{k: v for k, v in filters.items() if k != "netflow"}, "netflow_withheld": True}
+        out.append(item)
+    return {"data": out}
 
 
 @router.post("", status_code=201)
@@ -125,6 +185,7 @@ async def create_report_schedule(
     user: User = Depends(require_permission("reports.manage")),
 ):
     await _refuse_scoped(db, user)
+    data.filters = await _validated_filters(data.filters)
     tz_name = await get_configured_timezone(db)
     sched = data.model_dump()
     next_run = compute_next_run(sched, tz_name) if data.enabled else None
@@ -164,6 +225,8 @@ async def update_report_schedule(
     fields = data.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+    if "filters" in fields:
+        fields["filters"] = await _validated_filters(fields["filters"])
 
     set_parts, params = [], {"id": schedule_id}
     for key, value in fields.items():
@@ -263,12 +326,47 @@ async def run_report_schedule_now(
     return {"message": f"Report generated ({result['status']})", **result}
 
 
+REPORTS_VIEW_PERMISSION = "reports.view"
+REPORTS_MANAGE_PERMISSION = "reports.manage"
+
+
+async def is_report_manager(db: AsyncSession, user: User) -> bool:
+    """A reports.manage holder who may actually manage report schedules: an
+    account limited to a visibility scope cannot (``_refuse_scoped``), so it
+    is not a report manager here either -- its permission alone must not turn
+    it into a reader of fleet-wide scheduled reports."""
+    if not has_permission(await get_role_permissions(db, user.role), REPORTS_MANAGE_PERMISSION):
+        return False
+    return await scoping.visible_tags(db, user) is None
+
+
+async def sees_share_links(db: AsyncSession, user: User, owner_id) -> bool:
+    """Whether a run's share token may be shown to ``user``.
+
+    The token opens the stored report without signing in, and a scheduled
+    report renders with its owner's visibility (NetFlow sections included),
+    so a token is a copy of what the owner may see: only the schedule's
+    owner (``report_schedules.created_by``) and report managers
+    (``is_report_manager``) get it. Everyone else sees the run without its
+    link."""
+    if await is_report_manager(db, user):
+        return True
+    return owner_id is not None and str(owner_id) == str(getattr(user, "id", ""))
+
+
 @router.get("/{schedule_id}/runs")
 async def list_runs(
     schedule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("reports.view")),
+    user: User = Depends(require_permission(REPORTS_VIEW_PERMISSION)),
 ):
+    """A schedule's recent runs. Share tokens only for the schedule's owner
+    and report managers (``sees_share_links``)."""
+    schedule = (await db.execute(
+        text("SELECT created_by FROM report_schedules WHERE id = :id"), {"id": schedule_id})).first()
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Report schedule not found")
+    links = await sees_share_links(db, user, schedule.created_by)
     rows = (await db.execute(
         text("""SELECT id, token, title, status, delivered_to, error, generated_at
                 FROM report_runs WHERE schedule_id = :id ORDER BY generated_at DESC LIMIT 20"""),
@@ -276,8 +374,9 @@ async def list_runs(
     )).fetchall()
     return {"data": [
         {
-            "id": str(r.id), "token": r.token, "title": r.title, "status": r.status,
+            "id": str(r.id), "token": r.token if links else None, "token_withheld": not links,
+            "title": r.title, "status": r.status,
             "delivered_to": r.delivered_to or [], "error": r.error,
             "generated_at": r.generated_at.isoformat() if r.generated_at else None,
         } for r in rows
-    ]}
+    ], "can_view_links": links}

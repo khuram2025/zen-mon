@@ -35,6 +35,8 @@ import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { ReportScheduleFormDialog } from '@/components/forms/ReportScheduleFormDialog'
 import { Button } from '@/components/ui/Button'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { NetflowScopeChips, NetflowScopePicker, parseReportScope, reportScopeObject, reportScopeParam } from './NetflowReportScope'
+import type { FlowFilter } from '@/lib/netflow/filters'
 
 /* ------------------------------------------------------------------ */
 /*  Types — GET /reports/render/{key}?format=json                      */
@@ -84,6 +86,7 @@ interface RenderSection {
 }
 
 interface RenderReport {
+  scope_label?: string
   key: string
   title: string
   description: string
@@ -224,8 +227,9 @@ function DonutChart({ series }: { series: ChartSeries }) {
     return <p className="py-8 text-center text-sm text-muted">No data for this window</p>
   }
   return (
-    <div className="flex items-center gap-5">
-      <div className="h-[180px] w-[180px] shrink-0">
+    // Stacked on narrow screens so the legend keeps room for its names (NF-30).
+    <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:items-center sm:gap-5">
+      <div className="h-[180px] w-[180px] shrink-0 self-center">
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie
@@ -262,7 +266,8 @@ function DonutChart({ series }: { series: ChartSeries }) {
               {d.value.toLocaleString()} {series.unit || ''}
             </span>
             <span className="w-12 shrink-0 text-right tabular-nums text-text">
-              {((d.value / total) * 100).toFixed(1)}%
+              {/* A non-zero slice too small to show is "<0.1%", never "0.0%". */}
+              {d.value > 0 && (d.value / total) * 100 < 0.05 ? '<0.1' : ((d.value / total) * 100).toFixed(1)}%
             </span>
           </div>
         ))}
@@ -278,23 +283,30 @@ function DonutChart({ series }: { series: ChartSeries }) {
 const NUMERIC_CELL_RE = /^[\d,.\s%—-]+(ms|s|GB|MB|KB|B|bps|Kbps|Mbps|Gbps|min)?$/
 
 const STATUS_TONES: Record<string, string> = {
-  up: 'bg-success/15 text-success',
-  online: 'bg-success/15 text-success',
-  healthy: 'bg-success/15 text-success',
-  success: 'bg-success/15 text-success',
-  'on track': 'bg-success/15 text-success',
-  completed: 'bg-success/15 text-success',
-  down: 'bg-danger/15 text-danger',
-  offline: 'bg-danger/15 text-danger',
-  critical: 'bg-danger/15 text-danger',
-  failed: 'bg-danger/15 text-danger',
-  breaching: 'bg-danger/15 text-danger',
-  degraded: 'bg-warning/15 text-warning',
-  'at risk': 'bg-warning/15 text-warning',
-  warning: 'bg-warning/15 text-warning',
-  pending: 'bg-warning/15 text-warning',
-  stale: 'bg-warning/15 text-warning',
-  info: 'bg-info/15 text-info',
+  up: 'bg-success/15 text-success-fg',
+  online: 'bg-success/15 text-success-fg',
+  healthy: 'bg-success/15 text-success-fg',
+  success: 'bg-success/15 text-success-fg',
+  'on track': 'bg-success/15 text-success-fg',
+  completed: 'bg-success/15 text-success-fg',
+  resolved: 'bg-success/15 text-success-fg',
+  down: 'bg-danger/15 text-danger-fg',
+  offline: 'bg-danger/15 text-danger-fg',
+  critical: 'bg-danger/15 text-danger-fg',
+  failed: 'bg-danger/15 text-danger-fg',
+  breaching: 'bg-danger/15 text-danger-fg',
+  high: 'bg-danger/15 text-danger-fg',
+  degraded: 'bg-warning/15 text-warning-fg',
+  'at risk': 'bg-warning/15 text-warning-fg',
+  warning: 'bg-warning/15 text-warning-fg',
+  pending: 'bg-warning/15 text-warning-fg',
+  stale: 'bg-warning/15 text-warning-fg',
+  medium: 'bg-warning/15 text-warning-fg',
+  open: 'bg-warning/15 text-warning-fg',
+  acknowledged: 'bg-info/15 text-info-fg',
+  suppressed: 'bg-surface2 text-text2',
+  info: 'bg-info/15 text-info-fg',
+  low: 'bg-info/15 text-info-fg',
 }
 
 function StatusPill({ value }: { value: string }) {
@@ -766,6 +778,7 @@ function RenderExportMenu({
   toISO,
   deviceIds,
   applicationId,
+  netflowScope,
 }: {
   reportKey: string
   customId: string | null
@@ -773,6 +786,8 @@ function RenderExportMenu({
   toISO: string
   deviceIds?: string[]
   applicationId?: string | null
+  /** Canonical NetFlow scope query string (traffic / NetFlow reports). */
+  netflowScope?: string
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState<RenderFormat | null>(null)
@@ -791,6 +806,7 @@ function RenderExportMenu({
           ...(customId ? { custom_id: customId } : {}),
           ...(deviceIds && deviceIds.length > 0 ? { device_ids: deviceIds.join(',') } : {}),
           ...(applicationId ? { application_id: applicationId } : {}),
+          ...(netflowScope ? { netflow: netflowScope } : {}),
         },
         responseType: 'blob',
         timeout: 120_000,
@@ -875,7 +891,7 @@ export default function SectionReportViewer() {
     setSearchParams(next, { replace: true })
   }
 
-  const { data: catalog } = useQuery<{ types: { key: string; filterable?: string[] }[] }>({
+  const { data: catalog, isError: catalogFailed } = useQuery<{ types: { key: string; filterable?: string[] }[] }>({
     queryKey: ['reports', 'catalog'],
     queryFn: async () => (await api.get('/reports/catalog')).data,
     staleTime: 5 * 60_000,
@@ -884,6 +900,24 @@ export default function SectionReportViewer() {
     catalog?.types.find((t) => t.key === key)?.filterable?.includes('devices') ?? false
   const supportsAppFilter =
     catalog?.types.find((t) => t.key === key)?.filterable?.includes('applications') ?? false
+  // Custom reports may contain traffic sections too; the server ignores the scope otherwise.
+  const supportsNetflowFilter =
+    key === 'custom' || (catalog?.types.find((t) => t.key === key)?.filterable?.includes('netflow') ?? false)
+
+  // NetFlow scope (traffic / NetFlow reports): canonical flow filter, in the URL as `nf=`.
+  const nfScope = useMemo(() => parseReportScope(searchParams.get('nf')), [searchParams])
+  const nfParam = reportScopeParam(nfScope.filter)
+  // The scope actually sent: only for reports whose sections honour it. A link carrying a scope
+  // waits for the catalog so the first render is never an unscoped one under scoped chips.
+  const nfSent = supportsNetflowFilter ? nfParam : ''
+  const nfReady = !nfParam || key === 'custom' || catalog !== undefined || catalogFailed
+  const setNfScope = (f: FlowFilter) => {
+    const next = new URLSearchParams(searchParams)
+    const q = reportScopeParam(f)
+    if (q) next.set('nf', q)
+    else next.delete('nf')
+    setSearchParams(next, { replace: true })
+  }
 
   // Application scope (browser-RUM reports): in the URL so a scoped view is shareable.
   const appId = searchParams.get('app') || null
@@ -907,7 +941,7 @@ export default function SectionReportViewer() {
   }, [range.fromISO, range.toISO])
 
   const { data, isLoading, error, isPlaceholderData } = useQuery<RenderReport>({
-    queryKey: ['reports', 'render', key, customId ?? null, fromISO, toISO, nodeIds.join(','), appId],
+    queryKey: ['reports', 'render', key, customId ?? null, fromISO, toISO, nodeIds.join(','), appId, nfSent],
     queryFn: async () =>
       (
         await api.get(`/reports/render/${key}`, {
@@ -918,11 +952,12 @@ export default function SectionReportViewer() {
             ...(customId ? { custom_id: customId } : {}),
             ...(nodeIds.length > 0 ? { device_ids: nodeIds.join(',') } : {}),
             ...(appId ? { application_id: appId } : {}),
+            ...(nfSent ? { netflow: nfSent } : {}),
           },
           timeout: 120_000,
         })
       ).data,
-    enabled: !!key,
+    enabled: !!key && nfReady,
     placeholderData: (prev) => prev,
     staleTime: 4 * 60_000,
     retry: 1,
@@ -951,6 +986,7 @@ export default function SectionReportViewer() {
             {data && (
               <p className="mt-1 flex items-center gap-2 text-[11px] tabular-nums text-muted">
                 {data.period_label} · Generated {data.generated_label} · {data.company_name}
+                {data.scope_label && data.scope_label !== 'All monitored infrastructure' && <> · {data.scope_label}</>}
                 {isPlaceholderData && <Loader2 className="h-3 w-3 animate-spin text-primary" />}
               </p>
             )}
@@ -966,6 +1002,7 @@ export default function SectionReportViewer() {
             />
             {supportsDeviceFilter && <DeviceScopePicker selected={nodeIds} onChange={setNodeIds} />}
             {supportsAppFilter && <ApplicationScopePicker selected={appId} onChange={setAppId} />}
+            {supportsNetflowFilter && <NetflowScopePicker value={nfScope.filter} onChange={setNfScope} />}
             <RenderExportMenu
               reportKey={key}
               customId={customId}
@@ -973,6 +1010,7 @@ export default function SectionReportViewer() {
               toISO={toISO}
               deviceIds={nodeIds}
               applicationId={appId}
+              netflowScope={supportsNetflowFilter ? nfParam : undefined}
             />
             <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => setScheduleOpen(true)}>
               <CalendarClock className="h-3.5 w-3.5" />
@@ -980,6 +1018,16 @@ export default function SectionReportViewer() {
             </Button>
           </div>
         </div>
+
+        {supportsNetflowFilter && (
+          <NetflowScopeChips value={nfScope.filter} onChange={setNfScope} className="mt-3" />
+        )}
+        {nfScope.invalid.length > 0 && (
+          <p role="status" className="mt-2 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text">
+            <span className="font-semibold text-warning-fg">Not applied:</span> the link's NetFlow scope has invalid{' '}
+            {nfScope.invalid.join(', ')}.
+          </p>
+        )}
 
         {/* Contents */}
         {data && data.sections.length > 1 && (
@@ -999,7 +1047,7 @@ export default function SectionReportViewer() {
       </div>
 
       {/* Body */}
-      {isLoading ? (
+      {isLoading || (!data && !error) ? (
         <div className="space-y-4">
           {Array.from({ length: 3 }).map((_, i) => (
             <Skeleton key={i} className="h-[220px] rounded-xl" />
@@ -1028,7 +1076,13 @@ export default function SectionReportViewer() {
         open={scheduleOpen}
         onOpenChange={setScheduleOpen}
         schedule={null}
-        prefill={{ report_type: key === 'custom' ? 'custom' : key, custom_report_id: customId }}
+        prefill={{
+          report_type: key === 'custom' ? 'custom' : key,
+          custom_report_id: customId,
+          // A schedule keeps this exact scope, and starts from the rolling period being viewed.
+          filters: supportsNetflowFilter && nfParam ? { netflow: reportScopeObject(nfScope.filter) } : undefined,
+          period: ({ '24h': 'last_24h', '7d': 'last_7d', '1M': 'last_30d' } as Record<string, string>)[range.key],
+        }}
       />
     </div>
   )

@@ -38,9 +38,11 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ("netflow", "NetFlow", [
         ("netflow.view", "View", "View NetFlow traffic analytics"),
         ("netflow.manage", "Manage",
-         "Save personal NetFlow views and map flow exporters to devices"),
+         "Save personal NetFlow views, map flow exporters to devices and manage "
+         "NetFlow settings, rules and detection exceptions"),
         ("netflow.manage_shared", "Manage shared views",
          "Create, edit, and delete NetFlow views shared with every user"),
+        ("netflow.export", "Export raw", "Export complete raw flow result sets"),
     ]),
     ("udt", "User Device Tracker", [
         ("udt.view", "View", "View tracked endpoints and ports"),
@@ -118,6 +120,7 @@ PERMISSION_RISK: dict[str, str] = {
     "audit.view": "sensitive",
     "udt.view_users": "sensitive",
     "ncm.export": "sensitive",
+    "netflow.export": "sensitive",
     "ncm.credentials": "privileged",
     "ncm.trust": "privileged",
     "users.manage": "privileged",
@@ -142,6 +145,7 @@ PERMISSION_IMPLIES: dict[str, list[str]] = {
     "service_checks.manage": ["service_checks.view"],
     "netflow.manage": ["netflow.view"],
     "netflow.manage_shared": ["netflow.manage", "netflow.view"],
+    "netflow.export": ["netflow.view"],
     "udt.view_users": ["udt.view"],
     "udt.manage": ["udt.view"],
     "netpath.manage": ["netpath.view"],
@@ -164,7 +168,7 @@ _OPERATOR = [
     "dashboard.view", "devices.view", "devices.manage", "discovery.view",
     "discovery.run", "alerts.view", "alerts.acknowledge", "alerts.manage",
     "service_checks.view", "service_checks.manage", "netflow.view",
-    "netflow.manage", "netflow.manage_shared",
+    "netflow.manage", "netflow.manage_shared", "netflow.export",
     "udt.view", "udt.view_users", "udt.manage", "netpath.view", "netpath.manage",
     "ncm.view", "ncm.manage", "apm.view",
     "apm.manage", "reports.view", "reports.export", "reports.manage", "maps.view",
@@ -188,7 +192,7 @@ _READ_ONLY = [
 # rows (roles.definition_version); when the code's version is newer the
 # built-in rows are reconciled at startup. Custom roles are NEVER touched, so a
 # newly introduced permission is never granted to a custom role implicitly.
-BUILTIN_ROLE_DEFINITION_VERSION = 2
+BUILTIN_ROLE_DEFINITION_VERSION = 3
 
 BUILTIN_ROLE_DEFINITIONS: dict[str, list[str]] = {
     "admin": list(ALL_PERMISSIONS),

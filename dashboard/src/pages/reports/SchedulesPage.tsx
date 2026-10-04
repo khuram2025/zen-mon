@@ -11,6 +11,7 @@ import {
   ExternalLink,
   FileText,
   Loader2,
+  Lock,
   Mail,
   Pencil,
   Play,
@@ -372,14 +373,20 @@ function ScheduleDetail({ schedule }: { schedule: ReportSchedule }) {
                     <span className="text-xs text-muted">→ {run.delivered_to.join(', ')}</span>
                   )}
                 </div>
-                <a
-                  href={`${window.location.origin}/api/v1/reports/shared/${run.token}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                >
-                  <ExternalLink className="h-3 w-3" /> View report
-                </a>
+                {run.token ? (
+                  <a
+                    href={`${window.location.origin}/api/v1/reports/shared/${run.token}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                  >
+                    <ExternalLink className="h-3 w-3" /> View report
+                  </a>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-xs text-muted" title="Report links are shown to the schedule owner and to users who manage reports">
+                    <Lock className="h-3 w-3" aria-hidden /> Link restricted
+                  </span>
+                )}
               </div>
             ))}
           </div>

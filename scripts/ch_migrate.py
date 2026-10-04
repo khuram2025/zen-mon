@@ -78,6 +78,17 @@ TABLE_SETTING_INVARIANTS: dict[str, dict[str, object]] = {
         "setting": "non_replicated_deduplication_window",
         "value": "10000",
     },
+    "migrate-144-netflow-rollup-dedup-clickhouse.sql": {
+        "tables": (
+            "flow_conversations_1h",
+            "flow_qos_1h",
+            "flow_traffic_5m",
+            "flow_interface_5m",
+            "flow_exporter_minutes",
+        ),
+        "setting": "non_replicated_deduplication_window",
+        "value": "1000",
+    },
 }
 
 

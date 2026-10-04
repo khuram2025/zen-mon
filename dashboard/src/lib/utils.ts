@@ -6,28 +6,42 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/**
+ * Unit index for `value` in a 1000/1024-step scale, clamped to [0, top]. Values in (0, 1) have a
+ * negative logarithm; unclamped they indexed `units[-1]` and printed "500.00 undefined" (X-51).
+ */
+function unitIndex(value: number, k: number, top: number): number {
+  const a = Math.abs(value)
+  if (!(a >= 1)) return 0
+  return Math.max(0, Math.min(Math.floor(Math.log(a) / Math.log(k)), top))
+}
+
 export function formatBytes(bytes: number, decimals = 1): string {
-  if (bytes === 0 || !bytes) return '0 B'
+  if (bytes === 0 || !bytes || !Number.isFinite(bytes)) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-  const i = Math.floor(Math.log(Math.abs(bytes)) / Math.log(k))
+  if (Math.abs(bytes) < 1) return `${bytes < 0 ? '-' : ''}<1 B`
+  const i = unitIndex(bytes, k, sizes.length - 1)
   return `${(bytes / Math.pow(k, i)).toFixed(decimals)} ${sizes[i]}`
 }
 
 export function formatBps(bps: number): string {
-  if (!bps || bps === 0) return '0 bps'
+  if (!bps || bps === 0 || !Number.isFinite(bps)) return '0 bps'
   const k = 1000
   const units = ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps']
-  const i = Math.min(Math.floor(Math.log(Math.abs(bps)) / Math.log(k)), units.length - 1)
+  if (Math.abs(bps) < 1) return `${bps < 0 ? '-' : ''}<1 bps`
+  const i = unitIndex(bps, k, units.length - 1)
   return `${(bps / Math.pow(k, i)).toFixed(2)} ${units[i]}`
 }
 
 /** Compact bps for chart axes. formatBps' two decimals ("315.46 Kbps") overflow
- *  a narrow y-axis gutter and get clipped mid-number. */
+ *  a narrow y-axis gutter and get clipped mid-number. Fractional ticks below 1
+ *  are real on quiet series and print as numbers, never "undefined". */
 export function formatBpsAxis(bps: number): string {
-  if (!bps) return '0'
+  if (!bps || !Number.isFinite(bps)) return '0'
   const units = ['', 'K', 'M', 'G', 'T']
-  const i = Math.min(Math.floor(Math.log(Math.abs(bps)) / Math.log(1000)), units.length - 1)
+  if (Math.abs(bps) < 1) return String(Number(bps.toFixed(2)))
+  const i = unitIndex(bps, 1000, units.length - 1)
   const v = bps / Math.pow(1000, i)
   return `${v.toFixed(v < 10 ? 1 : 0)}${units[i]}`
 }

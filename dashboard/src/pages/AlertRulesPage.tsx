@@ -12,6 +12,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 import { AlertMessagePreviewDialog } from '@/components/alerts/AlertMessagePreviewDialog'
 import { toast } from '@/components/ui/Toast'
+import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
 
 const TRIGGER_LABELS: Record<string, string> = {
   down: 'Goes down',
@@ -21,6 +22,13 @@ const TRIGGER_LABELS: Record<string, string> = {
 }
 
 function scopeLabel(r: any): string {
+  if (r.family === 'netflow' || isNetflowMetric(r.metric)) {
+    const scope = r.flow_scope && typeof r.flow_scope === 'object' ? r.flow_scope : {}
+    const exporter = scope.exporter || String(scope.iface || '').split('@')[1]
+    const others = Object.keys(scope).filter((k) => k !== 'exporter' && !(k === 'iface' && !scope.exporter)).length
+    if (exporter) return others ? `NetFlow ${exporter} +${others}` : `NetFlow ${exporter}`
+    return others ? `NetFlow · ${others} filter${others === 1 ? '' : 's'}` : 'NetFlow (all)'
+  }
   if (r.service_check_id) return 'Service'
   if (r.service_check_group_id) return 'Svc group'
   if (r.group_id) return 'Group'
@@ -139,21 +147,30 @@ export function AlertRulesPage() {
                 {(rules || []).map((r) => (
                   <Tr key={r.id}>
                     <Td>
-                      <Switch checked={r.enabled} onCheckedChange={() => toggle.mutate(r.id)} />
+                      <Switch checked={r.enabled} onCheckedChange={() => toggle.mutate(r.id)} aria-label={`Rule ${r.name} enabled`} />
                     </Td>
                     <Td>
                       <div className="font-medium">{r.name}</div>
                       {r.description && <div className="max-w-xs truncate text-xs text-muted">{r.description}</div>}
                     </Td>
                     <Td className="text-xs">
-                      <div className="font-medium text-text">{TRIGGER_LABELS[r.trigger_on] || r.trigger_on || '—'}</div>
-                      <div className="font-mono text-[10px] text-muted">
-                        {r.metric === 'trap'
-                          ? r.trap_oid ? `trap ${r.trap_oid}` : 'any trap'
-                          : Array.isArray(r.conditions) && r.conditions.length > 1
-                          ? `${r.conditions.length} conditions (${r.condition_logic})`
-                          : r.metric}
-                      </div>
+                      {isNetflowMetric(r.metric) ? (
+                        <>
+                          <div className="font-medium text-text">{NETFLOW_METRIC_BY_KEY[r.metric as NetflowMetric].label}</div>
+                          <div className="max-w-[16rem] text-[10px] text-muted">{summarizeNetflowForm(formFromRule(r))}</div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="font-medium text-text">{TRIGGER_LABELS[r.trigger_on] || r.trigger_on || '—'}</div>
+                          <div className="font-mono text-[10px] text-muted">
+                            {r.metric === 'trap'
+                              ? r.trap_oid ? `trap ${r.trap_oid}` : 'any trap'
+                              : Array.isArray(r.conditions) && r.conditions.length > 1
+                              ? `${r.conditions.length} conditions (${r.condition_logic})`
+                              : r.metric}
+                          </div>
+                        </>
+                      )}
                     </Td>
                     <Td>
                       <Badge variant="outline" className="text-[10px]">{scopeLabel(r)}</Badge>

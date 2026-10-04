@@ -45,6 +45,22 @@ import { api } from '@/lib/api'
 import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { relativeTime } from '@/lib/utils'
+import { serverNow } from '@/lib/serverClock'
+import { useNfQuery } from '@/lib/netflow/api'
+import { apiErrorMessage, panelStatus } from '@/lib/netflow/status'
+import { StaleChip } from '@/components/netflow/QueryPanel'
+import { combinedStale, hasNfData } from './nfStale'
+import { hostPath } from '@/lib/netflow/links'
+import {
+  assessEmpty,
+  coverageLine,
+  groupFindings,
+  investigateLink,
+  rangeLink,
+  subjectText,
+  type FindingsResponse,
+} from '@/pages/netflow/anomalies/model'
+import { SeverityChip } from '@/pages/netflow/anomalies/parts'
 import { Sparkline } from '@/components/dashboard/Sparkline'
 import {
   CATEGORICAL,
@@ -102,16 +118,6 @@ type TopTalker = {
 }
 
 type ProtocolRow = { protocol: number; name: string; bytes: number; flows: number }
-
-type Anomaly = {
-  id: string
-  kind: string
-  severity: 'critical' | 'warning' | string
-  title: string
-  description: string
-  metric: number
-  metric_label: string
-}
 
 type LinkItem = {
   device_id: string
@@ -221,40 +227,33 @@ export function NetworkSecurityDashboard() {
     retry: 1,
   }).data
 
-  const nfOverview = useQuery<NetflowOverview>({
-    queryKey: ['netsec', 'nf-overview', range.minutes],
-    queryFn: async () => (await api.get(`/netflow/overview?minutes=${range.minutes}`)).data,
-    refetchInterval: 30_000,
-    retry: 1,
-  }).data
-
-  const nfSeries = useQuery<NetflowPoint[]>({
-    queryKey: ['netsec', 'nf-series', range.minutes],
-    queryFn: async () => (await api.get(`/netflow/timeseries?minutes=${range.minutes}&points=48`)).data,
-    refetchInterval: 30_000,
-    retry: 1,
-  }).data
-
-  const talkers = useQuery<TopTalker[]>({
-    queryKey: ['netsec', 'nf-talkers', range.minutes],
-    queryFn: async () => (await api.get(`/netflow/top-talkers?minutes=${range.minutes}&limit=6`)).data,
-    refetchInterval: 60_000,
-    retry: 1,
-  }).data
-
-  const protocols = useQuery<ProtocolRow[]>({
-    queryKey: ['netsec', 'nf-protocols', range.minutes],
-    queryFn: async () => (await api.get(`/netflow/protocols?minutes=${range.minutes}`)).data,
-    refetchInterval: 60_000,
-    retry: 1,
-  }).data
-
-  const anomalies = useQuery<{ findings: Anomaly[] } | Anomaly[]>({
-    queryKey: ['netsec', 'nf-anomalies', range.hours],
-    queryFn: async () => (await api.get(`/netflow/anomalies?hours=${Math.max(1, range.hours)}`)).data,
-    refetchInterval: 120_000,
-    retry: 1,
-  }).data
+  // NetFlow reads go through the envelope API (FE-03) and keep loading, failed and empty apart
+  // (NF-03): an unanswered query is never shown as zero traffic or "no threats".
+  const nfOpts = { keepPrevious: false } as const
+  const nfOverviewQ = useNfQuery<NetflowOverview>('/netflow/overview', { minutes: range.minutes }, { ...nfOpts, refetchInterval: 30_000 })
+  const nfSeriesQ = useNfQuery<NetflowPoint[]>('/netflow/timeseries', { minutes: range.minutes, points: 48 }, { ...nfOpts, refetchInterval: 30_000 })
+  const talkersQ = useNfQuery<TopTalker[]>('/netflow/top-talkers', { minutes: range.minutes, limit: 6 }, { ...nfOpts, refetchInterval: 60_000 })
+  const protocolsQ = useNfQuery<ProtocolRow[]>('/netflow/protocols', { minutes: range.minutes }, { ...nfOpts, refetchInterval: 60_000 })
+  // Findings recorded by the detection engine, seen in the range (not an ad-hoc raw scan).
+  // Enough rows to group the same activity seen by several exporters (one row per subject).
+  const findingsQ = useNfQuery<FindingsResponse>('/netflow/findings', { hours: range.hours, status: 'active', limit: 60 }, { ...nfOpts, refetchInterval: 120_000 })
+  const nfOverview = nfOverviewQ.data?.data
+  const nfSeries = nfSeriesQ.data?.data
+  const talkers = talkersQ.data?.data
+  const protocols = protocolsQ.data?.data
+  const nfState = {
+    overview: panelStatus(nfOverviewQ),
+    series: panelStatus(nfSeriesQ, { isEmpty: (d) => !d.data?.length }),
+    talkers: panelStatus(talkersQ, { isEmpty: (d) => !d.data?.length }),
+    protocols: panelStatus(protocolsQ, { isEmpty: (d) => !d.data?.length }),
+    findings: panelStatus(findingsQ, { isEmpty: () => false }),
+  }
+  // A failed refresh keeps the last good data with its time and a Retry (NF-03).
+  const trafficStale = combinedStale([nfOverviewQ, nfSeriesQ, protocolsQ])
+  const talkersStale = combinedStale([talkersQ])
+  const findingsStale = combinedStale([findingsQ])
+  const nfStale = !!(trafficStale || talkersStale || findingsStale)
+  const nfLink = (path: string, extra?: Record<string, string>) => rangeLink(path, range.key, range.hours, serverNow(), extra)
 
   const links = useQuery<LinkResponse>({
     queryKey: ['netsec', 'links', range.hours],
@@ -296,11 +295,13 @@ export function NetworkSecurityDashboard() {
   const total = summary?.total ?? 0
   const up = summary?.up ?? 0
 
-  const findings = useMemo<Anomaly[]>(() => {
-    if (!anomalies) return []
-    return Array.isArray(anomalies) ? anomalies : anomalies.findings || []
-  }, [anomalies])
-  const criticalFindings = findings.filter((f) => f.severity === 'critical').length
+  const findingsData = findingsQ.data?.data
+  const findings = findingsData?.items ?? []
+  const findingGroups = useMemo(() => groupFindings(findings).slice(0, 7), [findings])
+  const shownFindings = findingGroups.reduce((n, g) => n + 1 + g.others.length, 0)
+  const fCounts = findingsData?.counts
+  const criticalFindings = fCounts?.by_severity.critical ?? 0
+  const warningFindings = fCounts?.by_severity.warning ?? 0
 
   // The network team's feed: device-attached alerts (plus netpath events via rules).
   const netAlerts = useMemo(
@@ -356,9 +357,10 @@ export function NetworkSecurityDashboard() {
         title="Network & Security"
         subtitle={
           nfOverview
-            ? <>{fmtCount(nfOverview.flows)} flows · {fmtCount(nfOverview.src_hosts)} active hosts · {nfOverview.exporters} exporters · refreshes every 15s</>
-            : 'Fleet reachability, traffic, WAN paths and threat signals · refreshes every 15s'
+            ? <>{fmtCount(nfOverview.flows)} flows · {fmtCount(nfOverview.src_hosts)} active hosts · {nfOverview.exporters} exporters · {nfStale ? 'NetFlow refresh failed, showing earlier data' : 'refreshes every 15s'}</>
+            : `Fleet reachability, traffic, WAN paths and threat signals · ${nfStale ? 'NetFlow refresh failed, showing earlier data' : 'refreshes every 15s'}`
         }
+        live={nfStale ? 'stale' : 'live'}
         right={<><LiveClock /><RangePills value={rangeKey} onChange={setRangeKey} /></>}
       />
 
@@ -367,31 +369,36 @@ export function NetworkSecurityDashboard() {
         <KpiCard to="/devices" label="Devices Online" icon={<RouterIcon className="h-4 w-4" />} accent="success"
           value={<>{up}<span className="text-base font-medium text-muted">/{total}</span></>}
           sub={summary && (summary.down > 0
-            ? <span className="text-[10.5px] font-semibold text-danger">{summary.down} down</span>
+            ? <span className="text-[10.5px] font-semibold text-danger-fg">{summary.down} down</span>
             : summary.degraded > 0
-              ? <span className="text-[10.5px] text-warning">{summary.degraded} degraded</span>
-              : <span className="text-[10.5px] text-success">all reachable</span>)}
+              ? <span className="text-[10.5px] text-warning-fg">{summary.degraded} degraded</span>
+              : <span className="text-[10.5px] text-success-fg">all reachable</span>)}
           foot={<DeviceStatusBar s={summary} />}
         />
         <KpiCard to="/alerts" label="Active Alerts" icon={<AlertTriangle className="h-4 w-4" />}
           accent={(alertStats?.critical ?? 0) > 0 ? 'danger' : (alertStats?.active ?? 0) > 0 ? 'warning' : 'success'}
           value={fmtCount(alertStats?.active ?? 0)}
           sub={<span className="flex items-center gap-2 text-[10.5px]">
-            <span className="text-danger">{alertStats?.critical ?? 0} crit</span>
-            <span className="text-warning">{alertStats?.warning ?? 0} warn</span>
+            <span className="text-danger-fg">{alertStats?.critical ?? 0} crit</span>
+            <span className="text-warning-fg">{alertStats?.warning ?? 0} warn</span>
           </span>}
           foot={<div className="text-[10px] text-muted">{alertStats?.resolved_today ?? 0} resolved today</div>}
         />
-        <KpiCard to="/netflow" label="Traffic Now" icon={<Waves className="h-4 w-4" />} accent="info"
-          value={fmtBps(nfOverview?.current_bps ?? 0)}
-          sub={<span className="text-[10.5px] text-muted">peak {fmtBps(trafficStats.peak)}</span>}
+        <KpiCard to={nfLink('/netflow')} label="Traffic Now" icon={<Waves className="h-4 w-4" />} accent="info"
+          value={hasNfData(nfState.overview) ? fmtBps(nfOverview?.current_bps ?? 0) : '—'}
+          sub={<span className={`text-[10.5px] ${nfState.overview === 'stale' ? 'font-medium text-warning-fg' : 'text-text2'}`}>
+            {nfState.overview === 'loading' ? 'loading…'
+              : nfState.overview === 'error' || nfState.overview === 'forbidden' ? 'NetFlow unavailable'
+              : nfState.overview === 'stale' ? 'refresh failed'
+              : hasNfData(nfState.series) ? `peak ${fmtBps(trafficStats.peak)}` : 'rate at end of range'}
+          </span>}
           foot={<Sparkline values={trafficSpark.slice(-30)} color={SERIES.traffic} width={250} height={30} />}
         />
         <KpiCard to="/availability" label="Availability" icon={<HeartPulse className="h-4 w-4" />}
           accent={(exec?.kpis?.availability_pct ?? 100) >= 99.5 ? 'success' : 'warning'}
           value={exec?.kpis?.availability_pct != null ? `${exec.kpis.availability_pct.toFixed(2)}%` : '—'}
           sub={exec?.kpis?.availability_delta_pct != null
-            ? <span className={`flex items-center gap-0.5 text-[10.5px] ${exec.kpis.availability_delta_pct >= 0 ? 'text-success' : 'text-danger'}`}>
+            ? <span className={`flex items-center gap-0.5 text-[10.5px] ${exec.kpis.availability_delta_pct >= 0 ? 'text-success-fg' : 'text-danger-fg'}`}>
                 {exec.kpis.availability_delta_pct >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
                 {exec.kpis.availability_delta_pct >= 0 ? '+' : ''}{exec.kpis.availability_delta_pct.toFixed(2)}%
               </span>
@@ -408,19 +415,23 @@ export function NetworkSecurityDashboard() {
           accent={(netpath?.unreachable ?? 0) > 0 ? 'danger' : (netpath?.degraded ?? 0) > 0 ? 'warning' : 'success'}
           value={netpath ? <>{netpath.ok}<span className="text-base font-medium text-muted">/{netpath.enabled}</span></> : '—'}
           sub={netpath && (netpath.unreachable > 0
-            ? <span className="text-[10.5px] font-semibold text-danger">{netpath.unreachable} unreachable</span>
+            ? <span className="text-[10.5px] font-semibold text-danger-fg">{netpath.unreachable} unreachable</span>
             : netpath.degraded > 0
-              ? <span className="text-[10.5px] text-warning">{netpath.degraded} degraded</span>
-              : <span className="text-[10.5px] text-success">paths healthy</span>)}
+              ? <span className="text-[10.5px] text-warning-fg">{netpath.degraded} degraded</span>
+              : <span className="text-[10.5px] text-success-fg">paths healthy</span>)}
           foot={<div className="text-[10px] text-muted">{netpath?.path_changes_24h ?? 0} route changes · 24h</div>}
         />
-        <KpiCard to="/netflow/anomalies" label="Threat Signals" icon={<ShieldAlert className="h-4 w-4" />}
-          accent={criticalFindings > 0 ? 'danger' : findings.length > 0 ? 'warning' : 'success'}
-          value={fmtCount(findings.length)}
-          sub={findings.length
-            ? <span className="text-[10.5px] text-danger">{criticalFindings} critical</span>
-            : <span className="text-[10.5px] text-success">no detections</span>}
-          foot={<div className="text-[10px] text-muted">scan · sweep · exfil · beacon checks</div>}
+        <KpiCard to={nfLink('/netflow/anomalies')} label="Flow Findings" icon={<ShieldAlert className="h-4 w-4" />}
+          accent={!fCounts ? 'primary' : criticalFindings > 0 ? 'danger' : warningFindings > 0 ? 'warning' : fCounts.active > 0 ? 'info' : findingsData?.complete ? 'success' : 'primary'}
+          value={fCounts && nfState.findings !== 'error' && nfState.findings !== 'forbidden' ? fmtCount(fCounts.active) : '—'}
+          sub={<span className="text-[10.5px] text-text2">
+            {nfState.findings === 'loading' ? 'loading…'
+              : nfState.findings === 'forbidden' ? 'no NetFlow access'
+              : nfState.findings === 'error' ? 'detection status unavailable'
+              : fCounts && fCounts.active > 0 ? `${criticalFindings} critical · ${warningFindings} warning`
+              : findingsData?.complete ? 'none from the detectors that ran' : 'none recorded · coverage incomplete'}
+          </span>}
+          foot={<div className="text-[10px] text-text2">{findingsData ? coverageLine(findingsData.detectors) : 'flow detectors'}</div>}
         />
         <KpiCard to="/udt" label="Rogue Endpoints" icon={<ScanSearch className="h-4 w-4" />}
           accent={(udt?.rogue ?? 0) > 0 ? 'warning' : 'success'}
@@ -441,19 +452,19 @@ export function NetworkSecurityDashboard() {
               </span>
             )}
           />
-          <div className="grid grid-cols-4 gap-2 px-4 pt-3 text-center">
-            <MiniStat label="Current" value={fmtBps(nfOverview?.current_bps ?? 0)} tone="text-info" />
-            <MiniStat label="Average" value={fmtBps(trafficStats.avg)} tone="text-text" />
-            <MiniStat label="95th pct" value={fmtBps(trafficStats.p95)} tone="text-accent" />
-            <MiniStat label="Peak" value={fmtBps(trafficStats.peak)} tone="text-warning" />
+          {trafficStale && <StaleChip query={trafficStale} className="mx-4 mt-3" />}
+          {/* Values in body text (status colours as text fail 4.5:1 in the light theme, NF-29); the
+              stats follow the chart: shown whenever the chart is, from the same (possibly earlier) series. */}
+          <div className="grid grid-cols-2 gap-2 px-4 pt-3 text-center min-[480px]:grid-cols-4">
+            <MiniStat label="At range end" value={hasNfData(nfState.overview) ? fmtBps(nfOverview?.current_bps ?? 0) : '—'} />
+            <MiniStat label="Average" value={hasNfData(nfState.series) ? fmtBps(trafficStats.avg) : '—'} />
+            <MiniStat label="95th pct" value={hasNfData(nfState.series) ? fmtBps(trafficStats.p95) : '—'} />
+            <MiniStat label="Peak" value={hasNfData(nfState.series) ? fmtBps(trafficStats.peak) : '—'} />
           </div>
           <div className="h-[220px] px-2 pb-2 pt-1">
-            {!chartData.length ? (
-              <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
-                <Waves className="h-6 w-6 text-muted/50" />
-                <div className="text-xs text-muted">No flow records in this window</div>
-                <div className="text-[10px] text-muted/70">Point a NetFlow/IPFIX exporter at this appliance to light this up</div>
-              </div>
+            {nfState.series !== 'ok' && nfState.series !== 'stale' ? (
+              <NfState state={nfState.series} error={nfSeriesQ.error} onRetry={() => void nfSeriesQ.refetch()}
+                empty="No flow records in this window" emptyHint="Point a NetFlow/IPFIX exporter at this appliance to light this up" />
             ) : (
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData} margin={{ top: 8, right: 14, left: 0, bottom: 0 }}>
@@ -477,40 +488,69 @@ export function NetworkSecurityDashboard() {
           </div>
           <div className="border-t border-border px-4 py-2.5">
             <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Protocol mix · {range.label}</div>
-            <ShareBar parts={protoMix.map((p) => ({ label: p.name, value: p.bytes, color: p.color }))} height={10} />
-            <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
-              {protoMix.length === 0 && <span className="text-[10.5px] text-muted">No flow records in this window</span>}
-              {protoMix.map((p) => (
-                <span key={p.protocol} className="flex items-center gap-1.5 text-[10.5px] text-text2">
-                  <span className="h-2 w-2 rounded-sm" style={{ background: p.color }} />
-                  {p.name} <span className="font-mono text-muted">{p.pct.toFixed(0)}%</span>
-                </span>
-              ))}
-            </div>
+            {nfState.protocols === 'ok' || nfState.protocols === 'stale' ? (
+              <>
+                <ShareBar parts={protoMix.map((p) => ({ label: p.name, value: p.bytes, color: p.color }))} height={10} />
+                <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
+                  {protoMix.map((p) => (
+                    <span key={p.protocol} className="flex items-center gap-1.5 text-[10.5px] text-text2">
+                      <span className="h-2 w-2 rounded-sm" style={{ background: p.color }} />
+                      {p.name} <span className="font-mono text-muted">{p.pct.toFixed(0)}%</span>
+                    </span>
+                  ))}
+                </div>
+                <div className="mt-1 text-[10px] text-text2">Share of the top {protoMix.length} protocols' bytes</div>
+              </>
+            ) : (
+              <NfState compact state={nfState.protocols} error={protocolsQ.error} onRetry={() => void protocolsQ.refetch()} empty="No flow records in this window" />
+            )}
           </div>
         </Card>
 
         <Card className="xl:col-span-4">
-          <SectionHeader icon={<ShieldAlert className="h-3.5 w-3.5" />} title="Security Findings"
+          <SectionHeader icon={<ShieldAlert className="h-3.5 w-3.5" />} title="Flow Findings"
             hint={`flow detectors · ${range.label}`}
-            right={<Link to="/netflow/anomalies" className="text-xs text-primary hover:underline">Anomalies →</Link>} />
+            right={<Link to={nfLink('/netflow/anomalies')} className="text-xs text-primary hover:underline">Anomalies →</Link>} />
           <div className="px-3 pb-3 pt-2">
-            {!findings.length && <Empty text="No hostile patterns detected in this window 🎉" />}
-            <div className="space-y-1">
-              {findings.slice(0, 7).map((f) => (
-                <div key={f.id} className="flex gap-2.5 rounded-md px-2 py-1.5 transition hover:bg-surface2/50">
-                  <div className={`mt-0.5 w-1 shrink-0 self-stretch rounded-full ${f.severity === 'critical' ? 'bg-danger' : 'bg-warning'}`} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="truncate text-xs font-semibold text-text">{f.title}</span>
-                      <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted">{fmtCount(f.metric)} {f.metric_label}</span>
-                    </div>
-                    <div className="line-clamp-2 text-[11px] text-text2" title={f.description}>{f.description}</div>
+            {findingsStale && <StaleChip query={findingsStale} className="mb-2" />}
+            {nfState.findings !== 'ok' && nfState.findings !== 'stale' ? (
+              <NfState state={nfState.findings} error={findingsQ.error} onRetry={() => void findingsQ.refetch()} empty="" />
+            ) : !findings.length && findingsData ? (
+              (() => {
+                const a = assessEmpty({ detectors: findingsData.detectors, complete: findingsData.complete, engine: findingsData.engine, mode: 'stored', evaluatedPct: findingsData.engine?.evaluated_pct })
+                return (
+                  <div className="py-4 text-center" role="status">
+                    <div className={`text-xs font-semibold ${a.tone === 'success' ? 'text-success-fg' : a.tone === 'danger' ? 'text-danger-fg' : a.tone === 'warning' ? 'text-warning-fg' : 'text-text'}`}>{a.title}</div>
+                    <div className="mt-1 text-[11px] text-text2">{a.detail}</div>
                   </div>
-                  <Badge variant={f.severity === 'critical' ? 'danger' : 'warning'} className="self-center capitalize">{f.severity}</Badge>
-                </div>
-              ))}
-            </div>
+                )
+              })()
+            ) : (
+              <div className="space-y-1">
+                {findingGroups.map(({ key, primary: f, others }) => (
+                  <Link key={key} to={investigateLink(f) ?? nfLink('/netflow/anomalies')} className="flex gap-2.5 rounded-md px-2 py-1.5 transition hover:bg-surface2/50">
+                    <div className={`mt-0.5 w-1 shrink-0 self-stretch rounded-full ${f.severity === 'critical' ? 'bg-danger' : f.severity === 'warning' ? 'bg-warning' : 'bg-info'}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-xs font-semibold text-text">{f.title}</span>
+                        <span className="shrink-0 text-[10px] tabular-nums text-text2">{relativeTime(f.last_seen)}</span>
+                      </div>
+                      <div className="break-words font-mono text-[11px] text-text">
+                        {subjectText(f)}
+                        {others.length > 0 && <span className="ml-1.5 font-sans text-[10px] text-text2">· {others.length + 1} exporters</span>}
+                      </div>
+                      <div className="line-clamp-2 text-[11px] text-text2" title={f.description}>{f.description}</div>
+                    </div>
+                    <SeverityChip severity={f.severity} className="self-center" />
+                  </Link>
+                ))}
+                {fCounts && fCounts.active > shownFindings && (
+                  <Link to={nfLink('/netflow/anomalies')} className="block px-2 pt-1 text-[11px] text-primary hover:underline">
+                    {fCounts.active - shownFindings} more active finding{fCounts.active - shownFindings === 1 ? '' : 's'} →
+                  </Link>
+                )}
+              </div>
+            )}
           </div>
         </Card>
       </div>
@@ -531,7 +571,7 @@ export function NetworkSecurityDashboard() {
                       <span className="font-mono font-medium text-text">{l.if_name || `if${l.if_index}`}</span>
                       <span className="ml-1.5 text-[10px] text-muted">{l.hostname}{l.if_alias ? ` · ${l.if_alias}` : ''}</span>
                     </span>
-                    <span className={`shrink-0 font-mono text-[11px] font-semibold tabular-nums ${util >= 80 ? 'text-danger' : util >= 50 ? 'text-warning' : 'text-text2'}`}>
+                    <span className={`shrink-0 font-mono text-[11px] font-semibold tabular-nums ${util >= 80 ? 'text-danger-fg' : util >= 50 ? 'text-warning-fg' : 'text-text2'}`}>
                       {util.toFixed(1)}%
                     </span>
                   </div>
@@ -548,30 +588,35 @@ export function NetworkSecurityDashboard() {
 
         <Card className="xl:col-span-4">
           <SectionHeader icon={<Globe className="h-3.5 w-3.5" />} title="Top Talkers" hint={range.label}
-            right={<Link to="/netflow" className="text-xs text-primary hover:underline">NetFlow →</Link>} />
+            right={<Link to={nfLink('/netflow/top-talkers')} className="text-xs text-primary hover:underline">NetFlow →</Link>} />
           <div className="space-y-2.5 px-4 pb-4 pt-3">
-            {!talkers?.length && <Empty text="No flow records in this window" />}
-            {(talkers || []).map((t, i) => {
-              const max = talkers![0].bytes || 1
-              const app = t.ports?.[0]?.application || t.ports?.[0]?.service
-              return (
-                <div key={t.ip}>
-                  <div className="flex items-baseline justify-between text-xs">
-                    <span className="flex items-center gap-1.5 font-mono font-medium text-text">
-                      <span className="w-3 text-[9px] text-muted">{i + 1}</span>{t.ip}
-                      {app && <span className="rounded bg-surface2 px-1 py-px font-sans text-[8.5px] text-muted">{app}</span>}
-                    </span>
-                    <span className="font-mono text-[11px] font-semibold tabular-nums text-text2">{fmtBytes(t.bytes)}</span>
-                  </div>
-                  <InOutBar tx={t.src_bytes} rx={t.dst_bytes} scale={max} />
+            {talkersStale && <StaleChip query={talkersStale} />}
+            {nfState.talkers !== 'ok' && nfState.talkers !== 'stale' ? (
+              <NfState state={nfState.talkers} error={talkersQ.error} onRetry={() => void talkersQ.refetch()} empty="No flow records in this window" />
+            ) : (
+              <>
+                {(talkers || []).map((t, i) => {
+                  const max = talkers![0].bytes || 1
+                  const app = t.ports?.[0]?.application || t.ports?.[0]?.service
+                  return (
+                    <div key={t.ip}>
+                      <div className="flex items-baseline justify-between gap-2 text-xs">
+                        <span className="flex min-w-0 items-center gap-1.5 font-mono font-medium text-text">
+                          <span className="w-3 text-[9px] text-muted">{i + 1}</span>
+                          <Link to={hostPath(t.ip)} className="break-all hover:underline">{t.ip}</Link>
+                          {app && <span className="rounded bg-surface2 px-1 py-px font-sans text-[8.5px] text-text2">{app}</span>}
+                        </span>
+                        <span className="shrink-0 font-mono text-[11px] font-semibold tabular-nums text-text2">{fmtBytes(t.bytes)}</span>
+                      </div>
+                      <InOutBar tx={t.src_bytes} rx={t.dst_bytes} scale={max} />
+                    </div>
+                  )
+                })}
+                <div className="flex items-center gap-3 pt-1 text-[9.5px] text-text2">
+                  <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full" style={{ background: SERIES.traffic }} /> received</span>
+                  <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full" style={{ background: CATEGORICAL[3] }} /> sent</span>
                 </div>
-              )
-            })}
-            {!!talkers?.length && (
-              <div className="flex items-center gap-3 pt-1 text-[9.5px] text-muted">
-                <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full" style={{ background: SERIES.traffic }} /> received</span>
-                <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full" style={{ background: CATEGORICAL[3] }} /> sent</span>
-              </div>
+              </>
             )}
           </div>
         </Card>
@@ -581,9 +626,9 @@ export function NetworkSecurityDashboard() {
             right={<Link to="/netpath" className="text-xs text-primary hover:underline">NetPath →</Link>} />
           <div className="px-4 pb-3 pt-3">
             <div className="grid grid-cols-3 gap-2 text-center">
-              <PathStat label="Healthy" value={netpath?.ok ?? 0} tone="text-success" />
-              <PathStat label="Degraded" value={netpath?.degraded ?? 0} tone="text-warning" />
-              <PathStat label="Down" value={netpath?.unreachable ?? 0} tone="text-danger" />
+              <PathStat label="Healthy" value={netpath?.ok ?? 0} tone="text-success-fg" />
+              <PathStat label="Degraded" value={netpath?.degraded ?? 0} tone="text-warning-fg" />
+              <PathStat label="Down" value={netpath?.unreachable ?? 0} tone="text-danger-fg" />
             </div>
             <div className="mt-3 border-t border-border pt-2">
               <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Recent path events</div>
@@ -649,7 +694,7 @@ export function NetworkSecurityDashboard() {
                   <Link key={d.id} to={`/devices/${d.id}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-xs transition hover:bg-surface2/60">
                     <span className={`h-2 w-2 shrink-0 rounded-full ${d.status === 'down' ? 'bg-danger' : d.status === 'degraded' ? 'bg-warning' : critical > 0 ? 'bg-danger' : 'bg-warning'}`} />
                     <span className="min-w-0 flex-1 truncate font-medium text-text">{d.hostname}</span>
-                    {alerts > 0 && <span className={`rounded px-1 font-mono text-[10px] font-bold ${critical > 0 ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning'}`}>{alerts}</span>}
+                    {alerts > 0 && <span className={`rounded px-1 font-mono text-[10px] font-bold ${critical > 0 ? 'bg-danger/15 text-danger-fg' : 'bg-warning/15 text-warning-fg'}`}>{alerts}</span>}
                     <span className="shrink-0 text-[10px] capitalize text-muted">{d.status}</span>
                   </Link>
                 ))}
@@ -667,7 +712,7 @@ export function NetworkSecurityDashboard() {
               to="/traps"
               value={traps ? fmtCount(traps.total) : '—'}
               detail={traps
-                ? <><span className="text-danger">{traps.critical} crit</span> · <span className="text-warning">{traps.warning} warn</span></>
+                ? <><span className="text-danger-fg">{traps.critical} crit</span> · <span className="text-warning-fg">{traps.warning} warn</span></>
                 : 'collector offline'}
             />
             <PostureRow
@@ -706,11 +751,45 @@ export function NetworkSecurityDashboard() {
 
 /* ── Local building blocks ──────────────────────────────────────────────── */
 
-function MiniStat({ label, value, tone }: { label: string; value: string; tone: string }) {
+/** NetFlow widget states (NF-03): loading, no access, failed (with retry) and a genuinely empty result look different. */
+function NfState({ state, error, onRetry, empty, emptyHint, compact }: {
+  state: string
+  error: unknown
+  onRetry: () => void
+  empty: string
+  emptyHint?: string
+  compact?: boolean
+}) {
+  const pad = compact ? 'py-1' : 'h-full py-4'
+  if (state === 'loading') {
+    return <div className={`flex ${pad} items-center justify-center text-xs text-text2`} role="status" aria-busy="true">Loading NetFlow data…</div>
+  }
+  if (state === 'forbidden') {
+    return <div className={`flex ${pad} items-center justify-center text-xs text-text2`}>Your role does not include NetFlow data</div>
+  }
+  if (state === 'error') {
+    return (
+      <div className={`flex ${pad} flex-col items-center justify-center gap-1 text-center`} role="status">
+        <div className="text-xs font-medium text-danger-fg">Could not load NetFlow data</div>
+        <div className="text-[10.5px] text-text2">{apiErrorMessage(error)}</div>
+        <button type="button" onClick={onRetry} className="mt-0.5 rounded-md border border-border px-2 py-0.5 text-[11px] text-text hover:bg-surface2">Retry</button>
+      </div>
+    )
+  }
+  if (!empty) return null
+  return (
+    <div className={`flex ${pad} flex-col items-center justify-center gap-1 text-center`}>
+      <div className="text-xs text-text2">{empty}</div>
+      {emptyHint && <div className="text-[10px] text-text2">{emptyHint}</div>}
+    </div>
+  )
+}
+
+function MiniStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-border/60 bg-surface2/30 px-2 py-1.5">
-      <div className="text-[9px] font-bold uppercase tracking-wider text-muted">{label}</div>
-      <div className={`font-mono text-[13px] font-semibold tabular-nums ${tone}`}>{value}</div>
+      <div className="text-[9px] font-bold uppercase tracking-wider text-text2">{label}</div>
+      <div className="font-mono text-[13px] font-semibold tabular-nums text-text">{value}</div>
     </div>
   )
 }

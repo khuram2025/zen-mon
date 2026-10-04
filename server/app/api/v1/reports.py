@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.core.database import get_db
-from app.core.security import get_current_user, require_permission
+from app.core.permissions import has_permission
+from app.core.security import get_current_user, get_role_permissions, require_permission
 from app.models.user import User
 from app.services import availability_policy
+from app.services import netflow_alert_service as nfa
 from app.services.audit_service import write_audit_log
 from app.services.report_service import generate_report
 from app.services.export_service import generate_excel_report, generate_csv_report
@@ -59,6 +61,8 @@ async def generate_report_endpoint(
 ):
     name = REPORT_NAMES.get(data.report_type, 'Report')
     ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    # NetFlow alert messages are withheld from callers without netflow.view.
+    redact = await nfa.netflow_details_withheld(db, current_user)
 
     # A tag-scoped account may only export what it can see: the report is
     # confined to its visible devices, and report types whose sections read
@@ -85,6 +89,7 @@ async def generate_report_endpoint(
             group_ids=data.group_ids,
             locations=data.locations,
             device_types=data.device_types,
+            redact_netflow=redact,
         )
 
         if data.format == "excel":
@@ -160,11 +165,13 @@ async def get_technical_data(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Top-N worst devices, noisy alerts, bandwidth interfaces, alert volume."""
+    """Top-N worst devices, noisy alerts, bandwidth interfaces, alert volume.
+    NetFlow alert messages are withheld from callers without netflow.view."""
     _check_bounds(from_time, to_time)
     scope = await scoping.visible_tags(db, current_user)
+    redact = await nfa.netflow_details_withheld(db, current_user)
     try:
-        return await build_technical(db, from_time, to_time, visible_tags=scope)
+        return await build_technical(db, from_time, to_time, visible_tags=scope, redact_netflow=redact)
     except Exception:
         logger.exception("technical report data failed")
         raise HTTPException(status_code=500, detail="Technical report data failed")
@@ -233,6 +240,14 @@ async def update_availability_policy(
     return {"default_target_pct": body.default_target_pct, "source": "policy"}
 
 
+# The token is in the URL: never send it on as a Referer, never cache or index the page.
+SHARED_REPORT_HEADERS = {
+    "Cache-Control": "private, no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Robots-Tag": "noindex, nofollow",
+}
+
+
 @router.get("/shared/{token}", response_class=HTMLResponse)
 async def view_shared_report(
     token: str,
@@ -242,7 +257,10 @@ async def view_shared_report(
 
     Intentionally unauthenticated so email recipients (who are not logged in)
     can open the "View full report" link. The 32+ char random token is the
-    capability; rows can carry an optional expires_at.
+    capability; rows can carry an optional expires_at. The page is what the
+    schedule's owner may see, so the token is only ever listed to that owner
+    and reports.manage holders (``report_schedules.sees_share_links``), and
+    the response is kept out of caches, referrers and search indexes.
     """
     row = (await db.execute(
         text("SELECT html, expires_at FROM report_runs WHERE token = :t"),
@@ -254,7 +272,8 @@ async def view_shared_report(
         from datetime import datetime, timezone
         if row.expires_at < datetime.now(timezone.utc):
             raise HTTPException(status_code=410, detail="This report link has expired")
-    return HTMLResponse(content=row.html)
+    return HTMLResponse(content=row.html, headers=SHARED_REPORT_HEADERS)
+
 
 
 @router.get("/types")
@@ -358,6 +377,7 @@ async def report_catalog(
          # Which scope filters this report's sections actually honour.
          "filterable": (["devices"] if k == "availability" else
                         ["applications"] if any(s.startswith("rum_") for s in p["sections"])
+                        else ["netflow"] if any(s.startswith(("traffic_", "netflow_")) for s in p["sections"])
                         else [])}
         for k, p in _rs.REPORT_PRESETS.items()
     ]
@@ -418,11 +438,15 @@ async def render_section_report(
     device_ids: Optional[str] = Query(None, description="Comma-separated device UUIDs to scope node-aware sections"),
     application_id: Optional[str] = Query(None, max_length=128,
                                           description="Scope browser RUM sections to one application; omit for all"),
+    netflow: Optional[str] = Query(None, max_length=2000,
+                                   description="NetFlow scope for traffic sections: a URL-encoded flow filter "
+                                               "query string, e.g. exporter=10.0.0.1&app=DNS"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Render a section-engine report (preset key, or key='custom' +
-    custom_id) for an arbitrary window."""
+    custom_id) for an arbitrary window. NetFlow sections are restricted to
+    the flow exporters the caller may see."""
     try:
         title, description, section_ids = await _rs.resolve_report(db, key, custom_id)
     except KeyError:
@@ -441,14 +465,26 @@ async def render_section_report(
         filters = {"device_ids": ids}
     if application_id:
         filters = {**(filters or {}), "application_id": application_id.strip()}
+    if netflow:
+        from app.api.v1.netflow.common import NetflowError
+        from app.services import netflow_classify, netflow_groups, netflow_report
+        await netflow_classify.load_rules()
+        await netflow_groups.load_groups()
+        try:
+            nf_scope = netflow_report.scope_from_query(netflow)
+        except NetflowError as exc:
+            raise HTTPException(400, f"Invalid NetFlow scope: {exc.detail}")
+        if nf_scope:
+            filters = {**(filters or {}), "netflow": nf_scope}
 
     # Fail closed for tag-scoped accounts: only sections that honour a device
-    # filter may run, and the filter is pinned to the devices the user can see.
+    # filter (the filter is pinned to the devices the user can see) or that are
+    # confined by the requester's own NetFlow visibility may run.
     omitted = 0
     scoped, scoped_ids = await scoping.scoped_device_filter(
         db, current_user, (filters or {}).get("device_ids"))
     if scoped:
-        kept = [sid for sid in section_ids if sid in _rs.DEVICE_SCOPABLE_SECTIONS]
+        kept = [sid for sid in section_ids if sid in _rs.SCOPE_SAFE_SECTIONS]
         omitted = len(section_ids) - len(kept)
         if not kept:
             raise HTTPException(
@@ -459,7 +495,7 @@ async def render_section_report(
         filters.pop("application_id", None)
 
     start, end = _window_from_query(from_, to, hours)
-    sections = await _rs.build_sections(db, section_ids, start, end, filters)
+    sections = await _rs.build_sections(db, section_ids, start, end, filters, requester=current_user)
     category = (_rs.REPORT_PRESETS.get(key) or {}).get("category") or \
         ("Custom Report" if key == "custom" else "")
     scope_bits = []
@@ -467,6 +503,9 @@ async def render_section_report(
         scope_bits.append(f"{len(filters['device_ids'])} selected device(s)")
     if filters and filters.get("application_id"):
         scope_bits.append(f"application “{filters['application_id']}”")
+    if filters and filters.get("netflow"):
+        from app.services import netflow_report
+        scope_bits.append(f"NetFlow: {netflow_report.describe(filters['netflow'])}")
     scope_label = " · ".join(scope_bits) if scope_bits else "All monitored infrastructure"
     if scoped:
         scope_label = "Limited to your visibility scope" + (
@@ -484,6 +523,7 @@ async def render_section_report(
             "generated_label": meta["generated_label"],
             "company_name": meta["company_name"],
             "scope_label": scope_label,
+            "filters": {k: v for k, v in (filters or {}).items() if k in ("netflow", "application_id")},
             "sections": _rs.sections_to_json(sections),
         }
 
@@ -575,19 +615,29 @@ async def delete_custom_report(
 async def recent_report_runs(
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("reports.view")),
 ):
-    """Recent generated reports across all schedules (for the library page)."""
+    """Recent generated reports across all schedules (for the library page).
+    A run's share token only for its schedule's owner and report managers
+    (reports.manage holders not limited to a visibility scope; a run whose
+    schedule was deleted: report managers only)."""
+    from app.api.v1.report_schedules import is_report_manager
+
+    manager = await is_report_manager(db, current_user)
+    me = str(current_user.id)
     rows = (await db.execute(text(
         """SELECT r.id::text, r.title, r.report_type, r.period, r.token,
-                  r.status, r.delivered_to, r.generated_at, s.name AS schedule_name
+                  r.status, r.delivered_to, r.generated_at, s.name AS schedule_name,
+                  s.created_by::text AS owner_id
            FROM report_runs r
            LEFT JOIN report_schedules s ON s.id = r.schedule_id
            ORDER BY r.generated_at DESC LIMIT :lim"""), {"lim": limit})).fetchall()
-    return [
-        {"id": r[0], "title": r[1], "report_type": r[2], "period": r[3],
-         "token": r[4], "status": r[5], "delivered_to": r[6] or [],
-         "generated_at": r[7].isoformat() if r[7] else None,
-         "schedule_name": r[8]}
-        for r in rows
-    ]
+    out = []
+    for r in rows:
+        links = manager or (r[9] is not None and r[9] == me)
+        out.append({"id": r[0], "title": r[1], "report_type": r[2], "period": r[3],
+                    "token": r[4] if links else None, "token_withheld": not links,
+                    "status": r[5], "delivered_to": r[6] or [],
+                    "generated_at": r[7].isoformat() if r[7] else None,
+                    "schedule_name": r[8]})
+    return out

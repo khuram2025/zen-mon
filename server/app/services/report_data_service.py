@@ -951,14 +951,18 @@ async def build_technical(
     from_time: Optional[datetime],
     to_time: Optional[datetime],
     visible_tags: Optional[list[str]] = None,
+    *,
+    redact_netflow: bool = False,
 ) -> dict:
+    """``redact_netflow``: the requester lacks netflow.view, so a NetFlow
+    alert's message never reaches ``noisy_alerts`` (sample or grouping key)."""
     start, end = _normalise_window(from_time, to_time)
     errors = DataErrors()
 
     devices = await _fetch_devices(db, visible_tags=visible_tags)
     device_map = {str(d["id"]): d for d in devices}
     ids = list(device_map)
-    alerts = await _fetch_alerts(db, start, end, visible_tags=visible_tags)
+    alerts = await _fetch_alerts(db, start, end, visible_tags=visible_tags, redact_netflow=redact_netflow)
     maint = await _fetch_device_maintenance_windows(db, start, end)
     transitions = await asyncio.to_thread(
         errors.run, "device_status_log", _device_transitions, start, end, ids, default={})

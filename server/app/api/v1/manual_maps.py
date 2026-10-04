@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -11,9 +12,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.netflow import access as nf_access
+from app.api.v1.netflow.common import RAW, table_ref
+from app.api.v1.netflow.sql import EXPORTER, IF_IN, IF_OUT, VOLUME_GUARD, display
 from app.core.database import get_clickhouse_client, get_db
 from app.core.security import require_permission
 from app.models.user import User
+
+logger = logging.getLogger("zenplus.manual_maps")
 
 router = APIRouter(prefix="/maps", tags=["Manual Maps"])
 
@@ -941,7 +947,7 @@ async def links_live(
             ifaces_by_device.setdefault(str(row["device_id"]), []).append(dict(row))
 
     # For each link's two endpoints, try to match the typed interface
-    # name and collect (exporter_ip, ifindex) pairs we need traffic for.
+    # name and collect (device_id, ifindex) pairs we need traffic for.
     out: dict[str, dict] = {}
     flow_keys: set[tuple[str, int]] = set()
     snmp_keys: set[tuple[str, int]] = set()  # (device_id, if_index) for SNMP throughput
@@ -964,8 +970,7 @@ async def links_live(
                 return _empty_iface()
             payload = _iface_payload(matched)
             if payload["if_index"] is not None:
-                if side_node["ip"]:
-                    flow_keys.add((str(side_node["ip"]), int(payload["if_index"])))
+                flow_keys.add((str(side_node["device_id"]), int(payload["if_index"])))
                 snmp_keys.add((str(side_node["device_id"]), int(payload["if_index"])))
             return payload
 
@@ -976,61 +981,76 @@ async def links_live(
             "_dst_node": dst_node,
         }
 
-    # NetFlow query — one round-trip for every (exporter_ip, ifindex) we
-    # need. If ClickHouse is unavailable or there are no matched interfaces
-    # we just return matched=true with null throughput.
+    # NetFlow query — one round-trip for every (device, ifindex) we need.
+    # A device's flows come from every exporter it owns under the NetFlow
+    # ownership rule (explicit exporter->device mapping first, then the
+    # management IP) that the caller may see; without netflow.view, or when
+    # no visible exporter belongs to a device, its links fall back to SNMP
+    # below. If ClickHouse is unavailable we return matched=true with SNMP
+    # throughput or null.
     flow_map: dict[tuple[str, int], dict] = {}
-    if flow_keys:
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(seconds=_LIVE_WINDOW_SECONDS)
-        ip_list = sorted({ip for ip, _ in flow_keys})
-        idx_list = sorted({idx for _, idx in flow_keys})
-        try:
-            client = get_clickhouse_client()
-            res = client.query(
-                """
-                SELECT toString(exporter_ip) AS exporter_ip,
-                       ifindex,
-                       sum(in_bytes)   AS in_bytes,
-                       sum(out_bytes)  AS out_bytes,
-                       sum(in_packets) AS in_packets,
-                       sum(out_packets) AS out_packets
-                FROM (
-                    SELECT exporter_ip, input_snmp AS ifindex,
-                           sum(bytes) AS in_bytes, 0 AS out_bytes,
-                           sum(packets) AS in_packets, 0 AS out_packets
-                    FROM zenplus.flow_records
-                    WHERE timestamp BETWEEN %(start)s AND %(end)s
-                      AND input_snmp != 0
-                      AND toString(exporter_ip) IN %(ips)s
-                      AND input_snmp IN %(idx)s
-                    GROUP BY exporter_ip, input_snmp
-                    UNION ALL
-                    SELECT exporter_ip, output_snmp AS ifindex,
-                           0 AS in_bytes, sum(bytes) AS out_bytes,
-                           0 AS in_packets, sum(packets) AS out_packets
-                    FROM zenplus.flow_records
-                    WHERE timestamp BETWEEN %(start)s AND %(end)s
-                      AND output_snmp != 0
-                      AND toString(exporter_ip) IN %(ips)s
-                      AND output_snmp IN %(idx)s
-                    GROUP BY exporter_ip, output_snmp
+    vis = await nf_access.visibility_for_user(db, user)
+    if flow_keys and vis.can(nf_access.VIEW_PERMISSION):
+        owners = await nf_access.resolve_exporter_owners(db)
+        wanted_devices = {did for did, _ in flow_keys}
+        exporters = sorted(
+            ip for ip, o in owners.items() if o.device_id in wanted_devices and vis.allows(ip)
+        )
+        if exporters:
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(seconds=_LIVE_WINDOW_SECONDS)
+            exp_sql, params = nf_access.exporters_predicate(exporters, param="mm_exp")
+            params.update(start=start, end=end, idx=sorted({idx for _, idx in flow_keys}))
+            where = f"timestamp >= %(start)s AND timestamp < %(end)s AND {exp_sql} AND {VOLUME_GUARD}"
+            try:
+                client = get_clickhouse_client()
+                res = client.query(
+                    f"""
+                    SELECT {display(EXPORTER)} AS exporter,
+                           ifindex,
+                           sum(in_bytes)   AS in_bytes,
+                           sum(out_bytes)  AS out_bytes,
+                           sum(in_packets) AS in_packets,
+                           sum(out_packets) AS out_packets
+                    FROM (
+                        SELECT exporter_ip, exporter_ip6, {IF_IN} AS ifindex,
+                               sum(bytes) AS in_bytes, 0 AS out_bytes,
+                               sum(packets) AS in_packets, 0 AS out_packets
+                        FROM {table_ref(RAW)}
+                        WHERE {where} AND {IF_IN} IN %(idx)s
+                        GROUP BY exporter_ip, exporter_ip6, ifindex
+                        UNION ALL
+                        SELECT exporter_ip, exporter_ip6, {IF_OUT} AS ifindex,
+                               0 AS in_bytes, sum(bytes) AS out_bytes,
+                               0 AS in_packets, sum(packets) AS out_packets
+                        FROM {table_ref(RAW)}
+                        WHERE {where} AND {IF_OUT} IN %(idx)s
+                        GROUP BY exporter_ip, exporter_ip6, ifindex
+                    )
+                    GROUP BY exporter_ip, exporter_ip6, ifindex
+                    """,
+                    parameters=params,
                 )
-                GROUP BY exporter_ip, ifindex
-                """,
-                parameters={"start": start, "end": end, "ips": ip_list, "idx": idx_list},
-            )
-            for r in res.result_rows:
-                flow_map[(str(r[0]), int(r[1]))] = {
-                    "in_bytes": int(r[2] or 0),
-                    "out_bytes": int(r[3] or 0),
-                    "in_packets": int(r[4] or 0),
-                    "out_packets": int(r[5] or 0),
-                }
-        except Exception:
-            # ClickHouse may not be reachable or netflow may be disabled —
-            # interface status still useful, just no throughput.
-            flow_map = {}
+                for r in res.result_rows:
+                    owner = owners.get(nf_access.canonical_ip(r[0]))
+                    if owner is None:
+                        continue
+                    key = (owner.device_id, int(r[1]))
+                    if key not in flow_keys:
+                        continue
+                    # A device exporting from several addresses sums them:
+                    # the ifIndex names the same interface on each.
+                    agg = flow_map.setdefault(key, {"in_bytes": 0, "out_bytes": 0,
+                                                    "in_packets": 0, "out_packets": 0})
+                    agg["in_bytes"] += int(r[2] or 0)
+                    agg["out_bytes"] += int(r[3] or 0)
+                    agg["in_packets"] += int(r[4] or 0)
+                    agg["out_packets"] += int(r[5] or 0)
+            except Exception:
+                # ClickHouse may not be reachable or netflow may be disabled —
+                # interface status still useful, just no NetFlow throughput.
+                logger.exception("NetFlow link rates failed for map %s", map_id)
+                flow_map = {}
 
     # SNMP interface counters — the universal throughput source. NetFlow only
     # exists for flow-exporting devices (firewalls/routers); SNMP polls every
@@ -1075,7 +1095,7 @@ async def links_live(
             node = payload[node_key]
             if not side.get("matched") or not node:
                 continue
-            f = flow_map.get((str(node["ip"]), int(side["if_index"])))
+            f = flow_map.get((str(node["device_id"]), int(side["if_index"])))
             if f:
                 # NetFlow: bytes over the window → bits/sec.
                 in_bps = (f["in_bytes"] * 8) / window

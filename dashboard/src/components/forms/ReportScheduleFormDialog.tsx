@@ -17,6 +17,8 @@ import {
   SECTION_REPORT_TYPES,
   useReportCatalog,
 } from '@/hooks/useReportCatalog'
+import { FilterChips } from '@/components/netflow/FilterChips'
+import { flowFilterFromDraft, type FlowFilterDraft } from '@/lib/netflow/filters'
 
 export type ReportSchedule = {
   id: string
@@ -98,7 +100,7 @@ export function ReportScheduleFormDialog({
   onOpenChange: (open: boolean) => void
   schedule: ReportSchedule | null
   /** Initial report type when creating (schedule == null), e.g. from a report viewer. */
-  prefill?: { report_type?: string; custom_report_id?: string | null }
+  prefill?: { report_type?: string; custom_report_id?: string | null; filters?: Record<string, any>; period?: string }
 }) {
   const qc = useQueryClient()
   const [form, setForm] = useState<Form>(DEFAULT)
@@ -111,6 +113,8 @@ export function ReportScheduleFormDialog({
         ...DEFAULT,
         ...(prefill?.report_type ? { report_type: prefill.report_type } : {}),
         custom_report_id: prefill?.custom_report_id ?? null,
+        ...(prefill?.filters ? { filters: prefill.filters } : {}),
+        ...(prefill?.period ? { period: prefill.period } : {}),
       })
       return
     }
@@ -294,6 +298,28 @@ export function ReportScheduleFormDialog({
               </Select>
             </FormField>
           </div>
+
+          {form.filters?.netflow && Object.keys(form.filters.netflow).length > 0 && (
+            <div className="space-y-1.5 rounded-md border border-border bg-surface2/40 px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-text2">NetFlow scope saved with this schedule</span>
+                <button
+                  type="button"
+                  className="text-[11px] font-medium text-text2 underline-offset-2 hover:text-text hover:underline"
+                  onClick={() => setForm((s) => {
+                    const { netflow: _drop, ...rest } = s.filters || {}
+                    return { ...s, filters: rest }
+                  })}
+                >
+                  Remove scope
+                </button>
+              </div>
+              <FilterChips filter={flowFilterFromDraft(form.filters.netflow as FlowFilterDraft).filter} />
+              <p className="text-[11px] text-text2">
+                Every run covers the period above with exactly this scope, limited to the exporters the schedule's owner may see.
+              </p>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <FormField label="Frequency">

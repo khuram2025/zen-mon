@@ -44,13 +44,31 @@ function containsDescription(node: React.ReactNode, depth = 0): boolean {
 export const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => {
+>(({ className, children, onCloseAutoFocus, ...props }, ref) => {
   // Radix points aria-describedby at a description id by default and warns
   // when none is rendered. Without a description, drop the dangling
   // reference (the title still names the dialog); callers may override.
   const describedBy = 'aria-describedby' in props || containsDescription(children)
     ? {}
     : { 'aria-describedby': undefined }
+  // Radix returns focus on close to a <DialogTrigger> only. A dialog opened
+  // from code (a row button, a URL parameter) has none, so focus fell to the
+  // document body on Escape. Remember what had focus when the dialog opened
+  // and return there, unless the caller handles it or the element is gone.
+  const opener = React.useRef<HTMLElement | null>(
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement
+      : null,
+  )
+  const handleCloseAutoFocus = (event: Event) => {
+    onCloseAutoFocus?.(event)
+    if (event.defaultPrevented) return
+    const el = opener.current
+    if (el && el.isConnected) {
+      event.preventDefault()
+      el.focus({ preventScroll: true })
+    }
+  }
   return (
   <DialogPortal>
     <DialogOverlay />
@@ -68,6 +86,7 @@ export const DialogContent = React.forwardRef<
       )}
       {...describedBy}
       {...props}
+      onCloseAutoFocus={handleCloseAutoFocus}
     >
       {children}
       <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 focus:outline-none">

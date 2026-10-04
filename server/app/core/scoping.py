@@ -155,20 +155,44 @@ async def scoped_device_filter(
     return True, ids or [NO_MATCH_ID]
 
 
-async def visible_exporter_ips(db: AsyncSession, scope: list[str]) -> list[str]:
-    """NetFlow exporter IPs that belong to devices in scope: a device's own
-    management IP, or an exporter an operator explicitly mapped to such a
-    device. An exporter that resolves to no visible device is not visible."""
-    rows = (await db.execute(
-        text(
-            "SELECT DISTINCT ip FROM ("
-            " SELECT host(CAST(d.ip_address AS inet)) AS ip FROM devices d"
-            f" WHERE d.ip_address IS NOT NULL AND {jsonb_tags_visible('d.tags')}"
-            " UNION"
-            " SELECT host(m.exporter_ip) FROM netflow_exporter_devices m"
-            f" JOIN devices d ON d.id = m.device_id WHERE {jsonb_tags_visible('d.tags')}"
-            ") x WHERE ip IS NOT NULL"
-        ),
-        {SCOPE_PARAM: scope},
-    )).scalars().all()
-    return sorted(rows)
+async def other_scope_tags(db: AsyncSession, exclude: list[str] | None = None) -> set[str]:
+    """Tags that define some active user's visibility scope (lowercased),
+    minus ``exclude``. Assigning one of them to an entity publishes it into
+    that team's view."""
+    rows = (await db.execute(text(
+        "SELECT scope_tags FROM users WHERE is_active AND scope_tags IS NOT NULL "
+        "AND jsonb_typeof(scope_tags) = 'array' AND jsonb_array_length(scope_tags) > 0"
+    ))).scalars().all()
+    out: set[str] = set()
+    for r in rows:
+        out |= tag_set(r)
+    return out - set(exclude or ())
+
+
+async def assert_tags_assignable(db: AsyncSession, user: User, tags, *, previous=None) -> None:
+    """Tag writes by a scoped user (403 otherwise):
+
+    * the entity must keep at least one of the user's scope tags -- a scoped
+      user cannot create or re-tag an entity into invisibility;
+    * a tag newly added must not be another team's scope tag -- a scoped
+      user cannot push an entity (and with a device, the flow exporter its
+      address owns) into another team's view.
+
+    Other tags (classification such as a site or role) stay free. Unscoped
+    users and administrators are not limited.
+    """
+    scope = await visible_tags(db, user)
+    if scope is None:
+        return
+    from fastapi import HTTPException
+
+    wanted = tag_set(list(tags or []))
+    if not wanted & set(scope):
+        raise HTTPException(status_code=403, detail=(
+            "The device must carry at least one of your scope tags: " + ", ".join(scope)))
+    added = wanted - tag_set(list(previous or []))
+    foreign = sorted(added & (await other_scope_tags(db, exclude=scope)))
+    if foreign:
+        raise HTTPException(status_code=403, detail=(
+            "These tags define another team's scope and can only be assigned by an administrator: "
+            + ", ".join(foreign)))

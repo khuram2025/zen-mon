@@ -2,7 +2,7 @@
  * SolarWinds-style alert rule wizard — properties, trigger, reset, scope,
  * trigger actions, reset actions, schedule, and review.
  */
-import { FormEvent, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { FormEvent, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Bell,
@@ -40,6 +40,17 @@ import {
 } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
 import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
+import { NetflowConditionFields, NetflowDryRun, NetflowScopeFields } from './NetflowAlertFields'
+import {
+  defaultNetflowForm,
+  describeScopeDraft,
+  formFromRule,
+  isNetflowMetric,
+  netflowPayload,
+  summarizeNetflowForm,
+  validateNetflowForm,
+  type NetflowRuleForm,
+} from './netflowAlertRule'
 
 type Cond = { metric: string; operator: string; threshold: number; reset_threshold?: number | null }
 
@@ -53,7 +64,7 @@ type WizardState = {
   description: string
   enabled: boolean
   severity: 'info' | 'warning' | 'critical'
-  source: 'device' | 'service' | 'trap' | 'syslog' | 'apm'
+  source: 'device' | 'service' | 'trap' | 'syslog' | 'apm' | 'netflow'
   conditions: Cond[]
   condition_logic: 'AND' | 'OR'
   trigger_on: 'any' | 'down' | 'up' | 'degraded'
@@ -82,6 +93,8 @@ type WizardState = {
   recovery_email_subject: string
   recovery_email_body: string
   recovery_sms_template: string
+  /** NetFlow rules (source 'netflow'): condition, parameters and FlowFilter scope. */
+  nf: NetflowRuleForm
 }
 
 const STEPS = [
@@ -211,11 +224,12 @@ const DEFAULT_STATE: WizardState = {
   recovery_email_subject: '',
   recovery_email_body: '',
   recovery_sms_template: '',
+  nf: defaultNetflowForm(),
 }
 
 function ruleToState(rule: any): WizardState {
   const source =
-    rule.metric === 'syslog' ? 'syslog' : rule.metric === 'trap'
+    isNetflowMetric(rule.metric) ? 'netflow' : rule.metric === 'syslog' ? 'syslog' : rule.metric === 'trap'
       ? 'trap'
       : String(rule.metric || '').startsWith('apm_')
       ? 'apm'
@@ -269,6 +283,7 @@ function ruleToState(rule: any): WizardState {
     // column, which is NULL on any rule using the built-in wording and left
     // the editor showing six empty boxes.
     ...templateState(rule.effective_templates || rule),
+    nf: isNetflowMetric(rule.metric) ? formFromRule(rule) : defaultNetflowForm(),
   }
 }
 
@@ -290,7 +305,7 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
   const conditions = isDevice && (s.conditions.length > 1 || first.reset_threshold != null) ? s.conditions : null
   const recovery = !isTrap && !isSyslog && s.reset_mode === 'auto'
 
-  return {
+  const payload: Record<string, any> = {
     name: s.name,
     description: s.description || null,
     enabled: s.enabled,
@@ -341,6 +356,18 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
     recovery_email_body: recovery ? customOrNull(s.recovery_email_body, defaults.recovery_email_body) : null,
     recovery_sms_template: recovery ? customOrNull(s.recovery_sms_template, defaults.recovery_sms_template) : null,
   }
+  if (s.source === 'netflow') {
+    // One condition; the scope is the FlowFilter, not the device columns.
+    const nf = netflowPayload(s.nf)
+    Object.assign(payload, {
+      metric: nf.metric, operator: nf.operator, threshold: nf.threshold,
+      flow_scope: nf.flow_scope, flow_params: nf.flow_params,
+      conditions: null, trigger_on: 'any', trap_oid: null, target: null, min_duration: 0,
+      device_id: null, group_id: null, device_type: null, location: null, scope_tag: null,
+      service_check_id: null, service_check_group_id: null,
+    })
+  }
+  return payload
 }
 
 function customOrNull(value: string, fallback?: string | null): string | null {
@@ -348,6 +375,10 @@ function customOrNull(value: string, fallback?: string | null): string | null {
   if (!text) return null
   return text === (fallback || '').trim() ? null : value
 }
+
+const WIZARD_FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), ' +
+  'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 export function AlertRuleWizardDialog({
   open,
@@ -366,6 +397,7 @@ export function AlertRuleWizardDialog({
   const [preview, setPreview] = useState<any>(null)
   const [livePreview, setLivePreview] = useState<any>(null)
   const isRumMetric = s.source === 'apm' && s.conditions[0]?.metric.startsWith('apm_rum_')
+  const nfErrors = useMemo(() => (s.source === 'netflow' ? validateNetflowForm(s.nf) : {}), [s.source, s.nf])
 
   // Which default wording this rule's notifications are built from. Service
   // checks and traps lead with different sentences than a device does, so the
@@ -607,7 +639,9 @@ export function AlertRuleWizardDialog({
   const summary = useMemo(() => {
     const first = s.conditions[0]
     const condText =
-      s.source === 'trap'
+      s.source === 'netflow'
+        ? summarizeNetflowForm(s.nf)
+        : s.source === 'trap'
         ? s.trap_oid ? `Trap OID prefix ${s.trap_oid}` : 'Any SNMP trap'
         : s.source === 'service'
         ? `Service status → ${s.trigger_on}`
@@ -632,7 +666,20 @@ export function AlertRuleWizardDialog({
       (scopeMode === 'type' && !s.device_type) ||
       (scopeMode === 'location' && !s.location) ||
       (scopeMode === 'tag' && !s.scope_tag)
-    if (!isService && s.source !== 'apm' && scopeEmpty) {
+    if (s.source === 'netflow') {
+      const errs = validateNetflowForm(s.nf) as Record<string, string>
+      const keys = Object.keys(errs)
+      if (keys.length) {
+        const scopeKeys = new Set(['scope', 'exporter', 'iface', 'iface_dir', 'talker', 'src', 'dst', 'not_talker',
+          'not_src', 'not_dst', 'protocol', 'port', 'src_port', 'dst_port', 'dst_ports', 'service_port', 'app',
+          'dscp', 'netclass', 'tcpflag', 'hour', 'dow', 'group', 'asn', 'ip_version', 'direction', 'min_bytes',
+          'max_bytes', 'count'])
+        toast.error('NetFlow rule incomplete', errs[keys[0]])
+        setStep(keys.some((k) => scopeKeys.has(k)) && keys.every((k) => scopeKeys.has(k)) ? 'scope' : 'trigger')
+        return
+      }
+    }
+    if (!isService && s.source !== 'apm' && s.source !== 'netflow' && scopeEmpty) {
       toast.error('Scope incomplete', `Select a ${scopeMode === 'type' ? 'device type' : scopeMode}, or choose "All devices".`)
       setStep('scope')
       return
@@ -659,20 +706,66 @@ export function AlertRuleWizardDialog({
   }
   const isService = s.source === 'service'
 
+  // The drawer is a modal dialog: named by its title, focus moves into it on
+  // open, Tab stays inside, Escape closes it and focus returns to the opener.
+  const titleId = useId()
+  const descId = useId()
+  const panelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const active = document.activeElement
+    const opener = active instanceof HTMLElement && active !== document.body ? active : null
+    panelRef.current?.focus({ preventScroll: true })
+    return () => {
+      if (opener?.isConnected) opener.focus({ preventScroll: true })
+    }
+  }, [open])
+  const onPanelKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const panel = panelRef.current
+    // Keys from a popover rendered in a portal (a Select list) are its own.
+    if (!panel || !panel.contains(e.target as Node)) return
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      onOpenChange(false)
+      return
+    }
+    if (e.key !== 'Tab') return
+    const items = Array.from(panel.querySelectorAll<HTMLElement>(WIZARD_FOCUSABLE)).filter((el) => el.offsetParent !== null)
+    if (!items.length) return
+    const first = items[0]
+    const last = items[items.length - 1]
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault()
+      first.focus()
+    }
+  }
+
   if (!open) return null
 
   return (
     <div className="fixed inset-0 z-50 flex">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => onOpenChange(false)} />
-      <div className="relative ml-auto flex h-full w-full max-w-3xl flex-col border-l border-border bg-surface shadow-2xl">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" aria-hidden onClick={() => onOpenChange(false)} />
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descId}
+        tabIndex={-1}
+        onKeyDown={onPanelKeyDown}
+        className="relative ml-auto flex h-full w-full max-w-3xl flex-col border-l border-border bg-surface shadow-2xl focus:outline-none"
+      >
         {/* Header */}
         <div className="flex shrink-0 items-center justify-between border-b border-border px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold">{isEdit ? 'Edit Alert' : 'Create Alert'}</h2>
-            <p className="text-xs text-muted">SolarWinds-style alert wizard — step {stepIdx + 1} of {STEPS.length}</p>
+            <h2 id={titleId} className="text-lg font-semibold">{isEdit ? 'Edit Alert' : 'Create Alert'}</h2>
+            <p id={descId} className="text-xs text-muted">SolarWinds-style alert wizard — step {stepIdx + 1} of {STEPS.length}</p>
           </div>
-          <button type="button" onClick={() => onOpenChange(false)} className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-text">
-            <X className="h-5 w-5" />
+          <button type="button" aria-label="Close the alert wizard" onClick={() => onOpenChange(false)} className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-text">
+            <X className="h-5 w-5" aria-hidden />
           </button>
         </div>
 
@@ -732,10 +825,11 @@ export function AlertRuleWizardDialog({
                 </FormField>
                 <div className="flex items-center justify-between rounded-lg border border-border px-4 py-3">
                   <div>
-                    <div className="text-sm font-medium">Enabled</div>
-                    <div className="text-xs text-muted">Rule evaluates immediately when enabled</div>
+                    <div id={`${titleId}-enabled`} className="text-sm font-medium">Enabled</div>
+                    <div id={`${titleId}-enabled-h`} className="text-xs text-muted">Rule evaluates immediately when enabled</div>
                   </div>
-                  <Switch checked={s.enabled} onCheckedChange={(v) => setS({ ...s, enabled: v })} />
+                  <Switch checked={s.enabled} onCheckedChange={(v) => setS({ ...s, enabled: v })}
+                    aria-labelledby={`${titleId}-enabled`} aria-describedby={`${titleId}-enabled-h`} />
                 </div>
               </div>
             )}
@@ -743,8 +837,8 @@ export function AlertRuleWizardDialog({
             {step === 'trigger' && (
               <div className="space-y-4">
                 <SectionTitle title="Trigger Conditions" hint="Define when this alert fires. Add multiple child conditions with AND/OR logic." />
-                <div className="flex rounded-lg border border-border bg-surface2 p-1 text-xs">
-                  {(['device', 'service', 'trap', 'syslog', 'apm'] as const).map((src) => (
+                <div className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-surface2 p-1 text-xs sm:flex">
+                  {(['device', 'service', 'trap', 'syslog', 'apm', 'netflow'] as const).map((src) => (
                     <button
                       key={src}
                       type="button"
@@ -756,15 +850,18 @@ export function AlertRuleWizardDialog({
                           setS({ ...s, source: src, target: '', reset_mode: 'none', conditions: [{ metric: 'syslog', operator: '<=', threshold: 4 }] })
                         } else if (src === 'apm') {
                           setS({ ...s, source: src, target: '', conditions: [{ metric: 'apm_latency_p95', operator: '>', threshold: 800 }] })
-                        } else if (s.source === 'apm' || s.source === 'syslog') {
+                        } else if (src === 'netflow') {
+                          setS({ ...s, source: src, target: '', reset_mode: 'auto', recovery_alert: true })
+                        } else if (s.source === 'apm' || s.source === 'syslog' || s.source === 'netflow') {
                           setS({ ...s, source: src, target: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
                         } else {
                           setS({ ...s, source: src })
                         }
                       }}
-                      className={cn('flex-1 rounded-md py-2 font-medium', s.source === src ? 'bg-primary text-white' : 'text-muted')}
+                      aria-pressed={s.source === src}
+                      className={cn('flex-1 rounded-md px-1 py-2 font-medium', s.source === src ? 'bg-primary text-white' : 'text-muted')}
                     >
-                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : src === 'syslog' ? 'Syslog' : 'APM & RUM'}
+                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : src === 'syslog' ? 'Syslog' : src === 'apm' ? 'APM & RUM' : 'NetFlow'}
                     </button>
                   ))}
                 </div>
@@ -910,7 +1007,11 @@ export function AlertRuleWizardDialog({
                   </div>
                 )}
 
-                {s.source !== 'trap' && s.source !== 'syslog' && <FormField label="Condition must exist for" hint="Hold time before firing — prevents flapping alerts (SolarWinds 'condition must exist for more than').">
+                {s.source === 'netflow' && (
+                  <NetflowConditionFields form={s.nf} errors={nfErrors} onChange={(nf) => setS((st) => ({ ...st, nf }))} />
+                )}
+
+                {s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && <FormField label="Condition must exist for" hint="Hold time before firing — prevents flapping alerts (SolarWinds 'condition must exist for more than').">
                   <div className="flex items-center gap-3">
                     <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
                     <span className="text-sm text-muted">seconds (0 = fire immediately)</span>
@@ -950,7 +1051,13 @@ export function AlertRuleWizardDialog({
             {step === 'scope' && (
               <div className="space-y-4">
                 <SectionTitle title="Scope" hint="Which objects this alert monitors." />
-                {s.source === 'apm' ? (
+                {s.source === 'netflow' ? (
+                  <div className="space-y-4">
+                    <NetflowScopeFields form={s.nf} errors={nfErrors} open={open}
+                      onChange={(nf) => setS((st) => ({ ...st, nf }))} />
+                    <NetflowDryRun form={s.nf} />
+                  </div>
+                ) : s.source === 'apm' ? (
                   <FormField
                     label={isRumMetric ? 'Browser application / environment' : 'Application service'}
                     hint={isRumMetric
@@ -1173,9 +1280,11 @@ export function AlertRuleWizardDialog({
                       <Switch
                         checked={!!lv.repeat_every_minutes}
                         onCheckedChange={(v) => updateEsc(i, { repeat_every_minutes: v ? Math.max(lv.after_minutes, 15) : null })}
+                        aria-label={`Repeat escalation level ${i + 1}`}
                       />
                       <span className="text-muted">Repeat this level every</span>
                       <Input type="number" min={1} className="w-20" disabled={!lv.repeat_every_minutes}
+                        aria-label={`Repeat escalation level ${i + 1} every N minutes`}
                         value={lv.repeat_every_minutes ?? ''}
                         onChange={(e) => updateEsc(i, { repeat_every_minutes: Number(e.target.value) || null })} />
                       <span className="text-muted">minutes until acknowledged or resolved</span>
@@ -1265,7 +1374,14 @@ export function AlertRuleWizardDialog({
                 <ReviewRow label="Name" value={s.name || '—'} />
                 <ReviewRow label="Severity" value={<Badge variant={s.severity === 'critical' ? 'danger' : s.severity === 'warning' ? 'warning' : 'info'}>{s.severity}</Badge>} />
                 <ReviewRow label="Trigger" value={summary.condText} />
-                <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
+                {s.source === 'netflow' ? (
+                  <>
+                    <ReviewRow label="Scope" value={describeScopeDraft(s.nf)} />
+                    <ReviewRow label="Noise control" value={`Raise after ${s.nf.hold}, resolve after ${s.nf.clear_hold} evaluation(s)${Number(s.nf.flap_max) ? `; hold open after ${s.nf.flap_max} changes in ${s.nf.flap_window_min} min` : ''}`} />
+                  </>
+                ) : (
+                  <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
+                )}
                 <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution' : s.reset_mode === 'auto' ? 'Auto + recovery notify' : 'No recovery notify'} />
                 <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None (alert only)'} />
                 <ReviewRow

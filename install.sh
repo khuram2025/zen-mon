@@ -377,6 +377,10 @@ setup_user() {
         log "User $ZENPLUS_USER already exists"
     fi
     mkdir -p "$ZENPLUS_HOME"/{data,logs,backups,bin}
+    # Complete NetFlow exports (raw flow records, deleted after 24 h) are
+    # written by the API as $ZENPLUS_USER; not readable by other accounts.
+    # NETFLOW_EXPORT_DIR (zenplus-api.service, overridable in .env) points here.
+    install -d -m 0750 "$ZENPLUS_HOME/data/netflow-exports"
     chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME"
 }
 
@@ -699,6 +703,12 @@ build_components() {
     setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
     log "Go poller built"
 
+    # NetFlow / IPFIX / sFlow collector (zenplus-netflow-collector.service)
+    info "Building Go NetFlow collector..."
+    CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-netflow-collector" ./cmd/netflow-collector || err "Go NetFlow collector build failed"
+    [[ -x "$ZENPLUS_HOME/bin/zenplus-netflow-collector" ]] || err "Go NetFlow collector binary was not created"
+    log "Go NetFlow collector built"
+
     # Remote sensor binary served by /api/v1/sensor/install.sh.
     info "Building Go remote sensor..."
     SENSOR_ARTIFACT_DIR="$ZENPLUS_HOME/artifacts/sensors/bin/linux-amd64"
@@ -807,6 +817,11 @@ Group=zenplus
 WorkingDirectory=/opt/zenplus/server
 EnvironmentFile=/opt/zenplus/.env
 Environment=MPLCONFIGDIR=/tmp/matplotlib
+# NetFlow: the collector's live health JSON (NETFLOW_HEALTH_LISTEN in
+# zenplus-netflow-collector.service) and where complete flow exports are
+# written. Values in /opt/zenplus/.env take precedence over these.
+Environment=NETFLOW_COLLECTOR_HEALTH_URL=http://127.0.0.1:8091/health
+Environment=NETFLOW_EXPORT_DIR=/opt/zenplus/data/netflow-exports
 ExecStart=/opt/zenplus/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log --workers 2
 Restart=on-failure
 RestartSec=5
@@ -848,6 +863,22 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 SVCEOF
+
+    # NetFlow collector: the unit ships in the repo (the OTA updater installs the
+    # same file). It listens on UDP 2055 (NetFlow v5/v9, IPFIX) and 6343 (sFlow,
+    # NETFLOW_SFLOW_LISTEN) and keeps its disk spool and learned templates in
+    # its StateDirectory (NETFLOW_SPOOL_DIR=/var/lib/zenplus-netflow/spool).
+    if [[ -f "$ZENPLUS_HOME/poller/systemd/zenplus-netflow-collector.service" ]]; then
+        cp "$ZENPLUS_HOME/poller/systemd/zenplus-netflow-collector.service" /etc/systemd/system/
+        log "NetFlow collector unit installed"
+        # The kernel caps the collector's socket receive buffer (NETFLOW_RCVBUF,
+        # 8 MiB) at net.core.rmem_max (~208 KiB stock); raise it so flow
+        # bursts are buffered rather than dropped in the kernel.
+        bash "$ZENPLUS_HOME/scripts/setup-netflow-sysctl.sh" || warn "net.core.rmem_max not raised for the NetFlow collector"
+    else
+        warn "poller/systemd/zenplus-netflow-collector.service missing in repo — skipped"
+    fi
+    open_flow_ports
 
     # Nginx config
     if ! command -v nginx &>/dev/null; then
@@ -942,8 +973,30 @@ NGINXEOF
     systemctl restart zenplus-api
     sleep 3
     systemctl restart zenplus-poller
+    if [[ -f /etc/systemd/system/zenplus-netflow-collector.service ]]; then
+        systemctl enable zenplus-netflow-collector
+        systemctl restart zenplus-netflow-collector
+    fi
     systemctl restart nginx
     log "All services created and started"
+}
+
+# Exporters send flows over UDP: 2055 (NetFlow v5/v9, IPFIX) and 6343 (sFlow).
+# Only a host firewall that is already active is touched; the installer never
+# turns one on (that is the golden-image provisioning's job).
+open_flow_ports() {
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow 2055/udp >/dev/null && ufw allow 6343/udp >/dev/null \
+            && log "Firewall (ufw): UDP 2055 (NetFlow/IPFIX) and 6343 (sFlow) allowed" \
+            || warn "Could not open UDP 2055/6343 in ufw — exporters will not reach the collector"
+    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        firewall-cmd --permanent --add-port=2055/udp --add-port=6343/udp >/dev/null \
+            && firewall-cmd --reload >/dev/null \
+            && log "Firewall (firewalld): UDP 2055 (NetFlow/IPFIX) and 6343 (sFlow) allowed" \
+            || warn "Could not open UDP 2055/6343 in firewalld — exporters will not reach the collector"
+    else
+        info "No active host firewall: exporters reach UDP 2055 (NetFlow/IPFIX) and 6343 (sFlow) directly"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1150,6 +1203,10 @@ reinstall_units() {
         src="$ZENPLUS_HOME/updater/systemd/$u"
         [[ -f "$src" ]] && cp "$src" "/etc/systemd/system/$u"
     done
+    src="$ZENPLUS_HOME/poller/systemd/zenplus-netflow-collector.service"
+    [[ -f "$src" ]] && cp "$src" /etc/systemd/system/zenplus-netflow-collector.service
+    # net.core.rmem_max >= the collector's NETFLOW_RCVBUF (idempotent).
+    [[ -f "$ZENPLUS_HOME/scripts/setup-netflow-sysctl.sh" ]] && bash "$ZENPLUS_HOME/scripts/setup-netflow-sysctl.sh"
     systemctl daemon-reload
 }
 
@@ -1162,7 +1219,7 @@ case "${1:-help}" in
         echo -e "  IP:       $(get_ip)"
         echo ""
         echo -e "  ${BOLD}Services:${NC}"
-        for svc in zenplus-wait-deps zenplus-api zenplus-poller zenplus-updater.timer nginx postgresql redis-server; do
+        for svc in zenplus-wait-deps zenplus-api zenplus-poller zenplus-netflow-collector zenplus-updater.timer nginx postgresql redis-server; do
             st=$(systemctl is-active $svc 2>/dev/null || echo "inactive")
             en=$(systemctl is-enabled $svc 2>/dev/null || echo "disabled")
             if [[ "$st" == "active" || "$st" == "waiting" ]]; then
@@ -1185,9 +1242,9 @@ case "${1:-help}" in
         echo -e "    API Docs:   http://$(get_ip)/docs"
         echo -e "    Login:      admin / admin123"
         ;;
-    restart) echo "Restarting..."; systemctl restart zenplus-api zenplus-poller nginx; echo -e "${GREEN}Done${NC}" ;;
-    stop)    echo "Stopping..."; systemctl stop zenplus-poller zenplus-api; echo -e "${YELLOW}Stopped${NC}" ;;
-    start)   echo "Starting..."; systemctl start docker postgresql redis-server; docker start zenplus-clickhouse 2>/dev/null; systemctl start zenplus-wait-deps zenplus-api zenplus-poller nginx zenplus-updater.timer; echo -e "${GREEN}Started${NC}" ;;
+    restart) echo "Restarting..."; systemctl restart zenplus-api zenplus-poller zenplus-netflow-collector nginx; echo -e "${GREEN}Done${NC}" ;;
+    stop)    echo "Stopping..."; systemctl stop zenplus-netflow-collector zenplus-poller zenplus-api; echo -e "${YELLOW}Stopped${NC}" ;;
+    start)   echo "Starting..."; systemctl start docker postgresql redis-server; docker start zenplus-clickhouse 2>/dev/null; systemctl start zenplus-wait-deps zenplus-api zenplus-poller zenplus-netflow-collector nginx zenplus-updater.timer; echo -e "${GREEN}Started${NC}" ;;
     logs)    journalctl -u "zenplus-${2:-api}" -f ;;
     update)
         echo "Updating..."
@@ -1225,6 +1282,8 @@ case "${1:-help}" in
         ( cd "$ZENPLUS_HOME/poller" && go mod tidy && CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller ) || { echo "Poller build failed"; exit 1; }
         [[ -x "$ZENPLUS_HOME/bin/zenplus-poller" ]] || { echo "Poller binary was not created"; exit 1; }
         setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
+        echo "  building NetFlow collector..."
+        ( cd "$ZENPLUS_HOME/poller" && CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-netflow-collector" ./cmd/netflow-collector ) || { echo "NetFlow collector build failed"; exit 1; }
         echo "  building remote sensor..."
         SENSOR_ARTIFACT_DIR="$ZENPLUS_HOME/artifacts/sensors/bin/linux-amd64"
         mkdir -p "$SENSOR_ARTIFACT_DIR"
@@ -1251,6 +1310,7 @@ EOF
         chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME" 2>/dev/null
         echo "  restarting services..."
         systemctl restart zenplus-api zenplus-poller nginx
+        systemctl restart zenplus-netflow-collector 2>/dev/null || true
         systemctl restart zenplus-updater.timer 2>/dev/null || true
         # The pre-restart schema gate above proved this checkout safe to run.
         echo "$NEW" > "$ZENPLUS_HOME/.version"
@@ -1263,7 +1323,7 @@ EOF
         mkdir -p "$ZENPLUS_HOME/backups"
         sudo -u postgres pg_dump zenplus | gzip > "$OUT" && echo -e "${GREEN}Backup:${NC} $OUT"
         ;;
-    help|*)  echo -e "${CYAN}${BOLD}ZenPlus CLI${NC}\n\nUsage: zenplus <command>\n\n  status    Show services + OTA registration\n  start     Start all\n  stop      Stop app services\n  restart   Restart app services\n  update    Pull, migrate, rebuild, reload, restart\n  backup    Dump postgres to backups/\n  logs      Tail logs (api|poller|updater)" ;;
+    help|*)  echo -e "${CYAN}${BOLD}ZenPlus CLI${NC}\n\nUsage: zenplus <command>\n\n  status    Show services + OTA registration\n  start     Start all\n  stop      Stop app services\n  restart   Restart app services\n  update    Pull, migrate, rebuild, reload, restart\n  backup    Dump postgres to backups/\n  logs      Tail logs (api|poller|netflow-collector|updater)" ;;
 esac
 CLIEOF
     chmod +x /usr/local/bin/zenplus
@@ -1322,7 +1382,7 @@ verify_installation() {
         failures=$((failures + 1))
     fi
 
-    for unit in zenplus-api zenplus-poller nginx postgresql redis-server; do
+    for unit in zenplus-api zenplus-poller zenplus-netflow-collector nginx postgresql redis-server; do
         if systemctl is-active --quiet "$unit"; then
             log "service active: $unit"
         else
@@ -1398,6 +1458,8 @@ print_summary() {
     echo "    3. Register for updates — Settings → General → Licenses"
     echo "       ${DIM}(paste the licence key supplied with your subscription)${NC}"
     echo "    4. Add devices — Discovery, or Devices → Add Device"
+    echo "    5. Send flows to ${ip}: UDP 2055 (NetFlow/IPFIX) or 6343 (sFlow)"
+    echo "       ${DIM}(NetFlow → Collector health → Setup has device configuration snippets)${NC}"
     echo ""
     echo "  ${BOLD}Management${NC}"
     echo "    sudo zenplus status      Service and registration status"
