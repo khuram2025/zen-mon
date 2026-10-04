@@ -46,6 +46,12 @@ def test_first_use_state_allows_queue_without_claiming_capture():
     result = readiness.device_readiness(device, runtime, dict(state='pending', source='first_use', message='Will learn'))
     assert result['can_capture'] and not result['capture_verified']
     assert next(c for c in result['checks'] if c['id'] == 'trust')['status'] == 'pending'
+    device['ssh_auto_trust'] = True
+    for state in ('pending', 'pass'):
+        result = readiness.device_readiness(device, runtime, dict(state=state, source='first_use', message='Automatic'))
+        assert result['can_capture'] and not any(c['id'] == 'trust' for c in result['checks'])
+    blocked = readiness.device_readiness(device, runtime, dict(state='blocked', message='Retired trust'))
+    assert not blocked['can_capture'] and blocked['blockers'][0]['id'] == 'trust'
 
 
 @pytest.fixture

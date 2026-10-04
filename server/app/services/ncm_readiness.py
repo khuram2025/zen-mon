@@ -134,7 +134,10 @@ def device_readiness(device, runtime, trust):
     add('enabled', 'Collection enabled', 'pass' if device.get('ncm_enabled') else 'blocked',
         'Collection is enabled.' if device.get('ncm_enabled') else 'Save an enabled enrollment before starting the first capture.',
         action=None if device.get('ncm_enabled') else 'settings')
-    add('trust', 'SSH host trust', trust['state'], trust['message'], action=None if trust['state'] == 'pass' else 'trust')
+    # Automatic first-use profiles have no manual host-trust setup step.
+    # Keep actual trust problems visible (retirement, malformed files, etc.).
+    if not device.get('ssh_auto_trust') or trust['state'] == 'blocked':
+        add('trust', 'SSH host trust', trust['state'], trust['message'], action=None if trust['state'] == 'pass' else 'trust')
     add('encryption', 'Archive encryption', 'pass' if runtime['encryption'] == 'configured' else 'blocked',
         'Archive encryption is configured. Maintain a protected recovery copy of the key.' if runtime['encryption'] == 'configured' else 'An appliance administrator must configure a valid archive encryption key.')
     worker = runtime.get('worker')
