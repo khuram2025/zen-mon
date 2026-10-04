@@ -9,6 +9,10 @@ export function setApiToken(token: string | null) {
   currentToken = token
 }
 
+export function getApiToken(): string | null {
+  return currentToken
+}
+
 export const api = axios.create({
   baseURL: '/api/v1',
   timeout: 30_000,
