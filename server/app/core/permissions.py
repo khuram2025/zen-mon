@@ -60,7 +60,6 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         ("ncm.credentials", "Credentials", "Administer shared NCM connection profiles"),
         ("ncm.export", "Export raw", "Read and export configurations including secrets"),
         ("ncm.baseline", "Baselines", "Pin and approve configuration recovery points"),
-        ("ncm.trust", "SSH trust", "Register and retire verified device SSH host keys"),
         ("ncm.compliance", "Compliance", "Manage compliance policies, rules and exceptions"),
     ]),
     ("apm", "APM & Servers", [
@@ -122,7 +121,6 @@ PERMISSION_RISK: dict[str, str] = {
     "ncm.export": "sensitive",
     "netflow.export": "sensitive",
     "ncm.credentials": "privileged",
-    "ncm.trust": "privileged",
     "users.manage": "privileged",
     "roles.manage": "privileged",
     "settings.manage": "privileged",
@@ -153,7 +151,6 @@ PERMISSION_IMPLIES: dict[str, list[str]] = {
     "ncm.credentials": ["ncm.view"],
     "ncm.export": ["ncm.view"],
     "ncm.baseline": ["ncm.view"],
-    "ncm.trust": ["ncm.view"],
     "ncm.compliance": ["ncm.view"],
     "apm.manage": ["apm.view"],
     "reports.export": ["reports.view"],

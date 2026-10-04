@@ -51,10 +51,6 @@ async def device(db,tag='a',**settings):
     from app.core import crypto
     cred=(await db.execute(text("INSERT INTO ncm_credentials(name,username,password_enc) VALUES('fixture','fixture',:pw) RETURNING id"),{'pw':crypto.encrypt('fixture-password')})).scalar()
     await db.execute(text("INSERT INTO device_ncm(device_id,credential_id,platform,keep_versions) VALUES(:id,:cred,'cisco_ios',2)"),{'id':did,'cred':cred})
-    # Managed SSH trust for the fixture address, so the trust gate passes.
-    await db.execute(text('''INSERT INTO ncm_host_keys(device_id,host,port,key_type,key_base64,fingerprint_sha256,verification_method,verification_note,registered_by_name)
-        VALUES(:id,'192.0.2.1',22,'ssh-ed25519','AAAAC3NzaC1lZDI1NTE5AAAAIFixture','SHA256:fixture','console','fixture','fixture')
-        ON CONFLICT DO NOTHING'''),{'id':did})
     await db.commit()
     return did
 
@@ -142,7 +138,6 @@ async def test_readiness_is_scoped_readonly_and_does_not_expose_credentials(env,
     await db.execute(text('UPDATE ncm_credentials SET password_enc=:p'),{'p':crypto.encrypt('fixture-secret-never-return')})
     await db.commit()
     monkeypatch.setattr(ncm_readiness,'runtime_health',lambda:dict(worker='active',scheduler='active',delivery='active',encryption='configured'))
-    monkeypatch.setattr(ncm_readiness,'saved_trust',lambda *a:dict(state='pass',message='fixture trust'))
     overview=await ncm.ncm_overview(db,actor)
     assert len(overview['data'])==1 and overview['data'][0]['profile_configured']
     assert 'fixture-secret' not in str(overview)

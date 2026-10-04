@@ -110,7 +110,7 @@ export function pct(n: number, d: number): string {
 
 export const CATEGORY_LABELS: Record<string, string> = {
   blocked: 'Prerequisite missing', not_enrolled: 'Not enrolled', credentials: 'Credentials unavailable',
-  host_key_untrusted: 'SSH host key not trusted', host_key_changed: 'SSH host key changed', authentication: 'Authentication rejected',
+  authentication: 'Authentication rejected',
   unreachable: 'Unreachable', timeout: 'Timed out', negotiation: 'SSH negotiation failed', privilege: 'Insufficient privileges',
   driver: 'Driver / detection', unsupported_type: 'Unsupported capture type', incomplete: 'Incomplete output',
   format: 'Unexpected output format', interrupted: 'Session interrupted', archive: 'Archive / storage', cancelled: 'Cancelled',

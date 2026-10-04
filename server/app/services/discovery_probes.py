@@ -248,7 +248,7 @@ def _ssh_auth_check_sync(
         return False, None, None, "netmiko not installed"
 
     if (protocol or "ssh").lower() == "telnet":
-        return False, None, None, "Telnet credential authentication is disabled; use SSH with a trusted host key"
+        return False, None, None, "Telnet credential authentication is disabled; use SSH"
     conn_timeout = max(5, min(int(timeout_s), 30))
     base: dict[str, Any] = {
         "host": host,
@@ -258,10 +258,8 @@ def _ssh_auth_check_sync(
         "conn_timeout": conn_timeout,
         "timeout": conn_timeout + 10,
         "fast_cli": False,
-        "ssh_strict": True,
+        "ssh_strict": False,
         "disabled_algorithms": {"keys": ["ssh-rsa"], "pubkeys": ["ssh-rsa"]},
-        "alt_host_keys": True,
-        "alt_key_file": "/etc/zenplus/known_hosts",
     }
     if enable:
         base["secret"] = enable

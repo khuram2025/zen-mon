@@ -3,7 +3,7 @@ from datetime import datetime, time, timezone, timedelta
 import socket
 
 import pytest
-from paramiko import AuthenticationException, BadHostKeyException, SSHException
+from paramiko import AuthenticationException, SSHException
 from paramiko.ssh_exception import NoValidConnectionsError
 
 from app.services import ncm_schedule as schedule
@@ -89,15 +89,13 @@ def test_schedule_summary_distinguishes_modes():
 # --- B06: retryable versus permanent failures ---------------------------------
 @pytest.mark.parametrize('exc,category,retryable', [
     (AuthenticationException('x'), 'authentication', False),
-    (BadHostKeyException('h', type('K', (), {'get_base64': lambda s: 'a', 'get_name': lambda s: 'ssh-ed25519'})(),
-                         type('K', (), {'get_base64': lambda s: 'b', 'get_name': lambda s: 'ssh-ed25519'})()), 'host_key_changed', False),
-    (SSHException('Server x not found in known_hosts'), 'host_key_untrusted', False),
+    (SSHException('Unable to negotiate'), 'negotiation', False),
     (NoValidConnectionsError({('192.0.2.1', 22): OSError('x')}), 'unreachable', True),
     (socket.timeout('x'), 'timeout', True),
     (collection.CaptureError('Device rejected', 'privilege'), 'privilege', False),
     (collection.CaptureError('Incomplete capture'), 'incomplete', True),
     (collection.CaptureError('unsupported', 'driver'), 'driver', False),
-    (PrerequisiteError('no trust', 'host_key_untrusted'), 'host_key_untrusted', False),
+    (PrerequisiteError('not ready', 'blocked'), 'blocked', False),
 ])
 def test_failure_classification(exc, category, retryable):
     failure = classify(exc)
@@ -122,22 +120,22 @@ def target(**changes_):
 
 
 def test_eligibility_controls_coverage_not_collection():
-    result = readiness.device_readiness(target(eligible=False), RUNTIME, dict(state='pass', message='ok'))
+    result = readiness.device_readiness(target(eligible=False), RUNTIME)
     assert result['can_capture']
     assert next(c for c in result['checks'] if c['id'] == 'eligibility')['status'] == 'info'
 
 
 def test_worker_state_unknown_is_not_a_blocker_but_inactive_is():
-    unknown = readiness.device_readiness(target(), dict(RUNTIME, worker='unknown'), dict(state='pass', message='ok'))
-    inactive = readiness.device_readiness(target(), dict(RUNTIME, worker='inactive'), dict(state='pass', message='ok'))
+    unknown = readiness.device_readiness(target(), dict(RUNTIME, worker='unknown'))
+    inactive = readiness.device_readiness(target(), dict(RUNTIME, worker='inactive'))
     assert unknown['can_capture'] and not inactive['can_capture']
     assert [b['id'] for b in inactive['blockers']] == ['worker']
 
 
 def test_blockers_are_structured():
-    result = readiness.device_readiness(target(), RUNTIME, dict(state='blocked', message='no trust'))
-    assert result['blockers'] == [{'id': 'trust', 'label': 'SSH host trust', 'detail': 'no trust'}]
-    assert next(c for c in result['checks'] if c['id'] == 'trust')['action'] == 'trust'
+    result = readiness.device_readiness(target(), dict(RUNTIME, encryption='missing'))
+    assert [b['id'] for b in result['blockers']] == ['encryption']
+    assert 'trust' not in [c['id'] for c in result['checks']]
 
 
 # --- F02/B22: driver capability metadata --------------------------------------
