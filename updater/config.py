@@ -2,9 +2,14 @@
 
 import configparser
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .trust import TrustSettings, load_trust
+
+logger = logging.getLogger("zenplus.updater")
 
 UPDATER_DIR = Path("/opt/zenplus/updater")
 DEFAULT_CONFIG_PATH = UPDATER_DIR / "config" / "agent.conf"
@@ -26,9 +31,14 @@ class ApplianceConfig:
 
 @dataclass
 class SecurityConfig:
+    """What the updater trusts. Filled from root-owned settings, never agent.conf."""
+
     public_key_path: str = str(UPDATER_DIR / "keys" / "zentryc-release.pub")
+    public_key_paths: tuple = (str(UPDATER_DIR / "keys" / "zentryc-release.pub"),)
+    revoked_key_fingerprints: frozenset = frozenset()
     max_manifest_age_days: int = 30
     verify_tls: bool = True
+    allow_legacy_packages: bool = False
 
 
 @dataclass
@@ -57,12 +67,60 @@ class AgentConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
-def load_config(path: str | None = None) -> AgentConfig:
-    """Load agent configuration from INI file."""
+def _apply_trust(cfg: AgentConfig, trust: TrustSettings, parser: configparser.ConfigParser | None) -> None:
+    """Overwrite every trust-relevant field with the root-owned values.
+
+    agent.conf is writable by the app account, so a differing value there is
+    ignored (and reported) instead of being honoured.
+    """
+    if parser is not None:
+        ignored = []
+        file_url = parser.get("server", "url", fallback=None)
+        if file_url is not None and file_url.strip() != trust.server_url:
+            ignored.append("[server] url")
+        for key, effective in (
+            ("public_key_path", trust.public_key_paths[0] if trust.public_key_paths else ""),
+            ("max_manifest_age_days", str(trust.max_manifest_age_days)),
+            ("verify_tls", str(trust.verify_tls)),
+        ):
+            file_value = parser.get("security", key, fallback=None)
+            if file_value is None:
+                continue
+            if key == "verify_tls":
+                if file_value.strip().lower() != effective.lower():
+                    ignored.append(f"[security] {key}")
+            elif file_value.strip() != effective:
+                ignored.append(f"[security] {key}")
+        if ignored:
+            logger.warning(
+                "Ignoring %s in agent.conf: updater trust settings are read only from "
+                "/etc/zenplus/updater-trust.conf",
+                ", ".join(ignored),
+            )
+
+    cfg.server.url = trust.server_url
+    cfg.security.verify_tls = trust.verify_tls
+    cfg.security.max_manifest_age_days = trust.max_manifest_age_days
+    cfg.security.allow_legacy_packages = trust.allow_legacy_packages
+    cfg.security.public_key_paths = trust.public_key_paths
+    cfg.security.public_key_path = trust.public_key_paths[0]
+    cfg.security.revoked_key_fingerprints = trust.revoked_key_fingerprints
+
+
+def load_config(path: str | None = None, *, trust: TrustSettings | None = None) -> AgentConfig:
+    """Load agent configuration from INI file.
+
+    Enrollment state and operational settings come from agent.conf. Trust
+    settings (server URL, TLS verification, release keys, manifest age) come
+    from root-owned files only; see updater/trust.py.
+    """
     config_path = Path(path) if path else DEFAULT_CONFIG_PATH
     cfg = AgentConfig()
+    if trust is None:
+        trust = load_trust()
 
     if not config_path.exists():
+        _apply_trust(cfg, trust, None)
         return cfg
 
     parser = configparser.ConfigParser()
@@ -70,7 +128,6 @@ def load_config(path: str | None = None) -> AgentConfig:
 
     if parser.has_section("server"):
         s = parser["server"]
-        cfg.server.url = s.get("url", cfg.server.url)
         cfg.server.check_interval_seconds = s.getint(
             "check_interval_seconds", cfg.server.check_interval_seconds
         )
@@ -82,16 +139,6 @@ def load_config(path: str | None = None) -> AgentConfig:
         s = parser["appliance"]
         cfg.appliance.id = s.get("id", cfg.appliance.id)
         cfg.appliance.api_key = s.get("api_key", cfg.appliance.api_key)
-
-    if parser.has_section("security"):
-        s = parser["security"]
-        cfg.security.public_key_path = s.get(
-            "public_key_path", cfg.security.public_key_path
-        )
-        cfg.security.max_manifest_age_days = s.getint(
-            "max_manifest_age_days", cfg.security.max_manifest_age_days
-        )
-        cfg.security.verify_tls = s.getboolean("verify_tls", cfg.security.verify_tls)
 
     if parser.has_section("update"):
         s = parser["update"]
@@ -116,6 +163,7 @@ def load_config(path: str | None = None) -> AgentConfig:
             "log_rotate_count", cfg.logging.log_rotate_count
         )
 
+    _apply_trust(cfg, trust, parser)
     return cfg
 
 
@@ -126,8 +174,10 @@ def save_config(cfg: AgentConfig, path: str | None = None) -> None:
 
     parser = configparser.ConfigParser()
 
+    # Trust settings (server URL, TLS, release keys, manifest age) are not
+    # persisted here: this file is writable by the app account and the loader
+    # ignores them. See updater/trust.py.
     parser["server"] = {
-        "url": cfg.server.url,
         "check_interval_seconds": str(cfg.server.check_interval_seconds),
         "download_timeout_seconds": str(cfg.server.download_timeout_seconds),
     }
@@ -135,12 +185,6 @@ def save_config(cfg: AgentConfig, path: str | None = None) -> None:
     parser["appliance"] = {
         "id": cfg.appliance.id,
         "api_key": cfg.appliance.api_key,
-    }
-
-    parser["security"] = {
-        "public_key_path": cfg.security.public_key_path,
-        "max_manifest_age_days": str(cfg.security.max_manifest_age_days),
-        "verify_tls": str(cfg.security.verify_tls),
     }
 
     parser["update"] = {

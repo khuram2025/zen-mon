@@ -1,5 +1,10 @@
 # ZenPlus — Release Runbook (build & push to zentryc.com)
 
+> **Superseded in part.** `28-RELEASE-PATH-RUNBOOK.md` is current for where the signing
+> key lives (not on the development machine), building from a clean clone of a tag, the
+> signed per-file inventory, re-signing a lab-tested package, and the updater's trust
+> settings. Follow it where the two disagree.
+
 > **Audience.** Anyone cutting a ZenPlus release. This is the *only* document you need open while you're doing it.
 >
 > **What this gets you.** A new release published on `https://zentryc.com`, signed with the production private key, with a rollout policy attached so customer appliances will pick it up on their next checkin.

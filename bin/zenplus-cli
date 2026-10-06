@@ -5,6 +5,7 @@ Cisco IOS-style CLI with tab completion and ? context help.
 """
 
 import configparser
+import ipaddress
 import json
 import os
 import platform
@@ -124,7 +125,15 @@ def _svc_line(label, status):
 
 
 def _validate_host(t):
-    return bool(t) and bool(re.match(r'^[a-zA-Z0-9._:-]+$', t)) and len(t) <= 253
+    """A hostname or IP address that cannot be mistaken for a command-line option."""
+    if not t or len(t) > 253:
+        return False
+    try:
+        ipaddress.ip_address(t)
+        return True
+    except ValueError:
+        pass
+    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._:-]*$', t))
 
 
 # ── Command Handlers ─────────────────────────────────────────────────────────
@@ -334,11 +343,45 @@ def _cmd_reload(args):
 
 
 def _detect_iface():
+    """Interface carrying the IPv4 default route, or None if there is none."""
     try:
         r = subprocess.run(["ip", "-o", "-4", "route", "show", "default"], capture_output=True, text=True, timeout=5)
-        return r.stdout.split()[4] if r.stdout else "ens34"
     except Exception:
-        return "ens34"
+        return None
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if "dev" in parts and parts.index("dev") + 1 < len(parts):
+            return parts[parts.index("dev") + 1]
+    return None
+
+
+NETWORKD_DIR = Path("/etc/systemd/network")
+APPLY_NTP_HELPER = "/opt/zenplus/bin/zenplus-apply-ntp.sh"
+_DNS_LINE = re.compile(r"^\s*DNS\s*=", re.IGNORECASE)
+
+
+def _with_dns(content, servers):
+    """Return a .network file's text with its DNS= lines replaced by ``servers``."""
+    out, in_network, inserted = [], False, False
+    new_lines = [f"DNS={s}" for s in servers]
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_network and not inserted:
+                out.extend(new_lines)
+                inserted = True
+            in_network = stripped.lower() == "[network]"
+            out.append(line)
+        elif in_network and _DNS_LINE.match(line):
+            continue
+        else:
+            out.append(line)
+    if in_network and not inserted:
+        out.extend(new_lines)
+        inserted = True
+    if not inserted:
+        out.extend(["", "[Network]"] + new_lines)
+    return "\n".join(out) + "\n"
 
 
 def _apply_networkd(iface, content):
@@ -354,6 +397,9 @@ def _apply_networkd(iface, content):
 
 def _cmd_configure_ip_dhcp(args):
     iface = _detect_iface()
+    if not iface:
+        print("% No interface with a default route was found.")
+        return
     confirm = input(f"Set {iface} to DHCP? [y/N]: ").strip().lower()
     if confirm != "y":
         print("Cancelled.")
@@ -379,6 +425,9 @@ def _cmd_configure_ip_static(args):
         print("% Invalid gateway format.")
         return
     iface = _detect_iface()
+    if not iface:
+        print("% No interface with a default route was found.")
+        return
     confirm = input(f"Set {iface} to {ip_cidr} gw {gateway}? [y/N]: ").strip().lower()
     if confirm != "y":
         print("Cancelled.")
@@ -397,12 +446,42 @@ def _cmd_configure_dns(args):
     if not args:
         print("% Usage: configure dns <server1> [server2]")
         return
-    for s in args:
-        if not re.match(r'^\d+\.\d+\.\d+\.\d+$', s):
-            print(f"% Invalid DNS server: {s}")
+    for server in args:
+        try:
+            ipaddress.ip_address(server)
+        except ValueError:
+            print(f"% Invalid DNS server: {server}")
             return
-    print(_run(["sudo", "resolvectl", "dns", "1"] + list(args)))
-    print(f"  DNS set to: {' '.join(args)}")
+    iface = _detect_iface()
+    if not iface:
+        print("% No interface with a default route was found.")
+        return
+
+    network_file = NETWORKD_DIR / f"10-{iface}.network"
+    if network_file.is_file():
+        # Persistent: rewrite the interface's DNS= lines, which also applies them.
+        try:
+            current = network_file.read_text()
+        except OSError as exc:
+            print(f"% Cannot read {network_file}: {exc}")
+            return
+        ok, msg = _apply_networkd(iface, _with_dns(current, args))
+        if not ok:
+            print(f"% Failed to apply: {msg}")
+            return
+        print(f"  DNS on {iface} set to: {' '.join(args)} (saved in {network_file})")
+        return
+
+    # No networkd file for this interface (for example it is managed by netplan):
+    # apply to the running system only, and say so.
+    p = subprocess.run(["sudo", "-n", "resolvectl", "dns", iface] + list(args),
+                       capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        print(f"% Failed to apply: {(p.stderr or p.stdout or 'unknown error').strip()}")
+        return
+    print(f"  DNS on {iface} set to: {' '.join(args)}")
+    print("  Not persistent: this interface has no systemd-networkd file. "
+          "Use 'configure ip' to define its address and DNS.")
 
 
 def _cmd_configure_hostname(args):
@@ -419,14 +498,21 @@ def _cmd_configure_hostname(args):
 
 def _cmd_configure_ntp(args):
     if not args:
-        print("% Usage: configure ntp <server>")
+        print("% Usage: configure ntp <server> [server2 ...]")
         return
-    if not _validate_host(args[0]):
-        print("% Invalid NTP server")
+    if len(args) > 4:
+        print("% At most 4 NTP servers.")
         return
-    _run(["sudo", "timedatectl", "set-ntp", "true"])
-    print(f"  NTP configured. Server: {args[0]}")
-    print("  Note: Edit /etc/systemd/timesyncd.conf for custom NTP server.")
+    for server in args:
+        if not _validate_host(server):
+            print(f"% Invalid NTP server: {server}")
+            return
+    p = subprocess.run(["sudo", "-n", APPLY_NTP_HELPER] + list(args),
+                       capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        print(f"% Failed to apply: {(p.stderr or p.stdout or 'unknown error').strip()}")
+        return
+    print(f"  NTP servers set to: {' '.join(args)} (saved; time sync restarted)")
 
 
 def _cmd_clear(args):

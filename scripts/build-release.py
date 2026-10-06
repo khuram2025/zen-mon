@@ -40,6 +40,8 @@ import migration_order  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from updater.code_inventory import write_payload_manifest  # noqa: E402
+import release_source  # noqa: E402  (imports updater.package_trust, so the repo root must be on sys.path)
+from release_source import INVENTORY_EXCLUDED, INVENTORY_KEY  # noqa: E402,F401
 
 ZENPLUS_DIR = Path(os.getenv("ZENPLUS_DIR", "/opt/zenplus"))
 RELEASE_DIR = Path(os.getenv("ZENPLUS_RELEASE_DIR", "/tmp/zenplus-releases"))
@@ -673,10 +675,26 @@ def build_package(version: str, changelog: str, severity: str,
                   skip_go: bool, include_migrations: bool,
                   migration_files: list[str] | None = None,
                   agent_artifact_dir: Path | None = None,
-                  skip_agent_artifacts: bool = False) -> Path:
+                  skip_agent_artifacts: bool = False,
+                  allow_dirty: bool = False,
+                  require_tag: bool = False) -> Path:
     """Build a .zup release package from the current codebase."""
 
     validate_release_inputs(version)
+
+    provenance = release_source.git_provenance(ZENPLUS_DIR)
+    problems = release_source.source_problems(
+        provenance, allow_dirty=allow_dirty, require_tag=require_tag)
+    if problems:
+        print(f"ERROR: refusing to build a release from {ZENPLUS_DIR}:")
+        for problem in problems:
+            print(f"  - {problem}")
+        print("Build from a clean clone of a pushed tag (set ZENPLUS_DIR to it). "
+              "--allow-dirty exists for lab builds only.")
+        sys.exit(1)
+    if allow_dirty and (provenance["dirty"] or provenance["commit"] is None):
+        print("WARNING: --allow-dirty: this package is marked as built from uncommitted "
+              "or unknown source and verify-ota-release.py will reject it for production.")
 
     print(f"\n{'='*60}")
     print(f"  Building ZenPlus v{version}")
@@ -988,6 +1006,17 @@ def build_package(version: str, changelog: str, severity: str,
             "timeout": 120,
         })
 
+    # OTA trust boundary: root-owned updater trust settings, root-owned updater
+    # code and keys, and no Docker-socket access for the service account.
+    # Idempotent and never overwrites an administrator's trust file. Must run
+    # before start_services so the restarted services drop the docker group.
+    if (Path(build_dir) / "code" / "scripts" / "setup-updater-trust.sh").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/setup-updater-trust.sh",
+            "timeout": 120,
+        })
+
     # Host-results ingestion must not inherit the generic API's day-long nginx
     # timeout. Reconcile the active site after applying code while preserving
     # each appliance's existing HTTP/HTTPS and certificate configuration.
@@ -1137,6 +1166,11 @@ def build_package(version: str, changelog: str, severity: str,
         ],
     }
 
+    # The signature must cover the payload, not only the instructions: list the
+    # SHA-256 of every file that will be in the package, and name the commit.
+    manifest[INVENTORY_KEY] = release_source.payload_inventory(build_dir)
+    manifest["source"] = release_source.manifest_source(provenance)
+
     manifest_data = json.dumps(manifest, indent=2).encode()
     (build_dir / "manifest.json").write_bytes(manifest_data)
 
@@ -1167,6 +1201,11 @@ def build_package(version: str, changelog: str, severity: str,
             h = sha256_file(str(fpath))
             checksums_lines.append(f"{h}  {rel}")
     (build_dir / "checksums.sha256").write_text("\n".join(checksums_lines) + "\n")
+
+    # Nothing may have been added or changed since the manifest was signed.
+    if release_source.payload_inventory(build_dir) != manifest[INVENTORY_KEY]:
+        raise RuntimeError(
+            "release payload changed after the manifest was signed; refusing to package it")
 
     # Create tar.gz
     output_path = RELEASE_DIR / f"update-{version}.zup"
@@ -1495,6 +1534,11 @@ Examples:
         action="store_true",
         help="Build a verified appliance-only release without an agent installer",
     )
+    build_p.add_argument("--allow-dirty", action="store_true",
+                         help="Lab builds only: allow uncommitted changes or a non-git source; "
+                              "the package is marked dirty and the release verifier rejects it")
+    build_p.add_argument("--require-tag", action="store_true",
+                         help="Refuse to build unless HEAD is exactly at a git tag")
     build_p.add_argument("--include-migrations", action="store_true",
                          help="Require explicit --migration values for schema releases")
     build_p.add_argument("--migration", action="append", default=[],
@@ -1512,6 +1556,10 @@ Examples:
     pub_p.add_argument("--skip-go", action="store_true")
     pub_p.add_argument("--agent-artifact-dir", default=None)
     pub_p.add_argument("--skip-agent-artifacts", action="store_true")
+    pub_p.add_argument("--allow-dirty", action="store_true",
+                       help="Lab builds only: allow uncommitted changes or a non-git source")
+    pub_p.add_argument("--require-tag", action="store_true",
+                       help="Refuse to build unless HEAD is exactly at a git tag")
     pub_p.add_argument("--include-migrations", action="store_true",
                        help="Require explicit --migration values for schema releases")
     pub_p.add_argument("--migration", action="append", default=[],
@@ -1545,7 +1593,8 @@ Examples:
                       args.min_version, args.skip_dashboard, args.skip_go,
                       args.include_migrations, args.migration,
                       Path(args.agent_artifact_dir) if args.agent_artifact_dir else None,
-                      args.skip_agent_artifacts)
+                      args.skip_agent_artifacts,
+                      allow_dirty=args.allow_dirty, require_tag=args.require_tag)
 
     elif args.command == "publish":
         if args.file:
@@ -1558,7 +1607,8 @@ Examples:
                                      args.min_version, args.skip_dashboard, args.skip_go,
                                      args.include_migrations, args.migration,
                                      Path(args.agent_artifact_dir) if args.agent_artifact_dir else None,
-                                     args.skip_agent_artifacts)
+                                     args.skip_agent_artifacts,
+                                     allow_dirty=args.allow_dirty, require_tag=args.require_tag)
         publish_package(zup_path, args.version, args.changelog,
                         args.severity, args.min_version,
                         args.skip_agent_artifacts)

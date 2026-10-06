@@ -179,6 +179,8 @@ PY
 sudo -u postgres psql -d zenplus -v ON_ERROR_STOP=1 -v admin_hash="$ADMIN_HASH" <<'SQL' >/dev/null
 UPDATE users
 SET password_hash = :'admin_hash',
+    must_change_password = TRUE,
+    password_changed_at = NULL,
     last_login = NULL,
     updated_at = NOW()
 WHERE username = 'admin';

@@ -123,34 +123,60 @@ def verify_checksums(checksums_file: str, base_dir: str) -> list[str]:
     return failures
 
 
-def verify_manifest(
-    manifest_path: str,
-    signature_path: str,
-    public_key_path: str,
+def public_key_fingerprint(public_key: Ed25519PublicKey) -> str:
+    """SHA-256 of the raw 32-byte public key; the identifier used to revoke a key."""
+    raw = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def verify_manifest_bytes(
+    manifest_data: bytes,
+    signature: bytes,
+    public_key_paths: "str | Path | list[str] | tuple[str, ...]",
     max_age_days: int = 30,
+    revoked_fingerprints: "frozenset[str] | set[str]" = frozenset(),
 ) -> dict:
-    """Verify and parse a manifest file.
+    """Verify and parse manifest bytes that are still held in memory.
 
     Checks:
-    1. Ed25519 signature is valid
+    1. The Ed25519 signature is valid for at least one trusted, non-revoked key
     2. Manifest is not older than max_age_days
     3. JSON is well-formed
 
-    Returns parsed manifest dict on success, raises on failure.
+    Returns the parsed manifest dict on success, raises SecurityError on failure.
+    Takes bytes, not a path, so a package can be authenticated before any of its
+    contents are written to disk.
     """
-    manifest_data = Path(manifest_path).read_bytes()
-    signature = Path(signature_path).read_bytes()
-    public_key = load_public_key(public_key_path)
+    if isinstance(public_key_paths, (str, Path)):
+        public_key_paths = [str(public_key_paths)]
 
-    # Verify signature
-    if not verify_signature(manifest_data, signature, public_key):
+    keys = []
+    for key_path in public_key_paths:
+        try:
+            keys.append(load_public_key(str(key_path)))
+        except (OSError, ValueError) as exc:
+            logger.warning("Ignoring unusable trust key %s: %s", key_path, exc)
+    if not keys:
+        raise SecurityError("No usable release public key is installed")
+
+    verified = False
+    for key in keys:
+        if public_key_fingerprint(key) in revoked_fingerprints:
+            continue
+        if verify_signature(manifest_data, signature, key):
+            verified = True
+            break
+    if not verified:
         raise SecurityError("Manifest signature verification failed")
 
-    # Parse JSON
-    manifest = json.loads(manifest_data)
+    try:
+        manifest = json.loads(manifest_data)
+        release_date = datetime.fromisoformat(manifest["release_date"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise SecurityError(f"Signed manifest is malformed: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise SecurityError("Signed manifest is not a JSON object")
 
-    # Check age
-    release_date = datetime.fromisoformat(manifest["release_date"])
     if release_date.tzinfo is None:
         release_date = release_date.replace(tzinfo=timezone.utc)
     max_age = timedelta(days=max_age_days)
@@ -173,6 +199,21 @@ def verify_manifest(
         manifest.get("release_date"),
     )
     return manifest
+
+
+def verify_manifest(
+    manifest_path: str,
+    signature_path: str,
+    public_key_path: str,
+    max_age_days: int = 30,
+) -> dict:
+    """Verify and parse a manifest file (path-based wrapper, kept for callers)."""
+    return verify_manifest_bytes(
+        Path(manifest_path).read_bytes(),
+        Path(signature_path).read_bytes(),
+        public_key_path,
+        max_age_days=max_age_days,
+    )
 
 
 class SecurityError(Exception):

@@ -371,7 +371,8 @@ setup_user() {
     step "Setting up system user"
     if ! id "$ZENPLUS_USER" &>/dev/null; then
         useradd -r -m -d "$ZENPLUS_HOME" -s /bin/bash "$ZENPLUS_USER"
-        usermod -aG docker "$ZENPLUS_USER"
+        # Not added to the docker group: membership is root-equivalent through
+        # the Docker socket, and no service running as this account uses Docker.
         log "Created system user: $ZENPLUS_USER"
     else
         log "User $ZENPLUS_USER already exists"
@@ -556,6 +557,19 @@ print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('admin123'))
             runuser -u postgres -- psql -d zenplus -c \
                 "UPDATE users SET password_hash = '$ADMIN_HASH', is_active = true WHERE username = 'admin';" >/dev/null 2>&1
             ADMIN_PASSWORD_IS_DEFAULT=yes
+        fi
+    fi
+
+    # The seeded admin/admin123 login must not stay usable: the API refuses
+    # everything but a password change until the administrator chooses a new
+    # one, and the dashboard shows the forced-change screen. A password the
+    # customer already chose is never flagged.
+    if [[ "${ADMIN_PASSWORD_IS_DEFAULT:-no}" == "yes" ]]; then
+        if runuser -u postgres -- psql -d zenplus -c \
+            "UPDATE users SET must_change_password = TRUE WHERE username = 'admin';" >/dev/null 2>&1; then
+            info "Administrator will be required to choose a new password at first sign-in"
+        else
+            warn "could not require an admin password change — change admin/admin123 immediately"
         fi
     fi
 
@@ -1018,7 +1032,11 @@ setup_updater() {
 
     # Updater config / log / backup / key directories
     mkdir -p "$ZENPLUS_HOME/updater/"{config,logs,backups,keys}
-    chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME/updater"
+    # The updater runs as root: its code, release keys, logs and backups belong
+    # to root. Only config/ (enrollment state, written by the API) is the
+    # service account's. setup-updater-trust.sh below re-asserts all of this.
+    chown -R root:root "$ZENPLUS_HOME/updater"
+    chown "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME/updater/config"
 
     # Default agent.conf — keep existing creds across re-installs.
     AGENT_CONF="$ZENPLUS_HOME/updater/config/agent.conf"
@@ -1032,11 +1050,6 @@ download_timeout_seconds = 600
 [appliance]
 id =
 api_key =
-
-[security]
-public_key_path = /opt/zenplus/updater/keys/zentryc-release.pub
-max_manifest_age_days = 30
-verify_tls = true
 
 [update]
 backup_dir = /opt/zenplus/updater/backups
@@ -1056,6 +1069,19 @@ CONF
         log "Created default agent.conf"
     else
         log "Preserved existing agent.conf (credentials kept)"
+    fi
+
+    # What the updater trusts (server URL, TLS, release keys) lives in root-owned
+    # /etc/zenplus/updater-trust.conf, never in agent.conf. The same script makes
+    # everything the root updater runs root-owned and drops docker-group access.
+    if [[ -f "$ZENPLUS_HOME/scripts/setup-updater-trust.sh" ]]; then
+        if bash "$ZENPLUS_HOME/scripts/setup-updater-trust.sh"; then
+            log "Updater trust settings installed"
+        else
+            warn "setup-updater-trust.sh failed — updater trust not hardened"
+        fi
+    else
+        warn "scripts/setup-updater-trust.sh missing in repo — updater trust not hardened"
     fi
 
     # Updater systemd units (shipped with the repo at updater/systemd/)
