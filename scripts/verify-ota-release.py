@@ -10,6 +10,7 @@ import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,6 +53,25 @@ def verify_msi_container(tar: tarfile.TarFile, name: str) -> tarfile.TarInfo:
     if handle is None or handle.read(8) != bytes.fromhex("d0cf11e0a1b11ae1"):
         raise RuntimeError("Windows MSI has an invalid compound-document header")
     return member
+
+
+def verify_sensor_manifests(tar: tarfile.TarFile, public_key) -> int:
+    """Nested sensor signatures must use the same release trust as the OTA."""
+    names = sorted(member.name for member in tar.getmembers()
+                   if member.isfile() and member.name.startswith('sensor-artifacts/')
+                   and member.name.endswith('/manifest.json'))
+    for name in names:
+        data = read_member(tar, name)
+        prefix = name.rsplit('/', 1)[0]
+        try:
+            public_key.verify(read_member(tar, prefix + '/manifest.json.sig'), data)
+            metadata = json.loads(data)
+        except (InvalidSignature, KeyError, ValueError) as exc:
+            raise RuntimeError(f'invalid sensor release signature or manifest: {name}') from exc
+        if (not isinstance(metadata, dict) or metadata.get('binary') != 'zenplus-sensor'
+                or metadata.get('sha256') != hashlib.sha256(read_member(tar, prefix + '/zenplus-sensor')).hexdigest()):
+            raise RuntimeError(f'sensor manifest does not match its binary: {name}')
+    return len(names)
 
 
 def main() -> None:
@@ -121,6 +141,7 @@ def main() -> None:
             for name, expected in inventory.items():
                 if hashlib.sha256(read_member(tar, name)).hexdigest() != expected:
                     raise RuntimeError(f"file differs from the signed inventory: {name}")
+        sensors_verified = verify_sensor_manifests(tar, public_key)
         source = manifest.get("source") or {}
         if not args.allow_dirty_source and (
                 source.get("dirty") is not False or not source.get("commit")):
@@ -268,6 +289,7 @@ def main() -> None:
         "release_version": args.version,
         "signature": "valid",
         "signed_inventory_files": len(inventory) if inventory is not None else None,
+        "sensor_signatures_verified": sensors_verified,
         "source_commit": (manifest.get("source") or {}).get("commit"),
         "checksums_verified": verified,
         "archive_members": len(members),

@@ -62,9 +62,11 @@ there, if needed, uses a separate checkout; it does not change installed code.
    appliances with the test key.
 6. **Production signing.** Copy the lab-tested `.zup` to the signing machine and re-sign
    it. The tool verifies the package completely (test signature, signed inventory, every
-   file hash, clean recorded source) and writes a copy whose manifest is byte-for-byte
-   unchanged with only the signature replaced, so customers receive exactly what was
-   tested:
+   file hash, clean recorded source). It replaces the OTA signature and any bundled
+   sensor signatures. Application code, binaries and sensor manifest bytes stay
+   unchanged. When a sensor signature changes, its hash in the outer inventory and
+   the checksums change too; the outer manifest is then re-signed. A package without
+   nested signature changes keeps its manifest byte-for-byte unchanged:
 
    ```bash
    python3 scripts/resign-release.py update-<version>.zup \
@@ -73,6 +75,11 @@ there, if needed, uses a separate checkout; it does not change installed code.
    python3 scripts/verify-ota-release.py final/update-<version>.zup \
        <production public key> --version <version> --appliance-only
    ```
+
+   Verify every nested sensor manifest against the production public key as well.
+   Compare the lab and final payloads: only signatures, the corresponding inventory
+   hashes and checksums may differ. Re-test the final signed artifact on the reference
+   appliance before publishing; a passing lab-key build alone is not that test.
 
 7. **Canary, then everyone.**
 

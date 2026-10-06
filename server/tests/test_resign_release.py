@@ -5,6 +5,7 @@ not fully verified first."""
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
 import subprocess
@@ -27,6 +28,9 @@ from updater.crypto import SecurityError
 spec = importlib.util.spec_from_file_location("resign_release", ROOT / "scripts" / "resign-release.py")
 resign_release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(resign_release)
+verify_spec = importlib.util.spec_from_file_location('verify_ota', ROOT / 'scripts' / 'verify-ota-release.py')
+verify_ota = importlib.util.module_from_spec(verify_spec)
+verify_spec.loader.exec_module(verify_ota)
 
 
 class Keys:
@@ -186,3 +190,73 @@ def test_the_command_line_reports_a_refusal_without_a_traceback(world, tmp_path)
         cwd=world["tmp"], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
     assert result.returncode == 1
     assert result.stderr.startswith("ERROR:") and "Traceback" not in result.stderr
+
+
+def sensor_files(keys, *, bad_signature=False, bad_hash=False):
+    binary = b'fixture sensor binary\n'
+    metadata = json.dumps({'binary': 'zenplus-sensor',
+                           'sha256': '0' * 64 if bad_hash else hashlib.sha256(binary).hexdigest()}).encode()
+    prefix = 'sensor-artifacts/bin/linux-amd64/'
+    return {prefix + 'zenplus-sensor': binary, prefix + 'manifest.json': metadata,
+            prefix + 'manifest.json.sig': b'x' * 64 if bad_signature else keys.private.sign(metadata)}
+
+
+def test_sensor_signature_is_promoted_and_inventory_checksums_follow(world, tmp_path):
+    files = dict(FILES, **sensor_files(world['test']))
+    inventory = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
+    before_manifest = make_package(world['pkg'], world['test'], files=files, inventory_override=inventory)
+    checksum_files = dict(files, **{'manifest.json': before_manifest})
+    checksums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n'
+                        for name, data in checksum_files.items()).encode()
+    make_package(world['pkg'], world['test'], files=dict(files, **{'checksums.sha256': checksums}),
+                 inventory_override=inventory)
+    summary = resign(world)
+    before, after = read_members(world['pkg']), read_members(world['out'])
+    prefix = 'sensor-artifacts/bin/linux-amd64/'
+    world['prod'].private.public_key().verify(after[prefix + 'manifest.json.sig'], after[prefix + 'manifest.json'])
+    assert after[prefix + 'manifest.json'] == before[prefix + 'manifest.json']
+    assert after[prefix + 'zenplus-sensor'] == before[prefix + 'zenplus-sensor']
+    assert summary['nested_signatures_changed'] == [prefix + 'manifest.json.sig']
+    assert summary['manifest_unchanged'] is False
+    with tarfile.open(world['pkg'], 'r:gz') as tar:
+        with pytest.raises(RuntimeError, match='sensor release signature'):
+            verify_ota.verify_sensor_manifests(tar, world['prod'].private.public_key())
+    with tarfile.open(world['out'], 'r:gz') as tar:
+        assert verify_ota.verify_sensor_manifests(tar, world['prod'].private.public_key()) == 1
+    changed = {name for name in before if before[name] != after[name]}
+    assert changed == {prefix + 'manifest.json.sig', 'manifest.json', 'manifest.json.sig', 'checksums.sha256'}
+    package_trust.verify_and_extract(str(world['out']), str(tmp_path / 'verified'),
+                                     public_key_paths=[str(world['prod'].pub)])
+    for line in after['checksums.sha256'].decode().splitlines():
+        digest, name = line.split('  ', 1)
+        assert hashlib.sha256(after[name]).hexdigest() == digest
+
+
+@pytest.mark.parametrize('bad', ['signature', 'hash'])
+def test_invalid_sensor_metadata_is_not_promoted(world, bad):
+    files = dict(FILES, **sensor_files(world['test'], bad_signature=bad == 'signature', bad_hash=bad == 'hash'))
+    make_package(world['pkg'], world['test'], files=files,
+                 inventory_override={name: hashlib.sha256(data).hexdigest() for name, data in files.items()})
+    with pytest.raises(SecurityError, match='sensor'):
+        resign(world)
+    assert not world['out'].exists()
+
+
+def test_repacking_uses_verified_snapshot_when_input_changes(world, monkeypatch):
+    original_verify = resign_release.verify_and_extract
+    def replace_after_verify(*args, **kwargs):
+        manifest = original_verify(*args, **kwargs)
+        make_package(world['pkg'], world['test'], files=dict(FILES, **{'requirements.txt': b'changed after verification'}))
+        return manifest
+    monkeypatch.setattr(resign_release, 'verify_and_extract', replace_after_verify)
+    resign(world)
+    assert read_members(world['out'])['requirements.txt'] == FILES['requirements.txt']
+
+
+def test_preexisting_predictable_partial_symlink_is_not_followed(world):
+    world['out'].parent.mkdir(parents=True)
+    victim = world['tmp'] / 'victim'
+    victim.write_bytes(b'keep this')
+    world['out'].with_name(world['out'].name + '.partial').symlink_to(victim)
+    resign(world)
+    assert victim.read_bytes() == b'keep this'
