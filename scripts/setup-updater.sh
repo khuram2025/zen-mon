@@ -82,6 +82,9 @@ else
     log "agent.conf exists, keeping credentials"
 fi
 
+# Harden before enabling any privileged unit. Failure must stop setup.
+bash "${ZENPLUS_DIR}/scripts/setup-updater-trust.sh"
+
 # ─── 4. Install systemd units ────────────────────────────────────────────────
 log "Installing systemd units ..."
 cp "${ZENPLUS_DIR}/updater/systemd/zenplus-updater.service" /etc/systemd/system/

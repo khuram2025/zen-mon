@@ -142,8 +142,8 @@ def load_config(path: str | None = None, *, trust: TrustSettings | None = None) 
 
     if parser.has_section("update"):
         s = parser["update"]
-        cfg.update.backup_dir = s.get("backup_dir", cfg.update.backup_dir)
-        cfg.update.max_backups = s.getint("max_backups", cfg.update.max_backups)
+        # Paths and retention govern privileged writes/deletions. They are
+        # compiled policy, not values delegated to the application account.
         cfg.update.auto_update = s.getboolean("auto_update", cfg.update.auto_update)
         cfg.update.maintenance_window_start = s.get(
             "maintenance_window_start", cfg.update.maintenance_window_start
@@ -154,14 +154,12 @@ def load_config(path: str | None = None, *, trust: TrustSettings | None = None) 
 
     if parser.has_section("logging"):
         s = parser["logging"]
-        cfg.logging.log_file = s.get("log_file", cfg.logging.log_file)
         cfg.logging.log_level = s.get("log_level", cfg.logging.log_level)
-        cfg.logging.max_log_size_mb = s.getint(
-            "max_log_size_mb", cfg.logging.max_log_size_mb
-        )
-        cfg.logging.log_rotate_count = s.getint(
-            "log_rotate_count", cfg.logging.log_rotate_count
-        )
+
+    for section, names in (("update", ("backup_dir", "max_backups")),
+                           ("logging", ("log_file", "max_log_size_mb", "log_rotate_count"))):
+        if any(parser.has_option(section, name) for name in names):
+            logger.warning("Ignoring privileged path/retention settings in [%s] of agent.conf", section)
 
     _apply_trust(cfg, trust, parser)
     return cfg
@@ -188,18 +186,13 @@ def save_config(cfg: AgentConfig, path: str | None = None) -> None:
     }
 
     parser["update"] = {
-        "backup_dir": cfg.update.backup_dir,
-        "max_backups": str(cfg.update.max_backups),
         "auto_update": str(cfg.update.auto_update),
         "maintenance_window_start": cfg.update.maintenance_window_start,
         "maintenance_window_end": cfg.update.maintenance_window_end,
     }
 
     parser["logging"] = {
-        "log_file": cfg.logging.log_file,
         "log_level": cfg.logging.log_level,
-        "max_log_size_mb": str(cfg.logging.max_log_size_mb),
-        "log_rotate_count": str(cfg.logging.log_rotate_count),
     }
 
     with open(config_path, "w") as f:

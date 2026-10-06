@@ -75,7 +75,9 @@ rm -f "$ZENPLUS_HOME/.env"
 rm -f "$SENTINEL"
 rm -f /var/lib/zenplus/.initialized
 rm -f /var/lib/zenplus/initial-admin-password
-rm -f "$ZENPLUS_HOME/updater/config/subscription.json"
+printf '{}\n' > "$ZENPLUS_HOME/updater/config/subscription.json"
+chown "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME/updater/config/subscription.json"
+chmod 0600 "$ZENPLUS_HOME/updater/config/subscription.json"
 rm -f "$ZENPLUS_HOME/updater/logs/update.log"*
 if [[ -d /data/clickhouse ]]; then
   find /data/clickhouse -mindepth 1 -maxdepth 1 -exec rm -rf {} +

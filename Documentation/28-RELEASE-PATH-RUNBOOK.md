@@ -1,6 +1,6 @@
 # ZenPlus Release Path Runbook
 
-How a change gets from the development machine (.221) to customer appliances, which
+How a change gets from a development checkout to customer appliances, which
 machine holds which secret, and how the updater decides what to trust. Where this
 document and `15-RELEASE-RUNBOOK.md` disagree (key location, build host), this one is
 current.
@@ -9,27 +9,29 @@ current.
 
 | Environment | Holds | Never holds |
 |---|---|---|
-| Development (.221) | Source, Git, toolchains, simulator labs, the **test** signing key | Production signing key, zentryc.com admin login |
-| Build | A clean clone of one pushed tag, pinned toolchain | Uncommitted changes, any production secret |
+| Development checkout (workstation or isolated VM) | Source, Git, review branches | Production signing key, publishing login |
+| Build (lab `zentryc-build01`, 192.168.233.10) | A clean clone of one pushed tag, pinned toolchain, disposable **test** signing key | Uncommitted changes, any production secret |
 | Signing and publishing | Production signing key, publishing login (MFA on) | Development tools, source edits |
-| Lab appliances | Trust for the test key only | Production trust |
+| Lab appliances (lab `zentryc-test01`, 192.168.233.11) | Trust for the test key only, disposable databases | Production credentials or copied customer data |
 | Reference appliance | Production trust; enrolled in the canary group | Development tools, the test key |
 | Customer appliances | Production trust only | Any key that can sign |
 
 A customer appliance is never a copy of .221's disk. It runs the same signed release
 that was built from a tag and tested on lab and reference appliances.
+The installed `/opt/zenplus` on .221 is not a release build directory. Development
+there, if needed, uses a separate checkout; it does not change installed code.
 
 ## 2. Cutting a release
 
 1. **Tag and push.** Merge to the release branch, `git tag v<version>`, push the branch
    and the tag to GitHub. Released source must exist off the development machine.
-2. **Clean clone.** `git clone --branch v<version> <repo> /home/zen/release-<version>`.
-   Check `ls -d /home/zen/*<version>*` and `pgrep -af "build-release|build-ota"` first:
+2. **Clean clone on the builder.** `git clone --branch v<version> <repo> /srv/zentryc/source/release-<version>`.
+   Check for an existing checkout for that version and `pgrep -af "build-release|build-ota"` first:
    never reuse a version another session has started.
 3. **Build** from that clone (not from `/opt/zenplus`), signing with the **test** key:
 
    ```bash
-   ZENPLUS_DIR=/home/zen/release-<version> \
+   ZENPLUS_DIR=/srv/zentryc/source/release-<version> \
    ZENPLUS_RELEASE_PRIVATE_KEY=<test private key> \
    python3 scripts/build-release.py build --version <version> --severity security \
        --require-tag --skip-agent-artifacts
@@ -41,6 +43,11 @@ that was built from a tag and tested on lab and reference appliances.
    `source.dirty` in the signed manifest, and signs the SHA-256 of **every file** in the
    package (`payload_files`). `--allow-dirty` exists for lab builds only; the offline
    verifier and the re-signing tool both reject such a package.
+   A package built locally before the branch/tag is pushed is a lab candidate only;
+   passing local tests does not replace the five required GitHub CI checks.
+   Run the strict `npm run build`, `npm run smoke:routes`, applicable Python
+   contracts and Go tests before release. Live API/database tests need disposable
+   fixtures; record excluded tests explicitly and do not claim they passed.
 4. **Verify offline** before any production API call:
 
    ```bash
@@ -116,6 +123,20 @@ by group or others, the updater **refuses to run** and says why in the journal
 update and by `install.sh`) creates the files with safe ownership, hands the updater
 code, `scripts/`, `bin/` and the Python virtualenv to root, and removes the service
 account from the `docker` group. It never overwrites an administrator's trust file.
+
+The enrollment **directory** `updater/config/` is root-owned (0755). Only its
+pre-created `agent.conf` and `subscription.json` files are owned by `zenplus`
+(0600); resetting enrollment writes an empty object to the existing cache file.
+Allowing the account to create directory entries could plant a Python package that
+shadows `config.py`. Startup rejects unexpected `__init__.*` entries before loading
+the agent, and trust checks reject symlinks in the entire path, including parents.
+
+The app-owned config cannot set the root updater's log/backup paths or retention
+policy; those use compiled defaults. `/opt/zenplus/.env`, read by systemd for the
+root updater, is root-owned and group-readable (0640). First boot preserves that
+ownership. Both installer paths must stop if trust setup fails. These protections
+prevent subsequent app-account writes; they do not establish that previously
+writable code or environment data on an already compromised machine is clean.
 
 ### Legacy packages
 

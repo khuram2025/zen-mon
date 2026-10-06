@@ -64,24 +64,26 @@ def require_root_owned(
     and including ``stop_at``) must be owned by ``trusted_uid`` and not be
     writable by group or others.
     """
-    try:
-        st = os.lstat(path)
-    except OSError as exc:
-        raise SecurityError(f"{what}: cannot stat {path}: {exc}") from exc
-    if stat.S_ISLNK(st.st_mode):
-        raise SecurityError(f"{what}: {path} is a symlink")
-
-    real = Path(os.path.realpath(path))
-    stop = Path(os.path.realpath(stop_at))
-    chain = [real]
-    if real != stop:
-        for parent in real.parents:
+    # Check the lexical path: realpath would discard a symlinked ancestor,
+    # leaving the replaceable directory entry outside the ownership checks.
+    absolute = Path(os.path.abspath(path))
+    stop = Path(os.path.abspath(stop_at))
+    if absolute != stop and stop not in absolute.parents:
+        raise SecurityError(f"{what}: {absolute} is outside trust boundary {stop}")
+    chain = [absolute]
+    if absolute != stop:
+        for parent in absolute.parents:
             chain.append(parent)
             if parent == stop:
                 break
 
     for node in chain:
-        node_st = os.lstat(node)
+        try:
+            node_st = os.lstat(node)
+        except OSError as exc:
+            raise SecurityError(f"{what}: cannot stat {node}: {exc}") from exc
+        if stat.S_ISLNK(node_st.st_mode):
+            raise SecurityError(f"{what}: {node} is a symlink")
         if node_st.st_uid != trusted_uid:
             raise SecurityError(
                 f"{what}: {node} is owned by uid {node_st.st_uid}, expected {trusted_uid}"

@@ -1033,10 +1033,11 @@ setup_updater() {
     # Updater config / log / backup / key directories
     mkdir -p "$ZENPLUS_HOME/updater/"{config,logs,backups,keys}
     # The updater runs as root: its code, release keys, logs and backups belong
-    # to root. Only config/ (enrollment state, written by the API) is the
-    # service account's. setup-updater-trust.sh below re-asserts all of this.
+    # to root. Only the two files inside config/ (enrollment state written by
+    # the API) belong to the service account; the directory belongs to root.
+    # setup-updater-trust.sh below re-asserts all of this.
     chown -R root:root "$ZENPLUS_HOME/updater"
-    chown "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME/updater/config"
+    chown root:root "$ZENPLUS_HOME/updater/config"
 
     # Default agent.conf — keep existing creds across re-installs.
     AGENT_CONF="$ZENPLUS_HOME/updater/config/agent.conf"
@@ -1079,9 +1080,11 @@ CONF
             log "Updater trust settings installed"
         else
             warn "setup-updater-trust.sh failed — updater trust not hardened"
+            return 1
         fi
     else
         warn "scripts/setup-updater-trust.sh missing in repo — updater trust not hardened"
+        return 1
     fi
 
     # Updater systemd units (shipped with the repo at updater/systemd/)
@@ -1523,7 +1526,7 @@ main() {
     run_step      "Provisioning trial licence"   seed_trial_licence
     run_step      "Configuring services"         create_services
     run_soft_step "Installing TLS/security tools" setup_security_hardening
-    run_soft_step "Configuring OTA updater"      setup_updater
+    run_step      "Configuring OTA updater"      setup_updater
     run_step      "Installing support tooling"   setup_support_bundles
     run_step      "Installing management CLI"    create_cli
     run_step      "Finalising installation"      finalize

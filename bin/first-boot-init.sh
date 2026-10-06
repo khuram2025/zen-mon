@@ -77,7 +77,7 @@ POSTGRES_USER=zenplus
 REDIS_HOST=localhost
 REDIS_PORT=6379
 EOF
-chown zenplus:zenplus "${ENV_FILE}.tmp"
+chown root:zenplus "${ENV_FILE}.tmp"
 chmod 640 "${ENV_FILE}.tmp"
 mv "${ENV_FILE}.tmp" "$ENV_FILE"
 
@@ -147,7 +147,9 @@ done
 # the appliance creds so the updater can't immediately re-fetch the
 # old remote state, and (c) only then reset the DB row.
 echo "[6/8] clearing OTA registration and resetting subscription..."
-rm -f /opt/zenplus/updater/config/subscription.json
+printf '{}\n' > /opt/zenplus/updater/config/subscription.json
+chown zenplus:zenplus /opt/zenplus/updater/config/subscription.json
+chmod 0600 /opt/zenplus/updater/config/subscription.json
 
 AGENT_CONF=/opt/zenplus/updater/config/agent.conf
 if [ -f "$AGENT_CONF" ]; then

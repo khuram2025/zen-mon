@@ -119,13 +119,16 @@ def test_running_twice_changes_nothing(box):
     assert (box["etc"] / "updater-trust.conf").read_text() == first
 
 
-def test_updater_code_is_handed_to_root_but_the_config_directory_is_not(box):
+def test_updater_tree_is_root_owned_with_only_data_files_delegated(box):
     _, calls = run(box)
     recursive = [c for c in calls if c.startswith("chown -h -R root:root")]
     handed = {Path(c.split()[-1]).name for c in recursive}
     assert {"agent.py", "steps", "keys", "logs", "backups"} <= handed
     assert "config" not in handed
-    assert any(c.endswith(f"zenplus:zenplus {box['updater']}/config") for c in calls)
+    assert not any(c.endswith(f"zenplus:zenplus {box['updater']}/config") for c in calls)
+    assert any(c.endswith(f"root:root {box['updater']}/config") for c in calls)
+    assert any(c.endswith(f"zenplus:zenplus {box['updater']}/config/agent.conf") for c in calls)
+    assert any(c.endswith(f"zenplus:zenplus {box['updater']}/config/subscription.json") for c in calls)
 
 
 def test_group_and_other_write_is_removed_from_the_updater_tree(box):
@@ -223,3 +226,43 @@ def test_a_machine_without_the_optional_directories_is_fine(box):
     (box["zp"] / "venv").unlink()
     result, _ = run(box)
     assert result.returncode == 0, result.stderr
+
+
+def test_config_directory_prevents_module_creation_but_data_is_writable(box):
+    result, calls = run(box)
+    assert result.returncode == 0, result.stderr
+    config = box['updater'] / 'config'
+    assert stat.S_IMODE(config.stat().st_mode) == 0o755
+    assert (config / 'subscription.json').read_text().strip() == '{}'
+    assert stat.S_IMODE((config / 'agent.conf').stat().st_mode) == 0o600
+    assert stat.S_IMODE((config / 'subscription.json').stat().st_mode) == 0o600
+    assert f'chown root:root {config}' in calls
+
+
+@pytest.mark.parametrize('name', ['__init__.py', '__init__.pyc', '__init__.abi3.so'])
+def test_setup_refuses_a_planted_config_package(box, name):
+    (box['updater'] / 'config' / name).write_text('# untrusted code\n')
+    result, calls = run(box)
+    assert result.returncode != 0
+    assert 'Unexpected Python package' in result.stderr
+
+
+def test_state_symlink_is_refused_without_touching_the_target(box):
+    target = box['tmp'] / 'other-file'
+    target.write_text('preserve this\n')
+    state = box['updater'] / 'config' / 'subscription.json'
+    state.symlink_to(target)
+    result, calls = run(box)
+    assert result.returncode != 0
+    assert target.read_text() == 'preserve this\n'
+    assert 'symlink' in result.stderr
+
+
+def test_root_service_environment_is_not_app_writable(box):
+    env = box['zp'] / '.env'
+    env.write_text('CLICKHOUSE_PASSWORD=lab-only-placeholder\n')
+    env.chmod(0o666)
+    result, calls = run(box)
+    assert result.returncode == 0, result.stderr
+    assert f'chown root:zenplus {env}' in calls
+    assert stat.S_IMODE(env.stat().st_mode) == 0o640

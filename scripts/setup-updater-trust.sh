@@ -10,8 +10,8 @@
 #   2. /etc/zenplus/updater-keys.d/     extra release public keys (rotation)
 #   3. Everything the root updater executes or imports is owned by root:
 #      /opt/zenplus itself (so `updater` cannot be swapped by renaming),
-#      updater/ (only updater/config, written by the API, stays with
-#      zenplus), scripts/ (the updater loads scripts/ch_migrate.py), bin/ and
+#      updater/ (config directory is root-owned; only its two state files are
+#      written by the API), scripts/ (the updater loads scripts/ch_migrate.py), bin/ and
 #      the Python virtualenv the updater runs under
 #   4. docker group                     `zenplus` is removed from it: membership
 #      is root-equivalent through the Docker socket, and no ZenPlus service
@@ -102,11 +102,29 @@ if [ -d "${UPDATER_DIR}" ]; then
         chown -h -R root:root "${entry}"
         chmod -R go-w "${entry}"
     done
-    # Enrollment state is written by the API as the service account.
+    # An app-writable directory inside a Python package can shadow config.py
+    # with config/__init__.py. Keep the directory root-owned, and give the API
+    # write access only to the two pre-created, regular state files.
     if [ -d "${UPDATER_DIR}/config" ]; then
-        chown "${SERVICE_USER}:${SERVICE_USER}" "${UPDATER_DIR}/config" 2>/dev/null || true
+        [ ! -L "${UPDATER_DIR}/config" ] || { warn "config is a symlink"; exit 1; }
+        chown root:root "${UPDATER_DIR}/config"
+        chmod 0755 "${UPDATER_DIR}/config"
+        if [ -n "$(find "${UPDATER_DIR}/config" -maxdepth 1 -name '__init__.*' -print -quit)" ]; then
+            warn "Unexpected Python package in enrollment data; refusing to enable updater"
+            exit 1
+        fi
+        for state in agent.conf subscription.json; do
+            file="${UPDATER_DIR}/config/${state}"
+            [ ! -L "${file}" ] || { warn "Enrollment state is a symlink: ${state}"; exit 1; }
+            if [ ! -e "${file}" ]; then
+                if [ "${state}" = subscription.json ]; then printf '{}\n' > "${file}"; else : > "${file}"; fi
+            fi
+            [ -f "${file}" ] || { warn "Enrollment state is not a file: ${state}"; exit 1; }
+            chown "${SERVICE_USER}:${SERVICE_USER}" "${file}"
+            chmod 0600 "${file}"
+        done
     fi
-    log "Updater code, keys, logs and backups are owned by root (config/ stays with ${SERVICE_USER})"
+    log "Updater tree is root-owned; enrollment data files remain writable by ${SERVICE_USER}"
 else
     warn "${UPDATER_DIR} not found; skipping ownership fix"
 fi
@@ -137,6 +155,14 @@ harden_tree() {
 harden_tree "${ZENPLUS_DIR}/scripts"
 harden_tree "${ZENPLUS_DIR}/bin"
 harden_tree "${ZENPLUS_DIR}/venv"
+
+# systemd reads this file before starting the root Python interpreter. The
+# service account must not be able to inject interpreter/loader environment.
+if [ -e "${ZENPLUS_DIR}/.env" ] || [ -L "${ZENPLUS_DIR}/.env" ]; then
+    [ -f "${ZENPLUS_DIR}/.env" ] && [ ! -L "${ZENPLUS_DIR}/.env" ] || { warn ".env is not a regular file"; exit 1; }
+    chown "root:${SERVICE_USER}" "${ZENPLUS_DIR}/.env"
+    chmod 0640 "${ZENPLUS_DIR}/.env"
+fi
 
 # ── 3. The service account must not be able to reach the Docker socket ──────
 if getent group docker >/dev/null 2>&1; then
