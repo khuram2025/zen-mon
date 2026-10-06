@@ -13,8 +13,12 @@ TRANSACTIONS = STATE / 'transactions'
 
 def _prepare() -> None:
     for directory in (STATE, BACKUPS, TRANSACTIONS):
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        mode = 0o755 if directory == STATE else 0o700
+        directory.mkdir(mode=mode, parents=True, exist_ok=True)
         require_root_owned(directory, what='OTA backup state')
+        # PostgreSQL traverses STATE/work for public migration payloads. Only
+        # backups and transaction records are private, even with umask 077.
+        directory.chmod(mode)
 
 def _marker(update_id: str) -> Path:
     if not isinstance(update_id, str) or not update_id:
@@ -35,6 +39,11 @@ def create_transaction_backup(update_id: str) -> Path:
         json.dump({'backup': backup.name}, stream)
     cleanup_old_backups(str(BACKUPS), 3)
     return backup
+
+def begin_transaction(update_id: str) -> None:
+    """Discard a prior attempt before services stop or the backup hook starts."""
+    _prepare()
+    _marker(update_id).unlink(missing_ok=True)
 
 def restore_transaction_backup(update_id: str) -> bool:
     _prepare()

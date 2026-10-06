@@ -62,3 +62,21 @@ def test_incomplete_backup_cannot_become_recovery_target(monkeypatch, state):
     with pytest.raises(RuntimeError, match='incomplete'):
         transaction.create_transaction_backup('incomplete-release')
     assert not transaction._marker('incomplete-release').exists()
+
+def test_preflight_clears_stale_marker_before_backup_process_starts(state):
+    marker = transaction._marker('retried-release')
+    marker.write_text('{"backup":"pre-current-old"}')
+    marker.chmod(0o600)
+    transaction.begin_transaction('retried-release')
+    assert not marker.exists()
+    assert transaction.restore_transaction_backup('retried-release') is False
+
+def test_private_umask_keeps_migration_parent_traversable(state):
+    import stat
+    transaction.STATE.chmod(0o700)
+    previous = os.umask(0o077)
+    try: transaction._prepare()
+    finally: os.umask(previous)
+    assert stat.S_IMODE(transaction.STATE.stat().st_mode) == 0o755
+    assert stat.S_IMODE(transaction.BACKUPS.stat().st_mode) == 0o700
+    assert stat.S_IMODE(transaction.TRANSACTIONS.stat().st_mode) == 0o700
