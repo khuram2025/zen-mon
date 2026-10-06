@@ -87,6 +87,36 @@ def test_a_fresh_appliance_gets_a_default_trust_file_and_key_directory(box):
     assert any(c.startswith("chown root:root") and "updater-trust.conf" in c for c in calls)
 
 
+def test_legacy_version_marker_is_protected_without_advancing_it(box):
+    marker = box['zp'] / '.version'
+    marker.write_text('1.23.31\nold-timestamp\n')
+    marker.chmod(0o666)
+    result, calls = run(box)
+    assert result.returncode == 0, result.stderr
+    assert f'chown root:root {marker}' in calls
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o644
+    assert marker.read_text() == '1.23.31\nold-timestamp\n'
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'dangling_symlink', 'directory'])
+def test_invalid_version_marker_is_rejected_without_following_it(box, kind):
+    marker = box['zp'] / '.version'
+    target = box['tmp'] / 'outside-version'
+    if kind == 'directory':
+        marker.mkdir()
+    else:
+        if kind == 'symlink':
+            target.write_text('outside\n')
+            target.chmod(0o666)
+        marker.symlink_to(target)
+    result, calls = run(box)
+    assert result.returncode != 0 and '.version is not a regular file' in result.stderr
+    assert f'chown root:root {marker}' not in calls
+    if target.exists():
+        assert target.read_text() == 'outside\n'
+        assert stat.S_IMODE(target.stat().st_mode) == 0o666
+
+
 def test_the_generated_trust_file_is_accepted_by_the_updater(box):
     run(box)
     for directory in [box["etc"].parent, box["etc"], box["etc"] / "updater-keys.d"]:

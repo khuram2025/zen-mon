@@ -157,6 +157,14 @@ harden_tree "${ZENPLUS_DIR}/bin"
 harden_tree "${ZENPLUS_DIR}/venv"
 harden_tree "${ZENPLUS_DIR}/docker"
 harden_tree "${ZENPLUS_DIR}/.git"
+# Legacy installers left this marker app-owned. apply_code intentionally keeps
+# it until the update succeeds, and the legacy agent's final write preserves its
+# existing owner. Protect it before that write so the app cannot spoof versions.
+if [ -e "${ZENPLUS_DIR}/.version" ] || [ -L "${ZENPLUS_DIR}/.version" ]; then
+    [ -f "${ZENPLUS_DIR}/.version" ] && [ ! -L "${ZENPLUS_DIR}/.version" ] || { warn ".version is not a regular file"; exit 1; }
+    chown root:root "${ZENPLUS_DIR}/.version"
+    chmod 0644 "${ZENPLUS_DIR}/.version"
+fi
 if [ -e "${ZENPLUS_DIR}/docker-compose.yml" ]; then
     [ -f "${ZENPLUS_DIR}/docker-compose.yml" ] && [ ! -L "${ZENPLUS_DIR}/docker-compose.yml" ] || { warn "compose config is not a regular file"; exit 1; }
     chown root:root "${ZENPLUS_DIR}/docker-compose.yml"
