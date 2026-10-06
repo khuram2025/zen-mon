@@ -393,6 +393,9 @@ def test_rmem_max_refused_is_reported_not_failed(tmp_path):
 
 def test_installer_cli_update_and_ota_run_the_sysctl_setup():
     install = (ROOT / "install.sh").read_text()
-    assert install.count("setup-netflow-sysctl.sh") >= 2          # install + `zenplus update` (reinstall_units)
+    assert "setup-netflow-sysctl.sh" in install
+    # Operator updates delegate to OTA; the signed manifest owns this setup.
+    cli = (ROOT / "bin" / "zenplus-management").read_text()
+    assert "systemctl start zenplus-updater.service" in cli
     release = (ROOT / "scripts" / "build-release.py").read_text()
     assert '"script": "code/scripts/setup-netflow-sysctl.sh"' in release
