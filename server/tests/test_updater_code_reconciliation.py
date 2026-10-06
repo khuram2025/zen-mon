@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import gzip
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -168,3 +170,27 @@ def test_postgres_restore_failure_is_not_reported_as_success(monkeypatch, tmp_pa
 
     with pytest.raises(RuntimeError, match="PostgreSQL restore failed"):
         rollback._restore_postgres(dump)
+
+
+def test_invalid_gzip_never_starts_database_reset(monkeypatch, tmp_path):
+    dump = tmp_path / "invalid.sql.gz"
+    dump.write_bytes(b"not gzip")
+    calls = []
+    monkeypatch.setattr(rollback.subprocess, "run", lambda *a, **kw: calls.append(a))
+    with pytest.raises(RuntimeError, match="PostgreSQL restore failed"):
+        rollback._restore_postgres(dump)
+    assert calls == []
+
+
+def test_sql_restore_failure_is_fatal_and_does_not_log_appliance_data(monkeypatch, tmp_path, caplog):
+    dump = tmp_path / "valid.sql.gz"
+    with gzip.open(dump, "wb") as source:
+        source.write(b"SELECT 1;\n")
+    def fail_sql(command, **kwargs):
+        assert "--single-transaction" in command
+        assert "ON_ERROR_STOP=1" in command
+        return subprocess.CompletedProcess(command, 3, stdout=b"", stderr=b"private-appliance-row")
+    monkeypatch.setattr(rollback.subprocess, "run", fail_sql)
+    with pytest.raises(RuntimeError, match="restore transaction rolled back"):
+        rollback._restore_postgres(dump)
+    assert "private-appliance-row" not in caplog.text

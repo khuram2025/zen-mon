@@ -749,7 +749,8 @@ EOF
     python3 -m venv "$ZENPLUS_HOME/venv"
     "$ZENPLUS_HOME/venv/bin/pip" install -q --upgrade pip
     "$ZENPLUS_HOME/venv/bin/pip" install -q -r requirements.txt
-    "$ZENPLUS_HOME/venv/bin/pip" install -q 'bcrypt==4.2.1' fpdf2 matplotlib Pillow
+    # All runtime dependencies, including bcrypt and reporting libraries, are
+    # pinned in requirements.txt. Do not override that inventory after install.
     log "Python environment ready"
 
     # React dashboard

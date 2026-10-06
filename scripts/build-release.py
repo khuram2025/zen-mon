@@ -1165,7 +1165,10 @@ def build_package(version: str, changelog: str, severity: str,
             {"type": "stop_services", "services": next(
                 step["services"] for step in steps if step["type"] == "stop_services"
             )},
-            {"type": "restore_backup"},
+            # The first fixed release runs inside the old updater process.
+            # Execute the authenticated restore implementation in a new process.
+            {"type": "run_hook", "script": "code/scripts/ota-restore-backup.py",
+             "timeout": 600},
             # Security floor: restoring older code must never resurrect the
             # legacy support worker's root execution path. This hook executes
             # from the signed release payload, not the restored code tree.

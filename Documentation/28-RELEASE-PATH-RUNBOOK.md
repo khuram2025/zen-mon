@@ -171,6 +171,21 @@ air-gapped site that must install one sets `allow_legacy_packages = true` in
 
 ## 5. Transition to this model
 
+The rollback manifest calls `code/scripts/ota-restore-backup.py` from the verified
+payload in a new process. This avoids retaining the older updater's imported
+restore handler during the first upgrade. PostgreSQL recovery clears user schemas
+and replays the plain dump in one transaction with `ON_ERROR_STOP=1`. SQL errors
+abort the transaction; a corrupt gzip is rejected before database changes. Database
+ownership/settings and system schemas are preserved. Test changed rows, newly
+created tables and a deliberately invalid SQL dump against disposable PostgreSQL,
+then force a final update health failure and verify the old services and version.
+This is application recovery; it does not provide an OS A/B rollback or reverse
+ClickHouse migrations.
+
+Fresh installers use the pinned runtime requirements without a second bcrypt
+override. Compare the installed versions with `server/requirements.txt` during
+fresh-image acceptance.
+
 - Packages up to 1.23.31 are installed by an updater that still unpacks before it
   verifies. The first release built with this tooling is installed by that old updater,
   so the exposure closes only when that release has been installed. Publish it as
