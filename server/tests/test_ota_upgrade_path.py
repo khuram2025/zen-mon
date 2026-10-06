@@ -165,16 +165,32 @@ def test_preflight_runs_with_old_installed_updater_without_dirtying_payload(tmp_
     import os, shutil, subprocess
     package = tmp_path / "package"
     (package / "code" / "scripts").mkdir(parents=True)
-    (package / "code" / "updater").mkdir()
-    for name in ("__init__.py", "version_policy.py"):
-        shutil.copy2(ROOT / "updater" / name, package / "code" / "updater" / name)
+    shutil.copytree(ROOT / 'updater', package / 'code' / 'updater',
+                    ignore=shutil.ignore_patterns('__pycache__', 'config'))
     shutil.copy2(ROOT / "scripts" / "ota-preflight.py", package / "code" / "scripts")
-    (package / "manifest.json").write_text(json.dumps(dict(version="1.23.10", min_version="1.23.9")))
+    (package / "manifest.json").write_text(json.dumps(dict(version="1.23.10", min_version="1.23.9", update_id='fixture-update')))
     (package / "code" / ".version").write_text("1.23.10")
     installed = tmp_path / "installed"
     installed.mkdir()
     (installed / ".version").write_text("1.23.9")
-    command = [sys.executable, str(package / "code" / "scripts" / "ota-preflight.py")]
+    # Execute the real root-state implementation in an ownership fixture; the
+    # live appliance test exercises uid 0 and the fixed production paths.
+    launcher = f'''
+import pathlib, runpy, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, {str(package/'code')!r})
+from updater import backup_transaction as transaction
+from updater.trust import require_root_owned
+base = pathlib.Path({str(tmp_path)!r})
+transaction.STATE = base/'state'
+transaction.BACKUPS = transaction.STATE/'backups'
+transaction.TRANSACTIONS = transaction.STATE/'transactions'
+def checked(path, **kw):
+    require_root_owned(path, trusted_uid=base.stat().st_uid, stop_at=base, **kw)
+transaction.require_root_owned = checked
+runpy.run_path({str(package/'code/scripts/ota-preflight.py')!r}, run_name='__main__')
+'''
+    command = [sys.executable, '-c', launcher]
     result = subprocess.run(command, env={**os.environ, "ZENPLUS_DIR": str(installed)}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert not list((package / "code").rglob("__pycache__"))
