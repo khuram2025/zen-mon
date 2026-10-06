@@ -48,6 +48,10 @@ there, if needed, uses a separate checkout; it does not change installed code.
    Run the strict `npm run build`, `npm run smoke:routes`, applicable Python
    contracts and Go tests before release. Live API/database tests need disposable
    fixtures; record excluded tests explicitly and do not claim they passed.
+   The CLI and its source helpers under `bin/` ship as individually managed files.
+   The updater does not take over the whole `bin/` directory or remove existing
+   compiled binaries and local helpers. DNS/NTP commands still require an approved
+   sudo policy on the appliance; do not grant unrestricted sudo to the app account.
 4. **Verify offline** before any production API call:
 
    ```bash

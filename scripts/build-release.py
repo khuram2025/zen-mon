@@ -61,7 +61,14 @@ GO_BIN = shutil.which("go") or "/usr/local/go/bin/go"
 # behavior.  node_modules, dist, and build remain excluded by CODE_IGNORE.
 CODE_DIRS = ["server", "poller", "scripts", "support", "docker", "dashboard"]
 # Files to include at root level
-CODE_FILES = [".version", "docker-compose.yml"]
+CODE_FILES = [
+    ".version", "docker-compose.yml",
+    # Manage source scripts individually: bin/ also holds running Go binaries,
+    # which must stay untouched until their explicit install_binary steps.
+    "bin/zenplus-cli", "bin/zenplus-apply-network.sh", "bin/zenplus-apply-ntp.sh",
+    "bin/first-boot-init.sh", "bin/wait-for-deps.sh", "bin/expand-storage.sh",
+    "bin/verify-ship-ready.sh",
+]
 CODE_IGNORE = [
     "__pycache__", "*.pyc", ".pytest_cache", "node_modules",
     ".mypy_cache", ".ruff_cache", "*.egg-info",
@@ -670,6 +677,18 @@ def validate_release_inputs(version: str) -> None:
         )
 
 
+def stage_code_files(code_dir: Path) -> None:
+    """Ship the CLI/helpers as managed files without taking over bin/."""
+    for name in CODE_FILES:
+        source = ZENPLUS_DIR / name
+        if not source.is_file() or source.is_symlink():
+            raise RuntimeError(f"Required release source file missing or unsafe: {name}")
+        destination = code_dir / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        print(f"  + {name}")
+
+
 def build_package(version: str, changelog: str, severity: str,
                   min_version: str | None, skip_dashboard: bool,
                   skip_go: bool, include_migrations: bool,
@@ -724,11 +743,7 @@ def build_package(version: str, changelog: str, severity: str,
             shutil.copytree(src, code_dir / d, ignore=shutil.ignore_patterns(*ignore))
             print(f"  + {d}/")
 
-    for f in CODE_FILES:
-        src = ZENPLUS_DIR / f
-        if src.exists():
-            shutil.copy2(src, code_dir / f)
-            print(f"  + {f}")
+    stage_code_files(code_dir)
 
     # Also copy the updater module itself — but never its per-appliance state.
     # `config/` holds agent.conf (api_key) and subscription.json (this appliance's

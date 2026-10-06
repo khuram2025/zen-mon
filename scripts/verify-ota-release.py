@@ -151,6 +151,10 @@ def main() -> None:
         installed_version = read_member(tar, "code/.version").decode().splitlines()[0]
         if installed_version != args.version:
             raise RuntimeError("code/.version does not match release version")
+        if tuple(map(int, args.version.split('.'))) >= (1, 23, 32):
+            for helper in ('zenplus-cli', 'zenplus-apply-network.sh', 'zenplus-apply-ntp.sh'):
+                if f'code/bin/{helper}' not in members:
+                    raise RuntimeError(f'required management CLI/helper missing: {helper}')
 
         steps = manifest.get("steps", [])
         if not steps or steps[0].get("script") != "code/scripts/ota-preflight.py":
