@@ -195,6 +195,9 @@ the compose file and installed Git metadata are root-owned; OTA reapplies trust
 before other root setup hooks read refreshed files. `zenplus update` invokes
 the signed OTA service. The root-owned operator CLI is delivered on fresh installs
 and OTA upgrades; it no longer pulls and builds unsigned source on the appliance.
+Critical installer phases preserve shell failure handling, including errors
+before their final log message. Installation acceptance checks both complete
+database schemas as well as HTTP health and updater trust.
 
 - Packages up to 1.23.31 are installed by an updater that still unpacks before it
   verifies. The first release built with this tooling is installed by that old updater,

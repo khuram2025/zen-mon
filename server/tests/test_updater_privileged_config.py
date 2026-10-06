@@ -109,3 +109,22 @@ def test_installer_stops_before_finalization_when_updater_setup_fails(tmp_path):
     assert result.returncode != 0
     assert not marker.exists(), 'Installer continued after failed privileged updater setup'
     assert 'Configuring OTA updater' in result.stdout
+
+
+@pytest.mark.parametrize('phase', ['install_prerequisites', 'build_components', 'setup_databases', 'finalize'])
+def test_early_critical_command_failure_cannot_be_hidden_by_later_success(tmp_path, phase):
+    definitions = tmp_path / 'installer-definitions.sh'
+    definitions.write_text((ROOT / 'install.sh').read_text(encoding='utf-8').rsplit('\nmain "$@"',1)[0])
+    marker = tmp_path/'incorrectly-continued'
+    harmless = ('check_root show_banner preflight_checks install_prerequisites '
+                'setup_user fetch_code configure_env build_components setup_databases '
+                'seed_trial_licence create_services setup_security_hardening setup_updater '
+                'setup_support_bundles create_cli finalize verify_installation collect_report print_summary')
+    script = f'source {shlex.quote(str(definitions))}\n'
+    script += ''.join(f'{name}() {{ :; }}\n' for name in harmless.split())
+    script += f'{phase}() {{ false; touch {shlex.quote(str(marker))}; }}\nmain\n'
+    result = subprocess.run(['bash','-c',script],env=dict(os.environ,INSTALL_LOG=str(tmp_path/'install.log')),
+                            capture_output=True,text=True,timeout=20)
+    assert result.returncode != 0
+    assert not marker.exists()
+    assert 'Installation aborted during' in result.stdout

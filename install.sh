@@ -139,7 +139,16 @@ _run_step() {
         echo "===== [$STEP_NO/$TOTAL_STEPS] $title — $(date -Iseconds) ====="
     } >> "$INSTALL_LOG"
     CURRENT_STEP_TITLE="$title"; STEP_IN_FLIGHT=1
-    "$@" >> "$INSTALL_LOG" 2>&1 || rc=$?
+    if [[ "$critical" == "critical" ]]; then
+        # A function invoked on the left of `||` suppresses errexit throughout
+        # its body. Keep critical phases out of that context so an early apt,
+        # pip or build failure cannot be hidden by a later successful log call.
+        set -e
+        "$@" >> "$INSTALL_LOG" 2>&1
+        set +e
+    else
+        "$@" >> "$INSTALL_LOG" 2>&1 || rc=$?
+    fi
     STEP_IN_FLIGHT=0
     local dur=$((SECONDS - start))
     [[ $IS_TTY -eq 1 ]] && printf '\r'
@@ -303,7 +312,7 @@ install_prerequisites() {
     apt-get update -qq
 
     info "Installing core packages..."
-    apt-get install -y -qq \
+    apt-get -o DPkg::Lock::Timeout=300 install -y -qq \
         curl wget git apt-transport-https ca-certificates \
         gnupg lsb-release software-properties-common \
         python3 python3-pip python3-venv \
@@ -1221,6 +1230,13 @@ finalize() {
 verify_installation() {
     step "Verifying appliance health"
     local failures=0
+
+    if python3 "$ZENPLUS_HOME/scripts/sync-schema.py" --scripts-dir "$ZENPLUS_HOME/scripts" --json; then
+        log "PostgreSQL and ClickHouse schemas match the installed code"
+    else
+        echo "[fail] Database schema verification failed after installation"
+        failures=$((failures + 1))
+    fi
 
     if (cd "$ZENPLUS_HOME" && "$ZENPLUS_HOME/venv/bin/python" -c \
         'from updater.config import load_config; load_config()'); then
