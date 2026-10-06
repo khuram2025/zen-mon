@@ -155,6 +155,13 @@ harden_tree() {
 harden_tree "${ZENPLUS_DIR}/scripts"
 harden_tree "${ZENPLUS_DIR}/bin"
 harden_tree "${ZENPLUS_DIR}/venv"
+harden_tree "${ZENPLUS_DIR}/docker"
+harden_tree "${ZENPLUS_DIR}/.git"
+if [ -e "${ZENPLUS_DIR}/docker-compose.yml" ]; then
+    [ -f "${ZENPLUS_DIR}/docker-compose.yml" ] && [ ! -L "${ZENPLUS_DIR}/docker-compose.yml" ] || { warn "compose config is not a regular file"; exit 1; }
+    chown root:root "${ZENPLUS_DIR}/docker-compose.yml"
+    chmod 0644 "${ZENPLUS_DIR}/docker-compose.yml"
+fi
 
 # systemd reads this file before starting the root Python interpreter. The
 # service account must not be able to inject interpreter/loader environment.

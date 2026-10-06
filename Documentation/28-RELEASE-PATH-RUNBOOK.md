@@ -190,7 +190,9 @@ ClickHouse migrations.
 Fresh installers use the pinned runtime requirements without a second bcrypt
 override. Compare the installed versions with `server/requirements.txt` during
 fresh-image acceptance. Finalization preserves root ownership and reasserts
-hardening; the final health gate also loads updater trust. `zenplus update` invokes
+hardening; the final health gate also loads updater trust. Docker configuration,
+the compose file and installed Git metadata are root-owned; OTA reapplies trust
+before other root setup hooks read refreshed files. `zenplus update` invokes
 the signed OTA service. The root-owned operator CLI is delivered on fresh installs
 and OTA upgrades; it no longer pulls and builds unsigned source on the appliance.
 

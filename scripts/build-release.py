@@ -978,6 +978,9 @@ def build_package(version: str, changelog: str, severity: str,
 
     steps.append({"type": "apply_code", "method": "replace", "source": "code/"})
 
+    # Protect the refreshed files before other root setup hooks read them.
+    steps.append({"type": "run_hook", "script": "code/scripts/setup-updater-trust.sh", "timeout": 120})
+
     steps.append({"type": "run_hook", "script": "code/scripts/setup-management-cli.sh", "timeout": 30})
 
     # The updater process imported its apply_code handler before replacing its
