@@ -43,7 +43,7 @@ class SecurityConfig:
 
 @dataclass
 class UpdateConfig:
-    backup_dir: str = str(UPDATER_DIR / "backups")
+    backup_dir: str = "/var/lib/zenplus-updater/backups"
     max_backups: int = 3
     auto_update: bool = True
     maintenance_window_start: str = ""

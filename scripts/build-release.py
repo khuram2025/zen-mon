@@ -65,7 +65,7 @@ CODE_FILES = [
     ".version", "docker-compose.yml",
     # Manage source scripts individually: bin/ also holds running Go binaries,
     # which must stay untouched until their explicit install_binary steps.
-    "bin/zenplus-cli", "bin/zenplus-apply-network.sh", "bin/zenplus-apply-ntp.sh",
+    "bin/zenplus-cli", "bin/zenplus-management", "bin/zenplus-apply-network.sh", "bin/zenplus-apply-ntp.sh",
     "bin/first-boot-init.sh", "bin/wait-for-deps.sh", "bin/expand-storage.sh",
     "bin/verify-ship-ready.sh",
 ]
@@ -963,7 +963,7 @@ def build_package(version: str, changelog: str, severity: str,
     # Stop services before update
     steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector", "zenplus-syslog",
         "zenplus-ncm-backup.timer", "zenplus-ncm-delivery.timer", "zenplus-ncm-backup.service", "zenplus-ncm-delivery.service", "zenplus-ncm-worker.service"]})
-    steps.append({"type": "backup", "targets": ["code", "database"]})
+    steps.append({"type": "run_hook", "script": "code/scripts/ota-create-backup.py", "timeout": 600})
 
     # Heal the OS prerequisites every appliance needs but older installers
     # missed. apt_install is idempotent — already-present packages are a
@@ -977,6 +977,8 @@ def build_package(version: str, changelog: str, severity: str,
     })
 
     steps.append({"type": "apply_code", "method": "replace", "source": "code/"})
+
+    steps.append({"type": "run_hook", "script": "code/scripts/setup-management-cli.sh", "timeout": 30})
 
     # The updater process imported its apply_code handler before replacing its
     # own module. Old appliances therefore need one post-overlay hook to load

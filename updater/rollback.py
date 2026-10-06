@@ -165,7 +165,7 @@ def _backup_postgres(backup_path: Path) -> None:
         raise RuntimeError(f"PostgreSQL backup failed: {e}") from e
 
 
-def restore_backup(backup_dir: str) -> None:
+def restore_backup(backup_dir: str, *, selected_backup: Path | None = None) -> None:
     """Restore from the most recent backup."""
     backup_base = Path(backup_dir)
 
@@ -182,7 +182,12 @@ def restore_backup(backup_dir: str) -> None:
         logger.error("No backup directories found")
         return
 
-    backup_path = backups[0]
+    backup_path = selected_backup or backups[0]
+    if selected_backup is not None and (
+        selected_backup.resolve().parent != backup_base.resolve()
+        or not selected_backup.is_dir()
+    ):
+        raise RuntimeError("selected backup is outside the backup directory or missing")
     logger.info("Restoring from backup: %s", backup_path)
 
     # Restore code

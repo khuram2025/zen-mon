@@ -18,6 +18,7 @@ def test_cli_and_helpers_are_delivered_but_running_binaries_are_preserved(tmp_pa
     monkeypatch.setattr(builder, 'ZENPLUS_DIR', ROOT)
     builder.stage_code_files(code)
     assert (code / 'bin/zenplus-cli').read_bytes() == (ROOT / 'bin/zenplus-cli').read_bytes()
+    assert (code / 'bin/zenplus-management').read_bytes() == (ROOT / 'bin/zenplus-management').read_bytes()
     assert (code / 'bin/zenplus-apply-ntp.sh').read_bytes() == (ROOT / 'bin/zenplus-apply-ntp.sh').read_bytes()
     write_payload_manifest(code, managed_files=builder.CODE_FILES)
     destination = tmp_path / 'installed'
@@ -29,6 +30,7 @@ def test_cli_and_helpers_are_delivered_but_running_binaries_are_preserved(tmp_pa
     monkeypatch.setattr(apply, 'ZENPLUS_DIR', destination)
     apply._apply_replace({'source': 'code'}, str(tmp_path))
     assert (destination / 'bin/zenplus-cli').read_bytes() == (ROOT / 'bin/zenplus-cli').read_bytes()
+    assert (destination / 'bin/zenplus-management').read_bytes() == (ROOT / 'bin/zenplus-management').read_bytes()
     for name in ('zenplus-poller', 'zenplus-netflow-collector', 'local-operator-helper'):
         assert (destination / 'bin' / name).read_bytes() == b'keep running inode'
 

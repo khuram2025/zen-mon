@@ -171,9 +171,14 @@ air-gapped site that must install one sets `allow_legacy_packages = true` in
 
 ## 5. Transition to this model
 
-The rollback manifest calls `code/scripts/ota-restore-backup.py` from the verified
-payload in a new process. This avoids retaining the older updater's imported
-restore handler during the first upgrade. PostgreSQL recovery clears user schemas
+Backup and rollback call `code/scripts/ota-create-backup.py` and
+`code/scripts/ota-restore-backup.py` from the verified payload in new processes.
+This avoids retaining the older updater's imported handlers during the first
+upgrade. Completed backups live under `/var/lib/zenplus-updater/backups`, outside
+the older app-owned tree. A root-owned transaction marker binds recovery to this
+attempt's completed backup. A failed backup cannot select an unrelated older
+backup, and retries clear their old marker before starting. Existing legacy
+backups are retained separately. PostgreSQL recovery clears user schemas
 and replays the plain dump in one transaction with `ON_ERROR_STOP=1`. SQL errors
 abort the transaction; a corrupt gzip is rejected before database changes. Database
 ownership/settings and system schemas are preserved. Test changed rows, newly
@@ -184,7 +189,10 @@ ClickHouse migrations.
 
 Fresh installers use the pinned runtime requirements without a second bcrypt
 override. Compare the installed versions with `server/requirements.txt` during
-fresh-image acceptance.
+fresh-image acceptance. Finalization preserves root ownership and reasserts
+hardening; the final health gate also loads updater trust. `zenplus update` invokes
+the signed OTA service. The root-owned operator CLI is delivered on fresh installs
+and OTA upgrades; it no longer pulls and builds unsigned source on the appliance.
 
 - Packages up to 1.23.31 are installed by an updater that still unpacks before it
   verifies. The first release built with this tooling is installed by that old updater,

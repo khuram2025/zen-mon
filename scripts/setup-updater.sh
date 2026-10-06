@@ -65,7 +65,7 @@ max_manifest_age_days = 30
 verify_tls = true
 
 [update]
-backup_dir = /opt/zenplus/updater/backups
+backup_dir = /var/lib/zenplus-updater/backups
 max_backups = 3
 auto_update = true
 maintenance_window_start =

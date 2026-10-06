@@ -1,0 +1,51 @@
+#!/bin/bash
+# Root operator commands. Application releases are installed through signed OTA.
+set -euo pipefail
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run this command with sudo." >&2
+    exit 1
+fi
+case "${1:-help}" in
+    status)
+        printf 'ZenPlus version: '
+        head -1 /opt/zenplus/.version
+        systemctl --no-pager list-units --all zenplus-api.service zenplus-poller.service \
+            zenplus-netflow-collector.service nginx.service zenplus-updater.timer
+        ;;
+    update)
+        echo "Checking for an approved signed OTA release..."
+        systemctl start zenplus-updater.service
+        ;;
+    restart)
+        systemctl restart zenplus-api zenplus-poller zenplus-netflow-collector nginx
+        ;;
+    stop)
+        systemctl stop zenplus-netflow-collector zenplus-poller zenplus-api
+        ;;
+    start)
+        systemctl start docker postgresql redis-server
+        docker start zenplus-clickhouse >/dev/null
+        systemctl start zenplus-wait-deps zenplus-api zenplus-poller zenplus-netflow-collector nginx
+        ;;
+    logs)
+        case "${2:-api}" in
+            api|poller|netflow-collector|updater|syslog|ncm-worker) ;;
+            *) echo 'Unknown service.' >&2; exit 2 ;;
+        esac
+        journalctl -u "zenplus-${2:-api}" -f
+        ;;
+    backup)
+        umask 077
+        target=/var/lib/zenplus-appliance-backups
+        install -d -o root -g root -m 0700 "$target"
+        output=$(mktemp "$target/zenplus-$(date -u +%Y%m%dT%H%M%S)-XXXXXX.sql.gz")
+        trap 'rm -f "$output"' EXIT
+        runuser -u postgres -- pg_dump zenplus | gzip > "$output"
+        trap - EXIT
+        echo "Database backup: $output"
+        ;;
+    help|*)
+        echo 'Usage: zenplus <status|update|restart|stop|start|logs|backup>'
+        echo 'update checks and applies an approved signed OTA release.'
+        ;;
+esac

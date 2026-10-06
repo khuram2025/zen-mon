@@ -152,7 +152,7 @@ def main() -> None:
         if installed_version != args.version:
             raise RuntimeError("code/.version does not match release version")
         if tuple(map(int, args.version.split('.'))) >= (1, 23, 32):
-            for helper in ('zenplus-cli', 'zenplus-apply-network.sh', 'zenplus-apply-ntp.sh'):
+            for helper in ('zenplus-cli', 'zenplus-management', 'zenplus-apply-network.sh', 'zenplus-apply-ntp.sh'):
                 if f'code/bin/{helper}' not in members:
                     raise RuntimeError(f'required management CLI/helper missing: {helper}')
 
