@@ -1,0 +1,109 @@
+/*
+ * Report print layout. Scoped to pages that mount a report root
+ * (.zp-report-print), so importing it never changes how other pages print.
+ * Page size and margin boxes come from the organisation's paper size and are
+ * injected by the viewer (ReportPrintStyle).
+ */
+@media print {
+  /* Paper is white: use the light palette whatever the screen theme. */
+  html:has(.zp-report-print) {
+    --bg: 255 255 255;
+    --surface: 255 255 255;
+    --surface2: 241 245 249;
+    --surface3: 226 232 240;
+    --border: 226 232 240;
+    --border-strong: 203 213 225;
+    --text: 15 23 42;
+    --text2: 51 65 85;
+    --muted: 100 116 139;
+    --muted2: 148 163 184;
+    --primary: 37 99 235;
+    --success: 22 163 74;
+    --warning: 234 88 12;
+    --danger: 220 38 38;
+    --info: 14 165 233;
+    --accent: 168 85 247;
+    --danger-fg: 185 28 28;
+    --warning-fg: 154 52 18;
+    --success-fg: 22 101 52;
+    --info-fg: 7 89 133;
+    color-scheme: light;
+  }
+
+  html:has(.zp-report-print),
+  html:has(.zp-report-print) body {
+    background: rgb(var(--bg)) !important;
+    height: auto !important;
+  }
+
+  /* App chrome: sidebar, top bar and the content column's sidebar margin. */
+  html:has(.zp-report-print) #root aside,
+  html:has(.zp-report-print) #root header {
+    display: none !important;
+  }
+  html:has(.zp-report-print) .content-transition {
+    margin-left: 0 !important;
+  }
+  html:has(.zp-report-print) main {
+    padding: 0 !important;
+    overflow: visible !important;
+    animation: none !important;
+  }
+
+  .zp-report-print {
+    max-width: none !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .zp-report-print *,
+  .zp-report-print *::before,
+  .zp-report-print *::after {
+    box-shadow: none !important;
+    animation: none !important;
+    transition: none !important;
+  }
+
+  /* Cover: the brand header stands alone on the first page of long reports. */
+  .zp-report-print .zp-cover {
+    border: 0 !important;
+    border-radius: 0 !important;
+  }
+  .zp-report-print .zp-cover-break {
+    break-after: page;
+    page-break-after: always;
+    min-height: 60vh;
+  }
+
+  /* Keep KPI rows, charts and short blocks whole; let long sections flow. */
+  .zp-report-print .zp-avoid-break,
+  .zp-report-print figure,
+  .zp-report-print dl {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .zp-report-print .zp-section {
+    break-inside: auto;
+    border-radius: 0.5rem;
+  }
+  .zp-report-print .zp-section h2 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  .zp-report-print thead {
+    display: table-header-group;
+  }
+  .zp-report-print tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .zp-report-print .overflow-x-auto {
+    overflow: visible !important;
+  }
+
+  /* Charts drawn at screen width scale down to the page. */
+  .zp-report-print .zp-chart svg,
+  .zp-report-print .zp-chart canvas {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+}

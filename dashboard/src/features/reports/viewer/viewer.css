@@ -1,0 +1,25 @@
+/*
+ * Report viewer screen styles, scoped to the viewer root (.zp-report-viewer).
+ *
+ * The app's <main> is overflow-y:auto but never scrolls (the window does), so
+ * it would capture position:sticky. While a report is open it lets sticky
+ * toolbars and the contents rail follow the window scroll instead.
+ */
+main:has(.zp-report-viewer) {
+  overflow: visible;
+}
+
+@keyframes zp-report-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.zp-report-progress {
+  animation: zp-report-progress 1.3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zp-report-progress {
+    animation-duration: 3s;
+  }
+}

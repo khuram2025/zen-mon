@@ -61,6 +61,7 @@ export function NetflowScopePicker({ value, onChange }: { value: FlowFilter; onC
   const [alignRight, setAlignRight] = useState(true)
   const [draft, setDraft] = useState<FlowFilterDraft>({})
   const ref = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
   const id = useId()
   const exporters = useQuery<ExporterRow[]>({
     queryKey: ['netflow', 'exporters', 'status', 'report-scope'],
@@ -88,7 +89,10 @@ export function NetflowScopePicker({ value, onChange }: { value: FlowFilter; onC
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') {
+        setOpen(false)
+        trigger.current?.focus()
+      }
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -127,19 +131,20 @@ export function NetflowScopePicker({ value, onChange }: { value: FlowFilter; onC
 
   return (
     <div ref={ref} className="relative">
-      <Button variant="outline" size="sm" className="h-8 gap-1.5" aria-expanded={open} aria-haspopup="dialog"
+      <Button ref={trigger} variant="outline" size="sm" className={cn('h-8 gap-1.5', count > 0 && 'border-primary/50 bg-primary/5')}
+        aria-expanded={open} aria-haspopup="dialog" aria-controls={open ? `${id}-dialog` : undefined}
         onClick={() => {
           // Open towards the side with room: on a narrow screen the button sits at the left edge.
           const rect = ref.current?.getBoundingClientRect()
           if (rect) setAlignRight(rect.right - 352 >= 8)
           setOpen((v) => !v)
         }}>
-        <Filter className="h-3.5 w-3.5" aria-hidden />
+        <Filter className="h-3.5 w-3.5 text-primary" aria-hidden />
         <span className="text-xs font-semibold">{count ? `NetFlow scope (${count})` : 'NetFlow scope'}</span>
         <ChevronDown className="h-3 w-3 opacity-60" aria-hidden />
       </Button>
       {open && (
-        <div role="dialog" aria-label="NetFlow scope"
+        <div id={`${id}-dialog`} role="dialog" aria-label="NetFlow scope"
           className={cn('absolute z-30 mt-1 w-[min(22rem,calc(100vw-2rem))] space-y-3 rounded-lg border border-border bg-surface p-3 shadow-elevated',
             alignRight ? 'right-0' : 'left-0')}>
           <p className="text-[11px] text-text2">
