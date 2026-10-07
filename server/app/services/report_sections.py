@@ -2083,6 +2083,19 @@ def restricted_section(sid: str, title: Optional[str] = None, orphaned: bool = F
     return sec
 
 
+def _failure_note(exc: BaseException) -> str:
+    """Reader-facing reason a section failed — never the raw exception text
+    (it can carry SQL or connection details into shared report links)."""
+    mod = type(exc).__module__ or ""
+    if mod.startswith("clickhouse_connect") or getattr(exc, "status_code", None) == 503:
+        return ("Metrics for this section are temporarily unavailable: the time-series database did "
+                "not respond. Generate the report again shortly; other sections are unaffected.")
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "This section took too long to generate and was skipped. Try a shorter period."
+    return (f"This section could not be generated ({type(exc).__name__}). Other sections are "
+            "unaffected; the appliance log has details.")
+
+
 async def build_sections(db: AsyncSession, section_ids: list,
                          frm: datetime, to: datetime,
                          filters: Optional[dict] = None,
@@ -2129,8 +2142,7 @@ async def build_sections(db: AsyncSession, section_ids: list,
         except Exception as exc:
             logger.exception("report section %s failed", sid)
             sec = _section(sid, item["title"] or entry["title"],
-                           notes=[f"This section could not be generated ({type(exc).__name__}). "
-                                  "Other sections are unaffected; the appliance log has details."])
+                           notes=[_failure_note(exc)])
             sec["error"] = True
         if item["title"]:
             sec["title"] = item["title"]
