@@ -18,6 +18,12 @@ Shared rules in this pack:
   so instead of inferring lifecycle status.
 - Attribution in change events (reported_user) is whatever the device or the
   calling system wrote; it is shown as unverified.
+- SSH host-key trust was removed from NCCM in release 1.23.29 (the key a
+  device presents is accepted); ncm_host_keys and ncm_credentials.
+  ssh_auto_trust remain in the database unused, so no section reads them.
+- Status cells use words both the dashboard and the PDF/HTML renderers tone
+  (ok, stale, warning, failed, expired, compliant, non-compliant, unknown,
+  open, resolved); anything else renders neutral.
 """
 
 from __future__ import annotations
@@ -25,13 +31,13 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
 from app.services.report_sections import (
     SectionCtx,
     _fmt_pct,
+    _local_bucket_starts,
     _section,
     register_section,
     top_n_option,
@@ -53,7 +59,16 @@ FAILURE_LABELS = {
     "incomplete": "Incomplete output", "format": "Unexpected output format",
     "interrupted": "Session interrupted", "archive": "Archive or storage failure",
     "cancelled": "Cancelled", "busy": "Backup already running", "unknown": "Unknown cause",
+    # Retired with SSH host trust (1.23.29); older incidents keep these causes.
+    "host_key_untrusted": "SSH host key not trusted (retired check)",
+    "host_key_changed": "SSH host key changed (retired check)",
 }
+
+
+def _failure_label(category: Any) -> str:
+    cat = str(category or "unknown")
+    return FAILURE_LABELS.get(cat) or cat.replace("_", " ").capitalize()
+
 
 SOURCE_LABELS = {"syslog": "Syslog", "trap": "SNMP trap", "api": "API"}
 TRIGGER_LABELS = {"schedule": "Scheduled", "manual": "Manual", "event": "Change event"}
@@ -122,45 +137,35 @@ def _days(seconds: float) -> str:
     return "< 1 d" if d < 1 else f"{int(d):,} d"
 
 
-def _tz(ctx: SectionCtx) -> ZoneInfo:
-    try:
-        return ZoneInfo(ctx.tz_name)
-    except Exception:
-        return ZoneInfo("UTC")
-
-
 def _fmt_day(ctx: SectionCtx, day: date) -> str:
     """A calendar date in the organisation's date format, without shifting it
     through a timezone (snapshot days are already calendar days)."""
-    return ctx.fmt_date(datetime(day.year, day.month, day.day, 12, tzinfo=_tz(ctx)))
+    return ctx.fmt_date(datetime(day.year, day.month, day.day, 12, tzinfo=ctx._brand().tz))
 
 
 def _pg_day(column: str) -> str:
     """Epoch of the organisation-local day containing ``column`` (param :org_tz)."""
-    return (f"EXTRACT(EPOCH FROM (date_trunc('day', {column} AT TIME ZONE :org_tz)"
-            f" AT TIME ZONE :org_tz))::bigint")
-
-
-def _day_starts(ctx: SectionCtx) -> list[int]:
-    """Epochs of every organisation-local midnight from the window start."""
-    tz = _tz(ctx)
-    cur = _aware(ctx.frm).astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    end = _aware(ctx.to)
-    out: list[int] = []
-    while cur <= end and len(out) < 400:
-        out.append(int(cur.timestamp()))
-        cur = (cur.replace(tzinfo=None) + timedelta(days=1)).replace(tzinfo=tz)
-    return out
+    return (f"EXTRACT(EPOCH FROM (date_trunc('day', {column} AT TIME ZONE CAST(:org_tz AS text))"
+            f" AT TIME ZONE CAST(:org_tz AS text)))::bigint")
 
 
 def _daily_points(ctx: SectionCtx, counts: dict[int, int]) -> list[dict]:
-    """Counts per local day; a day without events is 0 (nothing was recorded)."""
-    keys = set(_day_starts(ctx))
+    """Counts per organisation-local day of the window. A day without records
+    is 0: these are event counts, not samples, so nothing is missing."""
+    keys = {int(d.timestamp()) for d in _local_bucket_starts(ctx, "day")}
     if keys:
         lo, hi = min(keys), int(_aware(ctx.to).timestamp())
         keys.update(k for k in counts if lo <= k <= hi)
     return [{"t": ctx.iso(datetime.fromtimestamp(k, timezone.utc)), "v": counts.get(k, 0)}
             for k in sorted(keys)]
+
+
+def _local_days(ctx: SectionCtx) -> tuple[date, date]:
+    """First and last organisation-local calendar day the window covers."""
+    brand = ctx._brand()
+    first = brand.localize(_aware(ctx.frm)).date()
+    last = brand.localize(_aware(ctx.to) - timedelta(microseconds=1)).date()
+    return first, max(first, last)
 
 
 def _change(curr: Optional[float], prev: Optional[float], unit: str, digits: int,
@@ -203,13 +208,14 @@ LIST_CHOICES = [["flagged", "Devices on older or minority versions"], ["all", "E
          "choices": LIST_CHOICES},
         {"key": "minority_pct", "label": "Minority version below (% of the model's devices)",
          "type": "number", "default": 20, "min": 1, "max": 50},
-        top_n_option(50, 1000),
+        top_n_option(100, 1000),
     ],
 )
 async def firmware_inventory(ctx: SectionCtx) -> dict:
     source = ctx.opt("version")
     title = VERSION_TITLES.get(source, VERSION_TITLES["os"])
     what = "OS version" if source == "os" else "firmware revision"
+    what_plural = "OS and firmware versions" if source == "os" else "Chassis firmware revisions"
     version_sql = ("COALESCE(NULLIF(btrim(d.os_version), ''), NULLIF(btrim(d.firmware_version), ''))"
                    if source == "os" else "NULLIF(btrim(d.firmware_version), '')")
     clause, params = ctx.pg_device_clause("d.id")
@@ -220,7 +226,9 @@ async def firmware_inventory(ctx: SectionCtx) -> dict:
     eol_note = ("No end-of-life or end-of-support data source exists in ZenPlus, so this report "
                 "does not state whether a version is still supported by its vendor.")
     if not rows:
-        return _section("firmware_inventory", title, notes=["No devices in scope.", eol_note])
+        return _section("firmware_inventory", title,
+                        description=f"{what_plural} by vendor and model, as of report generation.",
+                        notes=["No devices in scope.", eol_note])
 
     threshold = float(ctx.opt("minority_pct"))
     total = len(rows)
@@ -299,11 +307,12 @@ async def firmware_inventory(ctx: SectionCtx) -> dict:
               if top_versions else [])
     tables = []
     if dist_rows:
-        tables.append({"title": "Version distribution by vendor and model",
+        tables.append({"title": _truncated("Version distribution by vendor and model",
+                                           min(top_n, len(dist_rows)), len(dist_rows)),
                        "headers": ["Vendor", "Model", "Version", "Devices", "Share of model",
                                    "Finding", "Status"],
                        "styles": ["text", "text", "mono", "num", "pct", "text", "status"],
-                       "rows": dist_rows})
+                       "rows": dist_rows[:top_n]})
     if listed:
         base = "Devices and their versions" if show_all else "Devices on older or minority versions"
         tables.append({"title": _truncated(base, len(listed), len(device_rows)),
@@ -316,7 +325,10 @@ async def firmware_inventory(ctx: SectionCtx) -> dict:
              ("Versions are compared as reported, without normalising vendor naming schemes: "
               "'older' means the version sorts below the newest version seen on the same vendor "
               "and model in this inventory, and a minority version runs on fewer than "
-              f"{threshold:g}% of that model's devices.")]
+              f"{threshold:g}% of that model's devices."),
+             ("Versions are the last values each device reported: the poller keeps a reported "
+              "version until the device reports a different one, so an unreachable device shows its "
+              "last known version.")]
     if source == "os":
         notes.append("The OS version is identified over SNMP by the device's vendor profile; when a "
                      "device reports none, its chassis firmware revision (ENTITY-MIB) is used.")
@@ -327,7 +339,7 @@ async def firmware_inventory(ctx: SectionCtx) -> dict:
         notes.append("No device runs an older or minority version.")
     return _section(
         "firmware_inventory", title,
-        description=(f"{what.capitalize()}s of {total:,} device(s) by vendor and model, as of report "
+        description=(f"{what_plural} of {total:,} device(s) by vendor and model, as of report "
                      "generation."),
         kpis=kpis, charts=charts, tables=tables, notes=notes)
 
@@ -381,8 +393,11 @@ async def hardware_serial_inventory(ctx: SectionCtx) -> dict:
             f"WHERE TRUE{walk_clause} GROUP BY device_id) w ON w.device_id = e.device_id "
             "WHERE " + " AND ".join(where) + clause)
 
-    in_scope = _n((await ctx.db.execute(text(
-        f"SELECT count(*) FROM devices d WHERE TRUE{clause}"), params)).scalar())
+    scope_row = (await ctx.db.execute(text(
+        "SELECT count(*), count(*) FILTER (WHERE d.snmp_enabled) "
+        f"FROM devices d WHERE TRUE{clause}"), params)).first()
+    in_scope = _n(scope_row[0]) if scope_row else 0
+    snmp_n = _n(scope_row[1]) if scope_row else 0
     stats = (await ctx.db.execute(text(
         "SELECT e.class, GROUPING(e.class) AS is_total, count(*), count(DISTINCT e.device_id), "
         "count(*) FILTER (WHERE NULLIF(btrim(e.serial_number), '') IS NULL), "
@@ -396,7 +411,8 @@ async def hardware_serial_inventory(ctx: SectionCtx) -> dict:
         return _section(
             "hardware_serial_inventory", title,
             description="Hardware inventory reported by the devices in scope.",
-            kpis=[_kpi("Devices with hardware inventory", f"0 of {in_scope:,}", "neutral")],
+            kpis=[_kpi("Devices with hardware inventory", f"0 of {in_scope:,}", "neutral",
+                       f"{snmp_n:,} polled over SNMP")],
             notes=["No hardware inventory has been collected for the devices in scope. Inventory "
                    "comes from each device's ENTITY-MIB walk over SNMP; devices without SNMP or "
                    "ENTITY-MIB support have none."])
@@ -432,7 +448,7 @@ async def hardware_serial_inventory(ctx: SectionCtx) -> dict:
         rows.append(row)
     headers = ["Device", "Class", "Component", "Model", "Serial number", "HW revision",
                "FW revision", "Last seen"]
-    styles = ["text", "text", "text", "text", "mono", "mono", "mono", "text"]
+    styles = ["text", "text", "text", "text", "mono", "mono", "mono", "num"]
     if include_absent:
         headers.append("State")
         styles.append("status")
@@ -446,8 +462,8 @@ async def hardware_serial_inventory(ctx: SectionCtx) -> dict:
 
     kpis = [
         _kpi("Devices with hardware inventory", f"{devices_with:,} of {in_scope:,}",
-             "primary" if devices_with == in_scope else "warning",
-             f"{in_scope - devices_with:,} without ENTITY-MIB data" if in_scope > devices_with else None),
+             "primary" if devices_with >= snmp_n else "warning",
+             f"{snmp_n:,} polled over SNMP"),
         _kpi("Chassis", f"{chassis:,}", "info"),
         _kpi("Components listed", f"{listed_total:,}", "primary"),
         _kpi("Missing serial numbers", f"{no_serial:,}", "warning" if no_serial else "success"),
@@ -484,17 +500,24 @@ def _pass_rate(passed: int, failed: int) -> Optional[float]:
     return passed / (passed + failed) * 100 if passed + failed else None
 
 
+TREND_CHARTS = [["both", "Pass rate and check outcomes"], ["rate", "Pass rate"],
+                ["outcomes", "Check outcomes per day"]]
+
+
 @register_section(
     "ncm_compliance_trend", title="Compliance Trend", category="Configuration",
     description=("Daily configuration-compliance outcomes across every assessed device and policy, "
                  "with the change over the period."),
     scope="fleet", requires=("ncm.view",), semantics="window",
-    options=[{"key": "chart", "label": "Chart", "type": "select", "default": "rate",
-              "choices": [["rate", "Pass rate"], ["outcomes", "Check outcomes per day"]]}],
+    options=[{"key": "chart", "label": "Charts", "type": "select", "default": "both",
+              "choices": TREND_CHARTS}],
 )
 async def ncm_compliance_trend(ctx: SectionCtx) -> dict:
     title = "Compliance Trend"
-    d0, d1 = _aware(ctx.frm).date(), _aware(ctx.to).date()
+    d0, d1 = _local_days(ctx)
+    # Snapshot days are UTC days; a day that has not started in UTC yet cannot
+    # have one.
+    d1 = max(d0, min(d1, _now().date()))
     rows = (await ctx.db.execute(text(
         "SELECT s.day, p.name, s.devices, s.passed, s.failed, s.unknown, s.excepted, "
         "s.compliant_devices FROM ncm_compliance_snapshots s "
@@ -507,8 +530,10 @@ async def ncm_compliance_trend(ctx: SectionCtx) -> dict:
     if not rows:
         notes.insert(0, "No compliance snapshots were recorded in this period. A snapshot is taken "
                         "whenever policies are evaluated (at least once a day while NCCM compliance "
-                        "is in use).")
-        return _section("ncm_compliance_trend", title, notes=notes)
+                        "is in use); days before the first evaluation have no data.")
+        return _section("ncm_compliance_trend", title,
+                        description="Daily configuration-compliance outcomes, fleet-wide.",
+                        notes=notes)
 
     days: dict[date, list[int]] = {}
     policies: dict[str, list[tuple]] = {}
@@ -533,70 +558,78 @@ async def ncm_compliance_trend(ctx: SectionCtx) -> dict:
         _kpi("Pass rate", _fmt_pct(rate_last),
              "neutral" if rate_last is None else "success" if not last[2]
              else "warning" if rate_last >= 90 else "danger",
-             _change(rate_last, rate_first, " pts", 2, since) if compare else None),
+             _change(rate_last, rate_first, " pts", 2, since) if compare else
+             f"as of {_fmt_day(ctx, last_day)}"),
         _kpi("Failed checks", f"{last[2]:,}", "danger" if last[2] else "success",
              _change(last[2], first[2], "", 0, since) if compare else None),
-        _kpi("Not assessable", f"{last[3]:,}", "neutral" if not last[3] else "info",
+        _kpi("Not assessable", f"{last[3]:,}", "info" if last[3] else "neutral",
              "no validated configuration"),
-        _kpi("Excepted checks", f"{last[4]:,}", "warning" if last[4] else "neutral"),
-        _kpi("Compliant device–policy pairs", f"{last[5]:,} of {last[0]:,}", "primary"),
+        _kpi("Excepted checks", f"{last[4]:,}", "warning" if last[4] else "neutral",
+             "accepted risk with an owner"),
+        _kpi("Compliant device–policy pairs", f"{last[5]:,} of {last[0]:,}", "primary",
+             "every check passed or excepted"),
         _kpi("Days recorded", f"{len(days):,} of {len(all_days):,}",
              "success" if len(days) >= len(all_days) else "warning"),
     ]
 
-    if ctx.opt("chart") == "outcomes":
-        def pts(i: int) -> list[dict]:
-            return [{"t": noon(d), "v": days[d][i] if d in days else None} for d in all_days]
-        chart = {"title": "Check outcomes per day",
-                 "series": {"kind": "stacked", "unit": "checks", "points": pts(1),
-                            "series": [{"name": "Passed", "color": "success", "points": pts(1)},
-                                       {"name": "Failed", "color": "danger", "points": pts(2)},
-                                       {"name": "Not assessable", "color": "neutral", "points": pts(3)},
-                                       {"name": "Excepted", "color": "warning", "points": pts(4)}]}}
-    else:
+    charts = []
+    choice = ctx.opt("chart")
+    if choice in ("both", "rate"):
         points = []
         for d in all_days:
             rate = _pass_rate(days[d][1], days[d][2]) if d in days else None
             points.append({"t": noon(d), "v": round(rate, 2) if rate is not None else None})
         values = [p["v"] for p in points if p["v"] is not None]
         lo = max(0.0, (min(values) // 5) * 5 - 5) if values else 0.0
-        chart = {"title": "Pass rate per day",
-                 "series": {"kind": "line", "unit": "%", "color": "primary",
-                            "y_domain": [lo, 100], "points": points}}
+        charts.append({"title": "Pass rate per day",
+                       "series": {"kind": "line", "unit": "%", "color": "primary",
+                                  "y_domain": [lo, 100], "points": points}})
+    if choice in ("both", "outcomes"):
+        def pts(i: int) -> list[dict]:
+            return [{"t": noon(d), "v": days[d][i] if d in days else None} for d in all_days]
+        totals = [{"t": noon(d), "v": sum(days[d][1:5]) if d in days else None} for d in all_days]
+        charts.append({"title": "Check outcomes per day",
+                       "series": {"kind": "stacked", "unit": "checks", "points": totals,
+                                  "series": [{"name": "Passed", "color": "success", "points": pts(1)},
+                                             {"name": "Failed", "color": "danger", "points": pts(2)},
+                                             {"name": "Not assessable", "color": "neutral",
+                                              "points": pts(3)},
+                                             {"name": "Excepted", "color": "warning",
+                                              "points": pts(4)}]}})
 
     policy_rows = []
-    for name, series in sorted(policies.items(), key=lambda i: i[0].lower()):
+    for name, series in policies.items():
         f, l_ = series[0], series[-1]
         r_first, r_last = _pass_rate(f[2], f[3]), _pass_rate(l_[2], l_[3])
         delta = (f"{r_last - r_first:+.2f} pts" if r_first is not None and r_last is not None
                  and f[0] != l_[0] else "—")
-        status = "failing" if l_[3] else "unknown" if l_[4] else "passing"
-        policy_rows.append([name, f"{l_[1]:,}", _fmt_pct(r_first), _fmt_pct(r_last), delta,
-                            f"{l_[3]:,}", f"{l_[4]:,}", status])
-    policy_rows.sort(key=lambda r: ({"failing": 0, "unknown": 1}.get(r[7], 2), r[0].lower()))
+        status = "non-compliant" if l_[3] else "unknown" if l_[4] else "compliant"
+        policy_rows.append([_clip(name, 80), f"{l_[1]:,}", _fmt_pct(r_first), _fmt_pct(r_last),
+                            delta, f"{l_[3]:,}", f"{l_[4]:,}", f"{l_[5]:,}", status])
+    policy_rows.sort(key=lambda r: ({"non-compliant": 0, "unknown": 1}.get(r[8], 2), r[0].lower()))
     daily_rows = [[_fmt_day(ctx, d), f"{t[0]:,}", f"{t[1]:,}", f"{t[2]:,}", f"{t[3]:,}",
                    f"{t[4]:,}", _fmt_pct(_pass_rate(t[1], t[2]))]
-                  for d, t in sorted(days.items())]
+                  for d, t in sorted(days.items(), reverse=True)]
 
     notes[:0] = [
         "Pass rate = passed ÷ (passed + failed) checks. Checks that could not be assessed (no "
         "validated configuration) and excepted checks are shown separately and excluded from the "
         "rate.",
         "One point per UTC day: the state recorded by the last evaluation that day. Days without "
-        "an evaluation have no data and are drawn as gaps.",
+        "an evaluation have no data and are drawn as gaps, never as zero.",
         "Totals add up every policy, so a device assessed by two policies is counted in both.",
     ]
     return _section(
         "ncm_compliance_trend", title,
         description=(f"Configuration-compliance outcomes per day from {_fmt_day(ctx, d0)} to "
                      f"{_fmt_day(ctx, d1)}, fleet-wide."),
-        kpis=kpis, charts=[chart],
+        kpis=kpis, charts=charts,
         tables=[{"title": "By policy (first and last recorded day in the period)",
                  "headers": ["Policy", "Devices", "Pass rate (first)", "Pass rate (last)",
-                             "Change", "Failed", "Not assessable", "Status"],
-                 "styles": ["text", "num", "pct", "pct", "num", "num", "num", "status"],
+                             "Change", "Failed", "Not assessable", "Excepted", "Status"],
+                 "styles": ["text", "num", "pct", "pct", "num", "num", "num", "num", "status"],
                  "rows": policy_rows},
-                {"title": "Daily snapshots",
+                {"title": "Daily snapshots (newest first)",
                  "headers": ["Day", "Device–policy pairs", "Passed", "Failed", "Not assessable",
                              "Excepted", "Pass rate"],
                  "styles": ["text", "num", "num", "num", "num", "num", "pct"],
@@ -606,10 +639,21 @@ async def ncm_compliance_trend(ctx: SectionCtx) -> dict:
 
 # ─── Compliance exceptions ──────────────────────────────────────────────────
 
+def _exception_sql(covered: str, where: str) -> str:
+    return ("SELECT ru.title, ru.severity, p.name, e.device_id IS NULL, "
+            "CASE WHEN e.device_id IS NULL THEN NULL ELSE " + DEVICE_NAME + " END, "
+            "e.owner, e.reason, e.created_at, e.expires_at, "
+            "(SELECT count(*) FROM ncm_compliance_results r WHERE r.exception_id = e.id "
+            f"AND r.status = 'excepted'{covered}) "
+            "FROM ncm_compliance_exceptions e JOIN ncm_policy_rules ru ON ru.id = e.rule_id "
+            "JOIN ncm_policies p ON p.id = ru.policy_id LEFT JOIN devices d ON d.id = e.device_id "
+            f"WHERE e.revoked_at IS NULL AND {where}")
+
+
 @register_section(
     "ncm_compliance_exceptions", title="Compliance Exceptions", category="Configuration",
     description=("Active compliance exceptions with their owner, reason and expiry, as of report "
-                 "generation, highlighting those that expire soon."),
+                 "generation, highlighting those that expire soon and those that recently lapsed."),
     scope="device", requires=("ncm.view",), semantics="snapshot",
     options=[{"key": "days", "label": "Expiring within (days)", "type": "int", "default": 14,
               "min": 1, "max": 180},
@@ -618,31 +662,37 @@ async def ncm_compliance_trend(ctx: SectionCtx) -> dict:
 async def ncm_compliance_exceptions(ctx: SectionCtx) -> dict:
     title = "Compliance Exceptions"
     ids = ctx.device_ids
-    params: dict[str, Any] = {}
+    within = int(ctx.opt("days"))
+    params: dict[str, Any] = {"days": within}
     dev = covered = ""
     if ids:
-        # Fleet-wide exceptions (no device) apply to the selected devices too.
+        # Fleet-wide exceptions (no device) apply to the selected devices too,
+        # exactly as the compliance workspace lists them.
         dev = " AND (e.device_id IS NULL OR e.device_id::text = ANY(:dev_ids))"
         covered = " AND r.device_id::text = ANY(:dev_ids)"
         params["dev_ids"] = ids
     rows = (await ctx.db.execute(text(
-        "SELECT ru.title, ru.severity, p.name, e.device_id IS NULL, "
-        "CASE WHEN e.device_id IS NULL THEN NULL ELSE " + DEVICE_NAME + " END, "
-        "e.owner, e.reason, e.created_at, e.expires_at, "
-        "(SELECT count(*) FROM ncm_compliance_results r WHERE r.exception_id = e.id "
-        f"AND r.status = 'excepted'{covered}) "
-        "FROM ncm_compliance_exceptions e JOIN ncm_policy_rules ru ON ru.id = e.rule_id "
-        "JOIN ncm_policies p ON p.id = ru.policy_id LEFT JOIN devices d ON d.id = e.device_id "
-        f"WHERE e.revoked_at IS NULL AND e.expires_at > now(){dev} "
-        "ORDER BY e.expires_at, ru.title"), params)).fetchall()
-    if not rows:
+        _exception_sql(covered, f"e.expires_at > now(){dev}") + " ORDER BY e.expires_at, ru.title"),
+        params)).fetchall()
+    # Lapsed = expired by date (not revoked) in the last N days: the excepted
+    # checks count as failed again unless the exception is renewed.
+    lapsed = (await ctx.db.execute(text(
+        _exception_sql(covered, "e.expires_at <= now() AND e.expires_at > now() - "
+                                f"make_interval(days => CAST(:days AS integer)){dev}")
+        + " ORDER BY e.expires_at DESC, ru.title"), params)).fetchall()
+    if not rows and not lapsed:
         return _section("ncm_compliance_exceptions", title,
                         description="Active compliance exceptions, as of report generation.",
                         kpis=[_kpi("Active exceptions", "0", "success")],
-                        notes=["No active compliance exceptions."])
+                        notes=["No active compliance exceptions, and none lapsed in the last "
+                               f"{within} days."])
 
-    within = int(ctx.opt("days"))
     now = _now()
+    top_n = int(ctx.opt("top_n"))
+
+    def applies(r) -> str:
+        return "All devices" if r[3] else (r[4] or "—")
+
     expiring = fleet_wide = severe = checks = 0
     out = []
     for r in rows:
@@ -653,34 +703,55 @@ async def ncm_compliance_exceptions(ctx: SectionCtx) -> dict:
         severity = SEVERITY_MAP.get((r[1] or "").lower(), "info")
         severe += severity in ("critical", "major")
         checks += _n(r[9])
-        out.append([f"{_clip(r[0], 80)} ({_clip(r[2], 40)})", severity,
-                    "All devices" if r[3] else (r[4] or "—"), _clip(r[5], 40), _clip(r[6], 120),
-                    ctx.fmt_date(r[8]), _days(left) if left is not None else "—", f"{_n(r[9]):,}",
-                    "warning" if soon else "active"])
-    top_n = int(ctx.opt("top_n"))
+        out.append([f"{_clip(r[0], 80)} ({_clip(r[2], 40)})", severity, applies(r),
+                    _clip(r[5], 40), _clip(r[6], 80), ctx.fmt_date(r[8]),
+                    _days(left) if left is not None else "—", f"{_n(r[9]):,}",
+                    "expiring" if soon else "active"])
+    tables = []
+    if out:
+        tables.append({"title": _truncated("Active exceptions (soonest expiry first)",
+                                           min(top_n, len(out)), len(out)),
+                       "headers": ["Rule (policy)", "Severity", "Applies to", "Owner", "Reason",
+                                   "Expires", "Days left", "Checks excepted", "State"],
+                       "styles": ["text", "severity", "text", "text", "text", "num", "num",
+                                  "num", "status"],
+                       "rows": out[:top_n]})
+    if lapsed:
+        tables.append({"title": _truncated(f"Lapsed in the last {within} days",
+                                           min(top_n, len(lapsed)), len(lapsed)),
+                       "headers": ["Rule (policy)", "Severity", "Applies to", "Owner", "Reason",
+                                   "Expired", "State"],
+                       "styles": ["text", "severity", "text", "text", "text", "num", "status"],
+                       "rows": [[f"{_clip(r[0], 80)} ({_clip(r[2], 40)})",
+                                 SEVERITY_MAP.get((r[1] or "").lower(), "info"), applies(r),
+                                 _clip(r[5], 40), _clip(r[6], 80), ctx.fmt_date(r[8]), "expired"]
+                                for r in lapsed[:top_n]]})
     notes = ["An exception is an accepted risk with a named owner and an expiry: while it is active "
-             "the excepted check does not count as failed. Soonest expiry first."]
-    if ids and fleet_wide:
+             "the excepted check does not count as failed. Checks excepted is the number of "
+             "device/rule results the exception covers in the latest assessment."]
+    if lapsed:
+        notes.append("A lapsed exception no longer applies: its checks count as failed or not "
+                     "assessable again from the next evaluation unless it is renewed.")
+    if ids and (fleet_wide or any(r[3] for r in lapsed)):
         notes.append("Fleet-wide exceptions apply to every device, including the selected ones.")
+    if not rows:
+        notes.insert(0, "No active compliance exceptions.")
     return _section(
         "ncm_compliance_exceptions", title,
         description=f"{len(rows):,} active compliance exception(s), as of report generation.",
         kpis=[
-            _kpi("Active exceptions", f"{len(rows):,}", "info"),
+            _kpi("Active exceptions", f"{len(rows):,}", "info" if rows else "success"),
             _kpi(f"Expiring within {within} days", f"{expiring:,}",
                  "warning" if expiring else "success"),
+            _kpi(f"Lapsed in the last {within} days", f"{len(lapsed):,}",
+                 "warning" if lapsed else "success", "expired without renewal"),
             _kpi("Fleet-wide", f"{fleet_wide:,}", "warning" if fleet_wide else "neutral",
                  "apply to every device"),
-            _kpi("Critical or major rules", f"{severe:,}", "danger" if severe else "success"),
+            _kpi("Critical or major rules", f"{severe:,}", "danger" if severe else "success",
+                 "among active exceptions"),
             _kpi("Checks excepted", f"{checks:,}", "primary", "latest assessment"),
         ],
-        tables=[{"title": _truncated("Active exceptions", min(top_n, len(out)), len(out)),
-                 "headers": ["Rule (policy)", "Severity", "Applies to", "Owner", "Reason",
-                             "Expires", "Days left", "Checks excepted", "State"],
-                 "styles": ["text", "severity", "text", "text", "text", "text", "num", "num",
-                            "status"],
-                 "rows": out[:top_n]}],
-        notes=notes)
+        tables=tables, notes=notes)
 
 
 # ─── Configuration change audit ─────────────────────────────────────────────
@@ -827,10 +898,10 @@ async def ncm_change_audit(ctx: SectionCtx) -> dict:
         tables.append({
             "title": _truncated("Change notifications", len(ev_rows), events_n),
             "headers": ["Received", "Device", "Source", "Summary", "Reported user (unverified)",
-                        "Backup outcome", "Captured"],
-            "styles": ["text", "text", "text", "text", "text", "text", "text"],
+                        "Backup outcome", "Backup completed"],
+            "styles": ["num", "text", "text", "text", "text", "text", "num"],
             "rows": [[ctx.fmt_short(r[0]), r[1], SOURCE_LABELS.get(r[2], r[2] or "—"),
-                      _clip(r[3], 100), _clip(r[4], 40),
+                      _clip(r[3], 80), _clip(r[4], 40),
                       _event_outcome(bool(r[5]), bool(r[6]), r[7], r[8]),
                       ctx.fmt_short(r[9])] for r in ev_rows]})
     if run_rows:
@@ -838,7 +909,7 @@ async def ncm_change_audit(ctx: SectionCtx) -> dict:
             "title": _truncated("Captured configuration changes", len(run_rows), changes_n),
             "headers": ["Captured", "Device", "Type", "Trigger", "Notifications",
                         "Reported user (unverified)"],
-            "styles": ["text", "text", "text", "text", "num", "text"],
+            "styles": ["num", "text", "text", "text", "num", "text"],
             "rows": [[ctx.fmt_short(r[0]), r[1], (r[2] or "—").capitalize(),
                       TRIGGER_LABELS.get(r[3], r[3] or "—"), f"{_n(r[4]):,}", _clip(r[5], 60)]
                      for r in run_rows]})
@@ -851,6 +922,10 @@ async def ncm_change_audit(ctx: SectionCtx) -> dict:
         notes.append(f"{pending:,} notification(s) are still waiting for their debounced backup.")
     if initial_n:
         notes.append(f"{initial_n:,} first capture(s) in this period are not counted as changes.")
+    if source != "all":
+        notes.append("Captured changes and changes without a notification are counted whatever "
+                     "the notification source; only the notifications are limited to "
+                     f"{src_label}.")
     return _section(
         "ncm_change_audit", title,
         description=(f"Configuration-change notifications from {src_label} and changes captured by "
@@ -860,13 +935,14 @@ async def ncm_change_audit(ctx: SectionCtx) -> dict:
 
 # ─── Restore readiness ──────────────────────────────────────────────────────
 
-READINESS_ORDER = {"failed": 0, "warning": 1, "none": 2, "stale": 3, "ok": 4}
+READINESS_ORDER = {"failed": 0, "warning": 1, "untested": 2, "stale": 3, "ok": 4}
 
 
 @register_section(
     "ncm_restore_readiness", title="Restore Readiness", category="Configuration",
-    description=("The latest recorded restore test of every device enrolled for configuration "
-                 "backup, its age and the changes since the tested version, as of report generation."),
+    description=("The latest recorded restore test of every device with an enabled configuration-"
+                 "backup enrollment, its age and the changes since the tested version, as of report "
+                 "generation."),
     scope="device", requires=("ncm.view",), semantics="snapshot",
     options=[{"key": "max_age_days", "label": "A passed test is current for (days)", "type": "int",
               "default": 180, "min": 7, "max": 730},
@@ -886,25 +962,27 @@ async def ncm_restore_readiness(ctx: SectionCtx) -> dict:
         "FROM ncm_restore_tests rt WHERE rt.device_id = d.id "
         "ORDER BY rt.tested_at DESC LIMIT 1) t ON TRUE "
         "LEFT JOIN device_configs c ON c.id = t.version_id "
-        f"WHERE TRUE{clause} ORDER BY 1"), params)).fetchall()
+        f"WHERE n.enabled{clause} ORDER BY 1"), params)).fetchall()
     proof_note = ("Only a recorded restore test demonstrates recovery: a validated backup proves the "
                   "configuration was collected, not that it can be restored. Tests are performed and "
                   "recorded by operators; ZenPlus never writes to a device to test.")
     if not rows:
         return _section("ncm_restore_readiness", title,
-                        notes=["No devices in scope are enrolled for configuration backup.", proof_note])
+                        description="Restore evidence per enrolled device, as of report generation.",
+                        notes=["No devices in scope have an enabled configuration-backup enrollment.",
+                               proof_note])
 
     max_age = int(ctx.opt("max_age_days"))
     now = _now()
     out: list[tuple] = []
-    counts = {"ok": 0, "stale": 0, "warning": 0, "failed": 0, "none": 0}
+    counts = {"ok": 0, "stale": 0, "warning": 0, "failed": 0, "untested": 0}
     changed_since = 0
     for r in rows:
         result = (r[1] or "").lower()
         tested = _aware(r[2])
         age_s = (now - tested).total_seconds() if tested else None
         if not result:
-            status, label = "none", "Never tested"
+            status, label = "untested", "Never tested"
         elif result == "failed":
             status, label = "failed", "Failed"
         elif result == "partial":
@@ -929,13 +1007,13 @@ async def ncm_restore_readiness(ctx: SectionCtx) -> dict:
     ready = counts["ok"]
     return _section(
         "ncm_restore_readiness", title,
-        description=(f"Restore evidence for {total:,} device(s) enrolled for configuration backup, as "
-                     "of report generation."),
+        description=(f"Restore evidence for {total:,} device(s) with an enabled configuration-backup "
+                     "enrollment, as of report generation."),
         kpis=[
             _kpi("Restore-tested and current", f"{ready:,} of {total:,}",
                  "success" if ready == total else "warning" if ready else "danger",
                  f"{ready / total * 100:.1f}% passed within {max_age} days"),
-            _kpi("Never tested", f"{counts['none']:,}", "warning" if counts["none"] else "success"),
+            _kpi("Never tested", f"{counts['untested']:,}", "warning" if counts["untested"] else "success"),
             _kpi(f"Passed over {max_age} days ago", f"{counts['stale']:,}",
                  "warning" if counts["stale"] else "success"),
             _kpi("Partial or failed", f"{counts['warning'] + counts['failed']:,}",
@@ -949,12 +1027,12 @@ async def ncm_restore_readiness(ctx: SectionCtx) -> dict:
                             "points": [{"label": lbl, "value": counts[k]} for k, lbl in (
                                 ("ok", "Passed (current)"), ("stale", f"Passed (over {max_age} d)"),
                                 ("warning", "Partial"), ("failed", "Failed"),
-                                ("none", "Never tested")) if counts[k]]}}],
+                                ("untested", "Never tested")) if counts[k]]}}],
         tables=[{"title": _truncated("Restore evidence by device (least ready first)",
                                      min(top_n, len(out)), len(out)),
                  "headers": ["Device", "Latest result", "Tested", "Age", "Method", "Version tested",
                              "Changes since", "Recorded by", "Readiness"],
-                 "styles": ["text", "text", "text", "num", "text", "text", "num", "text", "status"],
+                 "styles": ["text", "text", "num", "num", "text", "text", "num", "text", "status"],
                  "rows": [o[1] for o in out[:top_n]]}],
         notes=[proof_note,
                "Changes since counts validated configuration changes captured after the tested "
@@ -1025,9 +1103,8 @@ async def ncm_backup_incidents(ctx: SectionCtx) -> dict:
         dur = _duration(((rec if closed else end) - op).total_seconds()) if op else "—"
         rows.append([r[0], ctx.fmt_short(op), ctx.fmt_short(rec) if closed else "Open",
                      dur if closed else f"{dur} (ongoing)", f"{_n(r[3]):,}",
-                     FAILURE_LABELS.get(r[4] or "unknown", r[4] or "Unknown cause"),
-                     _clip(r[5], 100), "resolved" if closed else "failing"])
-    cause_rows = [[FAILURE_LABELS.get(c[0], c[0]), f"{_n(c[1]):,}", f"{_n(c[2]):,}",
+                     _failure_label(r[4]), _clip(r[5], 100), "resolved" if closed else "open"])
+    cause_rows = [[_failure_label(c[0]), f"{_n(c[1]):,}", f"{_n(c[2]):,}",
                    GUIDANCE.get(c[0]) or "—"] for c in causes]
     prior_n = _n(prior) if prior is not None else None
     return _section(
@@ -1046,7 +1123,7 @@ async def ncm_backup_incidents(ctx: SectionCtx) -> dict:
         ],
         charts=[{"title": "Incidents by cause",
                  "series": {"kind": "rank", "unit": "incidents", "color": "warning",
-                            "points": [{"label": FAILURE_LABELS.get(c[0], c[0]), "value": _n(c[1])}
+                            "points": [{"label": _failure_label(c[0]), "value": _n(c[1])}
                                        for c in causes[:10]]}}] if causes else [],
         tables=[{"title": "Causes and recommended actions",
                  "headers": ["Cause", "Incidents", "Devices", "Recommended action"],
@@ -1054,19 +1131,38 @@ async def ncm_backup_incidents(ctx: SectionCtx) -> dict:
                 {"title": _truncated("Incidents (open first)", len(rows), total),
                  "headers": ["Device", "Opened", "Recovered", "Duration", "Failed jobs", "Cause",
                              "Last error", "Status"],
-                 "styles": ["text", "text", "text", "num", "num", "text", "text", "status"],
+                 "styles": ["text", "num", "num", "num", "num", "text", "text", "status"],
                  "rows": rows}],
-        notes=["One incident collects a device's repeated backup failures and closes on its next "
+        notes=["One incident collects a device's repeated failed backup jobs and closes on its next "
                "successful validated capture. Time to recovery is measured from the first failure to "
-               "that capture."])
+               "that capture; mean and median cover incidents recovered within the period.",
+               "Cause is the category of the incident's most recent failure."])
 
 
 # ─── Credential hygiene (fleet) ─────────────────────────────────────────────
 
+# Same test as the NCCM overview's profile_configured: a username and the
+# secret its authentication method needs (only presence is read).
+PROFILE_CONFIGURED = ("(COALESCE(c.username, '') <> '' AND (COALESCE(octet_length(c.password_enc), 0) > 0 "
+                      "OR (c.auth_method = 'key' AND c.private_key_enc IS NOT NULL)))")
+CREDENTIAL_PROBLEMS = {
+    "no_profile": "No connection profile assigned",
+    "no_secret": "Profile has no saved secret",
+    "authentication": "Authentication rejected by the device",
+    "credentials": "Saved secret could not be decrypted",
+}
+SSH_TRUST_NOTE = ("SSH host keys are not verified for NCCM connections (since release 1.23.29 the key "
+                  "a device presents is accepted), so a device impersonating another on the management "
+                  "network could receive a profile's credentials. Keep the management network "
+                  "restricted, use dedicated least-privilege backup accounts and rotate shared "
+                  "profiles.")
+
+
 @register_section(
     "ncm_credential_hygiene", title="NCM Credential Hygiene", category="Security",
-    description=("Connection profiles overdue for secret rotation, weak SSH settings and enrolled "
-                 "devices without a registered SSH host key, as of report generation."),
+    description=("NCCM connection profiles overdue for secret rotation or using cleartext or legacy "
+                 "SSH settings, and enrolled devices whose backups fail on credentials, as of report "
+                 "generation."),
     scope="fleet", requires=("ncm.view",), semantics="snapshot",
     options=[{"key": "due_days", "label": "Rotation due within (days)", "type": "int", "default": 14,
               "min": 1, "max": 90},
@@ -1075,113 +1171,127 @@ async def ncm_backup_incidents(ctx: SectionCtx) -> dict:
 async def ncm_credential_hygiene(ctx: SectionCtx) -> dict:
     title = "NCM Credential Hygiene"
     profiles = (await ctx.db.execute(text(
-        "SELECT c.name, c.protocol, COALESCE(c.auth_method, 'password'), c.secret_rotated_at, "
-        "c.rotation_days, c.is_default, COALESCE(c.ssh_legacy_compat, false), "
-        "COALESCE(c.ssh_auto_trust, false), "
-        "(COALESCE(octet_length(c.password_enc), 0) > 0 OR c.private_key_enc IS NOT NULL), "
+        "SELECT c.name, COALESCE(c.protocol, 'ssh'), COALESCE(c.auth_method, 'password'), "
+        "c.secret_rotated_at, c.rotation_days, c.is_default, COALESCE(c.ssh_legacy_compat, false), "
+        f"{PROFILE_CONFIGURED}, "
         "(SELECT count(*) FROM device_ncm n WHERE n.credential_id = c.id), "
         "(SELECT count(*) FROM device_ncm n WHERE n.credential_id = c.id AND n.enabled) "
         "FROM ncm_credentials c ORDER BY c.name"))).fetchall()
+    top_n = int(ctx.opt("top_n"))
+    problem = ("CASE WHEN n.credential_id IS NULL OR c.id IS NULL THEN 'no_profile' "
+               f"WHEN NOT {PROFILE_CONFIGURED} THEN 'no_secret' "
+               "WHEN n.last_status = 'failed' AND n.last_failure_category IN "
+               "('authentication', 'credentials') THEN n.last_failure_category END")
+    devices = (await ctx.db.execute(text(
+        f"SELECT * FROM (SELECT {DEVICE_NAME} AS device, host(d.ip_address) AS ip, c.name AS profile, "
+        f"{problem} AS problem, n.last_attempt_at, n.last_success_at "
+        "FROM device_ncm n JOIN devices d ON d.id = n.device_id "
+        "LEFT JOIN ncm_credentials c ON c.id = n.credential_id WHERE n.enabled) x "
+        "WHERE x.problem IS NOT NULL"))).fetchall()
+    enrolled = _n((await ctx.db.execute(text(
+        "SELECT count(*) FROM device_ncm n WHERE n.enabled"))).scalar())
+
     secrets_note = ("Secrets, usernames and key material are never included: this section reports "
-                    "rotation dates and settings only.")
+                    "rotation dates, settings and failure categories only.")
     notes = [secrets_note]
     if ctx.device_ids:
         notes.append("Connection profiles are shared across the fleet; the device selection does "
                      "not apply to this section.")
-    if not profiles:
-        notes.insert(0, "No NCCM connection profiles are configured.")
-        return _section("ncm_credential_hygiene", title, notes=notes)
-
-    top_n = int(ctx.opt("top_n"))
-    pending = (await ctx.db.execute(text(
-        f"SELECT {DEVICE_NAME}, host(d.ip_address), c.name, COALESCE(c.ssh_auto_trust, false), "
-        "n.last_success_at, count(*) OVER () "
-        "FROM device_ncm n JOIN devices d ON d.id = n.device_id "
-        "JOIN ncm_credentials c ON c.id = n.credential_id "
-        "WHERE n.enabled AND NOT EXISTS (SELECT 1 FROM ncm_host_keys k WHERE k.retired_at IS NULL "
-        "AND (k.device_id = d.id OR (k.host = host(d.ip_address) AND k.port = COALESCE(c.port, 22)))) "
-        "ORDER BY 1 LIMIT :lim"), {"lim": top_n})).fetchall()
-    pending_total = _n(pending[0][5]) if pending else 0
+    if not profiles and not devices:
+        notes.insert(0, "No NCCM connection profiles are configured and no enrolled device is "
+                        "waiting for one.")
+        return _section("ncm_credential_hygiene", title,
+                        description="NCCM connection profiles, as of report generation.",
+                        notes=notes)
 
     due_days = int(ctx.opt("due_days"))
     now = _now()
     overdue = due_soon = untracked = weak = 0
-    enrolled = 0
     rows: list[tuple] = []
     for r in profiles:
-        name, protocol, auth, rotated, rot_days = r[0], (r[1] or "ssh"), r[2], _aware(r[3]), r[4]
-        used, enabled = _n(r[9]), _n(r[10])
-        enrolled += enabled
+        name, protocol, auth, rotated, rot_days = r[0], str(r[1] or "ssh"), r[2], _aware(r[3]), r[4]
+        used, enabled = _n(r[8]), _n(r[9])
         next_due = rotated + timedelta(days=int(rot_days)) if rotated and rot_days else None
+        policy = f"{int(rot_days):,} d" if rot_days else "Not set"
         if not rot_days:
-            status, policy = "none", "None"
+            status = "untracked"
             untracked += 1
         elif not rotated:
-            status, policy = "unknown", f"Every {int(rot_days):,} days"
+            status = "unknown"
             untracked += 1
         elif (now - rotated).days >= int(rot_days):
-            status, policy = "expired", f"Every {int(rot_days):,} days"
+            status = "expired"
             overdue += 1
         elif next_due - now <= timedelta(days=due_days):
-            status, policy = "warning", f"Every {int(rot_days):,} days"
+            status = "warning"
             due_soon += 1
         else:
-            status, policy = "ok", f"Every {int(rot_days):,} days"
+            status = "ok"
         flags = []
         if r[5]:
             flags.append("Default profile")
-        if protocol != "ssh":
+        if protocol.lower() != "ssh":
             flags.append(f"{protocol.upper()} (cleartext)")
         if r[6]:
             flags.append("Legacy SSH algorithms")
-        if r[7]:
-            flags.append("Auto-trusts host keys")
-        if not r[8]:
+        if not r[7]:
             flags.append("No secret saved")
-        weak += bool(r[6] or r[7] or protocol != "ssh")
-        rank = {"expired": 0, "warning": 1, "unknown": 2, "none": 3, "ok": 4}[status]
+        weak += bool(r[6] or protocol.lower() != "ssh")
+        rank = {"expired": 0, "warning": 1, "unknown": 2, "untracked": 3, "ok": 4}[status]
         rows.append(((rank, -used, (name or "").lower()),
-                     [_clip(name, 60), "SSH key" if auth == "key" else "Password", f"{used:,}",
-                      ctx.fmt_date(rotated) if rotated else "Unknown", policy,
-                      ctx.fmt_date(next_due) if next_due else "—",
-                      "; ".join(flags) or "—", status]))
+                     [_clip(name, 60), "SSH key" if auth == "key" else "Password",
+                      f"{enabled:,} of {used:,}" if used != enabled else f"{used:,}",
+                      ctx.fmt_date(rotated) if rotated else "Not recorded", policy,
+                      ctx.fmt_date(next_due) if next_due else "—", "; ".join(flags) or "—", status]))
     rows.sort(key=lambda x: x[0])
-    in_use = sum(1 for r in profiles if _n(r[9]))
-    tables = [{"title": "Connection profiles (most urgent first)",
-               "headers": ["Profile", "Authentication", "Devices", "Last rotated", "Rotation policy",
-                           "Next due", "Flags", "Status"],
-               "styles": ["text", "text", "num", "text", "text", "text", "text", "status"],
-               "rows": [x[1] for x in rows]}]
-    if pending:
-        tables.append({"title": _truncated("Enrolled devices without a registered SSH host key",
-                                           len(pending), pending_total),
-                       "headers": ["Device", "IP address", "Profile", "Profile auto-trusts keys",
+    in_use = sum(1 for r in profiles if _n(r[8]))
+
+    order = list(CREDENTIAL_PROBLEMS)
+    devices = sorted(devices, key=lambda d: (order.index(d[3]) if d[3] in order else 99,
+                                             str(d[0] or "").lower()))
+    tables = []
+    if rows:
+        tables.append({"title": _truncated("Connection profiles (most urgent first)",
+                                           min(top_n, len(rows)), len(rows)),
+                       "headers": ["Profile", "Authentication", "Devices (enabled)", "Last rotated",
+                                   "Rotate every", "Next due", "Flags", "Status"],
+                       "styles": ["text", "text", "num", "num", "num", "num", "text", "status"],
+                       "rows": [x[1] for x in rows[:top_n]]})
+    if devices:
+        tables.append({"title": _truncated("Enrolled devices with credential problems",
+                                           min(top_n, len(devices)), len(devices)),
+                       "headers": ["Device", "IP address", "Profile", "Problem", "Last attempt",
                                    "Last successful backup"],
-                       "styles": ["text", "mono", "text", "text", "text"],
-                       "rows": [[p[0], p[1] or "—", _clip(p[2], 60), "Yes" if p[3] else "No",
-                                 ctx.fmt_short(p[4])] for p in pending]})
+                       "styles": ["text", "mono", "text", "text", "num", "num"],
+                       "rows": [[d[0], d[1] or "—", _clip(d[2], 60),
+                                 CREDENTIAL_PROBLEMS.get(d[3], str(d[3])),
+                                 ctx.fmt_short(d[4]), ctx.fmt_short(d[5]) if d[5] else "never"]
+                                for d in devices[:top_n]]})
     notes[:0] = [
         "Rotation is measured from the last time a profile's password or key was replaced in "
-        "ZenPlus; a profile without a rotation policy, or without a recorded rotation date, is not "
-        "tracked.",
-        "A device is listed when no active SSH host key is registered for it in ZenPlus (by device, "
-        "or by management address and port). Keys trusted only through the appliance trust file "
-        "are not visible to this report.",
+        "ZenPlus. A profile without a rotation policy, or without a recorded rotation date, is "
+        "not tracked.",
+        "Credential problems come from each enabled enrollment's latest backup attempt "
+        "(authentication rejected, or a secret that could not be decrypted) and from enrollments "
+        "without a usable profile.",
+        SSH_TRUST_NOTE,
     ]
+    if not profiles:
+        notes.insert(0, "No NCCM connection profiles are configured.")
     return _section(
         "ncm_credential_hygiene", title,
-        description=(f"{len(profiles):,} NCCM connection profile(s) and the SSH trust of "
-                     f"{enrolled:,} enrolled device(s), as of report generation."),
+        description=(f"{len(profiles):,} NCCM connection profile(s) and the credentials of "
+                     f"{enrolled:,} enabled enrollment(s), as of report generation."),
         kpis=[
             _kpi("Connection profiles", f"{len(profiles):,}", "primary", f"{in_use:,} in use"),
             _kpi("Overdue for rotation", f"{overdue:,}", "danger" if overdue else "success"),
             _kpi(f"Due within {due_days} days", f"{due_soon:,}", "warning" if due_soon else "success"),
             _kpi("Rotation not tracked", f"{untracked:,}", "warning" if untracked else "success",
                  "no policy or no rotation date"),
-            _kpi("Weak SSH settings", f"{weak:,}", "warning" if weak else "success",
-                 "legacy algorithms, auto-trust or cleartext"),
-            _kpi("Devices without a registered host key", f"{pending_total:,} of {enrolled:,}",
-                 "warning" if pending_total else "success"),
+            _kpi("Cleartext or legacy SSH", f"{weak:,}", "warning" if weak else "success",
+                 "profiles"),
+            _kpi("Devices with credential problems", f"{len(devices):,} of {enrolled:,}",
+                 "danger" if devices else "success", "enabled enrollments"),
         ],
         tables=tables, notes=notes)
 
@@ -1190,82 +1300,84 @@ async def ncm_credential_hygiene(ctx: SectionCtx) -> dict:
 
 template(
     "ncm_backup_status_report", "Configuration Backup Status",
-    "Which devices have a fresh, validated configuration backup, which do not and why: coverage by "
-    "vendor and site, daily outcomes, backup-failure incidents and devices needing action.",
+    "Which devices have a fresh, validated configuration backup, which do not and why: coverage, "
+    "devices needing action, daily backup outcomes, backup-failure incidents with mean time to "
+    "recovery, and coverage by vendor and site.",
     "configuration",
     ["ncm_protection", "ncm_at_risk", "ncm_outcomes", "ncm_backup_incidents", "ncm_breakdown"],
     audience=("Network engineer", "NOC operator", "IT manager"),
-    tags=("ncm", "backup", "coverage"), default_period="last_7d", frequency="weekly",
+    tags=("ncm", "backup", "coverage", "incidents"), default_period="last_7d", frequency="weekly",
     icon="HardDrive")
 
 template(
     "ncm_change_audit_report", "Configuration Change Audit",
     "Who changed what and when: configuration-change notifications from syslog, SNMP traps and "
     "change management with the (unverified) reported user, changes confirmed by validated backups, "
-    "the most changed devices and drift from approved baselines.",
+    "the most changed devices and drift from approved baselines. Never includes configuration text.",
     "configuration",
     ["ncm_change_audit", "ncm_changes"],
     audience=("Network engineer", "Security & audit"),
-    tags=("ncm", "changes", "audit"), default_period="last_7d", frequency="weekly",
-    icon="FileText")
+    tags=("ncm", "changes", "audit", "change management"), default_period="last_7d",
+    frequency="weekly", icon="FileText")
 
 template(
     "ncm_compliance_trend_report", "Compliance Trend",
-    "Configuration-compliance pass rate and failed checks day by day, per-policy movement over the "
-    "period and the rules failing most often today.",
+    "Configuration-compliance pass rate and check outcomes day by day, per-policy movement over the "
+    "period, and the policies and rules failing most often today.",
     "configuration",
-    ["ncm_compliance_trend", S("ncm_compliance_trend", "Check Outcomes per Day", chart="outcomes"),
-     "ncm_compliance"],
+    ["ncm_compliance_trend", "ncm_compliance"],
     audience=("Network engineer", "Security & audit", "IT manager"),
     tags=("ncm", "compliance", "trend"), default_period="last_30d", frequency="monthly",
     icon="TrendingUp")
 
 template(
     "ncm_compliance_exceptions_report", "Compliance Exceptions",
-    "Every active compliance exception with its owner, reason and expiry — exceptions expiring in the "
-    "next 30 days first — alongside the current policy results they affect.",
+    "Every active compliance exception with its owner, reason and expiry — those expiring in the "
+    "next 30 days and those that lapsed in the last 30 days first — alongside the current policy "
+    "results they affect.",
     "security",
     [S("ncm_compliance_exceptions", days=30, top_n=200), "ncm_compliance"],
     audience=("Security & audit", "IT manager"),
-    tags=("ncm", "compliance", "exceptions", "risk"), default_period="last_30d",
+    tags=("ncm", "compliance", "exceptions", "risk acceptance"), default_period="last_30d",
     frequency="monthly", icon="ShieldCheck")
 
 template(
     "ncm_restore_readiness_report", "Restore Readiness",
-    "Proof that configurations can be recovered: the latest restore test per device and its age, "
-    "devices never tested, changes since the tested version and current backup protection.",
+    "Evidence that configurations can be recovered: the latest restore test per device and its age, "
+    "devices never tested, changes since the tested version, and current backup protection.",
     "configuration",
     ["ncm_restore_readiness", "ncm_protection", "ncm_at_risk"],
     audience=("IT manager", "Network engineer", "Security & audit"),
-    tags=("ncm", "restore", "recovery", "dr"), default_period="last_30d", frequency="monthly",
-    icon="FileCheck2")
+    tags=("ncm", "restore", "recovery", "disaster recovery"), default_period="last_30d",
+    frequency="monthly", icon="FileCheck2")
 
 template(
     "firmware_os_versions_report", "Firmware and OS Versions",
-    "Software versions by vendor and model with devices on older or minority versions, plus chassis "
-    "firmware revisions — the starting point for upgrade planning.",
+    "Software versions by vendor and model with the devices on older or minority versions, plus "
+    "chassis firmware revisions — the starting point for upgrade planning. End-of-life status is "
+    "not included (no lifecycle data source).",
     "inventory",
     [S("firmware_inventory", None, version="os"),
      S("firmware_inventory", "Chassis Firmware Revisions", version="firmware")],
     audience=("Network engineer", "IT manager"),
-    tags=("inventory", "firmware", "os", "lifecycle"), default_period="last_30d",
+    tags=("inventory", "firmware", "os version", "lifecycle"), default_period="last_30d",
     frequency="monthly", icon="Layers")
 
 template(
     "hardware_serial_report", "Hardware Serial Number Inventory",
-    "Chassis, module, power-supply and fan serial numbers, models and hardware/firmware revisions "
-    "for asset, warranty and support-contract records.",
+    "Chassis, module, power-supply and fan serial numbers, models and hardware/firmware revisions, "
+    "with every device's software version, for asset, warranty and support-contract records.",
     "inventory",
     [S("hardware_serial_inventory", None, components="fru"),
-     S("firmware_inventory", "Firmware and OS Versions", list="all", top_n=500)],
+     S("firmware_inventory", "Software Versions by Device", list="all", top_n=1000)],
     audience=("IT manager", "Network engineer"),
     tags=("inventory", "serial numbers", "assets", "warranty"), default_period="last_30d",
     frequency="monthly", icon="Boxes")
 
 template(
     "ncm_credential_hygiene_report", "NCM Credential Hygiene",
-    "Connection profiles overdue for secret rotation, weak SSH settings and enrolled devices whose "
-    "SSH host key is not registered. Never includes secrets.",
+    "Connection profiles overdue for secret rotation or using cleartext or legacy SSH settings, and "
+    "enrolled devices whose backups fail on credentials. Never includes secrets or usernames.",
     "security",
     ["ncm_credential_hygiene"],
     audience=("Security & audit", "Network engineer"),
@@ -1275,8 +1387,8 @@ template(
 template(
     "monthly_config_compliance_review", "Monthly Configuration Compliance Review",
     "Monthly review of configuration governance: backup protection, compliance trend and current "
-    "failures, active exceptions, audited changes and baseline drift, backup-failure incidents, "
-    "restore evidence and credential hygiene.",
+    "failures, active and lapsed exceptions, audited changes and baseline drift, backup-failure "
+    "incidents, restore evidence and credential hygiene.",
     "configuration",
     ["ncm_protection", "ncm_compliance_trend", "ncm_compliance", "ncm_compliance_exceptions",
      "ncm_change_audit", "ncm_changes", "ncm_backup_incidents", "ncm_restore_readiness",
