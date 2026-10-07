@@ -40,9 +40,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from app.services.report_sections import (
+    RUM_ROLLUP_RETENTION_DAYS,
     SectionCtx,
     _fmt_bytes,
     _fmt_ms,
+    _retention_days,
+    _rum_raw_days,
     _section,
     register_section,
     top_n_option,
@@ -55,8 +58,6 @@ REQUIRES = ("apm.view",)
 CATEGORY = "Applications"
 EVENTS = "zenplus.apm_rum_events"
 ROLLUP = "zenplus.apm_rum_metrics_5m"
-RAW_DAYS_DEFAULT = 14       # apm_rum_events TTL (admin-changeable)
-ROLLUP_DAYS_DEFAULT = 90    # apm_rum_metrics_5m TTL (admin-changeable)
 MAX_GROUPS = 2000           # safety cap on groups pulled into Python
 
 # A view counts once: its view_start record (legacy SDKs: the only record).
@@ -83,8 +84,6 @@ THRESHOLD_NOTE = ("Ratings use the web.dev Core Web Vitals thresholds at the 75t
                   "CLS good ≤ 0.1, poor > 0.25.")
 VITALS_METHOD = ("Each page view contributes one finalized sample from sampled sessions, so "
                  "a view reported several times (checkpoints, retries) is counted once.")
-
-_TTL_RE = re.compile(r"toIntervalDay\((\d+)\)|INTERVAL (\d+) DAY")
 
 
 # ─── Country names (ISO 3166-1 alpha-2) ─────────────────────────────────────
@@ -335,28 +334,11 @@ def _vitals_from(row: Any, offset: int) -> dict[str, dict]:
 
 
 async def _retention(ctx: SectionCtx) -> dict[str, int]:
-    """Raw and rollup retention in days, from the ClickHouse table TTLs
-    (falls back to what the RUM API last read, then the defaults)."""
-    key = "rum_pack:retention"
-    if key not in ctx._cache:
-        out = {"raw": RAW_DAYS_DEFAULT, "rollup": ROLLUP_DAYS_DEFAULT}
-        try:
-            from app.api.v1.rum import _RETENTION_CACHE
-            out = {"raw": int(_RETENTION_CACHE.get("raw") or RAW_DAYS_DEFAULT),
-                   "rollup": int(_RETENTION_CACHE.get("rollup") or ROLLUP_DAYS_DEFAULT)}
-        except Exception:
-            logger.debug("rum retention cache unavailable", exc_info=True)
-        try:
-            for name, engine in await ctx.ch_rows(
-                    "SELECT name, engine_full FROM system.tables WHERE database = 'zenplus' "
-                    "AND name IN ('apm_rum_events', 'apm_rum_metrics_5m')"):
-                m = _TTL_RE.search(str(engine or ""))
-                if m:
-                    out["raw" if name == "apm_rum_events" else "rollup"] = int(m.group(1) or m.group(2))
-        except Exception:
-            logger.debug("rum retention lookup failed", exc_info=True)
-        ctx._cache[key] = out
-    return ctx._cache[key]
+    """Raw-event and rollup retention in days: the ClickHouse table TTLs (the
+    RUM settings page may change them), read once per render and shared with
+    the core RUM sections (report_sections._rum_source)."""
+    return {"raw": await _retention_days(ctx, "apm_rum_events", _rum_raw_days()),
+            "rollup": await _retention_days(ctx, "apm_rum_metrics_5m", RUM_ROLLUP_RETENTION_DAYS)}
 
 
 def _reaches_past(frm: datetime, days: int) -> bool:
@@ -382,6 +364,17 @@ async def _rollup_notes(ctx: SectionCtx) -> list[str]:
 
 async def _raw_only_note(ctx: SectionCtx, what: str) -> Optional[str]:
     return ctx.window_note((await _retention(ctx))["raw"], what)
+
+
+async def _raw_params(ctx: SectionCtx, **extra: Any) -> dict:
+    """ctx.rum_params for a section only raw events can answer: the window
+    starts no earlier than raw retention, exactly the span its window note
+    discloses (expired parts are dropped whole, so stragglers may remain)."""
+    params = ctx.rum_params(**extra)
+    horizon = _now() - timedelta(days=(await _retention(ctx))["raw"])
+    if _naive(params["f"]) < horizon:
+        params["f"] = horizon
+    return params
 
 
 def _as_dt(ctx: SectionCtx, v: Any) -> Optional[datetime]:
@@ -426,6 +419,7 @@ async def _overall_vitals(ctx: SectionCtx, frm: datetime, to: datetime) -> dict:
 # ─── Core Web Vitals trend ──────────────────────────────────────────────────
 
 INTERVALS = {"day": ("1 DAY", 86400), "hour": ("1 HOUR", 3600)}
+MAX_HOURLY_ROWS = 48        # the hourly table lists the newest two days; the charts show all
 
 
 @register_section(
@@ -502,7 +496,8 @@ async def rum_vitals_trend(ctx: SectionCtx) -> dict:
                      _pts_change(good_now, before[band]["good_pct"])))
 
     charts = []
-    colors = {"lcp": "primary", "inp": "info", "cls": "warning"}
+    # Data colours, not verdicts: the rating lives in the KPI accents and bands.
+    colors = {"lcp": "primary", "inp": "info", "cls": "primary"}
     for n in THRESHOLDS:
         pts = [(b["t"], b[n]["p75"]) for b in buckets]
         if any(v is not None for _t, v in pts):
@@ -524,11 +519,16 @@ async def rum_vitals_trend(ctx: SectionCtx) -> dict:
                                   ]}})
 
     fmt_t = ctx.fmt_date if choice == "day" else ctx.fmt_short
+    listed = list(reversed(buckets))
+    if choice == "hour":
+        listed = listed[:MAX_HOURLY_ROWS]
     table_rows = [[fmt_t(b["t"]), _count(b["views"]),
                    _fmt_vital("lcp", b["lcp"]["p75"]), _fmt_vital("inp", b["inp"]["p75"]),
                    _fmt_vital("cls", b["cls"]["p75"]),
                    _pct(b[band]["good_pct"]), _pct(b[band]["poor_pct"])]
-                  for b in reversed(buckets)]
+                  for b in listed]
+    table_title = (f"Core Web Vitals by {noun} (newest first)" if len(listed) == len(buckets) else
+                   f"Core Web Vitals by hour — newest {len(listed)} of {len(buckets)} hours")
     notes = [VITALS_METHOD + " " + THRESHOLD_NOTE,
              f"Times are in {ctx.tz_label()}; '—' marks a {noun} without samples for that vital."] + notes
     if rollup:
@@ -538,7 +538,7 @@ async def rum_vitals_trend(ctx: SectionCtx) -> dict:
                          f"{noun}s show a p75 but no good / poor share.")
     return _section(
         sid, title, description=desc, kpis=kpis, charts=charts,
-        tables=[{"title": f"Core Web Vitals by {noun} (newest first)",
+        tables=[{"title": table_title,
                  "headers": ["Day" if choice == "day" else "Hour", "Page views", "LCP p75",
                              "INP p75", "CLS p75", f"Good {band_label}", f"Poor {band_label}"],
                  "styles": ["text", "num", "num", "num", "num", "pct", "pct"],
@@ -550,6 +550,8 @@ async def rum_vitals_trend(ctx: SectionCtx) -> dict:
 # ─── Audience by country ────────────────────────────────────────────────────
 
 GEO_SORTS = {"sessions": "Sessions", "error_rate": "Error-Session Rate", "lcp": "Page Load (LCP p75)"}
+GEO_SORT_TEXT = {"sessions": "sessions", "error_rate": "error-session rate", "lcp": "page load (LCP p75)"}
+MIN_RANK_SAMPLES = 10   # rate / p75 rankings put thinner countries after the rest
 
 
 @register_section(
@@ -559,15 +561,19 @@ GEO_SORTS = {"sessions": "Sessions", "error_rate": "Error-Session Rate", "lcp": 
     options=[top_n_option(15, 250),
              {"key": "sort", "label": "Sort by", "type": "select", "default": "sessions",
               "choices": [["sessions", "Sessions"], ["error_rate", "Error-session rate"],
-                          ["lcp", "LCP p75 (slowest first)"]]}],
+                          ["lcp", "LCP p75 (slowest first)"]]},
+             {"key": "show_summary", "label": "Show summary tiles and chart", "type": "bool",
+              "default": True,
+              "help": "Turn off for a second, differently sorted country list in the same report."}],
 )
 async def rum_geography(ctx: SectionCtx) -> dict:
     sid = "rum_geography"
     sort = str(ctx.opt("sort"))
     top_n = int(ctx.opt("top_n"))
+    summary = bool(ctx.opt("show_summary"))
     title = "Audience by Country" if sort == "sessions" else f"Countries by {GEO_SORTS[sort]}"
     desc = (f"Sessions, page views, error-session rate and Core Web Vitals per visitor country, "
-            f"ranked by {GEO_SORTS[sort].lower()}.")
+            f"ranked by {GEO_SORT_TEXT[sort]}.")
     rollup = await _use_rollup(ctx)
     params = ctx.rum_params()
     countries: dict[str, dict] = {}
@@ -613,9 +619,11 @@ async def rum_geography(ctx: SectionCtx) -> dict:
         c["err_rate"] = _share(c["err"], c["sessions"])
     items = list(countries.values())
     if sort == "error_rate":
-        items.sort(key=lambda c: (c["err_rate"] is None, -(c["err_rate"] or 0), -c["sessions"], c["label"]))
+        items.sort(key=lambda c: (c["err_rate"] is None, c["sessions"] < MIN_RANK_SAMPLES,
+                                  -(c["err_rate"] or 0), -c["sessions"], c["label"]))
     elif sort == "lcp":
-        items.sort(key=lambda c: (c["lcp"]["p75"] is None, -(c["lcp"]["p75"] or 0), -c["sessions"], c["label"]))
+        items.sort(key=lambda c: (c["lcp"]["p75"] is None, c["lcp"]["samples"] < MIN_RANK_SAMPLES,
+                                  -(c["lcp"]["p75"] or 0), -c["sessions"], c["label"]))
     else:
         items.sort(key=lambda c: (-c["sessions"], c["label"]))
     shown = items[:top_n]
@@ -640,13 +648,20 @@ async def rum_geography(ctx: SectionCtx) -> dict:
     rows = [[c["label"], _count(c["sessions"]), _pct(_share(c["sessions"], denom)), _count(c["views"]),
              _pct(c["err_rate"]), _fmt_vital("lcp", c["lcp"]["p75"]), _fmt_vital("inp", c["inp"]["p75"]),
              _rating("lcp", c["lcp"]["p75"])[0]] for c in shown]
-    notes = ["Country comes from the CDN country header or the appliance's GeoIP database; "
-             "private and unresolvable addresses are listed as Unknown. Error-session rate is the "
-             "share of a country's sampled sessions with at least one JavaScript error. "
-             + THRESHOLD_NOTE] + notes
+    if summary:     # a second, re-sorted list in the same report skips the repeated method note
+        notes = ["Country comes from the CDN country header or the appliance's GeoIP database; "
+                 "private and unresolvable addresses are listed as Unknown. Error-session rate is the "
+                 "share of a country's sampled sessions with at least one JavaScript error. "
+                 + THRESHOLD_NOTE] + notes
+    if sort != "sessions":
+        notes.append(f"Countries with fewer than {MIN_RANK_SAMPLES} "
+                     f"{'sessions' if sort == 'error_rate' else 'LCP samples'} are ranked after the "
+                     "others, so a handful of visits cannot top the list.")
+    if not summary:
+        kpis, charts = [], []
     return _section(
         sid, title, description=desc, kpis=kpis, charts=charts,
-        tables=[{"title": _title_n(f"Countries by {GEO_SORTS[sort].lower()}", len(shown), len(items),
+        tables=[{"title": _title_n(f"Countries by {GEO_SORT_TEXT[sort]}", len(shown), len(items),
                                    "countries"),
                  "headers": ["Country", "Sessions", "Share", "Page views", "Error-session rate",
                              "LCP p75", "INP p75", "LCP rating"],
@@ -817,7 +832,7 @@ async def rum_slow_resources(ctx: SectionCtx) -> dict:
     desc = (f"{type_label} that real browsers loaded slowly or failed to load, by resource type, "
             "with URLs stripped of query strings.")
     where = _scope(ctx, f" AND sampled = 1 AND event_type = 'resource' AND resource_url != ''{type_sql}")
-    params = ctx.rum_params(min_req=min_req, lim=top_n)
+    params = await _raw_params(ctx, min_req=min_req, lim=top_n)
     notes: list[str] = []
     n = await _raw_only_note(ctx, "Browser resource detail")
     if n:
@@ -913,18 +928,21 @@ async def rum_slow_resources(ctx: SectionCtx) -> dict:
 
 # ─── Page-load breakdown ────────────────────────────────────────────────────
 
-# Per-sample, non-overlapping phases (milliseconds). connect_ms includes the
-# TLS handshake and wait_ms includes the server time the Server-Timing header
-# declares (which includes database time), so those are carved out instead of
-# stacked twice.
+# Per-sample, non-overlapping phases (milliseconds) in timeline order, as the
+# browser SDK measures them (rum_sdk.py): connect_ms includes the TLS
+# handshake and wait_ms (request start to first byte) includes the server time
+# the Server-Timing header declares (which includes database time), so those
+# are carved out instead of stacked twice. blocked_ms is queueing before the
+# request (fetch start to request start, less DNS and connect).
 _SRV = "least(if(has_server_timing = 1, server_ms, 0), wait_ms)"
 _DB = f"least(if(has_server_timing = 1, db_ms, 0), {_SRV})"
 PHASES: list[tuple[str, str, str]] = [
     ("redirect", "Redirect", "redirect_ms"),
+    ("blocked", "Queueing", "blocked_ms"),
     ("dns", "DNS lookup", "dns_ms"),
     ("connect", "TCP connect", "greatest(connect_ms - tls_ms, 0)"),
     ("tls", "TLS handshake", "tls_ms"),
-    ("wait", "Waiting (network and queueing)", f"greatest(wait_ms - {_SRV}, 0)"),  # = WAIT_PHASE
+    ("wait", "Waiting for first byte", f"greatest(wait_ms - {_SRV}, 0)"),  # = WAIT_PHASE
     ("server", "Server processing", f"greatest({_SRV} - {_DB}, 0)"),
     ("db", "Database", _DB),
     ("download", "Content download", "download_ms"),
@@ -963,11 +981,12 @@ async def rum_load_breakdown(ctx: SectionCtx) -> dict:
     title = cfg["title"]
     top_n = int(ctx.opt("top_n"))
     phases = [p for p in PHASES if not (target == "api" and p[0] == "processing")]
-    desc = (f"Where {cfg['noun']} spend their time — "
-            + ", ".join(p[1].lower() for p in phases)
+    desc = (f"Where {cfg['noun']} spend their time — redirects, queueing, DNS, connect, TLS, "
+            "waiting for the first byte, server and database time, download"
+            + (" and browser processing" if target == "page_loads" else "")
             + f" — over time and for the slowest {'pages' if target == 'page_loads' else 'endpoints'}.")
     where = _scope(ctx, cfg["where"])
-    params = ctx.rum_params(lim=top_n)
+    params = await _raw_params(ctx, lim=top_n)
     notes: list[str] = []
     n = await _raw_only_note(ctx, "Browser timing detail")
     if n:
@@ -1001,9 +1020,10 @@ async def rum_load_breakdown(ctx: SectionCtx) -> dict:
     total_avg = sum(s["avg"] or 0.0 for s in stats)
     for s in stats:
         s["share"] = _share(s["avg"], total_avg) if total_avg > 0 else None
-    largest = max(stats, key=lambda s: s["avg"] or 0.0)
+    largest = max(stats, key=lambda s: s["avg"] or 0.0) if total_avg > 0 else None
 
-    bucket, bp = ctx.ch_bucket("timestamp")
+    # Hourly bars up to two days, daily beyond (stacked bars stay readable).
+    bucket, bp = ctx.ch_bucket("timestamp", "1 HOUR" if ctx.hours <= 48 else "1 DAY")
     trend = await ctx.ch_rows(
         f"SELECT {bucket} AS b, {', '.join(f'avg({expr})' for _k, _l, expr in phases)} "
         f"FROM {EVENTS} WHERE {where} GROUP BY b ORDER BY b", {**params, **bp})
@@ -1012,10 +1032,15 @@ async def rum_load_breakdown(ctx: SectionCtx) -> dict:
         pts = [{"t": ctx.iso(_as_dt(ctx, r[0])), "v": round(_num(r[1 + i]) or 0.0, 1)} for r in trend]
         if any(p["v"] for p in pts):
             series.append({"name": s["label"], "points": pts})
-    charts = ([{"title": f"Average time per phase ({cfg['noun']})",
+    charts = ([{"title": f"Average time per phase by {'hour' if ctx.hours <= 48 else 'day'} "
+                         f"({cfg['noun']})",
                 "series": {"kind": "stacked", "unit": "ms", "series": series}}] if series else [])
 
     group = cfg["group"]
+    slow_total = await ctx.ch_rows(
+        f"SELECT count() FROM (SELECT 1 FROM {EVENTS} WHERE {where} GROUP BY {group} "
+        f"HAVING countIf({dur} > 0) >= 2)", params)
+    n_slow = _int(slow_total[0][0]) if slow_total else 0
     slow = await ctx.ch_rows(
         f"SELECT {group}, count() AS n, quantileTDigestIf(0.75)({dur}, {dur} > 0) AS p75, "
         f"countIf({dur} > 0), quantileTDigest(0.75)({WAIT_PHASE}), "
@@ -1038,8 +1063,9 @@ async def rum_load_breakdown(ctx: SectionCtx) -> dict:
         _kpi(f"Measured {cfg['noun']}", _count(samples), "primary", "with a phase breakdown"),
         _kpi("Load time p75" if target == "page_loads" else "Duration p75", _fmt_ms(dur_p75), "info",
              "navigation start to load event" if target == "page_loads" else "request start to response end"),
-        _kpi("Largest phase", largest["label"], "warning",
-             f"avg {_fmt_ms(largest['avg'])} · {_pct(largest['share'])} of measured time"),
+        _kpi("Largest phase", largest["label"] if largest else "—", "warning" if largest else "neutral",
+             f"avg {_fmt_ms(largest['avg'])} · {_pct(largest['share'])} of measured time"
+             if largest else "No phase time measured"),
         _kpi("Server-Timing coverage", _pct(_share(srv_samples, samples)),
              "success" if srv_samples else "neutral", "samples with a server / database split"),
     ]
@@ -1050,8 +1076,9 @@ async def rum_load_breakdown(ctx: SectionCtx) -> dict:
                "styles": ["text", "num", "num", "pct-bar", "num"], "rows": phase_rows}]
     if slow_rows:
         tables.append({
-            "title": (f"Slowest pages by load time (p75) — top {len(slow_rows)}" if target == "page_loads"
-                      else f"Slowest API calls (p75) — top {len(slow_rows)}"),
+            "title": _title_n("Slowest pages by load time (p75)" if target == "page_loads"
+                              else "Slowest API calls (p75)", len(slow_rows), max(n_slow, len(slow_rows)),
+                              "pages" if target == "page_loads" else "endpoints"),
             "headers": [cfg["label"], cfg["unit"], "Load p75" if target == "page_loads" else "Duration p75",
                         "Waiting p75", "Server incl. DB p75", "Download p75"],
             "styles": ["mono", "num", "num", "num", "num", "num"], "rows": slow_rows})
@@ -1059,9 +1086,11 @@ async def rum_load_breakdown(ctx: SectionCtx) -> dict:
               "route changes have no network phases)." if target == "page_loads" else
               "Phases come from the browser's Resource Timing for fetch/XHR calls.")
              + " Server processing and Database come from Server-Timing response headers and are "
-             "carved out of the waiting time, and TLS out of the connect time, so nothing is "
-             "counted twice. The chart stacks averages (averages add up; percentiles do not); "
-             "Server and Database p75 cover only samples with a Server-Timing split."] + notes
+             "carved out of the wait for the first byte, and TLS out of the connect time, so nothing "
+             "is counted twice; without a Server-Timing header the whole wait stays in Waiting for "
+             "first byte. The chart stacks averages (averages add up; percentiles do not); Server "
+             "and Database p75 cover only samples with a Server-Timing split. Pages and endpoints "
+             "need at least two measured requests to be ranked."] + notes
     return _section(sid, title, description=desc, kpis=kpis, charts=charts, tables=tables, notes=notes)
 
 
@@ -1123,7 +1152,7 @@ async def rum_funnel_conversion(ctx: SectionCtx) -> dict:
 
     results = []
     for f in funnels[:limit]:
-        params = ctx.rum_params(fapp=f["app"], window_ms=max(60, f["window_s"]) * 1000)
+        params = await _raw_params(ctx, fapp=f["app"], window_ms=max(60, f["window_s"]) * 1000)
         conds = [_step_condition(s, i, params) for i, s in enumerate(f["steps"])]
         levels = ", ".join(f"countIf(level >= {i + 1})" for i in range(len(conds)))
         got = await ctx.ch_rows(
@@ -1215,17 +1244,24 @@ LONG_TASK_MS = 50.0
     scope="fleet", requires=REQUIRES,
     options=[top_n_option(10, 100),
              {"key": "sort", "label": "Rank actions by", "type": "select", "default": "count",
-              "choices": [[k, v[0]] for k, v in ACTION_SORTS.items()]}],
+              "choices": [[k, v[0]] for k, v in ACTION_SORTS.items()]},
+             {"key": "show_long_tasks", "label": "List pages with long tasks", "type": "bool",
+              "default": True},
+             {"key": "show_summary", "label": "Show summary tiles and charts", "type": "bool",
+              "default": True,
+              "help": "Turn off for a second, differently ranked action list in the same report."}],
 )
 async def rum_user_actions(ctx: SectionCtx) -> dict:
     sid, title = "rum_user_actions", "User Actions and Long Tasks"
     top_n = int(ctx.opt("top_n"))
     sort = str(ctx.opt("sort"))
+    show_long = bool(ctx.opt("show_long_tasks"))
+    summary = bool(ctx.opt("show_summary"))
     sort_label, order_sql = ACTION_SORTS[sort]
-    desc = ("What visitors clicked and did most (including rage clicks), and the pages whose long "
-            "main-thread tasks block interaction.")
+    desc = (f"User actions real visitors performed, {sort_label.lower()} first (including rage clicks)"
+            + (", and the pages whose long main-thread tasks block interaction." if show_long else "."))
     base = _scope(ctx, " AND sampled = 1")
-    params = ctx.rum_params(lim=top_n)
+    params = await _raw_params(ctx, lim=top_n)
     notes: list[str] = []
     n = await _raw_only_note(ctx, "Browser action detail")
     if n:
@@ -1239,11 +1275,13 @@ async def rum_user_actions(ctx: SectionCtx) -> dict:
         f"sumIf({tbt}, event_type = 'long_task'), "
         "uniqExactIf((application_id, env, session_id), event_type = 'action'), "
         "uniqExactIf((view_name, action_name, action_type), event_type = 'action'), "
-        "uniqExactIf(view_name, event_type = 'long_task') "
+        "uniqExactIf(view_name, event_type = 'long_task'), "
+        "uniqExactIf((view_name, action_name, action_type), event_type = 'action' AND duration_ms > 0) "
         f"FROM {EVENTS} WHERE {base} AND event_type IN ('action', 'long_task')", params)
-    t = tot[0] if tot else (0,) * 8
-    actions, rage, long_n, long_sessions, blocking, action_sessions, distinct, long_pages = (
-        _int(t[0]), _int(t[1]), _int(t[2]), _int(t[3]), _num(t[4]), _int(t[5]), _int(t[6]), _int(t[7]))
+    t = tot[0] if tot else (0,) * 9
+    actions, rage, long_n, long_sessions, blocking, action_sessions, distinct, long_pages, timed = (
+        _int(t[0]), _int(t[1]), _int(t[2]), _int(t[3]), _num(t[4]), _int(t[5]), _int(t[6]), _int(t[7]),
+        _int(t[8]))
     if not actions and not long_n:
         return _section(sid, title, description=desc,
                         notes=["No user actions or long tasks were recorded in this period."] + notes)
@@ -1259,13 +1297,15 @@ async def rum_user_actions(ctx: SectionCtx) -> dict:
         "SELECT view_name, count() AS n, uniqExact((application_id, env, session_id)), "
         f"quantileTDigest(0.75)(duration_ms), max(duration_ms), sum({tbt}) "
         f"FROM {EVENTS} WHERE {base} AND event_type = 'long_task' "
-        "GROUP BY view_name ORDER BY n DESC, view_name ASC LIMIT %(lim)s", params)
-    bucket, bp = ctx.ch_bucket("timestamp")
-    trend = await ctx.ch_rows(
-        f"SELECT {bucket} AS b, countIf(event_type = 'long_task'), "
-        "countIf(event_type = 'action' AND action_type = 'rage_click') "
-        f"FROM {EVENTS} WHERE {base} AND event_type IN ('action', 'long_task') "
-        "GROUP BY b ORDER BY b", {**params, **bp})
+        "GROUP BY view_name ORDER BY n DESC, view_name ASC LIMIT %(lim)s", params) if show_long else []
+    trend = []
+    if summary:
+        bucket, bp = ctx.ch_bucket("timestamp", "1 HOUR" if ctx.hours <= 48 else "1 DAY")
+        trend = await ctx.ch_rows(
+            f"SELECT {bucket} AS b, countIf(event_type = 'long_task'), "
+            "countIf(event_type = 'action' AND action_type = 'rage_click') "
+            f"FROM {EVENTS} WHERE {base} AND event_type IN ('action', 'long_task') "
+            "GROUP BY b ORDER BY b", {**params, **bp})
 
     kpis = [
         _kpi("User actions", _count(actions), "primary", f"in {_count(action_sessions)} sessions"),
@@ -1277,13 +1317,13 @@ async def rum_user_actions(ctx: SectionCtx) -> dict:
              "time beyond 50 ms in long tasks"),
     ]
     charts = []
-    if top and sort == "count":
+    if top and sort == "count" and summary:
         charts.append({"title": "Most frequent actions",
                        "series": {"kind": "rank", "unit": "actions", "color": "primary",
                                   "points": [{"label": _clip(f"{r[0] or 'Action'} · {r[2] or '/'}", 60),
                                               "value": _int(r[3])} for r in top[:10]]}})
     if trend and (long_n or rage):
-        charts.append({"title": "Long tasks and rage clicks over time",
+        charts.append({"title": f"Long tasks and rage clicks by {'hour' if ctx.hours <= 48 else 'day'}",
                        "series": {"kind": "bars", "unit": "count", "series": [
                            {"name": "Long tasks", "points": [{"t": ctx.iso(_as_dt(ctx, r[0])), "v": _int(r[1])}
                                                              for r in trend]},
@@ -1293,7 +1333,7 @@ async def rum_user_actions(ctx: SectionCtx) -> dict:
     if top:
         tables.append({
             "title": _title_n(f"User actions — {sort_label.lower()}", len(top),
-                              distinct if sort != "duration" else len(top), "actions"),
+                              timed if sort == "duration" else distinct, "actions"),
             "headers": ["Action", "Type", "Page", "Count", "Sessions", "p75 duration", "Errors"],
             "styles": ["text", "text", "mono", "num", "num", "num", "num"],
             "rows": [[_clip(r[0] or "Action", 80), ACTION_TYPES.get(str(r[1] or ""), str(r[1]).replace("_", " ").capitalize()),
@@ -1303,18 +1343,21 @@ async def rum_user_actions(ctx: SectionCtx) -> dict:
         notes.insert(0, "No user action has a measured duration, so none is ranked as slowest.")
     else:
         notes.insert(0, "No user actions were recorded in this period.")
-    if pages:
+    if show_long and pages:
         tables.append({
             "title": _title_n("Pages with the most long tasks", len(pages), long_pages, "pages"),
             "headers": ["Page", "Long tasks", "Sessions affected", "p75 duration", "Longest", "Blocking time"],
             "styles": ["mono", "num", "num", "num", "num", "num"],
             "rows": [[_clip(r[0] or "/", 80), _count(r[1]), _count(r[2]), _fmt_ms(_num(r[3])),
                       _fmt_ms(_num(r[4])), _duration_ms(_num(r[5]))] for r in pages]})
-    else:
+    elif show_long:
         notes.insert(0, "No long tasks were recorded in this period.")
-    notes.append("A long task is main-thread work longer than 50 ms; blocking time is the part of "
-                 "each task beyond 50 ms (as in Total Blocking Time). Counts come from sampled "
-                 "sessions. Element selectors and user identities are not included.")
+    notes.append(("A long task is main-thread work longer than 50 ms; blocking time is the part of "
+                  "each task beyond 50 ms (as in Total Blocking Time). " if show_long or summary else "")
+                 + "Counts come from sampled sessions. Element selectors and user identities are not "
+                 "included.")
+    if not summary:
+        kpis = []
     return _section(sid, title, description=desc, kpis=kpis, charts=charts, tables=tables, notes=notes)
 
 
@@ -1324,6 +1367,7 @@ ISSUE_ORDER = ("regressed", "new", "open", "resolved", "ignored")
 ISSUE_FILTERS = {
     "all": ("All issues", ISSUE_ORDER),
     "active": ("New, open and regressed", ("regressed", "new", "open")),
+    "new_regressed": ("New and regressed", ("regressed", "new")),
     "new": ("New", ("new",)),
     "regressed": ("Regressed", ("regressed",)),
     "resolved": ("Resolved", ("resolved",)),
@@ -1331,10 +1375,15 @@ ISSUE_FILTERS = {
 }
 
 
+NEW_LOOKBACK = timedelta(days=1)   # raw history needed before the period to call an issue new
+
+
 def _effective_status(stored: Optional[dict], seen: Optional[dict], first_ever: Optional[datetime],
-                      frm: datetime) -> str:
+                      frm: datetime, new_detectable: bool = True) -> str:
     """new: first occurrence on record falls in the period (and nobody triaged
-    it); regressed: resolved, then seen again; else the stored state."""
+    it) -- only when raw history reaches far enough before the period to tell;
+    regressed: resolved, then seen again after resolution (the RUM errors
+    page's rule); else the stored state."""
     state = str((stored or {}).get("status") or "open")
     if state == "resolved":
         resolved_at = _naive((stored or {}).get("resolved_at"))
@@ -1345,7 +1394,7 @@ def _effective_status(stored: Optional[dict], seen: Optional[dict], first_ever: 
     if state == "ignored":
         return "ignored"
     first = _naive(first_ever)
-    if seen and first is not None and first >= _naive(frm):
+    if new_detectable and seen and first is not None and first >= _naive(frm):
         return "new"
     return "open"
 
@@ -1371,7 +1420,7 @@ async def rum_issue_status(ctx: SectionCtx) -> dict:
     n = ctx.window_note(ret["raw"], "Browser error detail")
     if n:
         notes.append(n)
-    params = ctx.rum_params()
+    params = await _raw_params(ctx)
     seen: dict[tuple, dict] = {}
     for r in await ctx.ch_rows(
             f"SELECT application_id, env, {FINGERPRINT} AS fp, count() AS n, uniqExact(session_id), "
@@ -1412,10 +1461,15 @@ async def rum_issue_status(ctx: SectionCtx) -> dict:
         history[(str(r[0]), str(r[1]), str(r[2]))] = {
             "first": r[3], "release": r[4], "message": r[5], "type": r[6]}
 
+    # "New" needs raw history before the period; a period that starts within a
+    # day of the raw-retention horizon cannot tell new issues from old ones.
+    horizon = _now() - timedelta(days=ret["raw"])
+    new_detectable = _naive(ctx.frm) >= horizon + NEW_LOOKBACK
     items = []
     for k in keys:
         s, h, st = seen.get(k), history.get(k, {}), stored.get(k)
-        status = _effective_status(st, s, h.get("first") or (s or {}).get("first"), ctx.frm)
+        status = _effective_status(st, s, h.get("first") or (s or {}).get("first"), ctx.frm,
+                                   new_detectable)
         release = str((st or {}).get("first_seen_release") or h.get("release") or "")
         items.append({
             "key": k, "status": status,
@@ -1448,13 +1502,23 @@ async def rum_issue_status(ctx: SectionCtx) -> dict:
     rows = [[_clip(i["message"] or "(no message)", 90), _clip(i["type"] or "—", 40), i["status"],
              _count(i["count"]), _count(i["sessions"]), ctx.fmt_short(i["first"]),
              ctx.fmt_short(i["last"]), _clip(i["release"] or "—", 40)] for i in shown]
+    headers = ["Issue", "Type", "Status", "Errors", "Sessions", "First seen", "Last seen",
+               "First seen release"]
+    styles = ["text", "text", "status", "num", "num", "text", "text", "mono"]
+    if not app:
+        # Every application in one list: say which one (and environment) each issue is in.
+        for row, i in zip(rows, shown):
+            row.insert(1, _clip(i["key"][0] + (f" · {i['key'][1]}" if i["key"][1] else ""), 40))
+        headers.insert(1, "Application")
+        styles.insert(1, "mono")
     tables = [{"title": _title_n(f"{show_label} by status and occurrences", len(shown), len(listed), "issues"),
-               "headers": ["Issue", "Type", "Status", "Errors", "Sessions", "First seen", "Last seen",
-                           "First seen release"],
-               "styles": ["text", "text", "status", "num", "num", "text", "text", "mono"],
-               "rows": rows}] if rows else []
+               "headers": headers, "styles": styles, "rows": rows}] if rows else []
     if not rows:
         notes.insert(0, f"No issues match “{show_label}” in this period.")
+    if not new_detectable:
+        notes.append(f"This period starts too close to the {ret['raw']}-day raw browser-event "
+                     "retention horizon to tell new issues from older ones, so issues first seen in "
+                     "it are counted as open.")
     notes.append("New: first occurrence on record falls in this period. Regressed: resolved, then "
                  "seen again. Resolved and ignored are the triage states set on the RUM errors page; "
                  "resolved issues that did not recur are listed when they were resolved in this "
@@ -1468,11 +1532,11 @@ async def rum_issue_status(ctx: SectionCtx) -> dict:
 template(
     "rum_core_web_vitals_trend", "Core Web Vitals Trend",
     "Daily 75th-percentile LCP, INP and CLS from real visitors with good / poor shares and the "
-    "change against the previous period, plus Core Web Vitals by release and the countries "
-    "with the slowest page loads.",
+    "change against the previous period, plus speed per page, Core Web Vitals by release and the "
+    "countries with the slowest page loads.",
     "experience",
-    ["rum_vitals_trend",
-     S("rum_vitals_trend", "Interactivity (INP) Rating Trend", rating_vital="inp"),
+    [S("rum_vitals_trend", None, interval="day"),
+     "rum_top_pages",
      S("rum_releases", "Core Web Vitals by Release", top_n=5),
      S("rum_geography", "Slowest Countries (LCP p75)", sort="lcp", top_n=10)],
     audience=("Application owner", "Executive", "IT manager"),
@@ -1483,10 +1547,13 @@ template(
 template(
     "rum_audience_by_country", "Audience by Country",
     "Where visitors come from: sessions, page views, error-session rate and Core Web Vitals per "
-    "country, and the countries with the highest error-session rate.",
+    "country, then the countries with the highest error-session rate and the slowest page loads.",
     "experience",
     [S("rum_geography", "Top 25 Countries by Sessions", top_n=25),
-     S("rum_geography", "Countries with the Highest Error-Session Rate", sort="error_rate", top_n=10)],
+     S("rum_geography", "Countries with the Highest Error-Session Rate", sort="error_rate", top_n=10,
+       show_summary=False),
+     S("rum_geography", "Countries with the Slowest Page Loads (LCP p75)", sort="lcp", top_n=10,
+       show_summary=False)],
     audience=("Application owner", "Executive"), tags=("rum", "geography", "audience", "countries"),
     default_period="last_30d", frequency="monthly", icon="Globe",
 )
@@ -1497,9 +1564,9 @@ template(
     "JavaScript issues that are new or regressed and the release they first appeared in.",
     "experience",
     [S("rum_releases", None, top_n=10),
-     S("rum_issue_status", "New and Regressed JavaScript Issues", status="active", top_n=25)],
+     S("rum_issue_status", "New and Regressed JavaScript Issues", status="new_regressed", top_n=25)],
     audience=("Application owner", "Service owner"), tags=("rum", "releases", "deployments", "regressions"),
-    default_period="last_30d", frequency="weekly", icon="Layers",
+    default_period="last_7d", frequency="weekly", icon="Layers",
 )
 
 template(
@@ -1507,7 +1574,7 @@ template(
     "The 25 slowest and the failing scripts, stylesheets, images and API calls real browsers "
     "loaded, by resource type, with the time breakdown of API calls.",
     "experience",
-    [S("rum_slow_resources", None, top_n=25),
+    [S("rum_slow_resources", "Top 25 Slow and Failing Resources", top_n=25),
      S("rum_slow_resources", "Slowest and Failing API Calls", resource_type="fetch", top_n=10),
      S("rum_load_breakdown", None, target="api")],
     audience=("Application owner", "Systems engineer"), tags=("rum", "resources", "errors", "performance"),
@@ -1541,8 +1608,9 @@ template(
     "The most frequent and slowest user actions, rage clicks, the pages whose long main-thread "
     "tasks block interaction, and the interactivity (INP) trend.",
     "experience",
-    [S("rum_user_actions", None, top_n=25),
-     S("rum_user_actions", "Slowest User Actions", sort="duration", top_n=10),
+    [S("rum_user_actions", "Top 25 User Actions and Long Tasks", top_n=25),
+     S("rum_user_actions", "Slowest User Actions (p75)", sort="duration", top_n=10,
+       show_summary=False, show_long_tasks=False),
      S("rum_vitals_trend", "Interactivity (INP) Trend", rating_vital="inp")],
     audience=("Application owner",), tags=("rum", "actions", "rage clicks", "long tasks", "inp"),
     default_period="last_7d", frequency="weekly", icon="MousePointerClick",
@@ -1566,7 +1634,7 @@ template(
     "experience",
     ["rum_audience", "rum_vitals_trend", "rum_top_pages", "rum_segments",
      S("rum_geography", None, top_n=10), S("rum_releases", None, top_n=5), "rum_reliability",
-     S("rum_issue_status", "New and Regressed JavaScript Issues", status="active", top_n=10),
+     S("rum_issue_status", "Active JavaScript Issues", status="active", top_n=10),
      S("rum_funnel_conversion", None, max_funnels=5)],
     audience=("Executive", "IT manager", "Application owner"),
     tags=("rum", "monthly review", "digital experience", "web vitals"),
