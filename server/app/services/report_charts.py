@@ -35,7 +35,6 @@ import hashlib
 import io
 import json
 import math
-import threading
 import warnings
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -57,6 +56,7 @@ from matplotlib.patches import FancyBboxPatch, Rectangle  # noqa: E402
 from app.services.report_service import (  # noqa: E402
     _MPL_RC,
     CATEGORICAL_HEX,
+    MPL_LOCK,
     HEX_BG_TINT,
     HEX_DANGER,
     HEX_DEGRADED,
@@ -69,6 +69,7 @@ from app.services.report_service import (  # noqa: E402
     HEX_WARNING,
     OTHER_HEX,
     accent_on_white,
+    release_figure,
     rgb_to_hex,
 )
 
@@ -113,7 +114,9 @@ _INK = HEX_TEXT
 _MUTED = HEX_MUTED
 _CHAR_MM = {6.2: 1.16, 6.8: 1.27, 7.0: 1.31, 7.2: 1.35}  # avg glyph width (mm) per pt size
 
-_LOCK = threading.Lock()
+# rcParams are process-global: share the document engine's matplotlib lock
+# (it also guards the LRU cache below).
+_LOCK = MPL_LOCK
 _CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 _CACHE_MAX = 48
 
@@ -426,8 +429,10 @@ def _new_fig(w_mm: float, h_mm: float) -> Figure:
 
 def _save(fig: Figure) -> bytes:
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=DPI, facecolor="white", edgecolor="none")
-    fig.clear()
+    try:
+        fig.savefig(buf, format="png", dpi=DPI, facecolor="white", edgecolor="none")
+    finally:
+        release_figure(fig)
     return buf.getvalue()
 
 
@@ -733,6 +738,7 @@ def _time_bars(s, series, title, ctx, w, h, unit, stacked: bool) -> bytes:
                     ha="center", va="bottom", fontsize=6.6, color=_INK)
     _style_value_axis(ax, lo, hi, unit, integer)
     _style_time_axis(ax, ctx, axis_w)
+    _bar_ticks(ax, ctx, keys, x, step, slot_mm)
     if ylabel_w:
         ax.set_ylabel(unit, fontsize=6.8, color=_MUTED, labelpad=2)
     fig.text(1 - right / w, 1.2 / h, _time_context(ctx, keys[0], keys[-1]), ha="right",
@@ -740,6 +746,37 @@ def _time_bars(s, series, title, ctx, w, h, unit, stacked: bool) -> bytes:
     if multi:
         _legend(fig, [p[0]["name"] for p in prepared], colors, w, h, top + 2.6, left, "bars")
     return _save(fig)
+
+
+def _bar_ticks(ax, ctx: _Ctx, keys: list[datetime], x: np.ndarray, step_days: float,
+               slot_mm: float) -> None:
+    """Ticks under the bars themselves: every bar when the slots are wide
+    enough for a label, else every k-th bar with k a calendar-friendly step
+    (aligned to the local clock for sub-day buckets)."""
+    n = len(x)
+    if n < 2 or n > 96 or slot_mm <= 0:
+        return
+    sub_day = step_days < 0.99
+    label_mm = 11.5 if (sub_day and ctx.twelve_hour) else 8.5
+    need = math.ceil(label_mm / slot_mm)
+    nice = (1, 2, 3, 4, 6, 8, 12, 24) if sub_day else (1, 2, 7, 14)
+    k = next((c for c in nice if c >= need), None)
+    if k is None:
+        return
+    idx = list(range(0, n, k))
+    if sub_day and k > 1:
+        period = int(round(step_days * 1440)) * k
+        if period and 1440 % period == 0:
+            aligned = []
+            for i, t in enumerate(keys):
+                local = t.astimezone(ctx.tz)
+                if (local.hour * 60 + local.minute) % period == 0:
+                    aligned.append(i)
+            if len(aligned) >= 2:
+                idx = aligned
+    if len(idx) < 2:
+        return  # keep the date locator's ticks
+    ax.set_xticks([x[i] for i in idx])
 
 
 def _categorical(s, series, title, ctx, w, h, unit, kind) -> bytes:

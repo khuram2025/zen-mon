@@ -18,21 +18,24 @@ Design system
 """
 
 import io
-import base64
 import logging
 import glob
 import re
 import statistics
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from math import ceil
 
 from fpdf import FPDF
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.ticker as mticker
 import matplotlib.font_manager as _fm
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +79,29 @@ for _path in [*_SANS_FILES.values(), *_MONO_FILES.values()]:
             _fm.fontManager.addfont(_path)
         except Exception:
             pass
+
+
+class _OncePerMessage(logging.Filter):
+    """An SVG logo is drawn on every page of every report; fpdf2 repeats its
+    'unsupported SVG element' warnings each time. Log each one once."""
+
+    def __init__(self):
+        super().__init__()
+        self._seen: set[str] = set()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            key = record.getMessage()
+        except Exception:
+            return True
+        if key in self._seen:
+            return False
+        if len(self._seen) < 256:
+            self._seen.add(key)
+        return True
+
+
+logging.getLogger("fpdf.svg").addFilter(_OncePerMessage())
 
 
 def _safe(text) -> str:
@@ -483,24 +509,56 @@ _MPL_RC = {
 }
 
 
-def _finish(fig: plt.Figure) -> bytes:
+# matplotlib's rcParams are process-global: every chart (these helpers and
+# report_charts.chart_png) renders under this lock so concurrent renders in
+# worker threads never see each other's style.
+MPL_LOCK = threading.RLock()
+
+
+@contextmanager
+def _figure(w_mm: float, h_mm: float, layout: str | None = "constrained"):
+    """A figure of exact physical size drawn with the document style. It is
+    built with the object API (no pyplot registry), so nothing is retained
+    after rendering, even when drawing fails half-way."""
+    with MPL_LOCK, matplotlib.rc_context(_MPL_RC):
+        fig = Figure(figsize=(w_mm / 25.4, h_mm / 25.4), dpi=_CHART_DPI, layout=layout)
+        FigureCanvasAgg(fig)
+        try:
+            yield fig
+        finally:
+            release_figure(fig)
+
+
+def release_figure(fig: Figure) -> None:
+    """Free a rendered figure now: its artists and the Agg pixel buffer
+    (several MB at 200 dpi), which would otherwise wait for the cyclic
+    garbage collector (figure <-> canvas)."""
+    try:
+        fig.clear()
+        canvas = fig.canvas
+        if getattr(canvas, "renderer", None) is not None:
+            canvas.renderer = None
+            canvas._lastKey = None
+    except Exception:
+        pass
+
+
+def _finish(fig: Figure) -> bytes:
     """Serialize at fixed DPI without bbox cropping so physical size is exact."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=_CHART_DPI, facecolor="white", edgecolor="none")
-    plt.close(fig)
     return buf.getvalue()
 
 
 def _empty_chart(w_mm: float = CONTENT_W, h_mm: float = 34,
                  label: str = "No data available for this period") -> bytes:
     """A quiet tinted panel used wherever a figure has nothing to show."""
-    with plt.rc_context(_MPL_RC):
-        fig = plt.figure(figsize=(w_mm / 25.4, h_mm / 25.4), dpi=_CHART_DPI)
+    with _figure(w_mm, h_mm, layout=None) as fig:
         ax = fig.add_axes([0, 0, 1, 1])
         ax.axis("off")
-        ax.add_patch(plt.Rectangle((0.004, 0.03), 0.992, 0.94, transform=ax.transAxes,
-                                   facecolor=HEX_BG_TINT, edgecolor=HEX_GRID,
-                                   linewidth=0.8, zorder=0))
+        ax.add_patch(Rectangle((0.004, 0.03), 0.992, 0.94, transform=ax.transAxes,
+                               facecolor=HEX_BG_TINT, edgecolor=HEX_GRID,
+                               linewidth=0.8, zorder=0))
         ax.text(0.5, 0.5, label, ha="center", va="center", fontsize=7.6,
                 color=HEX_MUTED, transform=ax.transAxes)
         return _finish(fig)
@@ -566,9 +624,8 @@ def _make_line_chart(timestamps: list[datetime], values: list[float],
                      unit: str = "", y_domain: tuple | None = None, tz=None) -> bytes:
     if not timestamps or not values or len(timestamps) < 2:
         return _empty_chart(w_mm, h_mm)
-    with plt.rc_context(_MPL_RC):
-        fig, ax = plt.subplots(figsize=(w_mm / 25.4, h_mm / 25.4),
-                               dpi=_CHART_DPI, layout="constrained")
+    with _figure(w_mm, h_mm) as fig:
+        ax = fig.add_subplot()
         ts, mean, bmin, bmax, reduced = _downsample(list(timestamps), list(values))
         if reduced:
             ax.fill_between(ts, bmin, bmax, color=color, alpha=0.12, linewidth=0)
@@ -618,9 +675,8 @@ def _make_time_bar_chart(timestamps: list[datetime], values: list[float],
                          w_mm: float = CONTENT_W, h_mm: float = 46, tz=None) -> bytes:
     if not timestamps or not any((v or 0) > 0 for v in values):
         return _empty_chart(w_mm, h_mm)
-    with plt.rc_context(_MPL_RC):
-        fig, ax = plt.subplots(figsize=(w_mm / 25.4, h_mm / 25.4),
-                               dpi=_CHART_DPI, layout="constrained")
+    with _figure(w_mm, h_mm) as fig:
+        ax = fig.add_subplot()
         if len(timestamps) > 1:
             deltas = sorted((timestamps[i + 1] - timestamps[i]).total_seconds()
                             for i in range(len(timestamps) - 1))
@@ -660,9 +716,8 @@ def _make_bar_chart(labels: list[str], values: list[float],
     if h_mm is None:
         h_mm = max(26.0, 7.2 * n + 10)
     color = colors if isinstance(colors, str) else (colors[0] if colors else HEX_PRIMARY)
-    with plt.rc_context(_MPL_RC):
-        fig, ax = plt.subplots(figsize=(w_mm / 25.4, h_mm / 25.4),
-                               dpi=_CHART_DPI, layout="constrained")
+    with _figure(w_mm, h_mm) as fig:
+        ax = fig.add_subplot()
         short = [l if len(l) <= 26 else l[:25] + "…" for l in labels]
         ax.barh(range(n), values, height=0.62, color=color, zorder=3)
         ax.set_yticks(range(n), labels=short)
@@ -705,8 +760,7 @@ def _make_donut(labels: list[str], values: list[float],
         slice_colors = slice_colors[:5] + [OTHER_HEX]
     total = sum(v for _, v in pairs)
 
-    with plt.rc_context(_MPL_RC):
-        fig = plt.figure(figsize=(w_mm / 25.4, h_mm / 25.4), dpi=_CHART_DPI)
+    with _figure(w_mm, h_mm, layout=None) as fig:
         ax = fig.add_axes([0.01, 0.04, 0.44, 0.92])
         ax.pie([v for _, v in pairs], colors=slice_colors, startangle=90,
                counterclock=False,
@@ -724,7 +778,7 @@ def _make_donut(labels: list[str], values: list[float],
         y0 = 0.5 + row_h * (n - 1) / 2
         for i, ((lab, val), col) in enumerate(zip(pairs, slice_colors)):
             y = y0 - i * row_h
-            fig.patches.append(plt.Rectangle(
+            fig.add_artist(Rectangle(
                 (0.485, y - 0.028), 0.022, 0.062, transform=fig.transFigure,
                 facecolor=col, edgecolor="none"))
             lab_s = lab if len(lab) <= 18 else lab[:17] + "…"
@@ -774,21 +828,31 @@ def _render_toc(pdf: "ZenPlusReport", outline) -> None:
 
     title_w = pdf.body_w - 10 - 20
     entries = [o for o in outline if o.level == 0]
+    muted = getattr(pdf, "_toc_muted", set())
     for i, o in enumerate(entries, 1):
         if pdf.get_y() + 8 > pdf.page_break_trigger:
             pdf.add_page()
         y = pdf.get_y()
         x = pdf.l_margin
+        off = i in muted
         pdf._sans("B", 8.6)
-        pdf.set_text_color(*pdf.accent)
+        pdf.set_text_color(*(COLOR_FAINT if off else pdf.accent))
         pdf.set_xy(x, y)
         pdf.cell(9, 6.6, f"{i:02d}")
+        suffix = "(not included)" if off else ""
+        pdf._sans("", 8.2)
+        suffix_w = pdf.get_string_width(suffix) + 2 * pdf.c_margin if suffix else 0.0
         pdf._sans("", 9.2)
-        pdf.set_text_color(*COLOR_TEXT)
-        title = pdf._fit(_safe(o.name), title_w)
-        pdf.set_xy(x + 10, y)
-        pdf.cell(title_w + 2, 6.6, title)
-        t_end = x + 10 + pdf.get_string_width(title) + 2.5
+        pdf.set_text_color(*(COLOR_MUTED if off else COLOR_TEXT))
+        title = pdf._fit(_safe(o.name), title_w - suffix_w)
+        # cells advance x to their right edge; text sits c_margin inside
+        pdf.set_xy(x + 10 - pdf.c_margin, y)
+        pdf.cell(pdf.get_string_width(title) + 2 * pdf.c_margin, 6.6, title)
+        if suffix:
+            pdf._sans("", 8.2)
+            pdf.set_text_color(*COLOR_FAINT)
+            pdf.cell(suffix_w, 6.6, suffix)
+        t_end = pdf.get_x() + 1.0
         pdf._sans("", 8.6)
         pdf.set_text_color(*COLOR_MUTED)
         pdf.set_xy(right - 12, y)
@@ -868,6 +932,8 @@ class ZenPlusReport(FPDF):
         self._cover_logo = cover_logo_bytes or logo_bytes
         self._cover_logo_on_dark = bool(cover_logo_bytes) and cover_logo_on_dark
         self._header_logo_failed = False
+        self._image_sizes: dict = {}
+        self._toc_muted: set[int] = set()   # contents entries shown as "not included"
         self._decor = True          # running header/footer on content pages
         self._outline_on = True     # record sections into the PDF outline
         self._section_n = 0
@@ -1025,17 +1091,26 @@ class ZenPlusReport(FPDF):
         return body
 
     def _image_size(self, data: bytes) -> tuple[float, float] | None:
-        """Intrinsic (width, height) of a logo (pixels or SVG units)."""
+        """Intrinsic (width, height) of a logo (pixels or SVG units). Parsed
+        once per document: the running header asks on every page."""
+        cache = self._image_sizes
+        key = (len(data or b""), hash(data))
+        if key in cache:
+            return cache[key]
         from fpdf.image_parsing import preload_image
+        size = None
         try:
             _name, img, info = preload_image(self.image_cache, io.BytesIO(self._norm_image(data)))
             vb = getattr(img, "viewbox", None)
             if vb and len(vb) == 4 and vb[2] and vb[3]:
-                return float(vb[2]), float(vb[3])
-            w, h = float(info.width), float(info.height)
-            return (w, h) if w > 0 and h > 0 else None
+                size = float(vb[2]), float(vb[3])
+            else:
+                w, h = float(info.width), float(info.height)
+                size = (w, h) if w > 0 and h > 0 else None
         except Exception:
-            return None
+            size = None
+        cache[key] = size
+        return size
 
     def _place_image(self, data: bytes, x: float, y: float, max_w: float, max_h: float,
                      align: str = "L") -> tuple[float, float] | None:
@@ -1308,12 +1383,21 @@ class ZenPlusReport(FPDF):
     # ----- structure blocks -----
 
     def section_title(self, title: str, description: str | None = None,
-                      category: str | None = None, number=("auto",)):
-        """Numbered section heading with accent rule; records a PDF bookmark."""
-        # Reserve room for the heading plus the first rows of content so a
-        # heading never sits orphaned at the bottom of a page.
-        need = 46 + (7 if description else 0)
-        self._check_page_space(need)
+                      category: str | None = None, number=("auto",),
+                      keep_with: float = 36.0):
+        """Numbered section heading with accent rule; records a PDF bookmark.
+
+        ``keep_with`` is the height (mm) of the first block that follows: the
+        heading moves to the next page with it rather than sit orphaned at
+        the bottom of a page."""
+        if description:
+            self._sans("", 8.2)
+            desc_h = self.multi_cell(self.content_w, 4.4, _safe(description),
+                                     dry_run=True, output="HEIGHT") + 1.2
+        else:
+            desc_h = 1.4
+        head_h = 3 + (4.6 if category else 0) + 9.6 + 3.4 + desc_h
+        self._check_page_space(head_h + min(max(keep_with, 0.0), 150.0))
         if number == ("auto",):
             self._section_n += 1
             num = self._section_n
@@ -1356,8 +1440,10 @@ class ZenPlusReport(FPDF):
         else:
             self.set_y(self.get_y() + 1.4)
 
-    def sub_heading(self, text_str: str):
-        self._check_page_space(22)
+    def sub_heading(self, text_str: str, keep_with: float = 32.0):
+        """Small heading kept on the page of the first ``keep_with`` mm of
+        what follows (by default a table header and its first rows)."""
+        self._check_page_space(9.2 + keep_with)
         self.ln(1.6)
         x = self.l_margin
         y = self.get_y()
@@ -1879,35 +1965,21 @@ class ZenPlusReport(FPDF):
 # ---------------------------------------------------------------------------
 
 async def _fetch_company_info(db: AsyncSession) -> dict:
-    """Get company name and logo from system_settings."""
-    result = await db.execute(
-        text("SELECT value FROM system_settings WHERE key = 'company'")
-    )
-    row = result.fetchone()
-    info = {"company_name": "ZenPlus", "logo_bytes": None, "timezone": "UTC"}
-    if row and row[0]:
-        val = row[0] if isinstance(row[0], dict) else {}
-        info["company_name"] = val.get("company_name", "ZenPlus")
-        info["timezone"] = val.get("timezone", "UTC")
+    """Company name, light logo (bytes + sniffed MIME) and timezone.
 
-    result2 = await db.execute(
-        text("SELECT value FROM system_settings WHERE key = 'company_logo'")
-    )
-    row2 = result2.fetchone()
-    if row2 and row2[0]:
-        val2 = row2[0] if isinstance(row2[0], dict) else {}
-        logo_b64 = val2.get("data") or val2.get("logo") or ""
-        if isinstance(row2[0], str):
-            logo_b64 = row2[0]
-        if logo_b64:
-            try:
-                # strip data URI prefix if present
-                if "," in logo_b64:
-                    logo_b64 = logo_b64.split(",", 1)[1]
-                info["logo_bytes"] = base64.b64decode(logo_b64)
-            except Exception:
-                pass
-    return info
+    Kept for older callers; it reads the same sanitised values as every
+    renderer (app.services.branding.load_branding), so an empty stored name
+    falls back to the product name and an unreadable logo is dropped."""
+    from app.services.branding import load_branding
+    branding = await load_branding(db)
+    logo = branding.logo
+    return {
+        "company_name": branding.display_name,
+        "logo_bytes": logo.data if logo else None,
+        "logo_mime": logo.content_type if logo else None,
+        "timezone": branding.timezone,
+        "branding": branding,
+    }
 
 
 def _build_device_filter_sql(device_ids: list[str] | None,

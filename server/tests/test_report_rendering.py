@@ -228,6 +228,9 @@ def test_render_html_logo_mime_and_fallback():
     assert 'src="data:image/png;base64,' in with_png and 'class="tile"' in with_png
     plain = rs.render_html(_meta(), _sections()[:1])
     assert '<span class="name">Acme Networks</span>' in plain
+    # an SVG with only a viewBox has no intrinsic size: the logo box sets a height
+    assert ".brand img{display:block;height:44px;" in with_svg
+    assert ".brand .tile img{height:32px;" in with_svg
 
 
 def test_render_html_light_brand_accent_is_darkened_and_letter_paper():
@@ -408,3 +411,132 @@ def test_legacy_status_log_rows_use_the_organisation_timezone():
         [{"timestamp": datetime(2026, 10, 7, 21, 30), "old_status": "up", "new_status": "down",
           "reason": "ping", "duration_sec": 0}], branding=_branding(date_format="DD/MM/YYYY"))
     assert rows[0][0] == "08/10/2026 00:30"
+
+
+def test_legacy_fetch_company_info_reads_sanitised_branding():
+    db = _LegacyDB({"company_name": "   ", "timezone": "Not/AZone"}, _png_logo())
+    info = asyncio.run(report_service._fetch_company_info(db))
+    assert info["company_name"] == "ZenPlus"  # an empty stored name falls back
+    assert info["timezone"] == "UTC" and info["logo_mime"] == "image/png"
+    assert info["logo_bytes"].startswith(b"\x89PNG")
+
+
+def test_legacy_chart_helpers_are_pyplot_free_and_tz_aware():
+    from matplotlib import _pylab_helpers
+
+    ts = [FROM + timedelta(hours=i) for i in range(30)]
+    pngs = [
+        report_service._make_line_chart(ts, [float(i % 7) for i in range(30)], unit="ms",
+                                        tz=_branding().tz),
+        report_service._make_time_bar_chart(ts[:7], [1, 2, 3, 0, 2, 1, 4]),
+        report_service._make_bar_chart(["a", "b"], [3, 1]),
+        report_service._make_donut(["Up", "Down"], [5, 1], center_text="83%"),
+        report_service._empty_chart(),
+    ]
+    assert all(p.startswith(b"\x89PNG") for p in pngs)
+    assert _pylab_helpers.Gcf.get_num_fig_managers() == 0  # nothing left in a global registry
+
+
+# ─── Layout details ─────────────────────────────────────────────────────────
+
+def _axes():
+    from matplotlib.figure import Figure
+    return Figure(figsize=(4, 2)).add_subplot()
+
+
+def test_daily_bars_get_a_tick_under_every_bar_when_there_is_room():
+    import matplotlib.dates as mdates
+
+    ctx = rc._Ctx(_branding())
+    keys = [datetime(2026, 9, 30, 21, tzinfo=timezone.utc) + timedelta(days=d) for d in range(7)]
+    ax = _axes()
+    rc._bar_ticks(ax, ctx, keys, mdates.date2num(keys), 1.0, slot_mm=10.0)
+    assert len(ax.get_xticks()) == 7
+    ax = _axes()
+    rc._bar_ticks(ax, ctx, keys, mdates.date2num(keys), 1.0, slot_mm=5.0)
+    assert len(ax.get_xticks()) == 4  # every second day
+    ax = _axes()
+    before = list(ax.get_xticks())
+    rc._bar_ticks(ax, ctx, keys, mdates.date2num(keys), 1.0, slot_mm=2.0)
+    assert list(ax.get_xticks()) == before  # weekly would leave one tick: keep the locator's
+
+
+def test_hourly_bar_ticks_align_to_the_local_clock():
+    import matplotlib.dates as mdates
+
+    ctx = rc._Ctx(_branding())  # Asia/Riyadh, GMT+3
+    keys = [datetime(2026, 10, 6, 10, tzinfo=timezone.utc) + timedelta(hours=h) for h in range(24)]
+    ax = _axes()
+    rc._bar_ticks(ax, ctx, keys, mdates.date2num(keys), 1 / 24, slot_mm=3.0)  # every 3rd bar
+    hours = [mdates.num2date(t, tz=ctx.tz).hour for t in ax.get_xticks()]
+    assert hours and all(h % 3 == 0 for h in hours)
+
+
+def test_pdf_heading_moves_with_its_first_block():
+    doc = report_service.ZenPlusReport.from_meta(_meta())
+    doc.add_page()
+    doc.set_y(doc.page_break_trigger - 45)
+    doc.section_title("Kept together", description="A short description.", keep_with=40)
+    assert doc.page_no() == 2  # heading + 40 mm do not fit: both start the next page
+    doc.set_y(doc.page_break_trigger - 45)
+    doc.section_title("Fits", keep_with=10)
+    assert doc.page_no() == 2
+
+
+def test_first_block_height_covers_charts_tables_and_kpis():
+    doc = report_service.ZenPlusReport.from_meta(_meta())
+    secs = {s["id"]: s for s in _sections()}
+    assert 45 < rs._first_block_mm(doc, secs["availability_trend"]) < 80  # chart + title
+    assert rs._first_block_mm(doc, secs["device_availability"]) > 30  # header + first rows
+    assert rs._first_block_mm(doc, secs["availability_kpis"]) == pytest.approx(27.0)
+    assert rs._first_block_mm(doc, secs["ncm_protection"]) > 15
+
+
+def test_pdf_contents_marks_restricted_sections(monkeypatch):
+    seen = []
+    orig = report_service._render_toc
+
+    def spy(pdf, outline):
+        seen.append((set(pdf._toc_muted), [o.name for o in outline if o.level == 0]))
+        return orig(pdf, outline)
+
+    monkeypatch.setattr(report_service, "_render_toc", spy)
+    rs.render_pdf(_meta(), _sections())
+    muted, names = seen[0]
+    assert names[5] == "Configuration Protection" and muted == {6}
+    assert len(names) == len(_sections())
+
+
+@pytest.mark.parametrize("fmt", ["WEBP", "JPEG"])
+def test_render_pdf_accepts_webp_and_jpeg_logos(fmt):
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (300, 100), (200, 30, 30)).save(buf, fmt)
+    logo = Logo(buf.getvalue(), f"image/{fmt.lower()}")
+    doc = report_service.ZenPlusReport.from_meta(_meta(logo=logo))
+    assert doc._image_size(logo.data) == (300.0, 100.0)
+    assert rs.render_pdf(_meta(logo=logo), _sections()[:2]).startswith(b"%PDF")
+
+
+def test_unreadable_logo_falls_back_to_the_company_name():
+    broken = Logo(b'<svg xmlns="http://www.w3.org/2000/svg"><g><broken', "image/svg+xml")
+    doc = report_service.ZenPlusReport.from_meta(_meta(logo=broken))
+    assert doc._image_size(broken.data) is None
+    doc.add_page()
+    assert doc._cover_brand(16, 14) is False  # cover() then prints the name
+    assert rs.render_pdf(_meta(logo=broken), _sections()[:2]).startswith(b"%PDF")
+
+
+def test_html_print_rules_keep_headings_and_pairs_together():
+    html = rs.render_html(_meta(), _sections())
+    assert ".sec-head{break-inside:avoid;break-after:avoid}" in html
+    assert ".disclaimer,.pair{break-inside:avoid}" in html
+    assert "thead{display:table-header-group}" in html
+
+
+def test_html_header_less_table_still_shows_its_rows():
+    sec = {"id": "x", "title": "Facts", "kpis": [], "charts": [], "notes": [],
+           "tables": [{"headers": [], "rows": [["Vendor", "Cisco"], ["Model", "C9300"]]}]}
+    html = rs.render_html(_meta(), [sec])
+    assert "C9300" in html and "<thead>" not in html
+    assert rs.render_pdf(_meta(), [sec]).startswith(b"%PDF")

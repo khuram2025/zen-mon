@@ -2180,6 +2180,7 @@ from html import escape as _html_escape  # noqa: E402
 
 from app.services.report_service import (  # noqa: E402
     COLOR_PRIMARY,
+    _png_size,
     brand_tokens,
     classification_rgb,
     infer_column_styles,
@@ -2277,9 +2278,10 @@ box-shadow:0 1px 3px rgba(15,23,42,.06),0 8px 28px rgba(15,23,42,.08)}
 .cover-top{display:flex;align-items:center;justify-content:space-between;gap:16px;
 padding-bottom:18px;border-bottom:1px solid var(--ground-panel)}
 .brand{display:flex;align-items:center;min-height:40px;min-width:0}
-.brand img{display:block;max-height:48px;max-width:220px;width:auto;height:auto}
+.brand img{display:block;height:44px;width:auto;max-width:220px;object-fit:contain;
+object-position:left center}
 .brand .tile{background:#fff;border-radius:8px;padding:6px 10px;display:inline-flex}
-.brand .tile img{max-height:34px}
+.brand .tile img{height:32px;max-width:200px}
 .brand .name{font-size:18px;font-weight:700;overflow-wrap:anywhere}
 .doc-label{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
 color:var(--ground-label);text-align:right}
@@ -2396,16 +2398,25 @@ body{background:#fff;font-size:10pt}
 .doc{margin:0;max-width:none;box-shadow:none;border-radius:0;overflow:visible}
 .cover,.badge,.sec-num,.kpi-bar,.pill,.pct .bar,.pct .bar i,.callout,.locked,.sec-head:after,
 table.data tbody tr:nth-child(even) td{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-.sec-head,.section h2,.table-title,figure.chart figcaption{break-after:avoid}
-.kpis,.kpi,figure.chart,.callout,.locked,.empty-state{break-inside:avoid}
+.cover{padding:20px 24px 24px}
+.toc,.content,.doc-foot{padding-left:0;padding-right:0}
+.toc{padding-top:18px}
+.section{margin-top:22px}
+.sec-head{break-inside:avoid;break-after:avoid}
+.section h2,.table-title,figure.chart figcaption,.kpis{break-after:avoid}
+.kpis{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}
+.kpis,.kpi,figure.chart,.callout,.locked,.empty-state,.disclaimer,.pair{break-inside:avoid}
 thead{display:table-header-group}
 tr{break-inside:avoid}
 .table-scroll{overflow:visible}
-figure.chart img{max-width:178mm}
+figure.chart img{max-width:178mm;margin:0 auto}
+.pair{gap:0 20px}
+.pair>.section+.section{padding-left:20px;margin-left:-10px}
+.pair>.section:first-child{padding-right:10px}
 .pair figure.chart img{max-width:85mm}
 .toc a{border-bottom-color:var(--line)}
 a{color:inherit;text-decoration:none}
-.doc-foot{break-inside:avoid}
+.doc-foot{break-inside:avoid;padding-top:10px}
 }
 """
 
@@ -2519,8 +2530,10 @@ def _html_cell(val: Any, style: str) -> tuple[str, str]:
 
 
 def _html_table(t: dict) -> str:
+    rows = [r if isinstance(r, (list, tuple)) else [r] for r in (t.get("rows") or [])]
     headers = [str(h) for h in (t.get("headers") or [])]
-    rows = list(t.get("rows") or [])
+    if not headers and rows:
+        headers = [""] * max(len(r) for r in rows)  # header-less table: size from the rows
     styles = infer_column_styles(headers, rows, t.get("styles"))
     title = f'<div class="table-title">{_esc(t["title"])}</div>' if t.get("title") else ""
     right = ' class="r"'
@@ -2541,8 +2554,9 @@ def _html_table(t: dict) -> str:
     if len(rows) > HTML_MAX_ROWS:
         cap = (f'<p class="cap-note">Showing the first {HTML_MAX_ROWS:,} of {len(rows):,} rows. '
                "The Excel (XLSX) export lists every row.</p>")
+    thead = f"<thead><tr>{head}</tr></thead>" if any(headers) else ""
     return (f'<div class="table-block">{title}<div class="table-scroll"><table class="data">'
-            f"<thead><tr>{head}</tr></thead><tbody>{''.join(out)}</tbody></table></div>{cap}</div>")
+            f"{thead}<tbody>{''.join(out)}</tbody></table></div>{cap}</div>")
 
 
 def _html_section(s: dict, number: int, branding: Any, half: bool) -> str:
@@ -2720,12 +2734,13 @@ def _pdf_section_body(pdf: ZenPlusReport, s: dict, half: bool = False) -> None:
         elif c.get("series") is not None or c.get("png") is not None:
             pdf.empty_state("Chart unavailable.")
     for t in tables:
-        rows = [["" if c is None else str(c) for c in row] for row in (t.get("rows") or [])]
+        rows = [["" if c is None else str(c) for c in (row if isinstance(row, (list, tuple)) else [row])]
+                for row in (t.get("rows") or [])]
         if not rows and notes:
             continue  # the section's note already explains the absence of data
         if t.get("title"):
             pdf.sub_heading(t["title"])
-        headers = t.get("headers") or []
+        headers = list(t.get("headers") or []) or ([""] * max((len(r) for r in rows), default=0))
         pdf.data_table(headers, rows, col_styles=t.get("styles"),
                        max_rows=PDF_MAX_ROWS_HALF if half else PDF_MAX_ROWS)
     for n in notes:
@@ -2735,6 +2750,35 @@ def _pdf_section_body(pdf: ZenPlusReport, s: dict, half: bool = False) -> None:
             pdf.note(n, kind="info")
     if not kpis and not charts and not tables and not notes:
         pdf.empty_state()
+
+
+def _first_block_mm(pdf: ZenPlusReport, s: dict) -> float:
+    """Height (mm) of the first block a full-width section body draws, so the
+    section heading moves to the next page with it instead of being left
+    orphaned at the bottom of a page."""
+    if s.get("restricted"):
+        return 24.0
+    kpis = s.get("kpis") or []
+    if kpis:
+        first_row = kpis[:len(kpis) if len(kpis) <= 5 else 4]
+        return (23.0 if any(k.get("subtitle") for k in first_row) else 19.6) + 4.0
+    charts = s.get("charts") or []
+    if charts:
+        c = charts[0]
+        png = _chart_image(c, getattr(pdf, "branding", None), False)
+        if not png:
+            return 15.0
+        px_w, px_h = _png_size(png)
+        w = min(px_w / 200 * 25.4, pdf.content_w)
+        return min(w * px_h / max(px_w, 1) + (6.2 if c.get("title") else 0) + 2.0, 150.0)
+    notes = s.get("notes") or []
+    for t in s.get("tables") or []:
+        rows = t.get("rows") or []
+        if not rows and notes:
+            continue
+        body = 6.2 + 0.9 + 6.35 * min(len(rows), 3) + 6.0 if rows else 15.0
+        return body + (9.2 if t.get("title") else 0.0)
+    return 16.0 if notes else 15.0
 
 
 def _half_heading(pdf: ZenPlusReport, s: dict, number: int) -> None:
@@ -2808,6 +2852,7 @@ def render_pdf(meta: dict, sections: list[dict]) -> bytes:
     pdf = ZenPlusReport.from_meta(meta)
     if pdf.branding is None:
         pdf.branding = _meta_branding(meta)
+    pdf._toc_muted = {n for n, s in enumerate(sections, 1) if s.get("restricted")}
     pdf.cover()
     if len(sections) >= 4:
         pdf.toc(expected_entries=len(sections))
@@ -2852,7 +2897,7 @@ def render_pdf(meta: dict, sections: list[dict]) -> bytes:
                 continue
         for s in group:
             pdf.section_title(s["title"], description=None if s.get("restricted") else s.get("description"),
-                              category=s.get("category"))
+                              category=s.get("category"), keep_with=_first_block_mm(pdf, s))
             _pdf_section_body(pdf, s, half=False)
             pdf.ln(4)
     if pdf.disclaimer:
