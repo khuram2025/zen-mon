@@ -694,6 +694,15 @@ async def update_server(
     if not row:
         raise HTTPException(404, "Server not found")
     await db.commit()
+    # Scope fields decide which baselines apply; refresh results so stale
+    # compliance rows don't linger (and re-enabling a server re-evaluates it).
+    if any(getattr(data, f) is not None for f in ("os_type", "site_id", "tags", "status")):
+        from app.services.baseline_service import evaluate_server
+        try:
+            await evaluate_server(db, str(server_id))
+        except Exception:
+            logger.exception("baseline re-eval failed for %s", server_id)
+            await db.rollback()
     return await get_server(server_id, db, user)
 
 
@@ -1024,20 +1033,37 @@ async def server_compliance(
     user: User = Depends(get_current_user),
 ):
     """Baseline evaluation results for one server, violations first."""
+    # Only baselines that currently apply to this server: results can outlive
+    # a rescope/disable/tag edit until the next evaluation, and showing them
+    # contradicts the Baselines page.
     rows = (await db.execute(
         text("""SELECT res.rule_id, res.baseline_id, res.status, res.found_package,
                        res.found_version, res.expected, res.severity,
                        res.first_failed_at, res.evaluated_at,
                        b.name AS baseline_name,
-                       br.rule_type, br.package_match, br.match_type, br.min_version, br.notes
+                       br.rule_type, br.package_match, br.match_type, br.min_version, br.notes,
+                       b.enabled AS _b_enabled, b.os_type AS _b_os_type,
+                       b.site_id AS _b_site_id, b.match_tags AS _b_match_tags,
+                       s.os_type AS _s_os_type, s.site_id AS _s_site_id,
+                       s.tags AS _s_tags, s.status AS _s_status
                 FROM server_baseline_results res
                 JOIN software_baselines b ON b.id = res.baseline_id
                 JOIN software_baseline_rules br ON br.id = res.rule_id
+                JOIN servers s ON s.id = res.server_id
                 WHERE res.server_id = :sid
                 ORDER BY (res.status = 'compliant'), b.name, br.package_match"""),
         {"sid": server_id},
     )).mappings().all()
-    items = [dict(r) for r in rows]
+    from app.services.baseline_service import baseline_in_scope
+    items = []
+    for r in rows:
+        r = dict(r)
+        baseline = {"enabled": r.pop("_b_enabled"), "os_type": r.pop("_b_os_type"),
+                    "site_id": r.pop("_b_site_id"), "match_tags": r.pop("_b_match_tags")}
+        server = {"os_type": r.pop("_s_os_type"), "site_id": r.pop("_s_site_id"),
+                  "tags": r.pop("_s_tags"), "status": r.pop("_s_status")}
+        if baseline_in_scope(baseline, server):
+            items.append(r)
     summary = {"total": len(items), "compliant": 0, "missing": 0, "outdated": 0, "prohibited": 0}
     for it in items:
         summary[it["status"]] = summary.get(it["status"], 0) + 1

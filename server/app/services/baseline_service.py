@@ -96,6 +96,27 @@ def _tags_list(v: Any) -> list[str]:
     return []
 
 
+def baseline_in_scope(baseline: dict, server: dict) -> bool:
+    """True when an enabled baseline's os/site/tag scope covers the server.
+
+    Single definition of "applies to this server", shared by the evaluator and
+    the read paths so a stale result row can never be shown for a baseline the
+    evaluator would no longer apply.
+    """
+    if not baseline.get("enabled", True):
+        return False
+    if server.get("status") == "disabled":
+        return False
+    if baseline.get("os_type") and baseline["os_type"] != server.get("os_type"):
+        return False
+    if baseline.get("site_id") and str(baseline["site_id"]) != str(server.get("site_id") or ""):
+        return False
+    need = set(_tags_list(baseline.get("match_tags")))
+    if need and not need.issubset(set(_tags_list(server.get("tags")))):
+        return False
+    return True
+
+
 async def _applicable_baselines(db: AsyncSession, server: dict) -> list[dict]:
     rows = (await db.execute(
         text("""SELECT * FROM software_baselines
@@ -104,15 +125,7 @@ async def _applicable_baselines(db: AsyncSession, server: dict) -> list[dict]:
                   AND (site_id IS NULL OR site_id = :site)"""),
         {"os": server.get("os_type"), "site": server.get("site_id")},
     )).mappings().all()
-
-    server_tags = set(_tags_list(server.get("tags")))
-    out = []
-    for b in rows:
-        need = set(_tags_list(b.get("match_tags")))
-        if need and not need.issubset(server_tags):
-            continue
-        out.append(dict(b))
-    return out
+    return [dict(b) for b in rows if baseline_in_scope(dict(b), server)]
 
 
 def _evaluate_rule(rule: dict, software: list[tuple[str, str]]) -> dict:
@@ -270,7 +283,7 @@ async def evaluate_baseline(db: AsyncSession, baseline_id: str) -> int:
         return 0
 
     where = ["status != 'disabled'"]
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = {"bid": baseline_id}
     if b.get("os_type"):
         where.append("os_type = :os")
         params["os"] = b["os_type"]
@@ -278,8 +291,14 @@ async def evaluate_baseline(db: AsyncSession, baseline_id: str) -> int:
         where.append("site_id = :site")
         params["site"] = b["site_id"]
 
+    # Also revisit servers that already hold results for this baseline: after
+    # the baseline is rescoped or disabled they fall outside the scope query
+    # above, and evaluate_server is what deletes their now-stale rows/alerts.
     rows = (await db.execute(
-        text(f"SELECT id FROM servers WHERE {' AND '.join(where)}"), params,
+        text(f"""SELECT id FROM servers WHERE {' AND '.join(where)}
+                 UNION
+                 SELECT server_id FROM server_baseline_results WHERE baseline_id = :bid"""),
+        params,
     )).fetchall()
 
     for (sid,) in rows:
@@ -289,10 +308,52 @@ async def evaluate_baseline(db: AsyncSession, baseline_id: str) -> int:
 
 
 async def evaluate_all(db: AsyncSession) -> int:
+    """Re-evaluate every active server, plus any server still holding results.
+
+    Doubles as a repair pass: servers that were rescoped, decommissioned or
+    never re-evaluated after a baseline change get their stale rows removed.
+    """
     rows = (await db.execute(
-        text("SELECT id FROM servers WHERE status != 'disabled'"),
+        text("""SELECT id FROM servers WHERE status != 'disabled'
+                UNION
+                SELECT server_id FROM server_baseline_results"""),
     )).fetchall()
+    done = 0
     for (sid,) in rows:
-        await evaluate_server(db, str(sid), commit=False)
+        try:
+            async with db.begin_nested():
+                await evaluate_server(db, str(sid), commit=False)
+            done += 1
+        except Exception:
+            logger.exception("baseline re-eval failed for %s", sid)
     await db.commit()
-    return len(rows)
+    return done
+
+
+# Advisory-lock key so only one API worker runs the periodic repair at a time.
+_REPAIR_LOCK_KEY = 0x7A656E42  # "zenB"
+REPAIR_INTERVAL_S = 3600
+
+
+async def baseline_repair_loop() -> None:
+    """Background task: hourly full re-evaluation to clear stale results."""
+    import asyncio
+    from app.core.database import AsyncSessionLocal
+
+    await asyncio.sleep(30)
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                got = (await db.execute(
+                    text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": _REPAIR_LOCK_KEY},
+                )).scalar()
+                if got:
+                    n = await evaluate_all(db)  # commit releases the lock
+                    logger.info("baseline repair pass evaluated %d servers", n)
+                else:
+                    await db.rollback()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("baseline repair pass failed")
+        await asyncio.sleep(REPAIR_INTERVAL_S)
