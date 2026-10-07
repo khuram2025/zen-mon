@@ -74,8 +74,15 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
 
 # ─── Logo validation ────────────────────────────────────────────────────────
 
+# Active content, and anything that makes a renderer load another resource:
+# fpdf2 follows <image href> / <use href> / CSS url() to local files and URLs
+# when it draws the logo into a PDF (file disclosure, SSRF), and DTD entities
+# can expand without bound. Only same-document references (#id) are allowed.
 _SVG_FORBIDDEN = re.compile(
-    rb"<\s*script|<\s*foreignObject|\bon[a-z]+\s*=|javascript:|<\s*iframe|<\s*embed|<\s*object",
+    rb"<\s*script|<\s*foreignObject|\bon[a-z]+\s*=|javascript:|<\s*iframe|<\s*embed|<\s*object"
+    rb"|<\s*image\b|<\s*style\b|<\s*!DOCTYPE|<\s*!ENTITY|@import"
+    rb"""|\bhref\s*=\s*(?:"\s*(?!#)|'\s*(?!#)|(?!["'\s#]))"""
+    rb"""|url\(\s*(?:"\s*(?!#)|'\s*(?!#)|(?!["'\s#]))""",
     re.IGNORECASE,
 )
 

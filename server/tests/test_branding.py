@@ -28,6 +28,9 @@ SVG = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="10" 
 @pytest.mark.parametrize("data,mime", [
     (PNG, "image/png"), (JPEG, "image/jpeg"), (WEBP, "image/webp"), (SVG, "image/svg+xml"),
     (b"<svg xmlns='http://www.w3.org/2000/svg'></svg>", "image/svg+xml"),
+    # Same-document references stay allowed (gradients, reused shapes).
+    (b'<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g"/></defs>'
+     b'<rect fill="url(#g)"/><use href="#g"/><use xlink:href=\'#g\'/></svg>', "image/svg+xml"),
 ])
 def test_sniff_accepts_supported_images(data, mime):
     assert branding.sniff_logo(data) == mime
@@ -42,6 +45,14 @@ def test_sniff_accepts_supported_images(data, mime):
     b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>',
     b'<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:alert(1)"/></svg>',
     b'<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div/></foreignObject></svg>',
+    # Anything that makes the PDF renderer load another resource (SSRF / file read).
+    b'<svg xmlns="http://www.w3.org/2000/svg"><image href="http://169.254.169.254/x.png"/></svg>',
+    b'<svg xmlns="http://www.w3.org/2000/svg"><image xlink:href="/etc/passwd"/></svg>',
+    b'<svg xmlns="http://www.w3.org/2000/svg"><use href="/var/lib/x.svg#a"/></svg>',
+    b'<svg xmlns="http://www.w3.org/2000/svg"><use xlink:href=file:///etc/hosts /></svg>',
+    b'<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(http://x/y)"/></svg>',
+    b'<svg xmlns="http://www.w3.org/2000/svg"><style>@import url(x.css)</style></svg>',
+    b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "aaaa">]><svg xmlns="http://www.w3.org/2000/svg"/>',
 ])
 def test_sniff_rejects_other_or_active_content(data):
     assert branding.sniff_logo(data) is None

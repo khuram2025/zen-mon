@@ -467,3 +467,33 @@ def test_report_type_vocabulary_matches_the_catalog():
     from app.services import report_periods, report_templates
     assert tuple(report_templates.PERIODS) == report_periods.PERIOD_IDS
 
+
+
+def test_a_manager_who_changes_someone_elses_delivery_takes_the_schedule_over(env):
+    """A schedule renders with its owner's permissions: a report manager who
+    changes what it sends, or to whom, must not borrow the owner's access."""
+    admin = env.state["user"]
+    sid = _post(env, {"name": "Board pack", "report_type": "availability", "period": "previous_month",
+                      "format": "pdf", "recipients": ["cio@example.com"]}).json()["id"]
+    assert str(env.db.schedules[sid]["created_by"]) == str(admin.id)
+
+    manager = _user("rsx_manager", "Report Manager")
+    env.state["user"] = manager
+    # Pausing or re-timing does not change what is delivered: ownership stays.
+    assert env.client.post(f"/api/v1/report-schedules/{sid}/toggle").status_code == 200
+    assert _put(env, sid, {"hour": 9}).status_code == 200
+    assert str(env.db.schedules[sid]["created_by"]) == str(admin.id)
+
+    # Redirecting it to new recipients hands it to the editor.
+    r = _put(env, sid, {"recipients": ["me@outside.example"]})
+    assert r.status_code == 200, r.text
+    assert str(env.db.schedules[sid]["created_by"]) == str(manager.id)
+    audit = env.db.audits[-1]
+    assert audit["action"] == "reports.schedule.update"
+    assert audit["metadata"]["owner_changed_from"] == str(admin.id)
+    assert "created_by" not in audit["metadata"]["changed"]
+
+    # A full administrator editing keeps the existing owner.
+    env.state["user"] = admin
+    assert _put(env, sid, {"report_type": "alerts"}).status_code == 200
+    assert str(env.db.schedules[sid]["created_by"]) == str(manager.id)

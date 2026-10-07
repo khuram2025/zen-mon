@@ -641,6 +641,18 @@ def _validate_custom(body: CustomReportBody) -> list[dict]:
     return _validate_entries(body.sections)
 
 
+def _refuse_unviewable(perms, entries: list[dict], already: frozenset = frozenset()) -> None:
+    """A template author may only add sections they are allowed to see: a
+    shared template is delivered by other people's schedules, which render
+    with their owners' permissions."""
+    bad = sorted({e["id"] for e in entries
+                  if e["id"] not in already and not _rs.may_view_section(perms, e["id"])})
+    if bad:
+        titles = [(_rs.SECTION_REGISTRY.get(b) or {}).get("title", b) for b in bad]
+        raise HTTPException(403, "You can't add sections you don't have permission to view: "
+                                 + ", ".join(titles))
+
+
 def _template_params(body: CustomReportBody, entries: list[dict]) -> dict:
     import json as _json
     return {
@@ -674,6 +686,8 @@ async def create_custom_report(
     current_user: User = Depends(require_permission("reports.manage")),
 ):
     entries = _validate_custom(body)
+    perms, _admin, _manager = await _access(db, current_user)
+    _refuse_unviewable(perms, entries)
     params = _template_params(body, entries)
     row = (await db.execute(text(
         "INSERT INTO custom_reports (name, description, sections, definition, category, tags, "
@@ -697,7 +711,7 @@ async def update_custom_report(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("reports.manage")),
 ):
-    _perms, admin, manager = await _access(db, current_user)
+    perms, admin, manager = await _access(db, current_user)
     row = await _render.load_template(db, report_id)
     if not _render.can_read_template(row, current_user, admin):
         raise HTTPException(404, "Report template not found")
@@ -706,6 +720,8 @@ async def update_custom_report(
     if body.visibility != row.visibility and not (admin or _render.is_owner(row, current_user)):
         raise HTTPException(403, "Only the owner can change who sees this template")
     entries = _validate_custom(body)
+    _refuse_unviewable(perms, entries,
+                       already=frozenset(e["id"] for e in _render.template_entries(row)))
     params = _template_params(body, entries)
     await db.execute(text(
         "UPDATE custom_reports SET name=:n, description=:d, sections=CAST(:s AS jsonb), "
@@ -769,6 +785,24 @@ async def delete_custom_report(
     if int(row.schedules or 0) and not force:
         raise HTTPException(409, f"{row.schedules} schedule(s) deliver this template. Delete them too, "
                                  "or keep the template.")
+    if int(row.schedules or 0):
+        # The schedules go with the template: only someone who may delete each
+        # of them (a report manager, or their owner) may force this, and every
+        # removed schedule is audited like a schedule delete.
+        dependants = (await db.execute(text(
+            "SELECT id, name, report_type, period, format, created_by FROM report_schedules "
+            "WHERE custom_report_id = :id"), {"id": row.id})).fetchall()
+        if not (admin or manager) and any(str(d.created_by or "") != str(current_user.id) for d in dependants):
+            raise HTTPException(403, "Other people's schedules deliver this template; ask a report "
+                                     "manager to remove them first.")
+        from app.api.v1.report_schedules import _refuse_scoped
+        await _refuse_scoped(db, current_user)
+        for d in dependants:
+            await db.execute(text("DELETE FROM report_schedules WHERE id = :id"), {"id": d.id})
+            await write_audit_log(
+                db, actor=current_user, action="reports.schedule.delete", resource_type="report_schedule",
+                resource_id=str(d.id), metadata={"name": d.name, "report_type": d.report_type,
+                                                 "reason": "template deleted", "template_id": row.id})
     await db.execute(text("DELETE FROM custom_reports WHERE id=:id"), {"id": row.id})
     await write_audit_log(
         db, actor=current_user, action="reports.template.delete", resource_type="report_template",

@@ -172,6 +172,9 @@ def _row_to_dict(row) -> dict:
 
 
 _SELECT = "SELECT * FROM report_schedules"
+# Fields that decide what a schedule delivers and to whom (see update).
+_DELIVERY_KEYS = frozenset({"report_type", "custom_report_id", "filters", "recipients",
+                            "notify_channels", "period", "format"})
 # Schedules with their owner's name and their organisation template's name
 # and visibility, for listings.
 _SELECT_DETAIL = (
@@ -443,6 +446,17 @@ async def update_report_schedule(
     if "filters" in fields:
         fields["filters"] = await _filters_for_update(db, user, current.filters, fields["filters"])
 
+    # A schedule renders with its owner's permissions. Someone else who changes
+    # what it delivers, or to whom, takes it over: from then on it runs with the
+    # editor's permissions, so a report manager cannot use another owner's
+    # broader access to send data they may not see to recipients they choose.
+    owner_changed = False
+    if (_DELIVERY_KEYS & set(fields)
+            and str(getattr(current, "created_by", "") or "") != str(user.id)
+            and not await _is_full_admin(db, user)):
+        fields["created_by"] = user.id
+        owner_changed = True
+
     set_parts, params = [], {"id": schedule_id}
     for key, value in fields.items():
         if key == "filters":
@@ -473,7 +487,9 @@ async def update_report_schedule(
             text("UPDATE report_schedules SET next_run_at = :n WHERE id = :id RETURNING *"),
             {"n": next_run, "id": schedule_id},
         )).first()
-    await _audit(db, user, "update", row, changed=sorted(fields))
+    await _audit(db, user, "update", row, changed=sorted(k for k in fields if k != "created_by"),
+                 **({"owner_changed_from": str(current.created_by) if current.created_by else None}
+                    if owner_changed else {}))
     await db.commit()
     detail = await _load_detail(db, schedule_id)
     return (await _Viewer.load(db, user)).serialize(detail or row)
