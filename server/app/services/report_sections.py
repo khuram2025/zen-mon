@@ -372,6 +372,49 @@ def _section(id: str, title: str, **parts: Any) -> dict:
     return out
 
 
+def _local_bucket_starts(ctx: SectionCtx, unit: str) -> list[datetime]:
+    """Aware-UTC starts of every organisation-local hour or day overlapping
+    the window (what Postgres ``date_trunc(unit, ts AT TIME ZONE tz)``
+    produces). Wall-clock stepping keeps local midnights across DST."""
+    zone = ctx._brand().tz
+    frm, to = _aware_utc(ctx.frm), _aware_utc(ctx.to)
+    local = frm.astimezone(zone).replace(tzinfo=None)
+    if unit == "day":
+        wall, step = local.replace(hour=0, minute=0, second=0, microsecond=0), timedelta(days=1)
+    else:
+        wall, step = local.replace(minute=0, second=0, microsecond=0), timedelta(hours=1)
+    out: list[datetime] = []
+    while len(out) < 10_000:
+        start = wall.replace(tzinfo=zone).astimezone(timezone.utc)
+        if start >= to:
+            break
+        if not out or start > out[-1]:      # a skipped DST hour maps onto the next one
+            out.append(start)
+        wall += step
+    return out
+
+
+async def _retention_days(ctx: SectionCtx, table: str, default: int) -> int:
+    """Days a ClickHouse table currently keeps (its TTL, which Storage settings
+    and the RUM settings page may change), cached per render; ``default``
+    when the TTL cannot be read."""
+    key = f"_ttl_days:{table}"
+    if key not in ctx._cache:
+        days = default
+        try:
+            from app.services.storage_service import _parse_ttl_days
+            rows = await ctx.ch_rows(
+                "SELECT engine_full FROM system.tables WHERE database = 'zenplus' AND name = %(ttl_table)s",
+                {"ttl_table": table})
+            parsed = _parse_ttl_days(str(rows[0][0])) if rows else None
+            if parsed and parsed > 0:
+                days = parsed
+        except Exception:
+            logger.debug("retention of %s unavailable", table, exc_info=True)
+        ctx._cache[key] = days
+    return ctx._cache[key]
+
+
 # ─── Availability sections ──────────────────────────────────────────────────
 
 SLA_TARGET_PCT = 99.9  # fallback only; the configured policy default wins
@@ -714,14 +757,15 @@ async def _sec_network_performance(ctx: SectionCtx) -> dict:
     )
 
 
-IF_RAW_RETENTION_DAYS = 30   # zenplus.snmp_if_metrics TTL; the 5-minute rollup keeps 90 days
+IF_RAW_RETENTION_DAYS = 30       # zenplus.snmp_if_metrics default TTL
+IF_ROLLUP_RETENTION_DAYS = 90    # zenplus.snmp_if_metrics_5m default TTL
 
 
 async def _interface_stats(ctx: SectionCtx) -> dict:
     """Per-interface throughput for the window (cached per render).
 
-    Raw ``snmp_if_metrics`` while the whole window is within its 30-day
-    retention, else the ``snmp_if_metrics_5m`` rollup (sample-weighted
+    Raw ``snmp_if_metrics`` while the whole window is within its retention
+    (30 days by default), else the ``snmp_if_metrics_5m`` rollup (sample-weighted
     averages; percentiles over 5-minute averages). Utilisation is against the
     effective interface speed (``interface_speed.effective_speed``: configured
     circuit speed, else SNMP ifSpeed); an unknown speed is never guessed.
@@ -730,7 +774,8 @@ async def _interface_stats(ctx: SectionCtx) -> dict:
         return ctx._cache["if_stats"]
     from app.services.interface_speed import effective_speed
 
-    raw = _aware_utc(ctx.frm) >= datetime.now(timezone.utc) - timedelta(days=IF_RAW_RETENTION_DAYS)
+    raw_days = await _retention_days(ctx, "snmp_if_metrics", IF_RAW_RETENTION_DAYS)
+    raw = _aware_utc(ctx.frm) >= datetime.now(timezone.utc) - timedelta(days=raw_days)
     clause, params = ctx.ch_device_clause("device_id")
     params.update({"f": _naive_utc(ctx.frm), "t": _naive_utc(ctx.to)})
     if raw:
@@ -762,7 +807,10 @@ async def _interface_stats(ctx: SectionCtx) -> dict:
             )
             GROUP BY did, if_index
         """
-    out: dict[str, Any] = {"rows": [], "raw": raw, "speed_unknown": 0}
+    out: dict[str, Any] = {"rows": [], "raw": raw, "raw_days": raw_days, "speed_unknown": 0,
+                           "rollup_note": None if raw else ctx.window_note(
+                               await _retention_days(ctx, "snmp_if_metrics_5m", IF_ROLLUP_RETENTION_DAYS),
+                               "Interface 5-minute history")}
     try:
         stats = await ctx.ch_rows(sql, params)
         dids = sorted({str(r[0]) for r in stats})
@@ -807,8 +855,11 @@ async def _interface_stats(ctx: SectionCtx) -> dict:
 def _if_method_note(st: dict) -> list[str]:
     if st.get("raw"):
         return []
-    return [f"Interface samples are kept for {IF_RAW_RETENTION_DAYS} days; this period is read from "
-            "5-minute averages (percentiles are taken across them)."]
+    notes = [f"Interface samples are kept for {st.get('raw_days') or IF_RAW_RETENTION_DAYS} days; this "
+             "period is read from 5-minute averages (percentiles are taken across them)."]
+    if st.get("rollup_note"):
+        notes.append(st["rollup_note"])
+    return notes
 
 
 async def _sec_interface_utilization(ctx: SectionCtx) -> dict:
@@ -964,8 +1015,10 @@ async def _sec_apm_services(ctx: SectionCtx) -> dict:
     try:
         frm_ms = int(_aware_utc(ctx.frm).timestamp() * 1000)
         to_ms = int(_aware_utc(ctx.to).timestamp() * 1000)
-        a_from, a_to, covered = align_ms_window(frm_ms, to_ms)
-        table = table_for(int(covered))
+        a_from, a_to, _covered = align_ms_window(frm_ms, to_ms)
+        # The table must match the bucket the start was aligned to (both follow
+        # the requested span), or an hourly bucket straddling the start drops out.
+        table = table_for(int(max((to_ms - frm_ms) / 1000.0, 1.0)))
         params = {"f": datetime.fromtimestamp(a_from / 1000, tz=timezone.utc).replace(tzinfo=None),
                   "t": datetime.fromtimestamp(a_to / 1000, tz=timezone.utc).replace(tzinfo=None)}
         rows = await ctx.ch_rows(
@@ -1156,23 +1209,25 @@ async def _sec_synthetics(ctx: SectionCtx) -> dict:
 USER_EXPR = ("if(attributes_string['enduser.id'] != '', "
              "attributes_string['enduser.id'], attributes_string['user.id'])")
 
-# zenplus.apm_spans keeps request-level spans for 14 days (migrate-098); the
-# usage sections read them, so every one of them is clamped to that and says so.
+# zenplus.apm_spans keeps request-level spans for 14 days by default
+# (migrate-098; Storage settings may change it). The usage sections read them,
+# so every one of them is clamped to the retained part and says so.
 SPAN_RETENTION_DAYS = 14
 
 
-def _span_window(ctx: SectionCtx) -> tuple[Optional[datetime], Optional[datetime], list[str]]:
+async def _span_window(ctx: SectionCtx) -> tuple[Optional[datetime], Optional[datetime], list[str]]:
     """(from, to, notes) clamped to raw span retention (naive UTC); from is
     None when nothing of the period is retained."""
-    reach = datetime.now(timezone.utc) - timedelta(days=SPAN_RETENTION_DAYS)
+    days = await _retention_days(ctx, "apm_spans", SPAN_RETENTION_DAYS)
+    reach = datetime.now(timezone.utc) - timedelta(days=days)
     frm, to = _aware_utc(ctx.frm), _aware_utc(ctx.to)
     if to <= reach:
-        return None, None, [f"Request-level span data is kept for {SPAN_RETENTION_DAYS} days; none "
-                            "of this period is retained."]
+        return None, None, [f"Request-level span data is kept for {days} days; none of this period "
+                            "is retained."]
     if frm < reach:
         return (_naive_utc(reach), _naive_utc(to),
-                [ctx.window_note(SPAN_RETENTION_DAYS, "Request-level span data")
-                 or f"Request-level span data is kept for {SPAN_RETENTION_DAYS} days."])
+                [f"Request-level span data is kept for {days} days; this section covers "
+                 f"{ctx.fmt_dt(reach)} onwards."])
     return _naive_utc(frm), _naive_utc(to), []
 
 
@@ -1180,7 +1235,7 @@ async def _sec_usage_kpis(ctx: SectionCtx) -> dict:
     reqs = users = pages = errors = 0
     p95: Optional[float] = None
     points: list[dict] = []
-    frm, to, notes = _span_window(ctx)
+    frm, to, notes = await _span_window(ctx)
     try:
         if frm is not None:
             t = (await ctx.ch_rows(
@@ -1207,8 +1262,7 @@ async def _sec_usage_kpis(ctx: SectionCtx) -> dict:
     err_rate = errors / reqs * 100 if reqs else None
     return _section(
         "usage_kpis", "Usage Summary",
-        description=(f"Application traffic and audience from request-level spans (kept for "
-                     f"{SPAN_RETENTION_DAYS} days)."),
+        description="Application traffic and audience from request-level spans.",
         kpis=[
             {"label": "Requests", "value": f"{reqs:,}", "accent": "primary"},
             {"label": "Unique users", "value": f"{users:,}", "accent": "info"},
@@ -1226,7 +1280,7 @@ async def _sec_usage_kpis(ctx: SectionCtx) -> dict:
 
 async def _sec_usage_pages(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
-    frm, to, notes = _span_window(ctx)
+    frm, to, notes = await _span_window(ctx)
     try:
         if frm is not None:
             rows = await ctx.ch_rows(
@@ -1254,7 +1308,7 @@ async def _sec_usage_pages(ctx: SectionCtx) -> dict:
 
 async def _sec_usage_users(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
-    frm, to, notes = _span_window(ctx)
+    frm, to, notes = await _span_window(ctx)
     try:
         if frm is not None:
             rows = await ctx.ch_rows(
@@ -1310,7 +1364,8 @@ RUM_VIEW_ONCE = ("sampled = 1 AND event_type = 'view' "
                  "AND (sdk_version = '' OR (is_final = 0 AND end_reason = 'view_start'))")
 RUM_VIEWS_SQL = f"uniqExactIf((application_id, env, view_id), {RUM_VIEW_ONCE})"
 RUM_SESSIONS_SQL = "uniqExactIf((application_id, env, session_id), sampled = 1)"
-RUM_RAW_RETENTION_DAYS = 14   # default; the RUM settings page may change it
+RUM_RAW_RETENTION_DAYS = 14      # defaults; the RUM settings page may change both
+RUM_ROLLUP_RETENTION_DAYS = 90
 
 
 def _vital_verdict(metric: str, value: Optional[float]) -> tuple[str, str]:
@@ -1340,18 +1395,23 @@ def _rum_raw_days() -> int:
         return RUM_RAW_RETENTION_DAYS
 
 
-def _rum_source(ctx: SectionCtx) -> dict:
+async def _rum_source(ctx: SectionCtx) -> dict:
     """Which RUM table answers this window: raw events while the whole period
-    is within raw retention, else the 5-minute rollup (cached per render)."""
+    is within raw retention (the table's TTL, which the RUM settings page may
+    change), else the 5-minute rollup (cached per render)."""
     if "rum_source" not in ctx._cache:
-        days = _rum_raw_days()
+        days = await _retention_days(ctx, "apm_rum_events", _rum_raw_days())
         reach = datetime.now(timezone.utc) - timedelta(days=days)
         rollup = _aware_utc(ctx.frm) < reach
-        ctx._cache["rum_source"] = {
-            "rollup": rollup, "raw_days": days, "reach": reach,
-            "note": (f"Browser events are kept for {days} days; this period is read from 5-minute "
-                     "aggregates, which do not keep individual users or error details.") if rollup else None,
-        }
+        note = None
+        if rollup:
+            note = (f"Browser events are kept for {days} days; this period is read from 5-minute "
+                    "aggregates, which do not keep individual users or error details.")
+            older = ctx.window_note(await _retention_days(ctx, "apm_rum_metrics_5m", RUM_ROLLUP_RETENTION_DAYS),
+                                    "Browser 5-minute aggregates")
+            if older:
+                note += " " + older
+        ctx._cache["rum_source"] = {"rollup": rollup, "raw_days": days, "reach": reach, "note": note}
     return ctx._cache["rum_source"]
 
 
@@ -1375,7 +1435,7 @@ async def _sec_rum_audience(ctx: SectionCtx) -> dict:
     users: Optional[int] = 0
     per_session = 0.0
     points: list[dict] = []
-    src = _rum_source(ctx)
+    src = await _rum_source(ctx)
     try:
         app = ctx.rum_app_clause()
         bucket_sql, bucket_params = ctx.ch_bucket("timestamp")
@@ -1450,7 +1510,7 @@ async def _sec_rum_audience(ctx: SectionCtx) -> dict:
 async def _sec_rum_experience(ctx: SectionCtx) -> dict:
     vitals: dict[str, Optional[float]] = {k: None for k in _VITAL_THRESHOLDS}
     good = needs = poor = 0
-    src = _rum_source(ctx)
+    src = await _rum_source(ctx)
     lcp_good, lcp_poor, _ = _VITAL_THRESHOLDS["LCP"]
     try:
         app = ctx.rum_app_clause()
@@ -1515,7 +1575,7 @@ async def _sec_rum_experience(ctx: SectionCtx) -> dict:
 async def _sec_rum_top_pages(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
     ranked: list[tuple[str, int]] = []
-    src = _rum_source(ctx)
+    src = await _rum_source(ctx)
     top = _top_n(ctx, 15)
     try:
         app = ctx.rum_app_clause()
@@ -1583,7 +1643,7 @@ async def _sec_rum_segments(ctx: SectionCtx) -> dict:
     device_rows: list[list[str]] = []
     browser_rows: list[list[str]] = []
     device_points: list[dict] = []
-    src = _rum_source(ctx)
+    src = await _rum_source(ctx)
     try:
         app = ctx.rum_app_clause()
         if src["rollup"]:
@@ -1664,7 +1724,7 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
     distinct: Optional[int] = 0
     affected_users: Optional[int] = 0
     rows_out: list[list[str]] = []
-    src = _rum_source(ctx)
+    src = await _rum_source(ctx)
     notes: list[str] = []
     try:
         app = ctx.rum_app_clause()
@@ -1679,16 +1739,23 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
             errors, affected_sessions, views = int(t[0] or 0), int(t[1] or 0), int(t[2] or 0)
             # Issue-level detail only exists in raw events: the retained part.
             raw_params["f"] = _naive_utc(src["reach"])
-            notes.append(f"Error details are kept for {src['raw_days']} days; distinct issues, users "
-                         f"affected and the error list cover {ctx.fmt_date(src['reach'])} onwards.")
-            d = (await ctx.ch_rows(
-                f"""
-                SELECT uniqIf(error_fingerprint, event_type = 'error' AND error_fingerprint != ''),
-                       uniqIf(user_id, event_type = 'error' AND user_id != '')
-                FROM zenplus.apm_rum_events
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
-                """, raw_params))[0]
-            distinct, affected_users = int(d[0] or 0), int(d[1] or 0)
+            detail = _aware_utc(ctx.to) > src["reach"]
+            if detail:
+                notes.append(f"Error details are kept for {src['raw_days']} days; distinct issues, users "
+                             f"affected and the error list cover {ctx.fmt_dt(src['reach'])} onwards.")
+                d = (await ctx.ch_rows(
+                    f"""
+                    SELECT uniqIf(error_fingerprint, event_type = 'error' AND error_fingerprint != ''),
+                           uniqIf(user_id, event_type = 'error' AND user_id != '')
+                    FROM zenplus.apm_rum_events
+                    WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                    """, raw_params))[0]
+                distinct, affected_users = int(d[0] or 0), int(d[1] or 0)
+            else:
+                # Not measured, never "0 issues".
+                distinct = affected_users = None
+                notes.append(f"Error details are kept for {src['raw_days']} days; distinct issues, users "
+                             "affected and the error list are not available for this period.")
         else:
             t = (await ctx.ch_rows(
                 f"""
@@ -1702,7 +1769,7 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
                 """, raw_params))[0]
             errors, distinct, affected_sessions, affected_users, views = (
                 int(t[0]), int(t[1]), int(t[2]), int(t[3]), int(t[4]))
-        rows = await ctx.ch_rows(
+        rows = [] if distinct is None else await ctx.ch_rows(
             f"""
             SELECT anyHeavy(error_message), anyHeavy(error_type), anyHeavy(view_name),
                    count() AS n, uniqExact((application_id, env, session_id)), max(timestamp)
@@ -1727,12 +1794,14 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
         kpis=[
             {"label": "Errors", "value": f"{errors:,}",
              "accent": "danger" if errors else "success"},
-            {"label": "Distinct issues", "value": f"{distinct:,}", "accent": "warning"},
+            {"label": "Distinct issues", "value": "—" if distinct is None else f"{distinct:,}",
+             "accent": "neutral" if distinct is None else "warning"},
             {"label": "Error rate", "value": _fmt_pct(err_rate),
              "accent": "danger" if (err_rate or 0) > 1 else "success", "subtitle": "of page views"},
             {"label": "Sessions affected", "value": f"{affected_sessions:,}", "accent": "warning"},
-            {"label": "Users affected", "value": f"{affected_users:,}",
-             "accent": "danger" if affected_users else "success"},
+            {"label": "Users affected", "value": "—" if affected_users is None else f"{affected_users:,}",
+             "accent": ("neutral" if affected_users is None else
+                        "danger" if affected_users else "success")},
         ],
         tables=[{"headers": ["Error", "Type", "Page", "Count", "Sessions", "Last seen"],
                  "styles": ["text", "text", "text", "num", "num", "num"], "rows": rows_out}],
@@ -1741,9 +1810,10 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
 
 # ─── Capacity sections ──────────────────────────────────────────────────────
 
-# Agents send filesystem inventory every few hours (6 h by default); a row
-# older than this is a volume the server no longer reports on.
-FS_FRESH_HOURS = 24
+# Agents refresh every filesystem row at least every 10 minutes (unchanged
+# rows included) and the Servers page marks a row stale after 15; a row not
+# refreshed for an hour belongs to a volume or agent that no longer reports.
+FS_FRESH_HOURS = 1
 
 
 async def _sec_capacity_filesystems(ctx: SectionCtx) -> dict:
@@ -1780,8 +1850,8 @@ async def _sec_capacity_filesystems(ctx: SectionCtx) -> dict:
         logger.debug("capacity filesystems unavailable", exc_info=True)
     notes = _shown_note(len(rows_out), total, "filesystems")
     if stale:
-        notes.append(f"{stale} filesystem(s) not reported by their agent in the last {FS_FRESH_HOURS} hours "
-                     "are left out (stale inventory).")
+        notes.append(f"{stale} filesystem(s) not reported by their agent in the last "
+                     f"{FS_FRESH_HOURS} hour(s) are left out (stale inventory).")
     return _section(
         "capacity_filesystems", "Filesystem Capacity",
         description="Fullest filesystems across agent-monitored servers.",
@@ -1896,11 +1966,17 @@ async def _sec_alert_trend(ctx: SectionCtx) -> dict:
         rows = (await ctx.db.execute(text(
             f"SELECT date_trunc('{unit}', a.triggered_at AT TIME ZONE CAST(:tz AS text))"
             " AT TIME ZONE CAST(:tz AS text) AS b, "
-            "count(*) AS n, count(*) FILTER (WHERE a.severity = 'critical') AS crit "
+            "count(*) AS n, count(*) FILTER (WHERE lower(a.severity) = 'critical') AS crit "
             "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at <= :t "
             f"AND NOT {wf.notice_sql('a')} GROUP BY 1 ORDER BY 1"),
             {"f": ctx.frm, "t": ctx.to, "tz": ctx.tz_name})).fetchall()
-        points = [{"t": ctx.iso(r[0]), "v": int(r[1] or 0)} for r in rows]
+        # Every local hour/day of the window gets a bar: a quiet day is 0
+        # alerts (a fact), not a missing bar.
+        counts = {ctx.iso(start): 0 for start in _local_bucket_starts(ctx, unit)}
+        for r in rows:
+            key = ctx.iso(r[0])
+            counts[key] = counts.get(key, 0) + int(r[1] or 0)
+        points = [{"t": k, "v": v} for k, v in sorted(counts.items()) if k]
         critical = sum(int(r[2] or 0) for r in rows)
     except Exception:
         logger.debug("alert trend unavailable", exc_info=True)
@@ -1929,6 +2005,7 @@ async def _sec_noisy_sources(ctx: SectionCtx) -> dict:
 
 async def _sec_recent_alerts(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
+    total = 0
     try:
         # A requester without netflow.view gets NetFlow alerts without their
         # flow-derived message (X-01), redacted like the Alert Center does.
@@ -1940,13 +2017,15 @@ async def _sec_recent_alerts(ctx: SectionCtx) -> dict:
             SELECT a.severity, a.message,
                    COALESCE(d.hostname, a.metadata->>'service', '—') AS source,
                    a.status, a.triggered_at,
-                   jsonb_build_object('source', a.metadata->'source') AS metadata
+                   jsonb_build_object('source', a.metadata->'source') AS metadata,
+                   COUNT(*) OVER () AS total
             FROM alerts a LEFT JOIN devices d ON d.id = a.device_id
             WHERE a.triggered_at >= :f AND a.triggered_at <= :t
             ORDER BY a.triggered_at DESC LIMIT :lim
             """), {"f": ctx.frm, "t": ctx.to, "lim": _top_n(ctx, 25)})).fetchall()
         for row in rows:
             r = dict(row._mapping)
+            total = max(total, int(r.get("total") or 0))
             if redact:
                 r = redact_alert_payload(r)
             rows_out.append([(r["severity"] or "").upper(), (r["message"] or "")[:70], r["source"],
@@ -1956,7 +2035,8 @@ async def _sec_recent_alerts(ctx: SectionCtx) -> dict:
     return _section("recent_alerts", "Recent Alerts",
                     tables=[{"headers": ["Severity", "Message", "Source", "Status", "Triggered"],
                              "styles": ["severity", "text", "text", "status", "num"],
-                             "rows": rows_out}])
+                             "rows": rows_out}],
+                    notes=_shown_note(len(rows_out), total, "alerts (latest first)"))
 
 
 # ─── Inventory sections ─────────────────────────────────────────────────────
@@ -2105,7 +2185,7 @@ async def _sec_ncm_outcomes(ctx: SectionCtx) -> dict:
         {"title": "Failed attempts per day",
          "series": {"kind": "bars", "unit": "attempts", "color": "warning",
                     "points": [{"t": t, "v": v} for t, v in zip(ts, fails)]}},
-    ]
+    ] if rows else []
     sec = _section("ncm_outcomes", "Backup Outcomes", charts=charts,
                    tables=[{"title": "Failed attempts by cause", "headers": ["Cause", "Attempts"],
                             "styles": ["text", "num"], "rows": [[r.cat.replace("_", " "), str(r.n)] for r in cats]}])
@@ -2120,11 +2200,13 @@ async def _sec_ncm_at_risk(ctx: SectionCtx) -> dict:
     risky.sort(key=lambda d: (order.index(d["backup_state"]), d["hostname"] or ""))
     rows = [[d["hostname"] or d["ip"], d["backup_state"].replace("_", " "), _ncm_when(ctx, d["validated_at"]),
              (d["last_error"] or d["support"]["message"] if d["backup_state"] in ("failed", "blocked", "unconfigured") else "")[:80],
-             _ncm_when(ctx, d["next_due"]) if d["next_due"] else "not scheduled"] for d in risky[:50]]
+             _ncm_when(ctx, d["next_due"]) if d["next_due"] else "not scheduled"]
+            for d in risky[:_top_n(ctx, 50)]]
     return _section("ncm_at_risk", "Devices Needing Action",
                     tables=[{"headers": ["Device", "State", "Last valid capture", "Reason", "Next due"],
                              "styles": ["text", "status", "num", "text", "num"], "rows": rows}],
-                    notes=[] if rows else ["Every eligible device has a fresh validated capture."])
+                    notes=(_shown_note(len(rows), len(risky), "devices needing action") if rows else
+                           ["Every eligible device has a fresh validated capture."]))
 
 
 async def _sec_ncm_compliance(ctx: SectionCtx) -> dict:
@@ -2228,7 +2310,8 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
     "ncm_outcomes": {"fn": _sec_ncm_outcomes, "title": "Backup Outcomes", "category": "Configuration",
                      "description": "Validated captures and failed attempts per day, failures by cause."},
     "ncm_at_risk": {"fn": _sec_ncm_at_risk, "title": "Devices Needing Action", "category": "Configuration",
-                    "description": "Failed, blocked, stale and never-captured eligible devices."},
+                    "description": "Failed, blocked, stale and never-captured eligible devices.",
+                    "options": [_rows_option(50, 500)]},
     "ncm_compliance": {"fn": _sec_ncm_compliance, "title": "Configuration Compliance", "category": "Configuration",
                        "description": "Policy pass/fail/exception status and most frequent failures."},
     "ncm_changes": {"fn": _sec_ncm_changes, "title": "Configuration Changes and Baseline Drift", "category": "Configuration",

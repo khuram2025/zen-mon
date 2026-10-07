@@ -18,7 +18,11 @@ Every test runs on fakes (no database, no ClickHouse):
 11. ignored APM issues are not listed;
 12. interface sections use effective speed and rank capacity by p95;
 13. network performance shows latency/loss from the ping data;
-14. list sections take a top_n option.
+14. list sections take a top_n option and never cut a list silently.
+
+Retention (spans, RUM events, interface samples) is the table's configured
+TTL read from system.tables once per render, with the documented default when
+it cannot be read.
 """
 from __future__ import annotations
 
@@ -81,14 +85,24 @@ class DB:
 
 
 class CH:
-    """ClickHouse stand-in answering by SQL substring; records every call."""
+    """ClickHouse stand-in answering by SQL substring; records every data call.
 
-    def __init__(self, *handlers):
+    Table-retention lookups (system.tables) are recorded apart in
+    ``ttl_calls`` and answered from ``ttl`` ({table: engine_full}); a table
+    without an entry has no readable TTL, so the section uses its default."""
+
+    def __init__(self, *handlers, ttl=None):
         self.handlers = list(handlers)
         self.calls: list[tuple[str, dict]] = []
+        self.ttl_calls: list[tuple[str, dict]] = []
+        self.ttl = dict(ttl or {})
 
     def query(self, sql, parameters=None, **_kw):
         params = dict(parameters or {})
+        if "system.tables" in sql:
+            self.ttl_calls.append((sql, params))
+            engine = self.ttl.get(params.get("ttl_table"))
+            return SimpleNamespace(result_rows=[(engine,)] if engine else [])
         self.calls.append((sql, params))
         for key, rows in self.handlers:
             if key in sql:
@@ -145,6 +159,20 @@ def test_recent_alerts_time_and_row_limit(monkeypatch):
     sec = run(rs._sec_recent_alerts(make_ctx(db, sid="recent_alerts", options={"top_n": 7})))
     assert sec["tables"][0]["rows"][0][4] == "Sep 01 15:00"
     assert db.calls[-1][1]["lim"] == 7 and "LIMIT :lim" in db.calls[-1][0]
+    assert sec["notes"] == []                                  # one alert in total: nothing cut
+
+
+def test_recent_alerts_say_when_the_list_is_cut(monkeypatch):
+    async def no_redaction(self):
+        return False
+    monkeypatch.setattr(rs.SectionCtx, "withholds_netflow_alerts", no_redaction)
+    rows = [SimpleNamespace(_mapping={"severity": "warning", "message": f"m{i}", "source": "edge",
+                                      "status": "resolved", "triggered_at": START, "total": 40,
+                                      "metadata": {"source": None}}) for i in range(3)]
+    db = DB(("FROM alerts a LEFT JOIN devices", lambda sql, p: rows[:p["lim"]]))
+    sec = run(rs._sec_recent_alerts(make_ctx(db, sid="recent_alerts", options={"top_n": 3})))
+    assert "COUNT(*) OVER ()" in db.calls[-1][0]
+    assert sec["notes"][0].startswith("Showing 3 of 40 alerts (latest first)")
 
 
 def test_ncm_times_have_no_utc_suffix():
@@ -171,11 +199,36 @@ def test_alert_trend_buckets_by_local_day_without_notices():
     sql, params = db.calls[-1]
     assert "date_trunc('day'" in sql and params["tz"] == "Asia/Riyadh"
     assert "is_recovery" in sql                                    # notices excluded
-    assert sec["charts"][0]["series"]["points"] == [{"t": "2026-08-31T21:00:00Z", "v": 5}]
+    points = sec["charts"][0]["series"]["points"]
+    # Sep 01 03:00 → Sep 08 03:00 Riyadh touches eight local days, each starting
+    # at local midnight (21:00 UTC); a day without alerts is a 0 bar, not a gap.
+    assert [p["t"] for p in points] == [f"2026-{m:02d}-{d:02d}T21:00:00Z" for m, d in
+                                        [(8, 31)] + [(9, d) for d in range(1, 8)]]
+    assert [p["v"] for p in points] == [5, 0, 0, 0, 0, 0, 0, 0]
     assert "2 critical alert(s) in the window." in sec["notes"]
     hourly = DB()
-    run(rs._sec_alert_trend(make_ctx(hourly, to=START + timedelta(hours=24))))
+    sec = run(rs._sec_alert_trend(make_ctx(hourly, to=START + timedelta(hours=24))))
     assert "date_trunc('hour'" in hourly.calls[-1][0]
+    assert len(sec["charts"][0]["series"]["points"]) == 24
+    assert all(p["v"] == 0 for p in sec["charts"][0]["series"]["points"])
+
+
+def test_alert_trend_query_failure_is_no_chart_data_not_zeroes():
+    class Broken(DB):
+        async def execute(self, stmt, params=None):
+            raise RuntimeError("database unavailable")
+    sec = run(rs._sec_alert_trend(make_ctx(Broken(), to=START + timedelta(days=7))))
+    assert sec["charts"][0]["series"]["points"] == []
+
+
+def test_local_bucket_starts_follow_dst_midnights():
+    ny = Branding(timezone="America/New_York")
+    # 2026-11-01 is the US fall-back day (25 hours long).
+    frm = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
+    days = rs._local_bucket_starts(make_ctx(frm=frm, to=frm + timedelta(days=3), branding=ny), "day")
+    assert [d.astimezone(ny.tz).strftime("%m-%d %H:%M") for d in days] == \
+        ["10-31 00:00", "11-01 00:00", "11-02 00:00", "11-03 00:00"]
+    assert days[2] - days[1] == timedelta(hours=25)
 
 
 def test_netflow_labels_use_the_organisation_timezone():
@@ -351,6 +404,16 @@ def test_capacity_filesystems_filter_freshness_and_disabled():
     assert sec["kpis"][0]["value"] == "1"                                  # the stale 92 % is not counted
     assert [r[1] for r in sec["tables"][0]["rows"]] == ["/", "C:"]
     assert any("not reported by their agent" in n for n in sec["notes"])
+    # Agents refresh every row at least every 10 minutes; an hour-old row is stale.
+    assert rs.FS_FRESH_HOURS == 1
+
+
+def test_capacity_filesystems_query_failure_is_not_measured():
+    class Broken(DB):
+        async def execute(self, stmt, params=None):
+            raise RuntimeError("database unavailable")
+    sec = run(rs._sec_capacity_filesystems(make_ctx(Broken(), sid="capacity_filesystems")))
+    assert sec["kpis"][0]["value"] == "—" and sec["kpis"][0]["accent"] == "neutral"
 
 
 # ── 6. server inventory ──────────────────────────────────────────────────────
@@ -381,6 +444,17 @@ def test_apm_services_read_the_rollup_for_the_window(ch, hours, table, minute):
     assert {k["label"]: k["value"] for k in sec["kpis"]} == {
         "Services reporting": "2", "Healthy": "1", "Degraded / critical": "1"}
     assert len(sec["tables"][0]["rows"]) == 1 and sec["tables"][0]["rows"][0][-1] == "degraded"
+
+
+def test_apm_services_six_hour_window_keeps_table_and_alignment_together(ch):
+    # Exactly 6 h from an unaligned start: the 5-minute table (bucket-aligned
+    # start), never the hourly table read from a 5-minute boundary, which
+    # would drop the hour bucket the window starts in.
+    frm = datetime(2026, 9, 1, 10, 7, tzinfo=UTC)
+    ch.client = CH(("span_kind IN", []))
+    run(rs._sec_apm_services(make_ctx(frm=frm, to=frm + timedelta(hours=6), sid="apm_services")))
+    sql, params = ch.client.calls[0]
+    assert "FROM zenplus.apm_span_metrics_5m" in sql and params["f"] == datetime(2026, 9, 1, 10, 5)
 
 
 # ── 8. SLO attainment ────────────────────────────────────────────────────────
@@ -419,6 +493,21 @@ def test_usage_sections_clamp_to_span_retention(ch, fn):
     reach = (now - timedelta(days=rs.SPAN_RETENTION_DAYS)).replace(tzinfo=None)
     assert abs((frm - reach).total_seconds()) < 120
     assert any("kept for 14 days" in n for n in sec["notes"])
+
+
+def test_usage_clamp_follows_the_configured_span_retention(ch):
+    now = _now()
+    ch.client = CH(("count(), uniqIf", [(10, 2, 3, 1, 120.0)]),
+                   ttl={"apm_spans": "MergeTree TTL toDateTime(timestamp) + toIntervalDay(7) SETTINGS x"})
+    sec = run(rs._sec_usage_kpis(make_ctx(frm=now - timedelta(days=10), to=now)))
+    assert ch.client.ttl_calls[0][1] == {"ttl_table": "apm_spans"}
+    frm = ch.client.calls[0][1]["f"]
+    assert abs((frm - (now - timedelta(days=7)).replace(tzinfo=None)).total_seconds()) < 120
+    assert any("kept for 7 days" in n for n in sec["notes"])
+    # A 5-day window is wholly retained: no clamp, no note.
+    ch.client = CH(("count(), uniqIf", [(10, 2, 3, 1, 120.0)]), ttl=ch.client.ttl)
+    sec = run(rs._sec_usage_kpis(make_ctx(frm=now - timedelta(days=5), to=now)))
+    assert sec["notes"] == []
 
 
 def test_usage_outside_span_retention_reads_nothing(ch):
@@ -468,6 +557,36 @@ def test_rum_beyond_raw_retention_reads_the_rollup(ch):
     run(rs._sec_rum_top_pages(ctx))
     run(rs._sec_rum_experience(ctx))
     assert not any("apm_rum_events" in sql for sql, _ in ch.client.calls)
+
+
+def test_rum_raw_retention_follows_the_rum_settings_ttl(ch):
+    now = _now()
+    ttl = {"apm_rum_events": "MergeTree ORDER BY x TTL toDateTime(timestamp) + toIntervalDay(7)"}
+    ch.client = CH(("uniqCombined64Merge(sessions), uniqCombined64Merge(views)", [(40, 120, 30)]), ttl=ttl)
+    sec = run(rs._sec_rum_audience(make_ctx(frm=now - timedelta(days=10), to=now)))
+    # 10 days is within the default 14 but beyond the configured 7: the rollup.
+    assert ch.client.calls and all("apm_rum_metrics_5m" in sql for sql, _ in ch.client.calls)
+    assert any("kept for 7 days" in n for n in sec["notes"])
+
+
+def test_table_retention_is_read_once_per_render(ch):
+    now = _now()
+    ctx = make_ctx(frm=now - timedelta(days=2), to=now)
+    for fn in (rs._sec_rum_audience, rs._sec_rum_top_pages, rs._sec_rum_experience, rs._sec_rum_reliability):
+        run(fn(ctx))
+    assert [p["ttl_table"] for _sql, p in ch.client.ttl_calls] == ["apm_rum_events"]
+    assert run(rs._retention_days(ctx, "apm_rum_events", 99)) == rs._rum_raw_days()   # cached
+
+
+def test_rum_reliability_beyond_raw_retention_is_not_measured(ch):
+    now = _now()
+    ch.client = CH(("sum(errors)", [(9, 4, 300)]))
+    sec = run(rs._sec_rum_reliability(make_ctx(frm=now - timedelta(days=60), to=now - timedelta(days=30))))
+    kpis = {k["label"]: k["value"] for k in sec["kpis"]}
+    assert kpis["Errors"] == "9" and kpis["Error rate"] == "3.00%"
+    assert kpis["Distinct issues"] == "—" and kpis["Users affected"] == "—"   # unknown, not 0
+    assert not any("apm_rum_events" in sql for sql, _ in ch.client.calls)
+    assert any("not available for this period" in n for n in sec["notes"])
 
 
 def test_rum_reliability_last_seen_is_local(ch):
@@ -532,6 +651,22 @@ def test_capacity_ranks_by_p95_utilisation_and_reads_rollup_beyond_raw(ch):
     assert any("5-minute averages" in n for n in sec["notes"])
 
 
+def test_interfaces_read_raw_while_the_configured_raw_retention_covers_the_window(ch):
+    db = _interface_world(ch)
+    ch.client.ttl = {"snmp_if_metrics": "MergeTree TTL toDateTime(timestamp) + INTERVAL 60 DAY"}
+    now = _now()
+    sec = run(rs._sec_capacity_interfaces(make_ctx(db, frm=now - timedelta(days=40), to=now)))
+    assert "FROM zenplus.snmp_if_metrics\n" in ch.client.calls[0][0]
+    assert not any("5-minute averages" in n for n in sec["notes"])
+
+
+def test_interfaces_beyond_rollup_retention_say_so(ch):
+    db = _interface_world(ch)
+    now = _now()
+    sec = run(rs._sec_interface_utilization(make_ctx(db, frm=now - timedelta(days=92), to=now)))
+    assert any("Interface 5-minute history is kept for 90 days" in n for n in sec["notes"])
+
+
 # ── 13. network performance ──────────────────────────────────────────────────
 
 def test_network_performance_shows_latency_and_loss(monkeypatch):
@@ -563,7 +698,7 @@ def test_node_loss_is_measured_while_reachable(monkeypatch):
 
 # ── 14. top_n options ────────────────────────────────────────────────────────
 
-LIST_SECTIONS = {"device_uptime": 10, "top_outages": 15, "recent_alerts": 25, "noisy_sources": 10,
+LIST_SECTIONS = {"ncm_at_risk": 50, "device_uptime": 10, "top_outages": 15, "recent_alerts": 25, "noisy_sources": 10,
                  "interface_utilization": 10, "capacity_interfaces": 15, "server_performance": 15,
                  "capacity_filesystems": 20, "apm_errors": 12, "usage_pages": 15, "usage_users": 15,
                  "rum_top_pages": 15, "service_availability": 25, "device_availability": 200,
@@ -575,6 +710,27 @@ def test_list_sections_declare_top_n():
         opts = {o["key"]: o for o in rs.SECTION_REGISTRY[sid]["options"]}
         assert opts["top_n"]["default"] == default, sid
         assert opts["top_n"]["type"] == "int" and opts["top_n"]["min"] == 1, sid
+
+
+def test_builtin_rows_option_is_the_registry_top_n_schema():
+    assert rs._rows_option(15, 100) == rs.top_n_option(15, 100)
+    for sid in LIST_SECTIONS:
+        opt = next(o for o in rs.SECTION_REGISTRY[sid]["options"] if o["key"] == "top_n")
+        assert {k: v for k, v in opt.items() if k != "help"} == \
+            {k: v for k, v in rs.top_n_option(opt["default"], opt["max"]).items() if k != "help"}, sid
+
+
+def test_ncm_devices_needing_action_disclose_their_row_limit(monkeypatch):
+    devices = [{"device_id": str(i), "hostname": f"sw{i:02d}", "ip": "10.0.0.1", "eligible": True,
+                "backup_state": "stale", "validated_at": None, "next_due": None, "last_error": None,
+                "support": {"message": ""}} for i in range(5)]
+
+    async def ncm_devices(ctx):
+        return devices
+    monkeypatch.setattr(rs, "_ncm_devices", ncm_devices)
+    sec = run(rs._sec_ncm_at_risk(make_ctx(sid="ncm_at_risk", options={"top_n": 2})))
+    assert [r[0] for r in sec["tables"][0]["rows"]] == ["sw00", "sw01"]
+    assert sec["notes"][0].startswith("Showing 2 of 5 devices needing action")
 
 
 def test_top_n_option_reaches_the_section(monkeypatch):

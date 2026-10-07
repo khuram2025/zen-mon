@@ -131,10 +131,12 @@ def now_naive():
 # ── availability_by_group ───────────────────────────────────────────────────
 
 def _group_db(labels_key="LEFT JOIN device_groups g", labels=None):
+    inventory = [(A, NAMES[A], "10.0.0.1", "DC1", "up"), (B, NAMES[B], "10.0.0.2", "DC1", "down"),
+                 (C, NAMES[C], "10.0.0.3", "Branch", "up"), (D, NAMES[D], "10.0.0.4", "", "unknown")]
     return FakeDB([
-        ("SELECT id::text, hostname, ip_address::text", [
-            (A, NAMES[A], "10.0.0.1", "DC1", "up"), (B, NAMES[B], "10.0.0.2", "DC1", "down"),
-            (C, NAMES[C], "10.0.0.3", "Branch", "up"), (D, NAMES[D], "10.0.0.4", "", "unknown")]),
+        # The node inventory honours the device filter like Postgres would.
+        ("SELECT id::text, hostname, ip_address::text",
+         lambda sql, p: [r for r in inventory if not (p or {}).get("ids") or r[0] in p["ids"]]),
         ("FROM device_maintenance m", []),
         ("system_settings", [(99.5,)]),
         (labels_key, labels if labels is not None else
@@ -143,11 +145,11 @@ def _group_db(labels_key="LEFT JOIN device_groups g", labels=None):
 
 
 def _group_ch():
-    b = datetime(2026, 10, 5)
     return FakeCH([
-        ("up_weighted", [(A, b, 990.0, 1000, 5.0), (B, b, 100.0, 100, 3.0),
-                         (C, b, 1000.0, 1000, 10.0)]),
         ("node_samples", [(A, 1000), (B, 100), (C, 1000)]),
+        # _node_availability per node: did, up, total, avg_rtt, p95_rtt, rtt_samples, loss_up.
+        ("AS loss_up", [(A, 990.0, 1000, 5.0, 6.0, 990, 0.0), (B, 100.0, 100, 3.0, 4.0, 100, 0.0),
+                        (C, 1000.0, 1000, 10.0, 12.0, 1000, 0.0)]),
     ])
 
 
@@ -186,7 +188,7 @@ def test_availability_by_group_by_site_truncates_and_honours_device_filter(monke
     # The device filter reaches Postgres and every ClickHouse query.
     assert any(p.get("dev_ids") == [A, B] for _s, p in db.calls if "device_polling_owner" in _s)
     assert ch.sql_with("node_samples")[0][1]["dev_ids"] == [A, B]
-    assert ch.sql_with("up_weighted")[0][1]["ids"] == [A, B]
+    assert ch.sql_with("AS loss_up")[0][1]["ids"] == [A, B]
 
 
 def test_availability_by_group_by_location_uses_node_location(monkeypatch):

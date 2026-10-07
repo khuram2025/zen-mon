@@ -688,7 +688,7 @@ async def netflow_conversations(ctx: SectionCtx, nf) -> dict:
         """, params, budget_s=nr.REPORT_BUDGET_S, label="report-conversations")
     description = nr._scope_description(
         nf, f"Conversations ranked by {_SORT_LABEL[sort]}, {_period(ctx, nf.win.start, nf.win.end)}.")
-    notes = list(nf.notes) + nr._plan_notes(plan)
+    notes = list(nf.notes) + nr._plan_notes(plan, nf.branding)
     rows = list(res.result_rows)
     if not rows:
         return _section(sid, title, description=description,
@@ -1355,7 +1355,7 @@ async def netflow_tcp_flags(ctx: SectionCtx, nf) -> dict:
     names = ["total", "flagged", *conds, "no_flags"]
     exp_rows = [{"exporter": nfa.canonical_ip(r[0]) or str(r[0]),
                  **{n: int(r[1 + i] or 0) for i, n in enumerate(names)}} for r in per_exp.result_rows]
-    notes += nr._plan_notes(plan)
+    notes += nr._plan_notes(plan, nf.branding)
     if not exp_rows or not sum(e["total"] for e in exp_rows):
         return _section(sid, title, description=description, notes=notes + ["No TCP flows in scope in this period."])
     tot = {n: sum(e[n] for e in exp_rows) for n in names}
