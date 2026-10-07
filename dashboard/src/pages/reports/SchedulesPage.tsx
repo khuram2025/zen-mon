@@ -79,7 +79,7 @@ export default function SchedulesPage() {
   const user = useAuth((s) => s.user)
   const scoped = isVisibilityScoped(user)
   const catalog = useReportCatalog()
-  const { branding } = useReportBranding()
+  const { branding, isSuccess: brandingLoaded } = useReportBranding()
   const schedules = useReportSchedules()
   const channelsQ = useNotificationChannels()
   const toggle = useToggleSchedule()
@@ -180,7 +180,8 @@ export default function SchedulesPage() {
             Scheduled reports
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-muted">
-            Generate reports automatically and deliver them by email and notification channels. Times are in the organisation time zone, {tzLabel}.
+            Generate reports automatically and deliver them by email and notification channels.
+            {brandingLoaded && <> Times are in the organisation time zone, {tzLabel}.</>}
           </p>
         </div>
         {canManage && (
