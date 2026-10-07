@@ -235,6 +235,22 @@ class SectionCtx:
         result = await asyncio.to_thread(client.query, sql, parameters=params or {})
         return list(result.result_rows)
 
+    def iso(self, value: Any) -> Optional[str]:
+        """Chart point timestamp: ISO-8601 UTC with 'Z' (the viewer formats it
+        in the organisation timezone; naive values are UTC)."""
+        dt = _coerce_dt(value)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def ch_bucket(self, column: str = "timestamp", interval: Optional[str] = None) -> tuple[str, dict]:
+        """``toStartOfInterval(column, INTERVAL …, tz)`` aligned to the
+        organisation timezone (daily buckets start at local midnight)."""
+        return (f"toStartOfInterval({column}, INTERVAL {interval or self.bucket()}, %(org_tz)s)",
+                {"org_tz": self.tz_name})
+
     def prior_window(self) -> tuple[datetime, datetime]:
         """The equally long window immediately before this one (for deltas)."""
         span = self.to - self.frm
