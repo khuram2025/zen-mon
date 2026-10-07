@@ -48,7 +48,7 @@ import { ClassificationPage as UdtClassificationPage } from '@/pages/udt/Classif
 import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
 import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
-import { ReportsPage } from '@/pages/ReportsPage'
+import { LegacyReportRedirect } from '@/features/reports/library/LegacyRedirect'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { SensorDetailPage } from '@/pages/SensorDetailPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/netflow'
@@ -83,11 +83,6 @@ import { NetflowSettingsPage } from '@/pages/netflow/SettingsPage'
 import { NetflowHostProfilePage } from '@/pages/netflow/HostProfilePage'
 import { NetflowAccessGate } from '@/components/netflow/NetflowAccess'
 
-const ExecutiveReport = lazy(() => import('@/pages/reports/ExecutiveReport'))
-const TechnicalReport = lazy(() => import('@/pages/reports/TechnicalReport'))
-const BusinessReport = lazy(() => import('@/pages/reports/BusinessReport'))
-const InventoryReport = lazy(() => import('@/pages/reports/InventoryReport'))
-const ApmReport = lazy(() => import('@/pages/reports/ApmReport'))
 const ReportLibrary = lazy(() => import('@/pages/reports/ReportLibrary'))
 const SectionReportViewer = lazy(() => import('@/pages/reports/SectionReportViewer'))
 const ReportBuilder = lazy(() => import('@/pages/reports/ReportBuilder'))
@@ -235,13 +230,14 @@ export default function App() {
         <Route path="network-events" element={<NetworkEventsPage />} />
         <Route path="ncm" element={<NcmPage />} />
         <Route path="ncm/:deviceId" element={<NcmDevicePage />} />
-        <Route path="reports" element={<ReportsPage />}>
+        <Route path="reports">
           <Route index element={<Suspense fallback={<ReportTabFallback />}><ReportLibrary /></Suspense>} />
-          <Route path="executive" element={<Suspense fallback={<ReportTabFallback />}><ExecutiveReport /></Suspense>} />
-          <Route path="technical" element={<Suspense fallback={<ReportTabFallback />}><TechnicalReport /></Suspense>} />
-          <Route path="business" element={<Suspense fallback={<ReportTabFallback />}><BusinessReport /></Suspense>} />
-          <Route path="inventory" element={<Suspense fallback={<ReportTabFallback />}><InventoryReport /></Suspense>} />
-          <Route path="apm" element={<Suspense fallback={<ReportTabFallback />}><ApmReport /></Suspense>} />
+          {/* Legacy persona pages open their built-in templates (query string kept). */}
+          <Route path="executive" element={<LegacyReportRedirect to="/reports/view/executive_overview" />} />
+          <Route path="technical" element={<LegacyReportRedirect to="/reports/view/network_operations" />} />
+          <Route path="business" element={<LegacyReportRedirect to="/reports/view/service_owner_sla" />} />
+          <Route path="inventory" element={<LegacyReportRedirect to="/reports/view/inventory" />} />
+          <Route path="apm" element={<LegacyReportRedirect to="/reports/view/apm_performance" />} />
           <Route path="view/:key" element={<Suspense fallback={<ReportTabFallback />}><SectionReportViewer /></Suspense>} />
           <Route path="builder" element={<Suspense fallback={<ReportTabFallback />}><ReportBuilder /></Suspense>} />
           <Route path="schedules" element={<Suspense fallback={<ReportTabFallback />}><ReportSchedulesPage /></Suspense>} />
