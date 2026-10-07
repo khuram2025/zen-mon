@@ -156,6 +156,13 @@ assert.deepEqual([r.items.length, r.scopeTotal], [1, 2], '"Showing X of Y" count
 assert.equal(m.isFiltered(m.DEFAULT_FILTERS), false)
 assert.equal(m.isFiltered({ ...m.DEFAULT_FILTERS, sort: 'name' }), false, 'sorting is not filtering')
 assert.equal(m.isFiltered({ ...m.DEFAULT_FILTERS, q: 'x' }), true)
+// The shelves + category sections only for the plain "All reports" card view.
+assert.equal(m.showsOverview(m.DEFAULT_FILTERS, 'grid'), true)
+assert.equal(m.showsOverview(m.DEFAULT_FILTERS, 'table'), false, 'the table is always one flat list')
+assert.equal(m.showsOverview({ ...m.DEFAULT_FILTERS, sort: 'name' }, 'grid'), false, 'an explicit sort shows one ordered list')
+assert.equal(m.showsOverview({ ...m.DEFAULT_FILTERS, category: 'traffic' }, 'grid'), false)
+assert.equal(m.showsOverview({ ...m.DEFAULT_FILTERS, view: 'favorites' }, 'grid'), false)
+assert.equal(m.showsOverview({ ...m.DEFAULT_FILTERS, audience: 'Executive' }, 'grid'), false)
 
 // ── sorting ─────────────────────────────────────────────────────────────────
 assert.deepEqual(run({}).items.map((i) => i.ref)[0], 'executive_overview', 'featured first by default')
@@ -167,7 +174,15 @@ const rail = m.railCategories(items, catalog.categories)
 assert.deepEqual(rail.map((c) => [c.id, c.count]), [['executive', 2], ['availability', 2], ['traffic', 0], ['servers', 1], ['other', 1]])
 assert.deepEqual(m.groupByCategory(items, catalog.categories).map((g) => g.category.id), ['executive', 'availability', 'servers', 'other'])
 assert.deepEqual(m.featuredItems(items).map((i) => i.ref), ['executive_overview'])
+{
+  const many = Array.from({ length: 9 }, (_, i) => ({ ...exec, ref: `f${i}`, featured: true, order: 9 - i }))
+  const shelf = m.featuredItems(many)
+  assert.equal(shelf.length, m.FEATURED_LIMIT, 'the Featured shelf is capped')
+  assert.deepEqual(shelf.map((i) => i.ref), ['f8', 'f7', 'f6', 'f5', 'f4', 'f3'], 'in catalog order')
+}
 assert.deepEqual(m.recentItems(items, ctx.recent).map((x) => x.item.ref), ['custom:c1', 'availability'])
+assert.deepEqual(m.favoriteItems(items, ctx.favorites).map((i) => i.ref), ['custom:c4', 'availability'], 'starred order; stale stars skipped')
+assert.deepEqual(m.favoriteItems(items, ['availability', 'availability', 'custom:c1'], 1).map((i) => i.ref), ['availability'], 'capped, no duplicates')
 assert.deepEqual(m.audienceOptions(items), ['Executive', 'IT manager', 'NOC operator'])
 
 // ── URL state round-trips and rejects junk ─────────────────────────────────
@@ -186,6 +201,17 @@ assert.equal(m.optionSummary({ id: 'top_downtime', options: { top_n: 25, hide_em
 assert.equal(m.optionSummary({ id: 'top_downtime', options: { sort: 'outages' } }, topDowntime), 'Top 10 · Sort by: Outages', 'defaults fill unset options; false booleans are omitted')
 assert.equal(m.optionSummary({ id: 'kpi_summary' }, catalog.sections[0]), '')
 assert.equal(m.optionSummary({ id: 'x' }, undefined), '')
+{
+  const now = Date.parse('2026-10-07T12:00:00Z')
+  const ago = (s) => m.viewedAgo(now - s * 1000, now)
+  assert.equal(ago(5), 'just now')
+  assert.equal(ago(-30), 'just now', 'a clock step backwards is not "in the future"')
+  assert.equal(ago(5 * 60), '5 min ago')
+  assert.equal(ago(3 * 3600 + 59), '3 h ago')
+  assert.equal(ago(30 * 3600), 'yesterday')
+  assert.equal(ago(4 * 86400), '4 days ago')
+  assert.equal(ago(8 * 86400), null, 'older than a week: the caller prints the date')
+}
 assert.equal(m.permissionLabel('netflow.view'), 'NetFlow traffic')
 assert.equal(m.permissionLabel('custom.thing'), 'custom.thing')
 
@@ -195,9 +221,12 @@ assert.equal(m.openLink(c1), '/reports/view/custom?custom_id=c1')
 assert.equal(m.customizeLink(exec), '/reports/builder?from=executive_overview')
 assert.equal(m.customizeLink(c1), '/reports/builder?clone=c1')
 assert.equal(m.editLink(c1), '/reports/builder?edit=c1')
-assert.deepEqual(m.schedulePrefill(exec), { report_type: 'executive_overview', period: 'previous_month' })
-assert.deepEqual(m.schedulePrefill(c1), { report_type: 'custom', custom_report_id: 'c1', period: 'previous_month' })
-assert.deepEqual(m.schedulePrefill(byRef.zz_uncategorised), { report_type: 'zz_uncategorised', period: 'last_7d' })
+assert.deepEqual(m.schedulePrefill(exec), { name: 'Executive Overview', report_type: 'executive_overview', period: 'previous_month' })
+assert.deepEqual(m.schedulePrefill(c1), { name: 'My SLA board pack', report_type: 'custom', custom_report_id: 'c1', period: 'previous_month' })
+assert.deepEqual(m.schedulePrefill(byRef.zz_uncategorised), { name: 'Alpha Misc', report_type: 'zz_uncategorised' },
+  'no default period and no cadence: the schedule dialog keeps its own default')
+assert.deepEqual(m.schedulePrefill({ ...byRef.zz_uncategorised, frequency: 'weekly' }).period, 'previous_week', 'the cadence suggests the period it covers')
+assert.equal('custom_report_id' in m.schedulePrefill(exec), false, 'built-ins send no custom_report_id')
 assert.equal(m.conflictScheduleCount('3 schedule(s) deliver this template. Delete them too, or keep the template.'), 3)
 assert.equal(m.conflictScheduleCount('Conflict'), null)
 

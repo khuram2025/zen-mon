@@ -6,7 +6,7 @@
  * (?view=&category=&q=&audience=&origin=&sort=); favourites, recently viewed
  * and the layout are per-user browser preferences (features/reports/storage).
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
   CalendarClock, FileText, FolderOpen, History, Plus, SearchX, Star, UserRound, Users,
@@ -28,7 +28,7 @@ import { LibraryList, LibraryOverview, CARD_GRID } from '@/features/reports/libr
 import { LibraryFiltersBar, SearchBox } from '@/features/reports/library/LibraryToolbar'
 import {
   applyFilters, audienceOptions, buildLibraryItems, DEFAULT_FILTERS, filtersFromParams, filtersToParams,
-  isFiltered, LIBRARY_VIEWS, openLink, railCategories, schedulePrefill, sectionMap, viewCounts,
+  isFiltered, LIBRARY_VIEWS, openLink, railCategories, schedulePrefill, sectionMap, showsOverview, viewCounts,
   type LibraryFilters, type LibraryItem, type SchedulePrefill,
 } from '@/features/reports/library/model'
 import { EmptyState } from '@/features/reports/library/parts'
@@ -45,10 +45,37 @@ export default function ReportLibrary() {
   const can = useCan()
   const user = useAuth((s) => s.user)
   const [params, setParams] = useSearchParams()
-  const filters = useMemo(() => filtersFromParams(params), [params])
+  const urlFilters = useMemo(() => filtersFromParams(params), [params])
+
+  // The search box is local state (results follow every keystroke) and
+  // reaches the URL after a pause. Binding the input straight to the URL
+  // drops keystrokes: the router applies the new URL after the input has
+  // already been reset to the old value.
+  const [q, setQ] = useState(urlFilters.q)
+  const writtenQ = useRef(urlFilters.q)
+  useEffect(() => {
+    // The URL changed elsewhere (back / forward, a shared link): adopt it.
+    if (urlFilters.q !== writtenQ.current) {
+      writtenQ.current = urlFilters.q
+      setQ(urlFilters.q)
+    }
+  }, [urlFilters.q])
+  useEffect(() => {
+    if (q === urlFilters.q) return
+    const t = window.setTimeout(() => {
+      writtenQ.current = q
+      setParams(filtersToParams({ ...urlFilters, q }), { replace: true })
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [q, urlFilters, setParams])
+
+  const filters = useMemo<LibraryFilters>(() => ({ ...urlFilters, q }), [urlFilters, q])
 
   const update = useCallback((patch: Partial<LibraryFilters>, push = false) => {
-    setParams(filtersToParams({ ...filters, ...patch }), { replace: !push })
+    const next = { ...filters, ...patch }
+    if (patch.q !== undefined) setQ(patch.q)
+    writtenQ.current = next.q
+    setParams(filtersToParams(next), { replace: !push })
   }, [filters, setParams])
 
   /* --- capabilities ------------------------------------------------ */
@@ -61,7 +88,8 @@ export default function ReportLibrary() {
   const sections = useMemo(() => sectionMap(catalog ?? { sections: [] }), [catalog])
   const ctx = useMemo(() => ({ favorites: prefs.favorites, recent: prefs.recent }), [prefs.favorites, prefs.recent])
   const result = useMemo(() => applyFilters(items, filters, ctx), [items, filters, ctx])
-  const counts = useMemo(() => viewCounts(items, ctx), [items, ctx])
+  // No counts until the catalog is in: a failed load must not read as "0 templates".
+  const counts = useMemo(() => (catalog ? viewCounts(items, ctx) : {}), [catalog, items, ctx])
   const categories = useMemo(() => railCategories(items, catalog?.categories ?? []), [items, catalog])
   const audiences = useMemo(() => audienceOptions(items), [items])
 
@@ -72,6 +100,18 @@ export default function ReportLibrary() {
   const [deleting, setDeleting] = useState<DeleteTarget | null>(null)
   const duplicate = useDuplicateTemplate()
 
+  /**
+   * Opens a dialog from a card, a row, a menu or the drawer. Whatever it came
+   * from closes first (the drawer, the overflow menu). Radix hands focus back
+   * to their opener in a timeout queued while they unmount; the dialog opens
+   * in the task after that, so it remembers the card or menu button as its
+   * opener and closing it lands there, not on the document body.
+   */
+  const openDialog = (open: () => void) => {
+    if (detailRef) setDetailRef(null)
+    window.setTimeout(() => window.setTimeout(open, 0), 0)
+  }
+
   const actions: LibraryActions = {
     canManage,
     canSchedule,
@@ -79,10 +119,8 @@ export default function ReportLibrary() {
     isFavorite: (item) => prefs.favorites.includes(item.ref),
     toggleFavorite: (item) => { prefs.toggleFavorite(item.ref) },
     showDetails: (item) => setDetailRef(item.ref),
-    schedule: (item) => {
-      setDetailRef(null)
-      setScheduling({ ...schedulePrefill(item), name: item.title })
-    },
+    opened: (item) => prefs.recordOpened(item.ref),
+    schedule: (item) => openDialog(() => setScheduling(schedulePrefill(item))),
     duplicate: (item) => {
       if (!item.customId) return
       duplicate.mutate(item.customId, {
@@ -90,10 +128,7 @@ export default function ReportLibrary() {
         onError: (e) => toast.error('The template was not duplicated', describeFailure(e).message),
       })
     },
-    remove: (item) => {
-      setDetailRef(null)
-      setDeleting({ item, schedules: item.schedules })
-    },
+    remove: (item) => openDialog(() => setDeleting({ item, schedules: item.schedules })),
     copyLink: (item) => {
       void copyText(`${window.location.origin}${openLink(item)}`).then((ok) =>
         ok ? toast.success('Link copied', item.title) : toast.error('Could not copy the link', 'Your browser blocked clipboard access.'))
@@ -106,7 +141,7 @@ export default function ReportLibrary() {
   const clearFilters = () => update({ q: '', audience: null, origin: 'all' })
   const delivered = filters.view === 'delivered'
   const filtered = isFiltered(filters)
-  const overview = filters.view === 'all' && !filters.category && !filtered && prefs.layout === 'grid'
+  const overview = showsOverview(filters, prefs.layout)
   const selectionLabel = filters.category
     ? categories.find((c) => c.id === filters.category)?.title ?? 'Category'
     : LIBRARY_VIEWS.find((v) => v.id === filters.view)?.label ?? 'All reports'
@@ -154,10 +189,10 @@ export default function ReportLibrary() {
                   <RailSelect selection={selection} viewCounts={counts} categories={categories} onSelect={select} />
                 </div>
                 <SearchBox
-                  value={filters.q}
-                  onChange={(q) => update({ q })}
+                  value={q}
+                  onChange={setQ}
                   label={delivered ? 'Search delivered reports' : 'Search report templates'}
-                  placeholder={delivered ? 'Search delivered reports' : 'Search titles, sections and tags'}
+                  placeholder={delivered ? 'Search delivered reports' : 'Search names, sections, tags'}
                 />
                 {!delivered && (
                   <LibraryFiltersBar
@@ -213,8 +248,10 @@ export default function ReportLibrary() {
                   <LibraryOverview
                     items={result.items}
                     categories={catalog?.categories ?? []}
+                    favorites={prefs.favorites}
                     recent={prefs.recent}
                     onSelectCategory={(id) => select({ view: 'all', category: id })}
+                    onSelectView={(view) => select({ view, category: null })}
                   />
                 ) : (
                   <LibraryList
@@ -223,6 +260,7 @@ export default function ReportLibrary() {
                     sort={filters.sort}
                     onSortByName={() => update({ sort: filters.sort === 'name' ? DEFAULT_FILTERS.sort : 'name' })}
                     label={`${selectionLabel} report templates`}
+                    showCategory={!filters.category}
                   />
                 )}
               </>

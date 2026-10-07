@@ -2,9 +2,11 @@
 import { useId } from 'react'
 import { Link } from 'react-router-dom'
 import { Info } from 'lucide-react'
-import { cn, relativeTime } from '@/lib/utils'
+import { formatDate } from '@/lib/branding'
+import { cn } from '@/lib/utils'
+import { useReportBranding } from '../api'
 import { QuickActions, TemplateMenu, useLibraryActions } from './actions'
-import { metaLine, openLink, periodLabel, type LibraryItem } from './model'
+import { metaLine, openLink, periodLabel, plural, viewedAgo, type LibraryItem } from './model'
 import { CategoryIcon, FavoriteButton, OriginBadges } from './parts'
 import { categoryTone, TONE_BAR } from './tones'
 
@@ -78,15 +80,17 @@ export function TemplateCard({ item }: { item: LibraryItem }) {
  */
 export function ShelfCard({ item, viewedAt }: { item: LibraryItem; viewedAt?: number }) {
   const a = useLibraryActions()
+  const { branding } = useReportBranding()
   const sub = viewedAt
-    ? `Viewed ${relativeTime(new Date(viewedAt).toISOString())}`
-    : [periodLabel(item.defaultPeriod), `${item.entries.length} sections`].filter(Boolean).join(' · ')
+    ? `Viewed ${viewedAgo(viewedAt) ?? formatDate(viewedAt, branding)}`
+    : [periodLabel(item.defaultPeriod), plural(item.entries.length, 'section')].filter(Boolean).join(' · ')
   return (
     <div className="group relative flex h-full w-full min-w-0 items-center gap-3 rounded-lg border border-border bg-surface p-3 shadow-card transition-colors hover:border-primary/40 focus-within:border-primary/40 dark:shadow-card-dark">
       <CategoryIcon icon={item.icon} category={item.category} size="sm" />
       <div className="min-w-0 flex-1">
         <Link
           to={openLink(item)}
+          onClick={() => a.opened(item)}
           className={cn(
             'block truncate text-[13px] font-medium text-text group-hover:text-primary focus-visible:outline-none',
             'after:absolute after:inset-0 after:rounded-lg after:content-[""] focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-primary/50',

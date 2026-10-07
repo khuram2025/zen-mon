@@ -268,6 +268,16 @@ export function isFiltered(f: LibraryFilters): boolean {
   return !!f.q.trim() || !!f.audience || f.origin !== 'all'
 }
 
+/**
+ * The unfiltered "All reports" overview (Featured and Recently viewed shelves,
+ * then one section per category) — only in the card layout with the default
+ * order. Searching, filtering, a category, another sort or the table layout
+ * show one flat, ordered list instead.
+ */
+export function showsOverview(f: LibraryFilters, layout: 'grid' | 'table'): boolean {
+  return f.view === 'all' && !f.category && !isFiltered(f) && f.sort === 'relevance' && layout === 'grid'
+}
+
 export function inView(item: LibraryItem, view: LibraryViewId, ctx: LibraryContext): boolean {
   switch (view) {
     case 'all': return true
@@ -408,8 +418,23 @@ export function groupByCategory(items: LibraryItem[], categories: ReportCategory
     .filter((g) => g.items.length > 0)
 }
 
-export function featuredItems(items: LibraryItem[], limit = 8): LibraryItem[] {
+/** The Featured shelf: six fills two or three even rows at every grid width. */
+export const FEATURED_LIMIT = 6
+
+export function featuredItems(items: LibraryItem[], limit = FEATURED_LIMIT): LibraryItem[] {
   return items.filter((i) => i.featured).sort((a, b) => a.order - b.order).slice(0, limit)
+}
+
+/** Starred templates in the order they were starred (newest first); stale stars are skipped. */
+export function favoriteItems(items: LibraryItem[], favorites: ReportRef[], limit = FEATURED_LIMIT): LibraryItem[] {
+  const byRef = new Map(items.map((i) => [i.ref, i]))
+  const out: LibraryItem[] = []
+  for (const ref of favorites) {
+    const item = byRef.get(ref)
+    if (item && !out.includes(item)) out.push(item)
+    if (out.length >= limit) break
+  }
+  return out
 }
 
 export function recentItems(items: LibraryItem[], recent: RecentEntry[], limit = 6): { item: LibraryItem; at: number }[] {
@@ -447,6 +472,24 @@ export function periodLabel(p: string | null | undefined): string | null {
 }
 
 export const FREQUENCY_LABEL: Record<string, string> = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' }
+
+/**
+ * "Viewed just now / 5 min ago / 3 h ago / yesterday / 4 days ago" for a
+ * browser-recorded timestamp (both instants come from this browser's clock).
+ * Older than a week returns null so the caller can print the date instead.
+ */
+export function viewedAgo(at: number, now = Date.now()): string | null {
+  const s = Math.max(0, Math.round((now - at) / 1000))
+  if (s < 60) return 'just now'
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} min ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h} h ago`
+  const d = Math.floor(h / 24)
+  if (d === 1) return 'yesterday'
+  if (d < 7) return `${d} days ago`
+  return null
+}
 
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`
@@ -542,19 +585,36 @@ export function editLink(item: Pick<LibraryItem, 'customId'>): string | null {
   return item.customId ? `/reports/builder?edit=${encodeURIComponent(item.customId)}` : null
 }
 
+/**
+ * What ReportScheduleFormDialog's `prefill` receives from the library. Only
+ * the fields the library knows: custom_report_id only for organisation
+ * templates, period only when the template suggests one (the dialog keeps its
+ * own default otherwise).
+ */
 export interface SchedulePrefill {
-  /** Suggested schedule name (the dialog may ignore it). */
+  /** Suggested schedule name. */
   name?: string
   report_type: string
-  custom_report_id?: string | null
-  period: string
+  custom_report_id?: string
+  period?: PeriodId
 }
 
-export function schedulePrefill(item: Pick<LibraryItem, 'origin' | 'key' | 'customId' | 'defaultPeriod'>): SchedulePrefill {
-  const period = item.defaultPeriod || 'last_7d'
-  return item.origin === 'custom'
-    ? { report_type: 'custom', custom_report_id: item.customId, period }
-    : { report_type: item.key, period }
+/** The period a delivery cadence usually covers: the previous full day, week or month. */
+export const FREQUENCY_PERIOD: Record<'daily' | 'weekly' | 'monthly', PeriodId> = {
+  daily: 'yesterday',
+  weekly: 'previous_week',
+  monthly: 'previous_month',
+}
+
+export function schedulePrefill(
+  item: Pick<LibraryItem, 'origin' | 'key' | 'customId' | 'defaultPeriod' | 'frequency' | 'title'>,
+): SchedulePrefill {
+  const period = item.defaultPeriod || (item.frequency ? FREQUENCY_PERIOD[item.frequency] : undefined)
+  const out: SchedulePrefill = item.origin === 'custom' && item.customId
+    ? { name: item.title, report_type: 'custom', custom_report_id: item.customId }
+    : { name: item.title, report_type: item.key }
+  if (period) out.period = period
+  return out
 }
 
 /** The schedule count from a 409 "3 schedule(s) deliver this template" reply. */

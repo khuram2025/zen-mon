@@ -51,7 +51,7 @@ export function SearchBox({ value, onChange, placeholder, label }: {
   const ref = useRef<HTMLInputElement>(null)
   useSlashFocus(ref)
   return (
-    <div role="search" className="relative min-w-0 flex-1 sm:min-w-[220px]">
+    <div role="search" className="relative w-full min-w-0 sm:w-auto sm:min-w-[220px] sm:flex-1">
       <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" aria-hidden />
       <label htmlFor="report-library-search" className="sr-only">{label}</label>
       <Input
@@ -124,7 +124,7 @@ export function LayoutToggle({ value, onChange }: { value: LibraryView; onChange
     { id: 'table', label: 'Table', icon: <Rows3 className="h-4 w-4" aria-hidden /> },
   ]
   return (
-    <div role="group" aria-label="Layout" className="inline-flex h-9 shrink-0 items-center gap-0.5 rounded-md border border-border bg-surface2/50 p-0.5">
+    <div role="group" aria-label="Layout" className="ml-auto inline-flex h-9 shrink-0 items-center gap-0.5 rounded-md border border-border bg-surface2/50 p-0.5 sm:ml-0">
       {opts.map((o) => (
         <button
           key={o.id}
@@ -155,7 +155,7 @@ export function LibraryFiltersBar({ filters, audiences, layout, onChange, onLayo
   return (
     <>
       <Select value={filters.audience ?? 'all'} onValueChange={(v) => onChange({ audience: v === 'all' ? null : v })}>
-        <SelectTrigger aria-label="Audience" className="w-[calc(50%-0.25rem)] sm:w-44">
+        <SelectTrigger aria-label={`Audience: ${filters.audience ?? 'all audiences'}`} className="w-[calc(50%-0.25rem)] sm:w-44">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -167,7 +167,10 @@ export function LibraryFiltersBar({ filters, audiences, layout, onChange, onLayo
         </SelectContent>
       </Select>
       <Select value={filters.sort} onValueChange={(v) => onChange({ sort: v as LibrarySort })}>
-        <SelectTrigger aria-label="Sort by" className="w-[calc(50%-0.25rem)] sm:w-40">
+        <SelectTrigger
+          aria-label={`Sort by: ${SORTS.find((s) => s.id === filters.sort)?.label ?? 'Relevance'}`}
+          className="w-[calc(50%-0.25rem)] sm:w-40"
+        >
           <span className="truncate"><span className="text-muted">Sort: </span><SelectValue /></span>
         </SelectTrigger>
         <SelectContent>

@@ -139,6 +139,8 @@ export function LibraryRail({ selection, viewCounts, categories, onSelect, loadi
             <div className="space-y-1.5 px-2 pt-1" aria-hidden>
               {Array.from({ length: 8 }).map((_, i) => <div key={i} className="h-5 animate-shimmer rounded" />)}
             </div>
+          ) : categories.length === 0 ? (
+            <p className="px-2 pt-0.5 text-xs text-muted">Unavailable until the catalog loads.</p>
           ) : (
             <ul className="space-y-px" role="list">
               {categories.map((c) => {
@@ -172,6 +174,9 @@ export function LibraryRail({ selection, viewCounts, categories, onSelect, loadi
 /** The rail as one grouped select, for screens below `lg`. */
 export function RailSelect({ selection, viewCounts, categories, onSelect }: RailProps) {
   const value = selection.view === 'all' && selection.category ? `cat:${selection.category}` : `view:${selection.view}`
+  const current = selection.view === 'all' && selection.category
+    ? categories.find((c) => c.id === selection.category)?.title
+    : LIBRARY_VIEWS.find((v) => v.id === selection.view)?.label
   return (
     <Select
       value={value}
@@ -180,7 +185,7 @@ export function RailSelect({ selection, viewCounts, categories, onSelect }: Rail
         else onSelect({ view: v.slice(5) as LibraryViewId, category: null })
       }}
     >
-      <SelectTrigger aria-label="Library view or category" className="lg:hidden">
+      <SelectTrigger aria-label={`Library view or category: ${current ?? 'All reports'}`} className="lg:hidden">
         <SelectValue />
       </SelectTrigger>
       <SelectContent className="max-h-[60vh] overflow-y-auto">

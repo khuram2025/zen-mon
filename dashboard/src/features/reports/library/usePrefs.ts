@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAuth } from '@/stores/auth'
 import {
-  getFavorites, getLibraryView, getRecent, setLibraryView, toggleFavorite,
+  getFavorites, getLibraryView, getRecent, recordRecent, setLibraryView, toggleFavorite,
   type LibraryView, type ReportRef,
 } from '../storage'
 
@@ -31,6 +31,8 @@ export function useReportPrefs() {
 
   const toggle = useCallback((ref: ReportRef) => toggleFavorite(userId, ref), [userId])
   const setLayout = useCallback((v: LibraryView) => setLibraryView(userId, v), [userId])
+  /** A report was opened from the library (the viewer records it too). */
+  const recordOpened = useCallback((ref: ReportRef) => recordRecent(userId, ref), [userId])
 
-  return { favorites, recent, layout, toggleFavorite: toggle, setLayout }
+  return { favorites, recent, layout, toggleFavorite: toggle, setLayout, recordOpened }
 }

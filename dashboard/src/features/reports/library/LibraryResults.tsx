@@ -1,10 +1,11 @@
 /** What the library shows: the "All" overview (shelves + category sections), or a flat result list. */
 import type { ReactNode } from 'react'
-import { ChevronRight, History, Sparkles } from 'lucide-react'
+import { ChevronRight, History, Sparkles, Star } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
-import type { RecentEntry } from '../storage'
+import type { RecentEntry, ReportRef } from '../storage'
 import {
-  featuredItems, groupByCategory, recentItems, type LibraryItem, type LibrarySort, type RailCategory,
+  favoriteItems, featuredItems, groupByCategory, recentItems,
+  type LibraryItem, type LibrarySort, type LibraryViewId, type RailCategory,
 } from './model'
 import type { ReportCategory } from '../types'
 import { CategoryIcon } from './parts'
@@ -28,46 +29,92 @@ export function CardGrid({ items, label }: { items: LibraryItem[]; label: string
   )
 }
 
-function Shelf({ id, icon, title, hint, children }: { id: string; icon: ReactNode; title: string; hint?: string; children: ReactNode }) {
+function ViewAllButton({ label, count, onClick }: { label: string; count?: number; onClick: () => void }) {
+  return (
+    <Button type="button" variant="ghost" size="sm" className="h-7 shrink-0 gap-1 px-2 text-xs text-primary [&_svg]:size-3.5" onClick={onClick}>
+      View all{count !== undefined ? ` ${count}` : ''}
+      <ChevronRight aria-hidden />
+      <span className="sr-only"> {label}</span>
+    </Button>
+  )
+}
+
+function Shelf({ id, icon, title, hint, action, children }: {
+  id: string
+  icon: ReactNode
+  title: string
+  hint?: string
+  action?: ReactNode
+  children: ReactNode
+}) {
   return (
     <section aria-labelledby={id} className="space-y-2">
-      <div className="flex items-baseline gap-2">
-        <h2 id={id} className="flex items-center gap-1.5 text-sm font-semibold text-text">
-          {icon}
-          {title}
-        </h2>
-        {hint && <span className="text-xs text-muted">{hint}</span>}
+      <div className="flex min-h-7 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 id={id} className="flex items-center gap-1.5 text-sm font-semibold text-text">
+            {icon}
+            {title}
+          </h2>
+          {hint && <span className="hidden truncate text-xs text-muted sm:inline">{hint}</span>}
+        </div>
+        {action}
       </div>
-      <ul role="list" className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(100%,17rem),1fr))]">
+      <ul role="list" aria-labelledby={id} className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(100%,17rem),1fr))]">
         {children}
       </ul>
     </section>
   )
 }
 
-/** Unfiltered "All reports": Featured and Recently viewed shelves, then one section per category. */
-export function LibraryOverview({ items, categories, recent, onSelectCategory }: {
+/**
+ * Unfiltered "All reports": the viewer's Favourites and Recently viewed
+ * shelves (when they have any), the Featured templates, then one section per
+ * category.
+ */
+export function LibraryOverview({ items, categories, favorites, recent, onSelectCategory, onSelectView }: {
   items: LibraryItem[]
   categories: ReportCategory[]
+  favorites: ReportRef[]
   recent: RecentEntry[]
   onSelectCategory: (id: string) => void
+  onSelectView: (view: LibraryViewId) => void
 }) {
-  const featured = featuredItems(items)
+  const starred = favoriteItems(items, favorites)
+  const starredTotal = items.filter((i) => favorites.includes(i.ref)).length
   const seen = recentItems(items, recent)
+  const seenTotal = items.filter((i) => recent.some((r) => r.ref === i.ref)).length
+  const featured = featuredItems(items)
   const groups = groupByCategory(items, categories)
   return (
     <div className="space-y-7">
-      {featured.length > 0 && (
-        <Shelf id="rl-featured" icon={<Sparkles className="h-4 w-4 text-primary" aria-hidden />} title="Featured" hint="Good places to start">
-          {featured.map((item) => (
+      {starred.length > 0 && (
+        <Shelf
+          id="rl-favorites"
+          icon={<Star className="h-4 w-4 fill-current text-warning-fg" aria-hidden />}
+          title="Favourites"
+          action={starredTotal > starred.length ? <ViewAllButton label="favourites" count={starredTotal} onClick={() => onSelectView('favorites')} /> : undefined}
+        >
+          {starred.map((item) => (
             <li key={item.ref}><ShelfCard item={item} /></li>
           ))}
         </Shelf>
       )}
       {seen.length > 0 && (
-        <Shelf id="rl-recent" icon={<History className="h-4 w-4 text-muted" aria-hidden />} title="Recently viewed">
+        <Shelf
+          id="rl-recent"
+          icon={<History className="h-4 w-4 text-muted" aria-hidden />}
+          title="Recently viewed"
+          action={seenTotal > seen.length ? <ViewAllButton label="recently viewed reports" count={seenTotal} onClick={() => onSelectView('recent')} /> : undefined}
+        >
           {seen.map(({ item, at }) => (
             <li key={item.ref}><ShelfCard item={item} viewedAt={at} /></li>
+          ))}
+        </Shelf>
+      )}
+      {featured.length > 0 && (
+        <Shelf id="rl-featured" icon={<Sparkles className="h-4 w-4 text-primary" aria-hidden />} title="Featured" hint="Good places to start">
+          {featured.map((item) => (
+            <li key={item.ref}><ShelfCard item={item} /></li>
           ))}
         </Shelf>
       )}
@@ -98,27 +145,23 @@ function CategorySection({ category, items, onViewAll }: { category: RailCategor
             {category.description && <p className="hidden truncate text-xs text-muted sm:block">{category.description}</p>}
           </div>
         </div>
-        {more && (
-          <Button type="button" variant="ghost" size="sm" className="h-7 shrink-0 gap-1 px-2 text-xs text-primary [&_svg]:size-3.5" onClick={onViewAll}>
-            View all {items.length}
-            <ChevronRight aria-hidden />
-            <span className="sr-only"> in {category.title}</span>
-          </Button>
-        )}
+        {more && <ViewAllButton label={`in ${category.title}`} count={items.length} onClick={onViewAll} />}
       </div>
       <CardGrid items={more ? items.slice(0, OVERVIEW_PER_CATEGORY) : items} label={category.title} />
     </section>
   )
 }
 
-export function LibraryList({ items, layout, sort, onSortByName, label }: {
+export function LibraryList({ items, layout, sort, onSortByName, label, showCategory }: {
   items: LibraryItem[]
   layout: 'grid' | 'table'
   sort: LibrarySort
   onSortByName: () => void
   label: string
+  /** False when the list is one category. */
+  showCategory: boolean
 }) {
   return layout === 'table'
-    ? <TemplateTable items={items} sort={sort} onSortByName={onSortByName} caption={label} />
+    ? <TemplateTable items={items} sort={sort} onSortByName={onSortByName} caption={label} showCategory={showCategory} />
     : <CardGrid items={items} label={label} />
 }

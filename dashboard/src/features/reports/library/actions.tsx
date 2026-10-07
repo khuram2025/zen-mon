@@ -25,6 +25,8 @@ export interface LibraryActions {
   isFavorite: (item: LibraryItem) => boolean
   toggleFavorite: (item: LibraryItem) => void
   showDetails: (item: LibraryItem) => void
+  /** An Open link was followed (records it as recently viewed). */
+  opened: (item: LibraryItem) => void
   schedule: (item: LibraryItem) => void
   duplicate: (item: LibraryItem) => void
   remove: (item: LibraryItem) => void
@@ -43,8 +45,6 @@ export function useLibraryActions(): LibraryActions {
 }
 
 const compactBtn = 'h-7 gap-1.5 px-2 text-xs [&_svg]:size-3.5'
-
-/** Open (primary), Schedule and Customize. */
 const iconBtn = 'h-7 w-7 px-0 text-muted hover:text-text [&_svg]:size-4'
 
 /**
@@ -62,7 +62,7 @@ export function QuickActions({ item, className, compact = true, iconsOnly = fals
   return (
     <div className={cn('flex flex-wrap items-center gap-1', className)}>
       <Button asChild size="sm" className={size}>
-        <Link to={openLink(item)} aria-label={`Open ${item.title}`}>
+        <Link to={openLink(item)} onClick={() => a.opened(item)} aria-label={`Open ${item.title}`}>
           <Play aria-hidden />
           Open
         </Link>

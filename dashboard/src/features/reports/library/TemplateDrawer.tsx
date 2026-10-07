@@ -3,7 +3,7 @@
  * outline with option summaries, defaults, audience and the data permissions
  * the template reads, plus Open / Schedule / Customize.
  */
-import type { ReactNode } from 'react'
+import { useRef, type ReactNode } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Check, Info, Lock, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -27,17 +27,40 @@ export function TemplateDrawer({ item, open, onOpenChange, sections, branding }:
     <DialogPrimitive.Root open={open && !!item} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-fade-in" />
-        <DialogPrimitive.Content
-          className={cn(
-            'fixed inset-y-0 right-0 z-50 flex w-full max-w-[460px] flex-col border-l border-border bg-surface shadow-xl',
-            'focus:outline-none data-[state=open]:animate-fade-in',
-          )}
-          aria-describedby={item ? 'report-template-purpose' : undefined}
-        >
-          {item && <DrawerBody item={item} sections={sections} branding={branding} />}
-        </DialogPrimitive.Content>
+        {item && <DrawerContent item={item} sections={sections} branding={branding} />}
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
+  )
+}
+
+/**
+ * The sheet itself. Mounted only while open, so it can remember what had
+ * focus (the card or row that opened it) and return there on close — Radix
+ * only does that for a <Dialog.Trigger>, and the drawer is opened from code.
+ */
+function DrawerContent({ item, sections, branding }: { item: LibraryItem; sections: SectionMap; branding: Branding }) {
+  const opener = useRef<HTMLElement | null>(
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement
+      : null,
+  )
+  return (
+    <DialogPrimitive.Content
+      className={cn(
+        'fixed inset-y-0 right-0 z-50 flex w-full max-w-[460px] flex-col border-l border-border bg-surface shadow-xl',
+        'focus:outline-none data-[state=open]:animate-fade-in',
+      )}
+      aria-describedby="report-template-purpose"
+      onCloseAutoFocus={(e) => {
+        const el = opener.current
+        if (el && el.isConnected) {
+          e.preventDefault()
+          el.focus({ preventScroll: true })
+        }
+      }}
+    >
+      <DrawerBody item={item} sections={sections} branding={branding} />
+    </DialogPrimitive.Content>
   )
 }
 
