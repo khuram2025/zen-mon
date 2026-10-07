@@ -3631,52 +3631,338 @@ async def build_report_meta(db: AsyncSession, title: str, frm: datetime, to: dat
     }
 
 
-def email_summary_html(meta: dict, sections: list[dict], view_url: Optional[str],
-                       attached: bool) -> str:
-    """Compact 600px email card: headline KPIs + view-report button."""
-    kpis: list[dict] = []
+# ─── Email summary ──────────────────────────────────────────────────────────
+# Email clients are not browsers: Outlook for Windows renders with Word, Gmail
+# blocks data: URIs and clips bodies over ~102 KB, nothing reliably renders
+# SVG. The summary is therefore a 600px table layout with inline CSS plus
+# bgcolor attributes, the logo travels as a CID attachment (PNG/JPEG only,
+# see email_logo_attachment) with the company name as alt text and as live
+# text, and the full report is the attachment or the "Open full report" link.
+
+EMAIL_LOGO_CID = "report-logo@zenplus"
+EMAIL_MAX_KPIS = 6
+EMAIL_MAX_FINDINGS = 5
+_EMAIL_IMAGE_TYPES = ("image/png", "image/jpeg")
+_EMAIL_FONT = "'Segoe UI',Helvetica,Arial,sans-serif"
+
+
+def _email_esc(v: Any) -> str:
+    import html as _html
+    return _html.escape("" if v is None else str(v), quote=True)
+
+
+def _email_clip(v: Any, limit: int) -> str:
+    s = " ".join(("" if v is None else str(v)).split())
+    return s if len(s) <= limit else s[:limit - 1].rstrip() + "…"
+
+
+def _email_logo(meta: dict) -> Optional[tuple[bytes, str, str]]:
+    """(bytes, mime, 'light'|'dark') of the logo an email can carry: the
+    light-background logo when it is PNG/JPEG, else a PNG/JPEG dark logo."""
+    from app.services.branding import sniff_logo
+    light = meta.get("logo_bytes")
+    if light:
+        mime = sniff_logo(bytes(light))
+        if mime in _EMAIL_IMAGE_TYPES:
+            return bytes(light), mime, "light"
+    dark = meta.get("cover_logo_bytes")
+    branding = meta.get("branding")
+    if getattr(branding, "logo_dark", None) is not None:
+        dark = branding.logo_dark.data
+    if dark and dark != light:
+        mime = sniff_logo(bytes(dark))
+        if mime in _EMAIL_IMAGE_TYPES:
+            return bytes(dark), mime, "dark"
+    return None
+
+
+def email_logo_attachment(meta: dict) -> Optional[tuple[str, bytes, str]]:
+    """``(content_id, bytes, mime)`` for the inline logo of the report email,
+    or None when the organisation has no PNG/JPEG logo (SVG and WebP are not
+    rendered reliably by email clients). Reference it as ``cid:<content_id>``
+    and send it with ``Content-ID: <content_id>``."""
+    logo = _email_logo(meta or {})
+    if logo is None:
+        return None
+    return EMAIL_LOGO_CID, logo[0], logo[1]
+
+
+def _email_logo_size(data: Optional[bytes], height: int = 40, max_width: int = 180) -> tuple[Optional[int], int]:
+    """Explicit pixel size for the logo (Outlook ignores CSS sizing)."""
+    if not data:
+        return None, height
+    try:
+        import io as _io
+        from PIL import Image
+        with Image.open(_io.BytesIO(data)) as im:
+            w, h = im.size
+    except Exception:
+        return None, height
+    if not w or not h:
+        return None, height
+    width = round(w * height / h)
+    if width > max_width:
+        return max_width, max(1, round(h * max_width / w))
+    return max(1, width), height
+
+
+def _email_safe_url(url: Optional[str]) -> Optional[str]:
+    if not url or not isinstance(url, str):
+        return None
+    url = url.strip()
+    return url if re.match(r"^https?://[^\s\"'<>]+$", url, re.IGNORECASE) else None
+
+
+def _email_kpis(sections: list[dict]) -> list[dict]:
+    out: list[dict] = []
     for s in sections:
-        kpis.extend(s.get("kpis") or [])
-        if len(kpis) >= 6:
-            break
-    cells = "".join(
-        f'<td style="padding:10px 12px;background:#F5F7FE;border-radius:8px;">'
-        f'<div style="font-size:19px;font-weight:700;color:{ACCENT_HEX.get(k.get("accent") or "primary", "#4F6BF6")}">'
-        f'{_esc(k.get("value"))}</div>'
-        f'<div style="font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:.04em">'
-        f'{_esc(k.get("label"))}</div></td><td style="width:8px"></td>'
-        for k in kpis[:6])
-    button = (f'<a href="{_esc(view_url)}" style="display:inline-block;background:#4F6BF6;color:#fff;'
-              f'padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:600;'
-              f'font-size:14px">View full report</a>') if view_url else ""
-    note = ('<p style="font-size:12px;color:#6B7280;margin-top:14px">The full report is attached '
-            'to this email.</p>' if attached else "")
-    return f"""<!DOCTYPE html><html><body style="margin:0;background:#EDF0F7;padding:24px;
-font-family:'Segoe UI',Helvetica,Arial,sans-serif">
-<table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0"
- style="background:#fff;border-radius:10px;overflow:hidden">
-<tr><td style="background:linear-gradient(135deg,#26324f,#4F6BF6);padding:22px 28px">
-  <div style="color:#fff;font-size:12px;letter-spacing:.14em;text-transform:uppercase;opacity:.85">
-    {_esc(meta.get('company_name') or 'ZenPlus')}</div>
-  <div style="color:#fff;font-size:21px;font-weight:700;margin-top:4px">{_esc(meta.get('title'))}</div>
-  <div style="color:#fff;font-size:12px;opacity:.85;margin-top:4px">{_esc(meta.get('period_label') or '')}</div>
-</td></tr>
-<tr><td style="padding:22px 28px">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{cells}</tr></table>
-  <div style="margin-top:20px">{button}</div>{note}
-</td></tr>
-<tr><td style="padding:14px 28px;border-top:1px solid #E5E7EB;color:#9CA3AF;font-size:11px">
-  Generated {_esc(meta.get('generated_label') or '')} · Powered by ZenPlus</td></tr>
-</table></body></html>"""
+        if s.get("restricted") or s.get("error"):
+            continue
+        for k in s.get("kpis") or []:
+            if isinstance(k, dict) and k.get("label") is not None:
+                out.append(k)
+                if len(out) >= EMAIL_MAX_KPIS:
+                    return out
+    return out
+
+
+def _email_findings(sections: list[dict]) -> list[tuple[str, str, str]]:
+    """(severity, section title, finding) for sections whose headline figures
+    are flagged danger/warning: the section's first note, else the flagged
+    figure itself. Danger first, report order within a severity."""
+    found: list[tuple[int, int, str, str, str]] = []
+    for i, s in enumerate(sections):
+        if s.get("restricted") or s.get("error"):
+            continue
+        flagged = [k for k in (s.get("kpis") or []) if isinstance(k, dict)
+                   and k.get("accent") in ("danger", "warning")]
+        if not flagged:
+            continue
+        severity = "danger" if any(k.get("accent") == "danger" for k in flagged) else "warning"
+        notes = [n for n in (s.get("notes") or []) if n]
+        if notes:
+            text_ = _email_clip(notes[0], 280)
+        else:
+            k = next(k for k in flagged if k.get("accent") == severity)
+            text_ = _email_clip(f"{k.get('label')}: {k.get('value')}", 280)
+        found.append((0 if severity == "danger" else 1, i, severity,
+                      _email_clip(s.get("title") or "", 90), text_))
+    found.sort(key=lambda f: (f[0], f[1]))
+    return [(sev, title, txt) for _, _, sev, title, txt in found[:EMAIL_MAX_FINDINGS]]
+
+
+def _email_omitted(sections: list[dict]) -> list[str]:
+    restricted = sum(1 for s in sections if s.get("restricted"))
+    failed = sum(1 for s in sections if s.get("error"))
+    out = []
+    if restricted:
+        out.append(f"{restricted} section{'s' if restricted != 1 else ''} not included "
+                   f"(requires additional permissions)")
+    if failed:
+        out.append(f"{failed} section{'s' if failed != 1 else ''} could not be generated")
+    return out
+
+
+def email_summary_html(meta: dict, sections: list[dict], view_url: Optional[str],
+                       attached: bool, logo_cid: Optional[str] = None) -> str:
+    """Branded, email-safe report summary (600px, tables + inline CSS +
+    bgcolor, no SVG or data: URIs): classification banner, header in the
+    brand colour with the logo (``cid:``) or company name, title, period with
+    timezone, scope, up to six KPIs, top findings, "Open full report" button,
+    footer text, contact line, disclaimer and generated time."""
+    from app.services import report_colors as rc
+
+    meta = meta or {}
+    esc = _email_esc
+    brand = rc.normalize(meta.get("brand_color") or getattr(meta.get("branding"), "brand_color", None))
+    on_brand = rc.text_on(brand)
+    company = str(meta.get("company_name") or "ZenPlus")
+    title = str(meta.get("title") or "Report")
+    font = f"font-family:{_EMAIL_FONT}"
+    kpis = _email_kpis(sections)
+    findings = _email_findings(sections)
+    url = _email_safe_url(view_url)
+    rows: list[str] = []
+
+    classification = str(meta.get("confidentiality") or "").strip()
+    if classification:
+        bg = rc.classification_bg(classification)
+        rows.append(
+            f'<tr><td bgcolor="{bg}" align="center" style="background:{bg};color:{rc.text_on(bg)};'
+            f'{font};font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;'
+            f'padding:7px 16px">{esc(classification)}</td></tr>')
+
+    if logo_cid:
+        logo = _email_logo(meta)
+        cell_bg = "#1F2937" if logo is not None and logo[2] == "dark" else "#FFFFFF"
+        w, h = _email_logo_size(logo[0] if logo else None)
+        size = (f' width="{w}"' if w else "") + f' height="{h}"'
+        css_w = f"width:{w}px;" if w else ""
+        brand_block = (
+            f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+            f'<td bgcolor="{cell_bg}" style="background:{cell_bg};padding:8px 12px">'
+            f'<img src="cid:{esc(logo_cid)}" alt="{esc(company)}"{size} border="0" '
+            f'style="display:block;{css_w}height:{h}px;border:0;outline:none;text-decoration:none;'
+            f'{font};font-size:14px;font-weight:700;color:#111827"></td>'
+            f'<td style="padding-left:14px;{font};font-size:13px;font-weight:600;color:{on_brand}">'
+            f'{esc(company)}</td></tr></table>')
+    else:
+        brand_block = (f'<div style="{font};font-size:15px;font-weight:700;letter-spacing:.5px;'
+                       f'color:{on_brand}">{esc(company)}</div>')
+
+    category = meta.get("category")
+    rows.append(
+        f'<tr><td bgcolor="{brand}" style="background:{brand};padding:22px 28px 24px">'
+        f'{brand_block}'
+        + (f'<div style="{font};font-size:11px;letter-spacing:1.5px;text-transform:uppercase;'
+           f'color:{on_brand};margin-top:18px">{esc(category)}</div>' if category else
+           '<div style="height:16px;line-height:16px;font-size:0">&nbsp;</div>')
+        + f'<div style="{font};font-size:22px;line-height:1.25;font-weight:700;color:{on_brand};'
+        f'margin-top:4px">{esc(title)}</div>'
+        f'<div style="{font};font-size:13px;color:{on_brand};margin-top:6px">'
+        f'{esc(meta.get("period_label") or "")}</div>'
+        + (f'<div style="{font};font-size:12px;color:{on_brand};margin-top:3px">Scope: '
+           f'{esc(meta.get("scope_label"))}</div>' if meta.get("scope_label") else "")
+        + "</td></tr>")
+
+    body: list[str] = []
+    if kpis:
+        cols = 2 if len(kpis) in (1, 2, 4) else 3
+        pct = 100 // cols
+        trs = []
+        for i in range(0, len(kpis), cols):
+            cells = []
+            row_has_sub = any(k.get("subtitle") for k in kpis[i:i + cols])
+            for k in kpis[i:i + cols]:
+                color = rc.accent_ink(k.get("accent"), brand)
+                sub = (f'<div style="{font};font-size:11px;color:#6B7280;margin-top:3px">'
+                       f'{esc(_email_clip(k.get("subtitle"), 80)) if k.get("subtitle") else "&nbsp;"}'
+                       f'</div>') if row_has_sub else ""
+                cells.append(
+                    f'<td width="{pct}%" valign="top" style="padding:5px">'
+                    f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
+                    f'<td bgcolor="#F5F7FE" style="background:#F5F7FE;border-top:3px solid {color};'
+                    f'padding:12px 14px">'
+                    f'<div style="{font};font-size:20px;font-weight:700;line-height:1.2;color:{color}">'
+                    f'{esc(_email_clip(k.get("value"), 40))}</div>'
+                    f'<div style="{font};font-size:11px;color:#4B5563;text-transform:uppercase;'
+                    f'letter-spacing:.5px;margin-top:4px">{esc(_email_clip(k.get("label"), 60))}</div>'
+                    f'{sub}</td></tr></table></td>')
+            cells += [f'<td width="{pct}%" style="padding:5px">&nbsp;</td>'] * (cols - len(cells))
+            trs.append("<tr>" + "".join(cells) + "</tr>")
+        body.append(f'<tr><td style="padding:18px 23px 6px">'
+                    f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+                    f'{"".join(trs)}</table></td></tr>')
+
+    if findings:
+        items = "".join(
+            f'<tr><td valign="top" width="18" style="{font};font-size:13px;line-height:20px;'
+            f'color:{rc.ACCENT_INK[sev]};padding:3px 0">&#9679;</td>'
+            f'<td style="{font};font-size:13px;line-height:20px;color:#1F2937;padding:3px 0">'
+            f'<strong>{esc(stitle)}</strong> — {esc(txt)}</td></tr>'
+            for sev, stitle, txt in findings)
+        body.append(
+            f'<tr><td style="padding:14px 28px 4px">'
+            f'<div style="{font};font-size:14px;font-weight:700;color:#111827;margin-bottom:6px">'
+            f'Top findings</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+            f'{items}</table></td></tr>')
+
+    omitted = _email_omitted(sections)
+    if omitted:
+        body.append(f'<tr><td style="padding:8px 28px 0;{font};font-size:12px;color:#6B7280">'
+                    f'{esc(" · ".join(omitted))}</td></tr>')
+
+    if url:
+        body.append(
+            f'<tr><td style="padding:20px 28px 4px">'
+            f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+            f'<td bgcolor="{brand}" style="background:{brand}">'
+            f'<a href="{esc(url)}" target="_blank" style="display:inline-block;padding:12px 24px;'
+            f'{font};font-size:14px;font-weight:600;color:{on_brand};text-decoration:none">'
+            f'Open full report</a></td></tr></table></td></tr>')
+    if attached:
+        body.append(f'<tr><td style="padding:10px 28px 0;{font};font-size:12px;color:#4B5563">'
+                    f'The full report is attached to this email.</td></tr>')
+    if not body:
+        body.append(f'<tr><td style="padding:18px 28px;{font};font-size:13px;color:#4B5563">'
+                    f'This report has no headline figures for the period.</td></tr>')
+    rows.append("".join(body) + '<tr><td style="height:22px;line-height:22px;font-size:0">&nbsp;</td></tr>')
+
+    foot: list[str] = []
+    first = " · ".join(_email_clip(p, 200) for p in (meta.get("footer_text"), meta.get("contact_line")) if p)
+    if first:
+        foot.append(f'<div style="margin-bottom:6px">{esc(first)}</div>')
+    if meta.get("disclaimer"):
+        foot.append(f'<div style="font-size:10px;line-height:1.45;color:#6B7280;margin-bottom:6px">'
+                    f'{esc(_email_clip(meta.get("disclaimer"), 1000))}</div>')
+    foot.append(f'<div>Generated {esc(meta.get("generated_label") or "")} · {esc(company)}</div>')
+    rows.append(
+        f'<tr><td bgcolor="#F9FAFB" style="background:#F9FAFB;border-top:1px solid #E5E7EB;'
+        f'padding:16px 28px;{font};font-size:11px;line-height:1.5;color:#4B5563">'
+        f'{"".join(foot)}</td></tr>')
+
+    pre_bits = [f"{_email_clip(k.get('label'), 40)} {_email_clip(k.get('value'), 30)}" for k in kpis[:3]]
+    preheader = (
+        f'<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;'
+        f'line-height:1px;color:#EDF0F7">{esc(" · ".join(pre_bits))}&nbsp;&zwnj;&nbsp;&zwnj;</div>'
+        if pre_bits else "")
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="x-apple-disable-message-reformatting">'
+        '<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">'
+        f'<title>{esc(title)}</title></head>'
+        '<body bgcolor="#EDF0F7" style="margin:0;padding:0;background:#EDF0F7">'
+        f'{preheader}'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        'bgcolor="#EDF0F7" style="background:#EDF0F7"><tr><td align="center" style="padding:24px 10px">'
+        '<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" '
+        'bgcolor="#FFFFFF" style="width:600px;max-width:600px;background:#FFFFFF;'
+        'border:1px solid #E5E7EB">'
+        + "".join(rows)
+        + '</table></td></tr></table></body></html>')
 
 
 def email_summary_text(meta: dict, sections: list[dict], view_url: Optional[str]) -> str:
-    lines = [meta.get("title") or "Report", meta.get("period_label") or "", ""]
-    for s in sections:
-        for k in s.get("kpis") or []:
-            lines.append(f"- {k.get('label')}: {k.get('value')}")
-    if view_url:
-        lines += ["", f"View the full report: {view_url}"]
+    """Plain-text alternative of :func:`email_summary_html`."""
+    meta = meta or {}
+    company = str(meta.get("company_name") or "ZenPlus")
+    lines: list[str] = []
+    classification = str(meta.get("confidentiality") or "").strip()
+    if classification:
+        lines += [f"[{classification.upper()}]", ""]
+    lines += [company, str(meta.get("title") or "Report")]
+    if meta.get("category"):
+        lines.append(str(meta["category"]))
+    if meta.get("period_label"):
+        lines.append(f"Period: {meta['period_label']}")
+    if meta.get("scope_label"):
+        lines.append(f"Scope: {meta['scope_label']}")
+    kpis = _email_kpis(sections)
+    if kpis:
+        lines += ["", "Key figures"]
+        for k in kpis:
+            sub = f" ({_email_clip(k.get('subtitle'), 80)})" if k.get("subtitle") else ""
+            lines.append(f"- {_email_clip(k.get('label'), 60)}: {_email_clip(k.get('value'), 40)}{sub}")
+    findings = _email_findings(sections)
+    if findings:
+        lines += ["", "Top findings"]
+        for sev, stitle, txt in findings:
+            lines.append(f"- [{'!' if sev == 'danger' else '~'}] {stitle} — {txt}")
+    omitted = _email_omitted(sections)
+    if omitted:
+        lines += [""] + omitted
+    url = _email_safe_url(view_url)
+    if url:
+        lines += ["", f"Open the full report: {url}"]
+    footer = [p for p in (meta.get("footer_text"), meta.get("contact_line")) if p]
+    lines += ["", "--"]
+    if footer:
+        lines.append(" · ".join(str(p) for p in footer))
+    if meta.get("disclaimer"):
+        lines.append(str(meta["disclaimer"]))
+    lines.append(f"Generated {meta.get('generated_label') or ''} · {company}".rstrip())
     return "\n".join(lines)
 
 

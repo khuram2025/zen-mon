@@ -12,12 +12,25 @@ All HTML is table + inline-CSS only so it renders consistently in email clients
 and any browser. Input ``data`` is the executive dataset produced by
 ``report_data_service.build_executive`` (KPIs, top issues, location summary,
 availability trend, outage timeline); missing keys degrade gracefully.
+
+Branding comes from ``meta``: ``branding`` (a branding.Branding — company
+name, brand colour, timezone and date/time format, footer and disclaimer),
+or the individual ``company_name`` / ``brand_color`` / ``generated_label``
+keys. ``start``/``end`` (aware datetimes) add the exact window, in the
+organisation's timezone, to a relative period label. ``logo_cid`` (email) or
+``logo_data_uri`` (standalone page) shows the logo; the company name is always
+shown as text.
 """
 
 from __future__ import annotations
 
 import html
+import re
 from datetime import datetime, timezone
+from typing import Any, Optional
+
+from app.services import report_colors as rc
+from app.services.branding import DEFAULT_BRAND_COLOR, Branding
 
 # Shared palette (kept in sync with email_render.py)
 _INK = "#0F172A"
@@ -25,12 +38,11 @@ _MUTED = "#64748B"
 _BORDER = "#E2E8F0"
 _BG = "#F1F5F9"
 _CARD = "#FFFFFF"
-_BRAND = "#2563EB"
+_BRAND = DEFAULT_BRAND_COLOR  # fallback only; the organisation's colour wins
 _GOOD = "#16A34A"
 _WARN = "#F59E0B"
 _BAD = "#DC2626"
-
-_SEV = {"critical": _BAD, "warning": _WARN, "info": _BRAND}
+_FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 
 _REPORT_TITLES = {
     "executive_summary": "Executive Summary",
@@ -60,17 +72,105 @@ def period_label(period: str) -> str:
 
 
 def _fmt_ts(ts) -> str:
+    """UTC fallback when no organisation branding is available."""
     if not ts:
         ts = datetime.now(timezone.utc)
     if isinstance(ts, str):
         try:
             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except ValueError:
-            return _esc(ts)
+            return str(ts)
     try:
-        return ts.strftime("%b %d, %Y · %H:%M %Z").strip() or ts.strftime("%b %d, %Y · %H:%M UTC")
+        utc = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(timezone.utc)
+        return utc.strftime("%b %d, %Y · %H:%M UTC")
     except Exception:
-        return _esc(str(ts))
+        return str(ts)
+
+
+# ---------------------------------------------------------------------------
+# Branding
+# ---------------------------------------------------------------------------
+
+def _branding(meta: dict) -> Optional[Branding]:
+    b = (meta or {}).get("branding")
+    return b if isinstance(b, Branding) else None
+
+
+def _brand_hex(meta: dict) -> str:
+    b = _branding(meta)
+    return rc.normalize((meta or {}).get("brand_color") or (b.brand_color if b else None), _BRAND)
+
+
+def _company(meta: dict) -> str:
+    b = _branding(meta)
+    return str((meta or {}).get("company_name") or (b.display_name if b else "") or "ZenPlus")
+
+
+def _as_dt(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _generated_text(meta: dict) -> str:
+    """Generation time in the organisation's timezone and format with an
+    unambiguous zone label ('GMT+3'); UTC when no branding is known."""
+    meta = meta or {}
+    if meta.get("generated_label"):
+        return str(meta["generated_label"])
+    b = _branding(meta)
+    gen = _as_dt(meta.get("generated_at")) or datetime.now(timezone.utc)
+    if b is not None:
+        return b.fmt_datetime(gen, with_tz=True)
+    return _fmt_ts(gen)
+
+
+def _period_text(meta: dict) -> str:
+    """The period label, plus the exact window in the organisation's timezone
+    when ``start``/``end`` are known ('Last 7 days (01/10/2026 08:00 —
+    08/10/2026 08:00 GMT+3)')."""
+    meta = meta or {}
+    base = str(meta.get("period_label") or period_label(meta.get("period", "")))
+    b = _branding(meta)
+    start, end = _as_dt(meta.get("start")), _as_dt(meta.get("end"))
+    if b is None or start is None or end is None:
+        return base
+    window = b.period_label(start, end)
+    if not base or base == window:
+        return window
+    return f"{base} ({window})"
+
+
+_PAGE_LOGO_RE = re.compile(r"^data:image/(png|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$")
+
+
+def _logo_html(meta: dict, *, email: bool) -> str:
+    """Logo cell for the header, or '' (the company name is always text).
+    Email references a CID attachment only (Gmail and older Outlook block
+    data: URIs); the standalone page may inline the logo."""
+    meta = meta or {}
+    if email:
+        cid = meta.get("logo_cid")
+        src = f"cid:{cid}" if isinstance(cid, str) and cid else ""
+    else:
+        uri = meta.get("logo_data_uri")
+        src = uri if isinstance(uri, str) and _PAGE_LOGO_RE.match(uri) else ""
+    if not src:
+        return ""
+    return (
+        f'<td width="1" valign="middle" style="padding-right:12px;">'
+        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+        f'<td bgcolor="#FFFFFF" style="background:#FFFFFF;border:1px solid {_BORDER};'
+        f'border-radius:6px;padding:4px 8px;">'
+        f'<img src="{html.escape(src, quote=True)}" alt="{html.escape(_company(meta), quote=True)}" '
+        f'height="32" style="display:block;height:32px;width:auto;max-width:160px;border:0;'
+        f'font-family:{_FONT};font-size:13px;font-weight:700;color:{_INK};"></td></tr></table></td>'
+    )
 
 
 def _num(v, suffix="", dash="—") -> str:
@@ -115,7 +215,7 @@ def _kpi_cards(data: dict) -> list[dict]:
             "label": "Devices Monitored",
             "value": _num(k.get("devices_monitored")),
             "delta": "",
-            "tone": _BRAND,
+            "tone": None,  # brand colour
         },
         {
             "label": "Active Critical",
@@ -145,15 +245,16 @@ def _kpi_cards(data: dict) -> list[dict]:
     ]
 
 
-def _kpi_grid_html(data: dict) -> str:
+def _kpi_grid_html(data: dict, brand: str = _BRAND) -> str:
     cards = _kpi_cards(data)
     cells = []
     for c in cards:
+        tone = c["tone"] or rc.ink(brand)
         cells.append(
             f'<td width="33%" style="padding:6px;" valign="top">'
             f'<div style="border:1px solid {_BORDER};border-radius:10px;padding:14px 16px;background:{_CARD};">'
             f'<div style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:{_MUTED};">{_esc(c["label"])}</div>'
-            f'<div style="margin-top:6px;font-size:24px;font-weight:700;color:{c["tone"]};">{c["value"]}{c["delta"]}</div>'
+            f'<div style="margin-top:6px;font-size:24px;font-weight:700;color:{tone};">{c["value"]}{c["delta"]}</div>'
             f'</div></td>'
         )
     rows = []
@@ -172,10 +273,11 @@ def _section_title(text: str) -> str:
     )
 
 
-def _top_issues_html(data: dict) -> str:
+def _top_issues_html(data: dict, brand: str = _BRAND) -> str:
     issues = (data or {}).get("top_issues") or []
     if not issues:
         return ""
+    sev_colors = {"critical": _BAD, "warning": _WARN, "info": brand}
     rows = [
         f'<tr style="background:{_BG};"><th align="left" style="padding:8px 12px;font-size:11px;'
         f'text-transform:uppercase;color:{_MUTED};letter-spacing:.4px;">Device</th>'
@@ -184,13 +286,13 @@ def _top_issues_html(data: dict) -> str:
         f'<th align="right" style="padding:8px 12px;font-size:11px;text-transform:uppercase;color:{_MUTED};">Alerts</th></tr>'
     ]
     for it in issues[:8]:
-        sev = _SEV.get((it.get("severity") or "info").lower(), _BRAND)
+        sev = sev_colors.get((it.get("severity") or "info").lower(), brand)
         rows.append(
             f'<tr style="border-top:1px solid {_BORDER};">'
             f'<td style="padding:9px 12px;font-size:13px;font-weight:600;color:{_INK};">{_esc(it.get("hostname","Unknown"))}</td>'
             f'<td style="padding:9px 12px;font-size:13px;">'
             f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;'
-            f'font-weight:600;color:#fff;background:{sev};">{_esc((it.get("issue") or "").upper() or "—")}</span></td>'
+            f'font-weight:600;color:{rc.text_on(sev)};background:{sev};">{_esc((it.get("issue") or "").upper() or "—")}</span></td>'
             f'<td align="right" style="padding:9px 12px;font-size:13px;color:{_INK};">{_num(it.get("duration_minutes"),"m")}</td>'
             f'<td align="right" style="padding:9px 12px;font-size:13px;color:{_INK};">{_num(it.get("alert_count"))}</td>'
             f'</tr>'
@@ -233,50 +335,60 @@ def _locations_html(data: dict) -> str:
     )
 
 
-def _header_block(meta: dict, *, status_chip: str | None = None) -> str:
-    product = _esc(meta.get("product_name", "ZenPlus"))
-    company = _esc(meta.get("company_name") or "")
+def _header_block(meta: dict, *, status_chip: str | None = None, email: bool = False) -> str:
+    brand = _brand_hex(meta)
+    company = _esc(_company(meta))
     title = _esc(meta.get("title") or report_title(meta.get("report_type", "")))
-    plabel = _esc(meta.get("period_label") or period_label(meta.get("period", "")))
-    gen = _fmt_ts(meta.get("generated_at"))
+    plabel = _esc(_period_text(meta))
+    gen = _generated_text(meta)
+    tagline = _esc(meta.get("category") or "Network Monitoring")
     chip = ""
     if status_chip:
         chip = (
-            f'<span style="display:inline-block;background:{_BRAND};color:#fff;font-size:11px;'
-            f'font-weight:700;letter-spacing:.6px;padding:5px 11px;border-radius:999px;">{_esc(status_chip)}</span>'
+            f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right"><tr>'
+            f'<td bgcolor="{brand}" style="background:{brand};border-radius:999px;padding:5px 11px;'
+            f'color:{rc.text_on(brand)};font-size:11px;font-weight:700;letter-spacing:.6px;">'
+            f'{_esc(status_chip)}</td></tr></table>'
         )
-    sub = f"{company} &middot; {plabel}" if company else plabel
     return (
-        f'<tr><td style="height:6px;background:{_BRAND};font-size:0;line-height:0;">&nbsp;</td></tr>'
+        f'<tr><td bgcolor="{brand}" style="height:6px;background:{brand};font-size:0;line-height:0;">&nbsp;</td></tr>'
         f'<tr><td style="padding:20px 28px 4px;">'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        f'<td width="36" valign="middle">'
-        f'<div style="width:32px;height:32px;background:{_BRAND};border-radius:8px;color:#ffffff;'
-        f'font-size:17px;font-weight:800;text-align:center;line-height:32px;">Z</div></td>'
-        f'<td valign="middle" style="padding-left:10px;">'
-        f'<div style="font-size:16px;font-weight:700;color:{_INK};letter-spacing:.2px;">{product}</div>'
+        f'{_logo_html(meta, email=email)}'
+        f'<td valign="middle">'
+        f'<div style="font-size:16px;font-weight:700;color:{_INK};letter-spacing:.2px;">{company}</div>'
         f'<div style="font-size:10px;font-weight:600;color:{_MUTED};letter-spacing:.8px;'
-        f'text-transform:uppercase;">Network Monitoring</div></td>'
+        f'text-transform:uppercase;">{tagline}</div></td>'
         f'<td align="right" valign="middle">{chip}</td></tr></table></td></tr>'
         f'<tr><td style="padding:8px 28px 2px;">'
         f'<div style="font-size:22px;line-height:1.25;font-weight:700;color:{_INK};">{title}</div>'
-        f'<div style="margin-top:4px;font-size:13px;color:{_MUTED};">{sub} &middot; generated {_esc(gen)}</div>'
+        f'<div style="margin-top:4px;font-size:13px;color:{_MUTED};">{plabel} &middot; generated {_esc(gen)}</div>'
         f'</td></tr>'
     )
 
 
 def _footer_block(meta: dict, *, email: bool) -> str:
-    product = _esc(meta.get("product_name", "ZenPlus"))
+    company = _esc(_company(meta))
+    b = _branding(meta)
+    footer_text = str(meta.get("footer_text") or (b.report_footer if b else "") or "").strip()
+    disclaimer = str(meta.get("disclaimer") or (b.report_disclaimer if b else "") or "").strip()
+    contact = str(meta.get("contact_line") or (b.contact_line if b else "") or "").strip()
     note = (
         "This report was delivered automatically because a notification channel "
         "is linked to a report schedule."
         if email else
         "Automatically generated report. Figures cover the period shown above."
     )
+    extra = ""
+    if footer_text or contact:
+        extra = "<br>" + _esc(" · ".join(p for p in (footer_text, contact) if p))
+    tail = " &middot; This mailbox is not monitored." if email else ""
+    disc = (f'<div style="margin-top:8px;color:{_MUTED};font-size:10px;line-height:1.45;">'
+            f'{_esc(disclaimer)}</div>' if disclaimer else "")
     return (
         f'<tr><td style="padding:18px 28px 26px;">'
         f'<div style="border-top:1px solid {_BORDER};padding-top:14px;color:{_MUTED};font-size:12px;line-height:1.5;">'
-        f'{note}<br>&copy; {datetime.now(timezone.utc).year} {product} &middot; This mailbox is not monitored.</div>'
+        f'{note}{extra}<br>&copy; {datetime.now(timezone.utc).year} {company}{tail}</div>{disc}'
         f'</td></tr>'
     )
 
@@ -291,11 +403,11 @@ def _shell(inner: str, *, title: str, width: int = 720, preheader: str = "") -> 
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta name="x-apple-disable-message-reformatting">
 <title>{_esc(title)}</title></head>
-<body style="margin:0;padding:0;background:{_BG};">
+<body bgcolor="{_BG}" style="margin:0;padding:0;background:{_BG};">
 {pre}
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{_BG};padding:24px 12px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{_BG}" style="background:{_BG};padding:24px 12px;">
 <tr><td align="center">
-<table role="presentation" width="{width}" cellpadding="0" cellspacing="0" style="max-width:{width}px;width:100%;background:{_CARD};border:1px solid {_BORDER};border-radius:14px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<table role="presentation" width="{width}" cellpadding="0" cellspacing="0" bgcolor="{_CARD}" style="max-width:{width}px;width:100%;background:{_CARD};border:1px solid {_BORDER};border-radius:14px;overflow:hidden;font-family:{_FONT};">
 {inner}
 </table>
 </td></tr></table>
@@ -308,10 +420,11 @@ def _shell(inner: str, *, title: str, width: int = 720, preheader: str = "") -> 
 
 def build_report_html(meta: dict, data: dict) -> str:
     """Standalone full HTML report page (token share link target)."""
+    brand = _brand_hex(meta)
     inner = (
         _header_block(meta, status_chip="REPORT")
-        + f'<tr><td style="padding:18px 22px 0;">{_kpi_grid_html(data)}</td></tr>'
-        + f'<tr><td style="padding:0 28px;">{_top_issues_html(data)}</td></tr>'
+        + f'<tr><td style="padding:18px 22px 0;">{_kpi_grid_html(data, brand)}</td></tr>'
+        + f'<tr><td style="padding:0 28px;">{_top_issues_html(data, brand)}</td></tr>'
         + f'<tr><td style="padding:0 28px;">{_locations_html(data)}</td></tr>'
         + _footer_block(meta, email=False)
     )
@@ -321,13 +434,17 @@ def build_report_html(meta: dict, data: dict) -> str:
 def build_report_email_html(meta: dict, data: dict, view_url: str | None = None,
                             attached: bool = False) -> str:
     """Email body: KPI summary + prominent 'View full report' button."""
+    brand = _brand_hex(meta)
     button = ""
-    if view_url:
+    if view_url and re.match(r"^https?://", str(view_url), re.IGNORECASE):
         button = (
             f'<tr><td style="padding:6px 28px 4px;">'
-            f'<a href="{_esc(view_url)}" style="display:inline-block;background:{_BRAND};color:#ffffff;'
-            f'text-decoration:none;font-size:14px;font-weight:600;padding:12px 24px;border-radius:8px;">'
-            f'View full report &rarr;</a></td></tr>'
+            f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+            f'<td bgcolor="{brand}" style="background:{brand};border-radius:8px;">'
+            f'<a href="{html.escape(str(view_url), quote=True)}" style="display:inline-block;'
+            f'color:{rc.text_on(brand)};text-decoration:none;font-size:14px;font-weight:600;'
+            f'padding:12px 24px;font-family:{_FONT};">View full report &rarr;</a></td></tr></table>'
+            f'</td></tr>'
         )
     attach_note = ""
     if attached:
@@ -345,9 +462,9 @@ def build_report_email_html(meta: dict, data: dict, view_url: str | None = None,
     if k.get("mttr_minutes") is not None:
         pre_bits.append(f"MTTR {_num(k.get('mttr_minutes'), 'm')}")
     inner = (
-        _header_block(meta, status_chip="SCHEDULED REPORT")
-        + f'<tr><td style="padding:16px 22px 0;">{_kpi_grid_html(data)}</td></tr>'
-        + f'<tr><td style="padding:6px 28px 0;">{_top_issues_html(data)}</td></tr>'
+        _header_block(meta, status_chip="SCHEDULED REPORT", email=True)
+        + f'<tr><td style="padding:16px 22px 0;">{_kpi_grid_html(data, brand)}</td></tr>'
+        + f'<tr><td style="padding:6px 28px 0;">{_top_issues_html(data, brand)}</td></tr>'
         + button
         + attach_note
         + _footer_block(meta, email=True)
@@ -359,10 +476,11 @@ def build_report_email_html(meta: dict, data: dict, view_url: str | None = None,
 def build_report_email_text(meta: dict, data: dict, view_url: str | None = None) -> str:
     k = (data or {}).get("kpis", {}) or {}
     title = meta.get("title") or report_title(meta.get("report_type", ""))
-    plabel = meta.get("period_label") or period_label(meta.get("period", ""))
+    company = _company(meta)
     lines = [
         f"{title}",
-        f"{(meta.get('company_name') or 'ZenPlus')} · {plabel}",
+        f"{company} · {_period_text(meta)}",
+        f"Generated {_generated_text(meta)}",
         "",
         f"Availability:    {_num(k.get('availability_pct'), '%')}",
         f"Devices:         {_num(k.get('devices_monitored'))}",
@@ -381,5 +499,9 @@ def build_report_email_text(meta: dict, data: dict, view_url: str | None = None)
             )
     if view_url:
         lines += ["", f"View full report: {view_url}"]
-    lines += ["", f"— {meta.get('product_name', 'ZenPlus')} automated report"]
+    lines += ["", f"— {company} automated report"]
+    b = _branding(meta)
+    disclaimer = str(meta.get("disclaimer") or (b.report_disclaimer if b else "") or "").strip()
+    if disclaimer:
+        lines.append(disclaimer)
     return "\n".join(lines)
