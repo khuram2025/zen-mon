@@ -11,9 +11,9 @@ import { downloadReport, type RenderParams } from '../api'
 type FileFormat = 'pdf' | 'xlsx' | 'html'
 
 const FORMATS: { key: FileFormat; label: string; hint: string; icon: typeof FileText; aliases: string[] }[] = [
-  { key: 'pdf', label: 'PDF document', hint: 'Branded, paginated', icon: FileText, aliases: ['pdf'] },
-  { key: 'xlsx', label: 'Excel workbook', hint: 'One sheet per table', icon: FileSpreadsheet, aliases: ['xlsx', 'excel'] },
-  { key: 'html', label: 'HTML page', hint: 'Self-contained file', icon: FileCode2, aliases: ['html'] },
+  { key: 'pdf', label: 'PDF document', hint: 'Branded and paginated', icon: FileText, aliases: ['pdf'] },
+  { key: 'xlsx', label: 'Excel workbook', hint: 'Tables as worksheets', icon: FileSpreadsheet, aliases: ['xlsx', 'excel'] },
+  { key: 'html', label: 'HTML page', hint: 'Self-contained web page', icon: FileCode2, aliases: ['html'] },
 ]
 
 /** Server detail from a failed blob download (the body is a Blob, not JSON). */
@@ -68,20 +68,24 @@ export function ExportMenu({ params, formats, onPrint }: ExportMenuProps) {
           <ChevronDown className="h-3 w-3 opacity-60" aria-hidden />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-60">
+      <DropdownMenuContent className="w-64">
         <DropdownMenuLabel>Download this period and scope</DropdownMenuLabel>
         {offered.map((f) => (
-          <DropdownMenuItem key={f.key} disabled={!!busy} onSelect={() => void run(f.key)}>
-            <f.icon className="text-primary" aria-hidden />
-            <span className="flex-1">{f.label}</span>
-            <span className="text-[10px] text-muted">{f.hint}</span>
+          <DropdownMenuItem key={f.key} disabled={!!busy} onSelect={() => void run(f.key)} className="items-start">
+            <f.icon className="mt-0.5 text-primary" aria-hidden />
+            <span className="min-w-0">
+              <span className="block font-medium">{f.label}</span>
+              <span className="block text-[11px] text-muted">{f.hint}</span>
+            </span>
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => window.setTimeout(onPrint, 60)}>
-          <Printer aria-hidden />
-          <span className="flex-1">Print or save as PDF</span>
-          <span className="text-[10px] text-muted">Ctrl P</span>
+        <DropdownMenuItem onSelect={() => window.setTimeout(onPrint, 60)} className="items-start">
+          <Printer className="mt-0.5" aria-hidden />
+          <span className="min-w-0">
+            <span className="block font-medium">Print or save as PDF</span>
+            <span className="block text-[11px] text-muted">From the browser, as shown on screen</span>
+          </span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

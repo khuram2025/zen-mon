@@ -4,6 +4,7 @@ import { CalendarRange, ChevronRight, Clock, Globe2, LockKeyhole, ShieldCheck } 
 import { cn } from '@/lib/utils'
 import { formatPeriod, logoUrl, onColor, type Branding, type Confidentiality } from '@/lib/branding'
 import type { RenderReport } from '../types'
+import { humanize } from './format'
 
 const HEX = /^#[0-9a-f]{6}$/i
 
@@ -76,6 +77,8 @@ export interface BrandHeaderProps {
   titleId?: string
   /** Long reports print the header as a cover page. */
   coverBreak?: boolean
+  /** Display title of the report's category (the catalog's); defaults to the report's own label. */
+  categoryTitle?: string | null
 }
 
 /** Scope chips from the server's scope label ("3 selected device(s) · NetFlow: …"). */
@@ -87,7 +90,7 @@ export function scopeChips(report: RenderReport): string[] {
 
 /** Report cover: organisation identity, trail, title, origin and classification, period, generation time and scope. */
 export function BrandHeader({
-  report, branding, origin, breadcrumb, scope, badges, compact, titleId, coverBreak,
+  report, branding, origin, breadcrumb, scope, badges, compact, titleId, coverBreak, categoryTitle,
 }: BrandHeaderProps) {
   const company = report.company_name || branding.display_name || branding.company_name || 'ZenPlus'
   const brand = HEX.test(branding.brand_color) ? branding.brand_color : null
@@ -96,6 +99,8 @@ export function BrandHeader({
   const chips = scopeChips(report)
   const period = formatPeriod(report.from, report.to, branding)
   const tzName = report.timezone || branding.timezone
+  // Built-in renders carry the category title; organisation templates may carry its id.
+  const category = categoryTitle || (/^[a-z0-9_]+$/.test(report.category || '') ? humanize(report.category) : report.category)
 
   const trail = breadcrumb === false ? null : breadcrumb ?? (
     <nav aria-label="Breadcrumb" className="print:hidden">
@@ -103,10 +108,10 @@ export function BrandHeader({
         <li>
           {compact ? <span>Reports</span> : <Link to="/reports" className="rounded hover:text-text hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">Reports</Link>}
         </li>
-        {report.category && (
+        {category && (
           <>
             <li aria-hidden><ChevronRight className="h-3 w-3" /></li>
-            <li aria-current="page" className="text-text2">{report.category}</li>
+            <li aria-current="page" className="text-text2">{category}</li>
           </>
         )}
       </ol>
@@ -126,7 +131,7 @@ export function BrandHeader({
         style={brand ? { background: brand, printColorAdjust: 'exact', WebkitPrintColorAdjust: 'exact' } : undefined}
       />
       <div className={cn(compact ? 'px-4 pb-4 pt-5' : 'px-6 pb-5 pt-6')}>
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
           <div className="flex min-w-0 items-center gap-3">
             <BrandLogo branding={branding} name={company} />
             <div className="min-w-0">

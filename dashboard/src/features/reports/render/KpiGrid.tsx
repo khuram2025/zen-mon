@@ -40,7 +40,11 @@ export function KpiGrid({ kpis, compact }: { kpis: RenderKpi[]; compact?: boolea
     <dl
       className={cn(
         'zp-avoid-break grid gap-2.5',
-        compact ? 'grid-cols-[repeat(auto-fill,minmax(8.5rem,1fr))]' : 'grid-cols-[repeat(auto-fill,minmax(10rem,1fr))]',
+        // Fill the row (no empty trailing columns), but keep one or two tiles from stretching across a wide section.
+        compact ? 'grid-cols-[repeat(auto-fit,minmax(8.5rem,1fr))]' : 'grid-cols-[repeat(auto-fit,minmax(10rem,1fr))]',
+        kpis.length === 1 && 'max-w-[16rem]',
+        kpis.length === 2 && 'max-w-xl',
+        kpis.length === 3 && 'max-w-3xl',
       )}
     >
       {kpis.map((kpi, i) => {

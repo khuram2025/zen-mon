@@ -6,7 +6,8 @@ import { formatDateTime, zoneLabel, type Branding } from '@/lib/branding'
 import { useVizColors, withAlpha, type VizColors } from '@/components/availability/viz'
 import type { ChartSeries, RenderChart } from '../types'
 import {
-  axisTimeLabel, chartModel, describeChart, formatValue, slices, type CategoryModel, type ChartModel, type TimeSeriesModel,
+  axisTimeLabel, chartModel, describeChart, drawAsBars, formatValue, slices, timeStep, unitKind,
+  type CategoryModel, type ChartModel, type TimeSeriesModel,
 } from './format'
 import { statusTone } from './table'
 
@@ -69,10 +70,12 @@ function TimePlot({ series, model, branding, height, description, window }: Plot
     const unit = series.unit
     const kind = series.kind
     const multi = model.series.length > 1
-    const isBar = kind === 'bars'
+    const isBar = drawAsBars(kind, model)
     const filled = kind === 'area' || kind === 'stacked'
-    const lo = !isBar && window ? Math.min(window.from, model.start) : model.start
-    const hi = !isBar && window ? Math.max(window.to, model.end) : model.end
+    // Bars sit on bucket starts: pad half a bucket so the first and last are not clipped.
+    const half = isBar ? Math.max(timeStep(model), 60_000) / 2 : 0
+    const lo = !isBar && window ? Math.min(window.from, model.start) : model.start - half
+    const hi = !isBar && window ? Math.max(window.to, model.end) : model.end + half
     const span = Math.max(hi - lo, 60_000)
     const muted = colors.c('muted')
     const zone = zoneLabel(branding.timezone, model.end)
@@ -153,7 +156,7 @@ function TimePlot({ series, model, branding, height, description, window }: Plot
     }
   }, [colors, series, model, branding, description, window])
 
-  return <ReactECharts option={option} notMerge lazyUpdate style={{ height, width: '100%' }} opts={{ renderer: 'svg' }} />
+  return <ReactECharts option={option} notMerge style={{ height, width: '100%' }} opts={{ renderer: 'svg' }} />
 }
 
 function CategoryPlot({ series, model, height, description }: PlotProps & { model: CategoryModel }) {
@@ -232,7 +235,7 @@ function CategoryPlot({ series, model, height, description }: PlotProps & { mode
     }
   }, [colors, series, model, horizontal, description])
   const h = horizontal ? Math.max(height, Math.min(520, model.labels.length * 24 + 40)) : height
-  return <ReactECharts option={option} notMerge lazyUpdate style={{ height: h, width: '100%' }} opts={{ renderer: 'svg' }} />
+  return <ReactECharts option={option} notMerge style={{ height: h, width: '100%' }} opts={{ renderer: 'svg' }} />
 }
 
 /** Single-series ranking as an accessible list (crisp text, prints well). */
@@ -243,11 +246,11 @@ function RankList({ series }: { series: ChartSeries }) {
   const max = rows[0].value || 1
   const color = resolveColor(colors, series.color, 0)
   return (
-    <ol className="space-y-1.5" role="list">
+    <ol className="max-w-3xl space-y-1.5" role="list">
       {rows.map((r, i) => (
         <li key={`${r.label}-${i}`} className="flex items-center gap-2.5 text-xs">
           <span className="w-5 shrink-0 text-right tabular-nums text-muted">{i + 1}</span>
-          <span className="w-[38%] min-w-0 shrink-0 truncate font-medium text-text2" title={r.label}>{r.label}</span>
+          <span className="w-[clamp(6rem,34%,15rem)] min-w-0 shrink-0 truncate font-medium text-text2" title={r.label}>{r.label}</span>
           <span aria-hidden className="h-3 min-w-0 flex-1 overflow-hidden rounded-sm bg-surface2">
             <span className="block h-full rounded-sm" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: color }} />
           </span>
@@ -294,7 +297,7 @@ function Donut({ series, height, description }: { series: ChartSeries; height: n
   return (
     <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:items-center sm:gap-6">
       <div className="relative shrink-0 self-center" style={{ width: size, height: size }}>
-        <ReactECharts option={option} notMerge lazyUpdate style={{ height: size, width: size }} opts={{ renderer: 'svg' }} />
+        <ReactECharts option={option} notMerge style={{ height: size, width: size }} opts={{ renderer: 'svg' }} />
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
           <span className="text-lg font-semibold tabular-nums text-text">{formatValue(total, series.unit, { compact: true })}</span>
           <span className="text-[10px] uppercase tracking-wide text-muted">Total{series.unit && !['%'].includes(series.unit) ? ` ${series.unit}` : ''}</span>
@@ -380,8 +383,9 @@ export function ChartBlock({ chart, branding, compact, window }: ChartBlockProps
       {chart.title && (
         <figcaption className="mb-1.5 flex items-baseline gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
           <span className="min-w-0 truncate">{chart.title}</span>
-          {series?.unit && series.kind !== 'donut' && (
-            <span className="shrink-0 font-normal normal-case tracking-normal text-muted2">{series.unit}</span>
+          {series?.unit && series.kind !== 'donut' && unitKind(series.unit) === 'count' && (
+            // Counted units ("alerts", "sessions") are not in the axis labels; measured ones (%, ms, bps) are.
+            <span className="shrink-0 font-normal normal-case tracking-normal text-muted">{series.unit}</span>
           )}
         </figcaption>
       )}

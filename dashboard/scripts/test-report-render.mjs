@@ -18,6 +18,7 @@ const { mod: t } = await load('src/features/reports/render/table.ts')
 const brand = await load('src/lib/branding.ts')
 const periods = await load('src/features/reports/periods.ts', { '@/lib/branding': brand.url })
 const { mod: r } = await load('src/features/reports/viewer/range.ts', { '../periods': periods.url })
+const { mod: pg } = await load('src/features/reports/viewer/pageCss.ts')
 
 /* ── Units ──────────────────────────────────────────────────────────── */
 assert.equal(f.unitKind('%'), 'percent')
@@ -109,7 +110,32 @@ const desc = f.describeChart('Throughput', multi, 'bps', (ms) => new Date(ms).to
 assert.match(desc, /Throughput: 2 series/)
 assert.match(desc, /Out: min 5 bps, max 7 bps, latest 7 bps\./)
 
+const daily = f.chartModel({
+  kind: 'stacked', unit: 'alerts',
+  series: [
+    { name: 'Critical', points: [{ t: '2026-10-01T00:00:00Z', v: 1 }, { t: '2026-10-02T00:00:00Z', v: 2 }, { t: '2026-10-03T00:00:00Z', v: 0 }] },
+    { name: 'Warning', points: [{ t: '2026-10-01T00:00:00Z', v: 3 }, { t: '2026-10-03T00:00:00Z', v: 1 }] },
+  ],
+})
+assert.equal(f.timeStep(daily), 86_400_000, 'smallest bucket across series')
+assert.equal(f.drawAsBars('stacked', daily), true, 'a few daily buckets stack as bars')
+assert.equal(f.drawAsBars('bars', single), true)
+assert.equal(f.drawAsBars('area', daily), false)
+const dense = f.chartModel({ kind: 'stacked', points: Array.from({ length: 288 }, (_, i) => ({ t: new Date(Date.UTC(2026, 9, 7) + i * 300_000).toISOString(), v: i })) })
+assert.equal(f.drawAsBars('stacked', dense), false, '5-minute samples stay a stacked area')
+assert.equal(f.timeStep({ kind: 'time', series: [{ name: 'x', data: [[5, 1]] }], start: 5, end: 5 }), 0)
+
 /* ── Sections ───────────────────────────────────────────────────────── */
+assert.deepEqual(
+  f.sectionFailure(['This section could not be generated (OperationalError). Other sections are unaffected; the appliance log has details.', 'extra']),
+  { code: 'OperationalError', detail: 'Other sections are unaffected; the appliance log has details.', extra: ['extra'] },
+  'the card heading is not repeated',
+)
+assert.deepEqual(f.sectionFailure(['Upstream timed out']), { code: null, detail: 'Upstream timed out', extra: [] })
+assert.deepEqual(f.sectionFailure([]), { code: null, detail: null, extra: [] })
+assert.deepEqual(f.sectionFailure(['This section could not be generated.']), { code: null, detail: null, extra: [] })
+assert.equal(f.humanize('device_tracker'), 'Device tracker')
+assert.equal(f.humanize(null), '')
 assert.equal(f.sectionStatus({ kpis: [{ label: 'a', value: '1', accent: 'warning' }, { label: 'b', value: '2', accent: 'danger' }] }), 'danger')
 assert.equal(f.sectionStatus({ kpis: [{ label: 'a', value: '1', accent: 'warning' }] }), 'warning')
 assert.equal(f.sectionStatus({ kpis: [], error: true }), 'error')
@@ -195,6 +221,10 @@ assert.deepEqual(r.parseSelection('custom', '2026-10-01T00:00:00Z', '2026-09-01T
 assert.equal(r.needsDefaultPeriod(null, null, null), true)
 assert.equal(r.needsDefaultPeriod('last_7d', null, null), false)
 assert.equal(r.needsDefaultPeriod(null, '2026-09-01T00:00:00Z', '2026-10-01T00:00:00Z'), false)
+assert.equal(r.needsDefaultPeriod('24h', null, null), false, 'legacy ranges are periods')
+assert.equal(r.needsDefaultPeriod('bogus', null, null), true, 'an unknown range waits for the template default')
+assert.equal(r.needsDefaultPeriod('custom', null, null), true, 'custom without dates waits for the template default')
+assert.equal(r.needsDefaultPeriod('custom', '2026-10-01T00:00:00Z', '2026-09-01T00:00:00Z'), true)
 assert.deepEqual(r.selectionParams({ kind: 'period', id: 'last_7d' }), { range: 'last_7d' })
 assert.deepEqual(r.selectionParams(custom), { range: 'custom', from: '2026-09-01T00:00:00.000Z', to: '2026-10-01T00:00:00.000Z' })
 const now = new Date('2026-10-07T11:05:00Z')
@@ -219,5 +249,18 @@ assert.deepEqual(r.filterableFor({ sections: ['rum_pages'] }, sections), ['appli
 assert.deepEqual(r.filterableFor(null, sections), [])
 assert.deepEqual(r.parseNodes('a, b,,a'), ['a', 'b'])
 assert.deepEqual(r.parseNodes(null), [])
+
+/* ── Print page rules ───────────────────────────────────────────────── */
+assert.equal(pg.cssString('Say "hi"\\now\nnext'), '"Say \\"hi\\"\\\\now next"', 'quotes, backslashes and newlines escaped')
+const css = pg.pageCss({ paper_size: 'Letter', confidentiality: 'Confidential', report_footer: '', company_name: 'Acme', display_name: 'Acme' }, 'SLA "Q3"')
+assert.match(css, /size: letter portrait/)
+assert.match(css, /@top-right \{ content: "CONFIDENTIAL"/)
+assert.match(css, /@top-left \{ content: "SLA \\"Q3\\""/)
+assert.match(css, /@bottom-left \{ content: "Acme"/)
+assert.match(css, /counter\(page\) " of " counter\(pages\)/)
+const a4 = pg.pageCss({ paper_size: 'A4', confidentiality: '', report_footer: 'NOC', company_name: '', display_name: '' }, 'T')
+assert.match(a4, /size: A4 portrait/)
+assert.doesNotMatch(a4, /@top-right/, 'no classification, no label')
+assert.match(a4, /@bottom-left \{ content: "NOC"/)
 
 console.log('report render ok')

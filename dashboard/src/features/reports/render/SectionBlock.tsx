@@ -6,6 +6,7 @@ import { ChartBlock } from './ChartBlock'
 import { DataTable } from './DataTable'
 import { KpiGrid } from './KpiGrid'
 import { NoteList } from './NoteList'
+import { sectionFailure } from './format'
 
 export interface SectionBlockProps {
   section: RenderSection
@@ -49,12 +50,14 @@ export function SectionBlock({
 }: SectionBlockProps) {
   const headingId = `${anchorId}-h`
   const description = section.description || meta?.description
-  const snapshot = meta?.semantics === 'snapshot'
+  // The catalog says whether a section is a point-in-time snapshot; a render may carry it too.
+  const snapshot = (meta?.semantics ?? (section as RenderSection & { semantics?: string }).semantics) === 'snapshot'
   const notes = section.notes || []
 
   const shell = 'zp-section scroll-mt-[var(--zp-report-offset,6rem)] rounded-xl border focus:outline-none'
 
   if (section.restricted) {
+    const requires = meta?.requires ?? []
     return (
       <section id={anchorId} aria-labelledby={headingId} tabIndex={-1} className={cn(shell, 'border-dashed border-border bg-surface2/40')}>
         <div className={cn('flex items-start gap-3', compact ? 'p-3' : 'px-5 py-4')}>
@@ -66,14 +69,22 @@ export function SectionBlock({
                 <LockKeyhole className="h-3 w-3" aria-hidden /> Restricted
               </span>
             </h2>
-            <p className="mt-1 text-xs text-muted">
-              {notes[0] || 'Your role does not include the permission this section needs, so its data is not shown.'}
-            </p>
-            {meta?.requires?.length ? (
-              <p className="mt-1 text-[11px] text-muted">
-                Requires <span className="font-mono">{meta.requires.join(', ')}</span> — ask an administrator to grant it.
+            {requires.length ? (
+              <p className="mt-1 text-xs leading-relaxed text-muted">
+                Your role does not include{' '}
+                {requires.map((p, i) => (
+                  <span key={p}>
+                    {i > 0 && (i === requires.length - 1 ? ' and ' : ', ')}
+                    <code className="rounded bg-surface px-1 py-px font-mono text-[11px] text-text2">{p}</code>
+                  </span>
+                ))}
+                {', which this section needs, so its data is not shown. Ask an administrator if you need it.'}
               </p>
-            ) : null}
+            ) : (
+              <p className="mt-1 text-xs leading-relaxed text-muted">
+                {notes[0] || 'Your role does not include the permission this section needs, so its data is not shown.'}
+              </p>
+            )}
           </div>
         </div>
       </section>
@@ -81,20 +92,24 @@ export function SectionBlock({
   }
 
   if (section.error) {
+    const failure = sectionFailure(notes)
     return (
       <section id={anchorId} aria-labelledby={headingId} tabIndex={-1} className={cn(shell, 'border-warning/40 bg-warning/5')}>
         <div className={cn('flex items-start gap-3', compact ? 'p-3' : 'px-5 py-4')}>
           <Number2 index={index} tone="warning" />
           <div className="min-w-0 flex-1">
             <h2 id={headingId} className="text-sm font-semibold text-text">{section.title}</h2>
-            <p role="note" className="mt-1.5 flex items-start gap-2 text-xs text-text2">
-              <TriangleAlert className="mt-px h-3.5 w-3.5 shrink-0 text-warning-fg" aria-hidden />
-              <span>
+            <div role="note" className="mt-1.5 flex items-start gap-2 text-xs leading-relaxed text-text2">
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning-fg" aria-hidden />
+              <p className="min-w-0">
                 <span className="font-semibold text-warning-fg">This section could not be generated.</span>{' '}
-                {notes[0] || 'The rest of the report is unaffected; the appliance log has details.'}
-              </span>
-            </p>
-            {notes.length > 1 && <NoteList notes={notes.slice(1)} className="mt-2" />}
+                {failure.detail || 'The rest of the report is unaffected; the appliance log has details.'}
+                {failure.code && (
+                  <code className="ml-1.5 rounded bg-surface px-1 py-px font-mono text-[10px] text-muted">{failure.code}</code>
+                )}
+              </p>
+            </div>
+            {failure.extra.length > 0 && <NoteList notes={failure.extra} className="mt-2" />}
           </div>
         </div>
       </section>

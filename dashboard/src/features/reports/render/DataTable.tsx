@@ -211,7 +211,12 @@ export function DataTable({ table, compact, canExport, filenameBase = 'report', 
                     key={i}
                     scope="col"
                     aria-sort={active ? (sort!.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    className={cn('whitespace-nowrap p-0 font-semibold text-text2', numeric && 'text-right')}
+                    className={cn(
+                      'whitespace-nowrap p-0 font-semibold text-text2',
+                      numeric && 'text-right',
+                      // Narrow screens scroll the table sideways rather than breaking names at every hyphen.
+                      !numeric && (i === 0 ? 'min-w-[8rem]' : 'min-w-[5.5rem]'),
+                    )}
                   >
                     <button
                       type="button"

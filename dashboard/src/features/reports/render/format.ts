@@ -303,6 +303,22 @@ export function chartModel(s: ChartSeries, fallbackName = 'Value'): ChartModel |
   return measured && labels.length ? { kind: 'category', labels, series } : null
 }
 
+/** Smallest gap between consecutive timestamps of a time model (ms); 0 for a single point. */
+export function timeStep(model: TimeSeriesModel): number {
+  const ts = [...new Set(model.series.flatMap((s) => s.data.map((d) => d[0])))].sort((a, b) => a - b)
+  let step = Infinity
+  for (let i = 1; i < ts.length; i++) step = Math.min(step, ts[i] - ts[i - 1])
+  return Number.isFinite(step) ? step : 0
+}
+
+/** Few discrete buckets (per day, per hour) read better as bars: `bars`, and `stacked` with ≤ 48 buckets. */
+export function drawAsBars(kind: ChartSeries['kind'], model: TimeSeriesModel): boolean {
+  if (kind === 'bars') return true
+  if (kind !== 'stacked') return false
+  const buckets = new Set(model.series.flatMap((s) => s.data.map((d) => d[0]))).size
+  return buckets > 0 && buckets <= 48
+}
+
 export interface Slice { label: string; value: number; share: string }
 
 /** Donut / rank slices: positive values only, largest first for ranks. */
@@ -358,6 +374,28 @@ export function sectionStatus(s: Pick<RenderSection, 'kpis' | 'error' | 'restric
   if (accents.includes('danger')) return 'danger'
   if (accents.includes('warning')) return 'warning'
   return 'ok'
+}
+
+const FAILED_RE = /^\s*this section could not be generated\s*(?:\(([^)]*)\))?\s*[.:]?\s*/i
+
+/**
+ * Split a failed section's server note ("This section could not be generated
+ * (OperationalError). Other sections are unaffected; …") into the error class
+ * and the remaining explanation, so the card does not repeat its own heading.
+ */
+export function sectionFailure(notes: string[] | undefined): { code: string | null; detail: string | null; extra: string[] } {
+  const list = (notes || []).map((n) => n.trim()).filter(Boolean)
+  if (!list.length) return { code: null, detail: null, extra: [] }
+  const m = FAILED_RE.exec(list[0])
+  if (!m) return { code: null, detail: list[0], extra: list.slice(1) }
+  const rest = list[0].slice(m[0].length).trim()
+  return { code: m[1]?.trim() || null, detail: rest || null, extra: list.slice(1) }
+}
+
+/** "device_tracker" / "traffic" → "Device tracker" / "Traffic" (a category id without a catalog title). */
+export function humanize(id: string | null | undefined): string {
+  const s = (id || '').replace(/[_-]+/g, ' ').trim()
+  return s ? s[0].toUpperCase() + s.slice(1) : ''
 }
 
 /** Stable, index-based anchor (a section may appear twice with different options). */

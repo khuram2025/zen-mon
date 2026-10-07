@@ -12,7 +12,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   AppWindow, ArrowLeft, CalendarClock, ChevronDown, CopyPlus, FileQuestion, Pencil, RefreshCw, Server,
-  SlidersHorizontal, X,
+  SlidersHorizontal, Waypoints, X,
 } from 'lucide-react'
 import '@/features/reports/render/print.css'
 import '@/features/reports/viewer/viewer.css'
@@ -38,7 +38,7 @@ import { DeviceScopePicker } from '@/features/reports/viewer/DeviceScopePicker'
 import { ApplicationScopePicker } from '@/features/reports/viewer/ApplicationScopePicker'
 import { ExportMenu } from '@/features/reports/viewer/ExportMenu'
 import { ShareMenu } from '@/features/reports/viewer/ShareMenu'
-import { printReport, ReportPrintStyle } from '@/features/reports/viewer/print'
+import { printReport, ReportPrintStyle, usePrintOnLightTheme } from '@/features/reports/viewer/print'
 import {
   filterableFor, needsDefaultPeriod, parseNodes, parseSelection, resolveWindow, selectionKey, selectionLabel,
   selectionParams, type PeriodSelection,
@@ -49,19 +49,34 @@ import type { FlowFilter } from '@/lib/netflow/filters'
 const ID_PREFIX = 'rpt'
 const CALENDAR = new Set<string>(PERIODS.filter((p) => p.kind === 'calendar').map((p) => p.id))
 
-function NotFoundState({ legacy }: { legacy?: boolean }) {
+/** Classic report types that have their own page (the rest are export-only). */
+const LEGACY_PAGES: Record<string, string> = {
+  executive_summary: '/reports/executive',
+  device_health: '/reports/technical',
+  service_health: '/reports/business',
+}
+
+function NotFoundState({ legacyKey }: { legacyKey?: string | null }) {
+  const page = legacyKey ? LEGACY_PAGES[legacyKey] : undefined
   return (
     <div className="mx-auto mt-6 max-w-lg rounded-xl border border-border bg-surface px-6 py-12 text-center shadow-card dark:shadow-card-dark">
       <FileQuestion className="mx-auto h-9 w-9 text-muted" aria-hidden />
-      <h1 className="mt-3 text-lg font-semibold text-text">{legacy ? 'This report opens elsewhere' : 'Report not found'}</h1>
+      <h1 className="mt-3 text-lg font-semibold text-text">{legacyKey ? 'This report opens elsewhere' : 'Report not found'}</h1>
       <p className="mt-1.5 text-sm text-muted">
-        {legacy
-          ? 'This is a classic report type that the document viewer does not render. Open it from the report library.'
+        {legacyKey
+          ? 'This is a classic report type that the document viewer does not render.'
           : 'The link is not valid, or the template was deleted or is private to its owner.'}
       </p>
-      <Button asChild className="mt-6">
-        <Link to="/reports"><ArrowLeft aria-hidden /> Back to the report library</Link>
-      </Button>
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+        {page && (
+          <Button asChild>
+            <Link to={page}>Open the classic report</Link>
+          </Button>
+        )}
+        <Button asChild variant={page ? 'outline' : 'default'}>
+          <Link to="/reports"><ArrowLeft aria-hidden /> Back to the report library</Link>
+        </Button>
+      </div>
     </div>
   )
 }
@@ -81,6 +96,8 @@ export function SectionReportViewer() {
   const customId = sp.get('custom_id')
   const can = useCan()
   const userId = useAuth((s) => s.user?.id)
+
+  usePrintOnLightTheme()
 
   const catalogQ = useReportCatalog()
   const catalog = catalogQ.data
@@ -222,9 +239,15 @@ export function SectionReportViewer() {
   useLayoutEffect(() => {
     const el = toolbarRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => setToolbarH(Math.round(el.getBoundingClientRect().height)))
+    // Only a sticky toolbar (md and up) covers the top of the sections.
+    const measure = () => setToolbarH(getComputedStyle(el).position === 'sticky' ? Math.round(el.getBoundingClientRect().height) : 0)
+    const ro = new ResizeObserver(measure)
     ro.observe(el)
-    return () => ro.disconnect()
+    window.addEventListener('resize', measure)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
   }, [unknownKey, legacy])
   const remPx = useMemo(() => (typeof document !== 'undefined' ? parseFloat(getComputedStyle(document.documentElement).fontSize) : 14) || 14, [])
   const offsetPx = Math.round(remPx * 3.5 + toolbarH)
@@ -247,6 +270,19 @@ export function SectionReportViewer() {
 
   /* ── Derived labels ───────────────────────────────────────────────── */
   const title = report?.title || custom?.name || builtin?.title || 'Report'
+  const categoryId = report?.category || custom?.category || builtin?.category || null
+  const categoryTitle = catalog?.categories.find((c) => c.id === categoryId || c.title === categoryId)?.title
+    ?? (key !== 'custom' ? builtin?.category_title : null) ?? null
+
+  // The tab title names the report (it is also the default file name of "Save as PDF").
+  useEffect(() => {
+    if (unknownKey || legacy) return
+    const previous = document.title
+    document.title = `${title} · ${orgBranding.display_name || orgBranding.company_name || 'ZenPlus'}`
+    return () => {
+      document.title = previous
+    }
+  }, [title, unknownKey, legacy, orgBranding.display_name, orgBranding.company_name])
   const branding = useMemo(() => ({ ...orgBranding, ...(report?.branding ?? {}) }), [orgBranding, report?.branding])
   const periodText = formatPeriod(win.from, win.to, branding)
 
@@ -282,7 +318,7 @@ export function SectionReportViewer() {
   const [scheduleOpen, setScheduleOpen] = useState(false)
 
   if (notFound || legacy) {
-    return <NotFoundState legacy={legacy && !notFound} />
+    return <NotFoundState legacyKey={legacy && !notFound ? key : null} />
   }
 
   const scopeSlot = (
@@ -297,7 +333,22 @@ export function SectionReportViewer() {
           <ScopeChip icon={SlidersHorizontal}>All monitored infrastructure</ScopeChip>
         )}
       </ul>
-      {sentNf && <FilterChips filter={nfScope.filter} tz={tz} />}
+      {sentNf && (
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted">
+          <Waypoints className="h-3 w-3" aria-hidden /> NetFlow
+        </span>
+      )}
+      {sentNf && (
+        <FilterChips
+          filter={nfScope.filter}
+          tz={tz}
+          onRemove={(keys) => {
+            const next = { ...nfScope.filter } as Record<string, unknown>
+            for (const k of keys) delete next[k]
+            setNf(next as FlowFilter)
+          }}
+        />
+      )}
       {(sentNodes.length > 0 || sentApp || sentNf) && (
         <button
           type="button"
@@ -329,8 +380,8 @@ export function SectionReportViewer() {
         ref={toolbarRef}
         className="relative z-10 -mx-5 -mt-5 mb-4 border-b md:sticky md:top-11 border-border bg-bg/90 px-5 py-2.5 backdrop-blur supports-[backdrop-filter]:bg-bg/75 print:hidden"
       >
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="mr-auto flex min-w-0 items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex min-w-[6rem] flex-1 basis-0 items-center gap-2">
             <Link
               to="/reports"
               className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
@@ -375,7 +426,7 @@ export function SectionReportViewer() {
               custom?.can_edit ? (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="sm" className="h-8 gap-1.5">
+                    <Button variant="outline" size="sm" className="h-8 gap-1.5" aria-label="Customize this template">
                       <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
                       <span className="hidden text-xs font-semibold xl:inline">Customize</span>
                       <ChevronDown className="h-3 w-3 opacity-60" aria-hidden />
@@ -420,6 +471,21 @@ export function SectionReportViewer() {
           </div>
         </div>
 
+        {catalogQ.isError && (
+          <p role="status" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text">
+            <span>
+              <span className="font-semibold text-warning-fg">Scope filters are unavailable:</span> the report catalog could not be loaded.
+            </span>
+            <button
+              type="button"
+              onClick={() => void catalogQ.refetch()}
+              disabled={catalogQ.isFetching}
+              className="font-semibold text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-60"
+            >
+              {catalogQ.isFetching ? 'Retrying…' : 'Retry'}
+            </button>
+          </p>
+        )}
         {nfScope.invalid.length > 0 && (
           <p role="status" className="mt-2 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text">
             <span className="font-semibold text-warning-fg">Not applied:</span> the link's NetFlow scope has invalid {nfScope.invalid.join(', ')}.
@@ -439,7 +505,7 @@ export function SectionReportViewer() {
       ) : !report ? (
         <ReportDocumentSkeleton />
       ) : (
-        <div className={cn(hasRail && 'lg:grid lg:grid-cols-[13.5rem_minmax(0,1fr)] lg:gap-6 print:!block')}>
+        <div className={cn(hasRail && 'lg:grid lg:grid-cols-[11.5rem_minmax(0,1fr)] lg:gap-5 xl:grid-cols-[13.5rem_minmax(0,1fr)] xl:gap-6 print:!block')}>
           {hasRail && (
             <div className="hidden lg:block print:hidden">
               <div className="sticky top-[var(--zp-report-offset)] max-h-[calc(100vh_-_var(--zp-report-offset)_-_1rem)] overflow-y-auto pb-4">
@@ -475,6 +541,7 @@ export function SectionReportViewer() {
                   origin={key === 'custom' ? 'custom' : 'builtin'}
                   scope={scopeSlot}
                   badges={customBadges}
+                  categoryTitle={categoryTitle}
                 />
               </div>
             </div>

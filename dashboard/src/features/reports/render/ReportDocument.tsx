@@ -25,6 +25,8 @@ export interface ReportDocumentProps {
   breadcrumb?: ReactNode | false
   scope?: ReactNode
   badges?: ReactNode
+  /** Display title of the report's category, from the catalog. */
+  categoryTitle?: string | null
   className?: string
 }
 
@@ -60,7 +62,7 @@ export function AccessBanner({ report }: { report: Pick<RenderReport, 'restricte
  * footer and disclaimer. Used by the viewer and the designer's live preview.
  */
 export function ReportDocument({
-  report, branding: orgBranding, sectionMeta, compact, canExport, idPrefix = 'rpt', origin, breadcrumb, scope, badges, className,
+  report, branding: orgBranding, sectionMeta, compact, canExport, idPrefix = 'rpt', origin, breadcrumb, scope, badges, categoryTitle, className,
 }: ReportDocumentProps) {
   const branding = useMemo(() => ({ ...orgBranding, ...(report.branding ?? {}) }), [orgBranding, report.branding])
   const rows = useMemo(() => layoutRows(report.sections), [report.sections])
@@ -84,6 +86,7 @@ export function ReportDocument({
         compact={compact}
         titleId={titleId}
         coverBreak={report.sections.length > 2}
+        categoryTitle={categoryTitle}
       />
 
       <AccessBanner report={report} />
@@ -99,7 +102,7 @@ export function ReportDocument({
       ) : (
         <div className="space-y-4">
           {rows.map((row) => (
-            <div key={row[0].index} className={cn('grid gap-4', row.length === 2 && 'xl:grid-cols-2')}>
+            <div key={row[0].index} className={cn('grid gap-4', row.length === 2 && (compact ? '2xl:grid-cols-2' : 'xl:grid-cols-2'))}>
               {row.map(({ section, index }) => (
                 <SectionBlock
                   key={index}

@@ -68,6 +68,10 @@
     border: 0 !important;
     border-radius: 0 !important;
   }
+  /* Interactive bits inside the cover (scope chip remove buttons, clear scope). */
+  .zp-report-print .zp-cover button {
+    display: none !important;
+  }
   .zp-report-print .zp-cover-break {
     break-after: page;
     page-break-after: always;
@@ -98,6 +102,17 @@
   }
   .zp-report-print .overflow-x-auto {
     overflow: visible !important;
+  }
+  /* Wide tables fit the page: smaller type, tighter cells, columns may wrap. */
+  .zp-report-print table {
+    font-size: 8.5pt;
+  }
+  .zp-report-print th {
+    min-width: 0 !important;
+  }
+  .zp-report-print th > button,
+  .zp-report-print td {
+    padding: 3px 6px !important;
   }
 
   /* Charts drawn at screen width scale down to the page. */

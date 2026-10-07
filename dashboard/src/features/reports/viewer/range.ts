@@ -42,10 +42,13 @@ export function parseSelection(range: string | null, from: string | null, to: st
   return { kind: 'period', id: fallback }
 }
 
-/** True when the URL names no period, so the template default applies. */
+/** True when the URL names no usable period, so the template default applies. */
 export function needsDefaultPeriod(range: string | null, from: string | null, to: string | null): boolean {
-  if (range) return false
-  return !(validDate(from) && validDate(to))
+  if (range && (isPeriodId(range) || LEGACY[range] || range === '1h')) return false
+  if (range && range !== 'custom') return true
+  const f = validDate(from)
+  const t = validDate(to)
+  return !(f && t && f < t)
 }
 
 /** URL parameters for a selection (relative periods carry no dates). */
