@@ -360,7 +360,14 @@ def _send_individually(gw: dict, recipients: list[str], subject: str, text_body:
                 failed.extend((a, _smtp_error(exc)) for a in recipients[i:])
                 break
             except smtplib.SMTPException as exc:
+                # Refused for this recipient only (SMTPException is an OSError,
+                # so this must come before the session-level handler).
                 failed.append((addr, _smtp_error(exc)))
+            except OSError as exc:
+                # The session is gone (timeout, reset): the addresses already
+                # sent stay recorded, the rest failed.
+                failed.extend((a, _smtp_error(exc)) for a in recipients[i:])
+                break
     finally:
         _smtp_close(server)
     return sent, failed
@@ -596,13 +603,23 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         "company_name": branding.display_name,
         "product_name": "ZenPlus",
     }
+    if not is_sections:
+        # Legacy reports carry the same branding as template reports: logo,
+        # colour, footer, disclaimer, window and generated time in the
+        # organisation timezone (report_html reads these keys).
+        legacy_meta = await _sections.build_report_meta(
+            db, title, _naive_utc(start), _naive_utc(end), branding=branding)
+        meta = {**legacy_meta, **meta, "start": start, "end": end,
+                "generated_label": legacy_meta["generated_label"]}
 
     # Persist a shareable HTML artifact.
     token = secrets.token_urlsafe(24)
+    # Rendering is CPU-bound (matplotlib charts, fpdf2, openpyxl): keep it off
+    # the event loop, which also serves API requests on this worker.
     if is_sections:
-        html_page = _sections.render_html(sec_meta, secs)
+        html_page = await asyncio.to_thread(_sections.render_html, sec_meta, secs)
     else:
-        html_page = report_html.build_report_html(meta, data)
+        html_page = await asyncio.to_thread(report_html.build_report_html, meta, data)
     run_row = (await db.execute(
         text("""INSERT INTO report_runs
                 (schedule_id, report_type, period, title, token, html, status, generated_at)
@@ -628,10 +645,10 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                 payload = html_page.encode("utf-8")
             elif is_sections:
                 if fmt == "pdf":
-                    payload = bytes(_sections.render_pdf(sec_meta, secs))
+                    payload = bytes(await asyncio.to_thread(_sections.render_pdf, sec_meta, secs))
                 elif fmt == "excel":
                     from app.services import report_xlsx
-                    payload = bytes(report_xlsx.render_xlsx(sec_meta, secs))
+                    payload = bytes(await asyncio.to_thread(report_xlsx.render_xlsx, sec_meta, secs))
                 else:
                     raise _AttachmentUnavailable(
                         f"{FORMAT_NAMES.get(fmt, fmt)} attachments are only available for legacy report "
@@ -662,17 +679,19 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                              f"({type(exc).__name__}); the email was sent without it")
 
     inline_images: list[tuple[str, bytes, str]] = []
+    logo = _email_logo(_sections, sec_meta if is_sections else meta)
+    if logo:
+        inline_images.append(logo)
     if is_sections:
-        logo = _email_logo(_sections, sec_meta)
-        extra: dict[str, Any] = {}
-        if logo:
-            inline_images.append(logo)
-            extra["logo_cid"] = logo[0]
-        email_html = _sections.email_summary_html(sec_meta, secs, view_url,
-                                                  attached=attachment is not None, **extra)
+        extra: dict[str, Any] = {"logo_cid": logo[0]} if logo else {}
+        email_html = await asyncio.to_thread(
+            lambda: _sections.email_summary_html(sec_meta, secs, view_url,
+                                                 attached=attachment is not None, **extra))
         email_text = _sections.email_summary_text(sec_meta, secs, view_url)
     else:
-        email_html = report_html.build_report_email_html(meta, data, view_url, attached=attachment is not None)
+        email_meta = {**meta, "logo_cid": logo[0]} if logo else meta
+        email_html = report_html.build_report_email_html(email_meta, data, view_url,
+                                                         attached=attachment is not None)
         email_text = report_html.build_report_email_text(meta, data, view_url)
     subject = email_subject(branding, meta["title"], plabel)
 

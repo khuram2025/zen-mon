@@ -452,7 +452,8 @@ def test_legacy_types_keep_their_pipeline_on_the_resolved_window(gen, monkeypatc
     assert kw["redact_netflow"] is False and kw["report_type"] == "executive_summary"
     fname, payload, mime = gen["sent"][0]["attachment"]
     assert fname.startswith("Acme-Ops-Exec-") and fname.endswith(".pdf") and payload == b"%PDF legacy"
-    assert gen["sent"][0]["inline"] == [] and gen["sent"][0]["subject"].startswith("[Confidential] Exec — ")
+    # Legacy reports carry the organisation logo inline, like template reports.
+    assert gen["sent"][0]["inline"] == [LOGO] and gen["sent"][0]["subject"].startswith("[Confidential] Exec — ")
 
 
 # ── Email construction ───────────────────────────────────────────────────────
@@ -533,3 +534,36 @@ def test_recipient_normalisation():
             rs.normalize_recipients([bad])
     with pytest.raises(ValueError):
         rs.normalize_recipients([f"u{i}@example.com" for i in range(rs.MAX_RECIPIENTS + 1)])
+
+
+
+def test_a_dropped_session_keeps_the_recipients_already_sent(monkeypatch):
+    sent = []
+
+    class FlakySMTP:
+        def __init__(self, host, port, timeout=None):
+            pass
+
+        def starttls(self, context=None):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def sendmail(self, sender, rcpts, raw):
+            if rcpts == ["c@example.com"]:
+                raise TimeoutError("timed out")
+            sent.append(rcpts[0])
+
+        def quit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rs.smtplib, "SMTP", FlakySMTP)
+    ok, failed = rs._send_individually({"host": "smtp.example", "from_email": "r@acme.example"},
+                                       ["a@example.com", "b@example.com", "c@example.com", "d@example.com"],
+                                       "Subject", "text", "<p>html</p>")
+    assert ok == ["a@example.com", "b@example.com"] == sent
+    assert [a for a, _ in failed] == ["c@example.com", "d@example.com"]
