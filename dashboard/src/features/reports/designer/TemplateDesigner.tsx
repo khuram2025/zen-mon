@@ -158,6 +158,12 @@ export function TemplateDesigner({ mode, initial, catalog, branding, template, b
   }
 
   const addSection = (def: SectionDef, at?: number) => {
+    if (!def.available) {
+      // The server refuses sections the author may not view (shared templates
+      // run under other people's permissions).
+      announce(`${def.title} needs a permission your role does not have, so it cannot be added.`)
+      return
+    }
     if (draft.entries.length >= MAX_SECTIONS) {
       announce(`The template already has the maximum of ${MAX_SECTIONS} sections.`)
       return
@@ -166,7 +172,7 @@ export function TemplateDesigner({ mode, initial, catalog, branding, template, b
     const pos = at ?? addPosition(draft.entries, selectedUid)
     setDraft((d) => ({ ...d, entries: insertEntry(d.entries, entry, pos) }))
     setSelectedUid(entry.uid)
-    announce(`Added ${def.title}. ${positionText(def.title, pos, draft.entries.length + 1)}${def.available ? '' : '. Restricted for your role.'}`)
+    announce(`Added ${def.title}. ${positionText(def.title, pos, draft.entries.length + 1)}`)
   }
 
   const loadBuiltin = (t: CatalogTemplate) => {

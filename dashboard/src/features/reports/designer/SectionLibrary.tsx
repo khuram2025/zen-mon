@@ -180,7 +180,7 @@ function LibraryItem({ def, used, full, expanded, onToggle, onAdd, draggable, ba
         <Hint content={<span className="line-clamp-4">{def.description}</span>} side="right" delay={600}>
           <button
             type="button"
-            disabled={full}
+            disabled={full || !def.available}
             onClick={onAdd}
             aria-describedby={expanded ? descId : undefined}
             className="flex min-w-0 flex-1 items-start gap-2 rounded-lg px-2 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-60"
@@ -232,7 +232,7 @@ function LibraryItem({ def, used, full, expanded, onToggle, onAdd, draggable, ba
           </p>
           <p className="text-muted">
             Data access: {def.requires.length ? def.requires.map(permissionLabel).join(', ') : 'report access only'}
-            {!def.available && <span className="font-medium text-warning-fg"> — your role lacks this, so your preview shows it as restricted.</span>}
+            {!def.available && <span className="font-medium text-warning-fg"> — your role lacks this, so you can't add it to a template.</span>}
           </p>
         </div>
       )}
