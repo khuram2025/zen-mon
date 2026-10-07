@@ -13,6 +13,8 @@ export type User = {
   /** Digest of role + permissions; changes when the account's effective access changes. */
   permissions_revision?: string
   scope_tags?: string[]
+  /** Scope inherited from the role; the effective scope is both lists together. */
+  role_scope_tags?: string[]
   must_change_password?: boolean
   mfa_enabled?: boolean
   /** Policy requires MFA and this account has not enrolled yet. */

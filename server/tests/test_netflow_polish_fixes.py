@@ -330,6 +330,10 @@ def test_share_links_go_to_the_owner_and_report_managers_only(monkeypatch):
     monkeypatch.setattr(RS, "get_role_permissions", role_perms)
     from app.core import scoping
     monkeypatch.setattr(scoping, "get_role_permissions", role_perms)
+
+    async def no_role_scope(db, role):
+        return []
+    monkeypatch.setattr(scoping, "get_role_scope_tags", no_role_scope)
     owner = uuid.uuid4()
 
     def sees(role, uid, owner_id, scope=None):

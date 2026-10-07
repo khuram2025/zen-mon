@@ -19,7 +19,9 @@ from app.core.security import (
     create_access_token,
     get_current_user,
     get_role_permissions,
+    get_role_scope_tags,
     hash_password,
+    SCOPE_LOOKUP_FAILED,
     security,
     verify_password,
 )
@@ -77,6 +79,7 @@ async def _user_response(db: AsyncSession, user: User, session_id: Optional[str]
     resp = UserResponse.model_validate(user)
     resp.permissions = await get_role_permissions(db, user.role)
     resp.permissions_revision = _permissions_revision(user.role, resp.permissions)
+    resp.role_scope_tags = [t for t in await get_role_scope_tags(db, user.role) if t != SCOPE_LOOKUP_FAILED]
     resp.must_change_password = bool(getattr(user, "must_change_password", False))
     resp.mfa_enabled = bool(getattr(user, "mfa_enabled", False))
     resp.mfa_required = (not resp.mfa_enabled) and await auth_policy.mfa_required_for(db, user)

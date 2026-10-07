@@ -41,6 +41,9 @@ class UserResponse(BaseModel):
     # Visibility scope (empty = unrestricted); the UI uses this to show a
     # "filtered view" indicator, never to enforce — enforcement is server-side.
     scope_tags: list[str] = []
+    # Scope inherited from the role (roles.scope_tags); the effective scope is
+    # scope_tags plus these, unless the role carries system.admin.
+    role_scope_tags: list[str] = []
     last_login: Optional[datetime]
     must_change_password: bool = False
     mfa_enabled: bool = False

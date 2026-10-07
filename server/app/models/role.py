@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, Boolean, DateTime, Text, Integer
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.types import JSON
 
 from app.core.database import Base
@@ -17,6 +17,9 @@ class Role(Base):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     permissions: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Visibility scope shared by every member (migrate-154): tag names, unioned
+    # with each user's own scope_tags. Empty = the role adds no limit.
+    scope_tags: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]", nullable=False)
     # Optimistic concurrency token (bumped on every change) and the version of
     # the built-in definition this row was last reconciled to (migrate-150).
     revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)

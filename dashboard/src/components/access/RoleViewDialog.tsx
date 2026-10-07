@@ -13,11 +13,16 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { useCanAny } from '@/stores/auth'
 import type { Catalog } from '@/lib/access'
 import { PermissionMatrix } from './PermissionMatrix'
+import { MenuPreview, ScopeChips } from './MenuPreview'
+import { AccessSummary } from './RoleEditorDialog'
 
 type Member = { id: string; username: string; full_name: string | null; email: string; is_active: boolean; auth_source: string; scope_tags: string[]; last_login: string | null; mfa_enabled: boolean }
 type HistoryRow = { revision: number; action: string; actor: string | null; at: string; added: string[]; removed: string[]; affected_users: number; reason: string | null }
 
-const ACTION_LABEL: Record<string, string> = { create: 'Created', update: 'Updated', rename: 'Renamed', delete: 'Deleted', builtin_reconcile: 'Built-in definition updated' }
+const ACTION_LABEL: Record<string, string> = {
+  create: 'Created', update: 'Updated', rename: 'Renamed', delete: 'Deleted', builtin_reconcile: 'Built-in definition updated',
+  builtin_create: 'Built-in role added', permission_split: 'Server permissions separated from APM',
+}
 
 /** Read-only role detail: what it grants, who has it, and how it changed. */
 export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: {
@@ -60,12 +65,34 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs defaultValue="permissions">
+        <Tabs defaultValue="overview">
           <TabsList className="bg-surface2/50 p-1">
+            <TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger>
             <TabsTrigger value="permissions" className="text-xs">Permissions</TabsTrigger>
             {canMembers && <TabsTrigger value="members" className="text-xs">Members{role ? ` (${role.user_count})` : ''}</TabsTrigger>}
             {canHistory && <TabsTrigger value="history" className="text-xs">History</TabsTrigger>}
           </TabsList>
+
+          <TabsContent value="overview" className="mt-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <section className="rounded-lg border border-border p-3 md:col-span-2">
+                <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Access by area</h4>
+                <AccessSummary catalog={catalog} granted={granted} superPerm={superPerm} />
+              </section>
+              <section className="rounded-lg border border-border p-3">
+                <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Visibility</h4>
+                {granted.has(superPerm)
+                  ? <p className="text-xs text-muted">Everything: full administration bypasses scope.</p>
+                  : (role?.scope_tags || []).length
+                    ? <><ScopeChips tags={role?.scope_tags} max={12} /><p className="mt-1 text-[11px] text-muted">Members see only resources tagged with any of these, plus their own scope tags.</p></>
+                    : <p className="text-xs text-muted">All resources the permissions allow (members may still have their own scope tags).</p>}
+              </section>
+              <section className="rounded-lg border border-border p-3">
+                <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Menu members see</h4>
+                <MenuPreview permissions={granted} />
+              </section>
+            </div>
+          </TabsContent>
 
           <TabsContent value="permissions" className="mt-3">
             {granted.has(superPerm) && (
@@ -93,7 +120,7 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
                           <Badge variant={u.is_active ? 'success' : 'outline'}>{u.is_active ? 'Active' : 'Disabled'}</Badge>
                           {u.auth_source !== 'local' && <Badge variant="info">{u.auth_source.toUpperCase()}</Badge>}
                           {u.mfa_enabled && <Badge variant="outline">MFA</Badge>}
-                          <span className="text-muted">{u.scope_tags.length ? `scope: ${u.scope_tags.join(', ')}` : 'all resources'}</span>
+                          <span className="text-muted">{u.scope_tags.length ? `own scope: ${u.scope_tags.join(', ')}` : (role?.scope_tags || []).length ? 'role scope only' : 'all resources'}</span>
                           <span className="text-muted">signed in {relativeTime(u.last_login)}</span>
                         </div>
                       </li>

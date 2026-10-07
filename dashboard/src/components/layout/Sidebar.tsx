@@ -22,6 +22,7 @@ import {
   type NavGroup,
   type NavNode,
 } from './navigation'
+import { filterNavGroups } from './navAccess'
 
 export const SIDEBAR_RAIL = 76
 export const SIDEBAR_WIDE = 256
@@ -58,19 +59,9 @@ function AlertBadge({ count }: { count: number }) {
 }
 
 /** Filters out nodes the signed-in role may not see, children included. */
-function usePermittedGroups(): NavGroup[] {
+export function usePermittedGroups(): NavGroup[] {
   const user = useAuth((s) => s.user)
-  return useMemo(() => {
-    const keep = (n: NavNode): NavNode | null => {
-      if (n.permission && !(Array.isArray(n.permission) ? n.permission : [n.permission as string]).some((p) => hasPermission(user, p))) return null
-      const children = (n.children || []).map(keep).filter(Boolean) as NavNode[]
-      if (n.children && children.length === 0) return null
-      return n.children ? { ...n, children } : n
-    }
-    return NAV_GROUPS.map((g) => ({ ...g, items: g.items.map(keep).filter(Boolean) as NavNode[] })).filter(
-      (g) => g.items.length > 0,
-    )
-  }, [user])
+  return useMemo(() => filterNavGroups(NAV_GROUPS, (p) => hasPermission(user, p)), [user])
 }
 
 /* ------------------------------------------------------------------ */
@@ -309,17 +300,21 @@ export function Sidebar({
   const navigate = useNavigate()
   const wide = variant === 'drawer' || expanded
 
+  const canSeeAlerts = hasPermission(user, 'alerts.view')
   const { data: stats } = useQuery<{ active?: number }>({
     queryKey: ['alerts', 'stats'],
     queryFn: async () => (await api.get('/alerts/stats')).data,
     refetchInterval: 15_000,
+    enabled: canSeeAlerts,
   })
-  const alertCount = Number(stats?.active || 0)
+  const alertCount = canSeeAlerts ? Number(stats?.active || 0) : 0
 
   const { data: sysStatus } = useQuery<{ current_version?: string }>({
     queryKey: ['system-update-status'],
     queryFn: async () => (await api.get('/system/update-status')).data,
     retry: false,
+    // Update status is a Full administration endpoint.
+    enabled: hasPermission(user, 'system.admin'),
   })
 
   /* --- group accordion ------------------------------------------- */

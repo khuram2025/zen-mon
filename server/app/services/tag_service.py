@@ -42,12 +42,14 @@ TAG_ARRAY_SURFACES: tuple[tuple[str, str, str], ...] = (
     ("netpath_probes", "tags", "text[]"),
 )
 
-# users.scope_tags participates in RENAME only: access must follow a renamed
-# tag, but a DELETE keeps the (now matching-nothing) name in the scope —
-# stripping it could silently widen a user whose last scope tag was deleted
-# to an unrestricted view. Fail-closed. See migrate-104.
+# users.scope_tags and roles.scope_tags participate in RENAME only: access must
+# follow a renamed tag, but a DELETE keeps the (now matching-nothing) name in
+# the scope — stripping it could silently widen a user (or every member of a
+# role) whose last scope tag was deleted to an unrestricted view. Fail-closed.
+# See migrate-104 and migrate-154.
 TAG_RENAME_ONLY_SURFACES: tuple[tuple[str, str, str], ...] = (
     ("users", "scope_tags", "jsonb"),
+    ("roles", "scope_tags", "jsonb"),
 )
 
 TAG_SCOPE_COLUMNS: tuple[tuple[str, str, str | None], ...] = (

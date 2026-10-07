@@ -196,6 +196,9 @@ class UserOut(BaseModel):
     is_active: bool
     auth_source: str = "local"
     scope_tags: list[str] = []
+    # Scope inherited from the role (roles.scope_tags); filled by list/detail
+    # endpoints. The effective scope is scope_tags plus these.
+    role_scope_tags: list[str] = []
     last_login: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -208,11 +211,17 @@ class UserOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-def _user_out(user: User) -> UserOut:
+def _user_out(user: User, role_scopes: Optional[dict[str, list[str]]] = None) -> UserOut:
     out = UserOut.model_validate(user)
     now = datetime.now(timezone.utc)
     out.locked = bool(user.locked_until and user.locked_until > now)
+    if role_scopes is not None:
+        out.role_scope_tags = list(role_scopes.get(user.role) or [])
     return out
+
+
+async def _role_scopes(db: AsyncSession) -> dict[str, list[str]]:
+    return {r.name: list(r.scope_tags or []) for r in await _db_roles(db)}
 
 
 class RoleOut(BaseModel):
@@ -341,10 +350,12 @@ async def list_users(
         conds.append(User.is_active.is_(False))
     elif status == "locked":
         conds.append(and_(User.locked_until.is_not(None), User.locked_until > now))
+    # Scoped by their own tags or by their role's (roles.scope_tags).
+    role_scoped = User.role.in_(select(Role.name).where(func.jsonb_array_length(Role.scope_tags) > 0))
     if scoped is True:
-        conds.append(func.jsonb_array_length(User.scope_tags) > 0)
+        conds.append(or_(func.jsonb_array_length(User.scope_tags) > 0, role_scoped))
     elif scoped is False:
-        conds.append(func.jsonb_array_length(User.scope_tags) == 0)
+        conds.append(and_(func.jsonb_array_length(User.scope_tags) == 0, ~role_scoped))
     if never_signed_in is True:
         conds.append(User.last_login.is_(None))
     elif never_signed_in is False:
@@ -359,7 +370,8 @@ async def list_users(
         select(User).where(*conds).order_by(ordering, User.username).limit(limit).offset(offset)
     )).scalars().all()
     response.headers["X-Total-Count"] = str(total)
-    return [_user_out(u) for u in rows]
+    role_scopes = await _role_scopes(db)
+    return [_user_out(u, role_scopes) for u in rows]
 
 
 @router.get("/access-review")
@@ -382,7 +394,9 @@ async def access_review_export(
         role = roles.get(u.role)
         perms = effective_permissions(role.permissions if role else LEGACY_ROLE_PERMISSIONS.get(u.role, []))
         risky = sorted(p for p in perms if risk_of(p) in ("privileged", "critical"))
-        scope = ", ".join(u.scope_tags or []) if (u.scope_tags and SUPERUSER_PERMISSION not in perms) else (
+        own_and_role = list(u.scope_tags or []) + [t for t in (role.scope_tags if role else None) or []
+                                                    if t.lower() not in {x.lower() for x in (u.scope_tags or [])}]
+        scope = ", ".join(own_and_role) if (own_and_role and SUPERUSER_PERMISSION not in perms) else (
             "all resources (full administration)" if SUPERUSER_PERMISSION in perms else "all resources")
 
         def cell(v: str) -> str:   # neutralize spreadsheet formula injection
@@ -494,8 +508,10 @@ async def create_user(
         raise HTTPException(status_code=422, detail=problems[0])
 
     await _assert_unique_identity(db, username=data.username, email=data.email)
+    role_scope = list(role.scope_tags or []) if role is not None else []
     scope_tags = await delegation.validate_assigned_scope(
-        db, current_user, await tag_service.canonicalize_tags(db, data.scope_tags))
+        db, current_user, await tag_service.canonicalize_tags(db, data.scope_tags), role_scope=role_scope)
+    await delegation.assert_effective_scope_within(db, current_user, scope_tags, role_scope)
 
     user = User(
         username=data.username,
@@ -535,7 +551,7 @@ async def get_user(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("users.view", "users.manage")),
 ):
-    return _user_out(await _get_user_or_404(db, user_id))
+    return _user_out(await _get_user_or_404(db, user_id), await _role_scopes(db))
 
 
 @router.put("/{user_id}", response_model=UserOut)
@@ -595,10 +611,22 @@ async def update_user(
         if {t.lower() for t in canonical} != {t.lower() for t in (user.scope_tags or [])}:
             if is_self and not await delegation.is_full_admin(db, current_user):
                 raise HTTPException(status_code=400, detail="You cannot change your own visibility scope")
-            canonical = await delegation.validate_assigned_scope(db, current_user, canonical)
+            final_role = await _role_by_name(db, user.role)
+            canonical = await delegation.validate_assigned_scope(
+                db, current_user, canonical,
+                role_scope=list(final_role.scope_tags or []) if final_role is not None else [])
             changes["scope_tags"] = {"from": list(user.scope_tags or []), "to": canonical}
             user.scope_tags = canonical
             access_changed = True
+
+    if "role" in changes or "scope_tags" in changes:
+        # Own tags plus the (possibly new) role's tags must stay within a
+        # scoped actor's scope: moving a user to an unscoped role must not
+        # leave them unrestricted.
+        final_role = await _role_by_name(db, user.role)
+        await delegation.assert_effective_scope_within(
+            db, current_user, user.scope_tags,
+            list(final_role.scope_tags or []) if final_role is not None else [])
 
     if "is_active" in fields and data.is_active is not None and data.is_active != user.is_active:
         if is_self and not data.is_active:
@@ -822,7 +850,9 @@ async def effective_access(
                   "risk": risk_of(pid)} for pid, pl, _ in perms]
         modules.append({"module": mid, "label": label, "permissions": items,
                         "granted_count": sum(1 for i in items if i["granted"]), "total": len(items)})
-    scope = list(user.scope_tags or [])
+    own_scope = list(user.scope_tags or [])
+    role_scope = list(role.scope_tags or []) if role else []
+    scope = own_scope + [t for t in role_scope if t.lower() not in {x.lower() for x in own_scope}]
     scope_state = "all" if (full or not scope) else "scoped"
     history = (await db.execute(text(
         "SELECT created_at, action, actor_username, metadata FROM audit_logs "
@@ -830,7 +860,7 @@ async def effective_access(
         {"rid": str(user.id)})).all()
     session_count = len(await session_service.list_sessions(db, user.id))
     return {
-        "user": _user_out(user).model_dump(mode="json"),
+        "user": _user_out(user, {user.role: role_scope}).model_dump(mode="json"),
         "role": {"name": user.role, "display_name": role.display_name if role else user.role,
                  "exists": role is not None, "full_administration": full},
         "permissions": modules,
@@ -839,6 +869,8 @@ async def effective_access(
         "scope": {
             "state": scope_state,
             "tags": scope,
+            "user_tags": own_scope,
+            "role_tags": role_scope,
             "ignored_because_full_administration": bool(full and scope),
             "note": ("Full administration bypasses visibility scope; stored tags apply again if the role changes."
                      if full else

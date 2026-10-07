@@ -107,8 +107,10 @@ export interface User {
   role: string
   is_active?: boolean
   auth_source?: 'local' | 'ldap' | 'radius' | 'oidc'
-  /** Visibility scope: tag names this user is limited to. Empty = unrestricted. */
+  /** Visibility scope: the user's own tag names. Their role's tags add to these. */
   scope_tags?: string[]
+  /** Scope inherited from the role (roles.scope_tags). */
+  role_scope_tags?: string[]
   last_login: string | null
   created_at?: string
   updated_at?: string
@@ -125,6 +127,8 @@ export interface Role {
   display_name: string
   description: string
   permissions: string[]
+  /** Visibility scope every member inherits (any-of tag match); empty = no role-level limit. */
+  scope_tags?: string[]
   is_system: boolean
   user_count: number
   /** Optimistic-concurrency token; send it back as expected_revision on save. */
@@ -150,6 +154,8 @@ export interface PermissionCatalogPermission {
 export interface PermissionCatalogModule {
   module: string
   label: string
+  /** Product area for grouping (Network, Systems, Applications, …). */
+  area?: string
   permissions: PermissionCatalogPermission[]
 }
 

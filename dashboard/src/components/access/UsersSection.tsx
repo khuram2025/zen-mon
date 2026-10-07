@@ -258,14 +258,21 @@ export function UsersSection() {
                       </Td>
                       <Td><Badge variant={isAdmin ? 'success' : 'info'}>{roleLabel[u.role] || u.role}</Badge></Td>
                       <Td>
-                        {isAdmin ? <span className="text-xs text-muted" title="Full administration bypasses visibility scope">All resources</span>
-                          : (u.scope_tags || []).length === 0 ? <span className="text-xs text-muted">All resources</span>
-                          : (
-                            <div className="flex max-w-[220px] flex-wrap gap-1">
-                              {(u.scope_tags || []).slice(0, 3).map((t) => <TagBadge key={t} name={t} color={tagColor(t, tagColors)} />)}
-                              {(u.scope_tags || []).length > 3 && <span className="text-[10px] text-muted">+{(u.scope_tags || []).length - 3}</span>}
+                        {(() => {
+                          if (isAdmin) return <span className="text-xs text-muted" title="Full administration bypasses visibility scope">All resources</span>
+                          // Effective scope: the role's tags plus the user's own.
+                          const own = u.scope_tags || []
+                          const fromRole = (u.role_scope_tags || []).filter((t) => !own.some((o) => o.toLowerCase() === t.toLowerCase()))
+                          const all = [...fromRole, ...own]
+                          if (all.length === 0) return <span className="text-xs text-muted">All resources</span>
+                          return (
+                            <div className="flex max-w-[220px] flex-wrap gap-1" title={fromRole.length ? `From the role: ${fromRole.join(', ')}${own.length ? ` · own: ${own.join(', ')}` : ''}` : undefined}>
+                              {all.slice(0, 3).map((t) => <TagBadge key={t} name={t} color={tagColor(t, tagColors)} />)}
+                              {all.length > 3 && <span className="text-[10px] text-muted">+{all.length - 3}</span>}
+                              {fromRole.length > 0 && <span className="text-[10px] text-muted">via role</span>}
                             </div>
-                          )}
+                          )
+                        })()}
                       </Td>
                       <Td className="text-xs">{SOURCE_LABEL[u.auth_source || 'local'] || u.auth_source}</Td>
                       <Td>

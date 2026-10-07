@@ -306,7 +306,13 @@ function ProfileCard() {
             ['Full name', user?.full_name || '—'],
             ['Role', user?.role || '—'],
             ['Sign-in', (user?.auth_source || 'local').toUpperCase()],
-            ['Visibility', (user?.scope_tags || []).length ? `Tags: ${(user?.scope_tags || []).join(', ')}` : 'All resources your role permits'],
+            ['Visibility', (() => {
+              if ((user?.permissions || []).includes('system.admin')) return 'All resources (full administration)'
+              const own = user?.scope_tags || []
+              const fromRole = (user?.role_scope_tags || []).filter((t) => !own.some((o) => o.toLowerCase() === t.toLowerCase()))
+              const all = [...fromRole, ...own]
+              return all.length ? `Tags: ${all.join(', ')}${fromRole.length ? ' (role tags included)' : ''}` : 'All resources your role permits'
+            })()],
           ].map(([k, v]) => (
             <div key={k} className="flex items-baseline justify-between gap-4 border-b border-border pb-2 last:border-0 last:pb-0">
               <span className="text-xs uppercase tracking-wider text-muted">{k}</span>

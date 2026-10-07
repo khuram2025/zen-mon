@@ -1,15 +1,19 @@
 """Per-user tag visibility scoping.
 
-Roles answer "what can you do"; users.scope_tags answers "what can you
-see". A user with a non-empty scope sees only entities whose tags share at
-least one name (case-insensitively) with that scope — devices, servers,
-service checks, APM services, and the alerts attached to them. Untagged
-entities are hidden from scoped users: fail-closed, so an unclassified
-device never leaks into a team's filtered view.
+Role permissions answer "what can you do"; scope tags answer "what can you
+see". A user's scope is the union of their own users.scope_tags and their
+role's roles.scope_tags (migrate-154): a team role scoped to "network" limits
+every member to network-tagged resources, and a user's own tags add to that.
+A user with a non-empty scope sees only entities whose tags share at least
+one name (case-insensitively) with that scope — devices, servers, service
+checks, APM services, and the alerts attached to them. Untagged entities are
+hidden from scoped users: fail-closed, so an unclassified device never leaks
+into a team's filtered view.
 
 Two rules keep this from ever locking the fleet away:
-- an empty scope (the default for every pre-existing user) is unrestricted;
-- a role carrying system.admin is never scoped, whatever the column says.
+- an empty scope on both the user and the role (the default for every
+  pre-existing account) is unrestricted;
+- a role carrying system.admin is never scoped, whatever the columns say.
 
 Every enforcement point goes through visible_tags() plus exactly one of the
 predicate builders below, so the matching semantics (lowercased, ANY-of)
@@ -28,7 +32,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import SUPERUSER_PERMISSION
-from app.core.security import get_role_permissions
+from app.core.security import get_role_permissions, get_role_scope_tags
 from app.models.user import User
 from app.services.tag_service import tag_set
 
@@ -38,14 +42,15 @@ SCOPE_PARAM = "vis_tags"
 
 async def visible_tags(db: AsyncSession, user: User) -> list[str] | None:
     """The user's visibility scope as lowercased tag names, or None if
-    unrestricted (empty scope, or a role carrying system.admin)."""
-    scope = sorted(tag_set(getattr(user, "scope_tags", None)))
-    if not scope:
-        return None
+    unrestricted (no scope on the user or the role, or a role carrying
+    system.admin). The scope is the user's own tags plus the role's tags."""
     perms = await get_role_permissions(db, user.role)
     if SUPERUSER_PERMISSION in perms:
         return None
-    return scope
+    own = tag_set(getattr(user, "scope_tags", None))
+    role_scope = tag_set(await get_role_scope_tags(db, user.role))
+    scope = sorted(own | role_scope)
+    return scope or None
 
 
 def jsonb_tags_visible(col: str, param: str = SCOPE_PARAM) -> str:
@@ -157,8 +162,9 @@ async def scoped_device_filter(
 
 async def other_scope_tags(db: AsyncSession, exclude: list[str] | None = None) -> set[str]:
     """Tags that define some active user's visibility scope (lowercased),
-    minus ``exclude``. Assigning one of them to an entity publishes it into
-    that team's view."""
+    minus ``exclude`` — the user's own scope tags and the scope tags of any
+    role an active user holds. Assigning one of them to an entity publishes it
+    into that team's view."""
     rows = (await db.execute(text(
         "SELECT scope_tags FROM users WHERE is_active AND scope_tags IS NOT NULL "
         "AND jsonb_typeof(scope_tags) = 'array' AND jsonb_array_length(scope_tags) > 0"
@@ -166,7 +172,29 @@ async def other_scope_tags(db: AsyncSession, exclude: list[str] | None = None) -
     out: set[str] = set()
     for r in rows:
         out |= tag_set(r)
+    out |= await _active_role_scope_tags(db)
     return out - set(exclude or ())
+
+
+async def _active_role_scope_tags(db: AsyncSession) -> set[str]:
+    """Scope tags of roles held by at least one active user (empty before
+    migrate-154 adds roles.scope_tags)."""
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text(
+                "SELECT r.scope_tags FROM roles r WHERE jsonb_typeof(r.scope_tags) = 'array' "
+                "AND jsonb_array_length(r.scope_tags) > 0 "
+                "AND EXISTS (SELECT 1 FROM users u WHERE u.role = r.name AND u.is_active)"
+            ))).scalars().all()
+    except Exception as exc:
+        from app.core.security import _is_missing_scope_column
+        if _is_missing_scope_column(exc):
+            return set()
+        raise
+    out: set[str] = set()
+    for r in rows:
+        out |= tag_set(r)
+    return out
 
 
 async def assert_tags_assignable(db: AsyncSession, user: User, tags, *, previous=None) -> None:

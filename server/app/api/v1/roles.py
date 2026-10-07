@@ -11,6 +11,11 @@ Authorization is decided by the permissions a role grants, never by its name.
 ``ON UPDATE CASCADE`` (migrate-150), so a rename carries assignments along
 atomically and deleting an assigned role is refused by the database itself.
 
+Visibility scope: ``roles.scope_tags`` (migrate-154) limits every member to
+resources carrying at least one of those tags, on top of each user's own
+scope tags (see ``app.core.scoping``). Built-in roles are never scoped; scope
+a custom copy instead.
+
 Delegation: a role manager can only grant permissions they hold, and can only
 change or delete roles that are within their own access (see
 ``app.core.delegation``). Every change is versioned (``roles.revision``),
@@ -49,7 +54,7 @@ from app.core.security import (
 )
 from app.models.role import Role
 from app.models.user import User
-from app.services import role_references
+from app.services import role_references, tag_service
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/roles", tags=["Role Management"])
@@ -71,6 +76,8 @@ class RoleCreate(BaseModel):
     display_name: str = Field(..., max_length=100)
     description: str = Field("", max_length=2000)
     permissions: list[str] = Field(default_factory=list)
+    # Visibility scope every member inherits. Empty = no role-level limit.
+    scope_tags: list[str] = Field(default_factory=list, max_length=100)
     reason: Optional[str] = Field(None, max_length=500)
 
 
@@ -79,6 +86,7 @@ class RoleUpdate(BaseModel):
     display_name: Optional[str] = Field(None, max_length=100)
     description: Optional[str] = Field(None, max_length=2000)
     permissions: Optional[list[str]] = None
+    scope_tags: Optional[list[str]] = Field(None, max_length=100)
     # Revision the editor loaded. When supplied, a stale save is refused (409)
     # instead of silently overwriting a concurrent change.
     expected_revision: Optional[int] = None
@@ -95,6 +103,7 @@ class RoleOut(BaseModel):
     display_name: str
     description: str
     permissions: list[str]
+    scope_tags: list[str] = []
     is_system: bool
     user_count: int = 0
     revision: int = 1
@@ -208,6 +217,7 @@ async def assignable_roles(
     roles = (await db.execute(select(Role).order_by(Role.is_system.desc(), Role.created_at))).scalars().all()
     allowed = await delegation.assignable_role_names(db, current_user, roles)
     return [{"name": r.name, "display_name": r.display_name, "description": r.description,
+             "scope_tags": list(r.scope_tags or []),
              "permission_count": len(effective_permissions(r.permissions)),
              "privileged": bool(effective_permissions(r.permissions) & ACCESS_CONTROL_PERMISSIONS)}
             for r in roles if r.name in allowed]
@@ -323,6 +333,8 @@ async def create_role(
         name = _check_name(slug) if slug and len(slug) >= 2 else f"role_{secrets.token_hex(3)}"
     perms = _validate_permissions(data.permissions)
     await delegation.assert_can_grant(db, current_user, perms)
+    scope_tags = await delegation.validate_role_scope(
+        db, current_user, [], await tag_service.canonicalize_tags(db, data.scope_tags))
 
     if (await db.execute(select(Role).where(Role.name == name))).scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"A role with the identifier '{name}' already exists")
@@ -332,6 +344,7 @@ async def create_role(
         display_name=display_name,
         description=(data.description or "").strip(),
         permissions=perms,
+        scope_tags=scope_tags,
         is_system=False,
         revision=1,
         updated_by=current_user.username,
@@ -343,14 +356,15 @@ async def create_role(
         await db.rollback()
         raise HTTPException(status_code=409, detail=f"A role with the identifier '{name}' already exists")
     await _record_history(db, role, "create", current_user, before=[], after=perms, affected=0,
-                          reason=data.reason, changes={"name": name, "display_name": display_name})
+                          reason=data.reason, changes={"name": name, "display_name": display_name,
+                                                       "scope_tags": scope_tags})
     await write_audit_log(
         db,
         actor=current_user,
         action="role.create",
         resource_type="role",
         resource_id=str(role.id),
-        metadata={"name": role.name, "permissions": perms, "reason": data.reason,
+        metadata={"name": role.name, "permissions": perms, "scope_tags": scope_tags, "reason": data.reason,
                   "privileged": [p for p in perms if risk_of(p) in ("privileged", "critical")]},
     )
     await db.commit()
@@ -396,6 +410,14 @@ async def update_role(
         if perms != before:
             role.permissions = perms
             changes["permissions"] = _diff(before, perms)
+
+    if data.scope_tags is not None:
+        canonical = await tag_service.canonicalize_tags(db, data.scope_tags)
+        current = list(role.scope_tags or [])
+        if {t.lower() for t in canonical} != {t.lower() for t in current}:
+            await delegation.validate_role_scope(db, current_user, current, canonical)
+            changes["scope_tags"] = {"from": current, "to": canonical}
+            role.scope_tags = canonical
 
     if data.name is not None and data.name.strip().lower() != role.name:
         new_name = _check_name(data.name)
