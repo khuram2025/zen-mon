@@ -169,9 +169,16 @@ def filterable_for(entries: Iterable[dict]) -> list[str]:
     return out
 
 
+def _loaded() -> None:
+    """Make sure report_sections (and with it every pack's templates) is loaded
+    before the catalog is iterated — loading it registers more templates."""
+    importlib.import_module("app.services.report_sections")
+
+
 def validate_catalog() -> list[str]:
+    _loaded()
     errors: list[str] = []
-    for key, t in TEMPLATES.items():
+    for key, t in list(TEMPLATES.items()):
         if not rs.re_key(key):
             errors.append(f"{key}: template keys are lower_snake_case, at most 50 characters")
         if t.category not in CATEGORY_TITLES:
@@ -216,7 +223,7 @@ def catalog_entry(t: Template, perms: Optional[frozenset[str]] = None) -> dict[s
 
 def publish_presets() -> None:
     """Expose every template through report_sections.REPORT_PRESETS."""
-    for key, t in TEMPLATES.items():
+    for key, t in list(TEMPLATES.items()):
         rs.REPORT_PRESETS[key] = {
             "title": t.title,
             "description": t.description,
