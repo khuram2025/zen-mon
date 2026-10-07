@@ -201,9 +201,26 @@ _PILL_VOCAB = {
     "acknowledged": "warning", "stale": "warning", "paused": "warning",
     "active": "info", "info": "info", "maintenance": "info", "pending": "info",
     "unknown": "neutral", "disabled": "neutral", "none": "neutral",
+    # severities and verdicts used by section packs
+    "major": "danger", "high": "danger", "poor": "danger", "non-compliant": "danger",
+    "medium": "warning", "minor": "warning", "needs work": "warning",
+    "needs improvement": "warning",
+    "low": "info", "good": "success", "compliant": "success", "validated": "success",
+    "not measured": "neutral", "no data": "neutral", "n/a": "neutral",
 }
 
-# Page geometry (A4)
+# Classification labels (Settings → Company → confidentiality): pill colours
+# that clear 4.5:1 with white text on light and dark grounds alike.
+CLASSIFICATION_RGB = {
+    "public": (21, 128, 61),
+    "internal": (180, 83, 9),
+    "confidential": (194, 65, 12),
+    "restricted": (185, 28, 28),
+}
+
+# Page geometry. PAGE_W/PAGE_H/CONTENT_W are the A4 defaults kept for chart
+# sizing and older callers; documents use ZenPlusReport.page_w / page_h /
+# body_w, which follow the configured paper size (A4 or Letter).
 PAGE_W = 210
 PAGE_H = 297
 MARGIN_L = 16
@@ -211,6 +228,160 @@ MARGIN_R = 16
 MARGIN_T = 24
 MARGIN_B = 18
 CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R  # 178mm
+PAPER_FORMATS = {"A4": "A4", "LETTER": "Letter"}
+
+
+def paper_format(paper_size: str | None) -> str:
+    """'A4' or 'Letter' (anything else falls back to A4)."""
+    return PAPER_FORMATS.get(str(paper_size or "").strip().upper(), "A4")
+
+
+# ---------------------------------------------------------------------------
+# Brand colour helpers (WCAG relative luminance / contrast)
+# ---------------------------------------------------------------------------
+
+def _lin(c: float) -> float:
+    c = c / 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def relative_luminance(rgb) -> float:
+    r, g, b = (_lin(float(v)) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(a, b) -> float:
+    la, lb = relative_luminance(a), relative_luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def mix_rgb(a, b, t: float) -> tuple[int, int, int]:
+    """Blend a → b by t (0 = a, 1 = b)."""
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+def rgb_to_hex(rgb) -> str:
+    return "#{:02X}{:02X}{:02X}".format(*(int(max(0, min(255, v))) for v in rgb))
+
+
+def _valid_rgb(rgb) -> tuple[int, int, int]:
+    try:
+        r, g, b = (int(v) for v in rgb)
+        if all(0 <= v <= 255 for v in (r, g, b)):
+            return r, g, b
+    except (TypeError, ValueError):
+        pass
+    return COLOR_PRIMARY
+
+
+def accent_on_white(rgb, minimum: float = 3.0) -> tuple[int, int, int]:
+    """The brand colour, darkened just enough to reach ``minimum`` contrast on
+    white so rules, numbers and icons that carry meaning stay visible
+    (WCAG 1.4.11 non-text contrast)."""
+    rgb = _valid_rgb(rgb)
+    white = (255, 255, 255)
+    if contrast_ratio(rgb, white) >= minimum:
+        return rgb
+    for i in range(1, 41):
+        cand = mix_rgb(rgb, (0, 0, 0), i * 0.025)
+        if contrast_ratio(cand, white) >= minimum:
+            return cand
+    return COLOR_TEXT
+
+
+def text_on(rgb) -> tuple[int, int, int]:
+    """White or ink, whichever reads better on ``rgb`` (white when it clears 4.5:1)."""
+    rgb = _valid_rgb(rgb)
+    if contrast_ratio(rgb, (255, 255, 255)) >= 4.5:
+        return (255, 255, 255)
+    return (255, 255, 255) if contrast_ratio(rgb, (255, 255, 255)) > contrast_ratio(rgb, COLOR_TEXT) \
+        else COLOR_TEXT
+
+
+def legible_on(fg, bg, minimum: float = 4.5) -> tuple[int, int, int]:
+    """``fg`` lightened (on a dark ground) or darkened (on a light one) until it
+    reaches ``minimum`` contrast against ``bg``."""
+    fg, bg = _valid_rgb(fg), _valid_rgb(bg)
+    target = (255, 255, 255) if relative_luminance(bg) < 0.4 else (0, 0, 0)
+    for i in range(0, 41):
+        cand = mix_rgb(fg, target, i * 0.025)
+        if contrast_ratio(cand, bg) >= minimum:
+            return cand
+    return target
+
+
+def brand_tokens(rgb) -> dict:
+    """Every colour a branded document derives from the organisation's brand
+    colour: the accent (≥3:1 on white), readable text on the brand, the dark
+    cover ground tinted with the brand and its secondary inks."""
+    brand = _valid_rgb(rgb)
+    accent = accent_on_white(brand)
+    ground = mix_rgb(brand, (10, 14, 28), 0.80)
+    return {
+        "brand": brand,
+        "accent": accent,
+        "on_brand": text_on(brand),
+        "on_accent": text_on(accent),
+        "tint": mix_rgb(accent, (255, 255, 255), 0.92),
+        "tint_strong": mix_rgb(accent, (255, 255, 255), 0.84),
+        "ground": ground,
+        "ground_panel": mix_rgb(ground, (255, 255, 255), 0.10),
+        "ground_motif": mix_rgb(ground, brand, 0.30),
+        "ground_label": legible_on(mix_rgb(ground, (255, 255, 255), 0.45), ground, 4.5),
+        "ground_text": legible_on(mix_rgb(ground, (255, 255, 255), 0.70), ground, 7.0),
+        "ground_eyebrow": legible_on(mix_rgb(brand, (255, 255, 255), 0.35), ground, 4.5),
+        "ground_highlight": legible_on(brand, ground, 3.0),
+    }
+
+
+def classification_rgb(label: str | None) -> tuple[int, int, int]:
+    return CLASSIFICATION_RGB.get(str(label or "").strip().lower(), COLOR_MUTED)
+
+
+# Header names that force a column style regardless of cell contents
+_HDR_STYLE_HINTS = {
+    "status": "status", "health": "status", "state": "status",
+    "severity": "severity",
+    "ip": "mono", "ip address": "mono",
+}
+
+_NUMISH_RE = re.compile(
+    r"^\s*[<>≥≤~]?\s*-?[\d.,]+\s*"
+    r"(%|ms|s|m|h|d|min|bps|kbps|mbps|gbps|b|kb|mb|gb|tb|pb|x)?\s*$",
+    re.IGNORECASE,
+)
+_NEUTRAL_CELL = {"", "-", "—", "–", "n/a", "none"}
+COLUMN_STYLES = ("text", "num", "mono", "pct", "pct-bar", "status", "severity")
+
+
+def infer_column_styles(headers: list, rows: list, col_styles: list | None) -> list[str]:
+    """Column styles for a table: the declared style, else a header hint
+    (status/severity/IP), else 'num' when most cells look numeric."""
+    n = len(headers)
+    declared = list(col_styles or [])
+    out = []
+    for ci in range(n):
+        s = declared[ci] if ci < len(declared) else None
+        if s in COLUMN_STYLES:
+            out.append(s)
+            continue
+        hint = _HDR_STYLE_HINTS.get(str(headers[ci]).strip().lower())
+        if hint:
+            out.append(hint)
+            continue
+        vals = ["" if ci >= len(r) or r[ci] is None else str(r[ci]).strip() for r in rows[:80]]
+        vals = [v for v in vals if v.lower() not in _NEUTRAL_CELL]
+        if vals and sum(1 for v in vals if _NUMISH_RE.match(v)) >= 0.7 * len(vals):
+            out.append("num")
+        else:
+            out.append("text")
+    return out
+
+
+def pill_kind(value) -> str:
+    """success | danger | warning | info | neutral for a status/severity word."""
+    return _PILL_VOCAB.get(str(value or "").strip().lower(), "neutral")
 
 
 # ---------------------------------------------------------------------------
@@ -367,10 +538,11 @@ def _downsample(timestamps: list, values: list, target: int = 560):
     return ts_out, mean_out, min_out, max_out, True
 
 
-def _style_time_axis(ax, narrow: bool = False):
-    locator = mdates.AutoDateLocator(maxticks=5 if narrow else 7)
+def _style_time_axis(ax, narrow: bool = False, tz=None):
+    """Concise date ticks; ``tz`` (a tzinfo) draws them in that zone (UTC if None)."""
+    locator = mdates.AutoDateLocator(maxticks=5 if narrow else 7, tz=tz)
     ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator, tz=tz))
     for lbl in ax.get_xticklabels():
         lbl.set_rotation(0)
         lbl.set_ha("center")
@@ -391,7 +563,7 @@ def _fmt_point(v: float, unit: str = "") -> str:
 def _make_line_chart(timestamps: list[datetime], values: list[float],
                      ylabel: str = "", color: str = HEX_PRIMARY,
                      w_mm: float = CONTENT_W, h_mm: float = 50,
-                     unit: str = "", y_domain: tuple | None = None) -> bytes:
+                     unit: str = "", y_domain: tuple | None = None, tz=None) -> bytes:
     if not timestamps or not values or len(timestamps) < 2:
         return _empty_chart(w_mm, h_mm)
     with plt.rc_context(_MPL_RC):
@@ -437,13 +609,13 @@ def _make_line_chart(timestamps: list[datetime], values: list[float],
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_axis_val))
         if ylabel:
             ax.set_ylabel(ylabel, labelpad=2)
-        _style_time_axis(ax, narrow=w_mm < 100)
+        _style_time_axis(ax, narrow=w_mm < 100, tz=tz)
         return _finish(fig)
 
 
 def _make_time_bar_chart(timestamps: list[datetime], values: list[float],
                          color: str = HEX_PRIMARY, ylabel: str = "",
-                         w_mm: float = CONTENT_W, h_mm: float = 46) -> bytes:
+                         w_mm: float = CONTENT_W, h_mm: float = 46, tz=None) -> bytes:
     if not timestamps or not any((v or 0) > 0 for v in values):
         return _empty_chart(w_mm, h_mm)
     with plt.rc_context(_MPL_RC):
@@ -470,7 +642,7 @@ def _make_time_bar_chart(timestamps: list[datetime], values: list[float],
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_axis_val))
         if ylabel:
             ax.set_ylabel(ylabel, labelpad=2)
-        _style_time_axis(ax, narrow=w_mm < 100)
+        _style_time_axis(ax, narrow=w_mm < 100, tz=tz)
         return _finish(fig)
 
 
@@ -586,23 +758,10 @@ ACCENT_RGB_CARD = {
     "neutral": (100, 116, 139),
 }
 
-# Header names that force a column style regardless of cell contents
-_HDR_STYLE_HINTS = {
-    "status": "status", "health": "status", "state": "status",
-    "severity": "severity",
-    "ip": "mono", "ip address": "mono",
-}
-
-_NUMISH_RE = re.compile(
-    r"^\s*[<>≥≤~]?\s*-?[\d.,]+\s*"
-    r"(%|ms|s|m|h|d|min|bps|kbps|mbps|gbps|b|kb|mb|gb|tb|pb|x)?\s*$",
-    re.IGNORECASE,
-)
-_NEUTRAL_CELL = {"", "-", "—", "–", "n/a", "none"}
-
 
 def _render_toc(pdf: "ZenPlusReport", outline) -> None:
     """Contents page: numbered entries, dotted leaders, clickable page refs."""
+    right = pdf.page_w - MARGIN_R
     pdf.set_y(pdf.t_margin + 4)
     pdf._sans("B", 16)
     pdf.set_text_color(*COLOR_TEXT)
@@ -610,9 +769,10 @@ def _render_toc(pdf: "ZenPlusReport", outline) -> None:
     y = pdf.get_y() + 10
     pdf.set_fill_color(*pdf.accent)
     pdf.rect(pdf.l_margin, y, 11, 0.85, "F")
-    pdf._hairline(pdf.l_margin + 13, y + 0.42, PAGE_W - MARGIN_R)
+    pdf._hairline(pdf.l_margin + 13, y + 0.42, right)
     pdf.set_y(y + 7)
 
+    title_w = pdf.body_w - 10 - 20
     entries = [o for o in outline if o.level == 0]
     for i, o in enumerate(entries, 1):
         if pdf.get_y() + 8 > pdf.page_break_trigger:
@@ -625,23 +785,23 @@ def _render_toc(pdf: "ZenPlusReport", outline) -> None:
         pdf.cell(9, 6.6, f"{i:02d}")
         pdf._sans("", 9.2)
         pdf.set_text_color(*COLOR_TEXT)
-        title = pdf._fit(_safe(o.name), 118)
+        title = pdf._fit(_safe(o.name), title_w)
         pdf.set_xy(x + 10, y)
-        pdf.cell(120, 6.6, title)
+        pdf.cell(title_w + 2, 6.6, title)
         t_end = x + 10 + pdf.get_string_width(title) + 2.5
         pdf._sans("", 8.6)
         pdf.set_text_color(*COLOR_MUTED)
-        pdf.set_xy(PAGE_W - MARGIN_R - 12, y)
+        pdf.set_xy(right - 12, y)
         pdf.cell(12, 6.6, str(o.page_number), align="R")
         # dotted leader
         pdf.set_draw_color(*COLOR_FAINT)
         pdf.set_line_width(0.25)
         pdf.set_dash_pattern(dash=0.4, gap=1.4)
-        pdf.line(t_end, y + 4.7, PAGE_W - MARGIN_R - 13.5, y + 4.7)
+        pdf.line(t_end, y + 4.7, right - 13.5, y + 4.7)
         pdf.set_dash_pattern()
         lk = pdf.add_link()
         pdf.set_link(lk, page=o.page_number)
-        pdf.link(x, y, CONTENT_W, 6.6, lk)
+        pdf.link(x, y, pdf.body_w, 6.6, lk)
         pdf.set_y(y + 7.4)
 
 
@@ -657,19 +817,57 @@ class ZenPlusReport(FPDF):
                  subtitle: str = "",
                  category: str = "",
                  scope_label: str = "",
-                 accent: tuple = COLOR_PRIMARY):
-        super().__init__(orientation="P", unit="mm", format="A4")
+                 accent: tuple = COLOR_PRIMARY,
+                 *,
+                 paper_size: str = "A4",
+                 cover_logo_bytes: bytes | None = None,
+                 cover_logo_on_dark: bool = False,
+                 doc_label: str = "",
+                 classification: str = "",
+                 footer_text: str = "",
+                 timezone_name: str = "UTC",
+                 tz_label: str = "UTC",
+                 generated_label: str = "",
+                 disclaimer: str = "",
+                 contact_line: str = "",
+                 branding=None):
+        """``accent`` is the organisation's brand colour (RGB); the document
+        uses a contrast-adjusted accent derived from it. ``logo_bytes`` is the
+        light-background logo (running header); ``cover_logo_bytes`` the logo
+        for the dark cover (``cover_logo_on_dark`` False puts it on a white
+        tile, for organisations that only uploaded a light-background logo)."""
+        self.paper_size = paper_format(paper_size)
+        super().__init__(orientation="P", unit="mm", format=self.paper_size)
+        # Page geometry follows the paper size; never use the A4 module
+        # constants for layout.
+        self.page_w = self.w
+        self.page_h = self.h
+        self.body_w = self.page_w - MARGIN_L - MARGIN_R
         self.set_auto_page_break(auto=True, margin=MARGIN_B)
         self.set_margins(MARGIN_L, MARGIN_T, MARGIN_R)
         self.report_title = title
-        self.company_name = company_name
+        self.company_name = company_name or "ZenPlus"
         self.period_label = period_label
         self.generated_at = generated_at or datetime.now(timezone.utc)
         self.subtitle = subtitle
         self.category = category
         self.scope_label = scope_label
-        self.accent = accent
+        self.tokens = brand_tokens(accent or COLOR_PRIMARY)
+        self.brand = self.tokens["brand"]
+        self.accent = self.tokens["accent"]
+        self.branding = branding
+        self.doc_label = doc_label or category or "Report"
+        self.classification = (classification or "").strip()
+        self.footer_text = (footer_text or "").strip()
+        self.timezone_name = timezone_name or "UTC"
+        self.tz_label = tz_label or "UTC"
+        self.generated_label = generated_label or self._fmt_generated(self.generated_at)
+        self.disclaimer = (disclaimer or "").strip()
+        self.contact_line = (contact_line or "").strip()
         self._logo = logo_bytes
+        self._cover_logo = cover_logo_bytes or logo_bytes
+        self._cover_logo_on_dark = bool(cover_logo_bytes) and cover_logo_on_dark
+        self._header_logo_failed = False
         self._decor = True          # running header/footer on content pages
         self._outline_on = True     # record sections into the PDF outline
         self._section_n = 0
@@ -677,6 +875,69 @@ class ZenPlusReport(FPDF):
         self._register_fonts()
         self.alias_nb_pages()
         self._sans("", 9)
+        # Document properties (shown by PDF viewers and indexers).
+        try:
+            self.set_title(str(title or "Report"))
+            self.set_author(str(self.company_name))
+            self.set_creator("ZenPlus")
+            if subtitle:
+                self.set_subject(str(subtitle)[:300])
+            self.set_lang("en")
+        except Exception:
+            pass
+
+    @classmethod
+    def from_meta(cls, meta: dict, **overrides) -> "ZenPlusReport":
+        """A document configured from report_sections.build_report_meta()."""
+        branding = meta.get("branding")
+        cover_on_dark = bool(getattr(branding, "logo_dark", None)) if branding is not None \
+            else bool(meta.get("cover_logo_on_dark"))
+        rgb = meta.get("brand_rgb")
+        if not rgb and meta.get("brand_color"):
+            from app.services.branding import hex_to_rgb
+            rgb = hex_to_rgb(meta["brand_color"])
+        kwargs = dict(
+            title=meta.get("title") or "Report",
+            company_name=meta.get("company_name") or "ZenPlus",
+            logo_bytes=meta.get("logo_bytes"),
+            period_label=meta.get("period_label") or "",
+            generated_at=meta.get("generated_at"),
+            subtitle=meta.get("description") or "",
+            category=meta.get("category") or "",
+            scope_label=meta.get("scope_label") or "",
+            accent=tuple(rgb) if rgb else COLOR_PRIMARY,
+            paper_size=meta.get("paper_size") or "A4",
+            cover_logo_bytes=meta.get("cover_logo_bytes"),
+            cover_logo_on_dark=cover_on_dark,
+            doc_label=meta.get("category") or "",
+            classification=meta.get("confidentiality") or "",
+            footer_text=meta.get("footer_text") or "",
+            timezone_name=meta.get("timezone") or "UTC",
+            tz_label=meta.get("tz_label") or "UTC",
+            generated_label=meta.get("generated_label") or "",
+            disclaimer=meta.get("disclaimer") or "",
+            contact_line=meta.get("contact_line") or "",
+            branding=branding,
+        )
+        kwargs.update(overrides)
+        return cls(**kwargs)
+
+    def _fmt_generated(self, at: datetime) -> str:
+        b = getattr(self, "branding", None)
+        if b is not None and hasattr(b, "fmt_datetime"):
+            try:
+                return b.fmt_datetime(at, with_tz=True)
+            except Exception:
+                pass
+        at = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+        return f"{at.astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC"
+
+    @property
+    def tz_note(self) -> str:
+        """'All times GMT+3 (Asia/Riyadh)', or 'All times UTC'."""
+        if self.timezone_name in ("UTC", "Etc/UTC") or self.tz_label == self.timezone_name:
+            return f"All times {self.tz_label}"
+        return f"All times {self.tz_label} ({self.timezone_name})"
 
     # ----- fonts -----
 
@@ -747,29 +1008,119 @@ class ZenPlusReport(FPDF):
                                 round(c1[2] + (c2[2] - c1[2]) * t))
             self.rect(x + w * i / steps, y, w / steps + 0.15, h, "F")
 
+    # ----- images (logos) -----
+
+    @staticmethod
+    def _norm_image(data: bytes) -> bytes:
+        """fpdf2 recognises SVG only when it starts with '<svg ' or '<?xml ':
+        drop a BOM, comments or doctype before the root element."""
+        if not data or data[:4] == b"\x89PNG" or data[:3] == b"\xff\xd8\xff" or data[:4] == b"RIFF":
+            return data
+        i = data[:4096].find(b"<svg")
+        if i < 0:
+            return data
+        body = data[i:]
+        if body[4:5] != b" ":
+            body = b"<svg " + body[4:].lstrip()
+        return body
+
+    def _image_size(self, data: bytes) -> tuple[float, float] | None:
+        """Intrinsic (width, height) of a logo (pixels or SVG units)."""
+        from fpdf.image_parsing import preload_image
+        try:
+            _name, img, info = preload_image(self.image_cache, io.BytesIO(self._norm_image(data)))
+            vb = getattr(img, "viewbox", None)
+            if vb and len(vb) == 4 and vb[2] and vb[3]:
+                return float(vb[2]), float(vb[3])
+            w, h = float(info.width), float(info.height)
+            return (w, h) if w > 0 and h > 0 else None
+        except Exception:
+            return None
+
+    def _place_image(self, data: bytes, x: float, y: float, max_w: float, max_h: float,
+                     align: str = "L") -> tuple[float, float] | None:
+        """Draw a logo inside max_w × max_h at its aspect ratio (vertically
+        centred, left/right aligned). Returns the drawn size, or None when the
+        image cannot be read (callers fall back to the company name)."""
+        size = self._image_size(data)
+        if not size:
+            return None
+        iw, ih = size
+        scale = min(max_w / iw, max_h / ih)
+        w, h = iw * scale, ih * scale
+        dx = x if align == "L" else x + max_w - w
+        try:
+            self.image(io.BytesIO(self._norm_image(data)), x=dx, y=y + (max_h - h) / 2, w=w, h=h)
+        except Exception:
+            logging.getLogger(__name__).debug("logo could not be drawn", exc_info=True)
+            return None
+        return w, h
+
+    def _classification_pill(self, x: float, y: float, h: float = 4.6, size: float = 6.2,
+                             align: str = "R") -> float:
+        """Classification label pill ending at ``x`` (align R) or starting at it
+        (align L); returns its width."""
+        label = _safe(self.classification.upper())
+        self._sans("B", size)
+        spacing = 0.45
+        w = self.get_string_width(label) + spacing * max(len(label) - 1, 0) + 5.2
+        x0 = x - w if align == "R" else x
+        self.set_fill_color(*classification_rgb(self.classification))
+        self.rect(x0, y, w, h, "F", round_corners=True, corner_radius=h / 2)
+        self.set_text_color(255, 255, 255)
+        try:
+            self.set_char_spacing(spacing)
+        except Exception:
+            pass
+        self.set_xy(x0, y)
+        self.cell(w, h, label, align="C")
+        try:
+            self.set_char_spacing(0)
+        except Exception:
+            pass
+        return w
+
     # ----- header / footer -----
 
     def header(self):
         if not self._decor:
             return
         y_rule = 15.2
-        x = self.l_margin
-        self._sans("B", 8.2)
-        self.set_text_color(*COLOR_TEXT)
-        self.set_xy(x, 7.6)
-        name = _safe(self.company_name)
-        self.cell(self.get_string_width(name) + 1, 4.4, name)
+        x = MARGIN_L
+        right = self.page_w - MARGIN_R
+        tx = x
+        if self._logo and not self._header_logo_failed:
+            dims = self._place_image(self._logo, x, 6.3, 30, 6.2)
+            if dims:
+                tx = x + dims[0] + 3.2
+            else:
+                self._header_logo_failed = True
+        if tx == x:
+            self._sans("B", 8.2)
+            self.set_text_color(*COLOR_TEXT)
+            self.set_xy(x, 7.6)
+            name = self._fit(_safe(self.company_name), 60)
+            self.cell(self.get_string_width(name) + 1, 4.4, name)
+            self._sans("", 8.2)
+            self.set_text_color(*COLOR_MUTED)
+            self.cell(4, 4.4, "·", align="C")
+            tx = self.get_x()
+        right_w = 0.0
+        if self.classification:
+            right_w = self._classification_pill(right, 7.5) + 3
+        elif self.period_label:
+            self._sans("", 7.4)
+            right_w = min(self.get_string_width(_safe(self.period_label)) + 2, self.body_w * 0.42)
+            self.set_text_color(*COLOR_MUTED)
+            self.set_xy(right - right_w, 7.7)
+            self.cell(right_w, 4.2, self._fit(_safe(self.period_label), right_w), align="R")
+            right_w += 3
         self._sans("", 8.2)
         self.set_text_color(*COLOR_MUTED)
-        self.cell(4, 4.4, "·", align="C")
-        title = self._fit(_safe(self.report_title), 92)
-        self.cell(self.get_string_width(title) + 1, 4.4, title)
-        if self.period_label:
-            self._sans("", 7.4)
-            self.set_text_color(*COLOR_MUTED)
-            self.set_xy(PAGE_W - MARGIN_R - 92, 7.7)
-            self.cell(92, 4.2, _safe(self.period_label), align="R")
-        self._hairline(x, y_rule, PAGE_W - MARGIN_R)
+        title_w = max(right - right_w - tx, 20)
+        self.set_xy(tx, 7.6)
+        self.cell(title_w, 4.4, self._fit(_safe(self.report_title), title_w))
+        self._hairline(x, y_rule, right)
         self.set_fill_color(*self.accent)
         self.rect(x, y_rule - 0.35, 11, 0.7, "F")
         self.set_text_color(*COLOR_TEXT)
@@ -780,19 +1131,32 @@ class ZenPlusReport(FPDF):
         # so the cover page must be excluded by number, not by the decor flag.
         if not self._decor or self.page_no() == getattr(self, "_cover_page", 0):
             return
-        y = PAGE_H - 12.6
-        self._hairline(self.l_margin, y, PAGE_W - MARGIN_R)
+        y = self.page_h - 12.6
+        x = MARGIN_L
+        right = self.page_w - MARGIN_R
+        self._hairline(x, y, right)
+        third = self.body_w / 3
         self._sans("", 6.8)
         self.set_text_color(*COLOR_FAINT)
-        self.set_xy(self.l_margin, y + 1.7)
-        self.cell(120, 4,
-                  _safe(f"Generated by ZenPlus  ·  {self.generated_at:%Y-%m-%d %H:%M} UTC"))
-        self.set_xy(PAGE_W - MARGIN_R - 40, y + 1.7)
-        self.cell(40, 4, f"Page {self.page_no()} of {{nb}}", align="R")
+        self.set_xy(x, y + 1.7)
+        self.cell(third, 4, self._fit(_safe(self.footer_text or self.company_name), third - 2))
+        self.set_xy(x + third, y + 1.7)
+        self.cell(third, 4, self._fit(_safe(self.tz_note), third - 2), align="C")
+        self.set_xy(right - third, y + 1.7)
+        self.cell(third, 4, f"Page {self.page_no()} of {{nb}}", align="R")
+        if self.classification:
+            page_w = self.get_string_width(f"Page {self.page_no()} of 99") + 2.5
+            self._sans("B", 6.6)
+            self.set_text_color(*classification_rgb(self.classification))
+            label = _safe(self.classification.upper()) + "  ·"
+            lw = self.get_string_width(label) + 1
+            self.set_xy(right - page_w - lw, y + 1.7)
+            self.cell(lw, 4, label, align="R")
 
     # ----- cover page -----
 
-    # Constellation accent in the upper-right quadrant of the cover
+    # Constellation accent in the upper-right quadrant of the cover (A4
+    # coordinates; shifted to the right edge on wider paper).
     _MOTIF_NODES = [
         (122, 52), (141, 46), (163, 50), (184, 44), (194, 60),
         (179, 69), (156, 64), (132, 71), (144, 82), (167, 84),
@@ -806,99 +1170,126 @@ class ZenPlusReport(FPDF):
     ]
 
     def _cover_motif(self):
-        self.set_draw_color(31, 45, 86)
+        dx = self.page_w - PAGE_W
+        t = self.tokens
+        self.set_draw_color(*t["ground_motif"])
         self.set_line_width(0.22)
         for a, b in self._MOTIF_EDGES:
             x1, y1 = self._MOTIF_NODES[a]
             x2, y2 = self._MOTIF_NODES[b]
-            self.line(x1, y1, x2, y2)
+            self.line(x1 + dx, y1, x2 + dx, y2)
+        node = mix_rgb(t["ground"], t["brand"], 0.55)
         for i, (x, y) in enumerate(self._MOTIF_NODES):
             if i in (1, 9, 15):
-                self.set_fill_color(79, 107, 246)
+                self.set_fill_color(*t["ground_highlight"])
                 r = 1.25
             else:
-                self.set_fill_color(54, 72, 124)
+                self.set_fill_color(*node)
                 r = 0.85
-            self.ellipse(x - r, y - r, 2 * r, 2 * r, "F")
+            self.ellipse(x + dx - r, y - r, 2 * r, 2 * r, "F")
 
-    def cover(self, doc_label: str = "Network Operations Report",
-              report_ref: str | None = None):
-        """Dark branded cover page."""
+    def _cover_brand(self, x: float, y: float) -> bool:
+        """Cover logo at its aspect ratio in a ~50×16 mm box. A dark-background
+        logo sits on the cover ground; a light-background one on a white tile."""
+        data = self._cover_logo
+        if not data:
+            return False
+        if self._cover_logo_on_dark:
+            return self._place_image(data, x, y, 50, 16) is not None
+        size = self._image_size(data)
+        if not size:
+            return False
+        iw, ih = size
+        scale = min(46 / iw, 12 / ih)
+        w, h = iw * scale, ih * scale
+        self.set_fill_color(255, 255, 255)
+        self.rect(x, y + (16 - h - 4) / 2, w + 4, h + 4, "F", round_corners=True,
+                  corner_radius=2.2)
+        return self._place_image(data, x + 2, y + (16 - h) / 2, w, h) is not None
+
+    def cover(self, doc_label: str | None = None, report_ref: str | None = None):
+        """Dark branded cover page (ground tinted with the brand colour)."""
+        t = self.tokens
+        pw, ph = self.page_w, self.page_h
+        right = pw - MARGIN_R
+        bw = self.body_w
         prev = self._decor
         self._decor = False
         prev_apb = self.auto_page_break
         self.set_auto_page_break(False)
         self.add_page()
         self._cover_page = self.page_no()
-        self.set_fill_color(*COLOR_NAVY)
-        self.rect(0, 0, PAGE_W, PAGE_H, "F")
+        self.set_fill_color(*t["ground"])
+        self.rect(0, 0, pw, ph, "F")
         self._cover_motif()
-        self._gradient_bar(0, 0, PAGE_W, 1.7, (79, 107, 246), (34, 211, 238))
+        self._gradient_bar(0, 0, pw, 1.7, t["brand"], mix_rgb(t["brand"], (255, 255, 255), 0.45))
 
-        # brand row
-        x = MARGIN_L
-        y = 17
-        if self._logo:
-            try:
-                self.set_fill_color(255, 255, 255)
-                self.rect(x, y, 13.5, 13.5, "F", round_corners=True, corner_radius=2.6)
-                self.image(io.BytesIO(self._logo), x=x + 1.6, y=y + 1.6, w=10.3, h=10.3,
-                           keep_aspect_ratio=True)
-                x += 18
-            except Exception:
-                pass
-        self._sans("B", 13)
-        self.set_text_color(255, 255, 255)
-        self.set_xy(x, y + 3.4)
-        self.cell(100, 6.6, _safe(self.company_name))
-        self._eyebrow(PAGE_W - MARGIN_R - 80, y + 4.6, doc_label,
-                      COLOR_NAVY_LABEL, size=6.6, align="R", w=80)
-        self._hairline(MARGIN_L, 38, PAGE_W - MARGIN_R, COLOR_NAVY_PANEL, 0.3)
+        # brand row: logo (or the company name) and the document label
+        y = 14
+        if not self._cover_brand(MARGIN_L, y):
+            self._sans("B", 13)
+            self.set_text_color(255, 255, 255)
+            self.set_xy(MARGIN_L, y + 4.6)
+            self.cell(bw - 70, 6.6, self._fit(_safe(self.company_name), bw - 72))
+        self._eyebrow(right - 70, y + 6.2, doc_label or self.doc_label,
+                      t["ground_label"], size=6.6, align="R", w=70)
+        self._hairline(MARGIN_L, 36, right, t["ground_panel"], 0.3)
 
         # title block
-        ty = 98
-        if self.category:
-            self._eyebrow(MARGIN_L, ty, self.category, (140, 160, 255), size=7.2)
-            ty += 7
+        ty = 96
+        if self.classification:
+            self._classification_pill(MARGIN_L, ty, h=5.6, size=7.0, align="L")
+            ty += 10
         self._sans("B", 26)
         self.set_text_color(255, 255, 255)
         self.set_xy(MARGIN_L, ty)
-        self.multi_cell(CONTENT_W, 11.5, _safe(self.report_title))
+        self.multi_cell(bw, 11.5, _safe(self.report_title))
         if self.subtitle:
             self.set_xy(MARGIN_L, self.get_y() + 3)
             self._sans("", 9.6)
-            self.set_text_color(*COLOR_NAVY_TEXT)
-            self.multi_cell(150, 5.4, _safe(self.subtitle))
+            self.set_text_color(*t["ground_text"])
+            sub = self.subtitle if len(self.subtitle) <= 420 else self.subtitle[:419] + "…"
+            self.multi_cell(min(150, bw), 5.4, _safe(sub))
 
         # meta grid
-        my = 210
-        self._hairline(MARGIN_L, my, PAGE_W - MARGIN_R, COLOR_NAVY_PANEL, 0.3)
-        gen = f"{self.generated_at:%d %B %Y, %H:%M} UTC"
-        ref = report_ref or f"RPT-{self.generated_at:%Y%m%d-%H%M%S}"
+        my = ph - 92
+        self._hairline(MARGIN_L, my, right, t["ground_panel"], 0.3)
+        local = self.generated_at
+        if self.branding is not None and hasattr(self.branding, "localize"):
+            try:
+                local = self.branding.localize(self.generated_at)
+            except Exception:
+                pass
+        ref = report_ref or f"RPT-{local:%Y%m%d-%H%M%S}"
         meta = [
             ("Reporting period", self.period_label or "—"),
-            ("Generated", gen),
+            ("Generated", self.generated_label),
             ("Scope", self.scope_label or "All monitored infrastructure"),
+            ("Time zone", self.tz_note),
+            ("Prepared by", self.company_name),
             ("Reference", ref),
         ]
-        col_w = CONTENT_W / 2
+        col_w = bw / 2
         for i, (label, value) in enumerate(meta):
             cx = MARGIN_L + (i % 2) * col_w
-            cy = my + 7 + (i // 2) * 17
-            self._eyebrow(cx, cy, label, COLOR_NAVY_LABEL, size=6.2)
-            self._sans("", 9.6)
+            cy = my + 7 + (i // 2) * 15
+            self._eyebrow(cx, cy, label, t["ground_label"], size=6.2)
+            self._sans("", 9.4)
             self.set_text_color(255, 255, 255)
-            self.set_xy(cx, cy + 4.6)
+            self.set_xy(cx, cy + 4.4)
             self.cell(col_w - 6, 5.4, self._fit(_safe(value), col_w - 8))
 
         # bottom band
-        self._hairline(MARGIN_L, 279, PAGE_W - MARGIN_R, COLOR_NAVY_PANEL, 0.3)
+        by = ph - 18
+        self._hairline(MARGIN_L, by, right, t["ground_panel"], 0.3)
         self._sans("", 7)
-        self.set_text_color(*COLOR_NAVY_LABEL)
-        self.set_xy(MARGIN_L, 281.5)
-        self.cell(120, 4.4, "Generated by ZenPlus Network Monitoring")
-        self.set_xy(PAGE_W - MARGIN_R - 60, 281.5)
-        self.cell(60, 4.4, _safe(f"{self.generated_at:%d %b %Y}"), align="R")
+        self.set_text_color(*t["ground_label"])
+        self.set_xy(MARGIN_L, by + 2.5)
+        left_txt = self.footer_text or self.contact_line
+        self.cell(bw - 50, 4.4, self._fit(_safe(left_txt), bw - 52))
+        self._sans("", 6.4)
+        self.set_xy(right - 48, by + 2.5)
+        self.cell(48, 4.4, "Generated by ZenPlus", align="R")
 
         self.set_auto_page_break(prev_apb, MARGIN_B)
         self._decor = prev
@@ -992,15 +1383,21 @@ class ZenPlusReport(FPDF):
         self.multi_cell(self.content_w, 4.2, _safe(text_str))
         self.ln(1.2)
 
-    def note(self, text_str: str, kind: str = "info"):
-        """Callout box with accent bar (info: brand; warning: amber)."""
+    def note(self, text_str: str, kind: str = "info", label: str = ""):
+        """Callout box with accent bar. info: brand accent; warning: amber;
+        error: red with a bold lead (a section that failed to generate)."""
         text_str = _safe(text_str)
-        bar, bg = ((COLOR_WARNING, TINT_WARNING) if kind == "warning"
-                   else (COLOR_PRIMARY, COLOR_BG_TINT))
-        self._sans("", 7.9)
+        bar, bg = {
+            "warning": (COLOR_WARNING, TINT_WARNING),
+            "error": (COLOR_DANGER, TINT_DANGER),
+        }.get(kind, (self.accent, COLOR_BG_TINT))
         inner_w = self.content_w - 11
+        lead_h = 0.0
+        if label:
+            lead_h = 4.6
+        self._sans("", 7.9)
         h_text = self.multi_cell(inner_w, 4.2, text_str, dry_run=True, output="HEIGHT")
-        box_h = h_text + 5.2
+        box_h = h_text + lead_h + 5.2
         self._check_page_space(box_h + 3)
         x = self.l_margin
         y = self.get_y()
@@ -1008,10 +1405,76 @@ class ZenPlusReport(FPDF):
         self.rect(x, y, self.content_w, box_h, "F", round_corners=True, corner_radius=1.8)
         self.set_fill_color(*bar)
         self.rect(x + 3, y + 2.4, 1.15, box_h - 4.8, "F", round_corners=True, corner_radius=0.5)
+        if label:
+            self._sans("B", 7.9)
+            self.set_text_color(*(bar if kind == "error" else COLOR_TEXT))
+            self.set_xy(x + 7.4, y + 2.4)
+            self.cell(inner_w, 4.2, self._fit(_safe(label), inner_w))
+            self._sans("", 7.9)
         self.set_text_color(*COLOR_BODY)
-        self.set_xy(x + 7.4, y + 2.6)
+        self.set_xy(x + 7.4, y + 2.6 + lead_h)
         self.multi_cell(inner_w, 4.2, text_str)
         self.set_y(y + box_h + 2.6)
+
+    def restricted_card(self, text_str: str):
+        """Muted 'Not included' card for a section the reader may not see."""
+        text_str = _safe(text_str)
+        inner_w = self.content_w - 14
+        self._sans("", 7.8)
+        h_text = self.multi_cell(inner_w, 4.1, text_str, dry_run=True, output="HEIGHT")
+        box_h = h_text + 11.4
+        self._check_page_space(box_h + 3)
+        x = self.l_margin
+        y = self.get_y()
+        self.set_fill_color(*COLOR_BG_TINT)
+        self.set_draw_color(*COLOR_HAIRLINE)
+        self.set_line_width(0.3)
+        self.set_dash_pattern(dash=1.2, gap=0.9)
+        self.rect(x, y, self.content_w, box_h, "DF", round_corners=True, corner_radius=2)
+        self.set_dash_pattern()
+        # padlock glyph
+        lx, ly = x + 4.2, y + 3.4
+        self.set_draw_color(*COLOR_FAINT)
+        self.set_line_width(0.45)
+        self.arc(lx + 0.55, ly - 0.2, 2.2, 2.6, 180, 360)
+        self.line(lx + 0.55, ly + 1.1, lx + 0.55, ly + 1.7)
+        self.line(lx + 2.75, ly + 1.1, lx + 2.75, ly + 1.7)
+        self.set_fill_color(*COLOR_FAINT)
+        self.rect(lx, ly + 1.6, 3.3, 2.5, "F", round_corners=True, corner_radius=0.4)
+        self._eyebrow(x + 10, y + 3.4, "Not included", COLOR_MUTED, size=6.4)
+        self._sans("", 7.8)
+        self.set_text_color(*COLOR_MUTED)
+        self.set_xy(x + 10, y + 7.8)
+        self.multi_cell(inner_w, 4.1, text_str)
+        self.set_y(y + box_h + 2.6)
+
+    def disclaimer_block(self, text_str: str, contact: str = "", address: str = ""):
+        """Closing disclaimer (printed once, at the end of the document)."""
+        text_str = _safe(text_str)
+        extra = " · ".join(_safe(p) for p in (address, contact) if p)
+        self._sans("", 7.4)
+        h_text = self.multi_cell(self.content_w, 3.9, text_str, dry_run=True, output="HEIGHT") \
+            if text_str else 0
+        need = h_text + (5 if extra else 0) + 14
+        self._check_page_space(need)
+        self.ln(4)
+        x = self.l_margin
+        y = self.get_y()
+        self._hairline(x, y, x + self.content_w)
+        self._eyebrow(x, y + 3, "Disclaimer" if text_str else "About this report",
+                      COLOR_FAINT, size=6.2)
+        self.set_y(y + 8)
+        if text_str:
+            self._sans("", 7.4)
+            self.set_text_color(*COLOR_MUTED)
+            self.set_x(x)
+            self.multi_cell(self.content_w, 3.9, text_str)
+        if extra:
+            self._sans("", 7.0)
+            self.set_text_color(*COLOR_FAINT)
+            self.set_x(x)
+            self.multi_cell(self.content_w, 3.8, extra)
+        self.ln(2)
 
     def empty_state(self, text_str: str = "No data available for this period."):
         self._check_page_space(15)
@@ -1037,11 +1500,12 @@ class ZenPlusReport(FPDF):
         for k in kpis:
             if isinstance(k, dict):
                 acc = k.get("accent") or "primary"
-                rgb = ACCENT_RGB_CARD.get(acc, acc if isinstance(acc, tuple) else COLOR_PRIMARY)
+                rgb = self.accent if acc == "primary" else \
+                    ACCENT_RGB_CARD.get(acc, acc if isinstance(acc, tuple) else self.accent)
                 items.append((str(k.get("label") or ""), str(k.get("value") or "—"),
                               rgb, str(k.get("subtitle") or "")))
             else:
-                label, value, rgb = k[0], k[1], (k[2] if len(k) > 2 else COLOR_PRIMARY)
+                label, value, rgb = k[0], k[1], (k[2] if len(k) > 2 else self.accent)
                 items.append((str(label), str(value), rgb, ""))
         if not items:
             return
@@ -1110,25 +1574,9 @@ class ZenPlusReport(FPDF):
 
     def _infer_styles(self, headers: list[str], rows: list[list[str]],
                       col_styles: list | None) -> list[str]:
-        n = len(headers)
-        styles = list(col_styles) + [None] * n if col_styles else [None] * n
-        out = []
-        for ci in range(n):
-            s = styles[ci] if ci < len(styles) else None
-            if s:
-                out.append(s)
-                continue
-            hint = _HDR_STYLE_HINTS.get(headers[ci].strip().lower())
-            if hint:
-                out.append(hint)
-                continue
-            vals = [r[ci].strip() for r in rows[:80] if ci < len(r)]
-            vals = [v for v in vals if v.lower() not in _NEUTRAL_CELL]
-            if vals and sum(1 for v in vals if _NUMISH_RE.match(v)) >= 0.7 * len(vals):
-                out.append("num")
-            else:
-                out.append("text")
-        return out
+        # 'pct' (a plain percentage) lays out like any right-aligned number.
+        return ["num" if s == "pct" else s
+                for s in infer_column_styles(headers, rows, col_styles)]
 
     def _cell_font(self, style: str):
         if style == "mono":
@@ -1209,7 +1657,7 @@ class ZenPlusReport(FPDF):
             self.set_fill_color(*COLOR_HAIRLINE_SOFT)
             self.rect(bx, by, bar_w, 1.6, "F", round_corners=True, corner_radius=0.8)
             if pct > 0:
-                self.set_fill_color(*COLOR_PRIMARY)
+                self.set_fill_color(*self.accent)
                 self.rect(bx, by, max(bar_w * pct / 100, 0.9), 1.6, "F",
                           round_corners=True, corner_radius=0.8)
 
@@ -1247,7 +1695,7 @@ class ZenPlusReport(FPDF):
                 pass
             cx = x0
             for ci, h in enumerate(headers):
-                align = "R" if styles[ci] in ("num", "pct-bar") else "L"
+                align = "R" if styles[ci] in ("num", "pct", "pct-bar") else "L"
                 pad_r = 2.2 if align == "R" and styles[ci] == "num" else 0
                 self.set_xy(cx, y)
                 self.cell(widths[ci] - pad_r, header_h, self._fit(h.upper(), widths[ci] - 2.4),
@@ -1282,7 +1730,7 @@ class ZenPlusReport(FPDF):
                         self.cell(w, row_h, "—" if UNICODE_FONTS else "-")
                 elif st == "pct-bar":
                     self._pct_cell(cx, y, w, row_h, val)
-                elif st == "num":
+                elif st in ("num", "pct"):
                     self._sans("", 7.6)
                     self.set_text_color(*COLOR_BODY)
                     self.set_xy(cx, y)
@@ -1305,7 +1753,8 @@ class ZenPlusReport(FPDF):
             self.set_text_color(*COLOR_FAINT)
             self.set_x(x0)
             self.cell(self.content_w, 4.4,
-                      _safe(f"Showing first {max_rows:,} of {len(rows):,} rows."))
+                      _safe(f"Showing the first {max_rows:,} of {len(rows):,} rows; "
+                            "the Excel (XLSX) export lists every row."))
             self.ln(4.6)
         self.ln(2.6)
 
@@ -1408,7 +1857,7 @@ class ZenPlusReport(FPDF):
         self._saved_apb = self.auto_page_break
         self.set_auto_page_break(False)
         self.set_left_margin(x)
-        self.set_right_margin(PAGE_W - x - w)
+        self.set_right_margin(self.page_w - x - w)
         self.set_x(x)
         self._in_column = True
 
@@ -1849,13 +2298,30 @@ _STATUS_LOG_HEADERS = ["Time", "From", "To", "Reason", "Duration"]
 _STATUS_LOG_STYLES = ["num", "status", "status", "text", "num"]
 
 
+def _pdf_tz(pdf: ZenPlusReport):
+    """The document's organisation timezone (tzinfo), or None for UTC."""
+    b = getattr(pdf, "branding", None)
+    return getattr(b, "tz", None) if b is not None else None
+
+
+def _fmt_when(pdf_or_branding, ts, short: bool = False) -> str:
+    """A timestamp in the organisation timezone and date/time format
+    (naive values are UTC)."""
+    b = getattr(pdf_or_branding, "branding", pdf_or_branding)
+    if not isinstance(ts, datetime):
+        return str(ts)[:16] if ts else "—"
+    if b is not None and hasattr(b, "fmt_datetime"):
+        return b.fmt_short(ts) if short else b.fmt_datetime(ts)
+    return ts.strftime("%m-%d %H:%M" if short else "%Y-%m-%d %H:%M")
+
+
 def _status_log_rows(entries: list[dict], id_key: str | None = None,
-                     limit: int = 10) -> list[list[str]]:
+                     limit: int = 10, branding=None) -> list[list[str]]:
     rows = []
     for e in entries[:limit]:
         ts = e.get("timestamp")
         rows.append([
-            ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16],
+            _fmt_when(branding, ts),
             (e.get("old_status") or "—"),
             (e.get("new_status") or "—"),
             (e.get("reason") or "—")[:70],
@@ -1939,7 +2405,8 @@ async def _build_executive_summary(pdf: ZenPlusReport, db: AsyncSession,
         ts, vals = _hourly_availability(ping_rows)
         if len(ts) >= 3:
             png = _make_line_chart(ts, vals, ylabel="availability %", color=HEX_SUCCESS,
-                                   h_mm=42, unit="%", y_domain=(min(vals) - 2, 100))
+                                   h_mm=42, unit="%", y_domain=(min(vals) - 2, 100),
+                                   tz=_pdf_tz(pdf))
             pdf.add_chart(png, title="Fleet availability trend")
 
     # --- Top problematic devices ---
@@ -2129,12 +2596,12 @@ async def _build_device_health(pdf: ZenPlusReport, db: AsyncSession,
         if len(rtt_pts) > 2:
             png = _make_line_chart([r["timestamp"] for r in rtt_pts],
                                    [r["rtt_ms"] for r in rtt_pts],
-                                   ylabel="RTT (ms)", h_mm=34, unit="ms")
+                                   ylabel="RTT (ms)", h_mm=34, unit="ms", tz=_pdf_tz(pdf))
             pdf.add_chart(png)
 
         dev_log = [e for e in status_log if str(e["device_id"]) == did]
         if dev_log:
-            pdf.data_table(_STATUS_LOG_HEADERS, _status_log_rows(dev_log, limit=10),
+            pdf.data_table(_STATUS_LOG_HEADERS, _status_log_rows(dev_log, limit=10, branding=pdf.branding),
                            col_styles=_STATUS_LOG_STYLES)
         _block_separator(pdf)
 
@@ -2229,7 +2696,10 @@ async def _build_service_health(pdf: ZenPlusReport, db: AsyncSession,
         if s.get("tls_days_remaining") is not None:
             days = s["tls_days_remaining"]
             expiry = s.get("tls_expiry_date")
-            exp_str = expiry.strftime("%Y-%m-%d") if hasattr(expiry, "strftime") else str(expiry or "")
+            if isinstance(expiry, datetime) and pdf.branding is not None:
+                exp_str = pdf.branding.fmt_date(expiry)
+            else:
+                exp_str = expiry.strftime("%Y-%m-%d") if hasattr(expiry, "strftime") else str(expiry or "")
             specs.append(("TLS expiry", f"{days}d ({exp_str})" if exp_str else f"{days}d"))
         pdf.spec_strip(specs)
 
@@ -2238,12 +2708,12 @@ async def _build_service_health(pdf: ZenPlusReport, db: AsyncSession,
         if len(svc_metrics) > 2:
             png = _make_line_chart([r["timestamp"] for r in svc_metrics],
                                    [r["response_ms"] for r in svc_metrics],
-                                   ylabel="response (ms)", h_mm=34, unit="ms")
+                                   ylabel="response (ms)", h_mm=34, unit="ms", tz=_pdf_tz(pdf))
             pdf.add_chart(png)
 
         s_log = [e for e in svc_log if str(e["service_check_id"]) == sid]
         if s_log:
-            pdf.data_table(_STATUS_LOG_HEADERS, _status_log_rows(s_log, limit=8),
+            pdf.data_table(_STATUS_LOG_HEADERS, _status_log_rows(s_log, limit=8, branding=pdf.branding),
                            col_styles=_STATUS_LOG_STYLES)
         _block_separator(pdf)
 
@@ -2294,13 +2764,16 @@ async def _build_alert_analysis(pdf: ZenPlusReport, db: AsyncSession,
     for a in alerts:
         t = a.get("triggered_at")
         if t:
+            if isinstance(t, datetime) and pdf.branding is not None:
+                t = pdf.branding.localize(t)  # calendar days in the organisation timezone
             day_key = t.strftime("%Y-%m-%d") if hasattr(t, "strftime") else str(t)[:10]
             day_counts[day_key] = day_counts.get(day_key, 0) + 1
     sorted_days = sorted(day_counts)
     bars_png = _make_time_bar_chart(
-        [datetime.strptime(dk, "%Y-%m-%d") for dk in sorted_days],
+        [datetime.strptime(dk, "%Y-%m-%d").replace(tzinfo=_pdf_tz(pdf) or timezone.utc)
+         for dk in sorted_days],
         [day_counts[dk] for dk in sorted_days],
-        color=HEX_WARNING, w_mm=86, h_mm=54)
+        color=HEX_WARNING, w_mm=86, h_mm=54, tz=_pdf_tz(pdf))
     pdf.add_chart_pair(donut_png, bars_png, "Alerts by severity", "Daily alert volume")
 
     # --- Top alerting devices ---
@@ -2338,7 +2811,7 @@ async def _build_alert_analysis(pdf: ZenPlusReport, db: AsyncSession,
     alert_rows = []
     for a in alerts[:30]:
         triggered = a.get("triggered_at")
-        trig = triggered.strftime("%m-%d %H:%M") if hasattr(triggered, "strftime") else str(triggered)[:16]
+        trig = _fmt_when(pdf, triggered, short=True)
         alert_rows.append([
             trig,
             a.get("hostname") or "—",
@@ -2408,21 +2881,45 @@ async def generate_report(
 ) -> bytes:
     """Generate a professional PDF report and return the raw PDF bytes."""
 
-    start, end, period_label = _resolve_period(period, from_time, to_time)
+    start, end, preset_label = _resolve_period(period, from_time, to_time)
 
-    # Fetch company branding
-    company = await _fetch_company_info(db)
+    # Organisation branding: name, logos, brand colour, paper size, timezone
+    # and date/time format (Settings → General → Company).
+    from app.services.branding import Branding, load_branding
+    try:
+        branding = await load_branding(db)
+    except Exception:
+        logging.getLogger(__name__).warning("branding unavailable for legacy report", exc_info=True)
+        branding = Branding()
+    window = branding.period_label(start, end)
+    period_label = window if period == "custom" else f"{preset_label} · {window}"
+    generated_at = datetime.now(timezone.utc)
+    light, cover_logo = branding.logo, branding.cover_logo()
 
     title = _REPORT_TITLES.get(report_type, "ZenPlus Report")
 
     pdf = ZenPlusReport(
         title=title,
-        company_name=company["company_name"],
-        logo_bytes=company["logo_bytes"],
+        company_name=branding.display_name,
+        logo_bytes=light.data if light else None,
         period_label=period_label,
+        generated_at=generated_at,
         subtitle=_REPORT_SUBTITLES.get(report_type, ""),
         category="Network Operations",
         scope_label=_legacy_scope_label(device_ids, group_ids, locations, device_types),
+        accent=branding.brand_rgb,
+        paper_size=branding.paper_size,
+        cover_logo_bytes=cover_logo.data if cover_logo else None,
+        cover_logo_on_dark=branding.logo_dark is not None,
+        doc_label="Network Operations Report",
+        classification=branding.confidentiality,
+        footer_text=branding.report_footer,
+        timezone_name=branding.timezone,
+        tz_label=branding.tz_label(end),
+        generated_label=branding.fmt_datetime(generated_at, with_tz=True),
+        disclaimer=branding.report_disclaimer,
+        contact_line=branding.contact_line,
+        branding=branding,
     )
     pdf.cover()
 
@@ -2457,5 +2954,9 @@ async def generate_report(
     else:
         pdf.add_page()
         pdf.note(f"Unknown report type: {report_type}", kind="warning")
+
+    if pdf.disclaimer:
+        pdf.disclaimer_block(pdf.disclaimer, contact=pdf.contact_line,
+                             address=branding.company_address)
 
     return pdf.output()

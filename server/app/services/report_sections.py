@@ -2176,113 +2176,527 @@ def sections_to_json(sections: list[dict]) -> list[dict]:
     return out
 
 
+from html import escape as _html_escape  # noqa: E402
+
+from app.services.report_service import (  # noqa: E402
+    COLOR_PRIMARY,
+    brand_tokens,
+    classification_rgb,
+    infer_column_styles,
+    pill_kind,
+    rgb_to_hex,
+)
+
+# Rows a table shows in the HTML document (beyond this an explicit note
+# points to the XLSX export) and in the PDF (full width / half width).
+HTML_MAX_ROWS = 500
+PDF_MAX_ROWS = 500
+PDF_MAX_ROWS_HALF = 40
+# Chart image sizes (mm). One size per layout, identical for HTML, PDF, A4
+# and Letter, so a chart drawn for the shared HTML and the PDF attachment of
+# the same run is rendered once (report_charts caches by content and size).
+CHART_W_FULL = 178.0
+CHART_W_HALF = 85.0
+
+_ACCENT_CLASSES = ("primary", "success", "warning", "danger", "info", "neutral")
+_NOT_INCLUDED = re.compile(r"^\s*not included:\s*", re.IGNORECASE)
+
+
+def _meta_branding(meta: dict):
+    """The meta's Branding, or one rebuilt from its plain values."""
+    from app.services.branding import Branding
+    b = meta.get("branding")
+    if isinstance(b, Branding):
+        return b
+    return Branding(company_name=meta.get("company_name") or "",
+                    timezone=meta.get("timezone") or "UTC",
+                    brand_color=meta.get("brand_color") or "#4F6BF6",
+                    paper_size=meta.get("paper_size") or "A4")
+
+
+def _meta_rgb(meta: dict) -> tuple:
+    rgb = meta.get("brand_rgb")
+    if rgb and len(rgb) == 3:
+        return tuple(int(v) for v in rgb)
+    if meta.get("brand_color"):
+        from app.services.branding import hex_to_rgb
+        return hex_to_rgb(meta["brand_color"])
+    return COLOR_PRIMARY
+
+
+def _chart_height(series: dict, half: bool) -> float:
+    kind = (series or {}).get("kind")
+    if kind == "donut":
+        return 50.0 if half else 58.0
+    return 50.0 if half else 56.0
+
+
+def _chart_image(c: dict, branding: Any, half: bool) -> Optional[bytes]:
+    """A chart's PNG: the section's own image when it has one, else the
+    branded rendering of its series (None when neither is usable)."""
+    if c.get("png"):
+        return c["png"]
+    series = c.get("series")
+    if isinstance(series, dict):
+        try:
+            from app.services.report_charts import chart_png
+            return chart_png(series, branding=branding,
+                             width_mm=CHART_W_HALF if half else CHART_W_FULL,
+                             height_mm=_chart_height(series, half))
+        except Exception:
+            logger.exception("report chart rendering failed")
+    return None
+
+
+def _restricted_text(s: dict) -> str:
+    notes = [n for n in (s.get("notes") or []) if n]
+    text_ = " ".join(_NOT_INCLUDED.sub("", str(n)) for n in notes) or \
+        "You do not have permission to view this section."
+    return text_[:1].upper() + text_[1:]
+
+
+def _is_error_note(s: dict, note: Any) -> bool:
+    return bool(s.get("error")) or "could not be generated" in str(note)
+
+
+# ─── HTML ───────────────────────────────────────────────────────────────────
+
 _HTML_CSS = """
-:root { --primary:#4F6BF6; --text:#1A2233; --muted:#6B7280; --line:#E5E7EB; --tint:#F5F7FE; }
-* { box-sizing: border-box; margin: 0; }
-body { font-family: 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif;
-       color: var(--text); background: #EDF0F7; padding: 24px; }
-.page { max-width: 900px; margin: 0 auto; background: #fff; border-radius: 10px;
-        box-shadow: 0 2px 14px rgba(16,24,40,.08); overflow: hidden; }
-.cover { background: linear-gradient(135deg, #26324f 0%, #4F6BF6 120%); color: #fff; padding: 34px 40px; }
-.cover .brand { display:flex; align-items:center; gap:12px; margin-bottom: 22px; }
-.cover .brand img { height: 36px; border-radius: 6px; background:#fff; padding:3px; }
-.cover .brand span { font-size: 14px; letter-spacing: .16em; text-transform: uppercase; opacity:.85; }
-.cover h1 { font-size: 27px; font-weight: 700; margin-bottom: 8px; }
-.cover .meta { font-size: 13px; opacity: .85; }
-.content { padding: 8px 40px 36px; }
-.section { margin-top: 30px; page-break-inside: avoid; }
-.section > h2 { font-size: 17px; padding-left: 10px; border-left: 4px solid var(--primary);
-                margin-bottom: 4px; }
-.section > p.desc { color: var(--muted); font-size: 12.5px; margin: 2px 0 12px 14px; }
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        gap: 10px; margin: 14px 0; }
-.kpi { background: var(--tint); border-radius: 8px; padding: 12px 14px; border-top: 3px solid var(--primary); }
-.kpi .v { font-size: 21px; font-weight: 700; }
-.kpi .l { font-size: 11px; color: var(--muted); margin-top: 3px; text-transform: uppercase;
-          letter-spacing: .04em; }
-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 10px 0 4px; }
-caption { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 6px 0; }
-th { background: var(--primary); color: #fff; text-align: left; padding: 7px 10px; font-size: 11.5px; }
-td { padding: 6px 10px; border-bottom: 1px solid var(--line); }
-tr:nth-child(even) td { background: #FAFBFF; }
-.chart { text-align: center; margin: 12px 0; }
-.chart img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
-.chart .cap { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
-.note { background: #FFFBEB; border: 1px solid #FDE68A; color: #92400E; font-size: 12.5px;
-        border-radius: 8px; padding: 9px 12px; margin: 8px 0; }
-.footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 11.5px;
-          padding: 16px 40px; display: flex; justify-content: space-between; }
-@media print {
-  body { background: #fff; padding: 0; }
-  .page { box-shadow: none; border-radius: 0; max-width: none; }
-  .section { page-break-inside: avoid; }
-  .cover { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  th, .kpi { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+:root{--ink:#0F172A;--body:#334155;--muted:#64748B;--faint:#94A3B8;--line:#E2E8F0;
+--line-soft:#EBF0F6;--panel:#F7F9FC;--ok:#16803D;--ok-bg:#E8F6EE;--bad:#B91C1C;--bad-bg:#FDECEC;
+--warn:#B45309;--warn-bg:#FEF3E2;--info:#075985;--info-bg:#E8F4FB;--neutral:#64748B;
+--neutral-bg:#EEF2F7;--k-success:#16A34A;--k-warning:#D97706;--k-danger:#DC2626;
+--k-info:#0891B2;--k-neutral:#64748B;color-scheme:light}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:#EEF1F6;color:var(--ink);
+font:14px/1.5 "Segoe UI",system-ui,-apple-system,"Liberation Sans","Helvetica Neue",Arial,sans-serif}
+.doc{max-width:980px;margin:24px auto;background:#fff;border-radius:12px;overflow:hidden;
+box-shadow:0 1px 3px rgba(15,23,42,.06),0 8px 28px rgba(15,23,42,.08)}
+.cover{background:var(--ground);color:#fff;padding:26px 40px 30px;border-top:4px solid var(--brand)}
+.cover-top{display:flex;align-items:center;justify-content:space-between;gap:16px;
+padding-bottom:18px;border-bottom:1px solid var(--ground-panel)}
+.brand{display:flex;align-items:center;min-height:40px;min-width:0}
+.brand img{display:block;max-height:48px;max-width:220px;width:auto;height:auto}
+.brand .tile{background:#fff;border-radius:8px;padding:6px 10px;display:inline-flex}
+.brand .tile img{max-height:34px}
+.brand .name{font-size:18px;font-weight:700;overflow-wrap:anywhere}
+.doc-label{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+color:var(--ground-label);text-align:right}
+.cover-body{padding:34px 0 4px}
+.badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.12em;
+text-transform:uppercase;padding:3px 11px;border-radius:999px;background:var(--class-bg);
+color:#fff;margin:0 0 14px}
+.cover h1{font-size:30px;line-height:1.2;margin:0 0 10px;font-weight:700;letter-spacing:-.01em;
+overflow-wrap:anywhere}
+.cover .lede{color:var(--ground-text);font-size:15px;max-width:660px;margin:0}
+.facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 28px;margin:28px 0 0;
+padding-top:18px;border-top:1px solid var(--ground-panel)}
+.facts dt{font-size:10.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+color:var(--ground-label);margin:0 0 3px}
+.facts dd{margin:0;font-size:13.5px;color:#fff;overflow-wrap:anywhere}
+.toc{padding:26px 40px 4px}
+.toc h2,.disclaimer h2{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+color:var(--muted);margin:0 0 8px}
+.toc ol{list-style:none;margin:0;padding:0;columns:2;column-gap:32px}
+.toc li{break-inside:avoid}
+.toc a{display:flex;gap:10px;padding:5px 0;color:var(--ink);text-decoration:none;
+border-bottom:1px solid var(--line-soft);font-size:13.5px}
+.toc a:hover{color:var(--accent)}
+.toc .n{font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
+.toc .off{color:var(--faint)}
+.content{padding:4px 40px 30px}
+.section{margin-top:32px;min-width:0}
+.sec-head{margin-bottom:12px;padding-bottom:9px;border-bottom:1px solid var(--line);position:relative}
+.sec-head:after{content:"";position:absolute;left:0;bottom:-1px;width:36px;height:2px;
+background:var(--accent)}
+.eyebrow{font-size:10.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+color:var(--faint);margin:0 0 3px}
+.section h2{font-size:19px;line-height:1.3;margin:0;display:flex;gap:10px;align-items:center}
+.sec-num{flex:none;font-size:12px;font-weight:700;line-height:1;padding:5px 7px;border-radius:6px;
+background:var(--accent);color:var(--on-accent);font-variant-numeric:tabular-nums}
+.desc{color:var(--muted);font-size:13.5px;margin:6px 0 0}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:16px 0}
+.pair .kpis{grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}
+.kpi{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fff;
+break-inside:avoid;min-width:0}
+.kpi-label{font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+color:var(--muted)}
+.kpi-value{font-size:23px;font-weight:700;line-height:1.25;margin-top:4px;overflow-wrap:anywhere}
+.kpi-bar{width:22px;height:3px;border-radius:2px;margin-top:8px;background:var(--accent)}
+.kpi--success .kpi-bar{background:var(--k-success)}.kpi--warning .kpi-bar{background:var(--k-warning)}
+.kpi--danger .kpi-bar{background:var(--k-danger)}.kpi--info .kpi-bar{background:var(--k-info)}
+.kpi--neutral .kpi-bar{background:var(--k-neutral)}
+.kpi-sub{font-size:12px;color:var(--muted);margin-top:6px}
+figure.chart{margin:16px 0;break-inside:avoid}
+figure.chart figcaption{font-size:12.5px;font-weight:600;margin:0 0 6px}
+figure.chart img{display:block;width:100%;height:auto}
+.table-block{margin:16px 0}
+.table-title{font-size:12.5px;font-weight:600;margin:0 0 6px}
+.table-scroll{overflow-x:auto}
+table.data{width:100%;border-collapse:collapse;font-size:12.5px}
+table.data th{text-align:left;font-size:10.5px;font-weight:700;letter-spacing:.06em;
+text-transform:uppercase;color:#475569;padding:7px 10px;border-bottom:1.5px solid #475569;
+white-space:nowrap}
+table.data td{padding:6px 10px;border-bottom:1px solid var(--line-soft);vertical-align:middle;
+color:var(--body)}
+table.data tbody tr:nth-child(even) td{background:#FBFCFE}
+table.data .r{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+table.data .mono{font-family:"DejaVu Sans Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+font-size:11.5px}
+table.data .dash,table.data .empty{color:var(--faint)}
+table.data .empty{text-align:center;padding:14px}
+.pill{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.06em;
+text-transform:uppercase;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.pill--success{color:var(--ok);background:var(--ok-bg)}.pill--danger{color:var(--bad);background:var(--bad-bg)}
+.pill--warning{color:var(--warn);background:var(--warn-bg)}.pill--info{color:var(--info);background:var(--info-bg)}
+.pill--neutral{color:var(--neutral);background:var(--neutral-bg)}
+.pct{display:inline-flex;align-items:center;gap:8px;justify-content:flex-end}
+.pct .bar{display:inline-block;width:56px;height:5px;background:var(--line-soft);border-radius:3px;
+overflow:hidden}
+.pct .bar i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.cap-note{font-size:12px;color:var(--muted);margin:6px 0 0}
+.callout{border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13px;break-inside:avoid}
+.callout--info{background:var(--panel);border-left:3px solid var(--accent);color:var(--body)}
+.callout--error{background:var(--bad-bg);border-left:3px solid var(--bad);color:#7F1D1D}
+.callout strong{display:block;font-size:12px;letter-spacing:.02em}
+.locked{display:flex;gap:12px;align-items:flex-start;border:1.5px dashed #CBD5E1;
+background:var(--panel);border-radius:10px;padding:14px 16px;color:var(--muted);font-size:13px;
+margin-top:12px;break-inside:avoid}
+.locked svg{flex:none;margin-top:2px}
+.locked .t{font-size:10.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+.locked p{margin:2px 0 0}
+.section--restricted .sec-head h2{color:var(--muted)}
+.section--restricted .sec-num{background:var(--neutral-bg);color:var(--muted)}
+.pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 32px}
+.pair>.section+.section{border-left:1px solid var(--line);padding-left:32px;margin-left:-16px}
+.pair>.section:first-child{padding-right:16px}
+.empty-state{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;
+text-align:center;color:var(--muted);font-size:13px;margin:12px 0}
+.disclaimer{margin-top:36px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);
+font-size:12px}
+.disclaimer p{margin:0 0 6px}
+.doc-foot{display:flex;justify-content:space-between;align-items:flex-end;gap:8px 16px;flex-wrap:wrap;
+border-top:1px solid var(--line);padding:14px 40px;color:var(--muted);font-size:12px}
+.doc-foot .sub{color:var(--faint);font-size:11px}
+.doc-foot .credit{color:var(--faint);font-size:11px;white-space:nowrap}
+@media (max-width:720px){
+.doc{margin:0;border-radius:0}
+.cover,.toc,.content,.doc-foot{padding-left:16px;padding-right:16px}
+.cover-top{flex-wrap:wrap}
+.facts{grid-template-columns:1fr}
+.toc ol{columns:1}
+.pair{grid-template-columns:1fr}
+.pair>.section+.section{border-left:0;padding-left:0;margin-left:0}
+.pair>.section:first-child{padding-right:0}
+.cover h1{font-size:24px}
+}
+@media print{
+body{background:#fff;font-size:10pt}
+.doc{margin:0;max-width:none;box-shadow:none;border-radius:0;overflow:visible}
+.cover,.badge,.sec-num,.kpi-bar,.pill,.pct .bar,.pct .bar i,.callout,.locked,.sec-head:after,
+table.data tbody tr:nth-child(even) td{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.sec-head,.section h2,.table-title,figure.chart figcaption{break-after:avoid}
+.kpis,.kpi,figure.chart,.callout,.locked,.empty-state{break-inside:avoid}
+thead{display:table-header-group}
+tr{break-inside:avoid}
+.table-scroll{overflow:visible}
+figure.chart img{max-width:178mm}
+.pair figure.chart img{max-width:85mm}
+.toc a{border-bottom-color:var(--line)}
+a{color:inherit;text-decoration:none}
+.doc-foot{break-inside:avoid}
 }
 """
 
+_LOCK_SVG = ('<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">'
+             '<rect x="3" y="7" width="10" height="7.5" rx="1.6" fill="#94A3B8"/>'
+             '<path d="M5.2 7V5.2a2.8 2.8 0 0 1 5.6 0V7" fill="none" stroke="#94A3B8" '
+             'stroke-width="1.6"/></svg>')
+
 
 def _esc(v: Any) -> str:
-    return (str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    """HTML-escape text and attribute values (quotes included)."""
+    return _html_escape("" if v is None else str(v), quote=True)
+
+
+def _css_str(v: Any) -> str:
+    """A CSS string literal: quotes, backslashes, newlines and angle
+    brackets escaped so the value can never close the string or the
+    <style> element."""
+    out = []
+    for ch in str(v or ""):
+        if ch in '"\\<>&' or ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\{ord(ch):X} ")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _logo_uri(meta: dict, uri_key: str, bytes_key: str) -> Optional[str]:
+    """A data: URI for a logo with its real (sniffed) MIME type."""
+    uri = meta.get(uri_key)
+    if isinstance(uri, str) and re.match(r"^data:image/(png|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$",
+                                         uri):
+        return uri
+    data = meta.get(bytes_key)
+    if isinstance(data, (bytes, bytearray)) and data:
+        from app.services.branding import sniff_logo
+        mime = sniff_logo(bytes(data))
+        if mime:
+            return f"data:{mime};base64,{base64.b64encode(bytes(data)).decode()}"
+    return None
+
+
+def _html_root_vars(meta: dict) -> str:
+    t = brand_tokens(_meta_rgb(meta))
+    pairs = {
+        "--brand": t["brand"], "--accent": t["accent"], "--on-accent": t["on_accent"],
+        "--on-brand": t["on_brand"], "--tint": t["tint"], "--ground": t["ground"],
+        "--ground-panel": t["ground_panel"], "--ground-label": t["ground_label"],
+        "--ground-text": t["ground_text"],
+        "--class-bg": classification_rgb(meta.get("confidentiality")),
+    }
+    return ":root{" + ";".join(f"{k}:{rgb_to_hex(v)}" for k, v in pairs.items()) + "}"
+
+
+def _html_page_css(meta: dict) -> str:
+    """@page rules: paper size, margins, running header/footer, page counter."""
+    size = "letter" if str(meta.get("paper_size") or "").lower() == "letter" else "A4"
+    company = meta.get("company_name") or "ZenPlus"
+    head = f"{company} · {meta.get('title') or 'Report'}"
+    foot = meta.get("footer_text") or company
+    tz = _tz_note(meta)
+    cls = (meta.get("confidentiality") or "").upper()
+    box = "font-family:\"Liberation Sans\",Arial,sans-serif;font-size:7.5pt;color:#64748B"
+    rules = [
+        f"@top-left{{content:{_css_str(head)};{box}}}",
+        f"@bottom-left{{content:{_css_str(foot)};{box}}}",
+        f"@bottom-center{{content:{_css_str(tz)};{box}}}",
+        f"@bottom-right{{content:\"Page \" counter(page) \" of \" counter(pages);{box}}}",
+    ]
+    if cls:
+        rgb = rgb_to_hex(classification_rgb(meta.get("confidentiality")))
+        rules.append(f"@top-right{{content:{_css_str(cls)};{box};color:{rgb};font-weight:700}}")
+    return (f"@page{{size:{size};margin:16mm 14mm 18mm 14mm;{''.join(rules)}}}"
+            "@page:first{@top-left{content:none}}")
+
+
+def _tz_note(meta: dict) -> str:
+    tz_label = meta.get("tz_label") or "UTC"
+    zone = meta.get("timezone") or "UTC"
+    if zone in ("UTC", "Etc/UTC") or zone == tz_label:
+        return f"All times {tz_label}"
+    return f"All times {tz_label} ({zone})"
+
+
+def _html_cell(val: Any, style: str) -> tuple[str, str]:
+    """(td class, inner html) for one cell."""
+    raw = "" if val is None else str(val)
+    stripped = raw.strip()
+    if style in ("status", "severity"):
+        if stripped.lower() in ("", "-", "—", "–", "n/a", "none"):
+            return "", '<span class="dash">—</span>'
+        return "", f'<span class="pill pill--{pill_kind(stripped)}">{_esc(stripped)}</span>'
+    if not stripped:
+        return ("r" if style in ("num", "pct", "pct-bar") else ""), '<span class="dash">—</span>'
+    if style == "pct-bar":
+        m = re.match(r"^\s*(-?\d[\d,]*(?:\.\d+)?)\s*%", stripped)
+        if m:
+            try:
+                pct = min(max(float(m.group(1).replace(",", "")), 0.0), 100.0)
+            except ValueError:
+                pct = None
+            if pct is not None:
+                return "r", (f'<span class="pct"><span>{_esc(stripped)}</span>'
+                             f'<span class="bar"><i style="width:{pct:.1f}%"></i></span></span>')
+        return "r", _esc(stripped)
+    if style in ("num", "pct"):
+        return "r", _esc(stripped)
+    if style == "mono":
+        return "mono", _esc(stripped)
+    return "", _esc(raw)
+
+
+def _html_table(t: dict) -> str:
+    headers = [str(h) for h in (t.get("headers") or [])]
+    rows = list(t.get("rows") or [])
+    styles = infer_column_styles(headers, rows, t.get("styles"))
+    title = f'<div class="table-title">{_esc(t["title"])}</div>' if t.get("title") else ""
+    right = ' class="r"'
+    head = "".join(
+        f'<th scope="col"{right if styles[i] in ("num", "pct", "pct-bar") else ""}>'
+        f"{_esc(h)}</th>" for i, h in enumerate(headers))
+    out: list[str] = []
+    for row in rows[:HTML_MAX_ROWS]:
+        cells = []
+        for i in range(len(headers)):
+            cls, inner = _html_cell(row[i] if i < len(row) else None, styles[i])
+            cells.append(f'<td class="{cls}">{inner}</td>' if cls else f"<td>{inner}</td>")
+        out.append("<tr>" + "".join(cells) + "</tr>")
+    if not rows:
+        out.append(f'<tr><td class="empty" colspan="{max(len(headers), 1)}">'
+                   "No records in this window.</td></tr>")
+    cap = ""
+    if len(rows) > HTML_MAX_ROWS:
+        cap = (f'<p class="cap-note">Showing the first {HTML_MAX_ROWS:,} of {len(rows):,} rows. '
+               "The Excel (XLSX) export lists every row.</p>")
+    return (f'<div class="table-block">{title}<div class="table-scroll"><table class="data">'
+            f"<thead><tr>{head}</tr></thead><tbody>{''.join(out)}</tbody></table></div>{cap}</div>")
+
+
+def _html_section(s: dict, number: int, branding: Any, half: bool) -> str:
+    sid = f"s-{number:02d}"
+    restricted = bool(s.get("restricted"))
+    classes = "section" + (" section--restricted" if restricted else "") + \
+        (" section--error" if s.get("error") else "")
+    parts = [f'<section class="{classes}" id="{sid}" aria-labelledby="{sid}-h">'
+             '<div class="sec-head">']
+    if s.get("category"):
+        parts.append(f'<div class="eyebrow">{_esc(s["category"])}</div>')
+    parts.append(f'<h2 id="{sid}-h"><span class="sec-num">{number:02d}</span>'
+                 f'<span>{_esc(s.get("title") or "Section")}</span></h2>')
+    if s.get("description") and not restricted:
+        parts.append(f'<p class="desc">{_esc(s["description"])}</p>')
+    parts.append("</div>")
+    if restricted:
+        parts.append(f'<div class="locked" role="note">{_LOCK_SVG}<div><div class="t">Not included</div>'
+                     f"<p>{_esc(_restricted_text(s))}</p></div></div></section>")
+        return "".join(parts)
+
+    kpis = s.get("kpis") or []
+    charts = s.get("charts") or []
+    tables = s.get("tables") or []
+    notes = s.get("notes") or []
+    if kpis:
+        parts.append('<div class="kpis">')
+        for k in kpis:
+            acc = k.get("accent") if k.get("accent") in _ACCENT_CLASSES else "primary"
+            sub = f'<div class="kpi-sub">{_esc(k["subtitle"])}</div>' if k.get("subtitle") else ""
+            parts.append(f'<div class="kpi kpi--{acc}"><div class="kpi-label">{_esc(k.get("label"))}</div>'
+                         f'<div class="kpi-value">{_esc(k.get("value") if k.get("value") not in (None, "") else "—")}</div>'
+                         f'<div class="kpi-bar"></div>{sub}</div>')
+        parts.append("</div>")
+    for c in charts:
+        uri = c.get("data_uri") if isinstance(c.get("data_uri"), str) and \
+            c["data_uri"].startswith("data:image/png;base64,") else None
+        if uri is None:
+            png = _chart_image(c, branding, half)
+            uri = "data:image/png;base64," + base64.b64encode(png).decode() if png else None
+        cap = f"<figcaption>{_esc(c['title'])}</figcaption>" if c.get("title") else ""
+        alt = _esc(c.get("title") or f"{s.get('title') or 'Section'} chart")
+        if uri:
+            parts.append(f'<figure class="chart">{cap}<img src="{uri}" alt="{alt}"></figure>')
+        else:
+            parts.append(f'<figure class="chart">{cap}<div class="empty-state">Chart unavailable.</div></figure>')
+    for t in tables:
+        if not t.get("rows") and notes:
+            continue  # the section's note already explains the absence of data
+        parts.append(_html_table(t))
+    for n in notes:
+        if _is_error_note(s, n):
+            parts.append(f'<div class="callout callout--error" role="note"><strong>Section unavailable'
+                         f"</strong>{_esc(n)}</div>")
+        else:
+            parts.append(f'<div class="callout callout--info" role="note">{_esc(n)}</div>')
+    if not kpis and not charts and not tables and not notes:
+        parts.append('<div class="empty-state">No data available for this period.</div>')
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def _layout(sections: list[dict]) -> list[tuple[dict, ...]]:
+    """Group consecutive half-width sections into side-by-side pairs."""
+    out: list[tuple[dict, ...]] = []
+    i = 0
+    while i < len(sections):
+        s = sections[i]
+        nxt = sections[i + 1] if i + 1 < len(sections) else None
+        if s.get("half") and nxt is not None and nxt.get("half"):
+            out.append((s, nxt))
+            i += 2
+        else:
+            out.append((s,))
+            i += 1
+    return out
 
 
 def render_html(meta: dict, sections: list[dict]) -> str:
-    """Self-contained branded HTML document (charts inlined as data URIs)."""
-    logo = meta.get("logo_data_uri")
-    brand_img = f'<img src="{logo}" alt="logo">' if logo else ""
-    parts: list[str] = [f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{_esc(meta.get('title') or 'Report')}</title>
-<style>{_HTML_CSS}</style></head><body><div class="page">
-<div class="cover">
-  <div class="brand">{brand_img}<span>{_esc(meta.get('company_name') or 'ZenPlus')}</span></div>
-  <h1>{_esc(meta.get('title') or 'Report')}</h1>
-  <div class="meta">{_esc(meta.get('period_label') or '')} &nbsp;·&nbsp;
-    Generated {_esc(meta.get('generated_label') or '')}
-    {f"&nbsp;·&nbsp; Scope: {_esc(meta.get('scope_label') or '')}" if meta.get('scope_label') else ''}</div>
-</div>
-<div class="content">"""]
+    """Self-contained, print-ready branded HTML document (no external
+    resources: logo and charts are data URIs, no scripts), used for the
+    shared-link artifact and the HTML download."""
+    branding = _meta_branding(meta)
+    title = meta.get("title") or "Report"
+    company = meta.get("company_name") or "ZenPlus"
+    on_dark = bool(getattr(branding, "logo_dark", None))
+    cover_uri = _logo_uri(meta, "cover_logo_data_uri", "cover_logo_bytes")
+    if cover_uri and on_dark:
+        brand = f'<img src="{_esc(cover_uri)}" alt="{_esc(company)}">'
+    elif cover_uri:
+        brand = f'<span class="tile"><img src="{_esc(cover_uri)}" alt="{_esc(company)}"></span>'
+    else:
+        brand = f'<span class="name">{_esc(company)}</span>'
+    doc_label = meta.get("category") or "Report"
+    badge = (f'<div class="badge">{_esc(meta["confidentiality"])}</div>'
+             if meta.get("confidentiality") else "")
+    lede = f'<p class="lede">{_esc(meta["description"])}</p>' if meta.get("description") else ""
+    facts = [
+        ("Reporting period", meta.get("period_label") or "—"),
+        ("Generated", meta.get("generated_label") or "—"),
+        ("Scope", meta.get("scope_label") or "All monitored infrastructure"),
+        ("Time zone", _tz_note(meta)),
+    ]
+    facts_html = "".join(f"<div><dt>{_esc(k)}</dt><dd>{_esc(v)}</dd></div>" for k, v in facts)
 
-    for s in sections:
-        parts.append(f'<div class="section"><h2>{_esc(s["title"])}</h2>')
-        if s.get("description"):
-            parts.append(f'<p class="desc">{_esc(s["description"])}</p>')
-        kpis = s.get("kpis") or []
-        if kpis:
-            parts.append('<div class="kpis">')
-            for k in kpis:
-                color = ACCENT_HEX.get(k.get("accent") or "primary", ACCENT_HEX["primary"])
-                parts.append(
-                    f'<div class="kpi" style="border-top-color:{color}">'
-                    f'<div class="v" style="color:{color}">{_esc(k.get("value"))}</div>'
-                    f'<div class="l">{_esc(k.get("label"))}</div></div>')
+    parts: list[str] = [
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta name="color-scheme" content="light"><meta name="generator" content="ZenPlus">'
+        '<meta name="robots" content="noindex, nofollow">'
+        f"<title>{_esc(title)} · {_esc(company)}</title>"
+        f"<style>{_html_root_vars(meta)}{_HTML_CSS}{_html_page_css(meta)}</style></head>"
+        '<body><main class="doc">'
+        f'<header class="cover"><div class="cover-top"><div class="brand">{brand}</div>'
+        f'<div class="doc-label">{_esc(doc_label)}</div></div>'
+        f'<div class="cover-body">{badge}<h1>{_esc(title)}</h1>{lede}'
+        f'<dl class="facts">{facts_html}</dl></div></header>'
+    ]
+
+    if len(sections) >= 2:
+        items = []
+        for n, s in enumerate(sections, 1):
+            off = ' <span class="off">(not included)</span>' if s.get("restricted") else ""
+            items.append(f'<li><a href="#s-{n:02d}"><span class="n">{n:02d}</span>'
+                         f'<span>{_esc(s.get("title") or "Section")}{off}</span></a></li>')
+        parts.append(f'<nav class="toc" aria-label="Contents"><h2>Contents</h2><ol>{"".join(items)}</ol></nav>')
+
+    parts.append('<div class="content">')
+    number = 0
+    for group in _layout(sections):
+        if len(group) == 2:
+            parts.append('<div class="pair">')
+            for s in group:
+                number += 1
+                parts.append(_html_section(s, number, branding, half=True))
             parts.append("</div>")
-        for c in s.get("charts") or []:
-            uri = c.get("data_uri") or (
-                "data:image/png;base64," + base64.b64encode(c["png"]).decode())
-            cap = f'<div class="cap">{_esc(c["title"])}</div>' if c.get("title") else ""
-            parts.append(f'<div class="chart"><img src="{uri}" alt="chart">{cap}</div>')
-        for t in s.get("tables") or []:
-            cap = f"<caption>{_esc(t['title'])}</caption>" if t.get("title") else ""
-            head = "".join(f"<th>{_esc(h)}</th>" for h in t.get("headers") or [])
-            body = "".join(
-                "<tr>" + "".join(f"<td>{_esc(c)}</td>" for c in row) + "</tr>"
-                for row in (t.get("rows") or [])[:60])
-            if not t.get("rows"):
-                body = f'<tr><td colspan="{max(len(t.get("headers") or []), 1)}" ' \
-                       f'style="color:#6B7280">No data for this window</td></tr>'
-            parts.append(f"<table>{cap}<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>")
-        for n in s.get("notes") or []:
-            parts.append(f'<div class="note">{_esc(n)}</div>')
-        parts.append("</div>")
+        else:
+            number += 1
+            parts.append(_html_section(group[0], number, branding, half=False))
+    if not sections:
+        parts.append('<div class="empty-state">This report has no sections.</div>')
+    if meta.get("disclaimer"):
+        parts.append(f'<aside class="disclaimer"><h2>Disclaimer</h2><p>{_esc(meta["disclaimer"])}</p></aside>')
+    parts.append("</div>")
 
-    parts.append(f"""</div>
-<div class="footer"><span>{_esc(meta.get('company_name') or 'ZenPlus')} · {_esc(meta.get('title') or '')}</span>
-<span>Powered by ZenPlus</span></div>
-</div></body></html>""")
+    foot_main = " · ".join(_esc(p) for p in (meta.get("footer_text") or company,
+                                              meta.get("contact_line")) if p)
+    address = f'<div class="sub">{_esc(meta["company_address"])}</div>' if meta.get("company_address") else ""
+    parts.append(f'<footer class="doc-foot"><div><div>{foot_main}</div>{address}</div>'
+                 '<div class="credit">Generated by ZenPlus</div></footer></main></body></html>')
     return "".join(parts)
 
+
+# ─── PDF ────────────────────────────────────────────────────────────────────
 
 _COL_GAP = 8
 
@@ -2290,6 +2704,9 @@ _COL_GAP = 8
 def _pdf_section_body(pdf: ZenPlusReport, s: dict, half: bool = False) -> None:
     """Render a section's KPIs, charts, tables and notes with the current
     margins (full page or a half-width column)."""
+    if s.get("restricted"):
+        pdf.restricted_card(_restricted_text(s))
+        return
     kpis = s.get("kpis") or []
     charts = s.get("charts") or []
     tables = s.get("tables") or []
@@ -2297,8 +2714,11 @@ def _pdf_section_body(pdf: ZenPlusReport, s: dict, half: bool = False) -> None:
     if kpis:
         pdf.kpi_row(kpis, per_row=2 if half else None)
     for c in charts:
-        if c.get("png"):
-            pdf.add_chart(c["png"], title=c.get("title") or "")
+        png = _chart_image(c, getattr(pdf, "branding", None), half)
+        if png:
+            pdf.add_chart(png, title=c.get("title") or "")
+        elif c.get("series") is not None or c.get("png") is not None:
+            pdf.empty_state("Chart unavailable.")
     for t in tables:
         rows = [["" if c is None else str(c) for c in row] for row in (t.get("rows") or [])]
         if not rows and notes:
@@ -2307,9 +2727,12 @@ def _pdf_section_body(pdf: ZenPlusReport, s: dict, half: bool = False) -> None:
             pdf.sub_heading(t["title"])
         headers = t.get("headers") or []
         pdf.data_table(headers, rows, col_styles=t.get("styles"),
-                       max_rows=30 if half else 100)
+                       max_rows=PDF_MAX_ROWS_HALF if half else PDF_MAX_ROWS)
     for n in notes:
-        pdf.note(n, kind="warning" if "could not be generated" in str(n) else "info")
+        if _is_error_note(s, n):
+            pdf.note(n, kind="error", label="Section unavailable")
+        else:
+            pdf.note(n, kind="info")
     if not kpis and not charts and not tables and not notes:
         pdf.empty_state()
 
@@ -2322,13 +2745,13 @@ def _half_heading(pdf: ZenPlusReport, s: dict, number: int) -> None:
         pdf._eyebrow(x, y, s["category"], COLOR_FAINT, size=5.8)
         y += 4.2
     pdf._sans("B", 8.8)
-    pdf.set_text_color(*pdf.accent)
+    pdf.set_text_color(*(COLOR_MUTED if s.get("restricted") else pdf.accent))
     ns = f"{number:02d}"
     pdf.set_xy(x, y + 1.1)
     pdf.cell(pdf.get_string_width(ns) + 1, 5, ns)
     tx = x + pdf.get_string_width(ns) + 2.8
     pdf._sans("B", 11)
-    pdf.set_text_color(*COLOR_TEXT)
+    pdf.set_text_color(*(COLOR_MUTED if s.get("restricted") else COLOR_TEXT))
     pdf.set_xy(tx, y)
     pdf.cell(pdf.content_w - (tx - x), 6.6,
              pdf._fit(_safe(s["title"]), pdf.content_w - (tx - x)))
@@ -2337,7 +2760,7 @@ def _half_heading(pdf: ZenPlusReport, s: dict, number: int) -> None:
     pdf.rect(x, y2, 9, 0.8, "F")
     pdf._hairline(x + 11, y2 + 0.4, x + pdf.content_w)
     pdf.set_y(y2 + 3)
-    if s.get("description"):
+    if s.get("description") and not s.get("restricted"):
         pdf._sans("", 7.4)
         pdf.set_text_color(*COLOR_MUTED)
         pdf.set_x(x)
@@ -2345,21 +2768,30 @@ def _half_heading(pdf: ZenPlusReport, s: dict, number: int) -> None:
         pdf.set_y(pdf.get_y() + 1.4)
 
 
-def _measure_half(s: dict, col_w: float) -> float | None:
+def _measure_half(s: dict, col_w: float, pdf: Optional[ZenPlusReport] = None) -> float | None:
     """Height of a section rendered at column width, or None if it cannot fit
-    on a single page."""
+    on a single page. Measures on one reusable probe document per report
+    (same paper size, accent and branding as ``pdf``)."""
     try:
-        probe = ZenPlusReport(title="probe")
-        probe._decor = False
-        probe._outline_on = False
+        probe = getattr(pdf, "_half_probe", None)
+        if probe is None:
+            probe = ZenPlusReport(title="probe",
+                                  paper_size=getattr(pdf, "paper_size", "A4"),
+                                  accent=getattr(pdf, "brand", COLOR_PRIMARY),
+                                  branding=getattr(pdf, "branding", None))
+            probe._decor = False
+            probe._outline_on = False
+            if pdf is not None:
+                pdf._half_probe = probe
         probe.add_page()
+        start = probe.page_no()
         probe.begin_column(MARGIN_L, col_w)
         probe.set_y(MARGIN_T)
         _half_heading(probe, s, 99)
         _pdf_section_body(probe, s, half=True)
         h = probe.get_y() - MARGIN_T
         probe.end_column()
-        if probe.page_no() > 1:
+        if probe.page_no() > start:
             return None
         return h
     except Exception:
@@ -2368,31 +2800,26 @@ def _measure_half(s: dict, col_w: float) -> float | None:
 
 
 def render_pdf(meta: dict, sections: list[dict]) -> bytes:
-    """Enterprise PDF: branded cover, contents (long reports), numbered
-    sections with side-by-side placement of compact half-width sections."""
-    pdf = ZenPlusReport(
-        title=meta.get("title") or "Report",
-        company_name=meta.get("company_name") or "ZenPlus",
-        logo_bytes=meta.get("logo_bytes"),
-        period_label=meta.get("period_label") or "",
-        subtitle=meta.get("description") or "",
-        category=meta.get("category") or "",
-        scope_label=meta.get("scope_label") or "",
-    )
+    """Enterprise PDF in the organisation's branding: cover, contents (4+
+    sections), numbered sections with side-by-side placement of compact
+    half-width sections, running header/footer, closing disclaimer.
+    Paper size (A4/Letter), accent, logos, timezone and labels come from
+    ``meta`` (build_report_meta)."""
+    pdf = ZenPlusReport.from_meta(meta)
+    if pdf.branding is None:
+        pdf.branding = _meta_branding(meta)
     pdf.cover()
-    if len(sections) >= 5:
+    if len(sections) >= 4:
         pdf.toc(expected_entries=len(sections))
     else:
         pdf.add_page()
 
-    i = 0
-    while i < len(sections):
-        s = sections[i]
-        nxt = sections[i + 1] if i + 1 < len(sections) else None
-        if s.get("half") and nxt is not None and nxt.get("half"):
-            col_w = (CONTENT_W - _COL_GAP) / 2
-            h1 = _measure_half(s, col_w)
-            h2 = _measure_half(nxt, col_w)
+    for group in _layout(sections):
+        if len(group) == 2:
+            s, nxt = group
+            col_w = (pdf.body_w - _COL_GAP) / 2
+            h1 = _measure_half(s, col_w, pdf)
+            h2 = _measure_half(nxt, col_w, pdf)
             page_capacity = pdf.page_break_trigger - MARGIN_T
             if h1 is not None and h2 is not None and max(h1, h2) <= page_capacity:
                 if max(h1, h2) > pdf.page_break_trigger - pdf.get_y() - 3:
@@ -2422,13 +2849,15 @@ def render_pdf(meta: dict, sections: list[dict]) -> bytes:
                 pdf.set_line_width(0.2)
                 pdf.line(divider_x, y0 + 1, divider_x, max(ends) - 2)
                 pdf.set_y(max(ends) + 7)
-                i += 2
                 continue
-        pdf.section_title(s["title"], description=s.get("description"),
-                          category=s.get("category"))
-        _pdf_section_body(pdf, s, half=False)
-        pdf.ln(4)
-        i += 1
+        for s in group:
+            pdf.section_title(s["title"], description=None if s.get("restricted") else s.get("description"),
+                              category=s.get("category"))
+            _pdf_section_body(pdf, s, half=False)
+            pdf.ln(4)
+    if pdf.disclaimer:
+        pdf.disclaimer_block(pdf.disclaimer, contact=pdf.contact_line,
+                             address=meta.get("company_address") or "")
     return bytes(pdf.output())
 
 
