@@ -292,10 +292,11 @@ def _availability_world(monkeypatch, samples):
     db = DB(("FROM devices", [(D1, "core-1", "10.0.0.1/32", "HQ", "up"),
                               (D2, "edge-1", "10.0.0.2/32", "DC", "up"),
                               (D3, "spare", "10.0.0.3/32", "", "unknown")]))
-    client = CH(("GROUP BY did", [(d, up, total, 5.0, 9.0, total, 0.0) for d, (up, total) in samples.items()]
-                 + [("44444444-4444-4444-8444-444444444444", 0, 1000, 1.0, 1.0, 1000, 0.0)]),
-                ("GROUP BY b", [(START, sum(u for u, _ in samples.values()),
-                                 sum(t for _, t in samples.values()))]))
+    gone = "44444444-4444-4444-8444-444444444444"      # deleted device: still in ClickHouse
+    client = CH(("GROUP BY did, b", [(d, START, up, total) for d, (up, total) in samples.items()]
+                 + [(gone, START, 0, 1000)]),
+                ("GROUP BY did", [(d, up, total, 5.0, 9.0, total, 0.0) for d, (up, total) in samples.items()]
+                 + [(gone, 0, 1000, 1.0, 1.0, 1000, 0.0)]))
     monkeypatch.setattr(rs.SectionCtx, "ch", lambda self: client)
     monkeypatch.setattr(rs, "device_outage_episodes", lambda *a, **k: [])
     return db, client
@@ -305,11 +306,20 @@ def _availability_world(monkeypatch, samples):
 def test_node_availability_reads_the_table_for_the_window(monkeypatch, hours, table):
     db, client = _availability_world(monkeypatch, {D1: (90, 100)})
     na = run(rs._node_availability(make_ctx(db, to=START + timedelta(hours=hours))))
-    sql = client.sql("GROUP BY did")[0][0]
+    sql, params = client.sql("GROUP BY did")[0]
     assert f"FROM zenplus.{table.strip()} " in sql
-    # Only current inventory is read (deleted devices never move the headline).
-    assert client.sql("GROUP BY did")[0][1]["ids"] == [D1, D2, D3]
+    # Unfiltered: no inventory id list is inlined (it would outgrow ClickHouse's
+    # query size on large estates); deleted devices are dropped in Python.
+    assert "ids" not in params and "device_id IN" not in sql
+    assert "timestamp < %(t)s" in sql                      # half-open window
     assert na["table"] == table.strip()
+    assert [n["id"] for n in na["nodes"]] == [D1, D2, D3]
+
+
+def test_node_availability_sends_ids_only_for_a_device_filter(monkeypatch):
+    db, client = _availability_world(monkeypatch, {D1: (90, 100)})
+    run(rs._node_availability(make_ctx(db, filters={"device_ids": [D1]})))
+    assert client.sql("GROUP BY did")[0][1]["ids"]
 
 
 def test_availability_headline_is_sample_weighted_and_unmeasured_is_null(monkeypatch):
@@ -327,7 +337,7 @@ def test_availability_headline_is_sample_weighted_and_unmeasured_is_null(monkeyp
     pt = trend["charts"][0]["series"]["points"][0]
     assert pt["t"].endswith("Z") and pt["v"] == pytest.approx(95.45)
     assert "png" not in trend["charts"][0]
-    bucket_sql, bucket_params = client.sql("GROUP BY b")[0]
+    bucket_sql, bucket_params = client.sql("GROUP BY did, b")[0]
     assert "%(org_tz)s" in bucket_sql and bucket_params["org_tz"] == "Asia/Riyadh"
 
 

@@ -24,6 +24,12 @@ class TickDB:
             def fetchall(self):
                 return rows if sql.startswith("SELECT * FROM report_schedules") else []
 
+            def first(self):
+                if not sql.startswith("SELECT * FROM report_schedules"):
+                    return None
+                done = set((params or {}).get("done") or [])
+                return next((r for r in rows if str(r.id) not in done), None)
+
         return R()
 
     async def commit(self):
@@ -567,3 +573,28 @@ def test_a_dropped_session_keeps_the_recipients_already_sent(monkeypatch):
                                        "Subject", "text", "<p>html</p>")
     assert ok == ["a@example.com", "b@example.com"] == sent
     assert [a for a, _ in failed] == ["c@example.com", "d@example.com"]
+
+
+
+def test_tick_claims_one_schedule_at_a_time(monkeypatch):
+    """Each run is claimed (and committed) just before it is generated, so a
+    worker that dies mid-batch leaves the remaining schedules due."""
+    order = []
+
+    async def fake_tz(db):
+        return "UTC"
+
+    async def fake_generate(db, sched, **kw):
+        claims = [s for s in db.log if s.startswith("UPDATE report_schedules")]
+        order.append((sched["id"], len(claims)))
+        return {"status": "success", "errors": []}
+
+    monkeypatch.setattr(rs, "get_configured_timezone", fake_tz)
+    monkeypatch.setattr(rs, "generate_and_deliver", fake_generate)
+    db = TickDB([_row(id="s1", report_type="availability", custom_report_id=None),
+                 _row(id="s2", report_type="alerts", custom_report_id=None)])
+    out = asyncio.run(rs.run_scheduler_tick(db))
+    assert out["fired"] == ["s1", "s2"]
+    # s1 was generated after only its own claim; s2 after s1's claim, s1's
+    # result and its own claim — never both claimed up front.
+    assert order == [("s1", 1), ("s2", 3)]

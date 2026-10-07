@@ -31,6 +31,7 @@ from sqlalchemy import text
 
 from app.services.report_sections import (
     SectionCtx,
+    _fmt_avail,
     _fmt_pct,
     _node_availability,
     _section,
@@ -64,7 +65,9 @@ async def device_status_now(ctx: SectionCtx) -> dict:
     for r in rows:
         counts[r[3]] = counts.get(r[3], 0) + 1
     down = [r for r in rows if r[3] in ("down", "degraded")]
-    down.sort(key=lambda r: (r[3] != "down", r[4] or ctx.frm))
+    # last_seen is timestamptz (aware) and may be NULL (a controller child seen
+    # down from the start): compare naive UTC, never-seen first.
+    down.sort(key=lambda r: (r[3] != "down", _naive(r[4]) or datetime.min))
     top_n = int(ctx.opt("top_n"))
     total = len(rows)
     up = counts.get("up", 0)
@@ -260,28 +263,6 @@ async def _group_labels(ctx: SectionCtx, group_by: str) -> dict[str, str]:
     return {str(r[0]): (r[1] or GROUP_FALLBACK[group_by]) for r in rows}
 
 
-async def _node_sample_weights(ctx: SectionCtx) -> Optional[dict[str, float]]:
-    """device_id -> ping samples behind its availability figure (same table as
-    _node_availability, maintenance excluded); None when unavailable."""
-    key = "devpack_node_samples"
-    if key in ctx._cache:
-        return ctx._cache[key]
-    msql, mparams = _maint_sql(await _maintenance(ctx))
-    dsql, dparams = ctx.ch_device_clause("device_id")
-    try:
-        rows = await ctx.ch_rows(
-            "SELECT toString(device_id) AS did, sum(sample_count) AS node_samples "
-            "FROM zenplus.ping_metrics_5m "
-            f"WHERE timestamp >= %(f)s AND timestamp <= %(t)s{dsql}{msql} GROUP BY did",
-            {"f": ctx.frm, "t": ctx.to, **dparams, **mparams})
-        out: Optional[dict[str, float]] = {str(r[0]): float(r[1] or 0) for r in rows}
-    except Exception:
-        logger.exception("availability_by_group: sample counts unavailable")
-        out = None
-    ctx._cache[key] = out
-    return out
-
-
 @register_section(
     "availability_by_group", title="Availability by Group and Site", category="Availability",
     description=("Node availability rolled up by device group, location, monitoring site or "
@@ -302,7 +283,6 @@ async def availability_by_group(ctx: SectionCtx) -> dict:
 
     labels = ({n["id"]: (n.get("location") or "").strip() or GROUP_FALLBACK["location"]
                for n in nodes} if group_by == "location" else await _group_labels(ctx, group_by))
-    weights = await _node_sample_weights(ctx)
     target = na.get("sla_target") or 99.9
 
     groups: dict[str, dict[str, Any]] = {}
@@ -315,11 +295,13 @@ async def availability_by_group(ctx: SectionCtx) -> dict:
         g["down_now"] += 1 if n.get("status") == "down" else 0
         if n.get("avail") is None:
             continue
-        w = 1.0 if weights is None else weights.get(n["id"], 0.0)
+        # Weighted by the samples behind each node's figure, from the same
+        # table, window and maintenance exclusion as _node_availability.
+        w = float(n.get("samples") or 0)
         if w <= 0:
             continue
         g["measured"] += 1
-        g["up"] += n["avail"] / 100.0 * w
+        g["up"] += float(n.get("up_samples") or 0)
         g["total"] += w
         g["down_min"] += n.get("downtime_min") or 0.0
         if g["worst"] is None or n["avail"] < g["worst"][1]:
@@ -339,11 +321,11 @@ async def availability_by_group(ctx: SectionCtx) -> dict:
     kpis = [
         {"label": GROUP_PLURAL[group_by].capitalize(), "value": f"{len(groups):,}",
          "accent": "primary", "subtitle": f"{len(nodes):,} node(s)"},
-        {"label": f"Lowest {head.lower()}", "value": _fmt_pct(measured[0][1]["avail"]) if measured else "—",
+        {"label": f"Lowest {head.lower()}", "value": _fmt_avail(measured[0][1]["avail"]) if measured else "—",
          "accent": ("neutral" if not measured else
                     "success" if measured[0][1]["avail"] >= target else "danger"),
          "subtitle": measured[0][0] if measured else "Not measured"},
-        {"label": f"Best {head.lower()}", "value": _fmt_pct(measured[-1][1]["avail"]) if measured else "—",
+        {"label": f"Best {head.lower()}", "value": _fmt_avail(measured[-1][1]["avail"]) if measured else "—",
          "accent": "success" if measured else "neutral",
          "subtitle": measured[-1][0] if measured else "Not measured"},
         {"label": f"Below target ({target:g}%)", "value": f"{len(below):,}",
@@ -353,22 +335,23 @@ async def availability_by_group(ctx: SectionCtx) -> dict:
          "accent": "warning" if unmeasured_nodes else "neutral",
          "subtitle": "No ping samples in the period"},
     ]
-    rows = [[name, f"{g['nodes']:,}", f"{g['measured']:,}", _fmt_pct(g["avail"]),
+    rows = [[name, f"{g['nodes']:,}", f"{g['measured']:,}", _fmt_avail(g["avail"]),
              f"{g['down_min']:,.0f} min" if g["measured"] else "—",
              f"{g['outages']:,}", f"{g['down_now']:,}",
-             f"{g['worst'][0]} ({g['worst'][1]:.2f}%)" if g["worst"] else "—"]
+             f"{g['worst'][0]} ({_fmt_avail(g['worst'][1])})" if g["worst"] else "—"]
             for name, g in shown]
     notes = ["Each row is weighted by ping samples (total up samples ÷ total samples), "
              "not a mean of node percentages; planned maintenance is excluded."]
-    if weights is None:
-        notes = ["Ping sample counts were unavailable, so each group is a mean of its node "
-                 "percentages for this report."]
     if na.get("maint_excluded_min"):
         notes.append(f"Planned maintenance excluded: {na['maint_excluded_min']:,.0f} device-minutes.")
     if group_by == "site":
         notes.append("Monitoring site is the site of each node's primary poller; "
                      "'Controller' means the central appliance polls it.")
-    notes += _coverage_note(ctx, ROLLUP_5M_RETENTION_DAYS, "5-minute ping history")
+    retention = {"ping_metrics": (RAW_RETENTION_DAYS, "Raw ping history"),
+                 "ping_metrics_5m": (ROLLUP_5M_RETENTION_DAYS, "5-minute ping history"),
+                 "ping_metrics_1h": (PING_1H_RETENTION_DAYS, "Hourly ping history")}.get(
+        na.get("table") or "", (ROLLUP_5M_RETENTION_DAYS, "5-minute ping history"))
+    notes += _coverage_note(ctx, *retention)
     return _section(
         "availability_by_group", title,
         description=(f"Availability of {len(nodes):,} node(s) by {head.lower()}, lowest first, "
@@ -436,7 +419,7 @@ async def _ping_quality(ctx: SectionCtx) -> dict:
     peak = _PING_PEAK_ROLLUP if rollup else _PING_PEAK_RAW
     dsql, dparams = ctx.ch_device_clause("device_id")
     msql, mparams = _maint_sql(await _maintenance(ctx))
-    where = f"timestamp >= %(f)s AND timestamp <= %(t)s{dsql}{msql}"
+    where = f"timestamp >= %(f)s AND timestamp < %(t)s{dsql}{msql}"
     params = {"f": ctx.frm, "t": ctx.to, **dparams, **mparams}
 
     per_node = {}
@@ -635,7 +618,7 @@ async def device_flapping(ctx: SectionCtx) -> dict:
             "countIf(n IN ('down', 'offline')) AS downs, countIf(n = 'degraded') AS degraded, "
             "max(timestamp) AS last_change "
             "FROM zenplus.device_status_log "
-            f"WHERE timestamp >= %(f)s AND timestamp <= %(t)s{dsql} GROUP BY did, b",
+            f"WHERE timestamp >= %(f)s AND timestamp < %(t)s{dsql} GROUP BY did, b",
             {"f": ctx.frm, "t": ctx.to, **dparams, **bparams}):
         did = str(did)
         if did not in names:
@@ -777,7 +760,7 @@ async def device_reboots(ctx: SectionCtx) -> dict:
             f"SELECT toString(device_id) AS did, argMin({lo}, timestamp) AS first_v, "
             f"argMax({hi}, timestamp) AS last_v, min(timestamp) AS first_ts, max(timestamp) AS last_ts "
             f"FROM zenplus.{table} WHERE metric_key = 'uptime' "
-            f"AND timestamp >= %(f)s AND timestamp <= %(t)s{dsql} GROUP BY did", params):
+            f"AND timestamp >= %(f)s AND timestamp < %(t)s{dsql} GROUP BY did", params):
         did = str(did)
         if did not in names:
             continue
@@ -791,25 +774,42 @@ async def device_reboots(ctx: SectionCtx) -> dict:
     reboots: dict[str, list[datetime]] = defaultdict(list)
     wraps = 0
     if flagged:
-        for did, ts, value, prev, prev_ts in await ctx.ch_rows(
-                "SELECT did, ts, cur, prev, prev_ts FROM ("
-                f"SELECT toString(device_id) AS did, timestamp AS ts, {lo} AS cur, "
-                f"lagInFrame({hi}, 1, -1.0) OVER w AS prev, "
+        # One row per sample (raw) or per 5-minute bucket (rollup: several rows
+        # can share a bucket, so reduce them to the bucket's min and max first).
+        # Consecutive minima are compared, so a bucket that straddles a reboot
+        # is counted once; the previous maximum feeds the counter-wrap check.
+        if raw:
+            src = ("SELECT device_id, timestamp, value AS lo_v, value AS hi_v FROM zenplus.snmp_metrics "
+                   "WHERE metric_key = 'uptime' AND timestamp >= %(f)s AND timestamp < %(t)s "
+                   "AND device_id IN %(flagged)s")
+        else:
+            src = ("SELECT device_id, timestamp, min(min_value) AS lo_v, max(max_value) AS hi_v "
+                   "FROM zenplus.snmp_metrics_5m WHERE metric_key = 'uptime' "
+                   "AND timestamp >= %(f)s AND timestamp < %(t)s AND device_id IN %(flagged)s "
+                   "GROUP BY device_id, timestamp")
+        for did, ts, value, prev_lo, prev_hi, prev_ts in await ctx.ch_rows(
+                "SELECT did, ts, cur, prev_lo, prev_hi, prev_ts FROM ("
+                "SELECT toString(device_id) AS did, timestamp AS ts, lo_v AS cur, "
+                "lagInFrame(lo_v, 1, -1.0) OVER w AS prev_lo, "
+                "lagInFrame(hi_v, 1, -1.0) OVER w AS prev_hi, "
                 "lagInFrame(timestamp) OVER w AS prev_ts "
-                f"FROM zenplus.{table} WHERE metric_key = 'uptime' "
-                "AND timestamp >= %(f)s AND timestamp <= %(t)s AND device_id IN %(flagged)s "
+                f"FROM ({src}) "
                 "WINDOW w AS (PARTITION BY device_id ORDER BY timestamp ASC "
                 "ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
-                f") WHERE prev >= 0 AND cur + {REBOOT_DROP_S:.0f} < prev ORDER BY did, ts",
+                f") WHERE prev_lo >= 0 AND cur + {REBOOT_DROP_S:.0f} < prev_lo ORDER BY did, ts",
                 {"f": ctx.frm, "t": ctx.to, "flagged": flagged}):
             ts_n, prev_n = _naive(ts), _naive(prev_ts) or _naive(ts)
             gap = max(0.0, (ts_n - prev_n).total_seconds()) if ts_n and prev_n else 0.0
-            if _is_wrap(float(prev), float(value), gap):
+            if _is_wrap(float(prev_hi), float(value), gap):
                 wraps += 1
                 continue
             # Boot time = sample time − uptime (a 5-minute bucket is placed at its middle).
             at = ts_n + (timedelta(seconds=150) if not raw else timedelta(0))
-            reboots[str(did)].append(at - timedelta(seconds=max(0.0, float(value))))
+            boot = at - timedelta(seconds=max(0.0, float(value)))
+            seen = reboots[str(did)]
+            # Belt and braces: one boot seen in neighbouring buckets is one reboot.
+            if not seen or abs((boot - seen[-1]).total_seconds()) > 300:
+                seen.append(boot)
 
     rebooted = sorted(reboots, key=lambda d: (-len(reboots[d]), names[d][1].lower()))
     shown = rebooted[:top_n]
@@ -1029,7 +1029,7 @@ async def site_vantage_reachability(ctx: SectionCtx) -> dict:
         "countIf(is_up = 1) AS up, sumIf(rtt_ms, is_up = 1 AND rtt_ms > 0) AS rtt_sum, "
         "countIf(is_up = 1 AND rtt_ms > 0) AS rtt_n, sumIf(packet_loss, is_up = 1) AS loss_sum, "
         "max(timestamp) AS last_ts FROM zenplus.ping_metrics "
-        f"WHERE timestamp >= %(f)s AND timestamp <= %(t)s{dsql}{msql} GROUP BY did, poller_id",
+        f"WHERE timestamp >= %(f)s AND timestamp < %(t)s{dsql}{msql} GROUP BY did, poller_id",
         {"f": max(frm, floor), "t": to, **dparams, **mparams})
 
     sensors = {str(r[0]): (r[1] or "Sensor", r[2]) for r in (await ctx.db.execute(text(
@@ -1105,7 +1105,7 @@ async def site_vantage_reachability(ctx: SectionCtx) -> dict:
                "headers": ["Site", "Sensor", "Nodes", "Availability", "Avg RTT", "Packet loss",
                            "Last result"],
                "styles": ["text", "text", "num", "pct-bar", "num", "pct", "text"],
-               "rows": [[s["site"], s["sensor"], f"{len(s['nodes']):,}", _fmt_pct(s["avail"]),
+               "rows": [[s["site"], s["sensor"], f"{len(s['nodes']):,}", _fmt_avail(s["avail"]),
                          _ms(s["rtt"]), _fmt_pct(s["loss"]), ctx.fmt_short(s["last"])]
                         for _k, s in site_rows]}]
     if shown:
@@ -1115,8 +1115,8 @@ async def site_vantage_reachability(ctx: SectionCtx) -> dict:
             "headers": ["Node", "Best site", "Availability", "Worst site", "Availability",
                         "Difference", "RTT by site"],
             "styles": ["text", "text", "pct", "text", "pct", "num", "num"],
-            "rows": [[names[c["id"]], c["best"], _fmt_pct(c["best_v"]), c["worst"],
-                      _fmt_pct(c["worst_v"]), f"{c['spread']:.2f} pts",
+            "rows": [[names[c["id"]], c["best"], _fmt_avail(c["best_v"]), c["worst"],
+                      _fmt_avail(c["worst_v"]), f"{c['spread']:.2f} pts",
                       (f"{_ms(c['rtt_lo'])} – {_ms(c['rtt_hi'])}" if c["rtt_lo"] is not None else "—")]
                      for c in shown]})
     elif compared:
@@ -1137,7 +1137,7 @@ async def site_vantage_reachability(ctx: SectionCtx) -> dict:
             {"label": f"Sites disagree (≥ {spread_min:g} pts)", "value": f"{len(disagree):,}",
              "accent": "warning" if disagree else ("success" if compared else "neutral")},
             {"label": "Lowest site availability",
-             "value": _fmt_pct(lowest[1]["avail"]) if lowest else "—",
+             "value": _fmt_avail(lowest[1]["avail"]) if lowest else "—",
              "accent": "neutral" if not lowest else ("success" if lowest[1]["avail"] >= 99 else "warning"),
              "subtitle": lowest[0] if lowest else "Not measured"},
         ],

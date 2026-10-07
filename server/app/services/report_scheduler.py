@@ -843,36 +843,45 @@ def _row_to_sched(row) -> dict:
     }
 
 
+MAX_RUNS_PER_TICK = 100
+
+
 async def run_scheduler_tick(db: AsyncSession) -> dict:
+    """Run every due schedule, one at a time.
+
+    Each schedule is claimed on its own (row lock, next_run_at advanced,
+    marked running, committed) and only then generated: both API workers run
+    this loop, so the claim keeps a slow run from being delivered twice, and
+    claiming one at a time means a worker that dies mid-batch loses at most the
+    run in progress — the other due schedules stay due for either worker."""
     now = datetime.now(timezone.utc)
     tz_name = await get_configured_timezone(db)
-    rows = (await db.execute(
-        text("""SELECT * FROM report_schedules
-                WHERE enabled = TRUE AND next_run_at IS NOT NULL AND next_run_at <= :now
-                FOR UPDATE SKIP LOCKED"""),
-        {"now": now},
-    )).fetchall()
-
-    # Claim every due row by advancing next_run_at while the row locks are
-    # held. Generation commits (releasing the locks) part-way through, and both
-    # API workers run this loop: without the claim a slow run could be picked
-    # up again by the other worker and delivered twice.
-    claimed: list[dict] = []
-    for row in rows:
+    fired: list[str] = []
+    done: list[str] = []
+    while len(done) < MAX_RUNS_PER_TICK:
+        row = (await db.execute(
+            text("""SELECT * FROM report_schedules
+                    WHERE enabled = TRUE AND next_run_at IS NOT NULL AND next_run_at <= :now
+                      AND NOT (id::text = ANY(:done))
+                    ORDER BY next_run_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED"""),
+            {"now": now, "done": done},
+        )).first()
+        if row is None or str(row.id) in done:
+            break
         sched = _row_to_sched(row)
+        done.append(sched["id"])
         nxt = compute_next_run(sched, tz_name, after=now + timedelta(seconds=1))
         await db.execute(
             text("""UPDATE report_schedules
-                    SET last_run_at = :now, next_run_at = :nxt, updated_at = NOW()
+                    SET last_run_at = :now, next_run_at = :nxt, last_status = 'running',
+                        last_error = NULL, updated_at = NOW()
                     WHERE id = :id"""),
             {"now": now, "nxt": nxt, "id": sched["id"]},
         )
-        claimed.append(sched)
-    if claimed:
         await db.commit()
 
-    fired: list[str] = []
-    for sched in claimed:
         try:
             result = await generate_and_deliver(db, sched)
             last_status = result["status"]
@@ -892,7 +901,7 @@ async def run_scheduler_tick(db: AsyncSession) -> dict:
 
     if fired:
         logger.info("report scheduler tick: fired %d schedule(s)", len(fired))
-    return {"fired": fired, "checked": len(rows)}
+    return {"fired": fired, "checked": len(done)}
 
 
 async def report_scheduler_loop() -> None:

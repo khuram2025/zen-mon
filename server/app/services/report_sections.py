@@ -115,6 +115,22 @@ def _fmt_ms(v: Optional[float]) -> str:
     return f"{v / 1000:.2f} s" if v >= 1000 else f"{v:.0f} ms"
 
 
+def _avail_num(v: Optional[float]) -> Optional[float]:
+    """Availability truncated to two decimals: a value with any downtime never
+    reads 100.00% (the rule of the Availability and Services pages)."""
+    if v is None:
+        return None
+    if v >= 100:
+        return 100.0
+    import math
+    return min(math.floor(v * 100 + 1e-7) / 100, 99.99)
+
+
+def _fmt_avail(v: Optional[float]) -> str:
+    n = _avail_num(v)
+    return "—" if n is None else f"{n:.2f}%"
+
+
 def _fmt_pct(v: Optional[float], digits: int = 2) -> str:
     return "—" if v is None else f"{v:.{digits}f}%"
 
@@ -160,6 +176,40 @@ def _shown_note(shown: int, total: int, what: str) -> list[str]:
 
 def _parse_ts(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+_LARGE_QUERY_CHARS = 200_000
+
+
+def maintenance_exclusion_sql(windows: dict, scope_ids: Optional[Any] = None,
+                              prefix: str = "m") -> tuple[str, dict]:
+    """`` AND NOT (...)`` dropping ClickHouse samples inside planned maintenance.
+
+    One clause per distinct interval (group, tag and all-device windows give
+    every member the same interval), and an interval that covers every device
+    in ``scope_ids`` needs no id list at all — so a fleet-wide window never
+    turns into thousands of OR terms or id literals. Bounds are inclusive, like
+    report_data_service._maintenance_exclusion_sql."""
+    from collections import defaultdict
+    by_interval: dict = defaultdict(set)
+    for did, wins in (windows or {}).items():
+        for start, end in wins:
+            by_interval[(start, end)].add(str(did))
+    scope = {str(i) for i in scope_ids} if scope_ids is not None else None
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, ((start, end), ids) in enumerate(sorted(by_interval.items())):
+        params[f"{prefix}s{i}"] = start
+        params[f"{prefix}e{i}"] = end
+        span = f"timestamp >= %({prefix}s{i})s AND timestamp <= %({prefix}e{i})s"
+        if scope is not None and scope <= ids:
+            clauses.append(f"({span})")
+        else:
+            params[f"{prefix}ids{i}"] = sorted(ids)
+            clauses.append(f"(toString(device_id) IN %({prefix}ids{i})s AND {span})")
+    if not clauses:
+        return "", {}
+    return " AND NOT (" + " OR ".join(clauses) + ")", params
 
 
 def _coerce_dt(value: Any) -> Optional[datetime]:
@@ -260,11 +310,26 @@ class SectionCtx:
             return "", {}
         return f" AND {column} IN %({key})s", {key: ids}
 
-    async def ch_rows(self, sql: str, params: Optional[dict] = None) -> list:
-        """Run a ClickHouse query off the event loop and return result rows."""
-        client = self.ch()
-        result = await asyncio.to_thread(client.query, sql, parameters=params or {})
-        return list(result.result_rows)
+    async def ch_rows(self, sql: str, params: Optional[dict] = None,
+                      settings: Optional[dict] = None) -> list:
+        """Run a ClickHouse query off the event loop and return result rows.
+
+        The client is resolved inside the worker thread: get_ch_client() is
+        thread-local because a clickhouse_connect session refuses concurrent
+        queries, so a client fetched on the event-loop thread must never be
+        used from a pool thread."""
+        if settings is None and len(sql) + len(repr(params or {})) > _LARGE_QUERY_CHARS:
+            # A visibility-scoped account can carry thousands of device ids;
+            # parameters are inlined client-side, so allow a bigger query than
+            # ClickHouse's 256 KiB default rather than failing the section.
+            settings = {"max_query_size": 16 * 1024 * 1024}
+
+        def _run() -> list:
+            kwargs: dict[str, Any] = {"parameters": params or {}}
+            if settings:
+                kwargs["settings"] = settings
+            return list(self.ch().query(sql, **kwargs).result_rows)
+        return await asyncio.to_thread(_run)
 
     def iso(self, value: Any) -> Optional[str]:
         """Chart point timestamp: ISO-8601 UTC with 'Z' (the viewer formats it
@@ -437,7 +502,6 @@ async def _node_availability(ctx: SectionCtx) -> dict:
         return ctx._cache["node_avail"]
 
     from app.services.ping_rollups import is_rollup, ping_table_for_hours, rtt_agg_sql, uptime_agg_sql
-    from app.services.report_data_service import _maintenance_exclusion_sql
     from app.services.report_service import _fetch_device_maintenance_windows
 
     ids = ctx.device_ids
@@ -467,14 +531,18 @@ async def _node_availability(ctx: SectionCtx) -> dict:
     stats: dict[str, dict] = {}
     trend: list[dict] = []
     if names:
-        maint_sql, maint_params = _maintenance_exclusion_sql(maint)
-        # Only current inventory is counted (ids come from Postgres, so the
-        # primary-key filter is always well formed): history of deleted
-        # devices must not move the headline.
-        params: dict[str, Any] = {"f": _naive_utc(ctx.frm), "t": _naive_utc(ctx.to),
-                                  "ids": list(names), **maint_params}
-        where = (f" FROM zenplus.{table} WHERE timestamp >= %(f)s AND timestamp <= %(t)s"
-                 f" AND device_id IN %(ids)s {maint_sql}")
+        maint_sql, maint_params = maintenance_exclusion_sql(maint, scope_ids=names)
+        # Only current inventory is counted: rows of deleted devices are
+        # dropped below (did not in names), so the id list is only sent when a
+        # device filter was asked for — inlining the whole inventory would
+        # outgrow ClickHouse's query size on large estates.
+        params: dict[str, Any] = {"f": _naive_utc(ctx.frm), "t": _naive_utc(ctx.to), **maint_params}
+        dev_sql = ""
+        if ids:
+            dev_sql = " AND device_id IN %(ids)s"
+            params["ids"] = list(names)
+        where = (f" FROM zenplus.{table} WHERE timestamp >= %(f)s AND timestamp < %(t)s"
+                 f"{dev_sql}{maint_sql}")
         # Packet loss while the node answered: a down probe records 100 % loss,
         # which is availability, not loss. On the rollups the down samples'
         # loss (1.0 each) is subtracted from the bucket total.
@@ -499,11 +567,20 @@ async def _node_availability(ctx: SectionCtx) -> dict:
             logger.exception("node availability query failed")
         try:
             bucket_sql, bucket_params = ctx.ch_bucket("timestamp")
+            # Per device and bucket, so devices no longer in the inventory are
+            # dropped here instead of by an inlined id list.
             trows = await ctx.ch_rows(
-                f"SELECT {bucket_sql} AS b, {uptime_agg_sql(table)}{where} GROUP BY b ORDER BY b",
-                {**params, **bucket_params})
-            trend = [{"t": ctx.iso(b), "v": round(float(up or 0) / float(total) * 100, 2)}
-                     for b, up, total in trows if total]
+                f"SELECT toString(device_id) AS did, {bucket_sql} AS b, {uptime_agg_sql(table)}{where} "
+                f"GROUP BY did, b", {**params, **bucket_params})
+            per_bucket: dict[Any, list[float]] = {}
+            for did, b, up, total in trows:
+                if str(did) not in names or not total:
+                    continue
+                acc = per_bucket.setdefault(b, [0.0, 0.0])
+                acc[0] += float(up or 0)
+                acc[1] += float(total)
+            trend = [{"t": ctx.iso(b), "v": round(up / total * 100, 2)}
+                     for b, (up, total) in sorted(per_bucket.items()) if total]
         except Exception:
             logger.exception("node availability trend query failed")
 
@@ -542,7 +619,11 @@ async def _node_availability(ctx: SectionCtx) -> dict:
         sla_min = max(window_min - maint_min, 0.0)
         nodes.append({
             **d,
-            "avail": round(avail, 3) if avail is not None else None,
+            # Full precision: comparisons against the SLA target and group
+            # weighting use the unrounded value; formatting truncates.
+            "avail": avail,
+            "up_samples": s.get("up"),
+            "samples": s.get("samples"),
             "downtime_min": round((100 - avail) / 100 * sla_min, 1) if avail is not None else None,
             "outages": s.get("outages", 0),
             "rtt": s.get("rtt"),
@@ -563,7 +644,7 @@ async def _node_availability(ctx: SectionCtx) -> dict:
     result = {
         "nodes": nodes,
         "trend": trend,
-        "overall": round(overall, 3) if overall is not None else None,
+        "overall": overall,
         "up": sum(1 for n in nodes if n["status"] == "up"),
         "below_sla": sum(1 for n in reporting if n["avail"] < sla_target),
         "sla_target": sla_target,
@@ -604,7 +685,7 @@ async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
         notes=maint_note,
         description=f"Computed over {scope} for the reporting window.",
         kpis=[
-            {"label": "Availability", "value": _fmt_pct(avail),
+            {"label": "Availability", "value": _fmt_avail(avail),
              "accent": ("neutral" if avail is None else
                         "success" if avail >= target else "danger")},
             {"label": f"Nodes up (of {len(na['nodes'])})", "value": str(na["up"]),
@@ -638,7 +719,7 @@ async def _sec_device_availability(ctx: SectionCtx) -> dict:
     nodes = na["nodes"]
     rows = [
         [n["hostname"], n["ip"], n["location"] or "—", n["status"],
-         _fmt_pct(n["avail"], 2) if n["avail"] is not None else "—",
+         _fmt_avail(n["avail"]),
          f"{n['downtime_min']:,.0f} min" if n["downtime_min"] is not None else "—",
          str(n["outages"]),
          _fmt_ms(n["rtt"]) if n["rtt"] else "—"]
@@ -663,7 +744,7 @@ async def _sec_device_uptime(ctx: SectionCtx) -> dict:
     measured = sorted((n for n in na["nodes"] if n["avail"] is not None), key=lambda n: n["avail"])
     top = _top_n(ctx, 10)
     rows = [
-        [n["hostname"] or "—", n["ip"] or "—", _fmt_pct(n["avail"]), str(n["outages"]),
+        [n["hostname"] or "—", n["ip"] or "—", _fmt_avail(n["avail"]), str(n["outages"]),
          _fmt_ms(n["rtt"]), _fmt_ms(n["p95_rtt"])]
         for n in measured[:top]
     ]
@@ -785,7 +866,7 @@ async def _interface_stats(ctx: SectionCtx) -> dict:
                    quantile(0.95)(in_bps), quantile(0.95)(out_bps),
                    max(in_bps), max(out_bps), count()
             FROM zenplus.snmp_if_metrics
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{clause}
+            WHERE timestamp >= %(f)s AND timestamp < %(t)s{clause}
             GROUP BY device_id, if_index
         """
     else:
@@ -801,7 +882,7 @@ async def _interface_stats(ctx: SectionCtx) -> dict:
                        max(max_in_bps) AS mi, max(max_out_bps) AS mo,
                        sum(sample_count) AS n
                 FROM zenplus.snmp_if_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{clause}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s{clause}
                 GROUP BY device_id, if_index, timestamp
                 HAVING n > 0
             )
@@ -905,7 +986,7 @@ async def _sec_server_performance(ctx: SectionCtx) -> dict:
                        sum(avg_total_pct * sample_count) / nullIf(sum(sample_count), 0) AS avg_cpu,
                        max(max_total_pct) AS max_cpu, sum(sample_count) AS n
                 FROM zenplus.host_cpu_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND server_id IN %(ids)s
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND server_id IN %(ids)s
                 GROUP BY server_id
                 """, params)}
             mem = {str(r[0]): r for r in await ctx.ch_rows(
@@ -914,7 +995,7 @@ async def _sec_server_performance(ctx: SectionCtx) -> dict:
                        sum(avg_used_pct * sample_count) / nullIf(sum(sample_count), 0) AS avg_mem,
                        max(max_used_pct) AS max_mem, sum(sample_count) AS n
                 FROM zenplus.host_memory_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND server_id IN %(ids)s
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND server_id IN %(ids)s
                 GROUP BY server_id
                 """, params)}
             ranked = []
@@ -1098,7 +1179,7 @@ async def _sec_apm_errors(ctx: SectionCtx) -> dict:
             SELECT group_id, anyHeavy(exception_type), anyHeavy(exception_message),
                    anyHeavy(service_name), count() AS occurrences, max(timestamp)
             FROM zenplus.apm_exceptions
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s
+            WHERE timestamp >= %(f)s AND timestamp < %(t)s
             GROUP BY group_id ORDER BY occurrences DESC LIMIT {top + len(ignored)}
             """, {"f": _naive_utc(ctx.frm), "t": _naive_utc(ctx.to)})
         for r in rows:
@@ -1181,7 +1262,7 @@ async def _sec_synthetics(ctx: SectionCtx) -> dict:
                 """
                 SELECT monitor_id, count(), countIf(success = 1), avg(total_ms)
                 FROM zenplus.apm_synthetic_results
-                WHERE monitor_id IN %(ids)s AND timestamp >= %(f)s AND timestamp <= %(t)s
+                WHERE monitor_id IN %(ids)s AND timestamp >= %(f)s AND timestamp < %(t)s
                 GROUP BY monitor_id
                 """,
                 {"ids": [_uuid.UUID(m[0]) for m in mons], "f": ctx.frm, "t": ctx.to},
@@ -1244,7 +1325,7 @@ async def _sec_usage_kpis(ctx: SectionCtx) -> dict:
                        uniqIf(http_route, http_route != ''), countIf(has_error = 1),
                        quantile(0.95)(duration_nano) / 1e6
                 FROM zenplus.apm_spans
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND span_kind_str IN {ENTRY_KINDS}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND span_kind_str IN {ENTRY_KINDS}
                 """, {"f": frm, "t": to}))[0]
             reqs, users, pages, errors = int(t[0]), int(t[1]), int(t[2]), int(t[3])
             p95 = _finite(t[4]) if reqs else None
@@ -1253,7 +1334,7 @@ async def _sec_usage_kpis(ctx: SectionCtx) -> dict:
                 f"""
                 SELECT {bucket_sql} AS b, count()
                 FROM zenplus.apm_spans
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND span_kind_str IN {ENTRY_KINDS}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND span_kind_str IN {ENTRY_KINDS}
                 GROUP BY b ORDER BY b
                 """, {"f": frm, "t": to, **bucket_params})
             points = [{"t": ctx.iso(r[0]), "v": float(r[1])} for r in series]
@@ -1289,7 +1370,7 @@ async def _sec_usage_pages(ctx: SectionCtx) -> dict:
                        uniqIf({USER_EXPR}, {USER_EXPR} != ''), countIf(has_error = 1),
                        quantile(0.95)(duration_nano) / 1e6
                 FROM zenplus.apm_spans
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s
                   AND span_kind_str IN {ENTRY_KINDS} AND http_route != ''
                 GROUP BY http_route ORDER BY hits DESC LIMIT {_top_n(ctx, 15)}
                 """, {"f": frm, "t": to})
@@ -1316,7 +1397,7 @@ async def _sec_usage_users(ctx: SectionCtx) -> dict:
                 SELECT {USER_EXPR} AS uid, count() AS reqs, countIf(has_error = 1),
                        uniqIf(http_route, http_route != ''), max(timestamp)
                 FROM zenplus.apm_spans
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s
                   AND span_kind_str IN {ENTRY_KINDS} AND {USER_EXPR} != ''
                 GROUP BY uid ORDER BY reqs DESC LIMIT {_top_n(ctx, 15)}
                 """, {"f": frm, "t": to})
@@ -1416,7 +1497,7 @@ async def _rum_source(ctx: SectionCtx) -> dict:
 
 
 def _rum_scope(ctx: SectionCtx, extra: str = "") -> str:
-    return f"timestamp >= %(f)s AND timestamp <= %(t)s{extra}{ctx.rum_app_clause()}"
+    return f"timestamp >= %(f)s AND timestamp < %(t)s{extra}{ctx.rum_app_clause()}"
 
 
 def _per_view_sql(ctx: SectionCtx, extra: str = "", group_by: str = "application_id, env, view_id") -> str:
@@ -1444,7 +1525,7 @@ async def _sec_rum_audience(ctx: SectionCtx) -> dict:
                 f"""
                 SELECT uniqCombined64Merge(sessions), uniqCombined64Merge(views), sum(actions)
                 FROM zenplus.apm_rum_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s{app}
                 """, ctx.rum_params()))[0]
             sessions, views, actions = int(t[0] or 0), int(t[1] or 0), int(t[2] or 0)
             users = None
@@ -1452,7 +1533,7 @@ async def _sec_rum_audience(ctx: SectionCtx) -> dict:
                 f"""
                 SELECT {bucket_sql} AS b, uniqCombined64Merge(sessions)
                 FROM zenplus.apm_rum_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s{app}
                 GROUP BY b ORDER BY b
                 """, ctx.rum_params(**bucket_params))
         else:
@@ -1463,14 +1544,14 @@ async def _sec_rum_audience(ctx: SectionCtx) -> dict:
                        {RUM_VIEWS_SQL},
                        countIf(event_type = 'action' AND sampled = 1)
                 FROM zenplus.apm_rum_events
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s{app}
                 """, ctx.rum_params()))[0]
             sessions, users, views, actions = int(t[0]), int(t[1]), int(t[2]), int(t[3])
             rows = await ctx.ch_rows(
                 f"""
                 SELECT {bucket_sql} AS b, {RUM_SESSIONS_SQL}
                 FROM zenplus.apm_rum_events
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s{app}
                 GROUP BY b ORDER BY b
                 """, ctx.rum_params(**bucket_params))
         per_session = views / sessions if sessions else 0.0
@@ -1524,7 +1605,7 @@ async def _sec_rum_experience(ctx: SectionCtx) -> dict:
                        quantileTDigestMerge(0.75)(ttfb), sum(ttfb_samples),
                        sum(lcp_good), sum(lcp_poor), sum(lcp_rated)
                 FROM zenplus.apm_rum_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s{app}
                 """, ctx.rum_params()))[0]
             good, poor, rated = int(r[10] or 0), int(r[11] or 0), int(r[12] or 0)
             needs = max(rated - good - poor, 0)
@@ -1586,7 +1667,7 @@ async def _sec_rum_top_pages(ctx: SectionCtx) -> dict:
                        quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
                        quantileTDigestMerge(0.75)(load_ms), sum(load_samples), sum(errors)
                 FROM zenplus.apm_rum_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND view_name != ''{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND view_name != ''{app}
                 GROUP BY view_name ORDER BY v DESC LIMIT {top}
                 """, ctx.rum_params())
             for r in rows:
@@ -1600,7 +1681,7 @@ async def _sec_rum_top_pages(ctx: SectionCtx) -> dict:
                 SELECT view_name, {RUM_VIEWS_SQL} AS v, {RUM_SESSIONS_SQL},
                        uniqIf(user_id, user_id != ''), countIf(event_type = 'error')
                 FROM zenplus.apm_rum_events
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND view_name != ''{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND view_name != ''{app}
                 GROUP BY view_name ORDER BY v DESC LIMIT {top}
                 """, ctx.rum_params())
             vit: dict[str, tuple] = {}
@@ -1652,7 +1733,7 @@ async def _sec_rum_segments(ctx: SectionCtx) -> dict:
                 SELECT device_type, uniqCombined64Merge(sessions) AS s, uniqCombined64Merge(views),
                        quantileTDigestMerge(0.75)(lcp), sum(lcp_samples)
                 FROM zenplus.apm_rum_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND device_type != ''{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND device_type != ''{app}
                 GROUP BY device_type ORDER BY s DESC LIMIT 10
                 """, ctx.rum_params())
             lcp_by_device = {r[0]: _p75(r[3], r[4]) for r in drows}
@@ -1661,7 +1742,7 @@ async def _sec_rum_segments(ctx: SectionCtx) -> dict:
                 SELECT browser, anyHeavy(os), uniqCombined64Merge(sessions) AS s,
                        uniqCombined64Merge(views), sum(errors)
                 FROM zenplus.apm_rum_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND browser != ''{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND browser != ''{app}
                 GROUP BY browser ORDER BY s DESC LIMIT 10
                 """, ctx.rum_params())
         else:
@@ -1669,7 +1750,7 @@ async def _sec_rum_segments(ctx: SectionCtx) -> dict:
                 f"""
                 SELECT device_type, {RUM_SESSIONS_SQL} AS s, {RUM_VIEWS_SQL}
                 FROM zenplus.apm_rum_events
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND device_type != ''{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND device_type != ''{app}
                 GROUP BY device_type ORDER BY s DESC LIMIT 10
                 """, ctx.rum_params())
             lcp_by_device = {}
@@ -1688,7 +1769,7 @@ async def _sec_rum_segments(ctx: SectionCtx) -> dict:
                 SELECT browser, anyHeavy(os), {RUM_SESSIONS_SQL} AS s,
                        {RUM_VIEWS_SQL}, countIf(event_type = 'error')
                 FROM zenplus.apm_rum_events
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND browser != ''{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s AND browser != ''{app}
                 GROUP BY browser ORDER BY s DESC LIMIT 10
                 """, ctx.rum_params())
         total_sessions = sum(int(r[1]) for r in drows) or 1
@@ -1734,7 +1815,7 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
                 f"""
                 SELECT sum(errors), uniqCombined64Merge(error_sessions), uniqCombined64Merge(views)
                 FROM zenplus.apm_rum_metrics_5m
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s{app}
                 """, ctx.rum_params()))[0]
             errors, affected_sessions, views = int(t[0] or 0), int(t[1] or 0), int(t[2] or 0)
             # Issue-level detail only exists in raw events: the retained part.
@@ -1748,7 +1829,7 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
                     SELECT uniqIf(error_fingerprint, event_type = 'error' AND error_fingerprint != ''),
                            uniqIf(user_id, event_type = 'error' AND user_id != '')
                     FROM zenplus.apm_rum_events
-                    WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                    WHERE timestamp >= %(f)s AND timestamp < %(t)s{app}
                     """, raw_params))[0]
                 distinct, affected_users = int(d[0] or 0), int(d[1] or 0)
             else:
@@ -1765,7 +1846,7 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
                        uniqIf(user_id, event_type = 'error' AND user_id != ''),
                        {RUM_VIEWS_SQL}
                 FROM zenplus.apm_rum_events
-                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                WHERE timestamp >= %(f)s AND timestamp < %(t)s{app}
                 """, raw_params))[0]
             errors, distinct, affected_sessions, affected_users, views = (
                 int(t[0]), int(t[1]), int(t[2]), int(t[3]), int(t[4]))
@@ -1774,7 +1855,7 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
             SELECT anyHeavy(error_message), anyHeavy(error_type), anyHeavy(view_name),
                    count() AS n, uniqExact((application_id, env, session_id)), max(timestamp)
             FROM zenplus.apm_rum_events
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s
+            WHERE timestamp >= %(f)s AND timestamp < %(t)s
               AND event_type = 'error' AND error_fingerprint != ''{app}
             GROUP BY error_fingerprint ORDER BY n DESC LIMIT 12
             """, raw_params)
@@ -1917,7 +1998,7 @@ async def _sec_alert_kpis(ctx: SectionCtx) -> dict:
         rows = (await ctx.db.execute(text(
             f"SELECT a.severity, count(*) FILTER (WHERE NOT {notice}) AS incidents, "
             f"count(*) FILTER (WHERE {notice}) AS notices "
-            "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at <= :t "
+            "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at < :t "
             "GROUP BY a.severity"), {"f": ctx.frm, "t": ctx.to})).fetchall()
         for sev, n_incidents, n_notices in rows:
             key = str(sev or "info").lower()
@@ -1967,7 +2048,7 @@ async def _sec_alert_trend(ctx: SectionCtx) -> dict:
             f"SELECT date_trunc('{unit}', a.triggered_at AT TIME ZONE CAST(:tz AS text))"
             " AT TIME ZONE CAST(:tz AS text) AS b, "
             "count(*) AS n, count(*) FILTER (WHERE lower(a.severity) = 'critical') AS crit "
-            "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at <= :t "
+            "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at < :t "
             f"AND NOT {wf.notice_sql('a')} GROUP BY 1 ORDER BY 1"),
             {"f": ctx.frm, "t": ctx.to, "tz": ctx.tz_name})).fetchall()
         # Every local hour/day of the window gets a bar: a quiet day is 0
@@ -2020,7 +2101,7 @@ async def _sec_recent_alerts(ctx: SectionCtx) -> dict:
                    jsonb_build_object('source', a.metadata->'source') AS metadata,
                    COUNT(*) OVER () AS total
             FROM alerts a LEFT JOIN devices d ON d.id = a.device_id
-            WHERE a.triggered_at >= :f AND a.triggered_at <= :t
+            WHERE a.triggered_at >= :f AND a.triggered_at < :t
             ORDER BY a.triggered_at DESC LIMIT :lim
             """), {"f": ctx.frm, "t": ctx.to, "lim": _top_n(ctx, 25)})).fetchall()
         for row in rows:

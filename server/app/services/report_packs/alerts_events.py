@@ -1092,7 +1092,7 @@ async def snmp_trap_summary(ctx: SectionCtx) -> dict:
     filtered = bool(ctx.device_ids)
     # A device filter only ever matches traps attributed to a managed device.
     scope_sql = f" AND {TRAP_KNOWN_SQL}{dev_sql}" if filtered else ""
-    base = f"FROM zenplus.snmp_traps WHERE timestamp >= %(f)s AND timestamp <= %(t)s{scope_sql}"
+    base = f"FROM zenplus.snmp_traps WHERE timestamp >= %(f)s AND timestamp < %(t)s{scope_sql}"
     params: dict[str, Any] = {"f": ctx.frm, "t": ctx.to, **dparams}
     notes: list[str] = []
     if (n := ctx.window_note(30, "SNMP trap history")):

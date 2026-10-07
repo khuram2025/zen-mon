@@ -187,7 +187,9 @@ def test_availability_by_group_by_site_truncates_and_honours_device_filter(monke
     assert any("primary poller" in n for n in sec["notes"])
     # The device filter reaches Postgres and every ClickHouse query.
     assert any(p.get("dev_ids") == [A, B] for _s, p in db.calls if "device_polling_owner" in _s)
-    assert ch.sql_with("node_samples")[0][1]["dev_ids"] == [A, B]
+    # Group weights come from the same per-node query as the availability
+    # figures (no second, differently-sourced sample count).
+    assert not ch.sql_with("node_samples")
     assert ch.sql_with("AS loss_up")[0][1]["ids"] == [A, B]
 
 
@@ -358,9 +360,11 @@ def _reboot_setup(to):
         ("argMin(", [(A, 1_000_000.0, 172_800.0, first, last),
                      (B, 500_000.0, 500_000.0 + elapsed, first, last),
                      (C, pack.SYSUPTIME_MAX_S - 1000, 600_000.0, first, last)]),
-        ("lagInFrame", [(A, r1, 100.0, 1_050_000.0, r1 - timedelta(seconds=60)),
-                        (A, r2, 30.0, 90_000.0, r2 - timedelta(seconds=60)),
-                        (C, w, 25.0, pack.SYSUPTIME_MAX_S - 20, w - timedelta(seconds=60))]),
+        # did, ts, cur (min), prev_lo, prev_hi, prev_ts
+        ("lagInFrame", [(A, r1, 100.0, 1_049_000.0, 1_050_000.0, r1 - timedelta(seconds=60)),
+                        (A, r2, 30.0, 89_000.0, 90_000.0, r2 - timedelta(seconds=60)),
+                        (C, w, 25.0, pack.SYSUPTIME_MAX_S - 30, pack.SYSUPTIME_MAX_S - 20,
+                         w - timedelta(seconds=60))]),
     ])
     return frm, db, ch, r2
 
@@ -392,7 +396,10 @@ def test_reboots_use_5m_rollup_beyond_raw_retention_and_filter(monkeypatch):
     sql, params = ch.sql_with("argMin(")[0]
     assert "FROM zenplus.snmp_metrics_5m" in sql and "argMin(min_value, timestamp)" in sql
     assert params["dev_ids"] == [A]
-    assert "min_value AS cur" in ch.sql_with("lagInFrame")[0][0]
+    sql2 = ch.sql_with("lagInFrame")[0][0]
+    # Rollup rows are reduced to one per bucket before neighbours are compared.
+    assert "min(min_value) AS lo_v" in sql2 and "GROUP BY device_id, timestamp" in sql2
+    assert "cur + " in sql2 and "< prev_lo" in sql2
     assert any("5-minute resolution" in n for n in sec["notes"])
 
 
