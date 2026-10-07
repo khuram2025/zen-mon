@@ -4,9 +4,16 @@ by group and owner, maintenance windows and per-site results.
 
 Availability is always the *confirmed* basis shared with the Services list and
 detail pages (service_availability.read_fleet_segments -> summarize /
-incident_intervals / daily_summaries): only confirmed incidents are downtime,
-isolated failed probes are diagnostic evidence, planned maintenance leaves the
-denominator and monitoring gaps stay unknown (coverage).
+incident_intervals / daily_summaries, the same computation as
+service_reports.fleet_report): only confirmed incidents are downtime, isolated
+failed probes are diagnostic evidence, planned maintenance leaves the
+denominator and monitoring gaps stay unknown (coverage). Targets come from each
+service's own objective, otherwise the availability policy
+(availability_policy.resolve_target). Availability is shown with two decimals,
+truncated so a non-perfect value never reads 100.00%.
+
+Every section reads fleet-wide service checks (scope "fleet"; they are
+withheld from visibility-scoped accounts) and needs service_checks.view.
 
 Cost: the confirmed evidence is read once per render (ctx._cache) and shared by
 every section here; contiguous identical pieces are merged as they stream in so
@@ -19,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import statistics
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -28,7 +36,6 @@ from sqlalchemy import text
 
 from app.services.report_sections import (
     SectionCtx,
-    _fmt_ms,
     _section,
     register_section,
     top_n_option,
@@ -38,6 +45,7 @@ from app.services.report_templates import S, template
 REQUIRES = ("service_checks.view",)
 RAW_RETENTION_DAYS = 30      # zenplus.service_metrics TTL
 ROLLUP_RETENTION_DAYS = 90   # zenplus.service_metrics_5m TTL
+MAX_MATRIX_COLUMNS = 16      # day/week columns per uptime table (PDF width)
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -69,7 +77,8 @@ def _finite(value: Any) -> Optional[float]:
 
 
 def _avail_num(v: Optional[float]) -> Optional[float]:
-    """Availability truncated to two decimals; a non-perfect value never reads 100."""
+    """Availability truncated to two decimals; a non-perfect value never reads 100
+    (the rule of the Services and Availability pages)."""
     if v is None:
         return None
     if v >= 100:
@@ -92,7 +101,22 @@ def _share(v: Optional[float]) -> str:
 
 
 def _target(v: Optional[float]) -> str:
+    """Targets as configured (99.9%, 99.95%, 95%)."""
     return "—" if v is None else f"{round(float(v), 3):g}%"
+
+
+def _ms(v: Optional[float]) -> str:
+    """Response time with precision that suits its size (0.42 ms, 12.3 ms, 245 ms, 1.20 s)."""
+    if v is None:
+        return "—"
+    v = float(v)
+    if v >= 1000:
+        return f"{v / 1000:.2f} s"
+    if v >= 100:
+        return f"{v:.0f} ms"
+    if v >= 10:
+        return f"{v:.1f} ms"
+    return f"{v:.2f} ms"
 
 
 def _dur(seconds: Optional[float]) -> str:
@@ -112,7 +136,7 @@ def _dur(seconds: Optional[float]) -> str:
 
 
 def _clip(value: Any, limit: int = 60) -> str:
-    s = str(value or "").strip()
+    s = " ".join(str(value or "").split())
     if not s:
         return "—"
     return s if len(s) <= limit else s[: limit - 1] + "…"
@@ -135,8 +159,20 @@ def _truncated(shown: int, total: int, noun: str) -> Optional[str]:
     return f"Showing the top {shown} of {total} {noun}." if total > shown else None
 
 
+def _top_title(title: str, shown: int, total: int) -> str:
+    return f"{title} (top {shown} of {total})" if total > shown else title
+
+
+def _zone(ctx: SectionCtx) -> ZoneInfo:
+    try:
+        return ZoneInfo(ctx.tz_name)
+    except Exception:
+        return ZoneInfo("UTC")
+
+
 def _local_days(ctx: SectionCtx, start: datetime, end: datetime) -> tuple[ZoneInfo, list[date]]:
-    zone = ZoneInfo(ctx.tz_name)
+    """Calendar days of [start, end) in the organisation timezone."""
+    zone = _zone(ctx)
     if end <= start:
         return zone, []
     d0 = start.astimezone(zone).date()
@@ -150,6 +186,19 @@ def _midnight(day: date, zone: ZoneInfo) -> datetime:
 
 def _day_label(day: date) -> str:
     return f"{_MONTHS[day.month - 1]} {day.day:02d}"
+
+
+def _history_notes(ctx: SectionCtx) -> list[str]:
+    """Disclose which probe history the confirmed evidence comes from."""
+    start, _end, now = _window(ctx)
+    notes = []
+    if start < now - timedelta(days=RAW_RETENTION_DAYS):
+        notes.append(f"Raw probes are kept for {RAW_RETENTION_DAYS} days; older parts of the period "
+                     "are measured from 5-minute rollups (5-minute resolution).")
+    note = ctx.window_note(ROLLUP_RETENTION_DAYS, "The 5-minute service probe history")
+    if note:
+        notes.append(note + " Earlier time is unknown (coverage), not downtime.")
+    return notes
 
 
 # ─── shared loaders (cached per render) ─────────────────────────────────────
@@ -180,13 +229,14 @@ async def _checks(ctx: SectionCtx) -> list[dict]:
             c["check_type"] = (c["check_type"] or "").lower()
             c["tags"] = list(c["tags"] or [])
             c["check_interval"] = int(c["check_interval"] or 60)
+            c["criticality"] = (c["criticality"] or "").strip().lower() or None
             checks.append(c)
         ctx._cache["svc_checks"] = checks
     return ctx._cache["svc_checks"]
 
 
 async def _maintenance_windows(ctx: SectionCtx) -> list[SimpleNamespace]:
-    """Maintenance windows (cancelled ones included) overlapping the period."""
+    """Service maintenance windows (cancelled ones included) overlapping the period."""
     if "svc_maint" not in ctx._cache:
         start, end, _now = _window(ctx)
         rows = (await ctx.db.execute(text(
@@ -291,6 +341,28 @@ async def _evidence(ctx: SectionCtx) -> dict:
     return result
 
 
+def _weighted_uptime(services: list[dict]) -> tuple[Optional[float], Optional[float]]:
+    """(confirmed uptime weighted by measured time, coverage) across services."""
+    covered = sum(s["covered"] for s in services if s["avail"] is not None)
+    down = sum(s["downtime"] or 0.0 for s in services if s["avail"] is not None)
+    span = sum(s["covered"] + (s["unknown"] or 0.0) for s in services if s["summary"])
+    uptime = (covered - down) / covered * 100 if covered > 0 else None
+    return uptime, (sum(s["covered"] for s in services) / span * 100 if span > 0 else None)
+
+
+def _owner(c: dict) -> str:
+    team, biz = (c.get("owner_team") or "").strip(), (c.get("business_owner") or "").strip()
+    if team and biz and team != biz:
+        return f"{team} ({biz})"
+    return team or biz or "—"
+
+
+# Latest result of each selected monitoring vantage (controller or sensor).
+_VANTAGE_COLS = ("check_id", "poller_id", "sensor_name", "site_name", "location", "sensor_status",
+                 "state", "last_change_at", "last_result_at", "latency_ms", "error",
+                 "tls_expiry", "tls_days", "tls_valid", "tls_issuer", "tls_subject")
+
+
 def _vantage_label(poller_id: str, sensor: Optional[str], site: Optional[str],
                    location: Optional[str]) -> str:
     if poller_id == "central":
@@ -299,13 +371,7 @@ def _vantage_label(poller_id: str, sensor: Optional[str], site: Optional[str],
     return f"{place} · {sensor}" if sensor else f"{place} · sensor {str(poller_id)[:8]}"
 
 
-_VANTAGE_COLS = ("check_id", "poller_id", "sensor_name", "site_name", "location", "sensor_status",
-                 "state", "last_change_at", "last_result_at", "latency_ms", "error",
-                 "tls_expiry", "tls_days", "tls_valid", "tls_issuer", "tls_subject")
-
-
 async def _vantages(ctx: SectionCtx) -> list[dict]:
-    """Latest result per selected monitoring vantage (controller or sensor)."""
     if "svc_vantages" not in ctx._cache:
         rows = (await ctx.db.execute(text(
             "SELECT v.service_check_id::text, v.poller_id, s.name, si.name, s.location, s.status, "
@@ -332,25 +398,9 @@ async def _vantages(ctx: SectionCtx) -> list[dict]:
 # ─── 1. SLA compliance ──────────────────────────────────────────────────────
 
 _COMPLIANCE_ORDER = {"breached": 0, "at_risk": 1, "met": 2, "not_assessed": 3}
-_COMPLIANCE_PILL = {"met": "on track", "at_risk": "at risk", "breached": "breaching",
+# Table verdicts use the report pill vocabulary (compliant = target met).
+_COMPLIANCE_PILL = {"met": "compliant", "at_risk": "at risk", "breached": "non-compliant",
                     "not_assessed": "not assessed"}
-_SOURCE_LABEL = {"service": "service", "policy": "policy", "default": "default"}
-
-
-def _owner(c: dict) -> str:
-    team, biz = (c.get("owner_team") or "").strip(), (c.get("business_owner") or "").strip()
-    if team and biz and team != biz:
-        return f"{team} ({biz})"
-    return team or biz or "—"
-
-
-def _weighted_uptime(services: list[dict]) -> tuple[Optional[float], Optional[float]]:
-    """(coverage-weighted confirmed uptime, coverage) across services."""
-    covered = sum(s["covered"] for s in services if s["avail"] is not None)
-    down = sum(s["downtime"] or 0.0 for s in services if s["avail"] is not None)
-    span = sum(s["covered"] + (s["unknown"] or 0.0) for s in services if s["summary"])
-    uptime = (covered - down) / covered * 100 if covered > 0 else None
-    return uptime, (sum(s["covered"] for s in services) / span * 100 if span > 0 else None)
 
 
 @register_section(
@@ -378,22 +428,25 @@ async def service_sla_compliance(ctx: SectionCtx) -> dict:
     assessed = counts["met"] + counts["at_risk"] + counts["breached"]
     uptime, coverage = _weighted_uptime(services)
     policy_target = ev["policy"][0]
+    worst_budget = max((s for s in services if s["budget_used"] is not None),
+                       key=lambda s: s["budget_used"], default=None)
 
     def of_assessed(n: int) -> str:
         return f"{n / assessed * 100:.0f}% of {assessed} assessed" if assessed else "None assessed"
 
+    attention = ctx.opt("show") == "attention"
     ordered = sorted(services, key=lambda s: (
         _COMPLIANCE_ORDER[s["compliance"]],
         s["avail"] if s["avail"] is not None else 101.0, s["check"]["name"].lower()))
-    if ctx.opt("show") == "attention":
+    if attention:
         ordered = [s for s in ordered if s["compliance"] in ("breached", "at_risk")]
     top_n = int(ctx.opt("top_n"))
     listed = ordered[:top_n]
     rows = [[
         s["check"]["name"],
-        (s["check"].get("criticality") or "—").lower() if s["check"].get("criticality") else "—",
+        s["check"]["criticality"] or "—",
         _owner(s["check"]),
-        f"{_target(s['target'])} ({_SOURCE_LABEL.get(s['target_source'], s['target_source'])})",
+        f"{_target(s['target'])} ({s['target_source']})",
         _avail(s["avail"]),
         _share(s["coverage"]),
         _dur(s["downtime"]),
@@ -401,18 +454,18 @@ async def service_sla_compliance(ctx: SectionCtx) -> dict:
         _COMPLIANCE_PILL[s["compliance"]],
     ] for s in listed]
     table_title = ("Services that breached or are at risk of breaching their target"
-                   if ctx.opt("show") == "attention" else "Service SLA compliance")
-    if len(ordered) > len(listed):
-        table_title += f" (top {len(listed)} of {len(ordered)})"
+                   if attention else "Service SLA compliance")
     notes = [BASIS_NOTE,
              f"At risk: the target was met but more than {AT_RISK_BUDGET_PCT:g}% of the error budget "
-             "was used. Targets come from each service's own objective, otherwise the organisation "
-             "availability policy (source shown next to each target)."]
+             "(the downtime the target allows over the measured time) was used. Targets come from each "
+             "service's own objective, otherwise the organisation availability policy; the source is "
+             "shown next to each target."]
     if counts["not_assessed"]:
         notes.append(f"{counts['not_assessed']} service(s) have no confirmed evidence in this period "
                      "and are not assessed (not counted as up or down).")
-    if ctx.opt("show") == "attention" and not ordered:
-        notes.append("No service breached or is at risk of breaching its target in this period.")
+    if attention and not ordered:
+        notes.insert(0, "No service breached or is at risk of breaching its target in this period.")
+    notes += _history_notes(ctx)
     return _section(
         "service_sla_compliance", title,
         description=(f"Confirmed availability of {len(services)} service check(s) against their "
@@ -424,13 +477,20 @@ async def service_sla_compliance(ctx: SectionCtx) -> dict:
              "accent": "warning" if counts["at_risk"] else "neutral",
              "subtitle": f"Over {AT_RISK_BUDGET_PCT:g}% of error budget used"},
             {"label": "Breached", "value": f"{counts['breached']:,}",
-             "accent": "danger" if counts["breached"] else "success", "subtitle": "Below target"},
+             "accent": "danger" if counts["breached"] else ("success" if assessed else "neutral"),
+             "subtitle": "Below target"},
             {"label": "Not assessed", "value": f"{counts['not_assessed']:,}", "accent": "neutral",
              "subtitle": "No confirmed evidence"},
             {"label": "Confirmed uptime", "value": _avail(uptime),
              "accent": ("neutral" if uptime is None else
                         "success" if uptime >= policy_target else "warning"),
              "subtitle": f"All services · {_share(coverage)} coverage"},
+            {"label": "Most error budget used",
+             "value": f"{worst_budget['budget_used']:.1f}%" if worst_budget else "—",
+             "accent": ("neutral" if not worst_budget else
+                        "danger" if worst_budget["budget_used"] > 100 else
+                        "warning" if worst_budget["budget_used"] > AT_RISK_BUDGET_PCT else "success"),
+             "subtitle": worst_budget["check"]["name"] if worst_budget else "Not measured"},
         ],
         charts=[{"title": "Services by SLA status",
                  "series": {"kind": "donut", "unit": "services",
@@ -439,10 +499,10 @@ async def service_sla_compliance(ctx: SectionCtx) -> dict:
                                                           ("breached", "Breached"),
                                                           ("not_assessed", "Not assessed"))
                                        if counts[key]]}}],
-        tables=[{"title": table_title,
+        tables=[{"title": _top_title(table_title, len(listed), len(ordered)),
                  "headers": ["Service", "Criticality", "Owner", "Target (source)", "Confirmed uptime",
                              "Coverage", "Downtime", "Error budget used", "SLA status"],
-                 "styles": ["text", "text", "text", "num", "pct-bar", "pct", "num", "pct", "status"],
+                 "styles": ["text", "status", "text", "num", "pct-bar", "pct", "num", "pct", "status"],
                  "rows": rows}] if rows else [],
         notes=notes,
     )
@@ -473,13 +533,17 @@ async def service_outages(ctx: SectionCtx) -> dict:
     end = ev["end"]
     incidents = [(s, inc) for s in ev["services"] for inc in s["incidents"]]
     zone, days = _local_days(ctx, ev["start"], end)
-    if not incidents:
-        notes = ["No confirmed service incidents in this period."] if ev["services"] else \
-            ["No service checks existed in this period."]
+    if not ev["services"]:
         return _section("service_outages", title,
                         description="Confirmed service incidents in the reporting period.",
-                        kpis=[{"label": "Incidents", "value": "0", "accent": "success"}] if ev["services"] else [],
-                        notes=notes + [BASIS_NOTE] if ev["services"] else notes)
+                        notes=["No service checks existed in this period."])
+    if not incidents:
+        return _section("service_outages", title,
+                        description="Confirmed service incidents in the reporting period.",
+                        kpis=[{"label": "Incidents", "value": "0", "accent": "success",
+                               "subtitle": f"{len(ev['services'])} service(s) monitored"}],
+                        notes=["No confirmed service incidents in this period.", BASIS_NOTE]
+                        + _history_notes(ctx))
 
     downtime = sum(inc["downtime_sec"] or 0.0 for _s, inc in incidents)
     longest = max(incidents, key=lambda p: _incident_span(p[1], end))
@@ -495,10 +559,11 @@ async def service_outages(ctx: SectionCtx) -> dict:
         if d in per_day:
             per_day[d] += 1
 
-    min_sec = int(ctx.opt("min_minutes")) * 60
-    listed = [p for p in incidents if _incident_span(p[1], end) >= min_sec]
-    if ctx.opt("sort") == "longest":
-        listed.sort(key=lambda p: -_incident_span(p[1], end))
+    min_minutes = int(ctx.opt("min_minutes"))
+    listed = [p for p in incidents if _incident_span(p[1], end) >= min_minutes * 60]
+    longest_first = ctx.opt("sort") == "longest"
+    if longest_first:
+        listed.sort(key=lambda p: (-_incident_span(p[1], end), p[0]["check"]["name"].lower()))
     else:
         listed.sort(key=lambda p: p[1]["start"], reverse=True)
     top_n = int(ctx.opt("top_n"))
@@ -518,16 +583,14 @@ async def service_outages(ctx: SectionCtx) -> dict:
 
     rows = [[s["check"]["name"], s["check"].get("group_name") or "Ungrouped",
              started(inc), ended(inc), duration(inc)] for s, inc in shown]
-    table_title = "Most recent incidents" if ctx.opt("sort") != "longest" else "Longest incidents"
-    if len(listed) > len(shown):
-        table_title += f" (top {len(shown)} of {len(listed)})"
     notes = [BASIS_NOTE,
              "A run interrupted only by maintenance or by a monitoring gap shorter than two check "
              "intervals is one incident. '≤' marks an incident already in progress when the period "
-             "began; '≥' marks a duration that continues beyond what the period shows."]
-    if min_sec and len(listed) < len(incidents):
-        notes.append(f"{len(incidents) - len(listed)} incident(s) shorter than "
-                     f"{int(ctx.opt('min_minutes'))} min are counted above but not listed.")
+             f"began; '≥' marks a duration that continues beyond the period. Times are {ctx.tz_label()}."]
+    if min_minutes and len(listed) < len(incidents):
+        notes.append(f"{len(incidents) - len(listed)} incident(s) shorter than {min_minutes} min are "
+                     "counted above but not listed.")
+    notes += _history_notes(ctx)
     return _section(
         "service_outages", title,
         description=(f"{len(incidents)} confirmed incident(s) across {affected} service(s) in the "
@@ -541,7 +604,7 @@ async def service_outages(ctx: SectionCtx) -> dict:
              "subtitle": "Sum across services, maintenance excluded"},
             {"label": "Longest incident", "value": _dur(_incident_span(longest[1], end)),
              "accent": "warning", "subtitle": longest[0]["check"]["name"]},
-            {"label": "Mean time to recover", "value": _dur(mttr), "accent": "info",
+            {"label": "Mean time to recover", "value": _dur(mttr), "accent": "info" if completed else "neutral",
              "subtitle": f"{len(completed)} completed incident(s)" if completed
              else "No incident both started and ended in the period"},
         ],
@@ -549,7 +612,8 @@ async def service_outages(ctx: SectionCtx) -> dict:
                  "series": {"kind": "bars", "unit": "incidents", "color": "danger",
                             "points": [{"t": ctx.iso(_midnight(d, zone)), "v": per_day[d]}
                                        for d in days]}}] if days else [],
-        tables=[{"title": table_title,
+        tables=[{"title": _top_title("Longest incidents" if longest_first else "Most recent incidents",
+                                     len(shown), len(listed)),
                  "headers": ["Service", "Group", "Started", "Ended", "Duration"],
                  "styles": ["text", "text", "text", "text", "num"], "rows": rows}] if rows else [],
         notes=notes,
@@ -558,8 +622,10 @@ async def service_outages(ctx: SectionCtx) -> dict:
 
 # ─── 3. Response times ──────────────────────────────────────────────────────
 
-_RT_SORT = {"p95": "95th percentile", "p99": "99th percentile", "p50": "median", "avg": "average",
-            "max": "maximum"}
+_RT_TITLE = {"p95": "95th-Percentile", "p99": "99th-Percentile", "p50": "Median",
+             "avg": "Average", "max": "Maximum"}
+_RT_TEXT = {"p95": "95th-percentile", "p99": "99th-percentile", "p50": "median",
+            "avg": "average", "max": "maximum"}
 
 
 @register_section(
@@ -579,58 +645,80 @@ _RT_SORT = {"p95": "95th percentile", "p99": "99th percentile", "p50": "median",
 async def service_response_times(ctx: SectionCtx) -> dict:
     start, end, now = _window(ctx)
     ctype = ctx.opt("check_type")
-    sort = ctx.opt("sort")
     top_n = int(ctx.opt("top_n"))
     threshold = float(ctx.opt("threshold_ms"))
     kind = "" if ctype == "all" else f"{TYPE_LABEL.get(ctype, ctype.upper())} "
     checks = {c["id"]: c for c in await _checks(ctx)}
     raw = start >= now - timedelta(days=RAW_RETENTION_DAYS) + timedelta(minutes=5)
+    requested = ctx.opt("sort")
+    sort = requested if raw or requested in ("p95", "avg", "max") else "p95"
+    title = f"Top {top_n} {kind}Services by {_RT_TITLE[sort]} Response Time"
+
     params: dict[str, Any] = {"f": _ch_time(start), "t": _ch_time(end)}
-    type_sql = ""
+    id_sql = ""
     if ctype != "all":
-        type_sql = " AND check_type = %(ctype)s"
-        params["ctype"] = ctype
+        params["ids"] = sorted(cid for cid, c in checks.items() if c["check_type"] == ctype)
+        id_sql = " AND service_check_id IN %(ids)s"
 
     stats: list[dict] = []
-    if end > start:
+    if end > start and (ctype == "all" or params["ids"]):
         if raw:
+            # Exact percentiles over every successful probe with a measured time.
             rows = await ctx.ch_rows(
-                "SELECT toString(service_check_id), count(), quantiles(0.5, 0.95, 0.99)(response_ms), "
-                "avg(response_ms), max(response_ms) "
+                "SELECT toString(service_check_id) AS sid, count() AS probes, "
+                "quantilesExactIf(0.5, 0.95, 0.99)(response_ms, response_ms > 0) AS q, "
+                "avgIf(response_ms, response_ms > 0) AS avg_ms, max(response_ms) AS max_ms "
                 "FROM zenplus.service_metrics "
-                f"WHERE timestamp >= %(f)s AND timestamp < %(t)s AND is_up = 1{type_sql} "
-                "GROUP BY service_check_id", params)
+                f"WHERE timestamp >= %(f)s AND timestamp < %(t)s AND is_up = 1{id_sql} "
+                "GROUP BY sid", params)
             for sid, n, q, avg_ms, max_ms in rows:
                 q = list(q or []) + [None, None, None]
                 stats.append({"id": str(sid), "n": int(n or 0), "p50": _finite(q[0]),
                               "p95": _finite(q[1]), "p99": _finite(q[2]),
                               "avg": _finite(avg_ms), "max": _finite(max_ms)})
         else:
+            # 5-minute buckets in which every probe succeeded: sample-weighted
+            # average, the 95th percentile of those 5-minute averages and the max.
             rows = await ctx.ch_rows(
-                "SELECT toString(service_check_id), sum(sample_count), "
-                "sum(avg_response_ms * sample_count) / nullIf(sum(sample_count), 0), "
-                "quantile(0.95)(avg_response_ms), max(max_response_ms) "
+                "SELECT toString(service_check_id) AS sid, sum(sample_count) AS probes, "
+                "sum(avg_response_ms * sample_count) / nullIf(sum(sample_count), 0) AS avg_ms, "
+                "quantileExactWeighted(0.95)(avg_response_ms, sample_count) AS p95_ms, "
+                "max(max_response_ms) AS max_ms "
                 "FROM zenplus.service_metrics_5m "
-                f"WHERE timestamp >= %(f)s AND timestamp < %(t)s AND uptime_pct >= 1{type_sql} "
-                "GROUP BY service_check_id", params)
+                f"WHERE timestamp >= %(f)s AND timestamp < %(t)s AND uptime_pct >= 1{id_sql} "
+                "GROUP BY sid", params)
             for sid, n, avg_ms, p95, max_ms in rows:
                 stats.append({"id": str(sid), "n": int(n or 0), "p50": None, "p95": _finite(p95),
                               "p99": None, "avg": _finite(avg_ms), "max": _finite(max_ms)})
-    stats = [s for s in stats if s["id"] in checks and s["n"] > 0]
-    if not raw and sort in ("p50", "p99"):
-        sort = "p95"
-    metric_name = _RT_SORT[sort] if raw or sort != "p95" else "95th percentile of 5-minute averages"
-    title = f"Top {top_n} {kind}Services by {_RT_SORT[sort].capitalize()} Response Time"
+    stats = [s for s in stats if s["id"] in checks and s["n"] > 0
+             and (ctype == "all" or checks[s["id"]]["check_type"] == ctype)]
+    metric_text = _RT_TEXT[sort] if raw or sort != "p95" else "95th percentile of 5-minute averages"
+    notes = ["Only successful probes are measured; failed probes are diagnostic evidence and do "
+             "not count towards response times. Each service's probes from every monitoring site "
+             "are combined."]
+    if raw:
+        notes.append("Percentiles are exact, computed in ClickHouse over every successful probe in "
+                     "the period.")
+    else:
+        notes.append(f"The period reaches past the {RAW_RETENTION_DAYS}-day raw probe retention, so "
+                     "figures come from 5-minute rollups of buckets in which every probe succeeded: "
+                     "the average is sample-weighted, P95 is the 95th percentile of 5-minute averages "
+                     "and P50/P99 are not available.")
+        if requested != sort:
+            notes.append(f"Ranked by P95 of 5-minute averages instead of {_RT_TEXT[requested]}.")
+        note = ctx.window_note(ROLLUP_RETENTION_DAYS, "The 5-minute service rollup")
+        if note:
+            notes.append(note)
     if not stats:
         return _section(
             "service_response_times", title,
             description=f"Response times of successful {kind}service probes in the reporting period.",
-            notes=[f"No successful {kind}service probes were recorded in this period."],
+            notes=[f"No successful {kind}service probes were recorded in this period."] + notes[1:],
         )
-    stats.sort(key=lambda s: (s[sort] is None, -(s[sort] or 0.0)))
+    stats.sort(key=lambda s: (s[sort] is None, -(s[sort] or 0.0), checks[s["id"]]["name"].lower()))
     shown = stats[:top_n]
-    p95s = sorted(s["p95"] for s in stats if s["p95"] is not None)
-    median_p95 = p95s[len(p95s) // 2] if p95s else None
+    p95s = [s["p95"] for s in stats if s["p95"] is not None]
+    median_p95 = statistics.median(p95s) if p95s else None
     slow = [s for s in stats if s["p95"] is not None and s["p95"] > threshold]
     slowest = max((s for s in stats if s["p95"] is not None), key=lambda s: s["p95"], default=None)
 
@@ -638,53 +726,41 @@ async def service_response_times(ctx: SectionCtx) -> dict:
         return checks[s["id"]]["name"]
 
     def ctype_of(s: dict) -> str:
-        return TYPE_LABEL.get(checks[s["id"]]["check_type"], checks[s["id"]]["check_type"].upper() or "—")
+        t = checks[s["id"]]["check_type"]
+        return TYPE_LABEL.get(t, t.upper() or "—")
 
     if raw:
         headers = ["Service", "Type", "P50", "P95", "P99", "Average", "Max", "Probes"]
-        rows = [[name(s), ctype_of(s), _fmt_ms(s["p50"]), _fmt_ms(s["p95"]), _fmt_ms(s["p99"]),
-                 _fmt_ms(s["avg"]), _fmt_ms(s["max"]), f"{s['n']:,}"] for s in shown]
+        rows = [[name(s), ctype_of(s), _ms(s["p50"]), _ms(s["p95"]), _ms(s["p99"]),
+                 _ms(s["avg"]), _ms(s["max"]), f"{s['n']:,}"] for s in shown]
     else:
         headers = ["Service", "Type", "Average", "P95 of 5-min averages", "Max", "Probes"]
-        rows = [[name(s), ctype_of(s), _fmt_ms(s["avg"]), _fmt_ms(s["p95"]), _fmt_ms(s["max"]),
+        rows = [[name(s), ctype_of(s), _ms(s["avg"]), _ms(s["p95"]), _ms(s["max"]),
                  f"{s['n']:,}"] for s in shown]
-    notes = ["Only successful probes are measured; failed probes are diagnostic evidence and do "
-             "not count towards response times."]
-    if raw:
-        notes.append("Percentiles are computed in ClickHouse over every successful probe in the period.")
-    else:
-        notes.append(f"The period reaches past the {RAW_RETENTION_DAYS}-day raw probe retention, so "
-                     "figures come from 5-minute rollups of buckets in which every probe succeeded: "
-                     "averages are sample-weighted, P95 is the 95th percentile of 5-minute averages, "
-                     "and P50/P99 are not available.")
-        note = ctx.window_note(ROLLUP_RETENTION_DAYS, "The 5-minute service rollup")
-        if note:
-            notes.append(note)
-    trunc = _truncated(len(shown), len(stats), "measured services")
-    if trunc:
-        notes.append(trunc)
-    chart_points = [{"label": name(s), "value": round(s[sort], 1)}
+    chart_points = [{"label": name(s), "value": round(s[sort], 2)}
                     for s in shown[:15] if s[sort] is not None]
     return _section(
         "service_response_times", title,
-        description=(f"Top {len(shown)} {kind}services by {metric_name} response time of successful "
-                     "probes over the reporting period."),
+        description=(f"Top {len(shown)} of {len(stats)} {kind}service(s) by {metric_text} response "
+                     "time of successful probes over the reporting period."),
         kpis=[
             {"label": "Services measured", "value": f"{len(stats):,}", "accent": "primary",
              "subtitle": f"{sum(s['n'] for s in stats):,} successful probes"},
-            {"label": "Slowest P95", "value": _fmt_ms(slowest["p95"]) if slowest else "—",
-             "accent": "warning" if slowest and slowest["p95"] > threshold else "neutral",
+            {"label": "Slowest P95", "value": _ms(slowest["p95"]) if slowest else "—",
+             "accent": ("neutral" if not slowest else
+                        "warning" if slowest["p95"] > threshold else "success"),
              "subtitle": name(slowest) if slowest else "Not measured"},
-            {"label": "Median service P95", "value": _fmt_ms(median_p95), "accent": "info"},
-            {"label": f"Over {threshold:g} ms (P95)", "value": f"{len(slow):,}",
+            {"label": "Median service P95", "value": _ms(median_p95),
+             "accent": "info" if median_p95 is not None else "neutral",
+             "subtitle": f"Across {len(p95s)} service(s)" if p95s else "Not measured"},
+            {"label": f"P95 over {threshold:g} ms", "value": f"{len(slow):,}",
              "accent": "danger" if slow else "success",
-             "subtitle": f"of {len(stats)} measured services"},
+             "subtitle": f"of {len(stats)} measured service(s)"},
         ],
-        charts=[{"title": f"Slowest services by {metric_name}",
+        charts=[{"title": f"Slowest services by {metric_text} response time",
                  "series": {"kind": "rank", "unit": "ms", "color": "warning",
                             "points": chart_points}}] if chart_points else [],
-        tables=[{"title": f"Response times (top {len(shown)} of {len(stats)})"
-                 if len(stats) > len(shown) else "Response times",
+        tables=[{"title": _top_title("Response times", len(shown), len(stats)),
                  "headers": headers, "styles": ["text", "text"] + ["num"] * (len(headers) - 2),
                  "rows": rows}],
         notes=notes,
@@ -693,24 +769,26 @@ async def service_response_times(ctx: SectionCtx) -> dict:
 
 # ─── 4. Daily uptime ────────────────────────────────────────────────────────
 
-def _columns(ctx: SectionCtx, days: list[date], zone: ZoneInfo) -> list[tuple[str, list[date]]]:
-    """Matrix columns: one per day, or calendar weeks when the period is long."""
+def _matrix_columns(ctx: SectionCtx, days: list[date]) -> tuple[str, list[tuple[str, list[date]]]]:
+    """("day" | "week", [(label, days)]): one column per day, or calendar weeks
+    (starting on the organisation's first day of the week)."""
     layout = ctx.opt("columns")
-    if layout == "days" and len(days) <= 31 or layout == "auto" and len(days) <= 14:
-        return [(_day_label(d), [d]) for d in days]
-    first = {"monday": 0, "sunday": 6, "saturday": 5}.get(getattr(ctx._brand(), "week_start", "monday"), 0)
-    cols: list[tuple[str, list[date]]] = []
+    if layout == "days" or (layout == "auto" and len(days) <= 14):
+        return "day", [(_day_label(d), [d]) for d in days]
+    first = {"monday": 0, "sunday": 6, "saturday": 5}.get(
+        getattr(ctx._brand(), "week_start", "monday"), 0)
+    groups: list[list[date]] = []
     for d in days:
-        if not cols or d.weekday() == first:
-            cols.append(("", []))
-        cols[-1][1].append(d)
+        if not groups or d.weekday() == first:
+            groups.append([])
+        groups[-1].append(d)
     out = []
-    for _label, ds in cols:
+    for ds in groups:
         a, b = ds[0], ds[-1]
         label = _day_label(a) if a == b else (
             f"{_day_label(a)}–{b.day:02d}" if a.month == b.month else f"{_day_label(a)}–{_day_label(b)}")
         out.append((label, ds))
-    return out
+    return "week", out
 
 
 @register_section(
@@ -719,7 +797,7 @@ def _columns(ctx: SectionCtx, days: list[date], zone: ZoneInfo) -> list[tuple[st
                  "the fleet's daily uptime."),
     scope="fleet", requires=REQUIRES,
     options=[top_n_option(25, 200),
-             {"key": "columns", "label": "Matrix columns", "type": "select", "default": "auto",
+             {"key": "columns", "label": "Table columns", "type": "select", "default": "auto",
               "choices": [["auto", "Days (weeks for periods over 14 days)"], ["days", "Days"],
                           ["weeks", "Weeks"]]},
              {"key": "sort", "label": "Sort services by", "type": "select", "default": "worst",
@@ -758,13 +836,12 @@ async def service_daily_uptime(ctx: SectionCtx) -> dict:
         cov, down = fleet.get(d.isoformat(), (0.0, 0.0))
         fleet_days.append((d, uptime_of(cov, down), down))
     measured = [(d, u, down) for d, u, down in fleet_days if u is not None]
-    worst = min(measured, key=lambda x: x[1], default=None)
+    worst = min(measured, key=lambda x: (x[1], x[0]), default=None)
     days_down = sum(1 for _d, _u, down in measured if down > 0)
     uptime, coverage = _weighted_uptime(services)
     with_downtime = sum(1 for s in services if (s["downtime"] or 0) > 0)
 
-    cols = _columns(ctx, days, zone)
-    weekly = any(len(ds) > 1 for _l, ds in cols)
+    unit, cols = _matrix_columns(ctx, days)
 
     def cell(entries: dict[str, dict], ds: list[date]) -> str:
         cov = down = maint = 0.0
@@ -786,25 +863,36 @@ async def service_daily_uptime(ctx: SectionCtx) -> dict:
                                     s["check"]["name"].lower()))
     top_n = int(ctx.opt("top_n"))
     shown = ordered[:top_n]
-    rows = [[s["check"]["name"]] + [cell(per_service[s["check"]["id"]], ds) for _l, ds in cols]
-            + [_avail(s["avail"])] for s in shown]
-    headers = ["Service"] + [label for label, _ds in cols] + ["Period"]
+
+    # Wide periods split into several tables so every column stays legible in PDF.
+    chunks = [cols[i:i + MAX_MATRIX_COLUMNS] for i in range(0, len(cols), MAX_MATRIX_COLUMNS)]
+    tables = []
+    for chunk in chunks:
+        heading = f"Confirmed uptime by {unit}"
+        if len(chunks) > 1:
+            heading += f" ({chunk[0][0]} to {chunk[-1][0]})"
+        tables.append({
+            "title": _top_title(heading, len(shown), len(ordered)),
+            "headers": ["Service"] + [label for label, _ds in chunk] + ["Period"],
+            "styles": ["text"] + ["pct"] * (len(chunk) + 1),
+            "rows": [[s["check"]["name"]] + [cell(per_service[s["check"]["id"]], ds) for _l, ds in chunk]
+                     + [_avail(s["avail"])] for s in shown],
+        })
 
     values = [_avail_num(u) for _d, u, _down in fleet_days if u is not None]
     lo = max(0, math.floor(min(values)) - 1) if values else 90
-    notes = [f"Calendar days follow the organisation timezone ({ctx.tz_name}). "
-             "'—' means no confirmed evidence that day; 'maint.' means the day was entirely "
-             "planned maintenance.", BASIS_NOTE]
-    if weekly:
-        notes.insert(0, "The period is longer than the matrix fits, so columns are calendar weeks; "
+    notes = [f"Calendar days follow the organisation timezone ({ctx.tz_name}). '—' means no confirmed "
+             "evidence that day; 'maint.' means the day was entirely planned maintenance.", BASIS_NOTE]
+    if unit == "week":
+        notes.insert(0, "The period is longer than two weeks, so table columns are calendar weeks; "
                         "the chart shows every day.")
-    trunc = _truncated(len(shown), len(ordered), "services")
-    if trunc:
-        notes.append(trunc)
+    if not measured:
+        notes.insert(0, "No service has confirmed evidence in this period (not measured).")
+    notes += _history_notes(ctx)
     return _section(
         "service_daily_uptime", title,
-        description=(f"Confirmed uptime per {'week' if weekly else 'day'} for "
-                     f"{len(shown)} service(s), and the fleet's uptime for each day of the period."),
+        description=(f"Confirmed uptime per {unit} for {len(shown)} of {len(services)} service(s), and "
+                     "the fleet's uptime for each day of the period."),
         kpis=[
             {"label": "Period uptime", "value": _avail(uptime),
              "accent": "neutral" if uptime is None else "success" if uptime >= ev["policy"][0] else "warning",
@@ -812,8 +900,10 @@ async def service_daily_uptime(ctx: SectionCtx) -> dict:
             {"label": "Worst day", "value": _avail(worst[1]) if worst else "—",
              "accent": "neutral" if not worst else "success" if worst[2] <= 0 else "warning",
              "subtitle": ctx.fmt_date(_midnight(worst[0], zone)) if worst else "Not measured"},
-            {"label": "Days with downtime", "value": f"{days_down} of {len(measured)}",
-             "accent": "warning" if days_down else "success", "subtitle": "Measured days"},
+            {"label": "Days with downtime",
+             "value": f"{days_down} of {len(measured)}" if measured else "—",
+             "accent": "warning" if days_down else ("success" if measured else "neutral"),
+             "subtitle": "Measured days" if measured else "No measured day"},
             {"label": "Services with downtime", "value": f"{with_downtime:,}",
              "accent": "warning" if with_downtime else "success",
              "subtitle": f"of {len(services)} service(s)"},
@@ -822,10 +912,8 @@ async def service_daily_uptime(ctx: SectionCtx) -> dict:
                  "series": {"kind": "bars", "unit": "%", "color": "success",
                             "y_domain": [min(lo, 99), 100],
                             "points": [{"t": ctx.iso(_midnight(d, zone)), "v": _avail_num(u)}
-                                       for d, u, _down in fleet_days]}}],
-        tables=[{"title": "Confirmed uptime by " + ("week" if weekly else "day"),
-                 "headers": headers, "styles": ["text"] + ["pct"] * (len(headers) - 1),
-                 "rows": rows}],
+                                       for d, u, _down in fleet_days]}}] if values else [],
+        tables=tables,
         notes=notes,
     )
 
@@ -833,6 +921,7 @@ async def service_daily_uptime(ctx: SectionCtx) -> dict:
 # ─── 5. TLS certificate expiry ──────────────────────────────────────────────
 
 def _tls_eligible(c: dict) -> bool:
+    """Same rule as report_data_service._tls_eligible."""
     kind = c.get("check_type") or ""
     return kind == "tls" or (kind == "http" and (c.get("target_url") or "").lower().startswith("https://"))
 
@@ -844,6 +933,14 @@ def _days_left(expiry: Optional[datetime], days: Any, now: datetime) -> Optional
         return int(days) if days is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return default
+    return out if out > 0 else default
 
 
 @register_section(
@@ -883,10 +980,12 @@ async def tls_certificate_expiry(ctx: SectionCtx) -> dict:
         if not observed and (c.get("tls_expiry_date") is not None or c.get("tls_days_remaining") is not None):
             observed = [{"tls_expiry": c.get("tls_expiry_date"), "tls_days": c.get("tls_days_remaining"),
                          "tls_subject": c.get("tls_subject"), "tls_issuer": c.get("tls_issuer"),
-                         "tls_valid": None, "label": "Monitor result"}]
+                         "tls_valid": None, "label": "Latest result"}]
         if not observed:
             no_evidence.append(c["name"])
             continue
+        warn = _positive_int(c.get("tls_warn_days"), 30)
+        crit = _positive_int(c.get("tls_critical_days"), 7)
         # One row per distinct certificate the vantages saw (load balancers can differ).
         groups: dict[tuple, dict] = {}
         for o in observed:
@@ -900,8 +999,6 @@ async def tls_certificate_expiry(ctx: SectionCtx) -> dict:
             if o.get("tls_valid") is False:
                 invalid.add(c["name"])
         for g in groups.values():
-            warn = int(c.get("tls_warn_days") or 30)
-            crit = int(c.get("tls_critical_days") or 7)
             days = _days_left(g["expiry"], g["days"], now)
             if days is None:
                 continue
@@ -914,26 +1011,25 @@ async def tls_certificate_expiry(ctx: SectionCtx) -> dict:
     counts = {k: sum(1 for g in certs if g["status"] == k) for k in ("expired", "critical", "warning")}
     listed = [g for g in certs if g["status"] != "ok" or g["days_left"] <= horizon]
     listed.sort(key=lambda g: (g["days_left"], g["check"]["name"].lower()))
+    upcoming = sum(1 for g in listed if g["status"] != "expired")
     top_n = int(ctx.opt("top_n"))
     shown = listed[:top_n]
     rows = [[g["check"]["name"], _clip(g["subject"]), _clip(g["issuer"]),
-             ctx.fmt_date(g["expiry"]) if g["expiry"] else "—", str(g["days_left"]), g["status"],
+             ctx.fmt_date(g["expiry"]) if g["expiry"] else "—", f"{g['days_left']:,}", g["status"],
              _clip(", ".join(sorted(set(g["vantages"]))), 80)] for g in shown]
-    notes = ["Graded with each check's own thresholds (critical / warning days). Dates come from the "
-             "latest TLS handshake seen by each monitoring vantage; service-check TLS is reported "
+    notes = ["Graded with each check's own critical and warning days. Dates come from the latest TLS "
+             "handshake seen by each monitoring site; service-check certificates are reported "
              "separately from F5 certificate inventory, which does not prove an active binding."]
     if no_evidence:
         names = ", ".join(no_evidence[:10]) + (" …" if len(no_evidence) > 10 else "")
-        notes.append(f"No TLS evidence yet for {len(no_evidence)} check(s): {names}.")
+        notes.append(f"No TLS evidence yet for {len(no_evidence)} check(s) (not measured): {names}.")
     if invalid:
-        notes.append(f"Certificate validation failed at a vantage for: {', '.join(sorted(invalid)[:10])}.")
+        notes.append(f"Certificate validation failed at a monitoring site for: "
+                     f"{', '.join(sorted(invalid)[:10])}.")
     if paused:
         notes.append(f"{paused} paused TLS/HTTPS check(s) are not assessed.")
     if not listed:
         notes.insert(0, f"No certificate is expired or expires within {horizon} days.")
-    trunc = _truncated(len(shown), len(listed), "certificates")
-    if trunc:
-        notes.append(trunc)
     return _section(
         "tls_certificate_expiry", title,
         description=(f"Certificates of {len(active)} TLS/HTTPS service check(s) that are expired or "
@@ -947,14 +1043,13 @@ async def tls_certificate_expiry(ctx: SectionCtx) -> dict:
             {"label": "Warning", "value": f"{counts['warning']:,}",
              "accent": "warning" if counts["warning"] else "success",
              "subtitle": "Within each check's warning days"},
-            {"label": f"Expiring within {horizon} days", "value": f"{len(listed):,}",
+            {"label": f"Expiring within {horizon} days", "value": f"{upcoming:,}",
              "accent": "info", "subtitle": f"of {len(certs)} certificate(s) seen"},
             {"label": "No TLS evidence", "value": f"{len(no_evidence):,}",
              "accent": "warning" if no_evidence else "neutral",
              "subtitle": f"of {len(active)} TLS/HTTPS check(s)"},
         ],
-        tables=[{"title": "Certificates needing attention" + (
-                    f" (top {len(shown)} of {len(listed)})" if len(listed) > len(shown) else ""),
+        tables=[{"title": _top_title("Certificates needing attention", len(shown), len(listed)),
                  "headers": ["Service", "Subject", "Issuer", "Expires", "Days left", "Status", "Seen by"],
                  "styles": ["text", "text", "text", "text", "num", "status", "text"],
                  "rows": rows}] if rows else [],
@@ -965,11 +1060,17 @@ async def tls_certificate_expiry(ctx: SectionCtx) -> dict:
 # ─── 6. By group and owner ──────────────────────────────────────────────────
 
 _GROUPINGS = {
-    "group": ("Service group", lambda c: c.get("group_name") or "Ungrouped"),
-    "owner_team": ("Owner team", lambda c: (c.get("owner_team") or "").strip() or "No owner team"),
-    "business_owner": ("Business owner", lambda c: (c.get("business_owner") or "").strip() or "No business owner"),
-    "criticality": ("Criticality", lambda c: (c.get("criticality") or "").lower() or "Not set"),
+    "group": ("Service group", "Service groups", "Ungrouped",
+              lambda c: c.get("group_name") or "Ungrouped"),
+    "owner_team": ("Owner team", "Owner teams", "No owner team",
+                   lambda c: (c.get("owner_team") or "").strip() or "No owner team"),
+    "business_owner": ("Business owner", "Business owners", "No business owner",
+                       lambda c: (c.get("business_owner") or "").strip() or "No business owner"),
+    "criticality": ("Criticality", "Criticality levels", "Not set",
+                    lambda c: c.get("criticality") or "Not set"),
 }
+_UNMAPPED_LABEL = {"group": "Ungrouped services", "owner_team": "Without an owner team",
+                   "business_owner": "Without a business owner", "criticality": "Criticality not set"}
 
 
 def _down_intervals(s: dict, end: datetime) -> list[tuple[datetime, datetime]]:
@@ -983,17 +1084,17 @@ def _down_intervals(s: dict, end: datetime) -> list[tuple[datetime, datetime]]:
 
 def _group_table(services: list[dict], key: str, end: datetime, top_n: int) -> tuple[dict, list]:
     from app.services.service_availability import merge_intervals
-    label, keyfn = _GROUPINGS[key]
+    label, _plural, _fallback, keyfn = _GROUPINGS[key]
     groups: dict[str, list[dict]] = {}
     for s in services:
         groups.setdefault(keyfn(s["check"]), []).append(s)
     stats = []
     for name, members in groups.items():
-        intervals = [iv for s in members for iv in _down_intervals(s, end)]
-        merged = sum((hi - lo).total_seconds() for lo, hi in merge_intervals(intervals))
         assessed = [s for s in members if s["avail"] is not None]
+        intervals = [iv for s in assessed for iv in _down_intervals(s, end)]
+        merged = sum((hi - lo).total_seconds() for lo, hi in merge_intervals(intervals))
         uptime, _cov = _weighted_uptime(members)
-        worst = min(assessed, key=lambda s: s["avail"], default=None)
+        worst = min(assessed, key=lambda s: (s["avail"], s["check"]["name"].lower()), default=None)
         stats.append({
             "name": name, "services": len(members), "assessed": len(assessed), "uptime": uptime,
             "incidents": sum(len(s["incidents"]) for s in members),
@@ -1008,8 +1109,7 @@ def _group_table(services: list[dict], key: str, end: datetime, top_n: int) -> t
              "—" if g["impact"] is None else f"{g['impact'] / 60:,.1f}",
              f"{g['worst']['check']['name']} ({_avail(g['worst']['avail'])})" if g["worst"] else "—"]
             for g in shown]
-    title = f"By {label.lower()}" + (f" (top {len(shown)} of {len(stats)})" if len(stats) > len(shown) else "")
-    return ({"title": title,
+    return ({"title": _top_title(f"By {label.lower()}", len(shown), len(stats)),
              "headers": [label, "Services", "Assessed", "Confirmed uptime", "Incidents",
                          "Merged downtime", "Impact (service-min)", "Lowest service"],
              "styles": ["text", "num", "num", "pct-bar", "num", "num", "num", "text"],
@@ -1050,10 +1150,17 @@ async def service_by_group(ctx: SectionCtx) -> dict:
     all_down = merge_intervals([iv for s in assessed for iv in _down_intervals(s, end)])
     merged_total = sum((hi - lo).total_seconds() for lo, hi in all_down) if assessed else None
     impact_total = sum(s["downtime"] or 0.0 for s in assessed) if assessed else None
-    ungrouped = sum(1 for s in services if not s["check"].get("group_name"))
-    no_team = sum(1 for s in services if not (s["check"].get("owner_team") or "").strip())
+    first = keys[0]
+    unmapped = sum(1 for s in services if _GROUPINGS[first][3](s["check"]) == _GROUPINGS[first][2])
     chart_points = [{"label": g["name"], "value": round(g["merged"] / 60, 1)}
                     for g in (first_stats or [])[:10] if g["merged"]]
+    notes = ["Merged downtime is wall-clock time during which at least one service in the row was "
+             "confirmed down (overlaps counted once); impact adds each service's confirmed downtime "
+             "(two services down for the same 10 minutes = 20 service-minutes). Uptime is weighted "
+             "by each service's measured time.", BASIS_NOTE]
+    if not assessed:
+        notes.insert(0, "No service has confirmed evidence in this period; downtime is not measured.")
+    notes += _history_notes(ctx)
     return _section(
         "service_by_group", title,
         description=(f"Confirmed availability of {len(services)} service(s) rolled up by "
@@ -1065,20 +1172,17 @@ async def service_by_group(ctx: SectionCtx) -> dict:
             {"label": "Impact", "value": "—" if impact_total is None else f"{impact_total / 60:,.1f} service-min",
              "accent": "neutral" if impact_total is None else "warning" if impact_total else "success",
              "subtitle": "Each service's downtime added up"},
-            {"label": _GROUPINGS[keys[0]][0] + "s", "value": f"{len(first_stats or []):,}",
-             "accent": "primary"},
-            {"label": "Without a group", "value": f"{ungrouped:,}",
-             "accent": "warning" if ungrouped else "success",
-             "subtitle": f"{no_team} without an owner team"},
+            {"label": _GROUPINGS[first][1], "value": f"{len(first_stats or []):,}",
+             "accent": "primary", "subtitle": f"{len(services)} service(s)"},
+            {"label": _UNMAPPED_LABEL[first], "value": f"{unmapped:,}",
+             "accent": "warning" if unmapped else "success",
+             "subtitle": f"of {len(services)} service(s)"},
         ],
-        charts=[{"title": f"Merged downtime by {_GROUPINGS[keys[0]][0].lower()} (minutes)",
+        charts=[{"title": f"Merged downtime by {_GROUPINGS[first][0].lower()} (minutes)",
                  "series": {"kind": "rank", "unit": "min", "color": "warning",
                             "points": chart_points}}] if chart_points else [],
         tables=tables,
-        notes=["Merged downtime is wall-clock time during which at least one service in the row was "
-               "confirmed down (overlaps counted once); impact minutes add each service's confirmed "
-               "downtime (two services down for 10 minutes = 20 service-minutes). Uptime is weighted "
-               "by each service's measured time.", BASIS_NOTE],
+        notes=notes,
     )
 
 
@@ -1086,6 +1190,16 @@ async def service_by_group(ctx: SectionCtx) -> dict:
 
 _STATE_LABEL = {"expired": "completed", "ended": "ended early", "cancelled": "cancelled",
                 "active": "active", "scheduled": "scheduled"}
+
+
+def _scope_label(w: SimpleNamespace) -> str:
+    if w.scope_type == "check":
+        return f"Monitor: {w.check_name}" if w.check_name else "(deleted monitor)"
+    if w.scope_type == "group":
+        return f"Group: {w.group_name}" if w.group_name else "(deleted group)"
+    if w.scope_type == "tag":
+        return f"Tag: {w.scope_tag or '—'}"
+    return "All monitors"
 
 
 @register_section(
@@ -1110,6 +1224,7 @@ async def service_maintenance_log(ctx: SectionCtx) -> dict:
     if not windows:
         return _section("service_maintenance_log", title,
                         description="Service maintenance windows in the reporting period.",
+                        kpis=[{"label": "Windows", "value": "0", "accent": "neutral"}],
                         notes=["No service maintenance windows in this period."])
     checks = await _checks(ctx)
     period_end = _aware(ctx.to) or end
@@ -1128,15 +1243,6 @@ async def service_maintenance_log(ctx: SectionCtx) -> dict:
             excluded_sec += sum((hi - lo).total_seconds() for lo, hi in iv)
     merged = sum((hi - lo).total_seconds() for lo, hi in merge_intervals(spans))
 
-    def scope(w) -> str:
-        if w.scope_type == "check":
-            return w.check_name or "(deleted monitor)"
-        if w.scope_type == "group":
-            return f"Group: {w.group_name}" if w.group_name else "(deleted group)"
-        if w.scope_type == "tag":
-            return f"tag:{w.scope_tag}"
-        return "All monitors"
-
     states = [(w, service_maintenance.window_state(w, now)) for w in windows]
     top_n = int(ctx.opt("top_n"))
     shown = states[:top_n]
@@ -1146,24 +1252,23 @@ async def service_maintenance_log(ctx: SectionCtx) -> dict:
         in_period = (max(0.0, (min(eff, period_end) - max(w.starts_at, start)).total_seconds())
                      if not w.cancelled_at else None)
         rows.append([
-            scope(w), f"{sum(1 for c in checks if service_maintenance.covers(w, c)):,}",
+            _scope_label(w), f"{sum(1 for c in checks if service_maintenance.covers(w, c)):,}",
             ctx.fmt_short(w.starts_at), ctx.fmt_short(w.ends_at),
             "—" if w.cancelled_at else ctx.fmt_short(eff),
             _dur(in_period), _STATE_LABEL.get(state, state), _clip(w.reason, 80),
         ])
     ended_early = sum(1 for _w, st in states if st == "ended")
     cancelled = sum(1 for w in windows if w.cancelled_at)
+    active = sum(1 for _w, st in states if st == "active")
     notes = ["Maintenance time is excluded from service availability (neither up nor down). Monitors "
-             "covered by group and tag windows are counted with today's membership."]
-    trunc = _truncated(len(shown), len(windows), "windows")
-    if trunc:
-        notes.append(trunc)
+             "covered by group and tag windows are counted with today's membership; cancelled windows "
+             f"never applied. Times are {ctx.tz_label()}."]
     return _section(
         "service_maintenance_log", title,
         description=f"{len(windows)} service maintenance window(s) overlapped the reporting period.",
         kpis=[
             {"label": "Windows", "value": f"{len(windows):,}", "accent": "info",
-             "subtitle": f"{len(applied)} applied"},
+             "subtitle": f"{len(applied)} applied" + (f" · {active} active now" if active else "")},
             {"label": "Time in maintenance", "value": _dur(merged), "accent": "info",
              "subtitle": "Wall-clock, overlaps merged"},
             {"label": "Monitors covered", "value": f"{len(covered_ids):,}", "accent": "primary",
@@ -1171,7 +1276,7 @@ async def service_maintenance_log(ctx: SectionCtx) -> dict:
             {"label": "Ended early", "value": f"{ended_early:,}", "accent": "neutral"},
             {"label": "Cancelled", "value": f"{cancelled:,}", "accent": "neutral"},
         ],
-        tables=[{"title": "Maintenance windows",
+        tables=[{"title": _top_title("Maintenance windows", len(shown), len(windows)),
                  "headers": ["Scope", "Monitors", "Start", "Planned end", "Effective end",
                              "In period", "State", "Reason"],
                  "styles": ["text", "num", "text", "text", "text", "num", "status", "text"],
@@ -1182,11 +1287,21 @@ async def service_maintenance_log(ctx: SectionCtx) -> dict:
 
 # ─── 8. Results by monitoring site ──────────────────────────────────────────
 
+async def _sensors(ctx: SectionCtx) -> dict[str, tuple]:
+    """sensor id -> (name, site, location, status) for every sensor."""
+    if "svc_sensors" not in ctx._cache:
+        rows = (await ctx.db.execute(text(
+            "SELECT s.id::text, s.name, si.name, s.location, s.status FROM sensors s "
+            "LEFT JOIN sites si ON si.id = s.site_id"))).fetchall()
+        ctx._cache["svc_sensors"] = {str(r[0]): (r[1], r[2], r[3], r[4]) for r in rows}
+    return ctx._cache["svc_sensors"]
+
+
 @register_section(
     "service_vantage_comparison", title="Service Results by Monitoring Site", category="Services",
     description=("Current state and latency of service checks per monitoring site (controller or "
-                 "sensor), with probe success and P95 latency per site over the period, as of "
-                 "report generation."),
+                 "sensor) as of report generation, with probe success and P95 latency per site over "
+                 "the period."),
     scope="fleet", requires=REQUIRES, semantics="snapshot",
     options=[top_n_option(25, 200),
              {"key": "detail", "label": "Monitor detail", "type": "select", "default": "differences",
@@ -1197,39 +1312,53 @@ async def service_vantage_comparison(ctx: SectionCtx) -> dict:
     title = "Service Results by Monitoring Site"
     start, end, now = _window(ctx)
     checks = {c["id"]: c for c in await _checks(ctx)}
-    vantages = [v for v in await _vantages(ctx) if v["check_id"] in checks]
+    # Paused monitors produce no new results; leaving them in would read as stale sites.
+    vantages = [v for v in await _vantages(ctx)
+                if v["check_id"] in checks and checks[v["check_id"]].get("enabled") is not False]
 
-    # Per-site probe statistics over the period (raw probes only keep poller_id).
+    # Per-site probe statistics over the period (only raw probes keep the poller).
     period: dict[str, dict] = {}
     raw_from = max(start, now - timedelta(days=RAW_RETENTION_DAYS))
     if end > raw_from:
         rows = await ctx.ch_rows(
-            "SELECT if(poller_id = %(controller)s, 'central', poller_id) AS source, count(), "
-            "countIf(is_up = 1), quantileIf(0.95)(response_ms, is_up = 1) "
+            "SELECT if(poller_id = %(controller)s, 'central', poller_id) AS source, count() AS probes, "
+            "countIf(is_up = 1) AS ok, "
+            "quantileTDigestIf(0.95)(response_ms, is_up = 1 AND response_ms > 0) AS p95_ms "
             "FROM zenplus.service_metrics WHERE timestamp >= %(f)s AND timestamp < %(t)s "
             "GROUP BY source",
             {"controller": os.getenv("POLLER_ID", "poller-01"), "f": _ch_time(raw_from),
              "t": _ch_time(end)})
         for source, n, ok, p95 in rows:
-            period[str(source)] = {"n": int(n or 0), "ok": int(ok or 0), "p95": _finite(p95)}
+            if int(n or 0) > 0:
+                period[str(source)] = {"n": int(n or 0), "ok": int(ok or 0),
+                                       "p95": _finite(p95) if ok else None}
 
-    if not vantages:
+    notes = ["Current state is each site's latest result for the enabled monitors assigned to it; a "
+             "result older than two check intervals is stale. Probe success per site is diagnostic: "
+             "service availability uses confirmed incidents only."]
+    note = ctx.window_note(RAW_RETENTION_DAYS, "Per-site probe data")
+    if note:
+        notes.append(note)
+    if not vantages and not period:
         return _section("service_vantage_comparison", title,
                         description="Service-check results per monitoring site.",
-                        notes=["No monitoring-site results are recorded for service checks yet."])
+                        notes=["No monitoring-site results are recorded for service checks."] + notes[1:])
+    sensors = await _sensors(ctx)
 
     def fresh(v: dict) -> bool:
         ts = _aware(v["last_result_at"])
         interval = checks[v["check_id"]]["check_interval"]
         return bool(ts and (now - ts).total_seconds() <= max(2 * interval, 60))
 
+    def site_entry(pid: str, label: str, status: Optional[str]) -> dict:
+        return {"label": label, "status": status, "monitors": 0, "up": 0, "down": 0, "warning": 0,
+                "unknown": 0, "stale": 0, "lat": []}
+
     sites: dict[str, dict] = {}
     per_check: dict[str, list[dict]] = {}
     for v in vantages:
         v["fresh"] = fresh(v)
-        s = sites.setdefault(v["poller_id"], {"label": v["label"], "status": v["sensor_status"],
-                                              "monitors": 0, "up": 0, "down": 0, "warning": 0,
-                                              "unknown": 0, "stale": 0, "lat": []})
+        s = sites.setdefault(v["poller_id"], site_entry(v["poller_id"], v["label"], v["sensor_status"]))
         s["monitors"] += 1
         if not v["fresh"]:
             s["stale"] += 1
@@ -1239,24 +1368,32 @@ async def service_vantage_comparison(ctx: SectionCtx) -> dict:
             if state == "up" and _finite(v["latency_ms"]) is not None:
                 s["lat"].append(float(v["latency_ms"]))
         per_check.setdefault(v["check_id"], []).append(v)
+    for pid in period:
+        if pid in sites:
+            continue
+        if pid == "central":
+            sites[pid] = site_entry(pid, "Controller", None)
+        elif pid in sensors:
+            name, site, location, status = sensors[pid]
+            sites[pid] = site_entry(pid, _vantage_label(pid, name, site, location), status)
+        else:
+            sites[pid] = site_entry(pid, f"Unknown poller ({pid[:12]})", None)
 
-    def median(xs: list[float]) -> Optional[float]:
-        xs = sorted(xs)
-        if not xs:
-            return None
-        m = len(xs) // 2
-        return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
-
+    ordered_sites = sorted(sites.items(), key=lambda kv: (kv[0] != "central", kv[1]["label"].lower()))
     site_rows = []
-    for pid, s in sorted(sites.items(), key=lambda kv: (kv[0] != "central", kv[1]["label"].lower())):
+    chart = []
+    for pid, s in ordered_sites:
         p = period.get(pid)
         site_rows.append([
             s["label"], "online" if pid == "central" else (s["status"] or "unknown"),
             f"{s['monitors']:,}", f"{s['up']:,}", f"{s['down']:,}", f"{s['warning']:,}",
-            f"{s['unknown']:,}", f"{s['stale']:,}", _fmt_ms(median(s["lat"])),
-            _fmt_ms(p["p95"]) if p else "—",
-            _share(p["ok"] / p["n"] * 100) if p and p["n"] else "—",
+            f"{s['unknown']:,}", f"{s['stale']:,}",
+            _ms(statistics.median(s["lat"]) if s["lat"] else None),
+            _ms(p["p95"]) if p else "—",
+            _share(p["ok"] / p["n"] * 100) if p else "—",
         ])
+        if p and p["p95"] is not None:
+            chart.append({"label": s["label"], "value": round(p["p95"], 2)})
     multi = {cid: vs for cid, vs in per_check.items() if len(vs) >= 2}
     disagree = {cid: vs for cid, vs in multi.items()
                 if len({v["state"] for v in vs if v["fresh"]}) > 1}
@@ -1269,12 +1406,6 @@ async def service_vantage_comparison(ctx: SectionCtx) -> dict:
                "styles": ["text", "status", "num", "num", "num", "num", "num", "num", "num", "num", "pct"],
                "rows": site_rows}]
     detail = ctx.opt("detail")
-    notes = ["Current state is each site's latest result for monitors it is assigned to; a result "
-             "older than two check intervals is stale. Probe success per site is diagnostic: "
-             "service availability uses confirmed incidents only."]
-    note = ctx.window_note(RAW_RETENTION_DAYS, "Per-site probe data")
-    if note:
-        notes.append(note)
     if detail != "none":
         chosen = disagree if detail == "differences" else multi
         ordered = sorted(chosen.items(), key=lambda kv: (kv[0] not in disagree,
@@ -1285,7 +1416,7 @@ async def service_vantage_comparison(ctx: SectionCtx) -> dict:
             for v in sorted(vs, key=lambda v: (v["poller_id"] != "central", v["label"].lower())):
                 rows.append([checks[cid]["name"], v["label"],
                              (v["state"] or "unknown") if v["fresh"] else "stale",
-                             _fmt_ms(_finite(v["latency_ms"])), ctx.fmt_short(v["last_result_at"]),
+                             _ms(_finite(v["latency_ms"])), ctx.fmt_short(v["last_result_at"]),
                              _clip(v["error"], 60)])
         if rows:
             label = ("Monitors whose sites disagree" if detail == "differences"
@@ -1297,13 +1428,10 @@ async def service_vantage_comparison(ctx: SectionCtx) -> dict:
                                        "Last result", "Last error"],
                            "styles": ["text", "text", "status", "num", "text", "text"],
                            "rows": rows})
-        elif detail == "differences":
-            notes.append("Every monitor checked from two or more sites currently agrees across sites.")
+        elif multi and detail == "differences":
+            notes.insert(0, "Every monitor checked from two or more sites currently agrees across sites.")
         else:
-            notes.append("No monitor is checked from two or more sites.")
-    chart = [{"label": s[0], "value": round(period[pid]["p95"], 1)}
-             for pid, s in zip(sorted(sites, key=lambda k: (k != "central", sites[k]["label"].lower())), site_rows)
-             if period.get(pid) and period[pid]["p95"] is not None]
+            notes.insert(0, "No monitor is checked from two or more sites.")
     return _section(
         "service_vantage_comparison", title,
         description=(f"Latest results of {len(per_check)} monitor(s) from {len(sites)} monitoring "
@@ -1313,9 +1441,10 @@ async def service_vantage_comparison(ctx: SectionCtx) -> dict:
             {"label": "Monitors on 2+ sites", "value": f"{len(multi):,}", "accent": "info",
              "subtitle": f"of {len(per_check)} monitor(s) with site results"},
             {"label": "Sites disagree", "value": f"{len(disagree):,}",
-             "accent": "warning" if disagree else "success", "subtitle": "Monitors, right now"},
+             "accent": "warning" if disagree else ("success" if multi else "neutral"),
+             "subtitle": "Monitors, right now"},
             {"label": "Stale site results", "value": f"{stale:,}",
-             "accent": "warning" if stale else "success",
+             "accent": "warning" if stale else ("success" if vantages else "neutral"),
              "subtitle": "Older than two check intervals"},
         ],
         charts=[{"title": "P95 latency of successful probes by site (period)",
@@ -1336,7 +1465,7 @@ template(
     [S("service_sla_compliance"),
      S("service_by_group", None, group_by="both"),
      S("service_outages", "Longest Service Incidents", sort="longest", top_n=15),
-     S("service_daily_uptime", None, columns="auto"),
+     S("service_daily_uptime", "Weekly Service Uptime", columns="weeks"),
      S("tls_certificate_expiry", "TLS Certificates Expiring Within 30 Days", days=30)],
     audience=("Executive", "IT manager", "Service owner"),
     tags=("sla", "services", "error budget", "monthly review"),
@@ -1359,7 +1488,7 @@ template(
 template(
     "service_response_times_web", "Web and API Response Times",
     "Slowest HTTP/HTTPS checks by 95th-percentile response time of successful probes, with "
-    "p50/p99, and the slowest checks of every type.",
+    "p50/p99, and the slowest checks of every type by 99th percentile.",
     "services",
     [S("service_response_times", "Top 25 Web and API Checks by 95th-Percentile Response Time",
        check_type="http", sort="p95", top_n=25),
@@ -1367,7 +1496,7 @@ template(
        check_type="all", sort="p99", top_n=10)],
     audience=("Application owner", "Network engineer", "Service owner"),
     tags=("response time", "latency", "http", "api", "percentiles"),
-    default_period="last_7d", frequency="weekly", icon="Gauge",
+    default_period="last_7d", frequency="weekly", icon="Gauge", featured=True,
 )
 
 template(
@@ -1385,7 +1514,8 @@ template(
 template(
     "tls_certificate_expiry_report", "TLS Certificate Expiry",
     "Expired and expiring certificates seen by TLS and HTTPS service checks, graded by each "
-    "check's own thresholds, with the vantage that saw them and checks lacking TLS evidence.",
+    "check's own thresholds, with the monitoring site that saw them and the checks lacking TLS "
+    "evidence.",
     "security",
     [S("tls_certificate_expiry", None, days=90, top_n=100)],
     audience=("Security & audit", "Service owner", "IT manager"),
@@ -1411,7 +1541,7 @@ template(
     "Planned maintenance on service checks in the period — scope, planned and effective times, "
     "monitors covered, early ends and cancellations — and the time excluded from SLA.",
     "services",
-    [S("service_maintenance_log", None, include_cancelled=True)],
+    [S("service_maintenance_log", None, include_cancelled=True, top_n=200)],
     audience=("IT manager", "NOC operator", "Security & audit"),
     tags=("maintenance", "change", "sla exclusions"),
     default_period="previous_month", frequency="monthly", icon="Wrench",
