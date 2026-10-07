@@ -1,0 +1,211 @@
+# ZenPlus Release Path Runbook
+
+How a change gets from a development checkout to customer appliances, which
+machine holds which secret, and how the updater decides what to trust. Where this
+document and `15-RELEASE-RUNBOOK.md` disagree (key location, build host), this one is
+current.
+
+## 1. Who holds what
+
+| Environment | Holds | Never holds |
+|---|---|---|
+| Development checkout (workstation or isolated VM) | Source, Git, review branches | Production signing key, publishing login |
+| Build (lab `zentryc-build01`, 192.168.233.10) | A clean clone of one pushed tag, pinned toolchain, disposable **test** signing key | Uncommitted changes, any production secret |
+| Signing and publishing | Production signing key, publishing login (MFA on) | Development tools, source edits |
+| Lab appliances (lab `zentryc-test01`, 192.168.233.11) | Trust for the test key only, disposable databases | Production credentials or copied customer data |
+| Reference appliance | Production trust; enrolled in the canary group | Development tools, the test key |
+| Customer appliances | Production trust only | Any key that can sign |
+
+A customer appliance is never a copy of .221's disk. It runs the same signed release
+that was built from a tag and tested on lab and reference appliances.
+The installed `/opt/zenplus` on .221 is not a release build directory. Development
+there, if needed, uses a separate checkout; it does not change installed code.
+
+## 2. Cutting a release
+
+1. **Tag and push.** Merge to the release branch, `git tag v<version>`, push the branch
+   and the tag to GitHub. Released source must exist off the development machine.
+2. **Clean clone on the builder.** `git clone --branch v<version> <repo> /srv/zentryc/source/release-<version>`.
+   Check for an existing checkout for that version and `pgrep -af "build-release|build-ota"` first:
+   never reuse a version another session has started.
+3. **Build** from that clone (not from `/opt/zenplus`), signing with the **test** key:
+
+   ```bash
+   ZENPLUS_DIR=/srv/zentryc/source/release-<version> \
+   ZENPLUS_RELEASE_PRIVATE_KEY=<test private key> \
+   python3 scripts/build-release.py build --version <version> --severity security \
+       --require-tag --skip-agent-artifacts
+   ```
+
+   (Drop `--skip-agent-artifacts` for a release that also ships a Windows agent.) The
+   builder refuses a working tree with uncommitted changes, or a directory that is not a
+   git checkout, records `source.commit`, `source.branch`, `source.tag` and
+   `source.dirty` in the signed manifest, and signs the SHA-256 of **every file** in the
+   package (`payload_files`). `--allow-dirty` exists for lab builds only; the offline
+   verifier and the re-signing tool both reject such a package.
+   A package built locally before the branch/tag is pushed is a lab candidate only;
+   passing local tests does not replace the five required GitHub CI checks.
+   Run the strict `npm run build`, `npm run smoke:routes`, applicable Python
+   contracts and Go tests before release. Live API/database tests need disposable
+   fixtures; record excluded tests explicitly and do not claim they passed.
+   The CLI and its source helpers under `bin/` ship as individually managed files.
+   The updater does not take over the whole `bin/` directory or remove existing
+   compiled binaries and local helpers. DNS/NTP commands still require an approved
+   sudo policy on the appliance; do not grant unrestricted sudo to the app account.
+4. **Verify offline** before any production API call:
+
+   ```bash
+   python3 scripts/verify-ota-release.py update-<version>.zup <public key> \
+       --version <version> --appliance-only
+   ```
+
+   It fails if the manifest has no signed inventory, if the archive contains a file
+   that is not in it (or lacks one that is), if any file differs from its signed hash,
+   or if the recorded source is dirty or has no commit.
+5. **Lab test.** Fresh install, and upgrades from the oldest supported version, on lab
+   appliances with the test key.
+6. **Production signing.** Copy the lab-tested `.zup` to the signing machine and re-sign
+   it. The tool verifies the package completely (test signature, signed inventory, every
+   file hash, clean recorded source). It replaces the OTA signature and any bundled
+   sensor signatures. Application code, binaries and sensor manifest bytes stay
+   unchanged. When a sensor signature changes, its hash in the outer inventory and
+   the checksums change too; the outer manifest is then re-signed. A package without
+   nested signature changes keeps its manifest byte-for-byte unchanged:
+
+   ```bash
+   python3 scripts/resign-release.py update-<version>.zup \
+       --test-public-key <test.pub> --signing-key <production private key> \
+       --output final/update-<version>.zup
+   python3 scripts/verify-ota-release.py final/update-<version>.zup \
+       <production public key> --version <version> --appliance-only
+   ```
+
+   Verify every nested sensor manifest against the production public key as well.
+   Compare the lab and final payloads: only signatures, the corresponding inventory
+   hashes and checksums may differ. Re-test the final signed artifact on the reference
+   appliance before publishing; a passing lab-key build alone is not that test.
+
+7. **Canary, then everyone.**
+
+   ```bash
+   python3 scripts/build-release.py publish --file final/update-<version>.zup --version <version> \
+       --severity security --skip-agent-artifacts --rollout canary --rollout-group canary
+   # reference appliance updates through the real OTA path; check it, then:
+   python3 scripts/build-release.py rollout --version <version> --stage full
+   ```
+
+   Rollouts auto-promote after 24 hours while failures stay under 5%.
+8. **New installs.** Build the customer image from the same signed release on a fresh
+   golden VM (`scripts/provision-main-appliance-golden.sh`). Never run
+   `prepare-main-appliance-ova.sh` on .221.
+
+## 3. What the appliance checks before it installs anything
+
+The updater runs as root, so it authenticates a package **before writing any of it to
+disk** (`updater/package_trust.py`):
+
+1. The archive may contain only plain files and directories with safe relative names.
+   Links, device files, absolute or `..` paths, duplicates and oversized entries are
+   refused.
+2. `manifest.json` and its signature are read into memory and verified against the
+   release keys; the manifest must not be older than `max_manifest_age_days`, and its
+   version must be the one the server offered.
+3. The signed manifest must carry `payload_files`, naming exactly the files in the
+   archive.
+4. Files are then written one at a time into a root-only directory
+   (`/var/lib/zenplus-updater/work`), each hashed as it is written and compared with
+   the signed value.
+
+## 4. Updater trust settings
+
+Everything the root updater trusts comes from places the `zenplus` service account
+cannot write. `updater/config/agent.conf` is **not** consulted for any of it; a
+differing value there is ignored and logged.
+
+| Setting | Where |
+|---|---|
+| Server URL (must be `https://`), TLS verification, manifest age, legacy-package policy, revoked keys | `/etc/zenplus/updater-trust.conf` (root, 0644) |
+| Default release key | `/opt/zenplus/updater/keys/zentryc-release.pub` |
+| Additional release keys | `/etc/zenplus/updater-keys.d/*.pub` |
+
+If any of those files, or any directory above them, is not owned by root or is writable
+by group or others, the updater **refuses to run** and says why in the journal
+(`journalctl -u zenplus-updater`). `scripts/setup-updater-trust.sh` (run on every OTA
+update and by `install.sh`) creates the files with safe ownership, hands the updater
+code, `scripts/`, `bin/` and the Python virtualenv to root, and removes the service
+account from the `docker` group. It never overwrites an administrator's trust file.
+
+The enrollment **directory** `updater/config/` is root-owned (0755). Only its
+pre-created `agent.conf` and `subscription.json` files are owned by `zenplus`
+(0600); resetting enrollment writes an empty object to the existing cache file.
+Allowing the account to create directory entries could plant a Python package that
+shadows `config.py`. Startup rejects unexpected `__init__.*` entries before loading
+the agent, and trust checks reject symlinks in the entire path, including parents.
+
+The app-owned config cannot set the root updater's log/backup paths or retention
+policy; those use compiled defaults. `/opt/zenplus/.env`, read by systemd for the
+root updater, is root-owned and group-readable (0640). First boot preserves that
+ownership. Both installer paths must stop if trust setup fails. These protections
+prevent subsequent app-account writes; they do not establish that previously
+writable code or environment data on an already compromised machine is clean.
+
+### Legacy packages
+
+Packages built before signed inventories (up to 1.23.31) are refused by default. An
+air-gapped site that must install one sets `allow_legacy_packages = true` in
+`/etc/zenplus/updater-trust.conf`, installs, and turns it back off.
+
+### Rotating or revoking a release key
+
+1. Generate the new keypair on the signing machine.
+2. Ship the new public key to appliances in a release signed by the **old** key (a hook
+   that copies it to `/etc/zenplus/updater-keys.d/`).
+3. Once appliances trust it, sign releases with the new key.
+4. To stop trusting a key, add its fingerprint to `revoked_key_fingerprints` in the
+   trust file (via a hook in a release signed by the new key):
+
+   ```bash
+   python3 -c "from updater.crypto import load_public_key, public_key_fingerprint; \
+   print(public_key_fingerprint(load_public_key('old.pub')))"
+   ```
+
+## 5. Transition to this model
+
+Backup and rollback call `code/scripts/ota-create-backup.py` and
+`code/scripts/ota-restore-backup.py` from the verified payload in new processes.
+This avoids retaining the older updater's imported handlers during the first
+upgrade. Completed backups live under `/var/lib/zenplus-updater/backups`, outside
+the older app-owned tree. A root-owned transaction marker binds recovery to this
+attempt's completed backup. A failed backup cannot select an unrelated older
+backup, and retries clear their old marker before starting. Existing legacy
+backups are retained separately. PostgreSQL recovery clears user schemas
+and replays the plain dump in one transaction with `ON_ERROR_STOP=1`. SQL errors
+abort the transaction; a corrupt gzip is rejected before database changes. Database
+ownership/settings and system schemas are preserved. Test changed rows, newly
+created tables and a deliberately invalid SQL dump against disposable PostgreSQL,
+then force a final update health failure and verify the old services and version.
+This is application recovery; it does not provide an OS A/B rollback or reverse
+ClickHouse migrations.
+
+Fresh installers use the pinned runtime requirements without a second bcrypt
+override. Compare the installed versions with `server/requirements.txt` during
+fresh-image acceptance. Finalization preserves root ownership and reasserts
+hardening; the final health gate also loads updater trust. Docker configuration,
+the compose file and installed Git metadata are root-owned; OTA reapplies trust
+before other root setup hooks read refreshed files. `zenplus update` invokes
+the signed OTA service. The root-owned operator CLI is delivered on fresh installs
+and OTA upgrades; it no longer pulls and builds unsigned source on the appliance.
+Critical installer phases preserve shell failure handling, including errors
+before their final log message. Installation acceptance checks both complete
+database schemas as well as HTTP health and updater trust.
+
+- Packages up to 1.23.31 are installed by an updater that still unpacks before it
+  verifies. The first release built with this tooling is installed by that old updater,
+  so the exposure closes only when that release has been installed. Publish it as
+  `--severity security` and roll out promptly.
+- The production key and the zentryc.com login have been readable by every process
+  running as `zen` on .221. Move both to the signing machine, turn on MFA for the
+  portal account, and rotate the key (section 4) once appliances carry the key list.
+- Turn off OTA updates on .221 (`systemctl disable --now zenplus-updater.timer`) so
+  the Git working tree is changed only by developers. Test OTA behaviour on lab and
+  reference appliances.

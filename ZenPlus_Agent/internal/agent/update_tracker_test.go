@@ -99,6 +99,9 @@ func TestRequestRefusesDowngradeAndRespectsCooldown(t *testing.T) {
 	tr.now = func() time.Time { return time.Now().UTC().Add(updateRetryCooldown + time.Minute) }
 	_ = tr.Request(context.Background(), api, "stable", "9.9.9", false, logf)
 	waitFor(t, func() bool { return requests.Load() > second })
+	// Receiving the HTTP request does not mean the worker finished persisting
+	// its failure. Let it finish before TempDir cleanup removes the state tree.
+	waitFor(t, func() bool { tr.mu.Lock(); defer tr.mu.Unlock(); return !tr.inFlight })
 }
 
 func waitFor(t *testing.T, cond func() bool) {

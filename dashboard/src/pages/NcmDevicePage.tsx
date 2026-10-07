@@ -24,7 +24,6 @@ import { Ago, EmptyState, Fact, Pagination, SectionError, StaleBanner, StateBadg
 import { HELP, absoluteUtc, categoryLabel, download, errorDetail, ncmError, scheduleSummary, stateOf } from '@/components/ncm/model'
 import { DayPicker, TimezoneSelect } from '@/components/ncm/BulkDialogs'
 import { DiffView } from '@/components/ncm/DiffView'
-import { TrustDialog } from '@/components/ncm/TrustDialog'
 import { DeviceCompliance } from '@/components/ncm/ComplianceWorkspace'
 import { DeliveriesList, JobList } from '@/components/ncm/OperationsWorkspace'
 import { CrossDeviceCompare } from '@/components/ncm/ArchiveTools'
@@ -39,7 +38,6 @@ export function NcmDevicePage() {
   const qc = useQueryClient()
   const can = useCan()
   const navigate = useNavigate()
-  const [trustOpen, setTrustOpen] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [blocked, setBlocked] = useState<any>(null)
   const [editRequest, setEditRequest] = useState(0)
@@ -54,8 +52,7 @@ export function NcmDevicePage() {
     setParams(next, { replace: true })
   }
   const onAction = (a: ReadinessAction) => {
-    if (a === 'trust') setTrustOpen(true)
-    else { setTab('settings'); if (can('ncm.manage')) setEditRequest((n) => n + 1) }
+    setTab('settings'); if (can('ncm.manage')) setEditRequest((n) => n + 1)
   }
   const backup = useMutation({
     mutationFn: async () => (await api.post(`/devices/${deviceId}/ncm-jobs`)).data,
@@ -96,7 +93,6 @@ export function NcmDevicePage() {
           <p className="text-sm text-muted">{[device.ip, device.device_type, device.vendor, device.location].filter(Boolean).join(' · ')}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {can('ncm.trust') && <Button variant="outline" onClick={() => setTrustOpen(true)}><Lock className="h-4 w-4" /> SSH trust</Button>}
           <Button disabled={!canBackup || backup.isPending || summary.isError} onClick={() => backup.mutate()}
             title={!device.enrolled ? 'Enroll the device first (Settings)' : !device.ncm_enabled ? 'Collection is disabled' : undefined}>
             {backup.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadCloud className="h-4 w-4" />} Backup now
@@ -130,13 +126,11 @@ export function NcmDevicePage() {
         <TabsContent value="settings"><SettingsTab device={device} stale={summary.isError} onDirty={setDirty} editRequest={editRequest} onRemoved={() => navigate('/ncm?tab=devices')} /></TabsContent>
       </Tabs>
 
-      <TrustDialog deviceId={deviceId} open={trustOpen} onOpenChange={setTrustOpen} />
       <Dialog open={!!blocked} onOpenChange={(o) => !o && setBlocked(null)}>
         <DialogContent>
           <DialogHeader><DialogTitle>Backup not queued</DialogTitle><DialogDescription>{blocked?.message} Nothing was sent to the device.</DialogDescription></DialogHeader>
           <ul className="space-y-2 text-sm">{blocked?.blockers?.map((b: any) => (
             <li key={b.id} className="rounded-md border border-border p-2"><div className="flex items-center gap-2 font-medium"><ToneIcon tone="danger" />{b.label}</div><p className="mt-0.5 text-xs text-muted">{b.detail}</p>
-              {b.id === 'trust' && <Button size="sm" variant="link" className="h-auto px-0" onClick={() => { setBlocked(null); setTrustOpen(true) }}>Set up SSH trust</Button>}
               {['profile', 'enabled', 'driver'].includes(b.id) && <Button size="sm" variant="link" className="h-auto px-0" onClick={() => { setBlocked(null); onAction('settings') }}>Open settings</Button>}
             </li>
           ))}</ul>

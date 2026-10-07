@@ -6,10 +6,15 @@ import argparse
 import hashlib
 import io
 import json
+import sys
 import tarfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from updater.package_trust import INVENTORY_EXCLUDED, INVENTORY_KEY  # noqa: E402
 
 
 def verify_public_permissions(tar: tarfile.TarFile) -> None:
@@ -50,6 +55,25 @@ def verify_msi_container(tar: tarfile.TarFile, name: str) -> tarfile.TarInfo:
     return member
 
 
+def verify_sensor_manifests(tar: tarfile.TarFile, public_key) -> int:
+    """Nested sensor signatures must use the same release trust as the OTA."""
+    names = sorted(member.name for member in tar.getmembers()
+                   if member.isfile() and member.name.startswith('sensor-artifacts/')
+                   and member.name.endswith('/manifest.json'))
+    for name in names:
+        data = read_member(tar, name)
+        prefix = name.rsplit('/', 1)[0]
+        try:
+            public_key.verify(read_member(tar, prefix + '/manifest.json.sig'), data)
+            metadata = json.loads(data)
+        except (InvalidSignature, KeyError, ValueError) as exc:
+            raise RuntimeError(f'invalid sensor release signature or manifest: {name}') from exc
+        if (not isinstance(metadata, dict) or metadata.get('binary') != 'zenplus-sensor'
+                or metadata.get('sha256') != hashlib.sha256(read_member(tar, prefix + '/zenplus-sensor')).hexdigest()):
+            raise RuntimeError(f'sensor manifest does not match its binary: {name}')
+    return len(names)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("package")
@@ -61,6 +85,16 @@ def main() -> None:
         "--appliance-only",
         action="store_true",
         help="Require a signed release that deliberately contains no agent installer",
+    )
+    parser.add_argument(
+        "--allow-legacy",
+        action="store_true",
+        help="Accept a package whose manifest has no signed file inventory (pre-1.23.32 releases)",
+    )
+    parser.add_argument(
+        "--allow-dirty-source",
+        action="store_true",
+        help="Accept a package built from uncommitted or unknown source (lab builds)",
     )
     parser.add_argument(
         "--required-source-archive",
@@ -89,9 +123,38 @@ def main() -> None:
 
         if manifest.get("version") != args.version:
             raise RuntimeError("manifest version mismatch")
+
+        inventory = manifest.get(INVENTORY_KEY)
+        if inventory is None:
+            if not args.allow_legacy:
+                raise RuntimeError(
+                    "manifest has no signed file inventory (payload_files); the signature "
+                    "would not cover the payload")
+        else:
+            file_names = {name for name, member in members.items() if member.isfile()}
+            if file_names - INVENTORY_EXCLUDED != set(inventory):
+                extra = sorted(file_names - INVENTORY_EXCLUDED - set(inventory))
+                missing = sorted(set(inventory) - file_names)
+                raise RuntimeError(
+                    f"signed file inventory does not match the archive "
+                    f"(extra: {extra[:3]}, missing: {missing[:3]})")
+            for name, expected in inventory.items():
+                if hashlib.sha256(read_member(tar, name)).hexdigest() != expected:
+                    raise RuntimeError(f"file differs from the signed inventory: {name}")
+        sensors_verified = verify_sensor_manifests(tar, public_key)
+        source = manifest.get("source") or {}
+        if not args.allow_dirty_source and (
+                source.get("dirty") is not False or not source.get("commit")):
+            raise RuntimeError(
+                "manifest does not record a clean, committed source (source.dirty / "
+                "source.commit); build from a clean checkout or pass --allow-dirty-source")
         installed_version = read_member(tar, "code/.version").decode().splitlines()[0]
         if installed_version != args.version:
             raise RuntimeError("code/.version does not match release version")
+        if tuple(map(int, args.version.split('.'))) >= (1, 23, 32):
+            for helper in ('zenplus-cli', 'zenplus-management', 'zenplus-apply-network.sh', 'zenplus-apply-ntp.sh'):
+                if f'code/bin/{helper}' not in members:
+                    raise RuntimeError(f'required management CLI/helper missing: {helper}')
 
         steps = manifest.get("steps", [])
         if not steps or steps[0].get("script") != "code/scripts/ota-preflight.py":
@@ -229,6 +292,9 @@ def main() -> None:
     print(json.dumps({
         "release_version": args.version,
         "signature": "valid",
+        "signed_inventory_files": len(inventory) if inventory is not None else None,
+        "sensor_signatures_verified": sensors_verified,
+        "source_commit": (manifest.get("source") or {}).get("commit"),
         "checksums_verified": verified,
         "archive_members": len(members),
         "release_scope": "appliance-only" if args.appliance_only else "appliance-and-agent",

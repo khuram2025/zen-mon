@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import subprocess
 from functools import lru_cache
-from pathlib import Path
 import time
 from datetime import datetime, timezone
 
 from sqlalchemy import text
 
 from app.core import crypto
-from app.services.ncm_collection import KNOWN_HOSTS, DRIVERS, STARTUP_COMMANDS, UNSUPPORTED
+from app.services.ncm_collection import DRIVERS, STARTUP_COMMANDS, UNSUPPORTED
 
 
 def support_details(vendor, platform, config_types=None):
@@ -29,60 +28,6 @@ def support_details(vendor, platform, config_types=None):
     if vendor.startswith('aruba'):
         return {'state': 'needs_detection', 'message': 'Select the exact Aruba driver (AOS-CX, ArubaOS-Switch or Mobility Controller); auto-detection cannot always tell them apart.', 'config_types': []}
     return {'state': 'needs_detection', 'message': 'Select the exact platform or let the first capture detect an implemented collector. Vendor inventory alone does not certify support.', 'config_types': []}
-
-
-def saved_trust(host, port=22, path=None):
-    """Inspect the appliance trust file only; never learn or approve a key over the network."""
-    from paramiko import HostKeys
-    path = Path(path or KNOWN_HOSTS)
-    try:
-        keys = HostKeys(str(path))
-        name = str(host) if int(port or 22) == 22 else f'[{host}]:{int(port)}'
-        if keys.lookup(name):
-            return {'state': 'pass', 'source': 'appliance_file', 'message': 'A saved SSH host-key entry exists in the appliance trust file. The collector will verify the actual peer when connecting.'}
-        return {'state': 'blocked', 'source': None, 'missing': True, 'message': 'No saved SSH host key for this address and port. Read the fingerprint from the device console, then register it under SSH trust (or ask an appliance administrator).'}
-    except FileNotFoundError:
-        return {'state': 'blocked', 'source': None, 'missing': True, 'message': 'No SSH trust is registered for this device. Read the fingerprint from the device console, then register it under SSH trust.'}
-    except Exception:
-        # Key parser exceptions can contain file contents; never expose them.
-        return {'state': 'blocked', 'source': None, 'message': 'The appliance SSH trust file cannot be read or parsed. Register the device key under SSH trust or ask an administrator to repair the file.'}
-
-
-async def managed_keys(db, host, port):
-    rows = (await db.execute(text('''SELECT id,key_type,key_base64,fingerprint_sha256,registered_by_name,created_at,verification_method
-        FROM ncm_host_keys WHERE host=:host AND port=:port AND retired_at IS NULL'''),
-        {'host': str(host), 'port': int(port or 22)})).fetchall()
-    return rows
-
-
-async def trust_state(db, host, port, *, auto_trust=False):
-    """Managed (database) trust first, then the appliance trust file."""
-    if host:
-        rows = await managed_keys(db, host, port)
-        accepted = [r for r in rows if auto_trust or r.verification_method != 'first_use']
-        if accepted:
-            r = accepted[0]
-            if all(k.verification_method == 'first_use' for k in accepted):
-                return {'state': 'pass', 'source': 'first_use', 'fingerprint': r.fingerprint_sha256,
-                        'message': f'Automatically learned—not console verified ({r.fingerprint_sha256}). Future connections must match the saved key; changed keys are blocked.'}
-            return {'state': 'pass', 'source': 'managed', 'fingerprint': r.fingerprint_sha256,
-                    'message': f'Managed SSH trust registered by {r.registered_by_name} ({r.fingerprint_sha256}). The collector verifies the actual peer when connecting.'}
-    import asyncio
-    saved = await asyncio.to_thread(saved_trust, host, port)
-    if saved['state'] == 'pass' or not saved.get('missing') or not host:
-        return saved
-    if rows:
-        return {'state': 'blocked', 'source': 'first_use',
-                'message': 'This key was automatically learned. Strict verification requires independent fingerprint registration under SSH trust.'}
-    history = (await db.execute(text('SELECT 1 FROM ncm_host_keys WHERE host=:h AND port=:p LIMIT 1'),
-                               {'h': str(host), 'p': int(port or 22)})).first()
-    if history:
-        return {'state': 'blocked', 'source': None,
-                'message': 'SSH trust was retired for this address and port. Register a verified key under SSH trust; automatic relearning is blocked.'}
-    if auto_trust:
-        return {'state': 'pending', 'source': 'first_use',
-                'message': 'Automatically trust new devices is enabled. The first backup will save the presented key without independent verification. Changed keys will be blocked.'}
-    return saved
 
 
 @lru_cache(maxsize=2)
@@ -113,7 +58,7 @@ def runtime_health():
             'server_time': datetime.now(timezone.utc).isoformat()}
 
 
-def device_readiness(device, runtime, trust):
+def device_readiness(device, runtime):
     support = support_details(device.get('vendor'), device.get('platform'), device.get('config_types'))
     checks = []
 
@@ -134,10 +79,6 @@ def device_readiness(device, runtime, trust):
     add('enabled', 'Collection enabled', 'pass' if device.get('ncm_enabled') else 'blocked',
         'Collection is enabled.' if device.get('ncm_enabled') else 'Save an enabled enrollment before starting the first capture.',
         action=None if device.get('ncm_enabled') else 'settings')
-    # Automatic first-use profiles have no manual host-trust setup step.
-    # Keep actual trust problems visible (retirement, malformed files, etc.).
-    if not device.get('ssh_auto_trust') or trust['state'] == 'blocked':
-        add('trust', 'SSH host trust', trust['state'], trust['message'], action=None if trust['state'] == 'pass' else 'trust')
     add('encryption', 'Archive encryption', 'pass' if runtime['encryption'] == 'configured' else 'blocked',
         'Archive encryption is configured. Maintain a protected recovery copy of the key.' if runtime['encryption'] == 'configured' else 'An appliance administrator must configure a valid archive encryption key.')
     worker = runtime.get('worker')

@@ -9,9 +9,9 @@ import { absoluteUtc, type Tone } from './model'
 
 const CHECK_TONE: Record<string, Tone> = { pass: 'success', blocked: 'danger', pending: 'warning', info: 'neutral' }
 const CHECK_TEXT: Record<string, string> = { pass: 'Ready', blocked: 'Action needed', pending: 'Not verified yet', info: 'For information' }
-const ACTION_TEXT: Record<string, string> = { trust: 'Set up SSH trust', profile: 'Choose a profile', settings: 'Open settings', scope: 'Review scope' }
+const ACTION_TEXT: Record<string, string> = { profile: 'Choose a profile', settings: 'Open settings', scope: 'Review scope' }
 
-export type ReadinessAction = 'trust' | 'profile' | 'settings' | 'scope'
+export type ReadinessAction = 'profile' | 'settings' | 'scope'
 
 /**
  * Onboarding checklist. Required prerequisites are enforced by the server when a

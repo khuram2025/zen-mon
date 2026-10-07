@@ -37,36 +37,39 @@ async def run_job(db, sessions):
 
 # --- B02 ----------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_queue_enforces_readiness_without_creating_jobs(env):
+async def test_queue_enforces_readiness_without_creating_jobs(env, monkeypatch):
     db, _, actor = env
     did = await device(db)
-    await db.execute(text('DELETE FROM ncm_host_keys'))
-    await db.commit()
+    monkeypatch.setattr(ncm_readiness, 'runtime_health',
+                        lambda: dict(worker='inactive', scheduler='active', delivery='active', encryption='configured',
+                                     time_sync='synchronized', server_time=datetime.now(timezone.utc).isoformat()))
     with pytest.raises(HTTPException) as blocked:
         await ncm.queue_backup(did, db, actor)
     assert blocked.value.status_code == 409 and blocked.value.detail['code'] == 'readiness_blocked'
-    assert [b['id'] for b in blocked.value.detail['blockers']] == ['trust']
+    assert [b['id'] for b in blocked.value.detail['blockers']] == ['worker']
     await db.rollback()
     assert (await db.execute(text('SELECT count(*) FROM ncm_jobs'))).scalar() == 0
-    await device(db)  # re-registers fixture trust for 192.0.2.1
+    monkeypatch.undo()
+    monkeypatch.setattr(ncm_readiness, 'runtime_health',
+                        lambda: dict(worker='active', scheduler='active', delivery='active', encryption='configured',
+                                     time_sync='synchronized', server_time=datetime.now(timezone.utc).isoformat()))
     assert (await ncm.queue_backup(did, db, actor))['queued']
 
 
 @pytest.mark.asyncio
-async def test_missing_trust_fails_once_without_connecting(env, monkeypatch):
+async def test_backup_connects_without_any_saved_host_key(env, monkeypatch):
     db, sessions, actor = env
     did = await device(db)
     await ncm_jobs.enqueue(db, did, actor=actor)
-    await db.execute(text('DELETE FROM ncm_host_keys'))
     await db.commit()
-    monkeypatch.setattr(ncm_readiness, 'saved_trust', lambda *a: dict(state='blocked', message='none', source=None))
-    connect = AsyncMock()
-    monkeypatch.setattr(ncm, '_netmiko_fetch', lambda *a, **k: connect())
+    seen = {}
+    def fetch(*args, **kwargs):
+        seen.update(kwargs)
+        return 'cisco_ios', GOOD
+    monkeypatch.setattr(ncm, '_netmiko_fetch', fetch)
     job = await run_job(db, sessions)
-    assert job['status'] == 'failed' and job['attempts'] == 1 and job['failure_category'] == 'host_key_untrusted'
-    connect.assert_not_called()
-    run = (await db.execute(text('SELECT stage,failure_category,retryable,job_id FROM ncm_backup_runs'))).first()
-    assert run.stage == 'prerequisites' and not run.retryable and run.job_id == job['id']
+    assert job['status'] == 'success' and job['attempts'] == 1
+    assert 'known_hosts' not in seen
 
 
 # --- B03 / B07 ------------------------------------------------------------------
@@ -192,7 +195,7 @@ async def test_permanent_failure_opens_one_incident_and_recovery_closes_it(env, 
     assert (await db.execute(text("SELECT count(*) FROM ncm_notification_outbox"))).scalar() == 1
     jobs = await ncm.backup_jobs(did, 20, 0, db, actor)
     runs = jobs['data'][0]['runs']
-    assert runs[0]['failure_category'] == 'authentication' and runs[0]['stage'] == 'collection'
+    assert runs[0]['failure_category'] == 'authentication' and runs[0]['stage'] == 'connect'
     assert runs[0]['recommended_action'] and 'SECRET' not in str(jobs)
 
     monkeypatch.setattr(ncm, '_netmiko_fetch', lambda *a, **k: ('cisco_ios', GOOD))
@@ -231,16 +234,16 @@ async def test_transient_failures_retry_and_resume_remaining_types(env, monkeypa
 @pytest.mark.asyncio
 async def test_bulk_jobs_report_each_outcome(env):
     db, _, actor = env
-    ready = await device(db); busy = await device(db); untrusted = await device(db)
-    await db.execute(text("UPDATE devices SET ip_address='192.0.2.9' WHERE id=:id"), {'id': untrusted})
+    ready = await device(db); busy = await device(db); unprofiled = await device(db)
+    await db.execute(text("UPDATE ncm_credentials SET password_enc=NULL WHERE id=(SELECT credential_id FROM device_ncm WHERE device_id=:id)"), {'id': unprofiled})
     plain = uuid4()
     await db.execute(text("INSERT INTO devices(id,hostname,ip_address,device_type,tags) VALUES(:id,'plain','192.0.2.50','router','[]')"), {'id': plain})
     await db.commit()
     await ncm_jobs.enqueue(db, busy, actor=actor); await db.commit()
-    result = await ncm.bulk_jobs(ncm.BulkJobs(device_ids=[ready, busy, untrusted, plain, uuid4()]), db, actor)
+    result = await ncm.bulk_jobs(ncm.BulkJobs(device_ids=[ready, busy, unprofiled, plain, uuid4()]), db, actor)
     status = {r['device_id']: r['status'] for r in result['results']}
     assert status[str(ready)] == 'queued' and status[str(busy)] == 'already_active'
-    assert status[str(untrusted)] == 'blocked' and status[str(plain)] == 'not_enrolled'
+    assert status[str(unprofiled)] == 'blocked' and status[str(plain)] == 'not_enrolled'
     assert result['not_found'] == 1 and result['queued'] == 1
 
 
@@ -273,7 +276,7 @@ async def test_version_history_pages_and_flags_protection(env):
 async def test_scheduler_skips_blocked_devices_with_one_incident(env):
     db, _, actor = env
     did = await device(db)
-    await db.execute(text('DELETE FROM ncm_host_keys'))
+    await db.execute(text('UPDATE ncm_credentials SET password_enc=NULL'))
     await db.execute(text('UPDATE device_ncm SET schedule_enabled=true'))
     await db.commit()
     result = await ncm._run_scheduled(db)
@@ -283,35 +286,6 @@ async def test_scheduler_skips_blocked_devices_with_one_incident(env):
     assert row.last_status == 'blocked'
     overview = await ncm.ncm_overview(db, actor)
     assert overview['data'][0]['backup_state'] == 'blocked' and overview['attention']['blocked'] == 1
-
-
-# --- F04 managed trust ----------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_trust_registration_requires_matching_fingerprint(env):
-    db, _, actor = env
-    did = await device(db)
-    await db.execute(text('DELETE FROM ncm_host_keys'))
-    await db.commit()
-    pub = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPko4JVtLe0xGXUIpbrLaX1nVjHpKxOZhSCNUNWyonNg'
-    import hashlib
-    blob = base64.b64decode(pub.split()[1])
-    fp = 'SHA256:' + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip('=')
-    with pytest.raises(HTTPException) as mismatch:
-        await ncm.register_trust(did, ncm.TrustIn(public_key=pub, expected_fingerprint='SHA256:wrongwrongwrong', verification_method='console', verification_note='console at DC'), db, actor)
-    assert mismatch.value.status_code == 422
-    first = await ncm.register_trust(did, ncm.TrustIn(public_key=pub, expected_fingerprint=fp, verification_method='console', verification_note='console at DC'), db, actor)
-    assert first['fingerprint_sha256'] == fp
-    state = await ncm_readiness.trust_state(db, '192.0.2.1', 22)
-    assert state['state'] == 'pass' and state['source'] == 'managed'
-    other = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGv6yGTYoB9sLZ2ZRj8m4XxWc0pUVZ1Sg6cQ1p0XJt0F'
-    ofp = 'SHA256:' + base64.b64encode(hashlib.sha256(base64.b64decode(other.split()[1])).digest()).decode().rstrip('=')
-    with pytest.raises(HTTPException) as exists:
-        await ncm.register_trust(did, ncm.TrustIn(public_key=other, expected_fingerprint=ofp, verification_method='console', verification_note='new chassis'), db, actor)
-    assert exists.value.status_code == 409
-    await db.rollback()
-    await ncm.register_trust(did, ncm.TrustIn(public_key=other, expected_fingerprint=ofp, verification_method='console', verification_note='new chassis', replace_reason='RMA chassis swap confirmed by owner'), db, actor)
-    entries = (await ncm.get_trust(did, db, actor))['entries']
-    assert len(entries) == 2 and sum(e['retired_at'] is None for e in entries) == 1
 
 
 # --- F01 compliance ----------------------------------------------------------------------

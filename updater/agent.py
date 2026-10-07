@@ -13,7 +13,6 @@ import logging.handlers
 import os
 import shutil
 import sys
-import tarfile
 import tempfile
 from base64 import b64decode, b64encode
 from datetime import datetime, timezone
@@ -33,6 +32,8 @@ from .crypto import (
     load_public_key,
 )
 from .downloader import DownloadError, download_package
+from .package_trust import verify_and_extract
+from .trust import require_root_owned
 from .health import HealthCheckError, check_http
 from . import history
 from .inventory import collect_inventory, get_current_version
@@ -41,7 +42,21 @@ from .lockfile import LockError, UpdateLock
 logger = logging.getLogger("zenplus.updater")
 
 ZENPLUS_DIR = Path("/opt/zenplus")
-TEMP_DIR = Path("/tmp/zenplus-updates")
+# Scratch space for downloaded and unpacked packages. It must be a directory
+# only root can write to: /tmp is writable by every local account, so an
+# attacker-owned /tmp/zenplus-updates could swap files between verification and
+# installation. Readable by others on purpose (database migrations run as the
+# postgres user from here).
+TEMP_DIR = Path("/var/lib/zenplus-updater/work")
+
+
+def _prepare_work_dir(work_dir: Path | None = None, **owner_checks) -> Path:
+    """Create the scratch directory if needed and refuse to use an unsafe one."""
+    work = Path(work_dir) if work_dir is not None else TEMP_DIR
+    work.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    work.mkdir(mode=0o755, exist_ok=True)
+    require_root_owned(work, what="updater work directory", **owner_checks)
+    return work
 
 
 def setup_logging(cfg: AgentConfig) -> None:
@@ -283,6 +298,9 @@ def download_and_extract(
 ) -> tuple[str, dict]:
     """Download, verify, and extract an update package.
 
+    The package is authenticated (signature and signed file inventory) before
+    any of it is written to disk; see updater/package_trust.py.
+
     Returns (extract_dir, manifest_dict).
     """
     version = release["version"]
@@ -290,9 +308,9 @@ def download_and_extract(
     package_sha256 = release["package_sha256"]
     manifest_sig_b64 = release.get("manifest_sig", "")
 
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    package_path = str(TEMP_DIR / f"update-{version}.zup")
-    extract_dir = str(TEMP_DIR / f"update-{version}")
+    work_dir = _prepare_work_dir()
+    package_path = str(work_dir / f"update-{version}.zup")
+    extract_dir = str(work_dir / f"update-{version}")
 
     # Download
     logger.info("Downloading update package v%s ...", version)
@@ -305,44 +323,31 @@ def download_and_extract(
         verify_tls=cfg.security.verify_tls,
     )
 
-    # Extract
-    logger.info("Extracting package ...")
-    if os.path.exists(extract_dir):
+    # Verify, then extract
+    logger.info("Verifying and extracting package ...")
+    if os.path.islink(extract_dir):
+        os.unlink(extract_dir)
+    elif os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
-    os.makedirs(extract_dir)
 
-    with tarfile.open(package_path, "r:gz") as tar:
-        # Security: prevent path traversal
-        for member in tar.getmembers():
-            if member.name.startswith("/") or ".." in member.name:
-                raise SecurityError(
-                    f"Dangerous path in archive: {member.name}"
-                )
-        tar.extractall(extract_dir)
-
-    # Verify manifest signature
-    manifest_path = os.path.join(extract_dir, "manifest.json")
-    sig_path = os.path.join(extract_dir, "manifest.json.sig")
-
-    if not os.path.exists(manifest_path):
-        raise SecurityError("Package missing manifest.json")
-
-    if not os.path.exists(sig_path) and manifest_sig_b64:
-        # Signature provided by server API instead of in package
-        Path(sig_path).write_bytes(b64decode(manifest_sig_b64))
-
-    manifest = verify_manifest(
-        manifest_path,
-        sig_path,
-        cfg.security.public_key_path,
+    manifest = verify_and_extract(
+        package_path,
+        extract_dir,
+        public_key_paths=cfg.security.public_key_paths,
         max_age_days=cfg.security.max_manifest_age_days,
+        revoked_fingerprints=cfg.security.revoked_key_fingerprints,
+        allow_legacy=cfg.security.allow_legacy_packages,
+        fallback_signature=b64decode(manifest_sig_b64) if manifest_sig_b64 else b"",
+        expected_version=version,
     )
 
-    # Verify file checksums
+    # Secondary check: checksums.sha256 is written after signing, so it is not
+    # authoritative (the signed inventory is), but a mismatch means a bad build.
     checksums_path = os.path.join(extract_dir, "checksums.sha256")
     if os.path.exists(checksums_path):
         failures = verify_checksums(checksums_path, extract_dir)
         if failures:
+            shutil.rmtree(extract_dir, ignore_errors=True)
             raise SecurityError(
                 f"Checksum verification failed: {', '.join(failures)}"
             )
@@ -518,7 +523,13 @@ def main(config_path: str | None = None, check_only: bool = False) -> int:
     Returns:
         0 on success/no-update, 1 on failure
     """
-    cfg = load_config(config_path)
+    try:
+        cfg = load_config(config_path)
+    except SecurityError as exc:
+        # Trust files that the app account could modify: do not update at all.
+        print(f"zenplus-updater: refusing to run, unsafe trust configuration: {exc}",
+              file=sys.stderr)
+        return 1
     setup_logging(cfg)
 
     logger.info("ZenPlus Update Agent v%s starting", __version__)
@@ -633,7 +644,11 @@ def cli() -> None:
     args = parser.parse_args()
 
     if args.register:
-        cfg = load_config(args.config)
+        try:
+            cfg = load_config(args.config)
+        except SecurityError as exc:
+            print(f"Registration refused, unsafe trust configuration: {exc}", file=sys.stderr)
+            sys.exit(1)
         setup_logging(cfg)
         try:
             register(cfg, registration_token=args.register)

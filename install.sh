@@ -139,7 +139,16 @@ _run_step() {
         echo "===== [$STEP_NO/$TOTAL_STEPS] $title — $(date -Iseconds) ====="
     } >> "$INSTALL_LOG"
     CURRENT_STEP_TITLE="$title"; STEP_IN_FLIGHT=1
-    "$@" >> "$INSTALL_LOG" 2>&1 || rc=$?
+    if [[ "$critical" == "critical" ]]; then
+        # A function invoked on the left of `||` suppresses errexit throughout
+        # its body. Keep critical phases out of that context so an early apt,
+        # pip or build failure cannot be hidden by a later successful log call.
+        set -e
+        "$@" >> "$INSTALL_LOG" 2>&1
+        set +e
+    else
+        "$@" >> "$INSTALL_LOG" 2>&1 || rc=$?
+    fi
     STEP_IN_FLIGHT=0
     local dur=$((SECONDS - start))
     [[ $IS_TTY -eq 1 ]] && printf '\r'
@@ -303,7 +312,7 @@ install_prerequisites() {
     apt-get update -qq
 
     info "Installing core packages..."
-    apt-get install -y -qq \
+    apt-get -o DPkg::Lock::Timeout=300 install -y -qq \
         curl wget git apt-transport-https ca-certificates \
         gnupg lsb-release software-properties-common \
         python3 python3-pip python3-venv \
@@ -371,7 +380,8 @@ setup_user() {
     step "Setting up system user"
     if ! id "$ZENPLUS_USER" &>/dev/null; then
         useradd -r -m -d "$ZENPLUS_HOME" -s /bin/bash "$ZENPLUS_USER"
-        usermod -aG docker "$ZENPLUS_USER"
+        # Not added to the docker group: membership is root-equivalent through
+        # the Docker socket, and no service running as this account uses Docker.
         log "Created system user: $ZENPLUS_USER"
     else
         log "User $ZENPLUS_USER already exists"
@@ -559,6 +569,19 @@ print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('admin123'))
         fi
     fi
 
+    # The seeded admin/admin123 login must not stay usable: the API refuses
+    # everything but a password change until the administrator chooses a new
+    # one, and the dashboard shows the forced-change screen. A password the
+    # customer already chose is never flagged.
+    if [[ "${ADMIN_PASSWORD_IS_DEFAULT:-no}" == "yes" ]]; then
+        if runuser -u postgres -- psql -d zenplus -c \
+            "UPDATE users SET must_change_password = TRUE WHERE username = 'admin';" >/dev/null 2>&1; then
+            info "Administrator will be required to choose a new password at first sign-in"
+        else
+            warn "could not require an admin password change — change admin/admin123 immediately"
+        fi
+    fi
+
     # --- Redis ---
     info "Configuring Redis..."
     if ! grep -q "^requirepass" /etc/redis/redis.conf 2>/dev/null; then
@@ -735,7 +758,8 @@ EOF
     python3 -m venv "$ZENPLUS_HOME/venv"
     "$ZENPLUS_HOME/venv/bin/pip" install -q --upgrade pip
     "$ZENPLUS_HOME/venv/bin/pip" install -q -r requirements.txt
-    "$ZENPLUS_HOME/venv/bin/pip" install -q 'bcrypt==4.2.1' fpdf2 matplotlib Pillow
+    # All runtime dependencies, including bcrypt and reporting libraries, are
+    # pinned in requirements.txt. Do not override that inventory after install.
     log "Python environment ready"
 
     # React dashboard
@@ -1018,7 +1042,12 @@ setup_updater() {
 
     # Updater config / log / backup / key directories
     mkdir -p "$ZENPLUS_HOME/updater/"{config,logs,backups,keys}
-    chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME/updater"
+    # The updater runs as root: its code, release keys, logs and backups belong
+    # to root. Only the two files inside config/ (enrollment state written by
+    # the API) belong to the service account; the directory belongs to root.
+    # setup-updater-trust.sh below re-asserts all of this.
+    chown -R root:root "$ZENPLUS_HOME/updater"
+    chown root:root "$ZENPLUS_HOME/updater/config"
 
     # Default agent.conf — keep existing creds across re-installs.
     AGENT_CONF="$ZENPLUS_HOME/updater/config/agent.conf"
@@ -1032,11 +1061,6 @@ download_timeout_seconds = 600
 [appliance]
 id =
 api_key =
-
-[security]
-public_key_path = /opt/zenplus/updater/keys/zentryc-release.pub
-max_manifest_age_days = 30
-verify_tls = true
 
 [update]
 backup_dir = /opt/zenplus/updater/backups
@@ -1056,6 +1080,21 @@ CONF
         log "Created default agent.conf"
     else
         log "Preserved existing agent.conf (credentials kept)"
+    fi
+
+    # What the updater trusts (server URL, TLS, release keys) lives in root-owned
+    # /etc/zenplus/updater-trust.conf, never in agent.conf. The same script makes
+    # everything the root updater runs root-owned and drops docker-group access.
+    if [[ -f "$ZENPLUS_HOME/scripts/setup-updater-trust.sh" ]]; then
+        if bash "$ZENPLUS_HOME/scripts/setup-updater-trust.sh"; then
+            log "Updater trust settings installed"
+        else
+            warn "setup-updater-trust.sh failed — updater trust not hardened"
+            return 1
+        fi
+    else
+        warn "scripts/setup-updater-trust.sh missing in repo — updater trust not hardened"
+        return 1
     fi
 
     # Updater systemd units (shipped with the repo at updater/systemd/)
@@ -1153,180 +1192,8 @@ setup_support_bundles() {
 # STEP 9: Create management CLI
 # ═══════════════════════════════════════════════════════════════
 create_cli() {
-    step "Creating management CLI"
-    cat > /usr/local/bin/zenplus <<'CLIEOF'
-#!/usr/bin/env bash
-set -uo pipefail
-ZENPLUS_HOME="/opt/zenplus"
-ZENPLUS_USER="zenplus"
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'; BOLD='\033[1m'
-get_ip() { ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1; }
-
-run_migrations() {
-    # Converge both databases through the same tracked path the OTA updater
-    # uses, so an appliance updated by hand and one updated over the air end up
-    # with identical schema. The old loop re-ran every file blind and discarded
-    # every error, which recorded nothing and hid failures.
-    set +e
-    [[ -f "$ZENPLUS_HOME/.env" ]] && set -a && . "$ZENPLUS_HOME/.env" && set +a
-    if [[ -x "$ZENPLUS_HOME/scripts/sync-schema.py" ]]; then
-        python3 "$ZENPLUS_HOME/scripts/sync-schema.py" --scripts-dir "$ZENPLUS_HOME/scripts"
-        local rc=$?
-        [[ $rc -eq 0 ]] || echo -e "${YELLOW}  Schema drift remains — see $ZENPLUS_HOME/.schema-status.json${NC}"
-        return $rc
-    fi
-
-    # Fallback for an appliance that predates sync-schema.py.
-    for sql in "$ZENPLUS_HOME"/scripts/migrate-*.sql; do
-        [[ -f "$sql" ]] || continue
-        case "$(basename "$sql")" in *clickhouse*) continue ;; esac
-        echo "  pg: $(basename "$sql")"
-        sudo -u postgres psql -d zenplus -f "$sql" >/dev/null 2>&1
-    done
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^zenplus-clickhouse$'; then
-        for sql in "$ZENPLUS_HOME"/scripts/migrate-*-clickhouse.sql; do
-            [[ -f "$sql" ]] || continue
-            echo "  ch: $(basename "$sql")"
-            docker cp "$sql" zenplus-clickhouse:/tmp/m.sql >/dev/null 2>&1
-            docker exec zenplus-clickhouse clickhouse-client \
-                --password "${CLICKHOUSE_PASSWORD:-}" \
-                --multiquery --queries-file /tmp/m.sql >/dev/null 2>&1
-        done
-    fi
-    set -e
-}
-
-reinstall_units() {
-    # Re-copy systemd unit files in case a release shipped an updated copy.
-    # Idempotent: overwrites with the in-tree version, then daemon-reload.
-    for u in zenplus-updater.service zenplus-updater.timer; do
-        src="$ZENPLUS_HOME/updater/systemd/$u"
-        [[ -f "$src" ]] && cp "$src" "/etc/systemd/system/$u"
-    done
-    src="$ZENPLUS_HOME/poller/systemd/zenplus-netflow-collector.service"
-    [[ -f "$src" ]] && cp "$src" /etc/systemd/system/zenplus-netflow-collector.service
-    # net.core.rmem_max >= the collector's NETFLOW_RCVBUF (idempotent).
-    [[ -f "$ZENPLUS_HOME/scripts/setup-netflow-sysctl.sh" ]] && bash "$ZENPLUS_HOME/scripts/setup-netflow-sysctl.sh"
-    systemctl daemon-reload
-}
-
-case "${1:-help}" in
-    status)
-        echo -e "${CYAN}${BOLD}ZenPlus Network Monitoring${NC}"
-        echo ""
-        echo -e "  Version:  $(cat $ZENPLUS_HOME/.version 2>/dev/null | head -1 || echo unknown)"
-        echo -e "  Commit:   $(cd $ZENPLUS_HOME && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-        echo -e "  IP:       $(get_ip)"
-        echo ""
-        echo -e "  ${BOLD}Services:${NC}"
-        for svc in zenplus-wait-deps zenplus-api zenplus-poller zenplus-netflow-collector zenplus-updater.timer nginx postgresql redis-server; do
-            st=$(systemctl is-active $svc 2>/dev/null || echo "inactive")
-            en=$(systemctl is-enabled $svc 2>/dev/null || echo "disabled")
-            if [[ "$st" == "active" || "$st" == "waiting" ]]; then
-                echo -e "    ${GREEN}●${NC} $svc  ${GREEN}$st${NC}  [$en]"
-            else
-                echo -e "    ${RED}●${NC} $svc  ${RED}$st${NC}  [$en]"
-            fi
-        done
-        echo ""; echo -e "  ${BOLD}Docker:${NC}"
-        cd $ZENPLUS_HOME && docker compose ps --format "    {{.Name}}  {{.Status}}" 2>/dev/null
-        echo ""; echo -e "  ${BOLD}OTA Registration:${NC}"
-        APP_ID=$(grep -Po '(?<=^id = ).*' $ZENPLUS_HOME/updater/config/agent.conf 2>/dev/null || echo "")
-        if [[ -n "$APP_ID" ]]; then
-            echo -e "    ${GREEN}registered${NC} as $APP_ID"
-        else
-            echo -e "    ${YELLOW}not registered${NC} — paste a license key in Settings → Subscription"
-        fi
-        echo ""; echo -e "  ${BOLD}Access:${NC}"
-        echo -e "    Dashboard:  http://$(get_ip)"
-        echo -e "    API Docs:   http://$(get_ip)/docs"
-        echo -e "    Login:      admin / admin123"
-        ;;
-    restart) echo "Restarting..."; systemctl restart zenplus-api zenplus-poller zenplus-netflow-collector nginx; echo -e "${GREEN}Done${NC}" ;;
-    stop)    echo "Stopping..."; systemctl stop zenplus-netflow-collector zenplus-poller zenplus-api; echo -e "${YELLOW}Stopped${NC}" ;;
-    start)   echo "Starting..."; systemctl start docker postgresql redis-server; docker start zenplus-clickhouse 2>/dev/null; systemctl start zenplus-wait-deps zenplus-api zenplus-poller zenplus-netflow-collector nginx zenplus-updater.timer; echo -e "${GREEN}Started${NC}" ;;
-    logs)    journalctl -u "zenplus-${2:-api}" -f ;;
-    update)
-        echo "Updating..."
-        cd "$ZENPLUS_HOME" || exit 1
-        git config --global --add safe.directory "$ZENPLUS_HOME" 2>/dev/null
-        OLD=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-        git fetch origin && git reset --hard origin/main
-        NEW=$(git rev-parse --short HEAD)
-        if [[ "$OLD" == "$NEW" ]]; then echo "Already up to date ($OLD)"; exit 0; fi
-        echo "  $OLD -> $NEW"
-        if ! command -v cloud-localds >/dev/null 2>&1; then
-            echo "  installing sensor seed-ISO dependency..."
-            apt-get update -qq && apt-get install -y -qq cloud-image-utils >/dev/null || {
-                echo "cloud-image-utils installation failed"; exit 1; }
-        fi
-        # Converge and verify the schema before replacing any generated runtime
-        # artifacts or restarting services.  The previous order restarted the
-        # newly checked-out API even when migration failed, then returned an
-        # error; that left the running code ahead of PostgreSQL/ClickHouse and
-        # caused only some telemetry modules to fail.  Keep the already-loaded
-        # old services healthy and restore their source checkout on failure.
-        echo "  running migrations..."
-        if ! run_migrations; then
-            echo -e "${RED}Schema drift — update aborted before service restart.${NC}"
-            echo -e "${YELLOW}Details: $ZENPLUS_HOME/.schema-status.json${NC}"
-            if git reset --hard "$OLD" >/dev/null 2>&1; then
-                echo -e "${YELLOW}Restored source checkout $OLD; existing services were not restarted.${NC}"
-            else
-                echo -e "${RED}Could not restore source checkout $OLD; existing processes are still running but manual repair is required.${NC}"
-            fi
-            exit 1
-        fi
-        export PATH=/usr/local/go/bin:$PATH
-        echo "  building poller..."
-        ( cd "$ZENPLUS_HOME/poller" && go mod tidy && CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller ) || { echo "Poller build failed"; exit 1; }
-        [[ -x "$ZENPLUS_HOME/bin/zenplus-poller" ]] || { echo "Poller binary was not created"; exit 1; }
-        setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
-        echo "  building NetFlow collector..."
-        ( cd "$ZENPLUS_HOME/poller" && CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-netflow-collector" ./cmd/netflow-collector ) || { echo "NetFlow collector build failed"; exit 1; }
-        echo "  building remote sensor..."
-        SENSOR_ARTIFACT_DIR="$ZENPLUS_HOME/artifacts/sensors/bin/linux-amd64"
-        mkdir -p "$SENSOR_ARTIFACT_DIR"
-        SENSOR_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-        SENSOR_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        SENSOR_VERSION=$(head -1 "$ZENPLUS_HOME/.version" 2>/dev/null || echo 0.1.0)
-        [[ "$SENSOR_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || SENSOR_VERSION=0.1.0
-        ( cd "$ZENPLUS_HOME/poller" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false \
-            -ldflags "-X main.version=sensor-$SENSOR_VERSION -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
-            -o "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ./cmd/sensor ) || { echo "Sensor build failed"; exit 1; }
-        [[ -x "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ]] || { echo "Sensor binary was not created"; exit 1; }
-        ( cd "$SENSOR_ARTIFACT_DIR" && sha256sum zenplus-sensor > zenplus-sensor.sha256 )
-        rm -f "$SENSOR_ARTIFACT_DIR/manifest.json.sig"
-        SENSOR_SHA=$(cut -d' ' -f1 "$SENSOR_ARTIFACT_DIR/zenplus-sensor.sha256")
-        cat > "$SENSOR_ARTIFACT_DIR/manifest.json" <<EOF
-{"product":"ZenPlus Remote Sensor","platform":"linux-amd64","os":"linux","arch":"amd64","version":"sensor-$SENSOR_VERSION","commit":"$SENSOR_COMMIT","built_at":"$SENSOR_BUILD_DATE","binary":"zenplus-sensor","binary_url":"zenplus-sensor","sha256_file":"zenplus-sensor.sha256","sha256":"$SENSOR_SHA"}
-EOF
-        echo "  installing python deps..."
-        "$ZENPLUS_HOME/venv/bin/pip" install -q -r "$ZENPLUS_HOME/server/requirements.txt"
-        echo "  building dashboard..."
-        ( cd "$ZENPLUS_HOME/dashboard" && npm install --silent 2>/dev/null && npx vite build 2>/dev/null )
-        echo "  reloading systemd..."
-        reinstall_units
-        chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME" 2>/dev/null
-        echo "  restarting services..."
-        systemctl restart zenplus-api zenplus-poller nginx
-        systemctl restart zenplus-netflow-collector 2>/dev/null || true
-        systemctl restart zenplus-updater.timer 2>/dev/null || true
-        # The pre-restart schema gate above proved this checkout safe to run.
-        echo "$NEW" > "$ZENPLUS_HOME/.version"
-        date -Iseconds >> "$ZENPLUS_HOME/.version"
-        echo -e "${GREEN}Updated to $NEW${NC}"
-        ;;
-    backup)
-        TS=$(date +%Y%m%d-%H%M%S)
-        OUT="$ZENPLUS_HOME/backups/zenplus-$TS.sql.gz"
-        mkdir -p "$ZENPLUS_HOME/backups"
-        sudo -u postgres pg_dump zenplus | gzip > "$OUT" && echo -e "${GREEN}Backup:${NC} $OUT"
-        ;;
-    help|*)  echo -e "${CYAN}${BOLD}ZenPlus CLI${NC}\n\nUsage: zenplus <command>\n\n  status    Show services + OTA registration\n  start     Start all\n  stop      Stop app services\n  restart   Restart app services\n  update    Pull, migrate, rebuild, reload, restart\n  backup    Dump postgres to backups/\n  logs      Tail logs (api|poller|netflow-collector|updater)" ;;
-esac
-CLIEOF
-    chmod +x /usr/local/bin/zenplus
+    step "Installing management CLI"
+    bash "$ZENPLUS_HOME/scripts/setup-management-cli.sh"
     log "CLI installed"
 }
 
@@ -1348,7 +1215,10 @@ finalize() {
         date -Iseconds
     } > "$ZENPLUS_VERSION_FILE"
     RESOLVED_VERSION="$ver"
-    chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME"
+    chown root:root "$ZENPLUS_VERSION_FILE"
+    chmod 0644 "$ZENPLUS_VERSION_FILE"
+    # Finalization must preserve the boundary established by updater setup.
+    bash "$ZENPLUS_HOME/scripts/setup-updater-trust.sh"
     log "Version stamped: $ver"
 }
 
@@ -1360,6 +1230,21 @@ finalize() {
 verify_installation() {
     step "Verifying appliance health"
     local failures=0
+
+    if python3 "$ZENPLUS_HOME/scripts/sync-schema.py" --scripts-dir "$ZENPLUS_HOME/scripts" --json; then
+        log "PostgreSQL and ClickHouse schemas match the installed code"
+    else
+        echo "[fail] Database schema verification failed after installation"
+        failures=$((failures + 1))
+    fi
+
+    if (cd "$ZENPLUS_HOME" && "$ZENPLUS_HOME/venv/bin/python" -c \
+        'from updater.config import load_config; load_config()'); then
+        log "Updater root trust verified after finalization"
+    else
+        echo "[fail] Updater trust is unsafe after installation"
+        failures=$((failures + 1))
+    fi
 
     info "Waiting for the API to answer..."
     local retries=30 up=0
@@ -1497,7 +1382,7 @@ main() {
     run_step      "Provisioning trial licence"   seed_trial_licence
     run_step      "Configuring services"         create_services
     run_soft_step "Installing TLS/security tools" setup_security_hardening
-    run_soft_step "Configuring OTA updater"      setup_updater
+    run_step      "Configuring OTA updater"      setup_updater
     run_step      "Installing support tooling"   setup_support_bundles
     run_step      "Installing management CLI"    create_cli
     run_step      "Finalising installation"      finalize

@@ -22,25 +22,25 @@ export type Profile = {
   id: string; name: string; description: string | null; protocol: string; port: number; username: string; is_default: boolean
   auth_method: 'password' | 'key'; has_password: boolean; has_enable: boolean; has_private_key: boolean; has_passphrase: boolean
   key_type: string | null; key_fingerprint: string | null; secret_rotated_at: string | null; rotation_days: number | null
-  rotation_due: boolean; rotation_unknown: boolean; used_by: number; ssh_legacy_compat: boolean; ssh_auto_trust: boolean
+  rotation_due: boolean; rotation_unknown: boolean; used_by: number; ssh_legacy_compat: boolean
 }
 type UsageRow = { device_id: string; hostname: string; ip: string | null; enabled: boolean; schedule_enabled: boolean }
 
 type Form = {
   name: string; description: string; username: string; port: string; auth_method: 'password' | 'key'
   password: string; enable_password: string; clear_enable_password: boolean; private_key: string; key_passphrase: string
-  is_default: boolean; rotation_days: string; ssh_legacy_compat: boolean; ssh_auto_trust: boolean
+  is_default: boolean; rotation_days: string; ssh_legacy_compat: boolean
 }
 const EMPTY: Form = {
   name: '', description: '', username: '', port: '22', auth_method: 'password', password: '', enable_password: '',
-  clear_enable_password: false, private_key: '', key_passphrase: '', is_default: false, rotation_days: '', ssh_legacy_compat: false, ssh_auto_trust: false,
+  clear_enable_password: false, private_key: '', key_passphrase: '', is_default: false, rotation_days: '', ssh_legacy_compat: false,
 }
 
 function formOf(p: Profile): Form {
   return {
     ...EMPTY, name: p.name, description: p.description || '', username: p.username, port: String(p.port || 22),
     auth_method: p.auth_method || 'password', is_default: p.is_default, ssh_legacy_compat: p.ssh_legacy_compat || false,
-    ssh_auto_trust: p.ssh_auto_trust || false, rotation_days: p.rotation_days ? String(p.rotation_days) : '',
+    rotation_days: p.rotation_days ? String(p.rotation_days) : '',
   }
 }
 
@@ -115,7 +115,6 @@ export function ProfilesDialog({ open, onOpenChange }: { open: boolean; onOpenCh
         key_passphrase: key && form.private_key.trim() && form.key_passphrase ? form.key_passphrase : undefined,
         is_default: form.is_default,
         ssh_legacy_compat: form.ssh_legacy_compat,
-        ssh_auto_trust: form.ssh_auto_trust,
         rotation_days: form.rotation_days.trim() ? Number(form.rotation_days) : null,
       }
       if (editing) return (await api.put(`/ncm/credentials/${editing.id}`, body)).data
@@ -169,7 +168,6 @@ export function ProfilesDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                         <span className="break-words text-sm font-medium">{p.name}</span>
                         {p.is_default && <Badge variant="info">Default</Badge>}
                         {p.ssh_legacy_compat && <Badge variant="warning">Legacy SSH</Badge>}
-                        {p.ssh_auto_trust && <Badge variant="warning">Automatic first-use trust</Badge>}
                         <Badge variant="outline">
                           {p.auth_method === 'key' ? <><KeyRound className="h-3 w-3" aria-hidden /> SSH key{p.key_type ? ` ${p.key_type}` : ''}</> : 'Password'}
                         </Badge>
@@ -283,22 +281,9 @@ export function ProfilesDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                 <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
                   <div>
                     <div className="text-sm font-medium">Legacy SSH compatibility</div>
-                    <div className="text-[11px] text-muted">Allow RSA/SHA-1 signatures and SHA-1 key exchange for devices using this profile. Saved host keys are still checked.</div>
+                    <div className="text-[11px] text-muted">Allow RSA/SHA-1 signatures and SHA-1 key exchange for devices using this profile.</div>
                   </div>
                   <Switch checked={form.ssh_legacy_compat} onCheckedChange={(v) => set('ssh_legacy_compat', v)} aria-label="Legacy SSH compatibility" />
-                </div>
-
-                <div className="space-y-2 rounded-md border border-border px-3 py-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-medium">Automatically trust new devices</div>
-                      <div className="text-[11px] text-muted">Save the first SSH key for a new address and port. Later connections must match it; changed or retired keys require administrator review. Off requires independent fingerprint verification.</div>
-                    </div>
-                    <Switch checked={form.ssh_auto_trust} onCheckedChange={(v) => set('ssh_auto_trust', v)}
-                      disabled={!can('ncm.trust')} aria-label="Automatically trust new devices" />
-                  </div>
-                  {form.ssh_auto_trust && <p className="text-xs text-warning">The first key is learned over the network, not verified against the device console. An impersonating device on the first connection could receive the SSH password or supply a false backup.</p>}
-                  {!can('ncm.trust') && <p className="text-xs text-muted">SSH trust administration permission is required to change this option.</p>}
                 </div>
 
                 <FormField label="Rotation policy (days)" error={showErr('rotation_days')}

@@ -153,6 +153,8 @@ def _load_subscription() -> Optional[RemoteSubscription]:
         return None
     try:
         data = json.loads(SUBSCRIPTION_PATH.read_text())
+        if not data:
+            return None
         return RemoteSubscription(**data)
     except (json.JSONDecodeError, OSError, TypeError):
         return None
@@ -749,7 +751,9 @@ async def reset_registration(
     # Drop the cached subscription so the UI reflects the new state
     try:
         if SUBSCRIPTION_PATH.exists():
-            SUBSCRIPTION_PATH.unlink()
+            # The directory is root-owned to prevent Python module planting.
+            # Clear the pre-created app-writable data file in place.
+            SUBSCRIPTION_PATH.write_text("{}\n")
     except OSError:
         pass
 

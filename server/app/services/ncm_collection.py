@@ -3,13 +3,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
 import re
-import tempfile
 import time
 from app.services.ncm_content import checked_content, MAX_CONFIG_BYTES
-
-KNOWN_HOSTS = '/etc/zenplus/known_hosts'
 
 # One entry per implemented collector. `scope` states what the artifact is
 # (and is not) so recovery claims stay honest; `omissions` lists what the
@@ -211,42 +207,6 @@ def key_fingerprint(key_type: str, key_b64: str) -> str:
     return 'SHA256:' + base64.b64encode(digest).decode().rstrip('=')
 
 
-def probe_host_key(host, port=22, timeout=10, *, legacy_compat=False):
-    """Read the SSH host key a device presents. No authentication is attempted
-    and nothing is saved: the operator must confirm the fingerprint against an
-    independent source before registering it."""
-    import socket
-    import paramiko
-    sock = socket.create_connection((str(host), int(port or 22)), timeout=timeout)
-    disabled = {} if legacy_compat else {'keys': ['ssh-rsa'], 'kex': list(LEGACY_KEX)}
-    transport = paramiko.Transport(sock, disabled_algorithms=disabled)
-    try:
-        transport.start_client(timeout=timeout)
-        key = transport.get_remote_server_key()
-        b64 = key.get_base64()
-        return {'key_type': key.get_name(), 'key_base64': b64, 'fingerprint_sha256': key_fingerprint(key.get_name(), b64),
-                'fingerprint_md5': ':'.join(f'{b:02x}' for b in key.get_fingerprint()), 'bits': key.get_bits()}
-    finally:
-        transport.close()
-
-
-def known_hosts_file(entries):
-    """Write a private known_hosts combining the appliance trust file and the
-    operator-managed entries for this connection. Returns the path; the caller
-    removes it. Strict checking still happens in paramiko."""
-    fd, path = tempfile.mkstemp(prefix='zenplus-ncm-kh-')
-    with os.fdopen(fd, 'w') as out:
-        try:
-            with open(KNOWN_HOSTS) as system:
-                out.write(system.read().rstrip('\n') + '\n')
-        except OSError:
-            pass
-        for host, port, key_type, key_b64 in entries:
-            name = str(host) if int(port or 22) == 22 else f'[{host}]:{int(port)}'
-            out.write(f'{name} {key_type} {key_b64}\n')
-    return path
-
-
 def load_private_key(text, passphrase=None):
     import io
     import paramiko
@@ -264,39 +224,22 @@ LEGACY_KEX = ('diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
               'diffie-hellman-group-exchange-sha1')
 
 
-def verified_ssh_algorithms(host, port, known_hosts, *, legacy_compat=False):
-    """Constrain host-key negotiation to independently verified key types.
-
-    RSA key material is named ssh-rsa in known_hosts even when its signature
-    uses RSA SHA2. Preserve SHA2 variants while excluding an unverified
-    Ed25519/EC key. SHA1 requires explicit opt-in on this connection profile.
-    """
-    import paramiko
-    name = str(host) if int(port or 22) == 22 else f'[{host}]:{int(port)}'
-    try:
-        keys = paramiko.HostKeys(known_hosts or KNOWN_HOSTS).lookup(name)
-    except OSError:
-        keys = None
-    if not keys:
-        raise paramiko.SSHException('Server not found in known_hosts')
-    allowed = set(keys.keys()) - {'ssh-rsa'}
-    if 'ssh-rsa' in keys:
-        allowed.update(('rsa-sha2-512', 'rsa-sha2-256'))
-        if legacy_compat:
-            allowed.add('ssh-rsa')
-    return {'keys': [key for key in paramiko.Transport._preferred_keys if key not in allowed],
+def ssh_algorithms(*, legacy_compat=False):
+    """Algorithm policy for device SSH sessions. SHA1 key exchange and
+    signatures need explicit opt-in on the connection profile. The explicit
+    'kex' entry keeps Netmiko's Fortinet driver from replacing the policy."""
+    return {'keys': [] if legacy_compat else ['ssh-rsa'],
             'pubkeys': [] if legacy_compat else ['ssh-rsa'],
             'kex': [] if legacy_compat else list(LEGACY_KEX)}
 
 
-def fetch_config(host, platform, username, password, enable, port, config_type='running', *, pkey=None, known_hosts=None, legacy_compat=False):
+def fetch_config(host, platform, username, password, enable, port, config_type='running', *, pkey=None, legacy_compat=False):
     from netmiko import ConnectHandler, SSHDetect
     if platform not in (None, '', 'autodetect') and platform not in DRIVERS:
         raise CaptureError('Unsupported device platform', 'driver')
     base = dict(host=host, username=username, password=password or '', port=port or 22,
-                fast_cli=False, ssh_strict=True,
-                disabled_algorithms=verified_ssh_algorithms(host, port, known_hosts, legacy_compat=legacy_compat),
-                alt_host_keys=True, alt_key_file=known_hosts or KNOWN_HOSTS, conn_timeout=20, timeout=60,
+                fast_cli=False, ssh_strict=False,
+                disabled_algorithms=ssh_algorithms(legacy_compat=legacy_compat), conn_timeout=20, timeout=60,
                 allow_agent=False)
     if pkey is not None:
         base.update(use_keys=True, pkey=pkey)
@@ -332,9 +275,6 @@ def fetch_config(host, platform, username, password, enable, port, config_type='
                 # Base cleanup may call inherited configuration mode methods;
                 # close the SSH transport without any configuration commands.
                 self.write_channel(command + '\r')
-        # The explicit 'kex' entry above keeps FortinetSSH from replacing the
-        # verified host-key and profile compatibility policy. Negotiate any
-        # modern algorithm supported by both peers; legacy use is opt-in.
         conn = ReadOnlyFortinet(**base, device_type=resolved)
     else:
         conn = ConnectHandler(**base, device_type=resolved)

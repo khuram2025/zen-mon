@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import gzip
 import logging
 import os
 import shutil
@@ -164,7 +165,7 @@ def _backup_postgres(backup_path: Path) -> None:
         raise RuntimeError(f"PostgreSQL backup failed: {e}") from e
 
 
-def restore_backup(backup_dir: str) -> None:
+def restore_backup(backup_dir: str, *, selected_backup: Path | None = None) -> None:
     """Restore from the most recent backup."""
     backup_base = Path(backup_dir)
 
@@ -181,7 +182,12 @@ def restore_backup(backup_dir: str) -> None:
         logger.error("No backup directories found")
         return
 
-    backup_path = backups[0]
+    backup_path = selected_backup or backups[0]
+    if selected_backup is not None and (
+        selected_backup.resolve().parent != backup_base.resolve()
+        or not selected_backup.is_dir()
+    ):
+        raise RuntimeError("selected backup is outside the backup directory or missing")
     logger.info("Restoring from backup: %s", backup_path)
 
     # Restore code
@@ -250,31 +256,50 @@ def restore_backup(backup_dir: str) -> None:
 
 
 def _restore_postgres(dump_file: Path) -> None:
-    """Restore PostgreSQL from dump."""
+    """Restore legacy plain dumps atomically into a clean application schema.
+
+    Loading a normal pg_dump over existing tables leaves changed rows intact:
+    CREATE/COPY errors are ignored by psql unless ON_ERROR_STOP is enabled.
+    Reset user schemas and replay the dump in one transaction. Invalid gzip is
+    detected before opening the database; any SQL error rolls back the reset.
+    Database ownership/settings and system schemas remain unchanged.
+    """
     logger.info("Restoring PostgreSQL ...")
     try:
-        gunzip = subprocess.Popen(
-            ["gunzip", "-c", str(dump_file)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        psql = subprocess.Popen(
-            ["sudo", "-u", "postgres", "psql", "zenplus"],
-            stdin=gunzip.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        gunzip.stdout.close()
-        _, stderr = psql.communicate(timeout=300)
-        gunzip_code = gunzip.wait(timeout=30)
-
-        if psql.returncode != 0:
-            raise RuntimeError(
-                f"psql exited unsuccessfully: {stderr.decode(errors='replace').strip()}"
+        with tempfile.TemporaryFile(mode="w+b") as sql:
+            sql.write(b"""DO $restore$
+DECLARE item record;
+BEGIN
+  FOR item IN SELECT nspname FROM pg_namespace
+      WHERE nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+        AND nspname <> 'information_schema'
+  LOOP
+    EXECUTE format('DROP SCHEMA %I CASCADE', item.nspname);
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pg_database_owner') THEN
+    CREATE SCHEMA public AUTHORIZATION pg_database_owner;
+  ELSE
+    CREATE SCHEMA public AUTHORIZATION postgres;
+  END IF;
+  GRANT USAGE ON SCHEMA public TO PUBLIC;
+  IF current_setting('server_version_num')::integer < 150000 THEN
+    GRANT CREATE ON SCHEMA public TO PUBLIC;
+  END IF;
+END $restore$;
+""")
+            with gzip.open(dump_file, "rb") as source:
+                shutil.copyfileobj(source, sql)
+            sql.seek(0)
+            result = subprocess.run(
+                ["sudo", "-u", "postgres", "psql", "--single-transaction",
+                 "-v", "ON_ERROR_STOP=1", "zenplus"],
+                stdin=sql, capture_output=True, timeout=300,
             )
-        if gunzip_code != 0:
-            detail = gunzip.stderr.read().decode(errors="replace").strip()
-            raise RuntimeError(f"gunzip exited unsuccessfully: {detail}")
+            if result.returncode != 0:
+                # SQL error details can contain appliance data; never log them.
+                raise RuntimeError(
+                    f"psql exited {result.returncode}; restore transaction rolled back"
+                )
         logger.info("PostgreSQL restored")
     except Exception as e:
         logger.error("PostgreSQL restore failed: %s", e)

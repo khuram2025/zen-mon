@@ -13,6 +13,7 @@ from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
 from app.api.v1 import security_settings as security_api
 from app.api.v1.probe_trust import router as probe_trust_router
+from app.api.v1.ssh_terminal import router as ssh_terminal_router
 from app.api.v1 import management_access
 from app.api.v1 import network_events
 from app.api.v1 import sensors as sensors_admin_api
@@ -143,6 +144,7 @@ def create_app() -> FastAPI:
     app.include_router(storage_api.router, prefix="/api/v1")
     app.include_router(security_api.router, prefix="/api/v1")
     app.include_router(probe_trust_router, prefix="/api/v1")
+    app.include_router(ssh_terminal_router, prefix="/api/v1")
     app.include_router(management_access.router, prefix="/api/v1")
     app.include_router(support.router, prefix="/api/v1")
     app.include_router(snmp.router, prefix="/api/v1", dependencies=[policy("snmp")])

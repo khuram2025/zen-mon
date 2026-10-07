@@ -117,15 +117,7 @@ def test_fortios_connection_never_changes_console(monkeypatch, tmp_path):
     monkeypatch.setattr(FortinetSSH,'disconnect',lambda self:self.cleanup())
     monkeypatch.setattr(FortinetSSH,'send_multiline',lambda *a,**k:pytest.fail('Persistent commands attempted'))
     monkeypatch.setattr(collection,'run_command',lambda *a,**k:'config system global\n set hostname edge\nend\n')
-    # The connection now requires verified trust before selecting algorithms.
-    # Keep this command-safety fixture trusted; actual SSH negotiation has its
-    # own loopback regression tests.
-    import paramiko
-    key = paramiko.RSAKey.generate(2048)
-    trust = tmp_path / 'known_hosts'
-    trust.write_text('192.0.2.1 ssh-rsa ' + key.get_base64() + '\n')
-    platform,result=collection.fetch_config('192.0.2.1','fortinet','test','test','',22,
-                                            known_hosts=str(trust))
+    platform,result=collection.fetch_config('192.0.2.1','fortinet','test','test','',22)
     assert platform=='fortinet' and commands==['exit\r']
 
 
@@ -196,9 +188,6 @@ def ssh_cli(tmp_path,monkeypatch):
     listener=socket.socket()
     listener.bind(('127.0.0.1',0)); listener.listen(1); listener.settimeout(.2)
     port=listener.getsockname()[1]
-    path=tmp_path/'known_hosts'
-    keys=paramiko.HostKeys(); keys.add(f'[127.0.0.1]:{port}',key.get_name(),key); keys.save(str(path))
-    monkeypatch.setattr(collection,'KNOWN_HOSTS',str(path))
     stopped=threading.Event()
     commands=[]
     class Server(paramiko.ServerInterface):
@@ -240,21 +229,14 @@ def ssh_cli(tmp_path,monkeypatch):
         finally:
             if transport:transport.close()
     thread=threading.Thread(target=serve,daemon=True); thread.start()
-    yield port,path,commands
+    yield port,commands
     stopped.set(); listener.close(); thread.join(12)
 
 
 @pytest.mark.parametrize('config_type,expected',[('running','hostname edge\n'),('startup','hostname edge-startup\n')])
-def test_real_ssh_capture_uses_trust_and_selected_command(ssh_cli,config_type,expected):
-    port,_,commands=ssh_cli
+def test_real_ssh_capture_connects_without_host_key_setup_and_uses_selected_command(ssh_cli,config_type,expected):
+    port,commands=ssh_cli
     platform,result=collection.fetch_config('127.0.0.1','cisco_ios','fixture','fixture','',port,config_type)
     assert platform=='cisco_ios' and expected in result and result.endswith('end\n')
     assert 'show '+config_type+'-config' in commands
     assert not any(c.startswith('configure') or c.startswith('write') for c in commands)
-
-
-def test_real_ssh_rejects_untrusted_host_key(ssh_cli):
-    port,path,_=ssh_cli
-    path.write_text('')
-    with pytest.raises(Exception):
-        collection.fetch_config('127.0.0.1','cisco_ios','fixture','fixture','',port)

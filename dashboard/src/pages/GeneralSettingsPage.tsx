@@ -21,6 +21,7 @@ import { SensorsCard } from '@/components/SensorsCard'
 import { SupportTabContent } from '@/components/SupportTabContent'
 import { StorageTabContent } from '@/components/StorageTabContent'
 import { SecurityTabContent } from '@/components/SecurityTabContent'
+import { SshTerminalCard } from '@/components/settings/SshTerminalCard'
 import { MibsTabContent } from '@/components/MibsTabContent'
 import { TemplatesTabContent } from '@/components/TemplatesTabContent'
 import { AccessTabContent, ACCESS_TAB_PERMISSIONS } from '@/components/access/AccessTabContent'
@@ -92,8 +93,9 @@ export function GeneralSettingsPage() {
         <TabsContent value="company">
           <CompanyCard />
         </TabsContent>
-        <TabsContent value="monitoring">
+        <TabsContent value="monitoring" className="space-y-4">
           <MonitoringCard />
+          <SshTerminalCard />
         </TabsContent>
         <TabsContent value="users">
           <AccessTabContent />

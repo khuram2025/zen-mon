@@ -18,6 +18,8 @@ def main():
     validate_transition(manifest, current)
     if (PAYLOAD / ".version").read_text().splitlines()[0].strip() != manifest["version"]:
         raise ValueError("Signed manifest and payload version mismatch")
+    from updater.backup_transaction import begin_transaction
+    begin_transaction(manifest['update_id'])
     print(f"Prerequisite verified: {current} -> {manifest['version']}")
     return 0
 

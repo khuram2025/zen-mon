@@ -29,7 +29,7 @@ echo "[first boot state]"
 check "! test -f '$ZENPLUS_HOME/.env'" ".env absent"
 check "! test -f '$SENTINEL'" "first-boot sentinel absent"
 check "! test -f /var/lib/zenplus/initial-admin-password" "initial admin password absent before export"
-check "! test -f '$ZENPLUS_HOME/updater/config/subscription.json'" "subscription cache absent"
+check "grep -Eq '^\\{\\}$' '$ZENPLUS_HOME/updater/config/subscription.json'" "subscription cache cleared"
 check "! grep -Eq '^id[[:space:]]*=[[:space:]]*[^[:space:]]+' '$ZENPLUS_HOME/updater/config/agent.conf'" "appliance id blank"
 check "! grep -Eq '^api_key[[:space:]]*=[[:space:]]*[^[:space:]]+' '$ZENPLUS_HOME/updater/config/agent.conf'" "appliance api key blank"
 

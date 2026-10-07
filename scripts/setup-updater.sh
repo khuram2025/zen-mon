@@ -65,7 +65,7 @@ max_manifest_age_days = 30
 verify_tls = true
 
 [update]
-backup_dir = /opt/zenplus/updater/backups
+backup_dir = /var/lib/zenplus-updater/backups
 max_backups = 3
 auto_update = true
 maintenance_window_start =
@@ -81,6 +81,9 @@ CONF
 else
     log "agent.conf exists, keeping credentials"
 fi
+
+# Harden before enabling any privileged unit. Failure must stop setup.
+bash "${ZENPLUS_DIR}/scripts/setup-updater-trust.sh"
 
 # ─── 4. Install systemd units ────────────────────────────────────────────────
 log "Installing systemd units ..."

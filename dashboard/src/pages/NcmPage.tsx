@@ -139,7 +139,7 @@ function ManagementOverview({ query, goDevices }: { query: any; goDevices: (patc
   const a = data.attention
   const actions: { key: string; count: number; label: string; hint: string; tone: Tone; go: Record<string, string | null> }[] = [
     { key: 'failed', count: a.failed, label: 'Backups failing', hint: 'Last attempt failed; open for the cause and fix.', tone: 'danger', go: { status: 'failed' } },
-    { key: 'blocked', count: a.blocked, label: 'Blocked by a missing prerequisite', hint: 'Scheduled backups are skipped until setup is fixed (e.g. SSH trust).', tone: 'danger', go: { status: 'blocked' } },
+    { key: 'blocked', count: a.blocked, label: 'Blocked by a missing prerequisite', hint: 'Scheduled backups are skipped until setup is fixed.', tone: 'danger', go: { status: 'blocked' } },
     { key: 'never', count: a.never_captured, label: 'Enrolled but never captured', hint: 'Run the first backup to prove access.', tone: 'warning', go: { flag: 'never_captured' } },
     { key: 'unenrolled', count: a.eligible_not_enrolled, label: 'Eligible but not enrolled', hint: `In scope with no backup configured${a.unsupported_eligible ? ` (${a.unsupported_eligible} of all eligible have no collector yet)` : ''}.`, tone: 'warning', go: { status: 'unconfigured' } },
     { key: 'stale', count: a.stale, label: 'Stale', hint: 'Validated copy older than the freshness limit.', tone: 'warning', go: { status: 'stale' } },

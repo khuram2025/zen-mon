@@ -14,18 +14,17 @@ def target(**changes):
 
 
 def test_readiness_does_not_confuse_prerequisites_with_capture():
-    result=readiness.device_readiness(target(),dict(worker='active',scheduler='active',delivery='active',encryption='configured'),dict(state='pass',message='saved only'))
+    result=readiness.device_readiness(target(),dict(worker='active',scheduler='active',delivery='active',encryption='configured'))
     assert result['can_capture'] and not result['capture_verified']
     assert next(c for c in result['checks'] if c['id']=='capture')['status']=='pending'
 
 
-@pytest.mark.parametrize('runtime,trust',[
-    (dict(worker='inactive',scheduler='active',delivery='active',encryption='configured'),dict(state='pass',message='saved')),
-    (dict(worker='active',scheduler='active',delivery='active',encryption='missing'),dict(state='pass',message='saved')),
-    (dict(worker='active',scheduler='active',delivery='active',encryption='configured'),dict(state='blocked',message='missing')),
+@pytest.mark.parametrize('runtime',[
+    dict(worker='inactive',scheduler='active',delivery='active',encryption='configured'),
+    dict(worker='active',scheduler='active',delivery='active',encryption='missing'),
 ])
-def test_missing_required_prerequisite_blocks_attempt(runtime,trust):
-    assert not readiness.device_readiness(target(),runtime,trust)['can_capture']
+def test_missing_required_prerequisite_blocks_attempt(runtime):
+    assert not readiness.device_readiness(target(),runtime)['can_capture']
 
 
 def test_driver_is_separate_from_eligibility():
@@ -37,15 +36,9 @@ def test_driver_is_separate_from_eligibility():
     assert readiness.support_details('Cisco',None)['state']=='needs_detection'
 
 
-def test_saved_trust_checks_port_and_hashed_entries_without_learning(tmp_path):
-    path=tmp_path/'known_hosts'
-    keys=HostKeys()
-    keys.add(HostKeys.hash_host('[192.0.2.1]:2222'),'ssh-rsa',RSAKey.generate(1024))
-    keys.save(str(path)); before=path.read_bytes()
-    assert readiness.saved_trust('192.0.2.1',2222,path)['state']=='pass'
-    assert readiness.saved_trust('192.0.2.1',22,path)['state']=='blocked'
-    assert path.read_bytes()==before
-    assert readiness.saved_trust('192.0.2.1',22,tmp_path/'missing')['state']=='blocked'
+def test_readiness_has_no_ssh_trust_prerequisite():
+    result=readiness.device_readiness(target(),dict(worker='active',scheduler='active',delivery='active',encryption='configured'))
+    assert 'trust' not in [c['id'] for c in result['checks']]
 
 
 @pytest.mark.parametrize('stamp',['invalid','2026-01-01T12:00:00','2099-01-01T00:00:00+00:00'])
@@ -61,7 +54,7 @@ def test_invalid_or_future_evidence_is_unknown(stamp):
 
 @pytest.mark.parametrize('exc,stage,expected',[
     (AuthenticationException('SECRET'),'collection','Authentication rejected'),
-    (SSHException('Server SECRET not found in known_hosts'),'collection','not trusted'),
+    (SSHException('SECRET'),'collection','negotiation failed'),
     (TimeoutError('SECRET'),'collection','timed out'),
     (RuntimeError('SECRET'),'archive','Archive failed'),
     (RuntimeError('SECRET'),'credentials','Credentials unavailable'),

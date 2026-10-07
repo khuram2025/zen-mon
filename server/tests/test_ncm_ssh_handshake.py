@@ -3,21 +3,19 @@ import io
 import json
 import logging
 import socket
-import tempfile
 import threading
 import time
-from pathlib import Path
 import paramiko
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from app.services.ncm_collection import fetch_config, probe_host_key
+from app.services.ncm_collection import fetch_config
 from app.services.ncm_errors import classify
 
 logging.getLogger('paramiko').addHandler(logging.NullHandler())
 logging.getLogger('paramiko').propagate = False
 logging.getLogger('paramiko').setLevel(logging.CRITICAL)
 
-def check(name, multiple, changed_key=False):
+def check(name, multiple):
     rsa = paramiko.RSAKey.generate(2048)
     raw = Ed25519PrivateKey.generate().private_bytes(serialization.Encoding.PEM,
         serialization.PrivateFormat.OpenSSH, serialization.NoEncryption()).decode()
@@ -52,36 +50,30 @@ def check(name, multiple, changed_key=False):
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     began = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix='nccm-verification-') as temp:
-        trust = Path(temp) / 'known_hosts'
-        trusted_rsa = paramiko.RSAKey.generate(2048) if changed_key else rsa
-        trust.write_text(f'[127.0.0.1]:{port} ssh-rsa {trusted_rsa.get_base64()}\n')
-        try:
-            fetch_config('127.0.0.1', 'fortinet' if multiple else 'cisco_ios',
-                'fixture', 'fixture-only', '', port, known_hosts=str(trust))
-            result = {'case': name, 'unexpected_success': True}
-        except Exception as error:
-            failure = classify(error, 'collection')
-            context = error.__cause__ or error.__context__
-            result = {'case': name, 'exception': type(error).__name__,
-                'underlying_exception': type(context).__name__ if context else None,
-                'category': failure.category, 'retryable': failure.retryable,
-                'duration_seconds': round(time.monotonic() - began, 3)}
+    try:
+        fetch_config('127.0.0.1', 'fortinet' if multiple else 'cisco_ios',
+            'fixture', 'fixture-only', '', port)
+        result = {'case': name, 'unexpected_success': True}
+    except Exception as error:
+        failure = classify(error, 'collection')
+        context = error.__cause__ or error.__context__
+        result = {'case': name, 'exception': type(error).__name__,
+            'underlying_exception': type(context).__name__ if context else None,
+            'category': failure.category, 'retryable': failure.retryable,
+            'duration_seconds': round(time.monotonic() - began, 3)}
     thread.join(4)
     result.update(server_selected_key=peer_keys, server_errors=server_errors)
     print(json.dumps(result))
-    expected='host_key_changed' if changed_key else 'authentication' if multiple else 'negotiation'
+    # An unseen host key is accepted; only the login (or, for a SHA1-only
+    # legacy device without profile opt-in, the negotiation) can fail.
+    expected='authentication' if multiple else 'negotiation'
     assert result.get('category')==expected and result.get('retryable') is False,result
-    if multiple:assert all(k.startswith('rsa-sha2-') for k in peer_keys),result
 
 def test_legacy_negotiation():
     check('Cisco legacy RSA/SHA1 host signature', False)
 
-def test_trusted_rsa_selection():
-    check('Fortinet stable RSA + Ed25519 server with RSA trusted', True)
-
-def test_actual_host_key_rotation():
-    check('Actual RSA host-key rotation', True, changed_key=True)
+def test_unseen_host_key_reaches_authentication():
+    check('Fortinet RSA + Ed25519 server with no saved host key', True)
 
 def readonly_fortinet():
     raw = Ed25519PrivateKey.generate().private_bytes(serialization.Encoding.PEM,
@@ -154,23 +146,19 @@ def readonly_fortinet():
             listener.close()
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
-    with tempfile.TemporaryDirectory(prefix='nccm-verification-') as temp:
-        trust = Path(temp) / 'known_hosts'
-        trust.write_text(f'[127.0.0.1]:{port} ssh-rsa {rsa.get_base64()}\n')
-        try:
-            platform, content = fetch_config('127.0.0.1', 'fortinet', 'fixture',
-                'fixture-only', '', port, known_hosts=str(trust))
-            result = {'case':'Read-only Fortinet dollar prompt with paging',
-                'validated_by_collector':True, 'platform':platform, 'lines':len(content.splitlines())}
-        except Exception as error:
-            failure = classify(error)
-            result = {'case':'Read-only Fortinet dollar prompt with paging',
-                'validated_by_collector':False,'exception':type(error).__name__, 'category':failure.category}
+    try:
+        platform, content = fetch_config('127.0.0.1', 'fortinet', 'fixture',
+            'fixture-only', '', port)
+        result = {'case':'Read-only Fortinet dollar prompt with paging',
+            'validated_by_collector':True, 'platform':platform, 'lines':len(content.splitlines())}
+    except Exception as error:
+        failure = classify(error)
+        result = {'case':'Read-only Fortinet dollar prompt with paging',
+            'validated_by_collector':False,'exception':type(error).__name__, 'category':failure.category}
     thread.join(4)
     result.update(observed_commands=commands,server_errors=failures,server_selected_key=selected)
     print(json.dumps(result))
     assert result['validated_by_collector'] and commands==['show full-configuration','exit'] and not failures,result
-    assert all(k.startswith('rsa-sha2-') for k in selected),result
 
 def test_readonly_fortinet_paging():
     readonly_fortinet()
@@ -180,7 +168,6 @@ from paramiko.ssh_exception import IncompatiblePeer
 def test_wrapped_exception_categories():
     for label,cause,category,retryable in (
         ('nested negotiation',IncompatiblePeer('fixture'),'negotiation',False),
-        ('wrapped missing trust',paramiko.SSHException('Server not found in known_hosts'),'host_key_untrusted',False),
         ('actual socket timeout',socket.timeout(),'timeout',True),
     ):
         error=NetmikoTimeoutException('fixture-wrapper')

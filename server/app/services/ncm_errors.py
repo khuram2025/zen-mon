@@ -1,7 +1,7 @@
 """Classify failures without returning third-party exception strings or CLI output.
 
 Every failed attempt is reduced to a stable category, a safe message and a
-retry decision. Permanent setup failures (trust, authentication, driver,
+retry decision. Permanent setup failures (authentication, driver,
 privilege, credentials) fail the job immediately: repeating the same attempt
 cannot succeed and only multiplies failed connections and alerts. Transient
 failures (reachability, timeouts, interrupted sessions, storage) retry within
@@ -9,7 +9,7 @@ the job's bounded budget.
 """
 import socket
 from dataclasses import dataclass
-from paramiko import AuthenticationException, BadHostKeyException, SSHException
+from paramiko import AuthenticationException, SSHException
 from paramiko.ssh_exception import NoValidConnectionsError
 from netmiko.exceptions import NetmikoTimeoutException, ReadTimeout
 from app.services.ncm_collection import CaptureError
@@ -27,8 +27,6 @@ GUIDANCE = {
     'blocked': 'Resolve the readiness items on the device page, then queue the backup again.',
     'not_enrolled': 'Save an enabled enrollment with a connection profile.',
     'credentials': 'Re-save the connection profile secret; confirm the appliance archive key has not changed.',
-    'host_key_untrusted': 'Obtain the device fingerprint from its console and register it under SSH trust.',
-    'host_key_changed': 'Confirm with the device owner why the key changed; retire the old trust entry only after independent verification.',
     'authentication': 'Check the profile username/password or key, the account lockout state and source-address restrictions on the device.',
     'unreachable': 'Verify the management IP, routing, ACLs/firewall rules and that SSH is enabled on the device port.',
     'timeout': 'Verify reachability and device load; slow devices may need a less busy maintenance window.',
@@ -71,23 +69,17 @@ def classify(exc, stage='collection') -> Failure:
     if stage == 'archive':
         return Failure('archive', 'Archive failed: inspect database/storage health and encryption; the previous validated snapshot is preserved.', True)
     chain = list(exception_chain(exc))
-    # Netmiko wraps handshake and trust errors in NetmikoTimeoutException.
+    # Netmiko wraps handshake errors in NetmikoTimeoutException.
     # Resolve permanent causes before allowing the wrapper to trigger retries.
     for error in chain:
-        if isinstance(error, BadHostKeyException):
-            return Failure('host_key_changed', 'SSH host key changed: independently verify device identity before updating managed SSH trust.', False)
         if isinstance(error, AuthenticationException):
             return Failure('authentication', 'Authentication rejected: verify the dedicated account, password, SSH access and source-address restrictions.', False)
         if isinstance(error, NoValidConnectionsError):
             return Failure('unreachable', 'SSH unreachable: verify the management address, port, routing and access rules.', True)
         if isinstance(error, SSHException) and not isinstance(error, (NetmikoTimeoutException, ReadTimeout)):
             message = str(error).lower()
-            if 'not found in known_hosts' in message:
-                return Failure('host_key_untrusted', 'SSH host key is not trusted: independently verify the fingerprint and register the address and port.', False)
             if 'no existing session' not in message and 'error reading ssh protocol banner' not in message:
-                return Failure('negotiation', 'SSH negotiation failed: verify managed host keys and supported SSH algorithms.', False)
-    if isinstance(exc, BadHostKeyException):
-        return Failure('host_key_changed', 'SSH host key changed: independently verify device identity before updating managed SSH trust.', False)
+                return Failure('negotiation', 'SSH negotiation failed: verify the supported SSH algorithms.', False)
     if isinstance(exc, AuthenticationException):
         return Failure('authentication', 'Authentication rejected: verify the dedicated account, password, SSH access and source-address restrictions.', False)
     if isinstance(exc, NoValidConnectionsError):
@@ -99,9 +91,7 @@ def classify(exc, stage='collection') -> Failure:
         category = getattr(exc, 'category', 'incomplete')
         return Failure(category, str(exc), category in ('incomplete', 'interrupted'))
     if isinstance(exc, SSHException):
-        if 'not found in known_hosts' in str(exc).lower():
-            return Failure('host_key_untrusted', 'SSH host key is not trusted: independently verify the fingerprint and register the address and port.', False)
-        return Failure('negotiation', 'SSH negotiation failed: verify managed host keys and supported SSH algorithms.', False)
+        return Failure('negotiation', 'SSH negotiation failed: verify the supported SSH algorithms.', False)
     if isinstance(exc, (ConnectionError, EOFError, OSError)):
         return Failure('interrupted', 'SSH connection interrupted: verify the device and network, then retry the capture.', True)
     return Failure('unknown', 'Collection failed: inspect the device connection and selected driver; no validated snapshot was published.', True)
