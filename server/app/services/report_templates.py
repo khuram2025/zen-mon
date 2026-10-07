@@ -16,10 +16,21 @@ options.
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
-from app.services import report_sections as rs
+
+class _LazySections:
+    """report_sections, imported on first use. report_sections imports this
+    module (and the packs that call template()) at its end, so a top-level
+    import here would make `import report_templates` fail when it runs first."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(importlib.import_module("app.services.report_sections"), name)
+
+
+rs = _LazySections()
 
 # ─── Categories ─────────────────────────────────────────────────────────────
 
@@ -106,7 +117,18 @@ TEMPLATES: dict[str, Template] = {}
 
 
 def _entries(items: Iterable) -> tuple[dict, ...]:
-    return tuple(rs.section_entries(list(items)))
+    """Same normalisation as report_sections.section_entries (kept local so
+    registering a template never needs report_sections to be loaded)."""
+    out = []
+    for it in items or ():
+        if isinstance(it, str):
+            out.append({"id": it, "title": None, "options": {}})
+        elif isinstance(it, dict) and isinstance(it.get("id"), str):
+            title = it.get("title")
+            out.append({"id": it["id"],
+                        "title": title.strip()[:120] if isinstance(title, str) and title.strip() else None,
+                        "options": it.get("options") if isinstance(it.get("options"), dict) else {}})
+    return tuple(out)
 
 
 def template(key: str, title: str, description: str, category: str, sections: Iterable,
