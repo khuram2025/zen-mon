@@ -846,7 +846,7 @@ def _render_toc(pdf: "ZenPlusReport", outline) -> None:
         pdf.set_text_color(*(COLOR_FAINT if off else pdf.accent))
         pdf.set_xy(x, y)
         pdf.cell(9, 6.6, f"{i:02d}")
-        suffix = "(not included)" if off else ""
+        suffix = "  (not included)" if off else ""
         pdf._sans("", 8.2)
         suffix_w = pdf.get_string_width(suffix) + 2 * pdf.c_margin if suffix else 0.0
         pdf._sans("", 9.2)
