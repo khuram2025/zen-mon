@@ -223,6 +223,9 @@ def create_app() -> FastAPI:
         # Discovery: recover restart-stranded runs, then fire due schedules.
         from app.services.discovery_scheduler import discovery_scheduler_loop
         app.state.discovery_scheduler = asyncio.create_task(discovery_scheduler_loop())
+        # Software baselines: hourly full re-evaluation clears stale results.
+        from app.services.baseline_service import baseline_repair_loop
+        app.state.baseline_repair = asyncio.create_task(baseline_repair_loop())
         # Host-metric alert rules: periodic threshold evaluation against ClickHouse.
         from app.services.host_alert_service import host_alert_evaluator_loop
         app.state.host_alert_evaluator = asyncio.create_task(host_alert_evaluator_loop())
@@ -299,7 +302,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator"):
+        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
