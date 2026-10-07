@@ -430,7 +430,11 @@ def _new_fig(w_mm: float, h_mm: float) -> Figure:
 def _save(fig: Figure) -> bytes:
     buf = io.BytesIO()
     try:
-        fig.savefig(buf, format="png", dpi=DPI, facecolor="white", edgecolor="none")
+        with warnings.catch_warnings():
+            # Very short ranges (a single bucket) make AutoDateLocator fall back
+            # to its default interval; harmless, and noisy in logs.
+            warnings.filterwarnings("ignore", message="AutoDateLocator was unable", category=UserWarning)
+            fig.savefig(buf, format="png", dpi=DPI, facecolor="white", edgecolor="none")
     finally:
         release_figure(fig)
     return buf.getvalue()

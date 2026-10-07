@@ -18,6 +18,7 @@ Design system
 """
 
 import io
+import warnings
 import logging
 import glob
 import re
@@ -546,7 +547,9 @@ def release_figure(fig: Figure) -> None:
 def _finish(fig: Figure) -> bytes:
     """Serialize at fixed DPI without bbox cropping so physical size is exact."""
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=_CHART_DPI, facecolor="white", edgecolor="none")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="AutoDateLocator was unable", category=UserWarning)
+        fig.savefig(buf, format="png", dpi=_CHART_DPI, facecolor="white", edgecolor="none")
     return buf.getvalue()
 
 

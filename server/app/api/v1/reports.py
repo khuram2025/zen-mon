@@ -258,6 +258,11 @@ SHARED_REPORT_HEADERS = {
     "Cache-Control": "private, no-store",
     "Referrer-Policy": "no-referrer",
     "X-Robots-Tag": "noindex, nofollow",
+    # The stored page is self-contained (inline styles, data: images, no
+    # scripts): nothing else may load or run when a recipient opens it.
+    "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+                               "frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "X-Content-Type-Options": "nosniff",
 }
 
 

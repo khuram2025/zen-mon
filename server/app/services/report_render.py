@@ -8,6 +8,7 @@ same file names.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import unicodedata
 import uuid as _uuid
@@ -162,13 +163,15 @@ async def render(db: AsyncSession, *, user: Any, key: str, title: str, descripti
             "branding": branding.public_dict(),
             "sections": rs.sections_to_json(sections),
         }
+    # Rendering is CPU-bound (matplotlib, fpdf2, openpyxl): keep it off the
+    # event loop so one large report does not stall the API worker.
     if fmt == "html":
-        body: bytes = rs.render_html(meta, sections).encode("utf-8")
+        body: bytes = (await asyncio.to_thread(rs.render_html, meta, sections)).encode("utf-8")
     elif fmt == "pdf":
-        body = bytes(rs.render_pdf(meta, sections))
+        body = bytes(await asyncio.to_thread(rs.render_pdf, meta, sections))
     elif fmt == "xlsx":
         from app.services.report_xlsx import render_xlsx
-        body = render_xlsx(meta, sections)
+        body = await asyncio.to_thread(render_xlsx, meta, sections)
     else:
         raise HTTPException(400, "Unknown format")
     return body, MEDIA_TYPES[fmt], content_disposition(title, fmt, branding)
