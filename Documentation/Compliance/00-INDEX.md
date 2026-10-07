@@ -1,5 +1,14 @@
 # Compliance & Vulnerability Management — Design Set Index
 
+> **Amended 2026-10-07.** This set becomes phase **P6** of the Inventory & Compliance module (`Documentation/Inventory/00-INDEX.md`). That index's *Reconciliation* table overrides several pins below:
+> - the sidebar group;
+> - the `/compliance/eol`, `/compliance/software` and `/compliance/assets` routes;
+> - the `compliance_asset_meta`, `compliance_product_aliases` and `compliance_oid_dictionary` tables;
+> - CV-E0 tasks 0.1–0.5;
+> - migration numbers 080–082.
+>
+> Everything else here stands.
+
 *Status: Design proposal · 2026-08-18 · Part of the ZenPlus Compliance module design set.*
 *This index is the navigation hub and single source of pinned truth. Where a sibling doc conflicts with this file, this file wins. For implementation status, `07-ROADMAP-AND-TASK-LIST.md` wins.*
 
