@@ -511,11 +511,15 @@ def _readable_sql(vis: FlowVisibility, params: dict, alias: str = "v") -> str:
     names_hosts = (f"EXISTS (SELECT 1 FROM jsonb_each({f}) kv "
                    "WHERE kv.key = ANY(CAST(:sv_hosts AS text[])) "
                    "AND kv.value NOT IN ('null'::jsonb, '\"\"'::jsonb, '[]'::jsonb))")
+    # The owner's scope is their own tags plus their role's (migrate-154).
+    owner_tags = ("(CASE WHEN jsonb_typeof(ou.scope_tags) = 'array' THEN ou.scope_tags ELSE '[]'::jsonb END"
+                  " || COALESCE((SELECT CASE WHEN jsonb_typeof(orl.scope_tags) = 'array' THEN orl.scope_tags"
+                  " END FROM roles orl WHERE orl.name = ou.role), '[]'::jsonb))")
     owner_within = (
         f"EXISTS (SELECT 1 FROM users ou WHERE ou.id = {alias}.owner_id "
-        "AND jsonb_typeof(ou.scope_tags) = 'array' AND jsonb_array_length(ou.scope_tags) > 0 "
+        f"AND jsonb_array_length({owner_tags}) > 0 "
         "AND ou.role <> ALL(CAST(:sv_admin_roles AS text[])) "
-        "AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(ou.scope_tags) t "
+        f"AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text({owner_tags}) t "
         "WHERE btrim(t) <> '' AND lower(btrim(t)) <> ALL(CAST(:sv_scope AS text[]))))"
     )
     return (
@@ -533,13 +537,15 @@ async def _owner_scopes(db: AsyncSession, views: list[NetflowSavedView]) -> dict
     if not ids:
         return {}
     admin_roles = set(await _admin_roles(db))
-    rows = (await db.execute(text("SELECT id::text, role, scope_tags FROM users WHERE id = ANY(CAST(:ids AS uuid[]))"),
-                             {"ids": ids})).all()
+    rows = (await db.execute(text(
+        "SELECT u.id::text AS id, u.role, u.scope_tags, r.scope_tags AS role_scope_tags "
+        "FROM users u LEFT JOIN roles r ON r.name = u.role WHERE u.id = ANY(CAST(:ids AS uuid[]))"),
+        {"ids": ids})).all()
     from app.services.tag_service import tag_set
 
     out: dict[str, frozenset[str] | None] = {}
     for r in rows:
-        tags = frozenset(tag_set(r.scope_tags))
+        tags = frozenset(tag_set(r.scope_tags) | tag_set(r.role_scope_tags))
         out[r.id] = None if (not tags or r.role in admin_roles) else tags
     return out
 

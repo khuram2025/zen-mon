@@ -16,7 +16,7 @@ import {
   Sun,
   User,
 } from 'lucide-react'
-import { useAuth } from '@/stores/auth'
+import { useAuth, useCan } from '@/stores/auth'
 import { useTheme } from '@/stores/theme'
 import { Button } from '@/components/ui/Button'
 import { api } from '@/lib/api'
@@ -24,6 +24,7 @@ import { relativeTime } from '@/lib/utils'
 import { UpdateNotificationBell } from '@/components/UpdateNotificationBell'
 import { Sidebar, SIDEBAR_RAIL, SIDEBAR_WIDE } from '@/components/layout/Sidebar'
 import { trailForLocation } from '@/components/layout/navigation'
+import { RouteGate } from '@/components/layout/RouteGate'
 
 type HeaderAlert = {
   id: string
@@ -186,6 +187,7 @@ function HeaderAlertCenter() {
 
 export function Layout() {
   const { user, logout } = useAuth()
+  const can = useCan()
   const { theme, toggle } = useTheme()
   const navigate = useNavigate()
   const { pathname, search } = useLocation()
@@ -240,6 +242,7 @@ export function Layout() {
             <Breadcrumbs />
           </div>
 
+          {can('devices.view') ? (
           <div role="search" aria-label="Device search" className="relative ml-auto flex max-w-xs flex-1 items-center">
             <Search className="absolute left-2.5 h-3.5 w-3.5 text-muted" aria-hidden />
             <input
@@ -254,6 +257,7 @@ export function Layout() {
               }}
             />
           </div>
+          ) : <div className="ml-auto" />}
 
           <Button
             variant="ghost"
@@ -266,7 +270,7 @@ export function Layout() {
             {theme === 'dark' ? <Sun className="h-3.5 w-3.5" aria-hidden /> : <Moon className="h-3.5 w-3.5" aria-hidden />}
           </Button>
 
-          <HeaderAlertCenter />
+          {can('alerts.view') && <HeaderAlertCenter />}
 
           {/* Update notification bell — deep-links to Settings → Updates */}
           <UpdateNotificationBell />
@@ -316,7 +320,9 @@ export function Layout() {
         {/* Content — full width */}
         <main className="flex-1 overflow-y-auto p-5 animate-fade-in">
           <ErrorBoundary resetKey={`${pathname}${search}`}>
-            <Outlet />
+            <RouteGate>
+              <Outlet />
+            </RouteGate>
           </ErrorBoundary>
         </main>
       </div>

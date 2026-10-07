@@ -51,10 +51,14 @@ def test_matching_is_case_insensitive_and_tolerates_json_strings():
 
 # ── visible_tags: who is scoped at all ──────────────────────────────────────
 
-def _visible(monkeypatch, user, perms):
+def _visible(monkeypatch, user, perms, role_scope=()):
     async def fake_perms(db, role):
         return perms
+
+    async def fake_role_scope(db, role):
+        return list(role_scope)
     monkeypatch.setattr(scoping, "get_role_permissions", fake_perms)
+    monkeypatch.setattr(scoping, "get_role_scope_tags", fake_role_scope)
     return asyncio.run(scoping.visible_tags(None, user))
 
 
@@ -76,6 +80,54 @@ def test_system_admin_is_never_scoped(monkeypatch):
 def test_user_without_scope_attr_is_unrestricted(monkeypatch):
     """Rows predating migrate-104 (or test fakes) must not break auth."""
     assert _visible(monkeypatch, SimpleNamespace(role="viewer"), []) is None
+
+
+# ── role scope (migrate-154): every member inherits the role's tags ─────────
+
+def test_role_scope_limits_members_without_a_scope_of_their_own(monkeypatch):
+    assert _visible(monkeypatch, _user([]), ["devices.view"], role_scope=["Network"]) == ["network"]
+
+
+def test_user_tags_add_to_the_role_scope(monkeypatch):
+    assert _visible(monkeypatch, _user(["Riyadh"]), ["devices.view"], role_scope=["network", "RIYADH"]) \
+        == ["network", "riyadh"]
+
+
+def test_role_scope_never_limits_full_administration(monkeypatch):
+    assert _visible(monkeypatch, _user([]), ["system.admin"], role_scope=["network"]) is None
+
+
+def test_role_scope_lookup_failure_hides_instead_of_revealing():
+    """No cached scope and a failing lookup: the role is treated as scoped to a
+    tag nothing can carry, never as unrestricted."""
+    from app.core import security
+
+    class Broken:
+        def begin_nested(self):
+            raise RuntimeError("database unavailable")
+
+    security.invalidate_role_cache()
+    scope = asyncio.run(security.get_role_scope_tags(Broken(), "no-such-cached-role"))
+    assert scope == [security.SCOPE_LOOKUP_FAILED]
+    assert len(security.SCOPE_LOOKUP_FAILED) > 64  # longer than any tag name may be
+    assert not scoping.entity_visible(["network"], scope)
+
+
+def test_role_scope_missing_column_means_no_role_scope():
+    """Before migrate-154 there are no role scopes: an absent column must not
+    lock every account out."""
+    from app.core import security
+
+    class UndefinedColumnError(Exception):
+        pass
+
+    class OldSchema:
+        def begin_nested(self):
+            raise UndefinedColumnError('column "scope_tags" does not exist')
+
+    security.invalidate_role_cache()
+    assert asyncio.run(security.get_role_scope_tags(OldSchema(), "viewer")) == []
+    security.invalidate_role_cache()
 
 
 # ── SQL predicate builders ──────────────────────────────────────────────────
@@ -118,6 +170,11 @@ def test_user_scope_column_renames_but_never_strips():
     assert ("users", "scope_tags", "jsonb") in TAG_RENAME_ONLY_SURFACES
     tables = {t for t, _c, _k in TAG_ARRAY_SURFACES}
     assert "users" not in tables  # deletes must not touch scopes (fail-closed)
+
+
+def test_role_scope_column_renames_but_never_strips():
+    assert ("roles", "scope_tags", "jsonb") in TAG_RENAME_ONLY_SURFACES
+    assert "roles" not in {t for t, _c, _k in TAG_ARRAY_SURFACES}
 
 
 def test_declared_kinds_match_the_live_schema_shapes():

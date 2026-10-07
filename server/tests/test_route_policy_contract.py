@@ -50,3 +50,19 @@ def test_mutating_module_routes_are_not_readable_by_view_only_defaults():
         assert write, name
         if name not in ("access",):
             assert not any(w.endswith(".view") and w != ANY_VIEW for w in write) or name == "link_utilization", name
+
+
+def test_server_routes_need_server_permissions_not_apm():
+    """migrate-154: servers.* is separate from apm.*, so an Application team
+    (apm.*) sees no servers and a Systems team (servers.*) sees no APM."""
+    prefixes = ("/api/v1/servers", "/api/v1/agent-policies", "/api/v1/agent-fleet",
+                "/api/v1/server-monitoring", "/api/v1/server-baselines")
+    server_rows = [r for r in _ROWS if r["path"].startswith(prefixes)]
+    assert server_rows
+    for r in server_rows:
+        assert r["kind"] == "module:servers" or r["kind"].startswith("guarded"), r
+        assert not any(p.startswith("apm.") for p in r["permissions"]), r
+        if r["kind"].startswith("guarded"):
+            assert all(p.startswith("servers.") for p in r["permissions"]), r
+    apm_rows = [r for r in _ROWS if r["path"].startswith("/api/v1/apm/") and r["kind"].startswith(("module", "guarded"))]
+    assert apm_rows and not any(p.startswith("servers.") for r in apm_rows for p in r["permissions"])

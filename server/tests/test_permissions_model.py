@@ -50,3 +50,50 @@ def test_exceeds_expands_full_administration():
 @pytest.mark.parametrize("name", ["owner", "admin", "root", "superuser", "editor", "viewer", "read_only"])
 def test_reserved_names(name):
     assert name in RESERVED_ROLE_NAMES
+
+
+# ── team roles and the Servers / APM split (migrate-154) ────────────────────
+
+from app.core.permissions import BUILTIN_ROLE_META, MODULE_AREAS, PERMISSION_MODULES  # noqa: E402
+
+TEAM_ROLES = ("network_team", "systems_team", "application_team", "security_team")
+
+
+def test_servers_and_apm_are_separate_modules():
+    modules = {m["module"]: m for m in catalog()}
+    assert {p["id"] for p in modules["servers"]["permissions"]} == {"servers.view", "servers.manage"}
+    assert {p["id"] for p in modules["apm"]["permissions"]} == {"apm.view", "apm.manage"}
+    assert PERMISSION_IMPLIES["servers.manage"] == ["servers.view"]
+
+
+def test_every_module_has_an_area():
+    assert set(MODULE_AREAS) == {m for m, _l, _p in PERMISSION_MODULES}
+    assert all(m["area"] for m in catalog())
+
+
+def test_existing_builtins_keep_server_access_after_the_split():
+    for name in ("operator", "viewer", "read_only"):
+        perms = set(BUILTIN_ROLE_DEFINITIONS[name])
+        assert "servers.view" in perms, name
+        assert ("apm.manage" in perms) == ("servers.manage" in perms), name
+
+
+def test_team_roles_are_built_in_described_and_reserved():
+    for name in TEAM_ROLES:
+        assert name in BUILTIN_ROLE_DEFINITIONS and name in BUILTIN_ROLE_META and name in RESERVED_ROLE_NAMES
+        perms = set(BUILTIN_ROLE_DEFINITIONS[name])
+        assert "dashboard.view" in perms
+        # Team roles never change who can do what.
+        assert not perms & {"users.manage", "roles.manage", "settings.manage", SUPERUSER_PERMISSION}, name
+        for p in perms:
+            assert set(PERMISSION_IMPLIES.get(p, [])) <= perms, (name, p)
+
+
+def test_application_and_systems_teams_are_separated():
+    app_team = set(BUILTIN_ROLE_DEFINITIONS["application_team"])
+    sys_team = set(BUILTIN_ROLE_DEFINITIONS["systems_team"])
+    net_team = set(BUILTIN_ROLE_DEFINITIONS["network_team"])
+    assert {"apm.view", "apm.manage"} <= app_team and not app_team & {"servers.view", "servers.manage"}
+    assert {"servers.view", "servers.manage"} <= sys_team and not sys_team & {"apm.view", "apm.manage"}
+    assert not net_team & {"servers.view", "apm.view"}
+    assert not (app_team | sys_team) & {"devices.view", "netflow.view", "ncm.view", "udt.view"}

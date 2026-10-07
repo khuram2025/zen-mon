@@ -41,10 +41,17 @@ security = HTTPBearer(auto_error=False)
 ROLE_POLICY_MAX_STALENESS_SECONDS = 5.0
 
 _ROLE_CACHE: dict[str, tuple[float, list[str]]] = {}
+_ROLE_SCOPE_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+# Scope used when a role's scope cannot be read and nothing was cached: longer
+# than any tag may be (tag_service.MAX_TAG_LEN = 64), so no entity can carry
+# it and a lookup failure hides resources instead of revealing them.
+SCOPE_LOOKUP_FAILED = "zenplus:role-scope-unavailable:" + "0" * 48
 
 
 def invalidate_role_cache() -> None:
     _ROLE_CACHE.clear()
+    _ROLE_SCOPE_CACHE.clear()
 
 
 def _is_missing_relation(exc: BaseException) -> bool:
@@ -94,6 +101,49 @@ async def get_role_permissions(db: AsyncSession, role_name: str) -> list[str]:
 
     _ROLE_CACHE[role_name] = (now, perms)
     return perms
+
+
+def _is_missing_scope_column(exc: BaseException) -> bool:
+    """True when roles.scope_tags does not exist yet (before migrate-154)."""
+    orig = getattr(exc, "orig", exc)
+    if type(orig).__name__ == "UndefinedColumnError":
+        return True
+    msg = str(orig).lower()
+    return "scope_tags" in msg and "does not exist" in msg
+
+
+async def get_role_scope_tags(db: AsyncSession, role_name: str) -> list[str]:
+    """Visibility scope tags every member of ``role_name`` is limited to
+    (``roles.scope_tags``, migrate-154). Empty = the role adds no limit.
+
+    Same caching and staleness bound as :func:`get_role_permissions`. Fail-closed:
+    on a lookup error the last resolved scope is reused, and with none the
+    role is treated as scoped to a tag that matches nothing. A database without
+    the column (or without the roles table) has no role scopes at all.
+    """
+    now = time.monotonic()
+    hit = _ROLE_SCOPE_CACHE.get(role_name)
+    if hit and now - hit[0] < ROLE_POLICY_MAX_STALENESS_SECONDS:
+        return hit[1]
+
+    try:
+        async with db.begin_nested():
+            row = (await db.execute(
+                text("SELECT scope_tags FROM roles WHERE name = :name"),
+                {"name": role_name},
+            )).first()
+    except Exception as exc:
+        if _is_missing_relation(exc) or _is_missing_scope_column(exc):
+            _ROLE_SCOPE_CACHE[role_name] = (now, [])
+            return []
+        logger.error("role scope lookup failed for %r; keeping last valid scope",
+                     role_name, exc_info=True)
+        return hit[1] if hit else [SCOPE_LOOKUP_FAILED]
+
+    raw = row[0] if row is not None else None
+    tags = [str(t) for t in raw if isinstance(t, str) and t.strip()] if isinstance(raw, list) else []
+    _ROLE_SCOPE_CACHE[role_name] = (now, tags)
+    return tags
 
 
 async def user_has_permission(db: AsyncSession, user: User, permission: str) -> bool:

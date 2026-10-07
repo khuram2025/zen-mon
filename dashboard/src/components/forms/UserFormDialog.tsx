@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from '@/components/ui/Toast'
 import { QueryFailure } from '@/components/ui/QueryState'
 import { TagPicker } from '@/components/tags/TagPicker'
+import { ScopeChips } from '@/components/access/MenuPreview'
 import { NewPasswordFields, usePasswordCheck } from '@/components/security/PasswordFields'
 import { useAuth } from '@/stores/auth'
 import { useDirtyGuard } from '@/hooks/useDirtyGuard'
@@ -90,6 +91,10 @@ export function UserFormDialog({ open, onOpenChange, user }: {
   const roleOptions = assignable.data || []
   const currentRoleInList = roleOptions.some((r) => r.name === role)
   const roleIsAdmin = !!roleMeta[role]?.permissions.includes('system.admin')
+  const roleScope = roleMeta[role]?.scope_tags || []
+  const scopeOptions: [('all' | 'tags'), string][] = roleScope.length
+    ? [['all', 'Role scope only'], ['tags', 'Add tags for this user']]
+    : [['all', 'All resources'], ['tags', 'Selected tags']]
   const roleAboveYou = isEdit && !!user && !roleOptions.some((r) => r.name === user.role) && assignable.isSuccess
 
   const pwCheck = usePasswordCheck(password, password2, { username: username.trim() || user?.username, email })
@@ -202,10 +207,11 @@ export function UserFormDialog({ open, onOpenChange, user }: {
                   : roleMeta[role]?.description || undefined
                 }
               >
-                <Select value={role} onValueChange={setRole} disabled={isExternal || isSelf || roleAboveYou || assignable.isLoading}>
+                {/* Radix reports '' while the options are still loading; never store it as the role. */}
+                <Select value={role} onValueChange={(v) => { if (v) setRole(v) }} disabled={isExternal || isSelf || roleAboveYou || assignable.isLoading}>
                   <SelectTrigger aria-label="Role"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {(currentRoleInList || !isEdit ? roleOptions : [{ name: role, display_name: roleMeta[role]?.display_name || role }, ...roleOptions]).map((r) => (
+                    {(currentRoleInList || !isEdit || !role ? roleOptions : [{ name: role, display_name: roleMeta[role]?.display_name || role }, ...roleOptions]).map((r) => (
                       <SelectItem key={r.name} value={r.name}>{r.display_name}</SelectItem>
                     ))}
                   </SelectContent>
@@ -235,8 +241,15 @@ export function UserFormDialog({ open, onOpenChange, user }: {
                 </div>
               ) : (
                 <>
+                  {roleScope.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-border bg-surface2/40 px-3 py-2 text-xs">
+                      <Info className="h-3.5 w-3.5 shrink-0 text-muted" />
+                      <span className="font-medium">The {roleMeta[role]?.display_name} role limits its members to</span>
+                      <ScopeChips tags={roleScope} max={8} />
+                    </div>
+                  )}
                   <div role="radiogroup" aria-label="Visibility scope" className="inline-flex overflow-hidden rounded-md border border-border text-xs">
-                    {([['all', 'All resources'], ['tags', 'Selected tags']] as const).map(([v, label]) => (
+                    {scopeOptions.map(([v, label]) => (
                       <button key={v} type="button" role="radio" aria-checked={scopeMode === v}
                         onClick={() => setScopeMode(v)}
                         className={cn('px-3 py-1.5 font-medium transition-colors', scopeMode === v ? 'bg-primary text-white' : 'bg-surface text-muted hover:bg-surface2')}>
@@ -245,12 +258,14 @@ export function UserFormDialog({ open, onOpenChange, user }: {
                     ))}
                   </div>
                   {scopeMode === 'all'
-                    ? <p className="text-[11px] text-muted">Sees every device, server, service and application the role permits.</p>
+                    ? <p className="text-[11px] text-muted">{roleScope.length ? 'Sees only the resources tagged with the role’s tags.' : 'Sees every device, server, service and application the role permits.'}</p>
                     : (
                       <>
                         <TagPicker value={scopeTags} onChange={setScopeTags} allowCreate={false} placeholder="Add tags to limit what this user sees…" />
                         <p className={cn('text-[11px]', scopeError && (submitted || scopeTags.length === 0 && false) ? 'text-danger' : 'text-muted')}>
-                          {scopeError && submitted ? scopeError : 'Sees only resources (and their alerts) carrying ANY of these tags. Untagged resources are hidden. Clearing the last tag switches to All resources.'}
+                          {scopeError && submitted ? scopeError : roleScope.length
+                            ? 'Also sees resources carrying ANY of these tags, in addition to the role’s tags.'
+                            : 'Sees only resources (and their alerts) carrying ANY of these tags. Untagged resources are hidden. Clearing the last tag switches to All resources.'}
                         </p>
                       </>
                     )}

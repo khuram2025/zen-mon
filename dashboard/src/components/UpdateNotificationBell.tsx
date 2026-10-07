@@ -4,6 +4,7 @@ import { Bell, BellRing } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
+import { useCan } from '@/stores/auth'
 
 interface UpdateHistoryRecord {
   version: string
@@ -32,6 +33,7 @@ interface UpdateStatusLite {
  */
 export function UpdateNotificationBell() {
   const navigate = useNavigate()
+  const canSeeUpdates = useCan()('system.admin')
 
   const { data: status } = useQuery<UpdateStatusLite>({
     queryKey: ['system-update-status'],
@@ -41,10 +43,13 @@ export function UpdateNotificationBell() {
       // Faster polling while an update is mid-flight; otherwise once a minute.
       return d?.updater_running || d?.active_update ? 5000 : 60000
     },
-    // Cheap: this fires for every authenticated session.
+    // Update status is a Full administration endpoint; other roles never see the bell.
+    enabled: canSeeUpdates,
     retry: false,
     refetchOnWindowFocus: true,
   })
+
+  if (!canSeeUpdates) return null
 
   const inFlight = !!status?.active_update
   const failed = status?.last_update?.status === 'failed'

@@ -8,7 +8,9 @@ An actor may only hand out, or touch, access that does not exceed their own:
   account or role whose current access is within their own ceiling;
 * **scope ceiling** - a tag-scoped actor can only assign (and manage accounts
   restricted to) tags inside their own scope, and can never create an
-  unrestricted account.
+  unrestricted account. The same holds for role scopes (roles.scope_tags,
+  which every member inherits): a scoped actor cannot assign or edit a role
+  scoped outside their own tags, nor lift a role's scope.
 
 These checks are the server-side policy; the UI only mirrors them by listing
 the assignable roles returned from ``GET /roles/assignable``.
@@ -59,10 +61,19 @@ async def assert_can_manage_role_target(db: AsyncSession, actor: User, role_perm
         )
 
 
+def _lower(tags) -> set[str]:
+    return {str(t).strip().lower() for t in (tags or []) if str(t).strip()}
+
+
 async def assignable_role_names(db: AsyncSession, actor: User, roles) -> set[str]:
-    """Names of ``roles`` (rows with .name/.permissions) the actor may assign."""
+    """Names of ``roles`` (rows with .name/.permissions/.scope_tags) the actor may assign."""
     ceiling = await actor_permissions(db, actor)
-    return {r.name for r in roles if not exceeds(r.permissions or [], ceiling)}
+    scope = await visible_tags(db, actor)
+    return {
+        r.name for r in roles
+        if not exceeds(r.permissions or [], ceiling)
+        and (scope is None or _lower(getattr(r, "scope_tags", None)) <= set(scope))
+    }
 
 
 async def assert_can_assign_role(db: AsyncSession, actor: User, role) -> None:
@@ -71,6 +82,35 @@ async def assert_can_assign_role(db: AsyncSession, actor: User, role) -> None:
         raise _forbidden(
             f"You cannot assign the '{role.name}' role: it grants access beyond your own"
         )
+    scope = await visible_tags(db, actor)
+    if scope is not None:
+        outside = sorted(_lower(getattr(role, "scope_tags", None)) - set(scope))
+        if outside:
+            raise _forbidden(
+                f"You cannot assign the '{role.name}' role: its visibility scope includes tags "
+                f"outside your own ({', '.join(outside)})"
+            )
+
+
+async def validate_role_scope(db: AsyncSession, actor: User, before, after: list[str]) -> list[str]:
+    """Scope the actor may put on a role. A tag-scoped actor may only set tags
+    inside their own scope, may not change the scope of a role scoped outside
+    theirs, and may not lift a role's scope (an empty scope would widen every
+    member who has no scope of their own to unrestricted)."""
+    scope = await visible_tags(db, actor)
+    if scope is None:
+        return after
+    old, new = _lower(before), _lower(after)
+    if old == new:
+        return after
+    if old and not old <= set(scope):
+        raise _forbidden("This role's visibility scope includes tags outside your own, so you cannot change it")
+    if old and not new:
+        raise _forbidden("You are limited to a visibility scope, so you cannot remove a role's scope")
+    outside = sorted(new - set(scope))
+    if outside:
+        raise _forbidden(f"You cannot grant visibility of tags outside your own scope: {', '.join(outside)}")
+    return after
 
 
 async def assert_can_manage_user(db: AsyncSession, actor: User, target: User,
@@ -83,21 +123,40 @@ async def assert_can_manage_user(db: AsyncSession, actor: User, target: User,
         raise _forbidden("This account has more access than you do, so you cannot change it")
     scope = await visible_tags(db, actor)
     if scope is not None:
-        target_scope = {str(t).lower() for t in (target.scope_tags or [])}
-        if not target_scope or not target_scope <= set(scope):
+        # The target's effective scope: their own tags plus their role's.
+        target_scope = await visible_tags(db, target)
+        if not target_scope or not set(target_scope) <= set(scope):
             raise _forbidden("This account can see resources outside your own visibility scope")
 
 
-async def validate_assigned_scope(db: AsyncSession, actor: User, requested: list[str]) -> list[str]:
+async def validate_assigned_scope(db: AsyncSession, actor: User, requested: list[str],
+                                  role_scope=None) -> list[str]:
     """Scope the actor is allowed to put on an account. A tag-scoped actor
-    cannot widen visibility: the new scope must be non-empty and inside theirs."""
+    cannot widen visibility: the new scope must be inside theirs, and non-empty
+    unless the account's role (``role_scope``) already limits it."""
     scope = await visible_tags(db, actor)
     if scope is None:
         return requested
     wanted = {str(t).lower() for t in requested}
-    if not wanted:
+    if not wanted and not _lower(role_scope):
         raise _forbidden("You are limited to a visibility scope, so accounts you manage must be scoped too")
     outside = sorted(wanted - set(scope))
     if outside:
         raise _forbidden(f"You cannot grant visibility of tags outside your own scope: {', '.join(outside)}")
     return requested
+
+
+async def assert_effective_scope_within(db: AsyncSession, actor: User, user_tags, role_scope) -> None:
+    """After a change, the account's effective scope (its own tags plus its
+    role's) must stay non-empty and inside a tag-scoped actor's scope — e.g.
+    moving a user from a scoped role to an unscoped one must not leave them
+    unrestricted."""
+    scope = await visible_tags(db, actor)
+    if scope is None:
+        return
+    effective = _lower(user_tags) | _lower(role_scope)
+    if not effective:
+        raise _forbidden("You are limited to a visibility scope, so accounts you manage must be scoped too")
+    outside = sorted(effective - set(scope))
+    if outside:
+        raise _forbidden(f"You cannot grant visibility of tags outside your own scope: {', '.join(outside)}")

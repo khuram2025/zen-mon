@@ -189,7 +189,7 @@ async def list_tags(
 async def create_tag(
     payload: TagCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "apm.manage")),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "servers.manage", "apm.manage")),
 ):
     name = payload.name.strip()
     if not name:
@@ -213,7 +213,7 @@ async def update_tag(
     tag_id: UUID,
     payload: TagUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "apm.manage")),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "servers.manage", "apm.manage")),
 ):
     cur = (await db.execute(
         text("SELECT name FROM tags WHERE id = :id"), {"id": tag_id}
@@ -258,7 +258,7 @@ async def update_tag(
 async def delete_tag(
     tag_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "apm.manage")),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "servers.manage", "apm.manage")),
 ):
     cur = (await db.execute(
         text("SELECT name FROM tags WHERE id = :id"), {"id": tag_id}
