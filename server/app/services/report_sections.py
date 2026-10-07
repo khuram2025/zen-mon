@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
@@ -118,13 +119,43 @@ def _fmt_pct(v: Optional[float], digits: int = 2) -> str:
     return "—" if v is None else f"{v:.{digits}f}%"
 
 
-def _iso_short(iso: Optional[str]) -> str:
-    if not iso:
-        return "—"
+def _finite(v: Any) -> Optional[float]:
+    """float(v), or None for missing, NaN or infinite values (an empty
+    ClickHouse quantile or average comes back as nan)."""
+    if v is None:
+        return None
     try:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%m-%d %H:%M")
-    except ValueError:
-        return iso[:16]
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _aware_utc(dt: datetime) -> datetime:
+    """Aware UTC; naive values are UTC throughout the report engine."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Naive UTC, the form ClickHouse DateTime parameters are bound in."""
+    return _aware_utc(dt).replace(tzinfo=None)
+
+
+def _top_n(ctx: "SectionCtx", default: int) -> int:
+    """The running section's validated ``top_n`` option (its registry
+    default when the template sets none; ``default`` outside a render)."""
+    try:
+        return max(1, int(ctx.opt("top_n", default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _shown_note(shown: int, total: int, what: str) -> list[str]:
+    """Disclose a list cut to the section's row limit (never cut silently)."""
+    if total > shown:
+        return [f"Showing {shown:,} of {total:,} {what}. Raise the section's “Rows” option to "
+                "list more."]
+    return []
 
 
 def _parse_ts(iso: str) -> datetime:
@@ -349,12 +380,22 @@ SLA_TARGET_PCT = 99.9  # fallback only; the configured policy default wins
 async def _node_availability(ctx: SectionCtx) -> dict:
     """Per-node availability over the window, honouring the device filter.
 
-    Weighted from ping_metrics_5m (uptime_pct x sample_count), outages from
-    device_status_log, device identity/status from Postgres. Cached per render
-    so KPIs, trend and the node table share one computation.
+    Read from the ping table that covers a window this long
+    (``ping_rollups.ping_table_for_hours``: raw up to 6 h, 5-minute up to 7 d,
+    hourly beyond) and sample-weighted (up samples / samples; the rollups'
+    ``uptime_pct`` is a 0..1 fraction), with samples inside planned
+    maintenance excluded -- the arithmetic of the Availability page
+    (report_data_service.build_executive), so the report's headline agrees
+    with it. Outage episodes come from device_status_log, device identity and
+    status from Postgres. Cached per render: the KPIs, trend, node table,
+    lowest-availability list, latency table and longest outages share it.
     """
     if "node_avail" in ctx._cache:
         return ctx._cache["node_avail"]
+
+    from app.services.ping_rollups import is_rollup, ping_table_for_hours, rtt_agg_sql, uptime_agg_sql
+    from app.services.report_data_service import _maintenance_exclusion_sql
+    from app.services.report_service import _fetch_device_maintenance_windows
 
     ids = ctx.device_ids
     pg_sql = ("SELECT id::text, hostname, ip_address::text, COALESCE(location, ''), "
@@ -369,76 +410,78 @@ async def _node_availability(ctx: SectionCtx) -> dict:
          "location": r[3], "status": r[4]}
         for r in (await ctx.db.execute(text(pg_sql + " ORDER BY hostname"), pg_params)).fetchall()
     ]
-
-    id_cond = " AND device_id IN %(ids)s" if ids else ""
-    ch_params: dict[str, Any] = {"f": ctx.frm, "t": ctx.to}
-    if ids:
-        ch_params["ids"] = ids
+    names = {d["id"]: d["hostname"] for d in devices}
 
     # Planned maintenance windows (device_id -> [(start, end)], naive UTC):
-    # 5-minute rollup buckets whose midpoint falls inside a window are dropped
-    # so planned downtime never dents availability or the trend.
-    from app.services.report_service import _fetch_device_maintenance_windows
+    # samples inside them never dent availability, the trend or the RTT.
     try:
         maint = await _fetch_device_maintenance_windows(ctx.db, ctx.frm, ctx.to)
     except Exception:
         maint = {}
+    maint = {did: wins for did, wins in maint.items() if did in names}
 
-    def _in_maint(device_id: str, ts) -> bool:
-        wins = maint.get(str(device_id))
-        if not wins:
-            return False
-        t = ts.replace(tzinfo=None) if ts.tzinfo else ts
-        return any(s <= t <= e for s, e in wins)
-
+    table = ping_table_for_hours(ctx.hours)
     stats: dict[str, dict] = {}
     trend: list[dict] = []
-    bucket_secs = {"5 MINUTE": 300, "30 MINUTE": 1800, "2 HOUR": 7200, "1 DAY": 86400}
-    try:
-        rows = ctx.ch().query(
-            f"""
-            SELECT device_id,
-                   toStartOfInterval(timestamp, INTERVAL {ctx.bucket()}) AS b,
-                   -- uptime_pct is stored as a 0..1 fraction in the rollup
-                   sum(uptime_pct * sample_count) AS up_weighted,
-                   sum(sample_count) AS samples,
-                   avg(avg_rtt_ms) AS rtt
-            FROM zenplus.ping_metrics_5m
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{id_cond}
-            GROUP BY device_id, b ORDER BY b
-            """, parameters=ch_params).result_rows
-        half = timedelta(seconds=bucket_secs.get(ctx.bucket(), 300) / 2)
-        per_dev: dict[str, list[float]] = {}
-        per_bucket: dict[Any, list[float]] = {}
-        for did, b, upw, sc, rtt in rows:
-            if _in_maint(str(did), b + half):
-                continue
-            dv = per_dev.setdefault(str(did), [0.0, 0.0, 0.0, 0])
-            dv[0] += float(upw or 0)
-            dv[1] += float(sc or 0)
-            dv[2] += float(rtt or 0)
-            dv[3] += 1
-            bv = per_bucket.setdefault(b, [0.0, 0.0])
-            bv[0] += float(upw or 0)
-            bv[1] += float(sc or 0)
-        for did, (upw, sc, rtt_sum, nb) in per_dev.items():
-            if sc > 0:
-                stats[did] = {"avail": upw / sc * 100, "rtt": (rtt_sum / nb) if nb else 0}
-        trend = [{"t": b.isoformat(), "v": round(upw / sc * 100, 2)}
-                 for b, (upw, sc) in sorted(per_bucket.items()) if sc > 0]
-
-    except Exception:
-        logger.exception("node availability query failed")
+    if names:
+        maint_sql, maint_params = _maintenance_exclusion_sql(maint)
+        # Only current inventory is counted (ids come from Postgres, so the
+        # primary-key filter is always well formed): history of deleted
+        # devices must not move the headline.
+        params: dict[str, Any] = {"f": _naive_utc(ctx.frm), "t": _naive_utc(ctx.to),
+                                  "ids": list(names), **maint_params}
+        where = (f" FROM zenplus.{table} WHERE timestamp >= %(f)s AND timestamp <= %(t)s"
+                 f" AND device_id IN %(ids)s {maint_sql}")
+        # Packet loss while the node answered: a down probe records 100 % loss,
+        # which is availability, not loss. On the rollups the down samples'
+        # loss (1.0 each) is subtracted from the bucket total.
+        loss_sql = ("greatest(sum(avg_packet_loss * sample_count) - sum((1 - uptime_pct) * sample_count), 0)"
+                    if is_rollup(table) else "sumIf(packet_loss, is_up = 1)")
+        try:
+            rows = await ctx.ch_rows(
+                f"SELECT toString(device_id) AS did, {uptime_agg_sql(table)}, {rtt_agg_sql(table)}, "
+                f"{loss_sql} AS loss_up{where} GROUP BY did", params)
+            for did, up, total, avg_rtt, p95_rtt, rtt_n, loss_up in rows:
+                did, up, total = str(did), float(up or 0), float(total or 0)
+                if did not in names or total <= 0:
+                    continue
+                has_rtt = float(rtt_n or 0) > 0
+                stats[did] = {
+                    "avail": up / total * 100, "up": up, "samples": total,
+                    "rtt": _finite(avg_rtt) if has_rtt else None,
+                    "p95_rtt": _finite(p95_rtt) if has_rtt else None,
+                    "loss_pct": (min(max(float(loss_up or 0) / up, 0.0), 1.0) * 100) if up > 0 else None,
+                }
+        except Exception:
+            logger.exception("node availability query failed")
+        try:
+            bucket_sql, bucket_params = ctx.ch_bucket("timestamp")
+            trows = await ctx.ch_rows(
+                f"SELECT {bucket_sql} AS b, {uptime_agg_sql(table)}{where} GROUP BY b ORDER BY b",
+                {**params, **bucket_params})
+            trend = [{"t": ctx.iso(b), "v": round(float(up or 0) / float(total) * 100, 2)}
+                     for b, up, total in trows if total]
+        except Exception:
+            logger.exception("node availability trend query failed")
 
     # Outage episodes pair each down transition with its recovery; the log's
     # duration_sec column is always 0, so it cannot supply durations.
+    outages: list[dict] = []
     try:
-        episodes = await asyncio.to_thread(
-            device_outage_episodes, ctx.frm, ctx.to, [d["id"] for d in devices], maint)
-        for e in episodes:
-            s = stats.setdefault(e["entity_id"], {})
-            s["outages"] = s.get("outages", 0) + 1
-            s["logged_down_s"] = s.get("logged_down_s", 0) + e["in_window_s"]
+        if names:
+            episodes = await asyncio.to_thread(
+                device_outage_episodes, ctx.frm, ctx.to, list(names), maint)
+            for e in episodes:
+                s = stats.setdefault(e["entity_id"], {})
+                s["outages"] = s.get("outages", 0) + 1
+                s["logged_down_s"] = s.get("logged_down_s", 0) + e["in_window_s"]
+                outages.append({
+                    "device_id": e["entity_id"], "hostname": names.get(e["entity_id"], "Unknown"),
+                    "started_at": e["started_at"] or e["clipped_start"],
+                    "start_known": e["started_at"] is not None,
+                    "duration_s": e["duration_s"], "in_window_s": e["in_window_s"],
+                    "ongoing": e["ongoing"],
+                })
     except Exception:
         logger.exception("node outage episodes query failed")
 
@@ -460,13 +503,20 @@ async def _node_availability(ctx: SectionCtx) -> dict:
             "downtime_min": round((100 - avail) / 100 * sla_min, 1) if avail is not None else None,
             "outages": s.get("outages", 0),
             "rtt": s.get("rtt"),
+            "p95_rtt": s.get("p95_rtt"),
+            "loss_pct": s.get("loss_pct"),
             "maintenance_min": round(maint_min, 1) if maint_min else 0,
         })
     # Problems first; devices with no data at the bottom.
     nodes.sort(key=lambda n: (n["avail"] is None, n["avail"] if n["avail"] is not None else 0))
 
     reporting = [n for n in nodes if n["avail"] is not None]
-    overall = (sum(n["avail"] for n in reporting) / len(reporting)) if reporting else None
+    # Sample-weighted over every measured node (not a mean of per-node
+    # percentages): a node polled twice as often weighs twice as much, exactly
+    # like the Availability page's headline.
+    up_sum = sum(s.get("up", 0.0) for s in stats.values())
+    sample_sum = sum(s.get("samples", 0.0) for s in stats.values())
+    overall = up_sum / sample_sum * 100 if sample_sum else None
     result = {
         "nodes": nodes,
         "trend": trend,
@@ -476,11 +526,25 @@ async def _node_availability(ctx: SectionCtx) -> dict:
         "sla_target": sla_target,
         "downtime_min": round(sum(n["downtime_min"] or 0 for n in nodes), 1),
         "outage_events": sum(n["outages"] for n in nodes),
+        "outage_list": outages,
         "filtered": bool(ids),
         "maint_excluded_min": round(sum(n["maintenance_min"] for n in nodes), 1),
+        "measured": len(reporting),
+        "table": table,
     }
     ctx._cache["node_avail"] = result
     return result
+
+
+def _ping_method_note(na: dict) -> list[str]:
+    """How long windows were measured (the rollups keep no raw probes)."""
+    if na.get("table") == "ping_metrics_1h":
+        return ["Windows longer than 7 days are measured from hourly ping rollups; latency "
+                "percentiles are taken across hourly averages and read slightly low."]
+    if na.get("table") == "ping_metrics_5m":
+        return ["Latency percentiles are taken across 5-minute averages (raw probes are kept "
+                "only for short windows) and read slightly low."]
+    return []
 
 
 async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
@@ -514,29 +578,28 @@ async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
 async def _sec_availability_trend(ctx: SectionCtx) -> dict:
     na = await _node_availability(ctx)
     trend = na["trend"]
-    ts = [_parse_ts(p["t"]) for p in trend]
-    vals = [p["v"] for p in trend]
-    png = _make_line_chart(ts, vals, ylabel="availability %", color=HEX_SUCCESS,
-                           unit="%", y_domain=(80, 100), h_mm=46)
     scope = "selected nodes" if na["filtered"] else "all monitored nodes"
     return _section(
         "availability_trend", "Availability Trend",
         description=f"Ping availability across {scope} over the reporting window.",
-        charts=[{"title": "", "png": png,
-                 "series": {"kind": "area", "unit": "%", "color": "success",
-                            "y_domain": [80, 100], "points": trend}}],
+        charts=([{"title": "",
+                  "series": {"kind": "area", "unit": "%", "color": "success",
+                             "y_domain": [80, 100], "points": trend}}] if trend else []),
+        notes=[] if trend else ["No ping samples in this window (not measured)."],
     )
 
 
 async def _sec_device_availability(ctx: SectionCtx) -> dict:
     na = await _node_availability(ctx)
+    top = _top_n(ctx, 200)
+    nodes = na["nodes"]
     rows = [
         [n["hostname"], n["ip"], n["location"] or "—", n["status"],
          _fmt_pct(n["avail"], 2) if n["avail"] is not None else "—",
          f"{n['downtime_min']:,.0f} min" if n["downtime_min"] is not None else "—",
          str(n["outages"]),
          _fmt_ms(n["rtt"]) if n["rtt"] else "—"]
-        for n in na["nodes"]
+        for n in nodes[:top]
     ]
     scope = "the selected nodes" if na["filtered"] else "every monitored node"
     return _section(
@@ -546,50 +609,60 @@ async def _sec_device_availability(ctx: SectionCtx) -> dict:
                              "Availability", "Downtime", "Outages", "Avg RTT"],
                  "styles": ["text", "mono", "text", "status", "pct-bar", "num", "num", "num"],
                  "rows": rows}],
+        notes=_shown_note(len(rows), len(nodes), "nodes (worst first)"),
     )
 
 
 async def _sec_device_uptime(ctx: SectionCtx) -> dict:
-    d = await ctx.dataset("technical")
+    # The same computation as Node Availability (one ping table per window,
+    # sample-weighted), so the two sections of one report never disagree.
+    na = await _node_availability(ctx)
+    measured = sorted((n for n in na["nodes"] if n["avail"] is not None), key=lambda n: n["avail"])
+    top = _top_n(ctx, 10)
     rows = [
-        [w.get("hostname") or "—", w.get("ip") or "—", _fmt_pct(w.get("availability_pct")),
-         str(w.get("outage_count") or 0), _fmt_ms(w.get("avg_rtt_ms")), _fmt_ms(w.get("p95_rtt_ms"))]
-        for w in (d.get("worst_devices") or [])
+        [n["hostname"] or "—", n["ip"] or "—", _fmt_pct(n["avail"]), str(n["outages"]),
+         _fmt_ms(n["rtt"]), _fmt_ms(n["p95_rtt"])]
+        for n in measured[:top]
     ]
     return _section(
         "device_uptime", "Lowest-Availability Devices",
         description="Devices with the poorest availability in the window — start remediation here.",
         tables=[{"headers": ["Device", "IP", "Availability", "Outages", "Avg RTT", "P95 RTT"],
                  "styles": ["text", "mono", "pct-bar", "num", "num", "num"], "rows": rows}],
+        notes=[] if measured else ["No ping samples in this window (not measured)."],
     )
 
 
 async def _sec_top_outages(ctx: SectionCtx) -> dict:
-    d = await ctx.dataset("executive")
-    outages = sorted(d.get("outage_timeline") or [],
-                     key=lambda o: -(o.get("duration_minutes") or o.get("in_window_minutes") or 0))[:15]
+    na = await _node_availability(ctx)
+    outages = sorted(na.get("outage_list") or [],
+                     key=lambda o: -(o.get("duration_s") or o.get("in_window_s") or 0))
+    top = _top_n(ctx, 15)
 
     def _duration(o: dict) -> str:
-        minutes = o.get("duration_minutes")
-        text_ = "unknown" if minutes is None else f"{minutes:,.0f} min"
+        secs = o.get("duration_s")
+        text_ = "unknown" if secs is None else f"{secs / 60:,.0f} min"
         return f"{text_} (ongoing)" if o.get("ongoing") else text_
 
-    rows = [[o.get("hostname") or "—", _iso_short(o.get("started_at")), _duration(o)]
-            for o in outages]
+    rows = [[o.get("hostname") or "—", ctx.fmt_short(o.get("started_at")), _duration(o)]
+            for o in outages[:top]]
     return _section(
         "top_outages", "Longest Outages", half=True,
         tables=[{"headers": ["Device", "Started", "Duration"],
                  "styles": ["text", "num", "num"], "rows": rows}],
+        notes=_shown_note(len(rows), len(outages), "outage episodes"),
     )
 
 
 async def _sec_service_availability(ctx: SectionCtx) -> dict:
     d = await ctx.dataset("business")
+    services = d.get("service_availability") or []
+    top = _top_n(ctx, 25)
     rows = [
         [s.get("name") or "—", (s.get("type") or "—").upper(), s.get("status") or "—",
          _fmt_pct(s.get("availability_pct")),
          f"{s.get('checks_failed') or 0}/{s.get('checks_total') or 0}"]
-        for s in (d.get("service_availability") or [])[:25]
+        for s in services[:top]
     ]
     tls = [[w.get("name") or "—", str(w.get("days_remaining")), w.get("severity") or ""]
            for w in (d.get("tls_warnings") or [])]
@@ -600,93 +673,235 @@ async def _sec_service_availability(ctx: SectionCtx) -> dict:
         tables.append({"title": "TLS certificates expiring within 30 days",
                        "headers": ["Service", "Days remaining", "Severity"],
                        "styles": ["text", "num", "severity"], "rows": tls})
-    return _section("service_availability", "Service Availability", tables=tables)
+    return _section("service_availability", "Service Availability", tables=tables,
+                    notes=_shown_note(len(rows), len(services), "service checks"))
 
 
 # ─── Performance sections ───────────────────────────────────────────────────
 
 async def _sec_network_performance(ctx: SectionCtx) -> dict:
-    d = await ctx.dataset("technical")
-    worst = d.get("worst_devices") or []
-    rtts = [w.get("p95_rtt_ms") for w in worst if w.get("p95_rtt_ms")]
+    # Latency and loss from the ping rollups (the same cached computation as
+    # the availability sections), ranked by p95 round-trip time.
+    na = await _node_availability(ctx)
+    measured = [n for n in na["nodes"] if n.get("rtt") is not None or n.get("p95_rtt") is not None]
+
+    def _rank(n: dict) -> float:
+        v = n.get("p95_rtt") if n.get("p95_rtt") is not None else n.get("rtt")
+        return -(v or 0.0)
+
+    ranked = sorted(measured, key=_rank)
+    top = _top_n(ctx, 10)
+    p95s = [n["p95_rtt"] for n in measured if n.get("p95_rtt") is not None]
+    lossy = sum(1 for n in measured if (n.get("loss_pct") or 0) >= 1)
     kpis = [
-        {"label": "Devices analysed", "value": str(len(worst)), "accent": "primary"},
-        {"label": "Worst p95 latency", "value": _fmt_ms(max(rtts)) if rtts else "—", "accent": "warning"},
+        {"label": "Devices measured", "value": str(len(measured)), "accent": "primary"},
+        {"label": "Worst p95 latency", "value": _fmt_ms(max(p95s)) if p95s else "—", "accent": "warning"},
+        {"label": "Devices with ≥1% loss", "value": str(lossy) if measured else "—",
+         "accent": "danger" if lossy else ("success" if measured else "neutral")},
     ]
-    rows = [[w.get("hostname") or "—", _fmt_ms(w.get("avg_rtt_ms")), _fmt_ms(w.get("p95_rtt_ms")),
-             _fmt_pct(w.get("availability_pct")), str(w.get("outage_count") or 0)]
-            for w in worst]
+    rows = [[n["hostname"] or "—", _fmt_ms(n.get("rtt")), _fmt_ms(n.get("p95_rtt")),
+             _fmt_pct(n.get("loss_pct"), 2), _fmt_pct(n.get("avail"))]
+            for n in ranked[:top]]
+    notes = [] if measured else ["No latency samples in this window (not measured)."]
     return _section(
         "network_performance", "Network Device Performance",
-        description="Round-trip latency and stability for the most stressed devices.",
+        description=("Devices with the highest round-trip latency (95th percentile) in the window, "
+                     "with packet loss while they answered; outages count toward availability."),
         kpis=kpis,
-        tables=[{"headers": ["Device", "Avg RTT", "P95 RTT", "Availability", "Outages"],
-                 "styles": ["text", "num", "num", "pct-bar", "num"], "rows": rows}],
+        tables=[{"headers": ["Device", "Avg RTT", "P95 RTT", "Packet loss", "Availability"],
+                 "styles": ["text", "num", "num", "num", "pct-bar"], "rows": rows}],
+        notes=notes + (_ping_method_note(na) if measured else []),
     )
 
 
+IF_RAW_RETENTION_DAYS = 30   # zenplus.snmp_if_metrics TTL; the 5-minute rollup keeps 90 days
+
+
+async def _interface_stats(ctx: SectionCtx) -> dict:
+    """Per-interface throughput for the window (cached per render).
+
+    Raw ``snmp_if_metrics`` while the whole window is within its 30-day
+    retention, else the ``snmp_if_metrics_5m`` rollup (sample-weighted
+    averages; percentiles over 5-minute averages). Utilisation is against the
+    effective interface speed (``interface_speed.effective_speed``: configured
+    circuit speed, else SNMP ifSpeed); an unknown speed is never guessed.
+    Interfaces of deleted devices are left out."""
+    if "if_stats" in ctx._cache:
+        return ctx._cache["if_stats"]
+    from app.services.interface_speed import effective_speed
+
+    raw = _aware_utc(ctx.frm) >= datetime.now(timezone.utc) - timedelta(days=IF_RAW_RETENTION_DAYS)
+    clause, params = ctx.ch_device_clause("device_id")
+    params.update({"f": _naive_utc(ctx.frm), "t": _naive_utc(ctx.to)})
+    if raw:
+        sql = f"""
+            SELECT toString(device_id) AS did, if_index,
+                   avg(in_bps), avg(out_bps),
+                   quantile(0.95)(in_bps), quantile(0.95)(out_bps),
+                   max(in_bps), max(out_bps), count()
+            FROM zenplus.snmp_if_metrics
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{clause}
+            GROUP BY device_id, if_index
+        """
+    else:
+        sql = f"""
+            SELECT did, if_index,
+                   sum(i * n) / sum(n), sum(o * n) / sum(n),
+                   quantile(0.95)(i), quantile(0.95)(o),
+                   max(mi), max(mo), sum(n)
+            FROM (
+                SELECT toString(device_id) AS did, if_index, timestamp,
+                       sum(avg_in_bps * sample_count) / sum(sample_count) AS i,
+                       sum(avg_out_bps * sample_count) / sum(sample_count) AS o,
+                       max(max_in_bps) AS mi, max(max_out_bps) AS mo,
+                       sum(sample_count) AS n
+                FROM zenplus.snmp_if_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{clause}
+                GROUP BY device_id, if_index, timestamp
+                HAVING n > 0
+            )
+            GROUP BY did, if_index
+        """
+    out: dict[str, Any] = {"rows": [], "raw": raw, "speed_unknown": 0}
+    try:
+        stats = await ctx.ch_rows(sql, params)
+        dids = sorted({str(r[0]) for r in stats})
+        meta: dict[tuple[str, int], tuple] = {}
+        hosts: dict[str, str] = {}
+        if dids:
+            res = await ctx.db.execute(text(
+                "SELECT d.id::text, d.hostname, di.if_index, di.if_name, di.if_speed, "
+                "di.configured_speed_bps "
+                "FROM devices d LEFT JOIN device_interfaces di ON di.device_id = d.id "
+                "WHERE d.id::text = ANY(:dids)"), {"dids": dids})
+            for r in res.fetchall():
+                hosts[str(r[0])] = r[1] or str(r[0])[:8]
+                if r[2] is not None:
+                    meta[(str(r[0]), int(r[2]))] = (r[3], r[4], r[5])
+        for did, idx, ia, oa, ip95, op95, imax, omax, n in stats:
+            did, idx = str(did), int(idx)
+            if did not in hosts:
+                continue
+            if_name, if_speed, configured = meta.get((did, idx), (None, None, None))
+            speed = effective_speed(configured, None, if_speed)
+            ia, oa = _finite(ia) or 0.0, _finite(oa) or 0.0
+            ip95, op95 = _finite(ip95) or 0.0, _finite(op95) or 0.0
+            out["rows"].append({
+                "device_id": did, "if_index": idx,
+                "label": f"{hosts[did]} · {if_name or f'#{idx}'}",
+                "in_avg": ia, "out_avg": oa, "in_p95": ip95, "out_p95": op95,
+                "in_max": _finite(imax) or 0.0, "out_max": _finite(omax) or 0.0,
+                "samples": float(n or 0), "speed": speed,
+                "util_avg": (max(ia, oa) / speed * 100) if speed else None,
+                "util_p95": (max(ip95, op95) / speed * 100) if speed else None,
+            })
+            if not speed:
+                out["speed_unknown"] += 1
+    except Exception:
+        logger.debug("interface statistics unavailable", exc_info=True)
+        out["error"] = True
+    ctx._cache["if_stats"] = out
+    return out
+
+
+def _if_method_note(st: dict) -> list[str]:
+    if st.get("raw"):
+        return []
+    return [f"Interface samples are kept for {IF_RAW_RETENTION_DAYS} days; this period is read from "
+            "5-minute averages (percentiles are taken across them)."]
+
+
 async def _sec_interface_utilization(ctx: SectionCtx) -> dict:
-    d = await ctx.dataset("technical")
+    st = await _interface_stats(ctx)
+    busiest = sorted(st["rows"], key=lambda r: -(r["in_avg"] + r["out_avg"]))
+    top = _top_n(ctx, 10)
     rows = [
-        [f"{i.get('hostname')} · {i.get('if_name')}", _fmt_bps(i.get("in_bps_avg") or 0),
-         _fmt_bps(i.get("out_bps_avg") or 0),
-         _fmt_pct(i.get("utilization_pct"), 1) if i.get("utilization_pct") is not None else "—"]
-        for i in (d.get("top_bandwidth_interfaces") or [])
+        [r["label"], _fmt_bps(r["in_avg"]), _fmt_bps(r["out_avg"]),
+         _fmt_pct(r["util_avg"], 1) if r["util_avg"] is not None else "—"]
+        for r in busiest[:top]
     ]
+    unknown = sum(1 for r in busiest[:top] if r["util_avg"] is None)
+    notes = _if_method_note(st)
+    if unknown:
+        notes.append(f"{unknown} of the listed interfaces have no known speed; their utilization "
+                     "is not shown (set the circuit speed on the interface to assess it).")
     return _section(
         "interface_utilization", "Busiest Interfaces",
-        description="Top interfaces by average throughput over the window.",
+        description=("Top interfaces by average throughput over the window; utilization is the busier "
+                     "direction against the effective interface speed."),
         tables=[{"headers": ["Interface", "Avg In", "Avg Out", "Utilization"],
                  "styles": ["text", "num", "num", "pct-bar"], "rows": rows}],
+        notes=notes,
     )
 
 
 async def _sec_server_performance(ctx: SectionCtx) -> dict:
-    frm, to = ctx.frm, ctx.to
+    """Agent servers ranked by sample-weighted average CPU (5-minute rollups);
+    disabled servers are left out and a server without samples is "not
+    measured", never 0 %."""
     rows_out: list[list[str]] = []
+    unmeasured = 0
+    total_ranked = 0
     try:
-        ch_rows = ctx.ch().query(
-            """
-            SELECT server_id,
-                   avg(avg_total_pct)  AS avg_cpu,
-                   max(max_total_pct)  AS max_cpu
-            FROM zenplus.host_cpu_metrics_5m
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s
-            GROUP BY server_id ORDER BY avg_cpu DESC LIMIT 15
-            """, parameters={"f": frm, "t": to}).result_rows
-        mem_rows = ctx.ch().query(
-            """
-            SELECT server_id, avg(avg_used_pct) AS avg_mem, max(max_used_pct) AS max_mem
-            FROM zenplus.host_memory_metrics_5m
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s
-            GROUP BY server_id
-            """, parameters={"f": frm, "t": to}).result_rows
-        mem_map = {str(r[0]): (float(r[1] or 0), float(r[2] or 0)) for r in mem_rows}
-        ids = [str(r[0]) for r in ch_rows]
-        names: dict[str, str] = {}
-        if ids:
-            pg = await ctx.db.execute(
-                text("SELECT id::text, COALESCE(display_name, hostname) FROM servers WHERE id::text = ANY(:ids)"),
-                {"ids": ids})
-            names = {r[0]: r[1] for r in pg.fetchall()}
-        for r in ch_rows:
-            sid = str(r[0])
-            mem = mem_map.get(sid, (None, None))
-            rows_out.append([
-                names.get(sid, sid[:8]), f"{float(r[1] or 0):.1f}%", f"{float(r[2] or 0):.1f}%",
-                _fmt_pct(mem[0], 1) if mem[0] is not None else "—",
-                _fmt_pct(mem[1], 1) if mem[1] is not None else "—",
-            ])
+        servers = {r[0]: r[1] for r in (await ctx.db.execute(text(
+            "SELECT id::text, COALESCE(display_name, hostname) FROM servers "
+            "WHERE COALESCE(status, '') <> 'disabled'"))).fetchall()}
+        if servers:
+            params = {"f": _naive_utc(ctx.frm), "t": _naive_utc(ctx.to), "ids": list(servers)}
+            cpu = {str(r[0]): r for r in await ctx.ch_rows(
+                """
+                SELECT toString(server_id) AS sid,
+                       sum(avg_total_pct * sample_count) / nullIf(sum(sample_count), 0) AS avg_cpu,
+                       max(max_total_pct) AS max_cpu, sum(sample_count) AS n
+                FROM zenplus.host_cpu_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND server_id IN %(ids)s
+                GROUP BY server_id
+                """, params)}
+            mem = {str(r[0]): r for r in await ctx.ch_rows(
+                """
+                SELECT toString(server_id) AS sid,
+                       sum(avg_used_pct * sample_count) / nullIf(sum(sample_count), 0) AS avg_mem,
+                       max(max_used_pct) AS max_mem, sum(sample_count) AS n
+                FROM zenplus.host_memory_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND server_id IN %(ids)s
+                GROUP BY server_id
+                """, params)}
+            ranked = []
+            for sid, name in servers.items():
+                c, m = cpu.get(sid), mem.get(sid)
+                c_avg = _finite(c[1]) if c and int(c[3] or 0) > 0 else None
+                c_max = _finite(c[2]) if c and int(c[3] or 0) > 0 else None
+                m_avg = _finite(m[1]) if m and int(m[3] or 0) > 0 else None
+                m_max = _finite(m[2]) if m and int(m[3] or 0) > 0 else None
+                if c_avg is None and m_avg is None:
+                    unmeasured += 1
+                    continue
+                ranked.append((name or sid[:8], c_avg, c_max, m_avg, m_max))
+            ranked.sort(key=lambda r: (r[1] is None, -(r[1] or 0.0), -(r[3] or 0.0)))
+            total_ranked = len(ranked)
+            for name, c_avg, c_max, m_avg, m_max in ranked[:_top_n(ctx, 15)]:
+                rows_out.append([name, _fmt_pct(c_avg, 1), _fmt_pct(c_max, 1),
+                                 _fmt_pct(m_avg, 1), _fmt_pct(m_max, 1)])
     except Exception:
         logger.debug("server performance section: host metrics unavailable", exc_info=True)
+    notes: list[str] = []
+    if not rows_out:
+        notes.append("No agent-monitored servers reported in this window.")
+    notes += _shown_note(len(rows_out), total_ranked, "servers")
+    if unmeasured and rows_out:
+        notes.append(f"{unmeasured} enabled server(s) reported no CPU or memory samples in this window "
+                     "(not measured).")
+    retention = ctx.window_note(90, "Server 5-minute metrics")
+    if retention:
+        notes.append(retention)
     return _section(
         "server_performance", "Server Performance",
-        description="Agent-monitored servers ranked by average CPU load.",
+        description=("Agent-monitored servers ranked by average CPU load (sample-weighted 5-minute "
+                     "averages; disabled servers excluded)."),
         tables=[{"headers": ["Server", "Avg CPU", "Peak CPU", "Avg Mem", "Peak Mem"],
                  "styles": ["text", "pct-bar", "num", "pct-bar", "num"], "rows": rows_out}],
-        notes=[] if rows_out else ["No agent-monitored servers reported in this window."],
+        notes=notes,
     )
-
 
 # ─── Traffic (NetFlow) sections ─────────────────────────────────────────────
 # Implemented in netflow_report on the NetFlow foundation: requester
@@ -725,11 +940,35 @@ async def _sec_netflow_executive(ctx: SectionCtx) -> dict:
 
 # ─── APM sections ───────────────────────────────────────────────────────────
 
+def _apm_health(err_rate: float, p95_ms: float, reqs: int) -> str:
+    """Same thresholds as the APM Services page (apm_services._health)."""
+    if reqs <= 0:
+        return "no data"
+    if err_rate >= 0.05 or p95_ms >= 1000:
+        return "critical"
+    if err_rate >= 0.01 or p95_ms >= 500:
+        return "degraded"
+    return "healthy"
+
+
 async def _sec_apm_services(ctx: SectionCtx) -> dict:
+    """RED metrics per service from the RED rollup that serves this window
+    (apm_rollup.table_for: 5-minute up to 6 h, hourly beyond -- the hourly
+    rollup keeps 395 days), with the window start snapped down to a bucket
+    boundary (apm_rollup.align_ms_window) so no bucket is silently dropped."""
+    from app.services.apm_rollup import align_ms_window, table_for
+
     rows_out: list[list[str]] = []
     healthy = degraded = 0
+    total = 0
     try:
-        rows = ctx.ch().query(
+        frm_ms = int(_aware_utc(ctx.frm).timestamp() * 1000)
+        to_ms = int(_aware_utc(ctx.to).timestamp() * 1000)
+        a_from, a_to, covered = align_ms_window(frm_ms, to_ms)
+        table = table_for(int(covered))
+        params = {"f": datetime.fromtimestamp(a_from / 1000, tz=timezone.utc).replace(tzinfo=None),
+                  "t": datetime.fromtimestamp(a_to / 1000, tz=timezone.utc).replace(tzinfo=None)}
+        rows = await ctx.ch_rows(
             f"""
             SELECT service_name,
                    sum(request_count) AS reqs,
@@ -737,21 +976,24 @@ async def _sec_apm_services(ctx: SectionCtx) -> dict:
                    arrayElement(quantilesTDigestMerge(0.5,0.95)(duration_state),1) AS p50,
                    arrayElement(quantilesTDigestMerge(0.5,0.95)(duration_state),2) AS p95,
                    sum(satisfied_count) AS sat, sum(tolerating_count) AS tol
-            FROM zenplus.apm_span_metrics_5m
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND span_kind IN {ENTRY_KINDS}
-            GROUP BY service_name ORDER BY reqs DESC LIMIT 25
-            """, parameters={"f": ctx.frm, "t": ctx.to}).result_rows
-        for r in rows:
+            FROM zenplus.{table}
+            WHERE timestamp >= %(f)s AND timestamp < %(t)s AND span_kind IN {ENTRY_KINDS}
+            GROUP BY service_name ORDER BY reqs DESC
+            """, params)
+        total = len(rows)
+        top = _top_n(ctx, 25)
+        for i, r in enumerate(rows):
             reqs, errs = int(r[1] or 0), int(r[2] or 0)
             err_rate = errs / reqs if reqs else 0
-            p95 = float(r[4] or 0)
-            apdex = (int(r[5] or 0) + int(r[6] or 0) / 2) / reqs if reqs else 0
-            state = "critical" if (err_rate >= 0.05 or p95 >= 1000) else \
-                    "degraded" if (err_rate >= 0.01 or p95 >= 500) else "healthy"
+            p50, p95 = _finite(r[3]), _finite(r[4])
+            apdex = (int(r[5] or 0) + int(r[6] or 0) / 2) / reqs if reqs else None
+            state = _apm_health(err_rate, p95 or 0.0, reqs)
             healthy += state == "healthy"
-            degraded += state != "healthy"
-            rows_out.append([r[0], f"{reqs:,}", _fmt_pct(err_rate * 100), _fmt_ms(float(r[3] or 0)),
-                             _fmt_ms(p95), f"{apdex:.2f}", state])
+            degraded += state in ("degraded", "critical")
+            if i < top:
+                rows_out.append([r[0], f"{reqs:,}", _fmt_pct(err_rate * 100) if reqs else "—",
+                                 _fmt_ms(p50) if reqs else "—", _fmt_ms(p95) if reqs else "—",
+                                 f"{apdex:.2f}" if apdex is not None else "—", state])
     except Exception:
         logger.debug("apm services section unavailable", exc_info=True)
     return _section(
@@ -766,55 +1008,112 @@ async def _sec_apm_services(ctx: SectionCtx) -> dict:
         tables=[{"headers": ["Service", "Requests", "Error rate", "P50", "P95", "Apdex", "Health"],
                  "styles": ["text", "num", "num", "num", "num", "num", "status"],
                  "rows": rows_out}],
+        notes=_shown_note(len(rows_out), total, "services"),
     )
+
+
+async def _apm_ignored_groups(ctx: SectionCtx) -> set[str]:
+    """Exception groups triaged as Ignored in APM → Errors. A group seen in
+    several services has one triage row per service; the most recently
+    touched row wins, exactly like the Errors inbox (apm_errors._triage_map)."""
+    try:
+        rows = (await ctx.db.execute(text(
+            "SELECT group_id FROM ("
+            " SELECT DISTINCT ON (group_id) group_id, status FROM apm_error_issues"
+            " ORDER BY group_id, updated_at DESC NULLS LAST, last_seen_at DESC NULLS LAST"
+            ") latest WHERE status = 'ignored'"))).fetchall()
+    except Exception:
+        logger.debug("apm error triage unavailable", exc_info=True)
+        return set()
+    return {str(r[0]) for r in rows}
+
+
+def _group_key(v: Any) -> str:
+    """ClickHouse FixedString group ids arrive as bytes."""
+    return v.decode(errors="replace") if isinstance(v, (bytes, bytearray)) else str(v)
 
 
 async def _sec_apm_errors(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
+    top = _top_n(ctx, 12)
+    ignored = await _apm_ignored_groups(ctx)
+    excluded = 0
     try:
-        rows = ctx.ch().query(
-            """
+        # Ask for enough groups that dropping the ignored ones still fills the table.
+        rows = await ctx.ch_rows(
+            f"""
             SELECT group_id, anyHeavy(exception_type), anyHeavy(exception_message),
                    anyHeavy(service_name), count() AS occurrences, max(timestamp)
             FROM zenplus.apm_exceptions
             WHERE timestamp >= %(f)s AND timestamp <= %(t)s
-            GROUP BY group_id ORDER BY occurrences DESC LIMIT 12
-            """, parameters={"f": ctx.frm, "t": ctx.to}).result_rows
+            GROUP BY group_id ORDER BY occurrences DESC LIMIT {top + len(ignored)}
+            """, {"f": _naive_utc(ctx.frm), "t": _naive_utc(ctx.to)})
         for r in rows:
+            if _group_key(r[0]) in ignored:
+                excluded += 1
+                continue
+            if len(rows_out) >= top:
+                break
             rows_out.append([str(r[1] or "Error"), (str(r[2] or ""))[:60], str(r[3] or "—"),
-                             f"{int(r[4]):,}", r[5].strftime("%m-%d %H:%M") if r[5] else "—"])
+                             f"{int(r[4]):,}", ctx.fmt_short(r[5])])
     except Exception:
         logger.debug("apm errors section unavailable", exc_info=True)
+    notes = ([f"{excluded} exception group(s) marked Ignored in APM → Errors are not listed."]
+             if excluded else [])
     return _section("apm_errors", "Top Application Errors",
                     tables=[{"headers": ["Type", "Message", "Service", "Count", "Last seen"],
-                             "rows": rows_out}])
+                             "rows": rows_out}],
+                    notes=notes)
+
+
+def _slo_budget(slo: dict) -> tuple[Optional[float], int]:
+    """(error budget consumed as a fraction, requests) over the SLO's own
+    trailing window; consumed is None when the window has no data. Blocking
+    ClickHouse -- run via asyncio.to_thread."""
+    from app.services.apm_slo_service import _bad_fraction
+
+    budget = max(1.0 - float(slo["target"]) / 100.0, 1e-9)
+    r = _bad_fraction(slo["service_name"], slo.get("env"), slo.get("operation"), slo["sli_type"],
+                      slo.get("latency_threshold_ms"), int(slo["window_days"]) * 86_400)
+    if not r:
+        return None, 0
+    return r[0] / budget, int(r[1] or 0)
 
 
 async def _sec_slo_attainment(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
     try:
-        from app.services.apm_slo_service import compute_slo_status, _load_slos
+        from app.services.apm_slo_service import _load_slos
         slos = await _load_slos(ctx.db)
         for slo in slos:
+            objective = f"{slo['target']}% / {slo['window_days']}d"
+            if slo.get("sli_type") == "custom":
+                rows_out.append([slo["name"], slo["service_name"], objective, "—", "Not evaluated"])
+                continue
             try:
-                st = compute_slo_status(slo)
-                remaining = max(0.0, 1.0 - float(st.get("budget_consumed") or 0)) * 100
-                rows_out.append([
-                    slo["name"], slo["service_name"], f"{slo['target']}% / {slo['window_days']}d",
-                    f"{remaining:.0f}%",
-                    "BREACHING" if (st.get("budget_consumed") or 0) >= 1 else
-                    "AT RISK" if remaining < 25 else "ON TRACK",
-                ])
+                consumed, _requests = await asyncio.to_thread(_slo_budget, slo)
             except Exception:
-                rows_out.append([slo["name"], slo["service_name"],
-                                 f"{slo['target']}% / {slo['window_days']}d", "—", "—"])
+                logger.debug("slo budget unavailable for %s", slo.get("name"), exc_info=True)
+                consumed = None
+            if consumed is None:
+                # No requests in the SLO window: nothing was measured, so the
+                # budget is unknown -- never "100% remaining / on track".
+                rows_out.append([slo["name"], slo["service_name"], objective, "—", "No data"])
+                continue
+            remaining = max(0.0, 1.0 - consumed) * 100
+            rows_out.append([
+                slo["name"], slo["service_name"], objective, f"{remaining:.0f}%",
+                "BREACHING" if consumed >= 1 else "AT RISK" if remaining < 25 else "ON TRACK",
+            ])
     except Exception:
         logger.debug("slo section unavailable", exc_info=True)
+    notes = (["Error budgets are measured over each SLO's own trailing window ending when the report "
+              "was generated, not over the report period."] if rows_out else ["No SLOs defined."])
     return _section(
         "slo_attainment", "SLO Attainment",
         tables=[{"headers": ["SLO", "Service", "Objective", "Budget remaining", "Status"],
                  "styles": ["text", "text", "text", "pct-bar", "status"], "rows": rows_out}],
-        notes=[] if rows_out else ["No SLOs defined."],
+        notes=notes,
     )
 
 
@@ -825,15 +1124,15 @@ async def _sec_synthetics(ctx: SectionCtx) -> dict:
             "SELECT id::text, name, status FROM apm_synthetic_monitors ORDER BY name"))).fetchall()
         if mons:
             import uuid as _uuid
-            stats = ctx.ch().query(
+            stats = await ctx.ch_rows(
                 """
                 SELECT monitor_id, count(), countIf(success = 1), avg(total_ms)
                 FROM zenplus.apm_synthetic_results
                 WHERE monitor_id IN %(ids)s AND timestamp >= %(f)s AND timestamp <= %(t)s
                 GROUP BY monitor_id
                 """,
-                parameters={"ids": [_uuid.UUID(m[0]) for m in mons], "f": ctx.frm, "t": ctx.to},
-            ).result_rows
+                {"ids": [_uuid.UUID(m[0]) for m in mons], "f": ctx.frm, "t": ctx.to},
+            )
             smap = {str(r[0]): r for r in stats}
             for m in mons:
                 s = smap.get(m[0])
@@ -857,104 +1156,130 @@ async def _sec_synthetics(ctx: SectionCtx) -> dict:
 USER_EXPR = ("if(attributes_string['enduser.id'] != '', "
              "attributes_string['enduser.id'], attributes_string['user.id'])")
 
+# zenplus.apm_spans keeps request-level spans for 14 days (migrate-098); the
+# usage sections read them, so every one of them is clamped to that and says so.
+SPAN_RETENTION_DAYS = 14
+
+
+def _span_window(ctx: SectionCtx) -> tuple[Optional[datetime], Optional[datetime], list[str]]:
+    """(from, to, notes) clamped to raw span retention (naive UTC); from is
+    None when nothing of the period is retained."""
+    reach = datetime.now(timezone.utc) - timedelta(days=SPAN_RETENTION_DAYS)
+    frm, to = _aware_utc(ctx.frm), _aware_utc(ctx.to)
+    if to <= reach:
+        return None, None, [f"Request-level span data is kept for {SPAN_RETENTION_DAYS} days; none "
+                            "of this period is retained."]
+    if frm < reach:
+        return (_naive_utc(reach), _naive_utc(to),
+                [ctx.window_note(SPAN_RETENTION_DAYS, "Request-level span data")
+                 or f"Request-level span data is kept for {SPAN_RETENTION_DAYS} days."])
+    return _naive_utc(frm), _naive_utc(to), []
+
 
 async def _sec_usage_kpis(ctx: SectionCtx) -> dict:
     reqs = users = pages = errors = 0
-    p95 = 0.0
-    series_png = None
+    p95: Optional[float] = None
+    points: list[dict] = []
+    frm, to, notes = _span_window(ctx)
     try:
-        # Raw spans carry a 7-day TTL; clamp so long windows stay honest.
-        frm = max(ctx.frm, datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)) \
-            if ctx.frm.tzinfo is None else max(ctx.frm, datetime.now(timezone.utc) - timedelta(days=7))
-        t = ctx.ch().query(
-            f"""
-            SELECT count(), uniqIf({USER_EXPR}, {USER_EXPR} != ''),
-                   uniqIf(http_route, http_route != ''), countIf(has_error = 1),
-                   quantile(0.95)(duration_nano) / 1e6
-            FROM zenplus.apm_spans
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND span_kind_str IN {ENTRY_KINDS}
-            """, parameters={"f": frm, "t": ctx.to}).result_rows[0]
-        reqs, users, pages, errors, p95 = int(t[0]), int(t[1]), int(t[2]), int(t[3]), float(t[4] or 0)
-        series = ctx.ch().query(
-            f"""
-            SELECT toStartOfInterval(timestamp, INTERVAL {ctx.bucket()}) AS b, count()
-            FROM zenplus.apm_spans
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND span_kind_str IN {ENTRY_KINDS}
-            GROUP BY b ORDER BY b
-            """, parameters={"f": frm, "t": ctx.to}).result_rows
-        series_pts = [(r[0], float(r[1])) for r in series]
-        series_png = _make_line_chart([t for t, _ in series_pts], [v for _, v in series_pts],
-                                      ylabel="requests", color=HEX_PRIMARY)
+        if frm is not None:
+            t = (await ctx.ch_rows(
+                f"""
+                SELECT count(), uniqIf({USER_EXPR}, {USER_EXPR} != ''),
+                       uniqIf(http_route, http_route != ''), countIf(has_error = 1),
+                       quantile(0.95)(duration_nano) / 1e6
+                FROM zenplus.apm_spans
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND span_kind_str IN {ENTRY_KINDS}
+                """, {"f": frm, "t": to}))[0]
+            reqs, users, pages, errors = int(t[0]), int(t[1]), int(t[2]), int(t[3])
+            p95 = _finite(t[4]) if reqs else None
+            bucket_sql, bucket_params = ctx.ch_bucket("timestamp")
+            series = await ctx.ch_rows(
+                f"""
+                SELECT {bucket_sql} AS b, count()
+                FROM zenplus.apm_spans
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND span_kind_str IN {ENTRY_KINDS}
+                GROUP BY b ORDER BY b
+                """, {"f": frm, "t": to, **bucket_params})
+            points = [{"t": ctx.iso(r[0]), "v": float(r[1])} for r in series]
     except Exception:
         logger.debug("usage kpis unavailable", exc_info=True)
+    err_rate = errors / reqs * 100 if reqs else None
     return _section(
         "usage_kpis", "Usage Summary",
-        description="Application traffic and audience (usage data window is bounded to 7 days).",
+        description=(f"Application traffic and audience from request-level spans (kept for "
+                     f"{SPAN_RETENTION_DAYS} days)."),
         kpis=[
             {"label": "Requests", "value": f"{reqs:,}", "accent": "primary"},
             {"label": "Unique users", "value": f"{users:,}", "accent": "info"},
             {"label": "Pages", "value": f"{pages:,}", "accent": "primary"},
-            {"label": "Error rate", "value": _fmt_pct(errors / reqs * 100 if reqs else 0),
-             "accent": "danger" if reqs and errors / reqs > 0.02 else "success"},
+            {"label": "Error rate", "value": _fmt_pct(err_rate),
+             "accent": "neutral" if err_rate is None else "danger" if err_rate > 2 else "success"},
             {"label": "P95 latency", "value": _fmt_ms(p95), "accent": "warning"},
         ],
-        charts=([{"title": "Request volume", "png": series_png,
+        charts=([{"title": "Request volume",
                   "series": {"kind": "area", "unit": "requests", "color": "primary",
-                             "points": [{"t": t.isoformat(), "v": v}
-                                        for t, v in series_pts]}}] if series_png else []),
+                             "points": points}}] if points else []),
+        notes=notes,
     )
 
 
 async def _sec_usage_pages(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
+    frm, to, notes = _span_window(ctx)
     try:
-        rows = ctx.ch().query(
-            f"""
-            SELECT http_route, anyHeavy(service_name), count() AS hits,
-                   uniqIf({USER_EXPR}, {USER_EXPR} != ''), countIf(has_error = 1),
-                   quantile(0.95)(duration_nano) / 1e6
-            FROM zenplus.apm_spans
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s
-              AND span_kind_str IN {ENTRY_KINDS} AND http_route != ''
-            GROUP BY http_route ORDER BY hits DESC LIMIT 15
-            """, parameters={"f": ctx.frm, "t": ctx.to}).result_rows
-        for r in rows:
-            hits = int(r[2])
-            rows_out.append([r[0], str(r[1]), f"{hits:,}", f"{int(r[3]):,}",
-                             _fmt_pct(int(r[4]) / hits * 100 if hits else 0), _fmt_ms(float(r[5] or 0))])
+        if frm is not None:
+            rows = await ctx.ch_rows(
+                f"""
+                SELECT http_route, anyHeavy(service_name), count() AS hits,
+                       uniqIf({USER_EXPR}, {USER_EXPR} != ''), countIf(has_error = 1),
+                       quantile(0.95)(duration_nano) / 1e6
+                FROM zenplus.apm_spans
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s
+                  AND span_kind_str IN {ENTRY_KINDS} AND http_route != ''
+                GROUP BY http_route ORDER BY hits DESC LIMIT {_top_n(ctx, 15)}
+                """, {"f": frm, "t": to})
+            for r in rows:
+                hits = int(r[2])
+                rows_out.append([r[0], str(r[1]), f"{hits:,}", f"{int(r[3]):,}",
+                                 _fmt_pct(int(r[4]) / hits * 100 if hits else None), _fmt_ms(_finite(r[5]))])
     except Exception:
         logger.debug("usage pages unavailable", exc_info=True)
     return _section("usage_pages", "Top Pages",
                     tables=[{"headers": ["Route", "Service", "Hits", "Users", "Error rate", "P95"],
                              "styles": ["mono", "text", "num", "num", "num", "num"],
-                             "rows": rows_out}])
+                             "rows": rows_out}],
+                    notes=notes)
 
 
 async def _sec_usage_users(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
+    frm, to, notes = _span_window(ctx)
     try:
-        rows = ctx.ch().query(
-            f"""
-            SELECT {USER_EXPR} AS uid, count() AS reqs, countIf(has_error = 1),
-                   uniqIf(http_route, http_route != ''), max(timestamp)
-            FROM zenplus.apm_spans
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s
-              AND span_kind_str IN {ENTRY_KINDS} AND {USER_EXPR} != ''
-            GROUP BY uid ORDER BY reqs DESC LIMIT 15
-            """, parameters={"f": ctx.frm, "t": ctx.to}).result_rows
-        for r in rows:
-            rows_out.append([r[0], f"{int(r[1]):,}", f"{int(r[2]):,}", f"{int(r[3]):,}",
-                             r[4].strftime("%m-%d %H:%M") if r[4] else "—"])
+        if frm is not None:
+            rows = await ctx.ch_rows(
+                f"""
+                SELECT {USER_EXPR} AS uid, count() AS reqs, countIf(has_error = 1),
+                       uniqIf(http_route, http_route != ''), max(timestamp)
+                FROM zenplus.apm_spans
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s
+                  AND span_kind_str IN {ENTRY_KINDS} AND {USER_EXPR} != ''
+                GROUP BY uid ORDER BY reqs DESC LIMIT {_top_n(ctx, 15)}
+                """, {"f": frm, "t": to})
+            for r in rows:
+                rows_out.append([r[0], f"{int(r[1]):,}", f"{int(r[2]):,}", f"{int(r[3]):,}",
+                                 ctx.fmt_short(r[4])])
     except Exception:
         logger.debug("usage users unavailable", exc_info=True)
+    if not rows_out and frm is not None:
+        notes = notes + ["No user attribution — set the enduser.id span attribute to unlock "
+                         "per-user analytics."]
     return _section(
         "usage_users", "Top Users",
         tables=[{"headers": ["User", "Requests", "Errors", "Pages", "Last seen"],
                  "styles": ["mono", "num", "num", "num", "num"], "rows": rows_out}],
-        notes=[] if rows_out else
-        ["No user attribution — set the enduser.id span attribute to unlock per-user analytics."],
+        notes=notes,
     )
-
 
 # ─── Browser RUM sections ───────────────────────────────────────────────────
 #
@@ -963,6 +1288,13 @@ async def _sec_usage_users(ctx: SectionCtx) -> dict:
 # how many people used the product, what did they use, and was it fast and
 # reliable for them. Google's Core Web Vitals thresholds are used verbatim so
 # the verdicts match what Search Console and PageSpeed report.
+#
+# Counting follows the RUM pages (app/api/v1/rum.py) exactly: a page view is
+# counted once (its view_start record; legacy SDKs send one record per view),
+# sessions and views are keyed by application + environment, Web Vitals take
+# one finalized, sampled sample per view, and a period older than raw-event
+# retention is read from the 5-minute rollup (apm_rum_metrics_5m), which keeps
+# no individual users or error details.
 
 # metric -> (good_max, poor_min, unit) using the p75 the Web Vitals spec scores on.
 _VITAL_THRESHOLDS = {
@@ -972,6 +1304,13 @@ _VITAL_THRESHOLDS = {
     "FCP": (1800.0, 3000.0, "ms"),
     "TTFB": (800.0, 1800.0, "ms"),
 }
+_VITAL_ORDER = ("LCP", "INP", "CLS", "FCP", "TTFB")
+
+RUM_VIEW_ONCE = ("sampled = 1 AND event_type = 'view' "
+                 "AND (sdk_version = '' OR (is_final = 0 AND end_reason = 'view_start'))")
+RUM_VIEWS_SQL = f"uniqExactIf((application_id, env, view_id), {RUM_VIEW_ONCE})"
+RUM_SESSIONS_SQL = "uniqExactIf((application_id, env, session_id), sampled = 1)"
+RUM_RAW_RETENTION_DAYS = 14   # default; the RUM settings page may change it
 
 
 def _vital_verdict(metric: str, value: Optional[float]) -> tuple[str, str]:
@@ -992,254 +1331,396 @@ def _fmt_vital(metric: str, value: Optional[float]) -> str:
     return f"{value:.3f}" if metric == "CLS" else _fmt_ms(value)
 
 
+def _rum_raw_days() -> int:
+    """Raw RUM event retention as the RUM API last read it (default 14 days)."""
+    try:
+        from app.api.v1.rum import _RETENTION_CACHE
+        return max(1, int(_RETENTION_CACHE.get("raw", RUM_RAW_RETENTION_DAYS)))
+    except Exception:
+        return RUM_RAW_RETENTION_DAYS
+
+
+def _rum_source(ctx: SectionCtx) -> dict:
+    """Which RUM table answers this window: raw events while the whole period
+    is within raw retention, else the 5-minute rollup (cached per render)."""
+    if "rum_source" not in ctx._cache:
+        days = _rum_raw_days()
+        reach = datetime.now(timezone.utc) - timedelta(days=days)
+        rollup = _aware_utc(ctx.frm) < reach
+        ctx._cache["rum_source"] = {
+            "rollup": rollup, "raw_days": days, "reach": reach,
+            "note": (f"Browser events are kept for {days} days; this period is read from 5-minute "
+                     "aggregates, which do not keep individual users or error details.") if rollup else None,
+        }
+    return ctx._cache["rum_source"]
+
+
+def _rum_scope(ctx: SectionCtx, extra: str = "") -> str:
+    return f"timestamp >= %(f)s AND timestamp <= %(t)s{extra}{ctx.rum_app_clause()}"
+
+
+def _per_view_sql(ctx: SectionCtx, extra: str = "", group_by: str = "application_id, env, view_id") -> str:
+    """One finalized, sampled Web Vitals sample per page view (rum.py's
+    per-view collapse), over this section's raw window."""
+    from app.api.v1.rum import _per_view_vitals_sql
+    return _per_view_vitals_sql(_rum_scope(ctx, extra), group_by)
+
+
+def _p75(value: Any, samples: Any) -> Optional[float]:
+    return _finite(value) if int(samples or 0) > 0 else None
+
+
 async def _sec_rum_audience(ctx: SectionCtx) -> dict:
-    sessions = users = views = actions = 0
+    sessions = views = actions = 0
+    users: Optional[int] = 0
     per_session = 0.0
-    series_pts: list[tuple[datetime, float]] = []
-    series_png = None
+    points: list[dict] = []
+    src = _rum_source(ctx)
     try:
         app = ctx.rum_app_clause()
-        t = ctx.ch().query(
-            f"""
-            SELECT uniq(session_id),
-                   uniqIf(user_id, user_id != ''),
-                   countIf(event_type = 'view'),
-                   countIf(event_type = 'action')
-            FROM zenplus.apm_rum_events
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
-            """, parameters=ctx.rum_params()).result_rows[0]
-        sessions, users, views, actions = int(t[0]), int(t[1]), int(t[2]), int(t[3])
+        bucket_sql, bucket_params = ctx.ch_bucket("timestamp")
+        if src["rollup"]:
+            t = (await ctx.ch_rows(
+                f"""
+                SELECT uniqCombined64Merge(sessions), uniqCombined64Merge(views), sum(actions)
+                FROM zenplus.apm_rum_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                """, ctx.rum_params()))[0]
+            sessions, views, actions = int(t[0] or 0), int(t[1] or 0), int(t[2] or 0)
+            users = None
+            rows = await ctx.ch_rows(
+                f"""
+                SELECT {bucket_sql} AS b, uniqCombined64Merge(sessions)
+                FROM zenplus.apm_rum_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                GROUP BY b ORDER BY b
+                """, ctx.rum_params(**bucket_params))
+        else:
+            t = (await ctx.ch_rows(
+                f"""
+                SELECT {RUM_SESSIONS_SQL},
+                       uniqIf(user_id, user_id != ''),
+                       {RUM_VIEWS_SQL},
+                       countIf(event_type = 'action' AND sampled = 1)
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                """, ctx.rum_params()))[0]
+            sessions, users, views, actions = int(t[0]), int(t[1]), int(t[2]), int(t[3])
+            rows = await ctx.ch_rows(
+                f"""
+                SELECT {bucket_sql} AS b, {RUM_SESSIONS_SQL}
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                GROUP BY b ORDER BY b
+                """, ctx.rum_params(**bucket_params))
         per_session = views / sessions if sessions else 0.0
-        rows = ctx.ch().query(
-            f"""
-            SELECT toStartOfInterval(timestamp, INTERVAL {ctx.bucket()}) AS b,
-                   uniq(session_id)
-            FROM zenplus.apm_rum_events
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
-            GROUP BY b ORDER BY b
-            """, parameters=ctx.rum_params()).result_rows
-        series_pts = [(r[0], float(r[1])) for r in rows]
-        if len(series_pts) >= 2:
-            series_png = _make_line_chart([p[0] for p in series_pts], [p[1] for p in series_pts],
-                                          ylabel="sessions", color=HEX_PRIMARY)
+        points = [{"t": ctx.iso(r[0]), "v": float(r[1] or 0)} for r in rows]
     except Exception:
         logger.debug("rum audience unavailable", exc_info=True)
+    if users is None:
+        user_kpi = {"label": "Unique users", "value": "—", "accent": "info",
+                    "subtitle": f"not kept beyond {src['raw_days']} days"}
+    else:
+        user_kpi = {"label": "Unique users", "value": f"{users:,}", "accent": "info",
+                    "subtitle": "signed-in identities" if users else "no user attribution"}
+    notes = ([src["note"]] if src["note"] else [])
+    if not sessions:
+        notes.append("No browser telemetry in this window — install a Browser RUM key from APM "
+                     "Settings → Ingest keys.")
     return _section(
         "rum_audience", "Audience & Engagement",
         description="Real people who opened the application in a browser during this period.",
         kpis=[
             {"label": "Sessions", "value": f"{sessions:,}", "accent": "primary"},
-            {"label": "Unique users", "value": f"{users:,}", "accent": "info",
-             "subtitle": "signed-in identities" if users else "no user attribution"},
+            user_kpi,
             {"label": "Page views", "value": f"{views:,}", "accent": "primary"},
             {"label": "Views / session", "value": f"{per_session:.1f}", "accent": "info",
              "subtitle": "engagement depth"},
             {"label": "User actions", "value": f"{actions:,}", "accent": "success",
              "subtitle": "clicks and interactions"},
         ],
-        charts=([{"title": "Sessions over time", "png": series_png,
+        charts=([{"title": "Sessions over time",
                   "series": {"kind": "area", "unit": "sessions", "color": "primary",
-                             "points": [{"t": t.isoformat(), "v": v} for t, v in series_pts]}}]
-                if series_png else []),
-        notes=[] if sessions else
-        ["No browser telemetry in this window — install a Browser RUM key from APM Settings → Ingest keys."],
+                             "points": points}}]
+                if len(points) >= 2 else []),
+        notes=notes,
     )
 
 
 async def _sec_rum_experience(ctx: SectionCtx) -> dict:
     vitals: dict[str, Optional[float]] = {k: None for k in _VITAL_THRESHOLDS}
     good = needs = poor = 0
-    donut_png = None
+    src = _rum_source(ctx)
+    lcp_good, lcp_poor, _ = _VITAL_THRESHOLDS["LCP"]
     try:
         app = ctx.rum_app_clause()
-        r = ctx.ch().query(
-            f"""
-            SELECT quantileIf(0.75)(lcp, has_lcp = 1),
-                   quantileIf(0.75)(inp, has_inp = 1),
-                   quantileIf(0.75)(cls, has_cls = 1),
-                   quantileIf(0.75)(fcp, has_fcp = 1),
-                   quantileIf(0.75)(ttfb, has_ttfb = 1),
-                   countIf(has_lcp = 1 AND lcp <= 2500),
-                   countIf(has_lcp = 1 AND lcp > 2500 AND lcp <= 4000),
-                   countIf(has_lcp = 1 AND lcp > 4000)
-            FROM zenplus.apm_rum_events
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
-            """, parameters=ctx.rum_params()).result_rows[0]
-        for i, k in enumerate(["LCP", "INP", "CLS", "FCP", "TTFB"]):
-            v = r[i]
-            # An empty quantile comes back as nan, which is not JSON-encodable.
-            vitals[k] = float(v) if v is not None and float(v) == float(v) else None
-        good, needs, poor = int(r[5]), int(r[6]), int(r[7])
-        if good + needs + poor:
-            donut_png = _make_donut(
-                ["Good", "Needs work", "Poor"],
-                [float(good), float(needs), float(poor)],
-                colors=[HEX_SUCCESS, HEX_WARNING, "#E5484D"],
-                unit="views",
-            )
+        if src["rollup"]:
+            r = (await ctx.ch_rows(
+                f"""
+                SELECT quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
+                       quantileTDigestMerge(0.75)(inp), sum(inp_samples),
+                       quantileTDigestMerge(0.75)(cls), sum(cls_samples),
+                       quantileTDigestMerge(0.75)(fcp), sum(fcp_samples),
+                       quantileTDigestMerge(0.75)(ttfb), sum(ttfb_samples),
+                       sum(lcp_good), sum(lcp_poor), sum(lcp_rated)
+                FROM zenplus.apm_rum_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                """, ctx.rum_params()))[0]
+            good, poor, rated = int(r[10] or 0), int(r[11] or 0), int(r[12] or 0)
+            needs = max(rated - good - poor, 0)
+        else:
+            r = (await ctx.ch_rows(
+                f"""
+                SELECT quantileTDigestIf(0.75)(lcp_value, lcp_present = 1), countIf(lcp_present = 1),
+                       quantileTDigestIf(0.75)(inp_value, inp_present = 1), countIf(inp_present = 1),
+                       quantileTDigestIf(0.75)(cls_value, cls_present = 1), countIf(cls_present = 1),
+                       quantileTDigestIf(0.75)(fcp_value, fcp_present = 1), countIf(fcp_present = 1),
+                       quantileTDigestIf(0.75)(ttfb_value, ttfb_present = 1), countIf(ttfb_present = 1),
+                       countIf(lcp_present = 1 AND lcp_value <= {lcp_good}),
+                       countIf(lcp_present = 1 AND lcp_value > {lcp_good} AND lcp_value <= {lcp_poor}),
+                       countIf(lcp_present = 1 AND lcp_value > {lcp_poor})
+                FROM ({_per_view_sql(ctx)})
+                """, ctx.rum_params()))[0]
+            good, needs, poor = int(r[10] or 0), int(r[11] or 0), int(r[12] or 0)
+        for i, k in enumerate(_VITAL_ORDER):
+            vitals[k] = _p75(r[2 * i], r[2 * i + 1])
     except Exception:
         logger.debug("rum experience unavailable", exc_info=True)
 
     kpis = []
-    for k in ["LCP", "INP", "CLS", "FCP", "TTFB"]:
+    for k in _VITAL_ORDER:
         verdict, accent = _vital_verdict(k, vitals[k])
         kpis.append({"label": f"{k} (p75)", "value": _fmt_vital(k, vitals[k]),
                      "accent": accent, "subtitle": verdict})
     total = good + needs + poor
+    notes = [src["note"]] if src["note"] else []
+    notes.append(f"{good / total * 100:.0f}% of page loads met the “Good” bar for LCP." if total else
+                 "No Core Web Vitals collected yet — vitals arrive once real visitors load an "
+                 "instrumented page.")
     return _section(
         "rum_experience", "Real-User Experience",
         description=("Core Web Vitals at the 75th percentile — the score Google applies to "
                      "search ranking, measured on your real visitors' devices."),
         kpis=kpis,
-        charts=([{"title": "Page-load experience (LCP)", "png": donut_png,
+        charts=([{"title": "Page-load experience (LCP)",
                   "series": {"kind": "donut", "unit": "views",
                              "points": [{"label": "Good", "value": good},
                                         {"label": "Needs work", "value": needs},
                                         {"label": "Poor", "value": poor}]}}]
-                if donut_png else []),
-        notes=([f"{good / total * 100:.0f}% of page loads met the “Good” bar for LCP."]
-               if total else
-               ["No Core Web Vitals collected yet — vitals arrive once real visitors load an instrumented page."]),
+                if total else []),
+        notes=notes,
     )
 
 
 async def _sec_rum_top_pages(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
-    bar_png = None
+    ranked: list[tuple[str, int]] = []
+    src = _rum_source(ctx)
+    top = _top_n(ctx, 15)
     try:
         app = ctx.rum_app_clause()
-        rows = ctx.ch().query(
-            f"""
-            SELECT view_name,
-                   countIf(event_type = 'view') AS views,
-                   uniq(session_id),
-                   uniqIf(user_id, user_id != ''),
-                   quantileIf(0.75)(lcp, has_lcp = 1),
-                   quantileIf(0.75)(load_ms, has_load = 1),
-                   countIf(event_type = 'error')
-            FROM zenplus.apm_rum_events
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND view_name != ''{app}
-            GROUP BY view_name ORDER BY views DESC LIMIT 15
-            """, parameters=ctx.rum_params()).result_rows
-        labels, values = [], []
-        for r in rows:
-            lcp = float(r[4]) if r[4] is not None and float(r[4]) == float(r[4]) else None
-            load = float(r[5]) if r[5] is not None and float(r[5]) == float(r[5]) else None
-            rows_out.append([r[0], f"{int(r[1]):,}", f"{int(r[2]):,}", f"{int(r[3]):,}",
-                             _fmt_vital("LCP", lcp), _fmt_ms(load) if load else "—",
-                             f"{int(r[6]):,}"])
-            labels.append(r[0])
-            values.append(float(r[1]))
-        if labels:
-            bar_png = _make_bar_chart(labels[:10], values[:10], ylabel="views")
+        if src["rollup"]:
+            rows = await ctx.ch_rows(
+                f"""
+                SELECT view_name, uniqCombined64Merge(views) AS v, uniqCombined64Merge(sessions),
+                       quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
+                       quantileTDigestMerge(0.75)(load_ms), sum(load_samples), sum(errors)
+                FROM zenplus.apm_rum_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND view_name != ''{app}
+                GROUP BY view_name ORDER BY v DESC LIMIT {top}
+                """, ctx.rum_params())
+            for r in rows:
+                lcp, load = _p75(r[3], r[4]), _p75(r[5], r[6])
+                rows_out.append([r[0], f"{int(r[1]):,}", f"{int(r[2]):,}", "—",
+                                 _fmt_vital("LCP", lcp), _fmt_ms(load), f"{int(r[7] or 0):,}"])
+                ranked.append((r[0], int(r[1])))
+        else:
+            rows = await ctx.ch_rows(
+                f"""
+                SELECT view_name, {RUM_VIEWS_SQL} AS v, {RUM_SESSIONS_SQL},
+                       uniqIf(user_id, user_id != ''), countIf(event_type = 'error')
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND view_name != ''{app}
+                GROUP BY view_name ORDER BY v DESC LIMIT {top}
+                """, ctx.rum_params())
+            vit: dict[str, tuple] = {}
+            names = [r[0] for r in rows]
+            if names:
+                vrows = await ctx.ch_rows(
+                    f"""
+                    SELECT view_name,
+                           quantileTDigestIf(0.75)(lcp_value, lcp_present = 1), countIf(lcp_present = 1),
+                           quantileTDigestIf(0.75)(load_value, load_present = 1), countIf(load_present = 1)
+                    FROM ({_per_view_sql(ctx, " AND view_name IN %(names)s",
+                                         "application_id, env, view_name, view_id")})
+                    GROUP BY view_name
+                    """, ctx.rum_params(names=names))
+                vit = {v[0]: v for v in vrows}
+            for r in rows:
+                v = vit.get(r[0])
+                lcp = _p75(v[1], v[2]) if v else None
+                load = _p75(v[3], v[4]) if v else None
+                rows_out.append([r[0], f"{int(r[1]):,}", f"{int(r[2]):,}", f"{int(r[3]):,}",
+                                 _fmt_vital("LCP", lcp), _fmt_ms(load), f"{int(r[4]):,}"])
+                ranked.append((r[0], int(r[1])))
     except Exception:
         logger.debug("rum top pages unavailable", exc_info=True)
     return _section(
         "rum_top_pages", "Most-Visited Pages",
         description="Where visitors actually spend their attention, and how each page performs.",
-        charts=([{"title": "Views by page", "png": bar_png,
+        charts=([{"title": "Views by page",
                   "series": {"kind": "rank", "unit": "views", "color": "primary",
-                             "points": [{"label": r[0], "value": int(r[1].replace(",", ""))}
-                                        for r in rows_out[:10]]}}]
-                if bar_png else []),
+                             "points": [{"label": name, "value": n} for name, n in ranked[:10]]}}]
+                if ranked else []),
         tables=[{"headers": ["Page", "Views", "Sessions", "Users", "LCP p75", "Load p75", "Errors"],
                  "styles": ["text", "num", "num", "num", "num", "num", "num"],
                  "rows": rows_out}],
+        notes=[src["note"]] if src["note"] else [],
     )
 
 
 async def _sec_rum_segments(ctx: SectionCtx) -> dict:
     device_rows: list[list[str]] = []
     browser_rows: list[list[str]] = []
-    donut_png = None
+    device_points: list[dict] = []
+    src = _rum_source(ctx)
     try:
         app = ctx.rum_app_clause()
-        drows = ctx.ch().query(
-            f"""
-            SELECT device_type, uniq(session_id) AS s, countIf(event_type = 'view'),
-                   quantileIf(0.75)(lcp, has_lcp = 1)
-            FROM zenplus.apm_rum_events
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND device_type != ''{app}
-            GROUP BY device_type ORDER BY s DESC LIMIT 10
-            """, parameters=ctx.rum_params()).result_rows
+        if src["rollup"]:
+            drows = await ctx.ch_rows(
+                f"""
+                SELECT device_type, uniqCombined64Merge(sessions) AS s, uniqCombined64Merge(views),
+                       quantileTDigestMerge(0.75)(lcp), sum(lcp_samples)
+                FROM zenplus.apm_rum_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND device_type != ''{app}
+                GROUP BY device_type ORDER BY s DESC LIMIT 10
+                """, ctx.rum_params())
+            lcp_by_device = {r[0]: _p75(r[3], r[4]) for r in drows}
+            brows = await ctx.ch_rows(
+                f"""
+                SELECT browser, anyHeavy(os), uniqCombined64Merge(sessions) AS s,
+                       uniqCombined64Merge(views), sum(errors)
+                FROM zenplus.apm_rum_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND browser != ''{app}
+                GROUP BY browser ORDER BY s DESC LIMIT 10
+                """, ctx.rum_params())
+        else:
+            drows = await ctx.ch_rows(
+                f"""
+                SELECT device_type, {RUM_SESSIONS_SQL} AS s, {RUM_VIEWS_SQL}
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND device_type != ''{app}
+                GROUP BY device_type ORDER BY s DESC LIMIT 10
+                """, ctx.rum_params())
+            lcp_by_device = {}
+            if drows:
+                vrows = await ctx.ch_rows(
+                    f"""
+                    SELECT device_type,
+                           quantileTDigestIf(0.75)(lcp_value, lcp_present = 1), countIf(lcp_present = 1)
+                    FROM ({_per_view_sql(ctx, " AND device_type != ''",
+                                         "application_id, env, device_type, view_id")})
+                    GROUP BY device_type
+                    """, ctx.rum_params())
+                lcp_by_device = {v[0]: _p75(v[1], v[2]) for v in vrows}
+            brows = await ctx.ch_rows(
+                f"""
+                SELECT browser, anyHeavy(os), {RUM_SESSIONS_SQL} AS s,
+                       {RUM_VIEWS_SQL}, countIf(event_type = 'error')
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND browser != ''{app}
+                GROUP BY browser ORDER BY s DESC LIMIT 10
+                """, ctx.rum_params())
         total_sessions = sum(int(r[1]) for r in drows) or 1
-        dev_labels, dev_values = [], []
         for r in drows:
-            lcp = float(r[3]) if r[3] is not None and float(r[3]) == float(r[3]) else None
-            device_rows.append([r[0].title(), f"{int(r[1]):,}",
+            label = str(r[0]).title()
+            device_rows.append([label, f"{int(r[1]):,}",
                                 _fmt_pct(int(r[1]) / total_sessions * 100, 1),
-                                f"{int(r[2]):,}", _fmt_vital("LCP", lcp)])
-            dev_labels.append(r[0].title())
-            dev_values.append(float(r[1]))
-        if dev_labels:
-            donut_png = _make_donut(dev_labels, dev_values, unit="sessions")
-
-        brows = ctx.ch().query(
-            f"""
-            SELECT browser, anyHeavy(os), uniq(session_id) AS s,
-                   countIf(event_type = 'view'), countIf(event_type = 'error')
-            FROM zenplus.apm_rum_events
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND browser != ''{app}
-            GROUP BY browser ORDER BY s DESC LIMIT 10
-            """, parameters=ctx.rum_params()).result_rows
+                                f"{int(r[2]):,}", _fmt_vital("LCP", lcp_by_device.get(r[0]))])
+            device_points.append({"label": label, "value": int(r[1])})
         for r in brows:
             browser_rows.append([r[0], str(r[1] or "—"), f"{int(r[2]):,}",
-                                 f"{int(r[3]):,}", f"{int(r[4]):,}"])
+                                 f"{int(r[3]):,}", f"{int(r[4] or 0):,}"])
     except Exception:
         logger.debug("rum segments unavailable", exc_info=True)
     return _section(
         "rum_segments", "Audience Segments",
         description="Which devices and browsers your visitors use — and whether any of them get a worse experience.",
-        charts=([{"title": "Sessions by device", "png": donut_png,
-                  "series": {"kind": "donut", "unit": "sessions",
-                             "points": [{"label": r[0], "value": int(r[1].replace(",", ""))}
-                                        for r in device_rows]}}]
-                if donut_png else []),
+        charts=([{"title": "Sessions by device",
+                  "series": {"kind": "donut", "unit": "sessions", "points": device_points}}]
+                if device_points else []),
         tables=[
             {"title": "By device", "headers": ["Device", "Sessions", "Share", "Views", "LCP p75"],
              "styles": ["text", "num", "num", "num", "num"], "rows": device_rows},
             {"title": "By browser", "headers": ["Browser", "OS", "Sessions", "Views", "Errors"],
              "styles": ["text", "text", "num", "num", "num"], "rows": browser_rows},
         ],
+        notes=[src["note"]] if src["note"] else [],
     )
 
 
 async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
-    errors = distinct = affected_sessions = affected_users = 0
-    views = 0
+    errors = affected_sessions = views = 0
+    distinct: Optional[int] = 0
+    affected_users: Optional[int] = 0
     rows_out: list[list[str]] = []
+    src = _rum_source(ctx)
+    notes: list[str] = []
     try:
         app = ctx.rum_app_clause()
-        t = ctx.ch().query(
-            f"""
-            SELECT countIf(event_type = 'error'),
-                   uniqIf(error_fingerprint, error_fingerprint != ''),
-                   uniqIf(session_id, event_type = 'error'),
-                   uniqIf(user_id, event_type = 'error' AND user_id != ''),
-                   countIf(event_type = 'view')
-            FROM zenplus.apm_rum_events
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
-            """, parameters=ctx.rum_params()).result_rows[0]
-        errors, distinct, affected_sessions, affected_users, views = (
-            int(t[0]), int(t[1]), int(t[2]), int(t[3]), int(t[4]))
-        rows = ctx.ch().query(
+        raw_params = ctx.rum_params()
+        if src["rollup"]:
+            t = (await ctx.ch_rows(
+                f"""
+                SELECT sum(errors), uniqCombined64Merge(error_sessions), uniqCombined64Merge(views)
+                FROM zenplus.apm_rum_metrics_5m
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                """, ctx.rum_params()))[0]
+            errors, affected_sessions, views = int(t[0] or 0), int(t[1] or 0), int(t[2] or 0)
+            # Issue-level detail only exists in raw events: the retained part.
+            raw_params["f"] = _naive_utc(src["reach"])
+            notes.append(f"Error details are kept for {src['raw_days']} days; distinct issues, users "
+                         f"affected and the error list cover {ctx.fmt_date(src['reach'])} onwards.")
+            d = (await ctx.ch_rows(
+                f"""
+                SELECT uniqIf(error_fingerprint, event_type = 'error' AND error_fingerprint != ''),
+                       uniqIf(user_id, event_type = 'error' AND user_id != '')
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                """, raw_params))[0]
+            distinct, affected_users = int(d[0] or 0), int(d[1] or 0)
+        else:
+            t = (await ctx.ch_rows(
+                f"""
+                SELECT countIf(event_type = 'error'),
+                       uniqIf(error_fingerprint, event_type = 'error' AND error_fingerprint != ''),
+                       uniqExactIf((application_id, env, session_id), event_type = 'error' AND sampled = 1),
+                       uniqIf(user_id, event_type = 'error' AND user_id != ''),
+                       {RUM_VIEWS_SQL}
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+                """, raw_params))[0]
+            errors, distinct, affected_sessions, affected_users, views = (
+                int(t[0]), int(t[1]), int(t[2]), int(t[3]), int(t[4]))
+        rows = await ctx.ch_rows(
             f"""
             SELECT anyHeavy(error_message), anyHeavy(error_type), anyHeavy(view_name),
-                   count() AS n, uniq(session_id), max(timestamp)
+                   count() AS n, uniqExact((application_id, env, session_id)), max(timestamp)
             FROM zenplus.apm_rum_events
             WHERE timestamp >= %(f)s AND timestamp <= %(t)s
               AND event_type = 'error' AND error_fingerprint != ''{app}
             GROUP BY error_fingerprint ORDER BY n DESC LIMIT 12
-            """, parameters=ctx.rum_params()).result_rows
+            """, raw_params)
         for r in rows:
             msg = str(r[0] or "Unknown error")
             rows_out.append([msg if len(msg) <= 90 else msg[:89] + "…",
                              str(r[1] or "—"), str(r[2] or "—"),
-                             f"{int(r[3]):,}", f"{int(r[4]):,}",
-                             r[5].strftime("%m-%d %H:%M") if r[5] else "—"])
+                             f"{int(r[3]):,}", f"{int(r[4]):,}", ctx.fmt_short(r[5])])
     except Exception:
         logger.debug("rum reliability unavailable", exc_info=True)
-    err_rate = errors / views * 100 if views else 0.0
+    err_rate = errors / views * 100 if views else None
+    if not errors:
+        notes.append("No browser errors reported in this period.")
     return _section(
         "rum_reliability", "Reliability in the Browser",
         description="JavaScript failures real visitors hit — each one is a person who could not finish what they came to do.",
@@ -1248,83 +1729,145 @@ async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
              "accent": "danger" if errors else "success"},
             {"label": "Distinct issues", "value": f"{distinct:,}", "accent": "warning"},
             {"label": "Error rate", "value": _fmt_pct(err_rate),
-             "accent": "danger" if err_rate > 1 else "success", "subtitle": "of page views"},
+             "accent": "danger" if (err_rate or 0) > 1 else "success", "subtitle": "of page views"},
             {"label": "Sessions affected", "value": f"{affected_sessions:,}", "accent": "warning"},
-            {"label": "Users affected", "value": f"{affected_users:,}", "accent": "danger" if affected_users else "success"},
+            {"label": "Users affected", "value": f"{affected_users:,}",
+             "accent": "danger" if affected_users else "success"},
         ],
         tables=[{"headers": ["Error", "Type", "Page", "Count", "Sessions", "Last seen"],
                  "styles": ["text", "text", "text", "num", "num", "num"], "rows": rows_out}],
-        notes=[] if errors else ["No browser errors reported in this period."],
+        notes=notes,
     )
-
 
 # ─── Capacity sections ──────────────────────────────────────────────────────
 
+# Agents send filesystem inventory every few hours (6 h by default); a row
+# older than this is a volume the server no longer reports on.
+FS_FRESH_HOURS = 24
+
+
 async def _sec_capacity_filesystems(ctx: SectionCtx) -> dict:
+    """Fullest monitorable filesystems right now: the capacity filter of the
+    server health and alert rules (no install media, tmpfs, overlays …),
+    disabled servers left out, stale inventory disclosed instead of shown."""
+    from app.services.filesystem_monitoring import pg_capacity_filter
+
     rows_out: list[list[str]] = []
+    critical: Optional[int] = None
+    total = stale = 0
     try:
         rows = (await ctx.db.execute(text(
-            """
+            f"""
             SELECT COALESCE(s.display_name, s.hostname), f.mount, f.used_pct,
-                   f.total_bytes, f.free_bytes
+                   f.total_bytes, f.free_bytes,
+                   f.updated_at >= NOW() - make_interval(hours => :fresh_h) AS fresh
             FROM server_filesystem_inventory f
             JOIN servers s ON s.id = f.server_id
             WHERE f.used_pct IS NOT NULL
-            ORDER BY f.used_pct DESC LIMIT 20
-            """))).fetchall()
-        for r in rows:
+              AND COALESCE(s.status, '') <> 'disabled'
+              AND {pg_capacity_filter('f.fs_type')}
+            ORDER BY f.used_pct DESC
+            """), {"fresh_h": FS_FRESH_HOURS})).fetchall()
+        fresh = [r for r in rows if r[5]]
+        stale = len(rows) - len(fresh)
+        total = len(fresh)
+        critical = sum(1 for r in fresh if float(r[2]) >= 90)
+        for r in fresh[:_top_n(ctx, 20)]:
             rows_out.append([r[0] or "—", r[1] or "—", _fmt_pct(float(r[2]), 1),
-                             _fmt_bytes(float(r[3] or 0)), _fmt_bytes(float(r[4] or 0))])
+                             _fmt_bytes(float(r[3])) if r[3] is not None else "—",
+                             _fmt_bytes(float(r[4])) if r[4] is not None else "—"])
     except Exception:
         logger.debug("capacity filesystems unavailable", exc_info=True)
-    critical = sum(1 for r in rows_out if float(r[2].rstrip("%") or 0) >= 90)
+    notes = _shown_note(len(rows_out), total, "filesystems")
+    if stale:
+        notes.append(f"{stale} filesystem(s) not reported by their agent in the last {FS_FRESH_HOURS} hours "
+                     "are left out (stale inventory).")
     return _section(
         "capacity_filesystems", "Filesystem Capacity",
         description="Fullest filesystems across agent-monitored servers.",
-        kpis=[{"label": "Filesystems ≥90% full", "value": str(critical),
-               "accent": "danger" if critical else "success"}],
+        kpis=[{"label": "Filesystems ≥90% full", "value": "—" if critical is None else str(critical),
+               "accent": "neutral" if critical is None else "danger" if critical else "success"}],
         tables=[{"headers": ["Server", "Mount", "Used", "Size", "Free"],
                  "styles": ["text", "mono", "pct-bar", "num", "num"], "rows": rows_out}],
+        notes=notes,
     )
 
 
 async def _sec_capacity_interfaces(ctx: SectionCtx) -> dict:
-    d = await ctx.dataset("technical")
+    """Interfaces truly closest to saturation: 95th-percentile utilisation of
+    the busier direction against the effective interface speed."""
+    st = await _interface_stats(ctx)
+    assessable = [r for r in st["rows"] if r["util_p95"] is not None]
+    assessable.sort(key=lambda r: -r["util_p95"])
+    top = _top_n(ctx, 15)
     rows = [
-        [f"{i.get('hostname')} · {i.get('if_name')}",
-         _fmt_pct(i.get("utilization_pct"), 1) if i.get("utilization_pct") is not None else "—",
-         _fmt_bps((i.get("in_bps_avg") or 0) + (i.get("out_bps_avg") or 0))]
-        for i in (d.get("top_bandwidth_interfaces") or [])
-        if (i.get("utilization_pct") or 0) > 0
+        [r["label"], _fmt_bps(r["speed"]), _fmt_pct(r["util_p95"], 1),
+         _fmt_pct(r["util_avg"], 1), _fmt_bps(max(r["in_p95"], r["out_p95"]))]
+        for r in assessable[:top]
     ]
-    rows.sort(key=lambda r: -float(r[1].rstrip("%")) if r[1] != "—" else 0)
+    notes = _if_method_note(st) + _shown_note(len(rows), len(assessable), "interfaces with a known speed")
+    if st.get("speed_unknown"):
+        notes.append(f"{st['speed_unknown']} interface(s) with traffic have no known speed and cannot be "
+                     "assessed (set the circuit speed on the interface).")
     return _section(
         "capacity_interfaces", "Link Capacity Headroom",
-        description="Interfaces closest to saturation (average utilization vs configured speed).",
-        tables=[{"headers": ["Interface", "Utilization", "Avg throughput"], "rows": rows[:15]}],
+        description=("Interfaces closest to saturation: 95th-percentile utilization of the busier "
+                     "direction against the effective interface speed (configured circuit speed, "
+                     "else SNMP ifSpeed)."),
+        tables=[{"headers": ["Interface", "Speed", "P95 utilization", "Avg utilization", "P95 rate"],
+                 "styles": ["text", "num", "pct-bar", "num", "num"], "rows": rows}],
+        notes=notes,
     )
 
 
 # ─── Alerting sections ──────────────────────────────────────────────────────
 
+def _fmt_minutes(m: Optional[float]) -> str:
+    if m is None:
+        return "—"
+    if m < 1:
+        return "<1 min"
+    return f"{m:,.0f} min" if m < 600 else f"{m / 60:,.1f} h"
+
+
 async def _sec_alert_kpis(ctx: SectionCtx) -> dict:
+    """Alert incidents raised in the window by severity, and MTTR, with the
+    Alert Center's semantics: recovery notices, dependency-suppressed and
+    hold-cancelled rows are notices, not alerts (alert_workflow.notice_sql),
+    and MTTR is the mean time to recover of incidents that recovered in the
+    window (alert_service.summary)."""
+    from app.services import alert_workflow as wf
+
     counts = {"critical": 0, "warning": 0, "info": 0}
-    mttr_min = None
-    total = 0
+    total = notices = 0
+    mttr_min: Optional[float] = None
+    recovered = 0
     try:
+        notice = wf.notice_sql("a")
         rows = (await ctx.db.execute(text(
-            "SELECT severity, COUNT(*) FROM alerts WHERE triggered_at >= :f AND triggered_at <= :t "
-            "GROUP BY severity"), {"f": ctx.frm, "t": ctx.to})).fetchall()
-        for sev, c in rows:
-            counts[str(sev)] = int(c)
-            total += int(c)
-        m = (await ctx.db.execute(text(
-            "SELECT AVG(EXTRACT(EPOCH FROM (resolved_at - triggered_at)))/60 FROM alerts "
-            "WHERE resolved_at IS NOT NULL AND triggered_at >= :f AND triggered_at <= :t"),
-            {"f": ctx.frm, "t": ctx.to})).scalar()
-        mttr_min = float(m) if m is not None else None
+            f"SELECT a.severity, count(*) FILTER (WHERE NOT {notice}) AS incidents, "
+            f"count(*) FILTER (WHERE {notice}) AS notices "
+            "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at <= :t "
+            "GROUP BY a.severity"), {"f": ctx.frm, "t": ctx.to})).fetchall()
+        for sev, n_incidents, n_notices in rows:
+            key = str(sev or "info").lower()
+            counts[key] = counts.get(key, 0) + int(n_incidents or 0)
+            total += int(n_incidents or 0)
+            notices += int(n_notices or 0)
     except Exception:
         logger.debug("alert kpis unavailable", exc_info=True)
+    try:
+        from app.services import alert_service
+        summ = await alert_service.summary(ctx.db, alert_service.AlertFilters(
+            from_time=_aware_utc(ctx.frm), to_time=_aware_utc(ctx.to)))
+        ttr = (summ.get("window") or {}).get("time_to_recover") or {}
+        if ttr.get("mean_s") is not None:
+            mttr_min = float(ttr["mean_s"]) / 60
+        recovered = int(ttr.get("count") or 0)
+    except Exception:
+        logger.debug("alert MTTR unavailable", exc_info=True)
+    notes = ([f"{notices:,} recovery or suppression notice(s) are not counted as alerts."]
+             if notices else [])
     return _section(
         "alert_kpis", "Alert Summary",
         kpis=[
@@ -1332,38 +1875,53 @@ async def _sec_alert_kpis(ctx: SectionCtx) -> dict:
             {"label": "Critical", "value": str(counts.get("critical", 0)),
              "accent": "danger" if counts.get("critical") else "success"},
             {"label": "Warning", "value": str(counts.get("warning", 0)), "accent": "warning"},
-            {"label": "MTTR", "value": f"{mttr_min:.0f} min" if mttr_min is not None else "—",
-             "accent": "info"},
+            {"label": "MTTR", "value": _fmt_minutes(mttr_min), "accent": "info",
+             "subtitle": (f"mean time to recover · {recovered:,} incident(s)" if recovered
+                          else "no incident recovered in this period")},
         ],
+        notes=notes,
     )
 
 
 async def _sec_alert_trend(ctx: SectionCtx) -> dict:
-    d = await ctx.dataset("technical")
-    vol = d.get("alert_volume_by_severity") or []
-    ts = [_parse_ts(p["ts"]) for p in vol]
-    crit = [p.get("critical") or 0 for p in vol]
-    totals = [(p.get("critical") or 0) + (p.get("warning") or 0) +
-              (p.get("info") or 0) for p in vol]
-    png = _make_time_bar_chart(ts, totals, color=HEX_WARNING, ylabel="alerts",
-                               w_mm=85, h_mm=52)
+    """Alert incidents raised per hour (windows up to 2 days) or per day,
+    bucketed in the organisation's time zone; notices excluded like the
+    Alert Summary."""
+    from app.services import alert_workflow as wf
+
+    unit = "hour" if (ctx.to - ctx.frm) <= timedelta(days=2) else "day"
+    points: list[dict] = []
+    critical = 0
+    try:
+        rows = (await ctx.db.execute(text(
+            f"SELECT date_trunc('{unit}', a.triggered_at AT TIME ZONE CAST(:tz AS text))"
+            " AT TIME ZONE CAST(:tz AS text) AS b, "
+            "count(*) AS n, count(*) FILTER (WHERE a.severity = 'critical') AS crit "
+            "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at <= :t "
+            f"AND NOT {wf.notice_sql('a')} GROUP BY 1 ORDER BY 1"),
+            {"f": ctx.frm, "t": ctx.to, "tz": ctx.tz_name})).fetchall()
+        points = [{"t": ctx.iso(r[0]), "v": int(r[1] or 0)} for r in rows]
+        critical = sum(int(r[2] or 0) for r in rows)
+    except Exception:
+        logger.debug("alert trend unavailable", exc_info=True)
     sec = _section("alert_trend", "Alert Volume Over Time", half=True,
-                   charts=[{"title": "", "png": png,
+                   description=f"Alerts raised per {unit} ({ctx.tz_label()}); recovery notices excluded.",
+                   charts=[{"title": "",
                             "series": {"kind": "bars", "unit": "alerts", "color": "warning",
-                                       "points": [{"t": t.isoformat(), "v": v}
-                                                  for t, v in zip(ts, totals)]}}])
-    if any(crit):
-        sec["notes"].append(f"{sum(crit)} critical alert(s) in the window.")
+                                       "points": points}}])
+    if critical:
+        sec["notes"].append(f"{critical} critical alert(s) in the window.")
     return sec
 
 
 async def _sec_noisy_sources(ctx: SectionCtx) -> dict:
     # The technical dataset withholds NetFlow alert messages from a requester
-    # without netflow.view (SectionCtx.withholds_netflow_alerts).
+    # without netflow.view (SectionCtx.withholds_netflow_alerts). It ranks the
+    # ten noisiest sources, so the section lists at most ten.
     d = await ctx.dataset("technical")
     rows = [[n.get("hostname") or "—", (n.get("sample_message") or "")[:60],
              (n.get("severity") or "").upper(), str(n.get("alert_count") or 0)]
-            for n in (d.get("noisy_alerts") or [])]
+            for n in (d.get("noisy_alerts") or [])][:_top_n(ctx, 10)]
     return _section("noisy_sources", "Noisiest Alert Sources", half=True,
                     tables=[{"headers": ["Device", "Sample message", "Severity", "Count"],
                              "styles": ["text", "text", "severity", "num"], "rows": rows}])
@@ -1385,15 +1943,14 @@ async def _sec_recent_alerts(ctx: SectionCtx) -> dict:
                    jsonb_build_object('source', a.metadata->'source') AS metadata
             FROM alerts a LEFT JOIN devices d ON d.id = a.device_id
             WHERE a.triggered_at >= :f AND a.triggered_at <= :t
-            ORDER BY a.triggered_at DESC LIMIT 25
-            """), {"f": ctx.frm, "t": ctx.to})).fetchall()
+            ORDER BY a.triggered_at DESC LIMIT :lim
+            """), {"f": ctx.frm, "t": ctx.to, "lim": _top_n(ctx, 25)})).fetchall()
         for row in rows:
             r = dict(row._mapping)
             if redact:
                 r = redact_alert_payload(r)
             rows_out.append([(r["severity"] or "").upper(), (r["message"] or "")[:70], r["source"],
-                             r["status"] or "—",
-                             r["triggered_at"].strftime("%m-%d %H:%M") if r["triggered_at"] else "—"])
+                             r["status"] or "—", ctx.fmt_short(r["triggered_at"])])
     except Exception:
         logger.debug("recent alerts unavailable", exc_info=True)
     return _section("recent_alerts", "Recent Alerts",
@@ -1421,18 +1978,13 @@ async def _sec_inventory_summary(ctx: SectionCtx) -> dict:
 async def _sec_inventory_breakdown(ctx: SectionCtx) -> dict:
     d = await ctx.dataset("inventory")
     by_type = d.get("devices_by_type") or []
-    total_dev = sum(t.get("count") or 0 for t in by_type)
-    png = _make_donut([(t.get("type") or "unknown").replace("_", " ") for t in by_type[:6]],
-                      [t.get("count") or 0 for t in by_type[:6]],
-                      center_text=f"{total_dev:,}" if total_dev else "",
-                      center_sub="devices")
     vendor_rows = [[v.get("vendor") or "unknown", str(v.get("count") or 0)]
                    for v in (d.get("devices_by_vendor") or [])[:10]]
     loc_rows = [[l.get("location") or "unknown", str(l.get("count") or 0)]
                 for l in (d.get("devices_by_location") or [])[:10]]
     return _section(
         "inventory_breakdown", "Device Breakdown",
-        charts=[{"title": "Devices by type", "png": png,
+        charts=[{"title": "Devices by type",
                  "series": {"kind": "donut", "unit": "devices",
                             "points": [{"label": t.get("type") or "unknown",
                                         "value": t.get("count") or 0}
@@ -1444,13 +1996,15 @@ async def _sec_inventory_breakdown(ctx: SectionCtx) -> dict:
 
 async def _sec_inventory_servers(ctx: SectionCtx) -> dict:
     rows_out: list[list[str]] = []
+    total = 0
     try:
         rows = (await ctx.db.execute(text(
             """
             SELECT COALESCE(display_name, hostname), os_name, os_version, status,
-                   environment, collection_mode
-            FROM servers ORDER BY hostname LIMIT 50
-            """))).fetchall()
+                   environment, collection_mode, COUNT(*) OVER () AS total
+            FROM servers ORDER BY hostname LIMIT :lim
+            """), {"lim": _top_n(ctx, 100)})).fetchall()
+        total = int(rows[0][6] or 0) if rows else 0
         for r in rows:
             rows_out.append([r[0] or "—", f"{r[1] or '—'} {r[2] or ''}".strip(),
                              (r[3] or "—"), r[4] or "—", r[5] or "—"])
@@ -1458,8 +2012,8 @@ async def _sec_inventory_servers(ctx: SectionCtx) -> dict:
         logger.debug("inventory servers unavailable", exc_info=True)
     return _section("inventory_servers", "Server Inventory",
                     tables=[{"headers": ["Server", "Operating system", "Status", "Environment", "Mode"],
-                             "rows": rows_out}])
-
+                             "rows": rows_out}],
+                    notes=_shown_note(len(rows_out), total, "servers"))
 
 # ─── NCCM (configuration protection) sections ──────────────────────────────
 
@@ -1474,8 +2028,9 @@ async def _ncm_devices(ctx: SectionCtx) -> list[dict]:
     return ctx._cache["ncm_devices"]
 
 
-def _ncm_when(iso: Optional[str]) -> str:
-    return iso[:16].replace("T", " ") + " UTC" if iso else "never"
+def _ncm_when(ctx: SectionCtx, iso: Optional[str]) -> str:
+    """An NCCM timestamp in the organisation's time zone and format."""
+    return ctx.fmt_dt(iso) if iso else "never"
 
 
 async def _sec_ncm_protection(ctx: SectionCtx) -> dict:
@@ -1528,13 +2083,15 @@ async def _sec_ncm_outcomes(ctx: SectionCtx) -> dict:
     params: dict[str, Any] = {"f": ctx.frm, "t": ctx.to}
     if ids:
         params["ids"] = ids
+    # Calendar days of the organisation's time zone (not the database's).
     rows = (await ctx.db.execute(text(f"""
-        SELECT date_trunc('day', COALESCE(finished_at, started_at)) AS day,
+        SELECT date_trunc('day', COALESCE(finished_at, started_at) AT TIME ZONE CAST(:tz AS text))
+                 AT TIME ZONE CAST(:tz AS text) AS day,
                count(*) FILTER (WHERE status='success' AND validated) AS ok,
                count(*) FILTER (WHERE status='failed') AS failed
         FROM ncm_backup_runs WHERE COALESCE(finished_at, started_at) BETWEEN :f AND :t{cond}
-        GROUP BY 1 ORDER BY 1"""), params)).fetchall()
-    ts = [r.day for r in rows]
+        GROUP BY 1 ORDER BY 1"""), {**params, "tz": ctx.tz_name})).fetchall()
+    ts = [ctx.iso(r.day) for r in rows]
     oks = [r.ok for r in rows]
     fails = [r.failed for r in rows]
     cats = (await ctx.db.execute(text(f"""
@@ -1542,12 +2099,12 @@ async def _sec_ncm_outcomes(ctx: SectionCtx) -> dict:
         WHERE status='failed' AND COALESCE(finished_at, started_at) BETWEEN :f AND :t{cond}
         GROUP BY 1 ORDER BY 2 DESC"""), params)).fetchall()
     charts = [
-        {"title": "Validated captures per day", "png": _make_time_bar_chart(ts, oks, color=HEX_SUCCESS, ylabel="captures", w_mm=85, h_mm=52),
+        {"title": "Validated captures per day",
          "series": {"kind": "bars", "unit": "captures", "color": "success",
-                    "points": [{"t": t.isoformat(), "v": v} for t, v in zip(ts, oks)]}},
-        {"title": "Failed attempts per day", "png": _make_time_bar_chart(ts, fails, color=HEX_WARNING, ylabel="attempts", w_mm=85, h_mm=52),
+                    "points": [{"t": t, "v": v} for t, v in zip(ts, oks)]}},
+        {"title": "Failed attempts per day",
          "series": {"kind": "bars", "unit": "attempts", "color": "warning",
-                    "points": [{"t": t.isoformat(), "v": v} for t, v in zip(ts, fails)]}},
+                    "points": [{"t": t, "v": v} for t, v in zip(ts, fails)]}},
     ]
     sec = _section("ncm_outcomes", "Backup Outcomes", charts=charts,
                    tables=[{"title": "Failed attempts by cause", "headers": ["Cause", "Attempts"],
@@ -1561,9 +2118,9 @@ async def _sec_ncm_at_risk(ctx: SectionCtx) -> dict:
     order = ["failed", "blocked", "stale", "unverified", "pending", "unconfigured"]
     risky = [d for d in await _ncm_devices(ctx) if d["eligible"] and d["backup_state"] in order]
     risky.sort(key=lambda d: (order.index(d["backup_state"]), d["hostname"] or ""))
-    rows = [[d["hostname"] or d["ip"], d["backup_state"].replace("_", " "), _ncm_when(d["validated_at"]),
+    rows = [[d["hostname"] or d["ip"], d["backup_state"].replace("_", " "), _ncm_when(ctx, d["validated_at"]),
              (d["last_error"] or d["support"]["message"] if d["backup_state"] in ("failed", "blocked", "unconfigured") else "")[:80],
-             _ncm_when(d["next_due"]) if d["next_due"] else "not scheduled"] for d in risky[:50]]
+             _ncm_when(ctx, d["next_due"]) if d["next_due"] else "not scheduled"] for d in risky[:50]]
     return _section("ncm_at_risk", "Devices Needing Action",
                     tables=[{"headers": ["Device", "State", "Last valid capture", "Reason", "Next due"],
                              "styles": ["text", "status", "num", "text", "num"], "rows": rows}],
@@ -1623,7 +2180,7 @@ async def _sec_ncm_changes(ctx: SectionCtx) -> dict:
                            "accent": "warning" if any(b.drifted for b in base) else "success"}],
                     tables=[{"title": "Most changed devices", "headers": ["Device", "Changes", "Last change"],
                              "styles": ["text", "num", "num"],
-                             "rows": [[c.hostname, str(c.n), c.last.strftime("%Y-%m-%d %H:%M")] for c in changes]},
+                             "rows": [[c.hostname, str(c.n), ctx.fmt_dt(c.last)] for c in changes]},
                             {"title": "Active baselines", "headers": ["Device", "Baseline", "Type", "State"],
                              "styles": ["text", "text", "text", "status"],
                              "rows": [[b.hostname, b.name, b.config_type, "drifted" if b.drifted else "in sync"] for b in base]}])
@@ -1655,6 +2212,13 @@ NETFLOW_SCOPED_SECTIONS = frozenset({
 # What an account limited to a visibility scope may render at all.
 SCOPE_SAFE_SECTIONS = DEVICE_SCOPABLE_SECTIONS | NETFLOW_SCOPED_SECTIONS
 
+def _rows_option(default: int, maximum: int, help_: str = "How many rows to list.") -> dict:
+    """The ``top_n`` option of a built-in list section: the schema of
+    ``top_n_option`` (defined with the registry v2 helpers below this table)."""
+    return {"key": "top_n", "label": "Rows", "type": "int", "default": default,
+            "min": 1, "max": maximum, "help": help_}
+
+
 SECTION_REGISTRY: dict[str, dict[str, Any]] = {
     # NCCM
     "ncm_protection": {"fn": _sec_ncm_protection, "title": "Configuration Protection", "category": "Configuration",
@@ -1679,25 +2243,32 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
     "device_availability": {"fn": _sec_device_availability, "title": "Node Availability",
                             "category": "Availability",
                             "description": "Per-node availability, downtime and outages "
-                                           "(supports node selection)."},
+                                           "(supports node selection).",
+                            "options": [_rows_option(200, 1000)]},
     "device_uptime": {"fn": _sec_device_uptime, "title": "Lowest-Availability Devices",
                       "category": "Availability",
-                      "description": "Devices with the worst uptime and their latency."},
+                      "description": "Devices with the worst uptime and their latency.",
+                      "options": [_rows_option(10, 100)]},
     "top_outages": {"fn": _sec_top_outages, "title": "Longest Outages", "category": "Availability",
-                    "description": "Outage episodes ranked by duration."},
+                    "description": "Outage episodes ranked by duration.",
+                    "options": [_rows_option(15, 100)]},
     "service_availability": {"fn": _sec_service_availability, "title": "Service Availability",
                              "category": "Availability",
-                             "description": "Service checks uptime and expiring TLS certificates."},
+                             "description": "Service checks uptime and expiring TLS certificates.",
+                             "options": [_rows_option(25, 500)]},
     # Performance
     "network_performance": {"fn": _sec_network_performance, "title": "Network Device Performance",
                             "category": "Performance",
-                            "description": "Latency and stability of the most stressed devices."},
+                            "description": "Highest p95 round-trip latency and packet loss per device.",
+                            "options": [_rows_option(10, 100)]},
     "interface_utilization": {"fn": _sec_interface_utilization, "title": "Busiest Interfaces",
                               "category": "Performance",
-                              "description": "Top interfaces by average throughput."},
+                              "description": "Top interfaces by average throughput.",
+                              "options": [_rows_option(10, 100)]},
     "server_performance": {"fn": _sec_server_performance, "title": "Server Performance",
                            "category": "Performance",
-                           "description": "Agent-monitored servers ranked by CPU and memory load."},
+                           "description": "Agent-monitored servers ranked by CPU and memory load.",
+                           "options": [_rows_option(15, 200)]},
     # Traffic
     "netflow_executive_summary": {"fn": _sec_netflow_executive, "title": "NetFlow Executive Summary",
                                   "category": "Traffic",
@@ -1718,9 +2289,11 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
     # Applications
     "apm_services": {"fn": _sec_apm_services, "title": "Application Service Health",
                      "category": "Applications",
-                     "description": "RED metrics and apdex per instrumented service."},
+                     "description": "RED metrics and apdex per instrumented service.",
+                     "options": [_rows_option(25, 200)]},
     "apm_errors": {"fn": _sec_apm_errors, "title": "Top Application Errors",
-                   "category": "Applications", "description": "Most frequent exception groups."},
+                   "category": "Applications", "description": "Most frequent exception groups.",
+                   "options": [_rows_option(12, 100)]},
     "slo_attainment": {"fn": _sec_slo_attainment, "title": "SLO Attainment",
                        "category": "Applications",
                        "description": "Error-budget status for every SLO."},
@@ -1730,7 +2303,8 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
     "usage_kpis": {"fn": _sec_usage_kpis, "title": "Usage Summary", "category": "Applications",
                    "description": "Requests, unique users, pages and error rate."},
     "usage_pages": {"fn": _sec_usage_pages, "title": "Top Pages", "category": "Applications",
-                    "description": "Most visited routes with audience and latency."},
+                    "description": "Most visited routes with audience and latency.",
+                    "options": [_rows_option(15, 100)]},
     "rum_audience": {"fn": _sec_rum_audience, "title": "Audience & Engagement",
                      "category": "Applications",
                      "description": "Browser sessions, users, page views and engagement depth."},
@@ -1739,7 +2313,8 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
                        "description": "Core Web Vitals (LCP/INP/CLS) at p75 with Google's verdicts."},
     "rum_top_pages": {"fn": _sec_rum_top_pages, "title": "Most-Visited Pages",
                       "category": "Applications",
-                      "description": "Top pages by views with per-page speed and errors."},
+                      "description": "Top pages by views with per-page speed and errors.",
+                      "options": [_rows_option(15, 100)]},
     "rum_segments": {"fn": _sec_rum_segments, "title": "Audience Segments",
                      "category": "Applications",
                      "description": "Device and browser mix, and the experience each segment gets."},
@@ -1747,23 +2322,28 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
                         "category": "Applications",
                         "description": "JavaScript errors, distinct issues and affected users."},
     "usage_users": {"fn": _sec_usage_users, "title": "Top Users", "category": "Applications",
-                    "description": "Most active users by request volume."},
+                    "description": "Most active users by request volume.",
+                    "options": [_rows_option(15, 100)]},
     # Capacity
     "capacity_filesystems": {"fn": _sec_capacity_filesystems, "title": "Filesystem Capacity",
                              "category": "Capacity",
-                             "description": "Fullest filesystems across servers."},
+                             "description": "Fullest filesystems across servers.",
+                             "options": [_rows_option(20, 500)]},
     "capacity_interfaces": {"fn": _sec_capacity_interfaces, "title": "Link Capacity Headroom",
                             "category": "Capacity",
-                            "description": "Interfaces closest to saturation."},
+                            "description": "Interfaces closest to saturation by p95 utilization of known speed.",
+                            "options": [_rows_option(15, 100)]},
     # Alerting
     "alert_kpis": {"fn": _sec_alert_kpis, "title": "Alert Summary", "category": "Alerting",
                    "description": "Alert counts by severity and MTTR."},
     "alert_trend": {"fn": _sec_alert_trend, "title": "Alert Volume Over Time",
                     "category": "Alerting", "description": "Alert volume chart."},
     "noisy_sources": {"fn": _sec_noisy_sources, "title": "Noisiest Alert Sources",
-                      "category": "Alerting", "description": "Devices/rules generating the most alerts."},
+                      "category": "Alerting", "description": "Devices/rules generating the most alerts.",
+                      "options": [_rows_option(10, 10, "How many sources to list (the ten noisiest are ranked).")]},
     "recent_alerts": {"fn": _sec_recent_alerts, "title": "Recent Alerts", "category": "Alerting",
-                      "description": "Latest alerts in the window."},
+                      "description": "Latest alerts in the window.",
+                      "options": [_rows_option(25, 200)]},
     # Inventory
     "inventory_summary": {"fn": _sec_inventory_summary, "title": "Asset Summary",
                           "category": "Inventory", "description": "Fleet totals."},
@@ -1771,7 +2351,8 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
                             "category": "Inventory",
                             "description": "Devices by type, vendor and location."},
     "inventory_servers": {"fn": _sec_inventory_servers, "title": "Server Inventory",
-                          "category": "Inventory", "description": "Agent-monitored server list."},
+                          "category": "Inventory", "description": "Agent-monitored server list.",
+                          "options": [_rows_option(100, 1000)]},
 }
 
 # ─── Registry v2: section metadata, options and registration ────────────────
