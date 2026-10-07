@@ -11,8 +11,10 @@ Data rules:
   end-to-end loss are measured over the runs that reached the target and
   unreached runs count only against reachability. worst_hop_loss_pct (set by
   the poller) is the highest loss at any intermediate hop, destination
-  excluded. path_changed is set only when this run and the previous one both
-  traced hops and their topology hash differs.
+  excluded. path_changed is set only when this run traced hops and its
+  topology hash differs from the previous run's. path_id is set exactly when
+  a run traced at least one responder (the poller upserts netpath_paths for
+  it), so routes and the primary-route share count those runs only.
 - Probe status follows the NetPath API (_CURRENT_STATUS_SQL in
   api/v1/netpath.py): a probe that has not run for three intervals is stale.
 - Discovery stores one result per scanned address per run (including the
@@ -89,6 +91,13 @@ def _i(v: Any) -> int:
 
 def _utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def _window(ctx: SectionCtx) -> dict[str, datetime]:
+    """The report window as aware UTC bind parameters. The report engine's
+    naive datetimes are UTC, but asyncpg reads a naive value bound to a
+    timestamptz column in the server process's local zone."""
+    return {"f": _utc(ctx.frm), "t": _utc(ctx.to)}
 
 
 def _zone(ctx: SectionCtx):
@@ -237,7 +246,7 @@ FROM netpath_probes p
 CROSS JOIN LATERAL (
     SELECT count(*) FILTER (WHERE s.run_at >= :f) AS runs,
            count(*) FILTER (WHERE s.run_at >= :f AND s.reached) AS reached,
-           count(*) FILTER (WHERE s.run_at >= :f AND s.hop_count > 0) AS traced,
+           count(*) FILTER (WHERE s.run_at >= :f AND s.path_id IS NOT NULL) AS traced,
            avg(s.rtt_ms) FILTER (WHERE s.run_at >= :f AND s.reached) AS avg_rtt,
            percentile_cont(0.95) WITHIN GROUP (ORDER BY s.rtt_ms)
                FILTER (WHERE s.run_at >= :f AND s.reached) AS p95_rtt,
@@ -245,7 +254,7 @@ CROSS JOIN LATERAL (
            avg(s.worst_hop_loss_pct) FILTER (WHERE s.run_at >= :f AND s.reached) AS avg_worst_hop,
            count(*) FILTER (WHERE s.run_at >= :f AND s.path_changed) AS changes,
            max(s.run_at) FILTER (WHERE s.run_at >= :f AND s.path_changed) AS last_change,
-           count(DISTINCT s.path_hash) FILTER (WHERE s.run_at >= :f AND s.hop_count > 0) AS paths,
+           count(DISTINCT s.path_id) FILTER (WHERE s.run_at >= :f) AS paths,
            count(*) FILTER (WHERE s.run_at < :f) AS prior_runs,
            count(*) FILTER (WHERE s.run_at < :f AND s.reached) AS prior_reached,
            count(*) FILTER (WHERE s.run_at < :f AND s.path_changed) AS prior_changes
@@ -263,7 +272,7 @@ async def _probe_stats(ctx: SectionCtx) -> list[dict]:
         return ctx._cache["netpath:probe_stats"]
     pf, _ = ctx.prior_window()
     rows = (await ctx.db.execute(text(_PROBE_STATS_SQL),
-                                 {"f": ctx.frm, "t": ctx.to, "pf": pf})).mappings().all()
+                                 {**_window(ctx), "pf": _utc(pf)})).mappings().all()
     out = []
     for r in rows:
         d = dict(r)
@@ -335,6 +344,7 @@ async def netpath_probe_health(ctx: SectionCtx) -> dict:
     worst = max((r for r in stats if r["p95_rtt"] is not None), key=lambda r: r["p95_rtt"], default=None)
     enabled = sum(1 for r in stats if r.get("enabled"))
     trouble = sum(1 for r in stats if r["status"] in _TROUBLE)
+    stale = sum(1 for r in stats if r["status"] == "stale")
     not_measured = sum(1 for r in stats if not r["runs"])
 
     ranked = _sort_probes(stats, how)
@@ -357,6 +367,9 @@ async def netpath_probe_health(ctx: SectionCtx) -> dict:
              "run for three of its intervals."]
     if not_measured:
         notes.append(f"{not_measured} enabled probe(s) did not run in this period (not measured).")
+    if stale:
+        notes.append(f"{stale} probe(s) are stale: they have not run for three of their intervals, so "
+                     "their current health is unknown (not counted as unhealthy).")
     if prior_runs == 0:
         notes.append("No NetPath runs in the previous period to compare against.")
 
@@ -377,8 +390,9 @@ async def netpath_probe_health(ctx: SectionCtx) -> dict:
             {"label": "Average loss", "value": _pct(avg_loss), "accent": _loss_accent(avg_loss),
              "subtitle": "Runs that reached the target"},
             {"label": "Unhealthy now", "value": f"{trouble:,}",
-             "accent": "danger" if trouble else "success",
-             "subtitle": f"Degraded, down or unreachable · of {enabled:,} enabled"},
+             "accent": "danger" if trouble else "warning" if stale else "success",
+             "subtitle": (f"Degraded, down or unreachable · of {enabled:,} enabled"
+                          + (f" · {stale:,} stale" if stale else ""))},
         ],
         charts=[{"title": chart_title + " by probe",
                  "series": {"kind": "rank", "unit": unit,
@@ -401,8 +415,8 @@ _EXTRA_PATH_SQL = """
 SELECT p.id::text AS id,
        (SELECT max(z.c) FROM (
             SELECT count(*) AS c FROM netpath_snapshots s
-            WHERE s.probe_id = p.id AND s.run_at >= :f AND s.run_at < :t AND s.hop_count > 0
-            GROUP BY s.path_hash) z) AS top_path_runs,
+            WHERE s.probe_id = p.id AND s.run_at >= :f AND s.run_at < :t AND s.path_id IS NOT NULL
+            GROUP BY s.path_id) z) AS top_path_runs,
        (SELECT count(*) FROM netpath_paths np
          WHERE np.probe_id = p.id AND np.first_seen >= :f AND np.first_seen < :t) AS new_paths,
        (SELECT count(*) FROM netpath_events e
@@ -442,11 +456,11 @@ async def netpath_path_changes(ctx: SectionCtx) -> dict:
 
     ids = [r["id"] for r in stats]
     extra = {r["id"]: dict(r) for r in (await ctx.db.execute(
-        text(_EXTRA_PATH_SQL), {"f": ctx.frm, "t": ctx.to, "ids": ids})).mappings().all()}
+        text(_EXTRA_PATH_SQL), {**_window(ctx), "ids": ids})).mappings().all()}
 
     seconds = 3600 if ctx.hours <= 48 else 86400
     trend = (await ctx.db.execute(text(_CHANGE_TREND_SQL.format(bucket=_pg_bucket("s.run_at", seconds))),
-                                  {"f": ctx.frm, "t": ctx.to, "org_tz": ctx.tz_name})).mappings().all()
+                                  {**_window(ctx), "org_tz": ctx.tz_name})).mappings().all()
     # Intervals without any run are gaps (not measured), not "no changes".
     per_bucket = {ctx.iso(r["bucket"]): _i(r["changes"]) for r in trend if _i(r["runs"])}
 
@@ -547,7 +561,7 @@ async def netpath_latency_trend(ctx: SectionCtx) -> dict:
     title = f"Path Latency Trend — Top {top_n} Probes by {_TREND_RANK_TITLE[rank]}"
     seconds = _BUCKET_SECONDS.get(ctx.bucket(), 7200)
     rows = (await ctx.db.execute(text(_TREND_SQL.format(bucket=_pg_bucket("s.run_at", seconds))),
-                                 {"f": ctx.frm, "t": ctx.to, "org_tz": ctx.tz_name})).mappings().all()
+                                 {**_window(ctx), "org_tz": ctx.tz_name})).mappings().all()
     if not rows:
         return _section("netpath_latency_trend", title, notes=["No NetPath runs in this period."])
 
@@ -779,7 +793,7 @@ async def netpath_problem_hops(ctx: SectionCtx) -> dict:
     top_n = int(ctx.opt("top_n"))
     thr = float(ctx.opt("min_loss"))
     title = f"Top {top_n} Problem Hops by Packet Loss"
-    params = {"f": ctx.frm, "t": ctx.to, "thr": thr}
+    params = {**_window(ctx), "thr": thr}
     probes = {r["id"]: dict(r) for r in (await ctx.db.execute(text(_HOP_PROBES_SQL), params))
               .mappings().all()}
     reached = sum(_i(p.get("reached")) for p in probes.values())
@@ -797,7 +811,8 @@ async def netpath_problem_hops(ctx: SectionCtx) -> dict:
         {"label": "Target also lost packets",
          "value": _pct(_ratio(carried_runs, lossy_runs)) if lossy_runs else "—",
          "accent": "neutral" if not lossy_runs else
-         "danger" if carried_runs / lossy_runs >= 0.5 else "success",
+         "danger" if carried_runs / lossy_runs >= 0.5 else
+         "warning" if carried_runs / lossy_runs >= 0.2 else "success",
          "subtitle": "Of the runs with hop loss" if lossy_runs else "No runs with hop loss"},
     ]
     hops = [dict(r) for r in (await ctx.db.execute(
@@ -881,7 +896,7 @@ _FINISHED = ("completed", "partial", "failed", "cancelled")
 )
 async def discovery_activity(ctx: SectionCtx) -> dict:
     title = "Discovery Activity"
-    params = {"f": ctx.frm, "t": ctx.to}
+    params = _window(ctx)
     s = (await ctx.db.execute(text("""
         SELECT count(*) AS runs,
                count(*) FILTER (WHERE status = 'completed') AS completed,
@@ -1172,7 +1187,7 @@ async def discovery_credential_gaps(ctx: SectionCtx) -> dict:
         JOIN discovery_results_v2 rr ON rr.id = l.id
         LEFT JOIN discovery_profiles p ON p.id = l.profile_id
         WHERE l.credential_status IN {_CRED_GAP} AND {_NOT_IGNORED}
-        ORDER BY 8 DESC, l.scanned_at DESC, l.ip_address LIMIT :lim"""),
+        ORDER BY managed DESC, l.scanned_at DESC, l.ip_address LIMIT :lim"""),
         {"since": since, "lim": top_n})).mappings().all()
 
     by_status: dict[str, int] = {}
@@ -1245,7 +1260,7 @@ template(
     "on its primary route and when targets became unreachable.",
     "paths",
     [S("netpath_path_changes", None, top_n=50),
-     S("netpath_probe_health", "Reachability by Probe", sort="reach", top_n=25)],
+     S("netpath_probe_health", "Least Available Paths", sort="reach", top_n=25)],
     audience=("Network engineer", "NOC operator"), tags=("netpath", "routing", "route changes", "stability"),
     default_period="last_30d", frequency="monthly", icon="Waypoints",
 )

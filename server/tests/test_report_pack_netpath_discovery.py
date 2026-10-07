@@ -23,6 +23,7 @@ _TODAY = datetime.now(RIYADH).replace(hour=0, minute=0, second=0, microsecond=0)
 TO = _TODAY.astimezone(timezone.utc).replace(tzinfo=None)       # local midnight, naive UTC
 FRM = TO - timedelta(days=7)
 FRM_UTC = FRM.replace(tzinfo=timezone.utc)
+TO_UTC = TO.replace(tzinfo=timezone.utc)
 # 12:00 UTC is 15:00 in Riyadh.
 OCT1_NOON = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -208,7 +209,11 @@ def test_probe_health_kpis_ranking_and_formatting(monkeypatch):
     sec = run(monkeypatch, "netpath_probe_health", db)
     sql, params = db.call("percentile_cont(0.95)")
     assert "FILTER (WHERE s.run_at >= :f AND s.reached) AS avg_rtt" in sql
-    assert params["f"] == FRM and params["t"] == TO and params["pf"] == FRM - timedelta(days=7)
+    # Aware UTC binds: asyncpg would read a naive timestamptz bind in the process's local zone.
+    assert params["f"] == FRM_UTC and params["t"] == TO_UTC and params["pf"] == FRM_UTC - timedelta(days=7)
+    assert all(params[k].tzinfo is not None for k in ("f", "t", "pf"))
+    # Routes and the primary-route share count runs that traced a responder (path_id set).
+    assert "s.path_id IS NOT NULL) AS traced" in sql and "count(DISTINCT s.path_id)" in sql
 
     assert kpi(sec, "Path probes")["value"] == "4"           # the disabled, silent probe is left out
     reach = kpi(sec, "Reachability")
@@ -259,6 +264,20 @@ def test_probe_health_empty_states(monkeypatch):
     idle = [_probe("p4", "New probe", runs=0, reached=0, status="stale", traced=0, paths=0)]
     sec = run(monkeypatch, "netpath_probe_health", _netpath_db(stats=idle))
     assert sec["notes"] == ["No NetPath runs in this period."]
+
+
+def test_probe_health_stale_probe_is_unknown_not_unhealthy(monkeypatch):
+    stats = [_probe("p1", "Google DNS", runs=100, reached=100, avg_rtt=20.0, p95=25.0, loss=0.0, worst=0.0),
+             _probe("p6", "Branch DIA", runs=40, reached=40, avg_rtt=30.0, p95=35.0, loss=0.0, worst=0.0,
+                    status="stale")]
+    sec = run(monkeypatch, "netpath_probe_health", _netpath_db(stats=stats))
+    unhealthy = kpi(sec, "Unhealthy now")
+    assert unhealthy["value"] == "0" and unhealthy["accent"] == "warning"
+    assert unhealthy["subtitle"].endswith("· 1 stale")
+    assert any(n.startswith("1 probe(s) are stale") for n in sec["notes"])
+    # Equal reachability ranks by name; the stale probe keeps its measured figures.
+    assert table(sec, "Probes")["rows"][0] == ["Branch DIA", "8.8.8.8", "100.00%", "30 ms", "35 ms", "0.00%",
+                                               "0.00%", "stale"]
 
 
 def test_probe_health_unreached_only_is_not_measured(monkeypatch):
@@ -435,6 +454,7 @@ def test_problem_hops_owners_assessment_and_shares(monkeypatch):
     assert kpi(sec, "Runs with hop loss")["value"] == "60.00%"
     assert kpi(sec, "Runs with hop loss")["subtitle"] == "1,800 of 3,000 runs had a hop at ≥ 20%"
     assert kpi(sec, "Target also lost packets")["value"] == "30.00%"
+    assert kpi(sec, "Target also lost packets")["accent"] == "warning"     # between 20% and 50%
     assert kpi(sec, "Internal / external")["value"] == "1 / 2"
     t = table(sec, "Hops with loss ≥ 20%")
     assert t["title"] == "Hops with loss ≥ 20% (top 3 of 4)"
@@ -505,7 +525,7 @@ def _activity_db(profiles=2):
 def test_discovery_activity_kpis_runs_and_profiles(monkeypatch):
     db = _activity_db()
     sec = run(monkeypatch, "discovery_activity", db, top_n=2)
-    assert db.call("count(DISTINCT profile_id)")[1] == {"f": FRM, "t": TO}
+    assert db.call("count(DISTINCT profile_id)")[1] == {"f": FRM_UTC, "t": TO_UTC}
     assert kpi(sec, "Discovery runs")["value"] == "5"
     assert kpi(sec, "Discovery runs")["subtitle"] == "3 completed · 1 failed"
     assert kpi(sec, "Responding hosts")["subtitle"] == "of 1,270 addresses scanned"
