@@ -1,0 +1,25 @@
+/*
+ * Template designer screen styles, scoped to the designer root (.zp-report-designer).
+ *
+ * The app's <main> is overflow-y:auto but never scrolls (the window does), so
+ * it would capture position:sticky. While the designer is open it lets the
+ * sticky action bar follow the window scroll on smaller screens.
+ */
+main:has(.zp-report-designer) {
+  overflow: visible;
+}
+
+@keyframes zp-designer-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.zp-designer-progress {
+  animation: zp-designer-progress 1.3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zp-designer-progress {
+    animation-duration: 3s;
+  }
+}
