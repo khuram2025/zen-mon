@@ -604,7 +604,11 @@ def _style_time_axis(ax, narrow: bool = False, tz=None):
     locator = mdates.AutoDateLocator(maxticks=5 if narrow else 7, tz=tz)
     ax.xaxis.set_major_locator(locator)
     ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator, tz=tz))
-    for lbl in ax.get_xticklabels():
+    with warnings.catch_warnings():
+        # A single-bucket range makes AutoDateLocator fall back to its default.
+        warnings.filterwarnings("ignore", message="AutoDateLocator was unable", category=UserWarning)
+        labels = ax.get_xticklabels()
+    for lbl in labels:
         lbl.set_rotation(0)
         lbl.set_ha("center")
     try:
