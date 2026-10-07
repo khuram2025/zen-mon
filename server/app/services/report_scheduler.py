@@ -465,6 +465,9 @@ def _row_to_sched(row) -> dict:
         "day_of_week": row.day_of_week,
         "day_of_month": row.day_of_month,
         "notify_channels": row.notify_channels or [],
+        # Custom (template) schedules render by this id; without it every
+        # timer-fired custom schedule failed and only "Run now" worked.
+        "custom_report_id": getattr(row, "custom_report_id", None),
     }
 
 
@@ -478,23 +481,39 @@ async def run_scheduler_tick(db: AsyncSession) -> dict:
         {"now": now},
     )).fetchall()
 
-    fired: list[str] = []
+    # Claim every due row by advancing next_run_at while the row locks are
+    # held. Generation commits (releasing the locks) part-way through, and both
+    # API workers run this loop: without the claim a slow run could be picked
+    # up again by the other worker and delivered twice.
+    claimed: list[dict] = []
     for row in rows:
         sched = _row_to_sched(row)
+        nxt = compute_next_run(sched, tz_name, after=now + timedelta(seconds=1))
+        await db.execute(
+            text("""UPDATE report_schedules
+                    SET last_run_at = :now, next_run_at = :nxt, updated_at = NOW()
+                    WHERE id = :id"""),
+            {"now": now, "nxt": nxt, "id": sched["id"]},
+        )
+        claimed.append(sched)
+    if claimed:
+        await db.commit()
+
+    fired: list[str] = []
+    for sched in claimed:
         try:
             result = await generate_and_deliver(db, sched)
             last_status = result["status"]
             last_error = "; ".join(result["errors"]) if result["errors"] else None
         except Exception as exc:
             logger.exception("report schedule %s failed", sched["id"])
-            last_status, last_error = "failed", str(exc)
-        nxt = compute_next_run(sched, tz_name, after=now + timedelta(seconds=1))
+            await db.rollback()
+            last_status, last_error = "failed", type(exc).__name__
         await db.execute(
             text("""UPDATE report_schedules
-                    SET last_run_at = :now, last_status = :st, last_error = :err,
-                        next_run_at = :nxt, updated_at = NOW()
+                    SET last_status = :st, last_error = :err, updated_at = NOW()
                     WHERE id = :id"""),
-            {"now": now, "st": last_status, "err": last_error, "nxt": nxt, "id": sched["id"]},
+            {"st": last_status, "err": last_error, "id": sched["id"]},
         )
         await db.commit()
         fired.append(sched["id"])

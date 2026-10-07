@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, HTMLResponse
@@ -209,6 +209,19 @@ async def get_inventory_data(
         raise HTTPException(status_code=500, detail="Inventory report data failed")
 
 
+@router.get("/branding")
+async def get_report_branding(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Organisation branding and regional formats for on-screen reports.
+
+    Report viewers need the logo, colour, timezone and date/time format
+    without holding settings.view (module default: reports.view)."""
+    from app.services.branding import load_branding
+    return (await load_branding(db)).public_dict()
+
+
 class AvailabilityPolicyBody(BaseModel):
     default_target_pct: float = Field(..., ge=availability_policy.MIN_TARGET_PCT, le=100)
 
@@ -330,19 +343,70 @@ async def list_report_types(
 
 import uuid as _uuid
 
+from app.services import report_render as _render
 from app.services import report_sections as _rs
 
 
 def _window_from_query(
     from_: Optional[datetime], to: Optional[datetime], hours: int
 ) -> tuple[datetime, datetime]:
-    end = to or datetime.utcnow()
+    # Naive UTC throughout (the section engine's convention). Aware inputs are
+    # converted to UTC — astimezone() with no argument would use the server
+    # OS zone and silently shift the window.
+    if to is not None and to.tzinfo is not None:
+        to = to.astimezone(timezone.utc).replace(tzinfo=None)
+    if from_ is not None and from_.tzinfo is not None:
+        from_ = from_.astimezone(timezone.utc).replace(tzinfo=None)
+    end = to or datetime.now(timezone.utc).replace(tzinfo=None)
     start = from_ or (end - timedelta(hours=max(1, min(hours, 24 * 92))))
-    if end.tzinfo is not None:
-        end = end.astimezone(tz=None).replace(tzinfo=None)
-    if start.tzinfo is not None:
-        start = start.astimezone(tz=None).replace(tzinfo=None)
+    if start >= end:
+        raise HTTPException(status_code=400, detail="'from' must be before 'to'")
+    if end - start > timedelta(days=400):
+        raise HTTPException(status_code=400, detail="Report window is limited to 400 days")
     return start, end
+
+
+LEGACY_TYPES = [
+    {"key": "executive_summary", "title": "Executive Summary",
+     "description": "Leadership view: availability, SLA, incidents and MTTR.",
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+    {"key": "device_health", "title": "Device Health",
+     "description": "Per-device uptime, latency and status changes.",
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+    {"key": "service_health", "title": "Service Health",
+     "description": "Service checks, response times and TLS expiry.",
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+    {"key": "alert_analysis", "title": "Alert Analysis",
+     "description": "Alert volumes, severity mix and MTTR breakdown.",
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+    {"key": "full_report", "title": "Full Report",
+     "description": "All legacy sections in a single document.",
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+]
+
+PERIOD_LABELS = [
+    {"id": "last_24h", "label": "Last 24 hours", "kind": "rolling"},
+    {"id": "last_7d", "label": "Last 7 days", "kind": "rolling"},
+    {"id": "last_30d", "label": "Last 30 days", "kind": "rolling"},
+    {"id": "last_90d", "label": "Last 90 days", "kind": "rolling"},
+    {"id": "today", "label": "Today", "kind": "calendar"},
+    {"id": "yesterday", "label": "Yesterday", "kind": "calendar"},
+    {"id": "week_to_date", "label": "This week", "kind": "calendar"},
+    {"id": "previous_week", "label": "Previous week", "kind": "calendar"},
+    {"id": "month_to_date", "label": "This month", "kind": "calendar"},
+    {"id": "previous_month", "label": "Previous month", "kind": "calendar"},
+    {"id": "quarter_to_date", "label": "This quarter", "kind": "calendar"},
+    {"id": "previous_quarter", "label": "Previous quarter", "kind": "calendar"},
+]
+
+
+async def _access(db: AsyncSession, user: User) -> tuple[Optional[frozenset], bool, bool]:
+    """(section permissions, is full admin, is report manager) for the caller."""
+    from app.api.v1.report_schedules import is_report_manager
+    from app.core.permissions import SUPERUSER_PERMISSION
+    perms = await _rs.requester_permissions(db, user)
+    admin = perms is None or SUPERUSER_PERMISSION in perms
+    return perms, admin, await is_report_manager(db, user)
 
 
 @router.get("/catalog")
@@ -350,51 +414,42 @@ async def report_catalog(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Everything the report library needs: built-in types (legacy + section
-    presets), the section library for the custom builder, and saved custom
-    reports."""
-    legacy = [
-        {"key": "executive_summary", "title": "Executive Summary",
-         "description": "Leadership view: availability, SLA, incidents and MTTR.",
-         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
-        {"key": "device_health", "title": "Device Health",
-         "description": "Per-device uptime, latency and status changes.",
-         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
-        {"key": "service_health", "title": "Service Health",
-         "description": "Service checks, response times and TLS expiry.",
-         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
-        {"key": "alert_analysis", "title": "Alert Analysis",
-         "description": "Alert volumes, severity mix and MTTR breakdown.",
-         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
-        {"key": "full_report", "title": "Full Report",
-         "description": "All legacy sections in a single document.",
-         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
-    ]
-    presets = [
-        {"key": k, "title": p["title"], "description": p["description"],
-         "category": p["category"], "engine": "sections",
-         "formats": ["html", "pdf"], "sections": p["sections"],
-         # Which scope filters this report's sections actually honour.
-         "filterable": (["devices"] if k == "availability" else
-                        ["applications"] if any(s.startswith("rum_") for s in p["sections"])
-                        else ["netflow"] if any(s.startswith(("traffic_", "netflow_")) for s in p["sections"])
-                        else [])}
-        for k, p in _rs.REPORT_PRESETS.items()
-    ]
+    """Everything the library, viewer and designer need: categories, built-in
+    templates (each marked with whether the caller can see its sections), the
+    section library with option schemas, the caller's readable organisation
+    templates, the period vocabulary and the caller's report capabilities."""
+    from app.core.permissions import has_permission
+    from app.services import report_templates as _rt
+
+    perms, admin, manager = await _access(db, current_user)
+    templates = [_rt.catalog_entry(t, perms) for t in _rt.TEMPLATES.values()]
     sections = [
         {"id": sid, "title": s["title"], "description": s["description"],
-         "category": s["category"]}
+         "category": s["category"], "scope": s["scope"], "requires": list(s["requires"]),
+         "options": s["options"], "semantics": s["semantics"],
+         "available": _rs.may_view_section(perms, sid)}
         for sid, s in _rs.SECTION_REGISTRY.items()
     ]
-    custom_rows = (await db.execute(text(
-        "SELECT id::text, name, description, sections, created_at "
-        "FROM custom_reports ORDER BY created_at DESC"))).fetchall()
-    custom = [
-        {"id": r[0], "name": r[1], "description": r[2] or "",
-         "sections": list(r[3] or []), "created_at": r[4].isoformat() if r[4] else None}
-        for r in custom_rows
-    ]
-    return {"types": legacy + presets, "sections": sections, "custom": custom}
+    rows = (await db.execute(text(
+        f"SELECT {_render.TEMPLATE_COLUMNS} FROM custom_reports c "
+        "LEFT JOIN users u ON u.id = c.created_by "
+        "WHERE c.visibility = 'shared' OR c.created_by = :me OR :admin "
+        "ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC"),
+        {"me": str(current_user.id), "admin": admin})).fetchall()
+    custom = [_render.serialize_template(r, current_user, admin, manager) for r in rows]
+    granted = perms if perms is not None else frozenset({"system.admin"})
+    return {
+        "categories": _rt.CATEGORIES,
+        "types": LEGACY_TYPES + templates,
+        "sections": sections,
+        "custom": custom,
+        "periods": PERIOD_LABELS,
+        "can": {
+            "manage": admin or has_permission(granted, "reports.manage"),
+            "export": admin or has_permission(granted, "reports.export"),
+            "share": admin or manager,
+        },
+    }
 
 
 @router.get("/rum-applications")
@@ -427,13 +482,45 @@ async def list_rum_applications(
     return {"days": days, "applications": out}
 
 
+async def _require_export(db: AsyncSession, user: User) -> None:
+    from app.core.permissions import has_permission
+    perms = await get_role_permissions(db, user.role)
+    if not has_permission(perms, "reports.export"):
+        raise HTTPException(403, "Downloading reports requires the reports.export permission")
+
+
+async def _resolve_for(db: AsyncSession, user: User, key: str,
+                       custom_id: Optional[str]) -> tuple[str, str, str, list]:
+    """(title, description, category label, entries) for a built-in key or a
+    readable organisation template. Unreadable templates are 404."""
+    if key == "custom":
+        _perms, admin, _manager = await _access(db, user)
+        row = await _render.load_template(db, custom_id)
+        if not _render.can_read_template(row, user, admin):
+            raise HTTPException(404, "Report template not found")
+        from app.services import report_templates as _rt
+        category = _rt.CATEGORY_TITLES.get(row.category or "", "") or "Custom report"
+        return row.name, row.description or "", category, _render.template_entries(row)
+    preset = _rs.REPORT_PRESETS.get(key)
+    if not preset:
+        raise HTTPException(404, f"Unknown report: {key}")
+    entries = preset.get("entries") or preset["sections"]
+    return preset["title"], preset["description"], preset.get("category") or "", entries
+
+
+def _file_response(out) -> Response:
+    body, media, disposition = out
+    return Response(content=body, media_type=media,
+                    headers={"Content-Disposition": disposition, "Cache-Control": "private, no-store"})
+
+
 @router.get("/render/{key}")
 async def render_section_report(
     key: str,
-    format: str = Query("json", pattern="^(json|html|pdf)$"),
+    format: str = Query("json", pattern="^(json|html|pdf|xlsx)$"),
     from_: Optional[datetime] = Query(None, alias="from"),
     to: Optional[datetime] = Query(None),
-    hours: int = Query(24, ge=1, le=24 * 92),
+    hours: int = Query(24, ge=1, le=24 * 400),
     custom_id: Optional[str] = None,
     device_ids: Optional[str] = Query(None, description="Comma-separated device UUIDs to scope node-aware sections"),
     application_id: Optional[str] = Query(None, max_length=128,
@@ -444,120 +531,135 @@ async def render_section_report(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Render a section-engine report (preset key, or key='custom' +
-    custom_id) for an arbitrary window. NetFlow sections are restricted to
-    the flow exporters the caller may see."""
-    try:
-        title, description, section_ids = await _rs.resolve_report(db, key, custom_id)
-    except KeyError:
-        raise HTTPException(404, f"Unknown report: {key}")
-
-    filters: Optional[dict] = None
-    if device_ids:
-        ids = [i.strip() for i in device_ids.split(",") if i.strip()]
-        try:
-            for i in ids:
-                _uuid.UUID(i)
-        except ValueError:
-            raise HTTPException(400, "device_ids must be UUIDs")
-        if len(ids) > 500:
-            raise HTTPException(400, "Too many device ids (max 500)")
-        filters = {"device_ids": ids}
-    if application_id:
-        filters = {**(filters or {}), "application_id": application_id.strip()}
-    if netflow:
-        from app.api.v1.netflow.common import NetflowError
-        from app.services import netflow_classify, netflow_groups, netflow_report
-        await netflow_classify.load_rules()
-        await netflow_groups.load_groups()
-        try:
-            nf_scope = netflow_report.scope_from_query(netflow)
-        except NetflowError as exc:
-            raise HTTPException(400, f"Invalid NetFlow scope: {exc.detail}")
-        if nf_scope:
-            filters = {**(filters or {}), "netflow": nf_scope}
-
-    # Fail closed for tag-scoped accounts: only sections that honour a device
-    # filter (the filter is pinned to the devices the user can see) or that are
-    # confined by the requester's own NetFlow visibility may run.
-    omitted = 0
-    scoped, scoped_ids = await scoping.scoped_device_filter(
-        db, current_user, (filters or {}).get("device_ids"))
-    if scoped:
-        kept = [sid for sid in section_ids if sid in _rs.SCOPE_SAFE_SECTIONS]
-        omitted = len(section_ids) - len(kept)
-        if not kept:
-            raise HTTPException(
-                403, "This report contains only fleet-wide sections, which are unavailable "
-                     "to accounts limited to a visibility scope")
-        section_ids = kept
-        filters = {**(filters or {}), "device_ids": scoped_ids}
-        filters.pop("application_id", None)
-
+    """Render a built-in template (key) or an organisation template
+    (key='custom' + custom_id) for a window: JSON for the viewer, or a branded
+    PDF / HTML / Excel download (downloads need reports.export). Sections the
+    caller's role cannot see are replaced by a 'restricted' stub; NetFlow
+    sections are restricted to the exporters the caller may see."""
+    if format != "json":
+        await _require_export(db, current_user)
+    title, description, category, entries = await _resolve_for(db, current_user, key, custom_id)
+    filters = await _render.build_filters(_render.parse_device_ids(device_ids), application_id, netflow)
     start, end = _window_from_query(from_, to, hours)
-    sections = await _rs.build_sections(db, section_ids, start, end, filters, requester=current_user)
-    category = (_rs.REPORT_PRESETS.get(key) or {}).get("category") or \
-        ("Custom Report" if key == "custom" else "")
-    scope_bits = []
-    if filters and filters.get("device_ids"):
-        scope_bits.append(f"{len(filters['device_ids'])} selected device(s)")
-    if filters and filters.get("application_id"):
-        scope_bits.append(f"application “{filters['application_id']}”")
-    if filters and filters.get("netflow"):
-        from app.services import netflow_report
-        scope_bits.append(f"NetFlow: {netflow_report.describe(filters['netflow'])}")
-    scope_label = " · ".join(scope_bits) if scope_bits else "All monitored infrastructure"
-    if scoped:
-        scope_label = "Limited to your visibility scope" + (
-            f" ({omitted} fleet-wide section(s) omitted)" if omitted else "")
-    meta = await _rs.build_report_meta(db, title, start, end,
-                                      description=description,
-                                      category=category,
-                                      scope_label=scope_label)
-
-    if format == "json":
-        return {
-            "key": key, "title": title, "description": description,
-            "from": start.isoformat(), "to": end.isoformat(),
-            "period_label": meta["period_label"],
-            "generated_label": meta["generated_label"],
-            "company_name": meta["company_name"],
-            "scope_label": scope_label,
-            "filters": {k: v for k, v in (filters or {}).items() if k in ("netflow", "application_id")},
-            "sections": _rs.sections_to_json(sections),
-        }
-
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    safe = title.replace(" ", "-")[:48]
-    if format == "html":
-        html = _rs.render_html(meta, sections)
-        return Response(
-            content=html, media_type="text/html",
-            headers={"Content-Disposition": f'attachment; filename="ZenPlus-{safe}-{ts}.html"'},
-        )
-    pdf = _rs.render_pdf(meta, sections)
-    return Response(
-        content=bytes(pdf), media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="ZenPlus-{safe}-{ts}.pdf"'},
-    )
+    out = await _render.render(db, user=current_user, key=key, title=title, description=description,
+                               category=category, entries=entries, start=start, end=end,
+                               filters=filters, fmt=format)
+    return out if format == "json" else _file_response(out)
 
 
-# ─── Custom reports CRUD ────────────────────────────────────────────────────
+class TemplateSection(BaseModel):
+    id: str = Field(..., max_length=64)
+    title: Optional[str] = Field(None, max_length=120)
+    options: dict = Field(default_factory=dict)
+
+
+class PreviewBody(BaseModel):
+    name: str = Field("Untitled report", max_length=120)
+    description: Optional[str] = Field(None, max_length=2000)
+    category: Optional[str] = Field(None, max_length=60)
+    sections: list[Union[str, TemplateSection]] = Field(..., min_length=1, max_length=_render.MAX_SECTIONS)
+    from_: Optional[datetime] = Field(None, alias="from")
+    to: Optional[datetime] = None
+    hours: int = Field(24, ge=1, le=24 * 400)
+    device_ids: Optional[list[str]] = None
+    application_id: Optional[str] = Field(None, max_length=128)
+    netflow: Optional[str] = Field(None, max_length=2000)
+
+    model_config = {"populate_by_name": True}
+
+
+def _entry_dicts(items: list) -> list[dict]:
+    return [i if isinstance(i, str) else i.model_dump() for i in items]
+
+
+def _validate_entries(items: list) -> list[dict]:
+    entries = _rs.section_entries(_entry_dicts(items))
+    if not entries:
+        raise HTTPException(400, "Pick at least one section")
+    if len(entries) > _render.MAX_SECTIONS:
+        raise HTTPException(400, f"A report can hold at most {_render.MAX_SECTIONS} sections")
+    errors: list[str] = []
+    for e in entries:
+        errors.extend(_rs.option_errors(e["id"], e["options"]))
+    if errors:
+        raise HTTPException(400, "; ".join(errors[:8]))
+    return entries
+
+
+@router.post("/preview")
+async def preview_report(
+    body: PreviewBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("reports.manage")),
+):
+    """Render an unsaved template definition (the designer's live preview)."""
+    entries = _validate_entries(body.sections)
+    from app.services import report_templates as _rt
+    filters = await _render.build_filters(_render.parse_device_ids(body.device_ids),
+                                          body.application_id, body.netflow)
+    start, end = _window_from_query(body.from_, body.to, body.hours)
+    return await _render.render(
+        db, user=current_user, key="preview", title=body.name.strip() or "Untitled report",
+        description=body.description or "", category=_rt.CATEGORY_TITLES.get(body.category or "", ""),
+        entries=entries, start=start, end=end, filters=filters, fmt="json")
+
+
+# ─── Organisation templates (custom_reports) ────────────────────────────────
 
 class CustomReportBody(BaseModel):
-    name: str
-    description: Optional[str] = None
-    sections: list[str]
+    name: str = Field(..., max_length=120)
+    description: Optional[str] = Field(None, max_length=2000)
+    sections: list[Union[str, TemplateSection]] = Field(..., max_length=_render.MAX_SECTIONS)
+    category: Optional[str] = Field(None, max_length=60)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+    visibility: str = Field("shared", pattern="^(private|shared)$")
+    source_key: Optional[str] = Field(None, max_length=80)
+    default_period: Optional[str] = Field(None, max_length=24)
 
 
-def _validate_custom(body: CustomReportBody) -> None:
+def _validate_custom(body: CustomReportBody) -> list[dict]:
+    from app.services import report_templates as _rt
     if not body.name.strip():
         raise HTTPException(400, "Name is required")
-    if not body.sections:
-        raise HTTPException(400, "Pick at least one section")
-    unknown = [s for s in body.sections if s not in _rs.SECTION_REGISTRY]
+    unknown = [e for e in _rs.section_entries(_entry_dicts(body.sections)) if e["id"] not in _rs.SECTION_REGISTRY]
     if unknown:
-        raise HTTPException(400, f"Unknown sections: {unknown}")
+        raise HTTPException(400, f"Unknown sections: {[e['id'] for e in unknown]}")
+    if body.category and body.category not in _rt.CATEGORY_TITLES:
+        raise HTTPException(400, "Unknown category")
+    if body.default_period and body.default_period not in _rt.PERIODS:
+        raise HTTPException(400, "Unknown default period")
+    if body.source_key and body.source_key not in _rt.TEMPLATES:
+        raise HTTPException(400, "Unknown source template")
+    for t in body.tags:
+        if not t.strip() or len(t) > 32:
+            raise HTTPException(400, "Tags are 1-32 characters")
+    return _validate_entries(body.sections)
+
+
+def _template_params(body: CustomReportBody, entries: list[dict]) -> dict:
+    import json as _json
+    return {
+        "n": body.name.strip(), "d": (body.description or "").strip() or None,
+        "s": _json.dumps([e["id"] for e in entries]),
+        "def": _json.dumps({"version": 1, "sections": entries}),
+        "cat": body.category or None,
+        "tags": _json.dumps(sorted({t.strip() for t in body.tags if t.strip()})),
+        "vis": body.visibility, "src": body.source_key or None,
+        "per": body.default_period or None,
+    }
+
+
+@router.get("/custom/{report_id}")
+async def get_custom_report(
+    report_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _perms, admin, manager = await _access(db, current_user)
+    row = await _render.load_template(db, report_id)
+    if not _render.can_read_template(row, current_user, admin):
+        raise HTTPException(404, "Report template not found")
+    return _render.serialize_template(row, current_user, admin, manager)
 
 
 @router.post("/custom", status_code=201)
@@ -566,49 +668,108 @@ async def create_custom_report(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("reports.manage")),
 ):
-    _validate_custom(body)
-    import json as _json
+    entries = _validate_custom(body)
+    params = _template_params(body, entries)
     row = (await db.execute(text(
-        "INSERT INTO custom_reports (name, description, sections, created_by) "
-        "VALUES (:n, :d, CAST(:s AS jsonb), :u) RETURNING id::text"),
-        {"n": body.name.strip(), "d": body.description,
-         "s": _json.dumps(body.sections), "u": str(current_user.id)})).first()
+        "INSERT INTO custom_reports (name, description, sections, definition, category, tags, "
+        "visibility, source_key, default_period, created_by, updated_by) "
+        "VALUES (:n, :d, CAST(:s AS jsonb), CAST(:def AS jsonb), :cat, CAST(:tags AS jsonb), "
+        ":vis, :src, :per, :u, :u) RETURNING id::text"),
+        {**params, "u": str(current_user.id)})).first()
+    await write_audit_log(
+        db, actor=current_user, action="reports.template.create", resource_type="report_template",
+        resource_id=row[0], metadata={"name": params["n"], "visibility": body.visibility,
+                                      "source_key": body.source_key,
+                                      "sections": [e["id"] for e in entries]})
     await db.commit()
-    return {"id": row[0], "message": f"Custom report '{body.name}' saved"}
+    return {"id": row[0], "message": f"Report template '{params['n']}' saved"}
 
 
 @router.put("/custom/{report_id}")
 async def update_custom_report(
-    report_id: _uuid.UUID,
+    report_id: str,
     body: CustomReportBody,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("reports.manage")),
 ):
-    _validate_custom(body)
-    import json as _json
-    res = await db.execute(text(
-        "UPDATE custom_reports SET name=:n, description=:d, "
-        "sections=CAST(:s AS jsonb), updated_at=NOW() WHERE id=:id"),
-        {"n": body.name.strip(), "d": body.description,
-         "s": _json.dumps(body.sections), "id": str(report_id)})
-    if not res.rowcount:
-        raise HTTPException(404, "Custom report not found")
+    _perms, admin, manager = await _access(db, current_user)
+    row = await _render.load_template(db, report_id)
+    if not _render.can_read_template(row, current_user, admin):
+        raise HTTPException(404, "Report template not found")
+    if not _render.can_edit_template(row, current_user, admin, manager):
+        raise HTTPException(403, "Only the owner or a report manager can change this template")
+    if body.visibility != row.visibility and not (admin or _render.is_owner(row, current_user)):
+        raise HTTPException(403, "Only the owner can change who sees this template")
+    entries = _validate_custom(body)
+    params = _template_params(body, entries)
+    await db.execute(text(
+        "UPDATE custom_reports SET name=:n, description=:d, sections=CAST(:s AS jsonb), "
+        "definition=CAST(:def AS jsonb), category=:cat, tags=CAST(:tags AS jsonb), visibility=:vis, "
+        "source_key=:src, default_period=:per, updated_by=:u, updated_at=NOW() WHERE id=:id"),
+        {**params, "u": str(current_user.id), "id": row.id})
+    changed = [k for k, old in (("name", row.name), ("visibility", row.visibility),
+                                ("category", row.category), ("default_period", row.default_period))
+               if (getattr(body, k) or None) != (old or None)]
+    await write_audit_log(
+        db, actor=current_user, action="reports.template.update", resource_type="report_template",
+        resource_id=row.id, metadata={"name": params["n"], "changed": changed,
+                                      "sections": [e["id"] for e in entries]})
     await db.commit()
-    return {"message": "Custom report updated"}
+    return {"message": "Report template updated"}
+
+
+@router.post("/custom/{report_id}/duplicate", status_code=201)
+async def duplicate_custom_report(
+    report_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("reports.manage")),
+):
+    """A private copy owned by the caller."""
+    import json as _json
+    _perms, admin, _manager = await _access(db, current_user)
+    row = await _render.load_template(db, report_id)
+    if not _render.can_read_template(row, current_user, admin):
+        raise HTTPException(404, "Report template not found")
+    entries = _render.template_entries(row)
+    name = f"Copy of {row.name}"[:120]
+    new = (await db.execute(text(
+        "INSERT INTO custom_reports (name, description, sections, definition, category, tags, "
+        "visibility, source_key, default_period, created_by, updated_by) "
+        "VALUES (:n, :d, CAST(:s AS jsonb), CAST(:def AS jsonb), :cat, CAST(:tags AS jsonb), "
+        "'private', :src, :per, :u, :u) RETURNING id::text"),
+        {"n": name, "d": row.description, "s": _json.dumps([e["id"] for e in entries]),
+         "def": _json.dumps({"version": 1, "sections": entries}), "cat": row.category,
+         "tags": _json.dumps(list(row.tags or [])), "src": row.source_key, "per": row.default_period,
+         "u": str(current_user.id)})).first()
+    await write_audit_log(
+        db, actor=current_user, action="reports.template.clone", resource_type="report_template",
+        resource_id=new[0], metadata={"name": name, "source_id": row.id})
+    await db.commit()
+    return {"id": new[0], "message": f"Created '{name}'"}
 
 
 @router.delete("/custom/{report_id}")
 async def delete_custom_report(
-    report_id: _uuid.UUID,
+    report_id: str,
+    force: bool = Query(False, description="Also delete the schedules that deliver this template"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("reports.manage")),
 ):
-    res = await db.execute(text(
-        "DELETE FROM custom_reports WHERE id=:id"), {"id": str(report_id)})
-    if not res.rowcount:
-        raise HTTPException(404, "Custom report not found")
+    _perms, admin, manager = await _access(db, current_user)
+    row = await _render.load_template(db, report_id)
+    if not _render.can_read_template(row, current_user, admin):
+        raise HTTPException(404, "Report template not found")
+    if not _render.can_edit_template(row, current_user, admin, manager):
+        raise HTTPException(403, "Only the owner or a report manager can delete this template")
+    if int(row.schedules or 0) and not force:
+        raise HTTPException(409, f"{row.schedules} schedule(s) deliver this template. Delete them too, "
+                                 "or keep the template.")
+    await db.execute(text("DELETE FROM custom_reports WHERE id=:id"), {"id": row.id})
+    await write_audit_log(
+        db, actor=current_user, action="reports.template.delete", resource_type="report_template",
+        resource_id=row.id, metadata={"name": row.name, "schedules_removed": int(row.schedules or 0)})
     await db.commit()
-    return {"message": "Custom report deleted"}
+    return {"message": "Report template deleted"}
 
 
 @router.get("/runs")
