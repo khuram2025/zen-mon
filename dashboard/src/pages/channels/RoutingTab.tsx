@@ -1,33 +1,34 @@
-import { Fragment, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useMemo, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  AlertOctagon,
   AlertTriangle,
+  ArrowRight,
   Bell,
   CalendarClock,
-  ChevronDown,
-  ChevronRight,
   Clock,
   ExternalLink,
-  FileText,
   Loader2,
-  Lock,
   Mail,
   Pencil,
-  Play,
-  Plus,
   Trash2,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
+import { apiErrorMessage } from '@/lib/utils'
+import { useCan } from '@/stores/auth'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { QueryFailure } from '@/components/ui/QueryState'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
-import { ReportScheduleFormDialog, type ReportSchedule } from '@/components/forms/ReportScheduleFormDialog'
+import { useReportSchedules } from '@/features/reports/schedules/api'
+import { isFailing, relativeTo, soonestRun } from '@/features/reports/schedules/model'
+import { useNow } from '@/features/reports/schedules/ui'
 
 type Channel = { id: string; name: string; type: string; enabled: boolean }
 type AlertRule = {
@@ -44,26 +45,7 @@ type AlertRule = {
   schedule_days?: number[]
 }
 
-const REPORT_TYPE_LABELS: Record<string, string> = {
-  executive_summary: 'Executive Summary',
-  device_health: 'Device Health',
-  service_health: 'Service Health',
-  alert_analysis: 'Alert Analysis',
-  full_report: 'Full Report',
-}
 const DAY_ABBR = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-
-function pad(n: number) {
-  return String(n).padStart(2, '0')
-}
-
-function scheduleSummary(s: ReportSchedule): string {
-  const t = `${pad(s.hour)}:${pad(s.minute)}`
-  if (s.frequency === 'daily') return `Daily at ${t}`
-  if (s.frequency === 'weekly') return `Weekly · ${DAY_ABBR[s.day_of_week || 1]} at ${t}`
-  if (s.frequency === 'monthly') return `Monthly · day ${s.day_of_month || 1} at ${t}`
-  return t
-}
 
 function quietHours(r: AlertRule): string {
   if (!r.schedule_start && !r.schedule_end && (!r.schedule_days || r.schedule_days.length === 0)) {
@@ -75,12 +57,6 @@ function quietHours(r: AlertRule): string {
       ? ' · ' + r.schedule_days.map((d) => DAY_ABBR[d]).join(',')
       : ''
   return window + days
-}
-
-function statusBadge(status?: string | null) {
-  if (!status) return <span className="text-xs text-muted">—</span>
-  const v = status === 'success' ? 'success' : status === 'partial' ? 'warning' : 'danger'
-  return <Badge variant={v as any}>{status}</Badge>
 }
 
 function ChannelBadges({ ids, map }: { ids: string[]; map: Record<string, Channel> }) {
@@ -109,11 +85,7 @@ function ChannelBadges({ ids, map }: { ids: string[]; map: Record<string, Channe
 export function RoutingTab() {
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const [formOpen, setFormOpen] = useState(false)
-  const [editing, setEditing] = useState<ReportSchedule | null>(null)
-  const [deletingSchedule, setDeletingSchedule] = useState<ReportSchedule | null>(null)
   const [deletingRule, setDeletingRule] = useState<AlertRule | null>(null)
-  const [expanded, setExpanded] = useState<string | null>(null)
 
   // NOTE: these query keys are shared with other pages (ChannelsPage,
   // AlertRulesPage), which normalize the response to a plain array. We MUST
@@ -128,42 +100,12 @@ export function RoutingTab() {
   })
   const channelMap = useMemo(() => Object.fromEntries(channels.map((c) => [c.id, c])), [channels])
 
-  const { data: schedulesResp, isLoading: loadingSchedules } = useQuery<any>({
-    queryKey: ['report-schedules'],
-    queryFn: async () => (await api.get('/report-schedules')).data,
-  })
-  const schedules: ReportSchedule[] & any[] = schedulesResp?.data || []
-
   const { data: rules = [], isLoading: loadingRules } = useQuery<AlertRule[]>({
     queryKey: ['alert-rules'],
     queryFn: async () => {
       const r = (await api.get('/alert-rules')).data
       return Array.isArray(r) ? r : r?.data || []
     },
-  })
-
-  const toggleSchedule = useMutation({
-    mutationFn: async (id: string) => api.post(`/report-schedules/${id}/toggle`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['report-schedules'] }),
-    onError: (e: any) => toast.error('Toggle failed', apiErrorMessage(e)),
-  })
-  const runNow = useMutation({
-    mutationFn: async (id: string) => (await api.post(`/report-schedules/${id}/run-now`)).data,
-    onSuccess: (data: any) => {
-      const delivered = data?.delivered?.length || 0
-      toast.success('Report generated', delivered ? `Delivered to ${delivered} channel(s)` : 'No channels linked — view via the report link')
-      qc.invalidateQueries({ queryKey: ['report-schedules'] })
-    },
-    onError: (e: any) => toast.error('Run failed', apiErrorMessage(e)),
-  })
-  const delSchedule = useMutation({
-    mutationFn: async (id: string) => api.delete(`/report-schedules/${id}`),
-    onSuccess: () => {
-      toast.success('Schedule deleted')
-      setDeletingSchedule(null)
-      qc.invalidateQueries({ queryKey: ['report-schedules'] })
-    },
-    onError: (e: any) => toast.error('Delete failed', apiErrorMessage(e)),
   })
 
   const toggleRule = useMutation({
@@ -183,103 +125,8 @@ export function RoutingTab() {
 
   return (
     <div className="space-y-5">
-      {/* ── Scheduled reports ── */}
-      <Card>
-        <CardContent className="p-0">
-          <div className="flex flex-col gap-2 border-b border-border p-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-info/10 text-info">
-                <FileText className="h-4 w-4" />
-              </div>
-              <div>
-                <h2 className="text-sm font-semibold">Scheduled Reports</h2>
-                <p className="text-xs text-muted">
-                  {loadingSchedules ? 'Loading…' : `${schedules.length} report schedule${schedules.length === 1 ? '' : 's'} delivering to channels`}
-                </p>
-              </div>
-            </div>
-            <Button size="sm" onClick={() => { setEditing(null); setFormOpen(true) }}>
-              <Plus className="h-4 w-4" />
-              New scheduled report
-            </Button>
-          </div>
-
-          <Table>
-            <THead className="bg-surface2/60">
-              <Tr>
-                <Th>Report</Th>
-                <Th>Schedule</Th>
-                <Th>Channels</Th>
-                <Th>Last run</Th>
-                <Th>Next run</Th>
-                <Th>Status</Th>
-                <Th className="w-48 text-right">Actions</Th>
-              </Tr>
-            </THead>
-            <TBody>
-              {loadingSchedules ? (
-                <Tr><Td colSpan={7} className="py-10 text-center text-sm text-muted"><Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" />Loading</Td></Tr>
-              ) : schedules.length === 0 ? (
-                <Tr>
-                  <Td colSpan={7} className="py-12">
-                    <div className="mx-auto flex max-w-md flex-col items-center gap-3 text-center">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-info/10 text-info"><FileText className="h-6 w-6" /></div>
-                      <div>
-                        <div className="text-sm font-semibold">No scheduled reports</div>
-                        <div className="mt-1 text-xs text-muted">Schedule a report to be generated and emailed automatically.</div>
-                      </div>
-                      <Button size="sm" onClick={() => { setEditing(null); setFormOpen(true) }}><Plus className="h-4 w-4" />New scheduled report</Button>
-                    </div>
-                  </Td>
-                </Tr>
-              ) : (
-                schedules.map((s) => (
-                  <Fragment key={s.id}>
-                    <Tr className="align-top">
-                      <Td>
-                        <button className="flex items-start gap-2 text-left" onClick={() => setExpanded(expanded === s.id ? null : s.id)}>
-                          {expanded === s.id ? <ChevronDown className="mt-1 h-4 w-4 text-muted" /> : <ChevronRight className="mt-1 h-4 w-4 text-muted" />}
-                          <span>
-                            <span className="font-medium text-text">{s.name}</span>
-                            <span className="mt-1 block">
-                              <Badge variant="outline">{REPORT_TYPE_LABELS[s.report_type] || s.report_type}</Badge>
-                            </span>
-                          </span>
-                        </button>
-                      </Td>
-                      <Td>
-                        <div className="flex items-center gap-1.5 text-sm"><CalendarClock className="h-3.5 w-3.5 text-muted" />{scheduleSummary(s)}</div>
-                        <div className="mt-1 text-[11px] uppercase text-muted">{s.period.replace('last_', 'last ')}</div>
-                      </Td>
-                      <Td><ChannelBadges ids={s.notify_channels} map={channelMap} /></Td>
-                      <Td><div className="text-sm text-text2">{s.last_run_at ? relativeTime(s.last_run_at) : 'Never'}</div></Td>
-                      <Td><div className="text-sm text-text2">{s.next_run_at ? relativeTime(s.next_run_at) : (s.enabled ? '—' : 'Disabled')}</div></Td>
-                      <Td>{statusBadge(s.last_status)}</Td>
-                      <Td>
-                        <div className="flex items-center justify-end gap-1">
-                          <Switch checked={s.enabled} onCheckedChange={() => toggleSchedule.mutate(s.id)} />
-                          <Button size="sm" variant="outline" onClick={() => runNow.mutate(s.id)} disabled={runNow.isPending} title="Generate & send now">
-                            {runNow.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                          </Button>
-                          <Button size="sm" variant="ghost" onClick={() => { setEditing(s); setFormOpen(true) }} title="Edit"><Pencil className="h-3.5 w-3.5" /></Button>
-                          <Button size="sm" variant="ghost" className="text-muted hover:text-danger" onClick={() => setDeletingSchedule(s)} title="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
-                        </div>
-                      </Td>
-                    </Tr>
-                    {expanded === s.id && (
-                      <Tr>
-                        <Td colSpan={7} className="bg-surface2/40">
-                          <ScheduleDetail schedule={s} />
-                        </Td>
-                      </Tr>
-                    )}
-                  </Fragment>
-                ))
-              )}
-            </TBody>
-          </Table>
-        </CardContent>
-      </Card>
+      {/* ── Scheduled reports (managed in Reports → Scheduled reports) ── */}
+      <ScheduledReportsSummary channelMap={channelMap} />
 
       {/* ── Alert rules routing ── */}
       <Card>
@@ -344,18 +191,6 @@ export function RoutingTab() {
         </CardContent>
       </Card>
 
-      <ReportScheduleFormDialog open={formOpen} onOpenChange={setFormOpen} schedule={editing} />
-
-      <ConfirmDialog
-        open={!!deletingSchedule}
-        onOpenChange={(o) => !o && setDeletingSchedule(null)}
-        title="Delete scheduled report"
-        description={<>Delete <span className="font-semibold text-text">{deletingSchedule?.name}</span>? Generated report links are kept.</>}
-        confirmText="Delete"
-        destructive
-        loading={delSchedule.isPending}
-        onConfirm={() => { if (deletingSchedule) delSchedule.mutate(deletingSchedule.id) }}
-      />
       <ConfirmDialog
         open={!!deletingRule}
         onOpenChange={(o) => !o && setDeletingRule(null)}
@@ -370,54 +205,94 @@ export function RoutingTab() {
   )
 }
 
-function ScheduleDetail({ schedule }: { schedule: ReportSchedule & any }) {
-  const { data, isLoading } = useQuery<any>({
-    queryKey: ['report-schedules', schedule.id, 'runs'],
-    queryFn: async () => (await api.get(`/report-schedules/${schedule.id}/runs`)).data,
-  })
-  const runs: any[] = data?.data || []
+/**
+ * Report schedules live in Reports → Scheduled reports. Routing shows how many
+ * deliver to channels, the next delivery, failures and which channels they
+ * use, with a link to manage them there.
+ */
+function ScheduledReportsSummary({ channelMap }: { channelMap: Record<string, Channel> }) {
+  const can = useCan()
+  const allowed = can('reports.view')
+  const q = useReportSchedules({ enabled: allowed })
+  const now = useNow(60_000)
+  const list = q.data ?? []
+  const active = list.filter((s) => s.enabled)
+  const failing = list.filter(isFailing)
+  const soonest = soonestRun(list, now)
+  const usage = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const s of list) for (const id of s.notify_channels ?? []) counts.set(id, (counts.get(id) ?? 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [list])
+
+  if (!allowed) return null
   return (
-    <div className="space-y-3 p-4">
-      {schedule.description && <p className="text-sm text-text2">{schedule.description}</p>}
-      <div className="flex flex-wrap gap-4 text-xs text-muted">
-        <span>Attachment: <span className="font-medium text-text">{schedule.format.toUpperCase()}</span></span>
-        <span>Period: <span className="font-medium text-text">{schedule.period}</span></span>
-        {schedule.last_error && <span className="text-danger">Last error: {schedule.last_error}</span>}
-      </div>
-      <div>
-        <div className="mb-1 text-xs font-semibold uppercase text-muted">Recent runs</div>
-        {isLoading ? (
-          <div className="text-xs text-muted"><Loader2 className="inline h-3 w-3 animate-spin" /> Loading runs</div>
-        ) : runs.length === 0 ? (
-          <div className="text-xs text-muted">No runs yet — use the ▶ action to generate one now.</div>
-        ) : (
-          <div className="space-y-1">
-            {runs.map((run) => (
-              <div key={run.id} className="flex items-center justify-between gap-3 rounded-md border border-border bg-bg px-3 py-2">
-                <div className="flex items-center gap-2 text-sm">
-                  {statusBadge(run.status)}
-                  <span className="text-text2">{run.generated_at ? relativeTime(run.generated_at) : ''}</span>
-                  {run.delivered_to?.length > 0 && <span className="text-xs text-muted">→ {run.delivered_to.join(', ')}</span>}
-                </div>
-                {run.token ? (
-                  <a
-                    href={`${window.location.origin}/api/v1/reports/shared/${run.token}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                  >
-                    <ExternalLink className="h-3 w-3" /> View report
-                  </a>
-                ) : (
-                  <span className="inline-flex items-center gap-1 text-xs text-muted" title="Report links are shown to the schedule owner and to users who manage reports">
-                    <Lock className="h-3 w-3" aria-hidden /> Link restricted
-                  </span>
-                )}
-              </div>
-            ))}
+    <Card>
+      <CardContent className="p-0">
+        <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-info/10 text-info">
+              <CalendarClock className="h-4 w-4" aria-hidden />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold">Scheduled Reports</h2>
+              <p className="text-xs text-muted">Report schedules that deliver to these channels are managed in Reports.</p>
+            </div>
           </div>
-        )}
-      </div>
-    </div>
+          <Button asChild size="sm" variant="outline" className="shrink-0">
+            <Link to="/reports/schedules">
+              Manage schedules <ArrowRight className="h-4 w-4" aria-hidden />
+            </Link>
+          </Button>
+        </div>
+        <div className="border-t border-border px-4 py-3">
+          {q.isLoading ? (
+            <div className="flex gap-3" aria-busy="true" aria-label="Loading scheduled reports">
+              <Skeleton className="h-5 w-28" /><Skeleton className="h-5 w-24" /><Skeleton className="h-5 w-40" />
+            </div>
+          ) : q.isError && !q.data ? (
+            <QueryFailure compact error={q.error} what="scheduled reports" onRetry={() => void q.refetch()} retrying={q.isFetching} />
+          ) : list.length === 0 ? (
+            <p className="text-sm text-muted">No scheduled reports yet.</p>
+          ) : (
+            <div className="space-y-2">
+              <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm" aria-label="Scheduled reports summary">
+                <li className="text-text2"><span className="font-semibold tabular-nums text-text">{list.length}</span> schedule{list.length === 1 ? '' : 's'}</li>
+                <li className="text-text2"><span className="font-semibold tabular-nums text-text">{active.length}</span> active</li>
+                {failing.length > 0 && (
+                  <li className="inline-flex items-center gap-1 text-danger-fg">
+                    <AlertOctagon className="h-3.5 w-3.5" aria-hidden />
+                    <span className="font-semibold tabular-nums">{failing.length}</span> failing
+                  </li>
+                )}
+                {soonest && (
+                  <li className="inline-flex min-w-0 items-center gap-1 text-text2">
+                    <Clock className="h-3.5 w-3.5 text-muted" aria-hidden />
+                    Next: <span className="truncate font-medium text-text">{soonest.schedule.name}</span>
+                    <span className="tabular-nums text-muted">{relativeTo(soonest.at, now)}</span>
+                  </li>
+                )}
+              </ul>
+              {usage.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
+                  <span>Delivering to</span>
+                  {usage.slice(0, 6).map(([id, n]) => {
+                    const ch = channelMap[id]
+                    return (
+                      <Badge key={id} variant={ch ? 'outline' : 'danger'} className="gap-1">
+                        {ch?.type === 'email' ? <Mail className="h-3 w-3" aria-hidden /> : <Bell className="h-3 w-3" aria-hidden />}
+                        {ch ? ch.name : 'Deleted channel'}
+                        <span className="tabular-nums text-muted">×{n}</span>
+                      </Badge>
+                    )
+                  })}
+                  {usage.length > 6 && <span>and {usage.length - 6} more</span>}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
