@@ -119,7 +119,7 @@ Clicking "6 stale" opens Assets filtered `freshness=stale`.
 | **Numbers** | `tabular-nums`; `fmtCount`; versions, builds and serials in `font-mono text-xs`; percentages to one decimal place |
 | **Color** | Series use `CATEGORICAL` (`pages/dashboards/shared.tsx`). Status tokens are reserved for state (freshness, health, and lifecycle stage in P4). Color is never the only signal: every slice also has a text label or legend count |
 | **Export** | `ExportCsvButton` on every table, shown only when `useCan('inventory.export')`. It calls the server-side `/inventory/export` with the current filters (full result, not just the page), and a toast reads "Export started — 2,410 rows" |
-| **Links to existing pages** | Asset names link to `/servers/:id` or `/devices/:id` only if the user holds `apm.view` / `devices.view`; otherwise plain text with a tooltip |
+| **Links to existing pages** | Asset names link to `/servers/:id` or `/devices/:id` only if the user holds `servers.view` / `devices.view`; otherwise plain text with a tooltip |
 | **Charts** | Recharts, `chartTooltipStyle`, a faint grid. Every chart has a **"View as table"** toggle (accessibility, and copying numbers) |
 | **Density** | 13 px table text, row height 36 px, sticky table headers, 50 rows per page by default (`PAGE_SIZES`) |
 
@@ -260,6 +260,7 @@ Clicking "6 stale" opens Assets filtered `freshness=stale`.
 - **Event list** grouped by day. Each row shows time, asset (link), category icon, and a sentence: "**Google Chrome** upgraded 151.0.7922.110 → 152.0.8001.12", "**FortiOS** changed 7.2.5 → 7.2.8 *(firmware)*", "**TeamViewer 15.5.3** installed".
 - **Filters:** category, action, asset kind, asset, product, search; all in the URL.
 - **Data-integrity footnote:** "History starts 2026-10-xx (when change capture was enabled). Earlier changes were not recorded." This is honest, and auditors ask for it.
+- **Pairing and caveats (from the Phase 0 review):** pair an `added` and a `removed` event with the same `subject_key` on the same asset in the same transaction (`observed_at`) as an **upgrade or downgrade** by comparator, because a product whose display name embeds its version (VC++ redistributables, Java) is stored as a new row. Show events whose `detail.snapshot_truncated` is true with a "list was capped at 1,000 titles" note, and the daily `(change budget exceeded)` marker as a distinct row. Scoped users' feeds must be built asset-first (doc 02 section 14).
 
 ### 3.8 `/inventory/lifecycle` (P4)
 

@@ -3,12 +3,16 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zenplus/poller/internal/checker"
 	"github.com/zenplus/poller/internal/checker/snmp"
@@ -19,6 +23,11 @@ import (
 // PostgresStore handles device data in PostgreSQL.
 type PostgresStore struct {
 	pool *pgxpool.Pool
+
+	// UpsertSystemInfo degradation state, see upsertSystemInfoSQL. Both are
+	// unix nanoseconds; the zero value means "columns assumed present".
+	sysInfoLegacyUntil atomic.Int64 // use the legacy statement until then
+	sysInfoWarnedAt    atomic.Int64 // last loud warning; 0 when not degraded
 }
 
 // NewPostgresStore connects to PostgreSQL.
@@ -439,33 +448,129 @@ const chassisEntitySQL = `
 	 ORDER BY COALESCE(parent_index, 0) <> 0, ent_index
 	 LIMIT 1`
 
-// UpsertSystemInfo writes discovered system-group fields back to
-// devices (vendor/model/os_version/sys_object_id). The sysDescr-derived
-// model only applies while the chassis entity reports no model name —
-// UpsertEntities keeps the exact SKU from ENTITY-MIB. The hostname is
-// only overwritten when the device has opted in via
-// auto_rename_from_snmp — otherwise the operator's chosen name wins.
-// This avoids the surprise where adding SNMP to a device silently
-// renames it to whatever its agent reports as sysName.
-func (s *PostgresStore) UpsertSystemInfo(
-	ctx context.Context, deviceID uuid.UUID,
-	sysObjectID, vendor, model, osVersion, sysName string,
-) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE devices
-		SET sys_object_id = COALESCE(NULLIF($2,''), sys_object_id),
-		    vendor        = COALESCE(NULLIF($3,''), vendor),
-		    model         = COALESCE((SELECT c.model_name FROM (`+chassisEntitySQL+`) c),
-		                             NULLIF($4,''), model),
-		    os_version    = COALESCE(NULLIF($5,''), os_version),
+// systemInfoSetSQL is the sticky SET list shared by both UpsertSystemInfo
+// statements ($1 = device id, $2..$6 = the collected values).
+//
+// Every collected value is cut to its column width with LEFT before the
+// sticky COALESCE(NULLIF(...)) test: devices.sys_object_id, model, os_version
+// and hostname are varchar(255), devices.vendor is varchar(100). One value
+// that is too long (a profile regex that captures the whole sysDescr, a
+// buggy agent's sysName) would otherwise fail the entire UPDATE with
+// SQLSTATE 22001 and lose every other field and the identity_updated_at
+// stamp with it, on every poll. LEFT counts characters, as varchar does, and
+// an empty string stays empty, so an empty input still never overwrites a
+// stored value.
+const systemInfoSetSQL = `
+		SET sys_object_id = COALESCE(NULLIF(LEFT($2, 255),''), sys_object_id),
+		    vendor        = COALESCE(NULLIF(LEFT($3, 100),''), vendor),
+		    model         = COALESCE((SELECT c.model_name FROM (` + chassisEntitySQL + `) c),
+		                             NULLIF(LEFT($4, 255),''), model),
+		    os_version    = COALESCE(NULLIF(LEFT($5, 255),''), os_version),
 		    hostname      = CASE
 		                      WHEN auto_rename_from_snmp
-		                      THEN COALESCE(NULLIF($6,''), hostname)
+		                      THEN COALESCE(NULLIF(LEFT($6, 255),''), hostname)
 		                      ELSE hostname
-		                    END
-		WHERE id = $1
-	`, deviceID, sysObjectID, vendor, model, osVersion, sysName)
+		                    END`
+
+// upsertSystemInfoSQL also keeps the raw sysDescr evidence ($7, sticky like
+// the other fields) and stamps identity_updated_at on every successful
+// system-info poll, so "last successful inventory" can be told from
+// last_seen. Both columns come from migration 157.
+const upsertSystemInfoSQL = `
+		UPDATE devices` + systemInfoSetSQL + `,
+		    sys_descr           = COALESCE(NULLIF($7,''), sys_descr),
+		    identity_updated_at = now()
+		WHERE id = $1`
+
+// upsertSystemInfoLegacySQL is the statement from before migration 157. It is
+// only used while those columns are missing (poller binary running ahead of
+// the schema), so identity writeback keeps working instead of failing whole.
+const upsertSystemInfoLegacySQL = `
+		UPDATE devices` + systemInfoSetSQL + `
+		WHERE id = $1`
+
+const (
+	// How long a detected missing-column schema is trusted before the
+	// current statement is tried again (one failed statement per interval
+	// instead of one per device per cycle).
+	sysInfoLegacyRetry = time.Minute
+	// Minimum gap between repeated warnings while the schema is behind.
+	sysInfoWarnEvery = 10 * time.Minute
+)
+
+// UpsertSystemInfo writes discovered system-group fields back to
+// devices (vendor/model/os_version/sys_object_id/sys_descr) and stamps
+// identity_updated_at. The sysDescr-derived model only applies while the
+// chassis entity reports no model name — UpsertEntities keeps the exact
+// SKU from ENTITY-MIB. The hostname is only overwritten when the device
+// has opted in via auto_rename_from_snmp — otherwise the operator's
+// chosen name wins. This avoids the surprise where adding SNMP to a
+// device silently renames it to whatever its agent reports as sysName.
+//
+// sysDescr is sanitised here (NUL, invalid UTF-8, length) and, like the
+// other values, an empty one never overwrites a stored value. The other
+// values are cut to their column width in SQL (see systemInfoSetSQL), so one
+// over-long value cannot fail the whole identity write.
+//
+// If the schema predates migration 157 (undefined sys_descr or
+// identity_updated_at), the legacy statement is used instead and a warning
+// is printed, so a binary that starts ahead of its migrations still records
+// vendor/model/OS. The current statement is retried every sysInfoLegacyRetry
+// and takes over as soon as the columns exist.
+func (s *PostgresStore) UpsertSystemInfo(
+	ctx context.Context, deviceID uuid.UUID,
+	sysObjectID, vendor, model, osVersion, sysName, sysDescr string,
+) error {
+	now := time.Now()
+	if now.UnixNano() >= s.sysInfoLegacyUntil.Load() {
+		_, err := s.pool.Exec(ctx, upsertSystemInfoSQL,
+			deviceID, sysObjectID, vendor, model, osVersion, sysName, sanitizeSysDescr(sysDescr))
+		if err == nil {
+			if s.sysInfoWarnedAt.Swap(0) != 0 {
+				fmt.Printf("INFO: devices.sys_descr / identity_updated_at are present again; " +
+					"sysDescr and identity freshness writes resumed\n")
+			}
+			return nil
+		}
+		if !isIdentityColumnMissing(err) {
+			return err
+		}
+		s.noteIdentityColumnsMissing(now, err)
+	}
+	_, err := s.pool.Exec(ctx, upsertSystemInfoLegacySQL,
+		deviceID, sysObjectID, vendor, model, osVersion, sysName)
 	return err
+}
+
+// isIdentityColumnMissing reports whether err is PostgreSQL's undefined_column
+// (42703) for one of the columns added by migration 157. Any other failure
+// is not a schema-lag problem and must surface unchanged.
+func isIdentityColumnMissing(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42703" {
+		return false
+	}
+	return strings.Contains(pgErr.Message, "sys_descr") ||
+		strings.Contains(pgErr.Message, "identity_updated_at")
+}
+
+// noteIdentityColumnsMissing switches UpsertSystemInfo to the legacy
+// statement for sysInfoLegacyRetry and warns, at most once per
+// sysInfoWarnEvery.
+func (s *PostgresStore) noteIdentityColumnsMissing(now time.Time, cause error) {
+	s.sysInfoLegacyUntil.Store(now.Add(sysInfoLegacyRetry).UnixNano())
+	last := s.sysInfoWarnedAt.Load()
+	if last != 0 && now.UnixNano()-last < int64(sysInfoWarnEvery) {
+		return
+	}
+	if s.sysInfoWarnedAt.CompareAndSwap(last, now.UnixNano()) {
+		fmt.Printf("WARN: devices.sys_descr / identity_updated_at are missing (%v): "+
+			"migration 157 (migrate-157-inventory-foundation.sql) has not been applied, so "+
+			"sysDescr is not stored and identity freshness is not stamped. Falling back to "+
+			"the pre-157 statement. Do not apply migration 157 to the running appliance: it "+
+			"locks the devices table while it runs and stalls this poller. Finish the update "+
+			"with services stopped, or run scripts/sync-schema.py in a maintenance window.\n", cause)
+	}
 }
 
 // LookupDeviceByIP returns the device ID for a given source IP. Used

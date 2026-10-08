@@ -42,13 +42,13 @@
 
 | # | Task | Area | Est | Depends |
 |---|---|---|---|---|
-| 0.1 | `migrate-154-inventory-foundation.sql` (doc 02 §3.2, §3.3, §5, §6): `inventory_identity`, evidence columns, `inventory_change_events` with triggers and suppression GUC, `inventory_daily_snapshots`, baselined-at seed, indexes, GRANTs. Plus lockfile entry and `lint-migrations` | db | 2 | — |
+| 0.1 | `migrate-157-inventory-foundation.sql` (doc 02 §3.2, §3.3, §5, §6): `inventory_identity`, evidence columns, `inventory_change_events` with triggers and suppression GUC, `inventory_daily_snapshots`, baselined-at seed, indexes, GRANTs. Plus lockfile entry and `lint-migrations` | db | 2 | — |
 | 0.2 | `services/versioning.py` (comparators: win_build, semverish, fortios, panos, cisco_ios/iosxe, junos) and `services/inventory_normalize.py` (OS, network OS, vendor, software name). Rule packs `software_rules.json`, `vendor_aliases.json`, `os_patterns.json`. Golden fixtures cover every row of the tables in doc 02 §4 plus the live values seen on .221 | api | 4 | — |
 | 0.3 | Ingest hardening (`host_metric_service._upsert_inventory`): keep architecture, source and install_location; inline keys and category; same-name dedupe; truncation guard (no prune at ≥ 1,000); stamp `inventory_updated_at` / `inventory_baselined_at`; normalise the server identity inline | api | 1.5 | 0.1, 0.2 |
-| 0.4 | Poller (Go): persist `sys_descr`; stamp `identity_updated_at` on every successful system-info poll. Profiles: `os_family` hint on every built-in profile. Verify the PAN/F5 template-value precedence end to end (no Go change needed for it) | poller, content | 2 | 0.1 |
+| 0.4 | Poller (Go): persist `sys_descr`; stamp `identity_updated_at` on every successful system-info poll. In P0 `os_family` is derived by the normaliser from profile name, then sysObjectID prefix, then sysDescr (`os_patterns.json`); an explicit `device_profiles.os_family` column is deferred because built-in profiles are seeded by shipped migrations that must not be edited. Verify the PAN/F5 template-value precedence end to end (no Go change needed for it) | poller, content | 2 | 0.1 |
 | 0.5 | `inventory_normalize_loop` (2 min, lock 1515074397, batches of 500, `asyncio.to_thread`, suppression on re-normalise) and `inventory_snapshot_loop` (daily 00:15, lock 1515074398, retention purge). Registered in `main.py` startup and shutdown lists | api | 1.5 | 0.2 |
-| 0.6 | RBAC: `inventory` module in `PERMISSION_MODULES`; `_OPERATOR`/`_VIEWER`/`_READ_ONLY` lists; `PERMISSION_IMPLIES`; `PERMISSION_RISK["inventory.export"]="sensitive"`; `BUILTIN_ROLE_DEFINITION_VERSION = 4`; `_POLICIES["inventory"]`; `test_permissions_model.py` and `integration/test_access_control_e2e.py` `READ_ONLY_PERMS` updated | api | 1 | — |
-| 0.7 | Integration tests on a disposable Postgres fixture: trigger and suppression behaviour (T3–T9 below) | test | 2 | 0.1–0.5 |
+| 0.6 | RBAC: `inventory` module in `PERMISSION_MODULES`; `_OPERATOR`/`_VIEWER`/`_READ_ONLY` lists; `PERMISSION_IMPLIES`; `PERMISSION_RISK["inventory.export"]="sensitive"`; `BUILTIN_ROLE_DEFINITION_VERSION = 5`; `MODULE_AREAS["inventory"]`; `_POLICIES["inventory"]`; `test_permissions_model.py` and `integration/test_access_control_e2e.py` `READ_ONLY_PERMS` updated | api | 1 | — |
+| 0.7 | Integration tests on a disposable Postgres fixture: trigger and suppression behaviour (T3–T9 below). The fixture (`server/tests/pg_fixture.py`) provisions its own private cluster (initdb in a temp dir, loopback port, template database from a full migration replay), so the tests also run in the CI `server` job on runners that ship PostgreSQL binaries, and skip where they don't | test | 2 | 0.1–0.5 |
 
 **Exit criteria**
 
@@ -56,6 +56,12 @@
 - `inventory_identity` is populated for 100% of assets.
 - Identity coverage is measured and reported in the PR. Targets on SNMP devices with a profile: vendor ≥ 95%, OS version ≥ 90% (PAN/F5 now filled from templates), model ≥ 90%.
 - Agent-ingest p95 latency is unchanged (± 5%).
+
+**Status (2026-10-08): built and reviewed, pending the Phase 0 pull request and reference-appliance acceptance.** Tasks 0.1 to 0.7 are implemented on `claude/inventory-phase0-foundations`. Verification on a clean checkout: full server suite 3,931 passed and 274 skipped with the PostgreSQL-backed tests required; migration lint passes; poller tests, `go vet` for the touched packages and `go test -race` pass; the loop tests passed 8 out of 8 repeated runs (the cancel tests used to hang about 1 in 10).
+
+A six-reviewer adversarial review (44 agents, every medium-or-worse finding independently verified) found no data-loss bug, but several ways to **write false history**: a rule-pack revision bump producing a fleet-wide false OS change (fixed with `inventory_identity.values_rev`), a transient missing version writing two false events, capped lists leaving stale rows, out-of-order snapshots rewinding state, and silent normaliser failures stamping rows clean. All are fixed with regression tests; the remainder are recorded in doc 02 section 14. Still to do for the exit criteria: measure identity coverage and the ingest latency on the reference appliance, and confirm the migration on a canary (it holds exclusive locks on `devices`, `servers` and `server_software_inventory` for about 0.5 to 1.5 seconds at 5,000 servers by 400 packages, with services stopped by the OTA flow).
+
+**Release coupling:** migration 157, the ingest hardening (0.3) and the poller change must ship together. Without the ingest hardening the triggers would record false events from duplicate names and capped lists.
 
 ### P1 — Inventory dashboard MVP (the request) · ≈ 24 d
 
@@ -206,7 +212,7 @@ Every release:
 | T13 | security | Export with cells starting `=`, `+`, `-`, `@`, tab | Neutralised; audit log row written |
 | T14 | security | Viewer role calls every mutating inventory route | 403 (route-guard test plus live check) |
 | T15 | perf | 5k servers × 400 packages, 10k devices, 1M events | Doc 02 §13 budgets met; ingest p95 unchanged while the normalise loop runs |
-| T16 | regression | Upgrade N-1 → N and fresh install, with migrations 154+ | Schema gate green both paths; baselined seed correct |
+| T16 | regression | Upgrade N-1 → N and fresh install, with migrations 157+ | Schema gate green both paths; baselined seed correct |
 | T17 | regression | Built-in role reconcile v3 → v4 | Built-ins gain inventory perms; custom roles byte-identical |
 | T-UI1 | ui | Strict build, `smoke:routes`, nav-target validation | Green; every nav `to:` routed |
 | T-UI2 | ui | Drill-down equality: each Overview KPI or chart link → list `total` | Equal for every link on the fixture dataset |
@@ -243,9 +249,10 @@ Every release:
 |---|---|---|
 | D1 | Group name and placement | **"Inventory & Compliance"** group after Servers; short label "Assets" |
 | D2 | Relabel Servers → "Inventory" to "All Servers" | **Yes**: one meaning for "Inventory" |
-| D3 | Does `inventory.view` alone reveal per-server software lists (today `apm.view`)? | **Yes, within tag scope**: the inventory is the point of the module |
+| D3 | Does `inventory.view` alone reveal per-server software lists (today `servers.view`)? | **Yes, within tag scope**: the inventory is the point of the module |
 | D4 | Do built-in viewers get `inventory.export`? | **No**: export is classified *sensitive*; operators and admins only |
 | D5 | Linux coverage path | **Agentless SSH first** (P3.4, reuses `ncm_credentials`); a Linux agent GA stays in the agent roadmap |
 | D6 | Lifecycle data source | **Bundled endoflife.date snapshot per release + signed refresh**; no direct appliance egress |
 | D7 | Accept the Compliance-set amendments (`00-INDEX.md`, reconciliation table) | **Yes** |
 | D8 | Ship P0 dark in the next patch release, ahead of the UI | **Yes**: history accrues from day one |
+| D9 | Which built-in team roles get `inventory.view` when the UI lands (P1)? Release 1.23.35 added `network_team`, `systems_team`, `application_team` and `security_team` as least-privilege starting points | **`network_team`, `systems_team` and `security_team`: view only** (devices and servers inventory is core to their work and CIS 1 and 2 are a security-team concern); **`application_team`: none** (it sees applications, not the estate). No team role gets `export` or `manage`. Applied with a role-definition bump in P1, when there is something to see |

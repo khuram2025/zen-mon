@@ -66,7 +66,7 @@ Compliance permissions (P5+): keep `compliance.view`, `compliance.triage` and `c
 Wiring:
 
 - `PERMISSION_IMPLIES` gains `inventory.manage → inventory.view` and `inventory.export → inventory.view`.
-- `BUILTIN_ROLE_DEFINITION_VERSION` goes from 3 to **4**. Custom roles are never changed.
+- `BUILTIN_ROLE_DEFINITION_VERSION` goes from 4 to **5** (4 was taken by the `servers.*` split and the team roles in release 1.23.35). Custom roles are never changed. The four team roles (`network_team`, `systems_team`, `application_team`, `security_team`) do **not** get `inventory.*` in Phase 0: nothing is visible yet, and which team sees what is an owner decision (D9 in `04-ROADMAP-PHASES-AND-TASKS.md`) applied together with the UI in P1.
 - `route_policy._POLICIES["inventory"] = (("inventory.view",), ("inventory.manage",))`.
 - Export routes declare `require_permission("inventory.export")` explicitly.
 - The role editor at `/settings/general?tab=users&sub=roles` renders `/roles/catalog`, so the new module row appears with no UI change.
@@ -76,7 +76,7 @@ Wiring:
 | Item | Pinned value |
 |---|---|
 | Router | `server/app/api/v1/inventory.py`: `APIRouter(prefix="/inventory", tags=["Inventory"])`, mounted in `main.py` with `dependencies=[policy("inventory")]` |
-| Services | `services/inventory_normalize.py` (OS, firmware, vendor and software normalisation) · `services/versioning.py` (scheme-aware version comparators shared with baselines and compliance) · `services/inventory_query.py` (asset union, facets, aggregates) · `services/inventory_snapshots.py` (daily rollup and retention) |
+| Services | `services/inventory_normalize.py` (OS, firmware, vendor and software normalisation) · `services/versioning.py` (scheme-aware version comparators shared with baselines and compliance) · `services/inventory_query.py` (asset union, facets, aggregates) · `services/inventory_service.py` (normalise loop, software-key backfill, daily snapshot and retention; a later split into `inventory_snapshots.py` is a pure file move) |
 | Background loops | `inventory_normalize_loop` (every 2 min; normalises dirty or outdated identity and software rows in batches of 500, including the post-upgrade backfill) · `inventory_snapshot_loop` (daily 00:15 appliance time, plus retention purge) |
 | Advisory lock keys | **1515074397** (normalise) · **1515074398** (snapshot). The Compliance set reserved …395/…396; re-verify all four are unused at implementation |
 | Settings storage | `system_settings` key **`'inventory'`** (JSON: freshness thresholds, change retention days, snapshot hour, noise-category defaults) |
@@ -86,9 +86,9 @@ Wiring:
 
 | Object | Phase | Role |
 |---|---|---|
-| `inventory_identity` | P0 | **One normalised identity row per asset** (`asset_kind, asset_id`): vendor, os_family/product/release/version/build/edition, hw vendor/model/serial, each with its source; dirty-marked by triggers, filled by the normalise loop. Raw columns are never overwritten |
+| `inventory_identity` | P0 | **One normalised identity row per asset** (`asset_kind, asset_id`): vendor, os_family/product/release/version/build/edition, hw vendor/model/serial, each with its source; dirty-marked by triggers (`norm_rev` NULL), filled by the normalise loop and by ingest; `values_rev` records the rule-pack revision the values were computed under, so a revision change never writes history. Raw columns are never overwritten |
 | `devices` + `sys_descr`, `identity_updated_at` | P0 | Raw sysDescr evidence; time of the last successful system-info poll (freshness) |
-| `servers` + `inventory_updated_at`, `inventory_baselined_at`, `hw_manufacturer`, `hw_model`, `hw_serial`, `bios_version`, `bios_date`, `virtualization` | P0 (hardware filled in P3) | Freshness, first-snapshot gate for change capture, raw hardware evidence |
+| `servers` + `inventory_updated_at`, `inventory_baselined_at`, `inventory_collected_at`, `software_truncated`, `hw_manufacturer`, `hw_model`, `hw_serial`, `bios_version`, `bios_date`, `virtualization` | P0 (hardware filled in P3) | Freshness, first-snapshot gate for change capture, newest accepted snapshot time (ordering guard), truncated-list flag, raw hardware evidence |
 | `server_software_inventory` + `architecture`, `source`, `install_location`, `first_seen_at`, `name_key`, `publisher_key`, `category`, `norm_rev` | P0 | Keep evidence that is dropped today, plus normalised grouping keys |
 | `inventory_change_events` | P0 | Append-only install / remove / version-change / firmware / hardware history, written by triggers |
 | `inventory_daily_snapshots` | P0 | One row per day per metric family: trend charts and point-in-time audit evidence |
@@ -104,11 +104,11 @@ Wiring:
 
 ### Migrations
 
-Numbered in ship order. **154 is the next free number today**; re-check `scripts/migrations.lock` at implementation, because parallel branches take numbers.
+Numbered in ship order. **157 is the number used by P0**: `main` already holds 154 (role scope and server permissions) and 156 (report templates), and the Compliance set's original 080 to 082 were taken long ago. Re-check `scripts/migrations.lock` before each phase, because parallel branches take numbers.
 
 | File | Phase | Contents |
 |---|---|---|
-| `migrate-154-inventory-foundation.sql` | P0 | `inventory_identity` + dirty-marking triggers; evidence columns on `devices`/`servers`/`server_software_inventory`; `inventory_change_events` + capture triggers; `inventory_daily_snapshots`; baselined-at seed for existing servers; indexes; GRANTs |
+| `migrate-157-inventory-foundation.sql` | P0 | `inventory_identity` + dirty-marking triggers; evidence columns on `devices`/`servers`/`server_software_inventory`; `inventory_change_events` + capture triggers; `inventory_daily_snapshots`; baselined-at seed for existing servers; indexes; GRANTs |
 | `migrate-155-inventory-catalog.sql` | P2 | `inventory_software_products`, `inventory_software_rules`, `inventory_publishers`, `inventory_asset_meta`, `inventory_saved_views` |
 | `migrate-156-inventory-coverage.sql` | P3 | `server_patch_inventory`; `server_software_inventory` key widened to `(server_id, source, package_name, architecture)` |
 | `migrate-157-inventory-lifecycle.sql` | P4 | `eol_definitions`, `inventory_lifecycle_overrides`; alert-metric constraint supersede for `inventory_eol_*` |
@@ -130,7 +130,7 @@ The Compliance set is unbuilt and still valid as the vulnerability engine. These
 | `compliance_oid_dictionary` | Built-in `os_patterns.json` + `inventory_identity.os_family` (P0) | Same data, shipped earlier |
 | CV-E0 columns `devices.os_family`, `servers.distro_*` | `inventory_identity.os_family / os_product / os_release` | One normalised layer for every asset kind |
 | CV-E0 tasks 0.1–0.5 (identity hardening) | **Absorbed into P0 and P3** of this set | They are inventory work |
-| Migrations 080/081/082 | 154–159 (numbers taken since August) | Lockfile reality |
+| Migrations 080/081/082 | 157 and later (numbers taken since August) | Lockfile reality |
 
 Everything else in the Compliance set (feed protocol, matching kinds, confidence tiers, FRS/ARS scoring, SLA policy, triage states) stands as written and becomes Phase P6.
 

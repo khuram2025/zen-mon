@@ -34,7 +34,8 @@ STRONG = "Correct-Horse-Battery-Staple-9"
 # What the built-in Read Only role grants: a delegated manager must hold at least
 # this to assign it.
 READ_ONLY_PERMS = ["dashboard.view", "devices.view", "alerts.view", "service_checks.view", "netflow.view",
-                   "udt.view", "netpath.view", "servers.view", "apm.view", "reports.view", "maps.view"]
+                   "udt.view", "netpath.view", "servers.view", "apm.view", "inventory.view", "reports.view",
+                   "maps.view"]
 
 
 class Client:
@@ -740,6 +741,36 @@ def test_catalog_marks_risk_and_dependencies(admin):
     assert perms["system.admin"]["risk"] == "critical" and perms["users.manage"]["risk"] == "privileged"
     assert "devices.view" in perms["devices.manage"]["implies"]
     assert "netflow.manage_shared" in perms and "roles.view" in perms
+    # Inventory module: export is the sensitive one; export and manage each offer .view.
+    assert {"inventory.view", "inventory.export", "inventory.manage"} <= set(perms)
+    assert perms["inventory.export"]["risk"] == "sensitive"
+    assert perms["inventory.view"]["risk"] == perms["inventory.manage"]["risk"] == "standard"
+    assert perms["inventory.manage"]["implies"] == ["inventory.view"]
+    assert perms["inventory.export"]["implies"] == ["inventory.view"]
+    assert any(m["module"] == "inventory" and m["label"] == "Inventory" for m in cat["modules"])
+
+
+def test_builtin_roles_gain_inventory_but_custom_roles_do_not(admin):
+    # The API reconciles built-in rows to the code definitions at startup (definition v4);
+    # a custom role is exactly what its administrator saved.
+    by_name = {r["name"]: r for r in admin.get("/roles").json() if r["is_system"]}
+    assert {"inventory.view", "inventory.export", "inventory.manage"} <= set(by_name["operator"]["permissions"])
+    assert "inventory.view" in by_name["viewer"]["permissions"]
+    assert "inventory.view" in by_name["read_only"]["permissions"]
+    for name in ("viewer", "read_only"):  # owner decision D4: no export, no writes
+        assert not {"inventory.export", "inventory.manage"} & set(by_name[name]["permissions"]), name
+    custom = make_role(admin, ["devices.view", "apm.view"])
+    listed = {r["id"]: r for r in admin.get("/roles").json()}[custom["id"]]
+    assert not [p for p in listed["permissions"] if p.startswith("inventory.")]
+
+
+def test_role_manager_cannot_grant_inventory_permissions_it_lacks(admin):
+    rm = make_user(admin, make_role(admin, ["roles.view", "roles.manage", "inventory.view"])["name"])
+    for perms in (["inventory.export"], ["inventory.manage"], ["inventory.view", "inventory.export"]):
+        r = rm.post("/roles", json={"display_name": uniq("Inv "), "permissions": perms})
+        assert r.status_code == 403, (perms, r.text)
+    ok = rm.post("/roles", json={"display_name": uniq("Inv "), "permissions": ["inventory.view"]})
+    assert ok.status_code == 201, ok.text
 
 
 def test_effective_access_and_access_review_export(admin):

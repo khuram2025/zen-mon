@@ -243,6 +243,7 @@ _POLICIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "apm": (("apm.view",), ("apm.manage",)),
     "udt": (("udt.view",), ("udt.manage",)),
     "netpath": (("netpath.view",), ("netpath.manage",)),
+    "inventory": (("inventory.view",), ("inventory.manage",)),
     "ncm": (("ncm.view",), ("ncm.manage",)),
     "access": (("users.view", "users.manage", "roles.view", "roles.manage"),
                ("users.manage", "roles.manage")),

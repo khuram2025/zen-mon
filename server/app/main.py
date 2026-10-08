@@ -287,6 +287,12 @@ def create_app() -> FastAPI:
         # switches as child devices (advisory-locked).
         from app.services.managed_device_service import managed_sync_loop
         app.state.managed_device_sync = asyncio.create_task(managed_sync_loop())
+        # Inventory & Compliance: normalise dirty/outdated identity and software rows
+        # (every 2 min), and the daily snapshot + retention pass. Both take
+        # transaction-scoped advisory locks, so every worker can run them.
+        from app.services.inventory_service import inventory_normalize_loop, inventory_snapshot_loop
+        app.state.inventory_normalize = asyncio.create_task(inventory_normalize_loop())
+        app.state.inventory_snapshot = asyncio.create_task(inventory_snapshot_loop())
 
     async def _sync_agent_packages_once():
         _pkg_logger = logging.getLogger("zenplus.agent_packages")
@@ -302,7 +308,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair"):
+        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

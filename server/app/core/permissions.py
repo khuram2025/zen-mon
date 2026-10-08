@@ -72,6 +72,17 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         ("apm.view", "View", "View APM services, service map, traces, errors, SLOs, synthetics and RUM"),
         ("apm.manage", "Manage", "Manage APM ingest keys, SLOs, synthetics, RUM applications and APM settings"),
     ]),
+    ("inventory", "Inventory", [
+        ("inventory.view", "View",
+         "View OS, firmware, software and hardware inventory for devices and servers "
+         "within your tag scope"),
+        ("inventory.export", "Export",
+         "Export inventory datasets to CSV (serial numbers and software lists are "
+         "reconnaissance data)"),
+        ("inventory.manage", "Manage",
+         "Manage software catalog rules, asset attributes, lifecycle overrides, "
+         "shared saved views and inventory settings"),
+    ]),
     ("reports", "Reports", [
         ("reports.view", "View", "View reports"),
         ("reports.export", "Export", "Export and download reports"),
@@ -126,6 +137,7 @@ PERMISSION_RISK: dict[str, str] = {
     "udt.view_users": "sensitive",
     "ncm.export": "sensitive",
     "netflow.export": "sensitive",
+    "inventory.export": "sensitive",
     "ncm.credentials": "privileged",
     "users.manage": "privileged",
     "roles.manage": "privileged",
@@ -160,6 +172,8 @@ PERMISSION_IMPLIES: dict[str, list[str]] = {
     "ncm.compliance": ["ncm.view"],
     "servers.manage": ["servers.view"],
     "apm.manage": ["apm.view"],
+    "inventory.manage": ["inventory.view"],
+    "inventory.export": ["inventory.view"],
     "reports.export": ["reports.view"],
     "reports.manage": ["reports.view"],
     "maps.manage": ["maps.view"],
@@ -175,21 +189,22 @@ _OPERATOR = [
     "netflow.manage", "netflow.manage_shared", "netflow.export",
     "udt.view", "udt.view_users", "udt.manage", "netpath.view", "netpath.manage",
     "ncm.view", "ncm.manage", "servers.view", "servers.manage", "apm.view",
-    "apm.manage", "reports.view", "reports.export", "reports.manage", "maps.view",
+    "apm.manage", "inventory.view", "inventory.export", "inventory.manage",
+    "reports.view", "reports.export", "reports.manage", "maps.view",
     "maps.manage", "settings.view",
 ]
 
 _VIEWER = [
     "dashboard.view", "devices.view", "discovery.view", "alerts.view",
     "alerts.acknowledge", "service_checks.view", "netflow.view",
-    "udt.view", "netpath.view", "ncm.view", "servers.view", "apm.view", "reports.view",
-    "reports.export", "maps.view",
+    "udt.view", "netpath.view", "ncm.view", "servers.view", "apm.view", "inventory.view",
+    "reports.view", "reports.export", "maps.view",
 ]
 
 _READ_ONLY = [
     "dashboard.view", "devices.view", "alerts.view",
     "service_checks.view", "netflow.view", "udt.view", "netpath.view",
-    "servers.view", "apm.view", "reports.view", "maps.view",
+    "servers.view", "apm.view", "inventory.view", "reports.view", "maps.view",
 ]
 
 # Team roles: least-privilege starting points for the teams that share the
@@ -224,7 +239,10 @@ _SECURITY_TEAM = [
 # built-in rows are reconciled at startup. Custom roles are NEVER touched, so a
 # newly introduced permission is never granted to a custom role implicitly.
 #   4 - servers.* split out of apm.*; built-in team roles added.
-BUILTIN_ROLE_DEFINITION_VERSION = 4
+#   5 - inventory.* added (operator: view, export, manage; viewer and read_only: view).
+#       The team roles deliberately do not get inventory.* yet; see
+#       Documentation/Inventory (decision D9).
+BUILTIN_ROLE_DEFINITION_VERSION = 5
 
 BUILTIN_ROLE_DEFINITIONS: dict[str, list[str]] = {
     "admin": list(ALL_PERMISSIONS),
@@ -318,6 +336,9 @@ MODULE_AREAS: dict[str, str] = {
     "service_checks": "Operations",
     "alerts": "Operations",
     "reports": "Operations",
+    # Inventory spans network devices and servers; Operations is where the other
+    # cross-cutting modules (alerts, reports) sit in the role editor.
+    "inventory": "Operations",
     "devices": "Network",
     "discovery": "Network",
     "netflow": "Network",

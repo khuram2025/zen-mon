@@ -78,7 +78,8 @@ CREATE TABLE IF NOT EXISTS inventory_identity (
     hw_serial         varchar(128),
     hw_source         varchar(16),
     lifecycle_slug    varchar(64),            -- P4: endoflife.date product, e.g. 'windows-server', 'fortios'
-    norm_rev          integer,                -- rule-pack revision used; NULL = dirty
+    norm_rev          integer,                -- NULL = dirty (a source changed since the last write)
+    values_rev        integer,                -- rule-pack revision the stored values were computed under
     source_changed_at timestamptz NOT NULL DEFAULT now(),
     normalized_at     timestamptz,
     PRIMARY KEY (asset_kind, asset_id)
@@ -95,22 +96,28 @@ CREATE INDEX IF NOT EXISTS idx_inv_identity_dirty  ON inventory_identity (asset_
 - **`device_template_values` AFTER INSERT OR UPDATE OF `value_text`**, `WHEN (NEW.metric_key IN ('fgt_fw_version','pan_sw_version','f5_version','f5_serial') AND OLD.value_text IS DISTINCT FROM NEW.value_text)`. This marks the owning device dirty.
 - **ON DELETE** of a server or device removes its identity row; `inventory_change_events` keeps the history.
 
-**`inventory_normalize_loop`** runs every 2 min with advisory lock 1515074397:
+**Two revision columns, two jobs.** `norm_rev` is the dirty flag: dirty-marking sets it to NULL, and a normalised write sets it to the current revision. `values_rev` records the rule-pack revision under which the stored *values* were computed; every writer of normalised values sets it to `RULEPACK_REV` in the same statement as `norm_rev`, and dirty-marking never touches it. The identity capture trigger fires only when `OLD.values_rev IS NOT DISTINCT FROM NEW.values_rev`, so **a rule-pack revision change can never write history**, whichever writer made it and whether or not the row was dirty. The price: a genuine change that lands in the very write that moves the revision is absorbed. A false event is worse than a missing one.
 
-1. Selects `norm_rev IS DISTINCT FROM :current_rev` rows (limit 500 per batch) plus assets with no identity row.
-2. Loads raw fields.
-3. Runs the normaliser (§4) and writes the identity row.
+**`inventory_normalize_loop`** runs every 2 min (45 s start delay) with advisory lock 1515074397, in separate short transactions for identity, software-key backfill and orphan cleanup:
 
-Agent ingest also normalises its server inline, so a server's dashboard updates within seconds. When the rule pack is upgraded (`current_rev` increments), all rows re-normalise in batches **with change events suppressed** (§5.3).
+1. Reads raw inputs **without locks** and normalises the batch off the event loop (`asyncio.to_thread`).
+2. Locks only inside the write step: `SELECT … FOR UPDATE SKIP LOCKED` over the rows whose `source_changed_at` still equals the value read, then writes just those rows. A row an upload or the poller holds is skipped and stays dirty; nothing waits on it, and each transaction sets `lock_timeout = 3 s`. A timeout reports `contended`. A deadlock is deliberately not swallowed.
+3. Order inside a tick: missing identity rows are created; **dirty** rows are written with capture enabled; **stale-revision** rows are written under the suppression setting (belt and braces beside `values_rev`).
+4. Normalisers are called with `strict=True`, so an internal exception reaches the per-row failure handling (row stays dirty, hour-long back-off, one logged line with `%r` of the asset id) instead of being stamped clean with generic output. If `packs_healthy()` is False nothing is stamped at all.
+5. `lifecycle_slug` is never written by the loop (the lifecycle phase owns it), and a known OS block is never replaced by an empty one: a source going missing is a gap.
+6. Software keys are backfilled in 2,000-row keyset batches. The NULL-keyed scan uses the partial index `idx_ssi_unkeyed`; the `norm_rev < RULEPACK_REV` scan runs once per process start (a revision bump ships with a restart). The backfill never writes `version` or `updated_at` (the ingest prune depends on it). A row with no `source` on a non-Windows server is left unkeyed for its next upload.
+
+Agent ingest also normalises its server inline, so a server's dashboard updates within seconds.
 
 **Source precedence for network OS version**, most exact first:
 
 1. a fresh template value (≤ 24 h): `fgt_fw_version`, `pan_sw_version`, `f5_version`;
-2. `devices.os_version` from the profile extract;
-3. `devices.firmware_version` (chassis `entPhysicalFirmwareRev`);
-4. managed-child mapping.
+2. `devices.os_version` from the profile extract (`os_source` `profile`);
+3. `devices.firmware_version` (chassis `entPhysicalFirmwareRev`, `entity`);
+4. a version found in `sys_descr` (`sysdescr`);
+5. a **stale** template value (older than 24 h, `template_stale`): the lowest rank, used only when nothing else supplies a version, so a device that was unreachable for a day keeps its last known firmware instead of losing it.
 
-The chosen source is recorded in `os_source` and shown in the UI ("from FortiGate template, 4 min ago").
+The chosen source is recorded in `os_source` and shown in the UI ("from FortiGate template, 4 min ago"). A device unpolled for 24 h whose stored version came from a template keeps that block; a recomputed row without an OS version never erases a known one.
 
 ### 3.3 Raw-evidence columns added in P0
 
@@ -125,6 +132,7 @@ ALTER TABLE servers ADD COLUMN IF NOT EXISTS hw_serial varchar(128);
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS bios_version varchar(128);
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS bios_date date;
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS virtualization varchar(32);        -- 'physical','vmware','hyper-v','kvm','xen','nutanix','cloud:*'
+ALTER TABLE servers ADD COLUMN IF NOT EXISTS software_truncated boolean NOT NULL DEFAULT false; -- agent list hit its 1,000-entry cap on the last upload
 
 ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS architecture varchar(16);   -- x64 / x86 / user
 ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS source varchar(32);         -- hklm / hklm_wow6432 / hkcu / dpkg / rpm
@@ -145,11 +153,18 @@ UPDATE servers s SET inventory_baselined_at = now()
 
 **Ingest changes** in `host_metric_service._upsert_inventory`:
 
-- Keep `architecture`, `source` and `install_location`.
-- Compute `name_key`, `publisher_key` and `category` inline.
-- **Dedupe same-name entries within one snapshot**, keeping the highest version by comparator. Otherwise the `(server_id, package_name)` key makes the version flap between entries and produce false "changed" events.
-- **Truncation guard:** if the snapshot holds ≥ 1,000 entries (the agent cap), upsert but **skip the prune**, so the missing tail is not recorded as removed. Raise an Inventory-health flag "software list truncated".
-- Stamp `inventory_updated_at`. Stamp `inventory_baselined_at` after the first accepted full snapshot.
+- Keep `architecture`, `source` and `install_location`. Every agent string that reaches PostgreSQL in this path (software fields, the OS section, the CPU model) goes through one sanitiser: NUL bytes dropped, lone surrogates replaced.
+- Compute `name_key`, `publisher_key`, `category` and `norm_rev` inline with `normalize_software(strict=True)`. An entry whose key computation fails is stored unkeyed with `norm_rev` NULL and one log line per upload; if `packs_healthy()` is False no row is stamped.
+- **Dedupe same-name entries within one snapshot**, keeping the highest version by comparator (`semverish`); where versioning refuses to order the group, a natural-sort key and then the raw text decide, so the survivor never depends on the order the agent listed the entries. Otherwise the `(server_id, package_name)` key makes the version flap and writes false "changed" events.
+- `version = COALESCE(EXCLUDED.version, existing)`: an empty `DisplayVersion` never erases a known version.
+- **Server-side cap:** `SOFTWARE_LIST_SERVER_CAP = 5000` entries; the excess is dropped and the snapshot counts as truncated.
+- **Truncation guard:** a list of ≥ 1,000 entries (`SOFTWARE_LIST_AGENT_CAP`, the agent's cap) is upserted, `servers.software_truncated` is stamped **before** the writes (so the capture triggers tag the events) and the final value after. The blanket prune is skipped; only rows that sort at or before the last listed name (compared in Go-compatible lower-cased code-point order, only when the list is verifiably in the agent's order) and are absent are pruned, and a `removed` event is written for them.
+- **Ordering guard:** `servers.inventory_collected_at` holds the agent-side timestamp of the newest accepted snapshot. A snapshot older than it is ignored for the software, OS and identity sections (other sections still apply), so a deferred or replayed older batch cannot rewind state or write events in both directions. A stored value more than a day in the future, or older than 24 hours (agent clocks are not monotonic and the agent spools a batch for at most 24 hours), never blocks a snapshot. The timestamp is the batch's `collected_at` for `batch.inventory` and the sample's own timestamp for `inventory` samples, neither clock-skew-corrected.
+- **Event budget:** at `SOFTWARE_EVENT_BUDGET_24H = 2000` software events for a server in the last 24 hours, the software section is captured silently and at most one marker event per server per day is written.
+- **Failure isolation:** every piece of inventory work inside ingest (planning, stamps, inline identity, the guards above) runs in a savepoint or a guarded call. An exception is logged and leaves the row unkeyed or dirty for `inventory_normalize_loop` to repair. It must never fail or roll back an agent upload, and the existing error behaviour of the other sections is unchanged.
+- Stamp `inventory_updated_at` after a non-empty software list or an OS section; stamp `inventory_baselined_at` after the first accepted non-empty software snapshot, **after** the row writes, so the first snapshot of a server is silent and every later one diffs.
+- Inline identity: after the OS update, `normalize_server` runs on the server's raw columns and the result is written to `inventory_identity` with `norm_rev` and `values_rev` set, unless the stored row already equals it.
+- Direct callers of `_upsert_inventory` that pass no `collected_at` keep the old behaviour, including its lock order (software rows, then the servers row, then the identity row).
 
 ## 4. Normalisation engine (`services/inventory_normalize.py` + `services/versioning.py`)
 
@@ -179,7 +194,9 @@ The Windows release comes **from the build number**, not the marketing string. T
 | F5 `17.1.1.3` | tmos | 17.1 | 17.1.1.3 | — |
 | Aruba AOS-CX `10.13.1000` | aos-cx | 10.13 | 10.13.1000 | — |
 
-`os_family` is derived from profile name, then sysObjectID prefix, then sysDescr regex (`os_patterns.json`). The device profiles also gain an `os_family` hint (P0 content task).
+`os_family` is derived from **hard evidence first**: the sysObjectID prefix, then the sysDescr rules, then the operator-chosen profile name (with a version-format check that separates classic IOS from IOS-XE), then the model, the vendor's only OS, and finally the version's shape (`os_patterns.json`). A profile name can seed the family but never outranks a sysObjectID or sysDescr that names a different one, and prefixes that are positively *not* a network OS of this pack (ClearPass, ScreenOS, F5OS) stop the search. Cisco IOS-XE is recognised by its platform markers (`CAT3K_CAA`, `LINUX_IOSD`, `_IOSXE`, `CAT9K_IOSXE`) and, failing that, by version shape. ASA keeps its interim build (`9.16(4)57`). No explicit `device_profiles.os_family` column exists in P0.
+
+Normaliser API: every `normalize_*` stays total by default; with `strict=True` an internal exception propagates so loops and ingest can apply their per-row failure handling. `normalize_device` also takes `stale_template_values`. The pinned test fingerprint per `RULEPACK_REV` covers the packs and a digest of the normaliser's output over the golden corpus, so an engine change without a revision bump fails CI.
 
 ### 4.3 Vendor canonicalisation (`vendor_aliases.json`)
 
@@ -259,19 +276,21 @@ CREATE INDEX IF NOT EXISTS idx_inv_events_key   ON inventory_change_events (subj
 | Source | Trigger | Emits |
 |---|---|---|
 | `server_software_inventory` | AFTER INSERT, only if the server's `inventory_baselined_at IS NOT NULL` | `software / added` (new_value = version) |
-| same | AFTER UPDATE OF `version`, `WHEN (OLD.version IS DISTINCT FROM NEW.version)` | `software / changed` (old → new). Upgrade vs downgrade is labelled at read time by comparator |
+| same | AFTER UPDATE OF `version`, `WHEN (OLD.version IS NOT NULL AND NEW.version IS NOT NULL AND OLD.version <> NEW.version)` | `software / changed` (old → new). A version that goes missing and returns is a gap, not two changes. Upgrade vs downgrade is labelled at read time by comparator |
 | same | AFTER DELETE, only if the parent server **still exists** and is baselined | `software / removed`. Cascade deletes of a removed server are skipped automatically: the parent row is already gone when the cascade runs |
-| `inventory_identity` | AFTER UPDATE when `os_version` changes with OLD and NEW both non-NULL | `firmware / changed` (devices) or `os / changed` (servers) |
+| `inventory_identity` | AFTER UPDATE when `os_version` changes with OLD and NEW both non-NULL **and `values_rev` is unchanged** | `firmware / changed` (devices) or `os / changed` (servers) |
 | same | AFTER UPDATE when `hw_serial` or `hw_model` changes with OLD and NEW both non-NULL | `hardware / changed` (RMA / chassis swap signal) |
 
-NULL → value is *discovery*, not change, and is never emitted. Value → NULL is ignored because poller writes are sticky.
+NULL → value is *discovery*, not change, and is never emitted. Value → NULL is ignored because poller writes are sticky. While `servers.software_truncated` is true, software events carry `detail.snapshot_truncated = true` so the read side can discount a list that was cut at the agent's cap.
 
 ### 5.3 Suppression (no fabricated history)
 
 - **First snapshot of a new server:** no events (the baselined gate).
-- **Rule-pack re-normalisation** without a source change: the loop runs with `SET LOCAL zenplus.inventory_suppress = 'on'`, and every trigger checks `current_setting('zenplus.inventory_suppress', true)`.
-- **P3 key-widening migration** and bulk admin operations also run with the GUC set.
-- **Truncated snapshots** skip the prune (§3.3), so they cause no removals.
+- **Rule-pack re-normalisation**: `values_rev` (§3.2) makes it silent for every writer. The loop additionally runs its stale-revision pass under `set_config('zenplus.inventory_suppress','on', true)` (`SET` cannot take bind parameters), and every capture trigger checks `current_setting('zenplus.inventory_suppress', true)`.
+- **P3 key-widening migration** and bulk admin operations also run with the setting on.
+- **Truncated snapshots** (a list that reached the agent's 1,000-entry cap) never trigger the blanket prune. Only rows that sort at or before the last listed name, and are absent, are pruned: the agent sorts by lower-cased name and cuts the tail, so those rows are provably uninstalled and the rest are unknown (§3.3).
+- **Stale or reordered snapshots** are ignored (§3.3), so a deferred older snapshot cannot rewind state or write events in both directions.
+- **Event budget**: a server with 2,000 or more software events in the last 24 hours has the software section of further uploads captured silently, with one marker event per day (`(change budget exceeded)`), so one misbehaving agent cannot write unbounded history.
 - **Never backfill events from history counts.** This is the project rule (AGENTS.md, UDT section) and applies equally here.
 
 ### 5.4 Retention
@@ -290,7 +309,7 @@ CREATE TABLE IF NOT EXISTS inventory_daily_snapshots (
 );
 ```
 
-`inventory_snapshot_loop` runs at 00:15 appliance time under advisory lock 1515074398 and is idempotent (`ON CONFLICT DO UPDATE`). It writes a few hundred rows a day and keeps 3 years.
+`inventory_snapshot_loop` wakes every 5 minutes and runs once per day at or after the configured hour:15 in the **appliance timezone** (the `company` setting's timezone, default UTC: the zone report schedules and alert quiet hours already use) under advisory lock 1515074398. A missed day is caught up on the next wake. `snapshot_day` deletes the day's rows of its six metric families and rewrites them in one transaction, so a re-run never leaves rows that no longer apply, and the previous day's `changes` family is recomputed once the day is over. It writes a few hundred rows a day and keeps 3 years. `trends_enabled` is a display switch only: recording continues, because history cannot be backfilled.
 
 It feeds the Overview's 30/90-day trend lines and the reports' "as of" snapshots. It is fleet-wide (unscoped), so **scoped users don't receive trend series**: the widget shows "Trends are available to unrestricted users".
 
@@ -481,10 +500,10 @@ As specified in `Documentation/Compliance/03` and `04`, with these inputs re-poi
 | Concern | Rule |
 |---|---|
 | Route guards | Router `policy("inventory")` plus explicit `require_permission("inventory.export")` on export, and `inventory.manage` on every mutation (precise permissions, no operator shortcut: RP-05). `test_route_policy_contract.py` covers the router. New `test_inventory_route_guards.py` asserts that every non-GET route declares more than `.view` (pattern: `test_netflow_route_guards.py`) |
-| Cross-module visibility | `inventory.view` alone shows asset identity and software inventory **within tag scope**. This intentionally widens server software visibility, which today needs `apm.view`. Links to `/devices/:id` and `/servers/:id` render as links only when `useCan('devices.view')` / `useCan('apm.view')`; otherwise as plain text |
+| Cross-module visibility | `inventory.view` alone shows asset identity and software inventory **within tag scope**. This intentionally widens server software visibility, which today needs `servers.view` (split out of `apm.view` in release 1.23.35). Role-level visibility scope (`roles.scope_tags`, added in the same release) combines with the user's own scope inside `scoping.visible_tags`, so the inventory queries inherit it. Links to `/devices/:id` and `/servers/:id` render as links only when `useCan('devices.view')` / `useCan('servers.view')`; otherwise as plain text |
 | Scope | Tag scope on every query. Detail endpoints return 404 out of scope. Trends and reports refuse scoped users, consistent with `reports.py` `/data/inventory` |
 | Audit | `write_audit_log` on export, catalog rule and product changes, asset-meta changes, settings changes, and (P5) policy and exception changes |
-| Built-ins | `BUILTIN_ROLE_DEFINITION_VERSION` 3 → 4. Release notes announce the new permissions and that **custom roles must be granted `inventory.view` explicitly** (doc §4 of the roles assessment) |
+| Built-ins | `BUILTIN_ROLE_DEFINITION_VERSION` 4 → 5. Release notes announce the new permissions and that **custom roles must be granted `inventory.view` explicitly** (doc §4 of the roles assessment) |
 
 ## 12. Reports integration (P2)
 
@@ -516,3 +535,23 @@ New sections in `services/report_sections.py`, registered in `SECTION_REGISTRY`:
 | Normalise loop | No agent-ingest latency impact | Batches of 500; pure-Python normaliser via `asyncio.to_thread` |
 
 If the software catalog exceeds budget on the perf fixture, add an `inventory_software_rollup` table refreshed by the normalise loop. This is the documented escape hatch and is not built unless the test fails.
+
+## 14. Known limitations and notes for later phases (from the Phase 0 review)
+
+A six-reviewer adversarial review of Phase 0 produced 44 findings; the confirmed ones that threaten history, uploads or CI are fixed. These are consciously **not** fixed in Phase 0 and are inputs to later phases.
+
+| Topic | Note |
+|---|---|
+| Scoped event queries (P1) | Neither `inventory_identity` nor `inventory_change_events` stores tags, and events deliberately have no foreign key. The natural scoped feed (`EXISTS` on the asset row, `ORDER BY observed_at DESC LIMIT 50`) walks the whole time index (about 4 s at 3 M events for a narrow scope). Scoped event queries must be **asset-driven**: build the visible-asset set first (tags live in the asset union) and join `inventory_change_events` through `idx_inv_events_asset` with a lateral join, with a perf test on a 3 M-event fixture and a scope that matches a quiet team. Decide explicitly what scoped users see for deleted assets. |
+| Product upgrades shown as install plus removal | A product whose display name embeds its version (VC++ redistributables, Java) or whose casing flips is captured as one `added` plus one `removed`. The read side pairs them: same asset, same `subject_key`, same `observed_at`, one added and one removed becomes an upgrade or downgrade by comparator. State this rule in the Changes page spec. |
+| Unattributed events | Events do not record which agent reported them, and the batch ledger that could attribute them expires before the events do (400 days). A fleet enrollment token can bind a second agent to an existing server by hostname (pre-existing, deliberate for reinstalls). Follow-up: set a transaction-local `zenplus.inventory_actor` setting in ingest and have the capture triggers copy it into `detail`. |
+| Volatile `sysDescr` | A device whose `sysDescr` changes every poll re-dirties its identity row every poll. Normalisation output is unchanged (no false events); the cost is write amplification (about one identity upsert per poll, and a normalise per tick). Mitigation if it ever matters: debounce `sys_descr`-only changes in a separate trigger and re-normalise rows older than 24 hours as the trailing edge. |
+| First-poll transient | Fixed for the usual case by writing entities before system info in the poller. Two rarer variants remain (a legacy import that inserts the profile model before the first poll; an entity walk that comes back empty on two consecutive polls flips `devices.model`). A settle rule in the dirty selection would close both. |
+| Template aging | A template-derived version is kept while the device is unpolled. A device that is polled but whose template group is no longer polled can be replaced by a sticky older profile version, which is a real change under an unchanged `values_rev` and writes an event. |
+| Lock order for callers without `collected_at` | Direct callers keep the payload-dependent lock order; a software-only snapshot can deadlock against `DELETE FROM servers` (the transaction is retried). The route always passes `collected_at`. |
+| `removed` events before key backfill | A `removed` event written for a row that is still unkeyed after the migration has a NULL `subject_key` for ever. Accepted; the read side falls back to the subject name. |
+| First upload after upgrade | A server whose snapshot lists the same product twice with different versions (HKLM and WOW6432Node) stored the last listed version before; the new rule stores the highest, so each affected package records one `changed` event on the first upload after the upgrade. |
+| Rule-pack fingerprint | The pinned fingerprint per revision covers the packs and the golden-corpus output, but nothing ties 'has shipped' to a released revision, so a shipped entry can still be edited in place. A CI step comparing against `origin/main` would close it. |
+| Poison pill outside this module | A lone surrogate in an agent batch makes `_host_results_batch_digest` (agents.py) raise before ingest runs, so the agent receives a 500 and retries for ever. Pre-existing. |
+| Poller database tests in CI | The Go PostgreSQL tests (42703 fallback, sticky semantics, migrated schema) run only where a PostgreSQL is available (`SYSINFO_TEST_DSN`, or `SYSINFO_TEST_PG=1` for the self-provisioning cluster); the required poller check does not run them. |
+| Poller start against an older schema | `install.sh` treats a failed migration runner as a warning, and the poller unit has no schema check. The poller degrades to the pre-157 statement and logs a WARN every 10 minutes; the degraded state is not yet shown in its health JSON. |
