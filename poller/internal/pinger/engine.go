@@ -69,7 +69,7 @@ type ServiceEventPublisher interface {
 // and writes discovery output back to Postgres.
 type SNMPLoader interface {
 	LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, error)
-	UpsertSystemInfo(ctx context.Context, deviceID uuid.UUID, sysObjectID, vendor, model, osVersion, sysName string) error
+	UpsertSystemInfo(ctx context.Context, deviceID uuid.UUID, sysObjectID, vendor, model, osVersion, sysName, sysDescr string) error
 	UpsertInterfaces(ctx context.Context, deviceID uuid.UUID, ifs []snmp.Interface) error
 	UpsertEntities(ctx context.Context, deviceID uuid.UUID, ents []snmp.Entity) error
 	UpsertSensors(ctx context.Context, deviceID uuid.UUID, sensors []snmp.Sensor) error
@@ -1362,7 +1362,22 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 		e.logger.Warnf("SNMP poll failed for %s (%s): %v", d.Hostname, d.IPAddress, rErr)
 	}
 
-	// 1) discovery writeback — system info, interfaces, entities, sensors
+	// 1) discovery writeback — entities, system info, interfaces, sensors
+	//
+	// Entities go first. The chassis row decides devices.model (an exact
+	// SKU beats the sysDescr-derived model), and the inventory normaliser
+	// copies devices.model into its change history. Writing the system
+	// info first would, on a device's first poll, store the profile model
+	// ('C9300') for the length of UpsertInterfaces and replace it with the
+	// chassis model ('C9300-48P') afterwards, which a normaliser tick in
+	// between records as a hardware change that never happened. With the
+	// chassis already stored, UpsertSystemInfo picks the same model and
+	// devices.model is written once.
+	if len(rEnts) > 0 {
+		if err := e.snmpLoader.UpsertEntities(ctx, d.ID, rEnts); err != nil {
+			e.logger.Warnf("UpsertEntities %s (%d rows): %v", d.Hostname, len(rEnts), err)
+		}
+	}
 	if rSystem != nil {
 		// Classify based on sysObjectID + sysDescr.
 		vendor, model, osVersion := "", "", ""
@@ -1375,18 +1390,13 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 				}
 			}
 		}
-		if err := e.snmpLoader.UpsertSystemInfo(ctx, d.ID, rSystem.SysObjectID, vendor, model, osVersion, rSystem.SysName); err != nil {
+		if err := e.snmpLoader.UpsertSystemInfo(ctx, d.ID, rSystem.SysObjectID, vendor, model, osVersion, rSystem.SysName, rSystem.SysDescr); err != nil {
 			e.logger.Warnf("UpsertSystemInfo %s: %v", d.Hostname, err)
 		}
 	}
 	if len(rIfs) > 0 {
 		if err := e.snmpLoader.UpsertInterfaces(ctx, d.ID, rIfs); err != nil {
 			e.logger.Warnf("UpsertInterfaces %s (%d rows): %v", d.Hostname, len(rIfs), err)
-		}
-	}
-	if len(rEnts) > 0 {
-		if err := e.snmpLoader.UpsertEntities(ctx, d.ID, rEnts); err != nil {
-			e.logger.Warnf("UpsertEntities %s (%d rows): %v", d.Hostname, len(rEnts), err)
 		}
 	}
 	if len(rSens) > 0 {

@@ -1,0 +1,199 @@
+{
+  "schema": 1,
+  "description": "Operating-system and network-OS patterns for services/inventory_normalize.py. Every regex is compiled case-insensitive and must stay linear-time (bounded quantifiers, no nested unbounded repetition). Bump RULEPACK_REV in inventory_normalize.py whenever this file changes.",
+
+  "windows": {
+    "description": "Windows release comes from the build number (third part of 10.0.<build>.<ubr>), never from the marketing string. 'server' applies when the OS name contains the word Server, otherwise 'client'. Build 19044 is 21H2 and 19045 is 22H2; 26300 is Windows 11 26H2 and 28000 is 26H1 (Microsoft release information). Review the table whenever Microsoft ships a feature update.",
+    "builds": [
+      {"build": 6000, "client": {"product": "Windows Vista", "release": "RTM"}},
+      {"build": 6001, "client": {"product": "Windows Vista", "release": "SP1"}, "server": {"release": "2008"}},
+      {"build": 6002, "client": {"product": "Windows Vista", "release": "SP2"}, "server": {"release": "2008"}},
+      {"build": 7600, "client": {"product": "Windows 7", "release": "RTM"}, "server": {"release": "2008 R2"}},
+      {"build": 7601, "client": {"product": "Windows 7", "release": "SP1"}, "server": {"release": "2008 R2"}},
+      {"build": 9200, "client": {"product": "Windows 8", "release": "RTM"}, "server": {"release": "2012"}},
+      {"build": 9600, "client": {"product": "Windows 8.1", "release": "RTM"}, "server": {"release": "2012 R2"}},
+      {"build": 10240, "client": {"product": "Windows 10", "release": "1507"}},
+      {"build": 10586, "client": {"product": "Windows 10", "release": "1511"}},
+      {"build": 14393, "client": {"product": "Windows 10", "release": "1607"}, "server": {"release": "2016"}},
+      {"build": 15063, "client": {"product": "Windows 10", "release": "1703"}},
+      {"build": 16299, "client": {"product": "Windows 10", "release": "1709"}, "server": {"release": "1709"}},
+      {"build": 17134, "client": {"product": "Windows 10", "release": "1803"}, "server": {"release": "1803"}},
+      {"build": 17763, "client": {"product": "Windows 10", "release": "1809"}, "server": {"release": "2019"}},
+      {"build": 18362, "client": {"product": "Windows 10", "release": "1903"}, "server": {"release": "1903"}},
+      {"build": 18363, "client": {"product": "Windows 10", "release": "1909"}, "server": {"release": "1909"}},
+      {"build": 19041, "client": {"product": "Windows 10", "release": "2004"}, "server": {"release": "2004"}},
+      {"build": 19042, "client": {"product": "Windows 10", "release": "20H2"}, "server": {"release": "20H2"}},
+      {"build": 19043, "client": {"product": "Windows 10", "release": "21H1"}},
+      {"build": 19044, "client": {"product": "Windows 10", "release": "21H2"}},
+      {"build": 19045, "client": {"product": "Windows 10", "release": "22H2"}},
+      {"build": 20348, "server": {"release": "2022"}},
+      {"build": 22000, "client": {"product": "Windows 11", "release": "21H2"}},
+      {"build": 22621, "client": {"product": "Windows 11", "release": "22H2"}},
+      {"build": 22631, "client": {"product": "Windows 11", "release": "23H2"}},
+      {"build": 25398, "server": {"release": "23H2"}},
+      {"build": 26100, "client": {"product": "Windows 11", "release": "24H2"}, "server": {"release": "2025"}},
+      {"build": 26200, "client": {"product": "Windows 11", "release": "25H2"}},
+      {"build": 26300, "client": {"product": "Windows 11", "release": "26H2"}},
+      {"build": 28000, "client": {"product": "Windows 11", "release": "26H1"}}
+    ],
+    "client_floor": [
+      {"min_build": 22000, "product": "Windows 11"},
+      {"min_build": 10240, "product": "Windows 10"}
+    ],
+    "server_year_re": "\\bserver\\s{1,3}(2003 R2|2003|2008 R2|2008|2012 R2|2012|2016|2019|2022|2025)\\b",
+    "client_name_re": "\\bwindows\\s{1,3}(11|10|8\\.1|8|7|vista|xp)\\b",
+    "client_release_re": "^(?:\\d{2}H[12]|\\d{4})$",
+    "edition_prefix_re": "^(?:microsoft\\s{1,3})?windows(?:\\s{1,3}server)?(?:\\s{1,3}(?:20\\d\\d(?:\\s{1,3}r2)?|\\d{1,2}(?:\\.\\d)?|vista|xp))?\\s{0,3}",
+    "version_re": "(?<![0-9.])(\\d{1,2}\\.\\d{1,2}\\.\\d{3,6}(?:\\.\\d{1,6})?)(?![0-9])",
+    "build_re": "\\bbuild\\s{0,2}(\\d{3,6}(?:\\.\\d{1,6})?)\\b"
+  },
+
+  "linux": {
+    "description": "Distribution table, first match wins. release: major | major_minor | none. 'sp_re' folds a SUSE service pack into the version (15 SP5 -> 15.5). Besides PRETTY_NAME style names the table accepts the spellings of the agent's gopsutil host.Info (redhat, oracle, amazon, sles, suse, opensuse-leap, linuxmint, arch, centos with 7.9.2009 style versions); the version then comes from os_version. 'os_version_re' restricts an entry to matching os_versions: CentOS Linux ended at 8, so gopsutil's centos 9 and later can only be CentOS Stream.",
+    "distros": [
+      {"id": "ubuntu", "product": "Ubuntu", "match": "^ubuntu\\b", "version_re": "ubuntu\\s{1,3}(\\d{2}\\.\\d{2}(?:\\.\\d{1,2})?)", "release": "major_minor", "edition_re": "\\b(LTS)\\b"},
+      {"id": "debian", "product": "Debian", "match": "^debian\\b", "version_re": "debian(?:\\s{1,3}gnu/linux)?\\s{1,3}(\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major"},
+      {"id": "rhel", "product": "RHEL", "match": "^(?:red\\s{1,3}hat\\s{1,3}enterprise|redhat|rhel)\\b", "version_re": "(?:linux(?:\\s{1,3}server)?|server)\\s{1,3}(?:release\\s{1,3})?(\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major"},
+      {"id": "centos-stream", "product": "CentOS Stream", "match": "^centos\\s{1,3}stream\\b", "version_re": "stream\\s{1,3}(?:release\\s{1,3})?(\\d{1,2})\\b", "release": "major"},
+      {"id": "centos-stream-short", "product": "CentOS Stream", "match": "^centos\\s{0,3}$", "os_version_re": "^(?:9|[1-9]\\d)$", "release": "major"},
+      {"id": "centos", "product": "CentOS", "match": "^centos\\b", "version_re": "(?:linux\\s{1,3})?(?:release\\s{1,3})?(\\d{1,2}(?:\\.\\d{1,2}){0,2})\\b", "release": "major"},
+      {"id": "rocky", "product": "Rocky Linux", "match": "^rocky\\b", "version_re": "linux\\s{1,3}(?:release\\s{1,3})?(\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major"},
+      {"id": "alma", "product": "AlmaLinux", "match": "^alma\\s{0,3}linux\\b", "version_re": "linux\\s{1,3}(?:release\\s{1,3})?(\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major"},
+      {"id": "oracle", "product": "Oracle Linux", "match": "^(?:oracle\\s{1,3}linux\\b|oracle\\s{0,3}$|ol\\s{0,3}$)", "version_re": "(?:server\\s{1,3})?(\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major"},
+      {"id": "fedora", "product": "Fedora", "match": "^fedora\\b", "version_re": "(?:linux\\s{1,3})?(\\d{2})\\b", "release": "major", "edition_re": "\\((\\w{1,20}\\s{1,3}edition)\\)"},
+      {"id": "sled", "product": "SLED", "match": "^(?:suse\\s{1,3}linux\\s{1,3}enterprise\\s{1,3}desktop|sled)\\b", "version_re": "desktop\\s{1,3}(\\d{1,2})\\b", "sp_re": "\\bsp(\\d{1,2})\\b", "release": "major"},
+      {"id": "sles", "product": "SLES", "match": "^(?:suse\\s{1,3}linux\\s{1,3}enterprise\\s{1,3}server|sles(?:_sap)?|suse(?!\\s{1,3}linux))\\b", "version_re": "server\\s{1,3}(\\d{1,2})\\b", "sp_re": "\\bsp(\\d{1,2})\\b", "release": "major"},
+      {"id": "opensuse-leap", "product": "openSUSE Leap", "match": "^opensuse[\\s-]{1,3}leap\\b", "version_re": "leap\\s{1,3}(\\d{1,2}\\.\\d{1,2})\\b", "release": "major_minor"},
+      {"id": "opensuse-tumbleweed", "product": "openSUSE Tumbleweed", "match": "^opensuse[\\s-]{1,3}tumbleweed\\b", "release": "none"},
+      {"id": "amazon", "product": "Amazon Linux", "match": "^amazon(?:\\s{1,3}linux)?\\b", "version_re": "(?:linux\\s{1,3})?(?:ami\\s{1,3})?(?:release\\s{1,3})?(\\d{1,4}(?:\\.\\d{1,2})?)\\b", "release": "major"},
+      {"id": "alpine", "product": "Alpine Linux", "match": "^alpine\\b", "version_re": "(?:linux\\s{1,3})?v?(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major_minor"},
+      {"id": "raspbian", "product": "Raspbian", "match": "^raspbian\\b", "version_re": "raspbian(?:\\s{1,3}gnu/linux)?\\s{1,3}(\\d{1,2})\\b", "release": "major"},
+      {"id": "kali", "product": "Kali Linux", "match": "^kali\\b", "version_re": "(\\d{4}\\.\\d{1,2})\\b", "release": "major_minor"},
+      {"id": "mint", "product": "Linux Mint", "match": "^linux\\s{0,3}mint\\b", "version_re": "mint\\s{1,3}(\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major"},
+      {"id": "arch", "product": "Arch Linux", "match": "^arch(?:\\s{0,3}linux)?\\b", "release": "none"}
+    ],
+    "generic_re": "\\b(?:linux|gnu)\\b"
+  },
+
+  "other_os": {
+    "description": "Non-Windows, non-Linux server operating systems.",
+    "systems": [
+      {"id": "macos", "family": "macos", "product": "macOS", "match": "^(?:mac\\s{0,3}os(?:\\s{0,3}x)?|macos|darwin)\\b", "version_re": "(?:os\\s{0,3}x|macos|darwin)\\s{1,3}(\\d{1,2}(?:\\.\\d{1,2}){1,2})\\b", "release": "macos"},
+      {"id": "freebsd", "family": "bsd", "product": "FreeBSD", "match": "^freebsd\\b", "version_re": "freebsd\\s{1,3}(\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major_minor"},
+      {"id": "openbsd", "family": "bsd", "product": "OpenBSD", "match": "^openbsd\\b", "version_re": "openbsd\\s{1,3}(\\d{1,2}\\.\\d{1,2})\\b", "release": "major_minor"},
+      {"id": "netbsd", "family": "bsd", "product": "NetBSD", "match": "^netbsd\\b", "version_re": "netbsd\\s{1,3}(\\d{1,2}(?:\\.\\d{1,2})?)\\b", "release": "major"}
+    ]
+  },
+
+  "network": {
+    "description": "Network operating systems. os_family comes from the device's own evidence first, the sysObjectID prefix (longest wins) and then sysDescr; the operator-chosen profile name decides only when neither names a family; then the hardware model, the vendor default and the shape of the version string. A family of '?cisco' means 'some Cisco OS': it is resolved from the version shape (os_version, firmware, or the 'Version x' token of sysDescr, see cisco_resolve) and stays unknown if that does not say which. A sysObjectID prefix mapped to 'none' is a product that is not a network OS family of this pack (ClearPass, ScreenOS, F5OS): it stops the search so no broader prefix or vendor default applies.",
+    "families": {
+      "fortios": {"vendor": "fortinet", "product": "FortiOS", "scheme": "fortios", "version_re": "v?\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}(?:,build\\d{1,6}(?:,\\d{6})?(?:\\s{1,3}\\([A-Za-z.]{1,10}\\))?)?", "descr_version_re": "\\bv(\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}(?:,build\\d{1,6}(?:,\\d{6})?(?:\\s{1,3}\\([A-Za-z.]{1,10}\\))?)?)", "template_keys": ["fgt_fw_version"]},
+      "fortiswitchos": {"vendor": "fortinet", "product": "FortiSwitchOS", "scheme": "fortios", "version_re": "v?\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}(?:,build\\d{1,6}(?:,\\d{6})?(?:\\s{1,3}\\([A-Za-z.]{1,10}\\))?)?", "descr_version_re": "\\bv(\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}(?:,build\\d{1,6}(?:,\\d{6})?(?:\\s{1,3}\\([A-Za-z.]{1,10}\\))?)?)", "template_keys": []},
+      "fortiap": {"vendor": "fortinet", "product": "FortiAP", "scheme": "fortios", "version_re": "v?\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}(?:,build\\d{1,6}(?:,\\d{6})?(?:\\s{1,3}\\([A-Za-z.]{1,10}\\))?)?", "descr_version_re": "\\bv(\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}(?:,build\\d{1,6}(?:,\\d{6})?(?:\\s{1,3}\\([A-Za-z.]{1,10}\\))?)?)", "template_keys": []},
+      "panos": {"vendor": "paloalto", "product": "PAN-OS", "scheme": "panos", "version_re": "\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}(?:-h\\d{1,3})?", "descr_version_re": null, "template_keys": ["pan_sw_version"]},
+      "ios-xe": {"vendor": "cisco", "product": "IOS XE", "scheme": "cisco_iosxe", "version_re": "\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}[a-z]{0,2}", "descr_version_re": "\\bversion\\s{1,3}(\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}[a-z]{0,2})\\b", "template_keys": []},
+      "ios": {"vendor": "cisco", "product": "IOS", "scheme": "cisco_ios", "version_re": "\\d{1,2}\\.\\d{1,2}\\(\\d{1,3}[a-z]{0,2}\\)[A-Z]{0,4}\\d{0,3}[a-z]{0,2}", "descr_version_re": "\\bversion\\s{1,3}(\\d{1,2}\\.\\d{1,2}\\(\\d{1,3}[a-z]{0,2}\\)[A-Z]{0,4}\\d{0,3}[a-z]{0,2})", "release_re": "^(\\d{1,2}\\.\\d{1,2})", "template_keys": []},
+      "nx-os": {"vendor": "cisco", "product": "NX-OS", "scheme": null, "version_re": "\\d{1,2}\\.\\d{1,2}\\(\\d{1,3}[a-z]?\\)(?:[A-Z]\\d{0,3}(?:\\(\\d{1,3}[a-z]?\\))?)?", "descr_version_re": "\\bversion\\s{1,3}(\\d{1,2}\\.\\d{1,2}\\(\\d{1,3}[a-z]?\\)(?:[A-Z]\\d{0,3}(?:\\(\\d{1,3}[a-z]?\\))?)?)", "release_re": "^(\\d{1,2}\\.\\d{1,2})", "template_keys": []},
+      "asa": {"vendor": "cisco", "product": "ASA", "scheme": "cisco_asa", "version_re": "\\d{1,2}\\.\\d{1,2}\\(\\d{1,3}(?:\\.\\d{1,3})?\\)(?:\\d{1,3}(?!\\d))?", "descr_version_re": "\\bversion\\s{1,3}(\\d{1,2}\\.\\d{1,2}\\(\\d{1,3}(?:\\.\\d{1,3})?\\)(?:\\d{1,3}(?!\\d))?)", "release_re": "^(\\d{1,2}\\.\\d{1,2})", "template_keys": []},
+      "junos": {"vendor": "juniper", "product": "Junos OS", "scheme": "junos", "version_re": "\\d{1,2}\\.\\d{1,2}(?:[RFB]\\d{1,3}(?:-S\\d{1,3})?|X\\d{1,3}-D\\d{1,3})(?:\\.\\d{1,3})?(?:-EVO)?", "descr_version_re": "\\bjunos(?:\\s{1,3}(?:software|base os|os|evolved))?\\s{0,3}(?:software\\s{1,3})?(?:release\\s{1,3})?\\[?(\\d{1,2}\\.\\d{1,2}(?:[RFB]\\d{1,3}(?:-S\\d{1,3})?|X\\d{1,3}-D\\d{1,3})(?:\\.\\d{1,3})?(?:-EVO)?)", "template_keys": []},
+      "tmos": {"vendor": "f5", "product": "TMOS", "scheme": "semverish", "version_re": "\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,3})?", "descr_version_re": null, "template_keys": ["f5_version"]},
+      "aos-cx": {"vendor": "aruba", "product": "AOS-CX", "scheme": "semverish", "version_re": "\\d{1,2}\\.\\d{1,2}\\.\\d{1,5}", "descr_version_re": "\\b(?:fl|dl|al|gl|rl|tl|pl|vl|kl|wl)\\.(\\d{1,2}\\.\\d{1,2}\\.\\d{1,5})\\b", "template_keys": []},
+      "arubaos": {"vendor": "aruba", "product": "ArubaOS", "scheme": "semverish", "version_re": "\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}", "descr_version_re": "\\bversion\\s{1,3}(\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}\\.\\d{1,3})", "template_keys": []},
+      "dellos10": {"vendor": "dell", "product": "Dell OS10", "scheme": "semverish", "version_re": "\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,3})?", "descr_version_re": "\\bversion:?\\s{1,3}(\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,3})?)", "template_keys": []},
+      "routeros": {"vendor": "mikrotik", "product": "RouterOS", "scheme": "semverish", "version_re": "\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,3})?(?:(?:beta|rc)\\d{1,3})?", "descr_version_re": "\\brouteros\\s{1,3}(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,3})?)", "template_keys": []},
+      "eos": {"vendor": "arista", "product": "EOS", "scheme": null, "version_re": "\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}[A-Za-z]?(?:\\.\\d{1,3})?", "descr_version_re": "\\bversion\\s{1,3}(\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}[A-Za-z]?(?:\\.\\d{1,3})?)", "release_re": "^(\\d{1,2}\\.\\d{1,2})", "template_keys": []}
+    },
+    "template_family_keys": {
+      "fgt_fw_version": "fortios",
+      "pan_sw_version": "panos",
+      "f5_version": "tmos"
+    },
+    "template_serial_keys": ["f5_serial"],
+    "profile_rules": [
+      {"pattern": "fortiswitch", "family": "fortiswitchos"},
+      {"pattern": "fortiap", "family": "fortiap"},
+      {"pattern": "fortigate|fortios|fortiwifi", "family": "fortios"},
+      {"pattern": "pan-?os|palo\\s{0,3}alto", "family": "panos"},
+      {"pattern": "\\bnx-?os\\b|nexus", "family": "nx-os"},
+      {"pattern": "\\basa\\b|adaptive security", "family": "asa"},
+      {"pattern": "\\bios[\\s-]?xe\\b.{0,12}\\bios\\b|\\bios\\b.{0,12}\\bios[\\s-]?xe\\b", "family": "?cisco"},
+      {"pattern": "\\bios[\\s-]?xe\\b", "family": "ios-xe"},
+      {"pattern": "\\bcisco\\b.{0,24}\\bios\\b(?![\\s-]{0,2}xr)", "family": "ios"},
+      {"pattern": "junos|juniper", "family": "junos"},
+      {"pattern": "\\bf5\\b|big-?ip|tmos", "family": "tmos"},
+      {"pattern": "aos-?cx|arubaos-?cx", "family": "aos-cx"},
+      {"pattern": "aruba.{0,20}(?:controller|mobility|instant)|arubaos", "family": "arubaos"},
+      {"pattern": "os10|smartfabric", "family": "dellos10"},
+      {"pattern": "routeros|mikrotik", "family": "routeros"},
+      {"pattern": "\\barista\\b|\\beos\\b", "family": "eos"}
+    ],
+    "sys_object_id_prefixes": [
+      {"prefix": "1.3.6.1.4.1.12356.101.1", "family": "fortios"},
+      {"prefix": "1.3.6.1.4.1.12356.15", "family": "fortios"},
+      {"prefix": "1.3.6.1.4.1.12356.106", "family": "fortiswitchos"},
+      {"prefix": "1.3.6.1.4.1.25461", "family": "panos"},
+      {"prefix": "1.3.6.1.4.1.9", "family": "?cisco"},
+      {"prefix": "1.3.6.1.4.1.9.12.3.1.3", "family": "nx-os"},
+      {"prefix": "1.3.6.1.4.1.2636", "family": "junos"},
+      {"prefix": "1.3.6.1.4.1.3375", "family": "tmos"},
+      {"prefix": "1.3.6.1.4.1.47196.4.1.1.1", "family": "aos-cx"},
+      {"prefix": "1.3.6.1.4.1.14823", "family": "arubaos"},
+      {"prefix": "1.3.6.1.4.1.14823.1.6", "family": "none"},
+      {"prefix": "1.3.6.1.4.1.3224", "family": "none"},
+      {"prefix": "1.3.6.1.4.1.12276", "family": "none"},
+      {"prefix": "1.3.6.1.4.1.674.11000.5000.100", "family": "dellos10"},
+      {"prefix": "1.3.6.1.4.1.14988", "family": "routeros"},
+      {"prefix": "1.3.6.1.4.1.30065", "family": "eos"}
+    ],
+    "sys_descr_rules": [
+      {"pattern": "\\bfortiswitch", "family": "fortiswitchos"},
+      {"pattern": "\\bfortiap\\b|\\bfortiap-", "family": "fortiap"},
+      {"pattern": "\\bforti(?:gate|wifi|os)", "family": "fortios"},
+      {"pattern": "pan-os|palo alto networks", "family": "panos"},
+      {"pattern": "ios[\\s-]?xe|linux_iosd|cat3k_caa|virtual xe", "family": "ios-xe"},
+      {"pattern": "nx-os", "family": "nx-os"},
+      {"pattern": "adaptive security appliance", "family": "asa"},
+      {"pattern": "cisco internetwork operating system", "family": "ios"},
+      {"pattern": "cisco ios software", "family": "?cisco"},
+      {"pattern": "\\bjunos\\b|juniper networks", "family": "junos"},
+      {"pattern": "big-?ip|\\btmos\\b", "family": "tmos"},
+      {"pattern": "aos-?cx|arubaos-?cx", "family": "aos-cx"},
+      {"pattern": "\\barubaos\\b", "family": "arubaos"},
+      {"pattern": "smartfabric os10|\\bos10\\b", "family": "dellos10"},
+      {"pattern": "\\brouteros\\b", "family": "routeros"},
+      {"pattern": "arista networks|\\barista\\b", "family": "eos"}
+    ],
+    "model_rules": [
+      {"vendor": "fortinet", "pattern": "^(?:fs|fsw|fortiswitch)[-_]?\\w", "family": "fortiswitchos"},
+      {"vendor": "fortinet", "pattern": "^(?:fap|fortiap)[-_]?\\w", "family": "fortiap"},
+      {"vendor": "fortinet", "pattern": "^(?:fgt|fwf|fortigate|fortiwifi)[-_]?\\w", "family": "fortios"},
+      {"vendor": "paloalto", "pattern": "^pa-\\w", "family": "panos"}
+    ],
+    "version_shapes": [
+      {"pattern": ",build\\d{1,6}", "family": "fortios"}
+    ],
+    "cisco_resolve": {
+      "ios_re": "^\\d{1,2}\\.\\d{1,2}\\(\\d",
+      "ios_majors": [11, 12, 15],
+      "iosxe_re": "^\\d{1,2}\\.\\d{1,2}\\.\\d{1,3}[a-z]{0,2}$",
+      "descr_version_re": "\\bversion\\s{1,3}(\\d[0-9a-z.()]{0,30})",
+      "iosxe_majors": [3, 16, 17, 18, 19]
+    }
+  },
+
+  "hardware": {
+    "description": "Model clean-up. Only Fortinet needs it: ENTITY-MIB reports FGT_VM64 where the profile extract reports FortiGate-VM64.",
+    "model_rules": [
+      {"vendor": "fortinet", "pattern": "^FGT[_-]([A-Za-z0-9][A-Za-z0-9_-]{0,40})$", "template": "FortiGate-\\1", "underscore_to_hyphen": true},
+      {"vendor": "fortinet", "pattern": "^FWF[_-]([A-Za-z0-9][A-Za-z0-9_-]{0,40})$", "template": "FortiWiFi-\\1", "underscore_to_hyphen": true},
+      {"vendor": "fortinet", "pattern": "^FSW?[_-]([A-Za-z0-9][A-Za-z0-9_-]{0,40})$", "template": "FortiSwitch-\\1", "underscore_to_hyphen": true},
+      {"vendor": "fortinet", "pattern": "^FAP[_-]([A-Za-z0-9][A-Za-z0-9_-]{0,40})$", "template": "FortiAP-\\1", "underscore_to_hyphen": true}
+    ],
+    "placeholder_values": [
+      "to be filled by o.e.m.", "to be filled by oem", "default string", "system product name", "system manufacturer",
+      "system serial number", "not specified", "not available", "not applicable", "none", "n/a", "na", "unknown",
+      "oem", "o.e.m.", "null", "undefined", "tbd", "123456789", "0123456789", "serial number", "chassis serial number"
+    ]
+  }
+}

@@ -64,6 +64,11 @@ logs/
 # ─── Data volumes (local dev) ───
 data/
 tmp/
+# The inventory rule packs under server/app/data/inventory ship in the release.
+# Re-include only that directory so any other runtime data stays ignored.
+!server/app/data/
+server/app/data/*
+!server/app/data/inventory/
 
 # ─── NPM cache ───
 .npm/

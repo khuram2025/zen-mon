@@ -151,3 +151,4 @@ e3033856d20cd2da99ed0cb417a183db20c4bdcff565083932c5bac0a292718f  migrate-140-ne
 8b1b0f4411cb3de3a35bd99f533b2d63862d8a945b0d40ec620e6d51ce5f42dd  migrate-151-ncm-ssh-compatibility.sql
 4836dcb9aae82d461bbb0fba703cc6d6d8e2a10b6cbb0a3a05c9bc9eb527651a  migrate-152-ncm-auto-trust.sql
 b5432e90b322b1d30c0b46bbaf0ffb443b4d4c55a20c0c7c3db553011f53806a  migrate-153-force-default-admin-password-change.sql
+9107a9b133ac55afb68bbb6a3bb58f4502045578e49c1b6deca8df170bccdfe2  migrate-154-inventory-foundation.sql
