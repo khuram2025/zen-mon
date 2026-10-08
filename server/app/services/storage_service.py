@@ -44,6 +44,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_ch_client
+from app.services.storage_layout import fs_usage, shares_filesystem
 
 logger = logging.getLogger("zenplus.storage")
 
@@ -62,6 +63,14 @@ STORAGE_SWEEP_ADVISORY_LOCK = 1515074390
 
 SWEEP_INTERVAL_S = 300
 BACKUP_STALE_AFTER_H = 3
+
+# Above this usage the auto-purge acts even when the purgeable metrics alone
+# cannot reach the target: a full disk stops ingest, so any space helps.
+# Below it, deleting history that cannot fix the problem is pure data loss
+# (typical on single-volume appliances where other files fill the disk).
+AUTO_PURGE_CRITICAL_PCT = 95
+# A skipped auto-purge is recorded at most this often per reason.
+AUTO_PURGE_SKIP_EVENT_EVERY_H = 6
 
 # Tables that must never be touched by retention/purge: ClickHouse's own
 # bookkeeping and datasets with their own first-class retention subsystem
@@ -172,17 +181,10 @@ def human_size(n: float) -> str:
 
 
 def _mount_usage(path: str) -> dict[str, Any]:
-    st = os.statvfs(path)
-    total = st.f_blocks * st.f_frsize
-    free = st.f_bavail * st.f_frsize
-    used = total - free
-    return {
-        "mount": path,
-        "total_bytes": total,
-        "used_bytes": used,
-        "free_bytes": free,
-        "usage_percent": round(used / total * 100, 1) if total else 0.0,
-    }
+    usage = fs_usage(path)
+    if usage is None:
+        raise OSError(f"cannot stat {path}")
+    return {"mount": path, **usage}
 
 
 def _run_helper(*args: str, timeout: int = 600) -> subprocess.CompletedProcess:
@@ -474,6 +476,38 @@ async def execute_purge(
     return result
 
 
+def auto_purge_decision(usage: dict, auto: dict, reclaimable_bytes: int) -> dict:
+    """Decide whether the emergency purge should drop partitions.
+
+    Returns {"action": "idle"|"purge"|"skip", "reason", "need_bytes"}.
+    ``need_bytes`` is how much must be freed to get back under the target.
+    """
+    pct = float(usage["usage_percent"])
+    capacity = usage["used_bytes"] + usage["free_bytes"]
+    need = max(0, int(usage["used_bytes"] - capacity * float(auto["target_pct"]) / 100))
+    if pct < float(auto["threshold_pct"]):
+        return {"action": "idle", "reason": None, "need_bytes": need}
+    if reclaimable_bytes <= 0:
+        return {"action": "skip", "reason": "nothing_purgeable", "need_bytes": need}
+    if reclaimable_bytes < need and pct < AUTO_PURGE_CRITICAL_PCT:
+        return {"action": "skip", "reason": "insufficient", "need_bytes": need}
+    return {"action": "purge", "reason": None, "need_bytes": need}
+
+
+async def _recent_skip_event(db: AsyncSession, reason: str) -> bool:
+    row = (
+        await db.execute(
+            text(
+                "SELECT 1 FROM storage_events WHERE event_type = 'auto_purge_skipped' "
+                "AND details->>'reason' = :r AND created_at > :since LIMIT 1"
+            ),
+            {"r": reason,
+             "since": datetime.now(timezone.utc) - timedelta(hours=AUTO_PURGE_SKIP_EVENT_EVERY_H)},
+        )
+    ).first()
+    return row is not None
+
+
 async def emergency_auto_purge(db: AsyncSession, auto: dict) -> Optional[dict]:
     """Drop oldest purgeable partitions until /data is back under target."""
     usage = _mount_usage(DATA_MOUNT)
@@ -488,15 +522,29 @@ async def emergency_auto_purge(db: AsyncSession, auto: dict) -> Optional[dict]:
     candidates = await asyncio.to_thread(
         _list_purgeable_partitions_sync, list(tables_meta), cutoff
     )
-    if not candidates:
-        await write_storage_event(
-            db, "auto_purge", details={
-                "usage_percent": usage["usage_percent"],
-                "note": "threshold exceeded but no purgeable partitions older "
-                        f"than {auto['min_keep_days']} days",
-            },
-        )
-        return {"freed_bytes": 0, "dropped_partitions": [], "exhausted": True}
+    reclaimable = sum(p["size_bytes"] for p in candidates)
+    decision = auto_purge_decision(usage, auto, reclaimable)
+    if decision["action"] == "skip":
+        # Recorded once per window, not every sweep: a persistent condition
+        # must not flood the activity log.
+        if not await _recent_skip_event(db, decision["reason"]):
+            note = (
+                f"no metrics data is older than the {auto['min_keep_days']}-day minimum keep window"
+                if decision["reason"] == "nothing_purgeable" else
+                f"purging all {human_size(reclaimable)} of eligible metrics data cannot free the "
+                f"{human_size(decision['need_bytes'])} needed; the space is used by other files"
+            )
+            await write_storage_event(
+                db, "auto_purge_skipped", details={
+                    "reason": decision["reason"],
+                    "usage_percent": usage["usage_percent"],
+                    "reclaimable_bytes": reclaimable,
+                    "need_bytes": decision["need_bytes"],
+                    "note": note,
+                },
+            )
+        return {"freed_bytes": 0, "dropped_partitions": [], "exhausted": True,
+                "skipped": decision["reason"]}
 
     target = float(auto["target_pct"])
     dropped, freed = [], 0
@@ -544,19 +592,127 @@ def _os_usage_extras() -> dict:
 
 async def os_overview() -> dict:
     mounts = []
-    seen = set()
-    for path, label in (("/", "System (OS)"), (DATA_MOUNT, "Data volume")):
+    shared = shares_filesystem("/", DATA_MOUNT)
+    if shared:
+        targets = [("/", "System & data volume", ["system", "data"])]
+    else:
+        targets = [("/", "System volume", ["system"]), (DATA_MOUNT, "Data volume", ["data"])]
+    for path, label, roles in targets:
         try:
-            u = _mount_usage(path)
-            dev = os.stat(path).st_dev
-            if dev in seen:
-                continue
-            seen.add(dev)
-            mounts.append({**u, "label": label})
+            mounts.append({**_mount_usage(path), "label": label, "roles": roles})
         except OSError:
             continue
     extras = await asyncio.to_thread(_os_usage_extras)
-    return {"mounts": mounts, **extras}
+    return {"mounts": mounts, "data_shares_os": shared, **extras}
+
+
+def _pg_data_path() -> str:
+    return f"{DATA_MOUNT}/postgresql" if os.path.isdir(f"{DATA_MOUNT}/postgresql") \
+        else "/var/lib/postgresql"
+
+
+def _mount_of(path: str) -> str:
+    return DATA_MOUNT if shares_filesystem(path, DATA_MOUNT) else "/"
+
+
+async def space_consumers(db: AsyncSession, ch_bytes: int, extras: dict) -> list[dict]:
+    """Known consumers per mount; the dashboard derives "other" from mount usage."""
+    try:
+        pg_bytes = int((await db.execute(
+            text("SELECT pg_database_size(current_database())"))).scalar() or 0)
+    except Exception:
+        pg_bytes = 0
+    # Sizes recorded when each backup finished; walking a multi-GB native
+    # ClickHouse backup on every poll would be far too slow.
+    try:
+        backup_bytes = int((await db.execute(text(
+            "SELECT COALESCE(sum(size_bytes), 0) FROM storage_backups "
+            "WHERE status = 'completed'"))).scalar() or 0)
+    except Exception:
+        backup_bytes = 0
+    rows = [
+        ("clickhouse", "Metrics database (ClickHouse)", ch_bytes, f"{DATA_MOUNT}/clickhouse",
+         "Shorten retention or purge old data"),
+        ("postgres", "Configuration database (PostgreSQL)", pg_bytes, _pg_data_path(), None),
+        ("backups", "Backups", backup_bytes, f"{DATA_MOUNT}/backups", "Delete old backups"),
+        ("journal", "System journal", int(extras.get("journal_bytes") or 0), "/var/log/journal",
+         "Vacuum the journal"),
+        ("apt_cache", "Package cache", int(extras.get("apt_cache_bytes") or 0), "/var/cache/apt",
+         "Clear the package cache"),
+    ]
+    return [
+        {"id": cid, "label": label, "bytes": size, "human": human_size(size),
+         "mount": _mount_of(path), "hint": hint}
+        for cid, label, size, path, hint in rows
+    ]
+
+
+def _parse_ts(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return ts if ts.year > 2000 else None   # partition keys without time report 1970
+
+
+def capacity_forecast(tables: list[dict], retention: dict, free_bytes: int) -> dict:
+    """Estimate ingest per day and where metrics storage levels off.
+
+    Daily footprint per table is its size over the span of data it holds;
+    with a retention of N days a table levels off at roughly N days of
+    footprint. Tables without any retention grow without bound.
+    """
+    categories = retention.get("categories") or {}
+    overrides = retention.get("table_overrides") or {}
+    per_category: dict[str, dict] = {}
+    total_daily = growing_daily = 0.0
+    remaining = 0.0
+    unbounded: set[str] = set()
+    for t in tables:
+        oldest, newest = _parse_ts(t.get("oldest")), _parse_ts(t.get("newest"))
+        cat = per_category.setdefault(t["category"], {
+            "daily_bytes": 0.0, "projected_bytes": 0.0, "unbounded": False, "estimated": True,
+        })
+        if not oldest or not newest or t["size_bytes"] <= 0:
+            cat["projected_bytes"] += t["size_bytes"]
+            continue
+        span_days = max(1.0, (newest - oldest).total_seconds() / 86400)
+        daily = t["size_bytes"] / span_days
+        days = overrides.get(t["table"]) or categories.get(t["category"]) or t.get("current_ttl_days")
+        cat["daily_bytes"] += daily
+        total_daily += daily
+        if not days:
+            cat["unbounded"] = True
+            unbounded.add(t["category"])
+            cat["projected_bytes"] += t["size_bytes"]
+            growing_daily += daily
+            continue
+        projected = daily * float(days)
+        cat["projected_bytes"] += max(projected, t["size_bytes"])
+        if projected > t["size_bytes"]:
+            remaining += projected - t["size_bytes"]
+            growing_daily += daily
+    current = sum(t["size_bytes"] for t in tables)
+    steady = sum(c["projected_bytes"] for c in per_category.values())
+    fits = not unbounded and remaining <= free_bytes
+    days_until_full = None
+    if not fits and growing_daily > 0:
+        days_until_full = int(free_bytes / growing_daily)
+    return {
+        "daily_bytes": int(total_daily),
+        "current_bytes": int(current),
+        "steady_state_bytes": int(steady),
+        "growth_remaining_bytes": int(remaining),
+        "free_bytes": int(free_bytes),
+        "fits": fits,
+        "days_until_full": days_until_full,
+        "unbounded_categories": sorted(unbounded),
+        "categories": {k: {**v, "daily_bytes": int(v["daily_bytes"]),
+                           "projected_bytes": int(v["projected_bytes"])}
+                       for k, v in per_category.items()},
+    }
 
 
 async def os_cleanup(db: AsyncSession, actions: list[str], journal_max_mb: int, actor: str) -> dict:

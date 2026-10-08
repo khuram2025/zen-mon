@@ -44,6 +44,15 @@ else
     warn "scripts/zenplus-storage-helper not found — skipping helper install"
 fi
 
+if [ -f "${ZENPLUS_DIR}/scripts/zenplus-volume-helper" ]; then
+    install -o root -g root -m 0755 \
+        "${ZENPLUS_DIR}/scripts/zenplus-volume-helper" \
+        /usr/local/sbin/zenplus-volume-helper
+    log "Installed /usr/local/sbin/zenplus-volume-helper"
+else
+    warn "scripts/zenplus-volume-helper not found — disk management will be unavailable"
+fi
+
 if [ -f "${ZENPLUS_DIR}/bin/expand-storage.sh" ]; then
     install -o root -g root -m 0755 \
         "${ZENPLUS_DIR}/bin/expand-storage.sh" \
@@ -71,6 +80,7 @@ zenplus ALL=(root) NOPASSWD: /usr/local/sbin/zenplus-lvm-helper pvresize *
 zenplus ALL=(root) NOPASSWD: /usr/bin/du -sb /data/clickhouse, /usr/bin/du -sb /data/postgresql, /usr/bin/du -sb /data/redis, /usr/bin/du -sb /data/backups, /usr/bin/du -sb /data/tmp
 zenplus ALL=(root) NOPASSWD: /usr/local/sbin/zenplus-expand-storage *
 zenplus ALL=(root) NOPASSWD: /usr/local/sbin/zenplus-storage-helper *
+zenplus ALL=(root) NOPASSWD: /usr/local/sbin/zenplus-volume-helper *
 SUDOEOF
 chmod 0440 /etc/sudoers.d/zenplus-storage.tmp
 # Validate before moving into place — a bad sudoers file breaks sudo entirely.

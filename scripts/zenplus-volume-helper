@@ -1,0 +1,579 @@
+#!/usr/bin/python3
+"""Root boundary for Settings -> Storage disk and volume management.
+
+The ZenPlus API runs as the unprivileged ``zenplus`` user;
+/etc/sudoers.d/zenplus-storage grants it NOPASSWD access to the root-owned
+installed copy of this file at /usr/local/sbin/zenplus-volume-helper. Every
+verb re-validates its arguments against the live system before changing
+anything: the API's own checks are a convenience, this file is the security
+boundary.
+
+The data volume is whatever logical volume backs /data (a dedicated data LV
+or, on single-disk appliances, the root LV). Nothing here assumes LV names.
+
+Verbs (each prints exactly one JSON object on stdout):
+  inventory                   Disks, partition geometry, LVM reports, / and /data mounts
+  rescan                      Detect newly attached disks and resized virtual disks
+  add-disk DISK [--wipe]      Initialize an unused whole disk and join the data VG
+  extend MOUNT all|BYTES      Extend the LV behind / or /data, then grow its filesystem online
+  grow-pv PV                  Claim space after a virtual disk was enlarged (growpart + pvresize)
+  evacuate PV                 Move every extent off a data-VG PV (background pvmove)
+  abort-evacuation            Abort a running pvmove
+  remove-disk PV              Detach an empty PV from the data VG (vgreduce + pvremove)
+  remove-missing              Forget missing PVs that held no extents (vgreduce --removemissing)
+
+Exit status: 0 success, 2 request rejected (nothing changed), 1 operation failed.
+"""
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+
+ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C", "LVM_SUPPRESS_FD_WARNINGS": "1"}
+SYS_CLASS_BLOCK = "/sys/class/block"
+SYS_SCSI_HOST = "/sys/class/scsi_host"
+LOCK_PATH = "/run/zenplus-volume-helper.lock"
+DATA_MOUNT = "/data"
+MANAGED_MOUNTS = ("/", DATA_MOUNT)
+SYSTEM_MOUNTS = ("/", "/boot", "/boot/efi", DATA_MOUNT)
+
+DISK_RE = re.compile(r"^/dev/(?:sd[a-z]{1,3}|vd[a-z]{1,3}|xvd[a-z]{1,3}|nvme\d{1,3}n\d{1,3})$")
+PV_RE = re.compile(
+    r"^/dev/(?:(?:sd|vd|xvd)[a-z]{1,3}\d{0,3}|nvme\d{1,3}n\d{1,3}(?:p\d{1,3})?)$"
+)
+SIZE_RE = re.compile(r"^\d{1,16}$")
+
+PV_FIELDS = ("pv_name", "vg_name", "pv_size", "pv_free", "pv_used", "dev_size",
+             "pv_missing", "pv_uuid")
+VG_FIELDS = ("vg_name", "vg_size", "vg_free", "vg_extent_size", "pv_count", "lv_count",
+             "vg_missing_pv_count", "vg_attr")
+LV_FIELDS = ("lv_name", "vg_name", "lv_path", "lv_dm_path", "lv_size", "lv_attr", "segtype",
+             "copy_percent", "move_pv")
+LSBLK_COLUMNS = "NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL,TRAN,RO,RM,ROTA,PKNAME"
+
+
+class Rejected(Exception):
+    """The request is not safe or not applicable; nothing was changed."""
+
+    def __init__(self, message, code="rejected"):
+        super().__init__(message)
+        self.code = code
+
+
+class Failed(Exception):
+    """A command failed part-way; the message says what state was left."""
+
+
+LOG = []
+
+
+def run(args, timeout=120, check=True):
+    result = subprocess.run(args, capture_output=True, text=True, env=ENV, timeout=timeout)
+    tail = "\n".join(x for x in (result.stdout.strip(), result.stderr.strip()) if x)
+    LOG.append({"cmd": " ".join(args), "rc": result.returncode, "output": tail[-2000:]})
+    if check and result.returncode != 0:
+        raise Failed(f"{os.path.basename(args[0])} failed: {(result.stderr or result.stdout).strip()[-600:]}")
+    return result
+
+
+def _int(value, default=0):
+    try:
+        return int(float(str(value).strip() or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _flag(value):
+    return value is True or str(value).strip().lower() in ("1", "true")
+
+
+def _read(path):
+    try:
+        with open(path, "r", encoding="ascii") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+# ─── Facts ──────────────────────────────────────────────────────────────────
+
+def lvm_report(command, fields, *extra):
+    result = run([command, "--reportformat", "json", "--units", "b", "--nosuffix",
+                  "-o", ",".join(fields), *extra], timeout=30)
+    key = {"pvs": "pv", "vgs": "vg", "lvs": "lv"}[command]
+    rows = []
+    for report in json.loads(result.stdout or "{}").get("report", []):
+        rows.extend(report.get(key, []))
+    return rows
+
+
+def pvs():
+    return lvm_report("pvs", PV_FIELDS)
+
+
+def vgs():
+    return lvm_report("vgs", VG_FIELDS)
+
+
+def lvs():
+    return lvm_report("lvs", LV_FIELDS, "-a")
+
+
+def lsblk(path=None):
+    args = ["lsblk", "-J", "-b", "-o", LSBLK_COLUMNS]
+    if path:
+        args.append(path)
+    return json.loads(run(args, timeout=15).stdout or "{}").get("blockdevices", [])
+
+
+def findmnt(target):
+    result = run(["findmnt", "-J", "-n", "-o", "TARGET,SOURCE,FSTYPE", "--target", target],
+                 timeout=10, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    rows = json.loads(result.stdout).get("filesystems", [])
+    if not rows:
+        return None
+    row = rows[0]
+    # A bind mount reports SOURCE as "/dev/x[/subdir]".
+    row["source"] = re.sub(r"\[.*\]$", "", row.get("source") or "")
+    return row
+
+
+def geometry():
+    """Partition start/size (512-byte sectors) for every disk, from sysfs."""
+    out = {}
+    try:
+        names = sorted(os.listdir(SYS_CLASS_BLOCK))
+    except OSError:
+        return out
+    for name in names:
+        base = os.path.join(SYS_CLASS_BLOCK, name)
+        if os.path.exists(os.path.join(base, "partition")):
+            continue
+        if not os.path.exists(os.path.join(base, "device")):
+            continue  # dm-*, loop*, sr* without a backing device are not disks we manage
+        disk = {"size_sectors": _int(_read(os.path.join(base, "size"))), "partitions": {}}
+        try:
+            children = os.listdir(base)
+        except OSError:
+            children = []
+        for child in children:
+            part = os.path.join(base, child)
+            if not os.path.exists(os.path.join(part, "partition")):
+                continue
+            disk["partitions"][child] = {
+                "number": _int(_read(os.path.join(part, "partition"))),
+                "start": _int(_read(os.path.join(part, "start"))),
+                "size": _int(_read(os.path.join(part, "size"))),
+            }
+        out[name] = disk
+    return out
+
+
+def tools():
+    found = {}
+    for tool in ("growpart", "resize2fs", "xfs_growfs", "wipefs", "pvmove"):
+        found[tool] = any(os.access(os.path.join(d, tool), os.X_OK)
+                          for d in ENV["PATH"].split(":"))
+    return found
+
+
+def inventory():
+    facts = {"errors": []}
+    for key, fn in (("lsblk", lsblk), ("pvs", pvs), ("vgs", vgs), ("lvs", lvs),
+                    ("geometry", geometry), ("tools", tools)):
+        try:
+            facts[key] = fn()
+        except Exception as exc:  # report what we can; a missing PV must not hide the rest
+            facts[key] = [] if key not in ("geometry", "tools") else {}
+            facts["errors"].append(f"{key}: {exc}")
+    facts["mounts"] = {}
+    for mount in SYSTEM_MOUNTS:
+        try:
+            facts["mounts"][mount] = findmnt(mount)
+        except Exception as exc:
+            facts["errors"].append(f"findmnt {mount}: {exc}")
+    return facts
+
+
+# ─── Resolution and validation ──────────────────────────────────────────────
+
+def _real(path):
+    return os.path.realpath(path) if path else ""
+
+
+def device_exists(path):
+    return os.path.exists(path)
+
+
+def active_pvmove(lv_rows=None):
+    for row in lv_rows if lv_rows is not None else lvs():
+        if (row.get("lv_attr") or "").startswith("p"):
+            return row
+    return None
+
+
+def volume_for_mount(mount):
+    """(lv_row, vg_row, mount_row) for the LV backing ``mount``."""
+    if mount not in MANAGED_MOUNTS:
+        raise Rejected(f"{mount} is not a managed mount point")
+    mount_row = findmnt(mount)
+    if not mount_row or not mount_row.get("source", "").startswith("/dev/"):
+        raise Rejected(f"{mount} is not mounted from a block device", "not_lvm")
+    source = _real(mount_row["source"])
+    lv = next((row for row in lvs()
+               if row.get("lv_path") and _real(row["lv_path"]) == source), None)
+    if lv is None:
+        raise Rejected(f"{mount} is not on an LVM logical volume", "not_lvm")
+    vg = next((row for row in vgs() if row.get("vg_name") == lv.get("vg_name")), None)
+    if vg is None:
+        raise Rejected(f"volume group {lv.get('vg_name')} was not found", "not_lvm")
+    return lv, vg, mount_row
+
+
+def data_vg():
+    _lv, vg, _mount = volume_for_mount(DATA_MOUNT)
+    return vg
+
+
+def _walk(devices):
+    for dev in devices:
+        yield dev
+        yield from _walk(dev.get("children") or [])
+
+
+def is_system_mount(mountpoint):
+    mountpoint = mountpoint or ""
+    return mountpoint in SYSTEM_MOUNTS or mountpoint.startswith("/boot") or mountpoint == "[SWAP]"
+
+
+def system_disks(devices):
+    """Disks with an OS partition mounted directly (/boot, swap, a plain /).
+
+    Logical volumes are skipped: a disk that only carries extents of the root
+    or data LV is a storage pool member, removable once its data is moved.
+    """
+    return {
+        dev.get("name") for dev in devices
+        if any(node.get("type") in ("disk", "part") and is_system_mount(node.get("mountpoint"))
+               for node in _walk([dev]))
+    }
+
+
+def validate_disk(disk):
+    if not isinstance(disk, str) or not DISK_RE.match(disk):
+        raise Rejected(f"{disk!r} is not a whole-disk device path", "invalid_device")
+    if not device_exists(disk):
+        raise Rejected(f"{disk} was not found; it may have been detached. Rescan disks.", "not_found")
+    return disk
+
+
+def validate_pv(path):
+    if not isinstance(path, str) or not PV_RE.match(path):
+        raise Rejected(f"{path!r} is not a disk or partition device path", "invalid_device")
+    return path
+
+
+def _holders(name):
+    try:
+        return os.listdir(os.path.join(SYS_CLASS_BLOCK, name, "holders"))
+    except OSError:
+        return []
+
+
+def signatures(path):
+    result = run(["wipefs", "-J", path], timeout=15, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    return json.loads(result.stdout).get("signatures", [])
+
+
+def data_pv(pv_path, pv_rows=None, vg=None):
+    vg = vg or data_vg()
+    row = next((r for r in (pv_rows if pv_rows is not None else pvs())
+                if r.get("pv_name") == pv_path), None)
+    if row is None or row.get("vg_name") != vg.get("vg_name"):
+        raise Rejected(f"{pv_path} is not a physical volume of the data volume group "
+                       f"{vg.get('vg_name')}", "not_member")
+    if row.get("pv_missing"):
+        raise Rejected(f"{pv_path} is missing", "missing")
+    return row, vg
+
+
+def no_pvmove():
+    move = active_pvmove()
+    if move:
+        raise Rejected(f"a data move off {move.get('move_pv') or 'a disk'} is in progress; "
+                       "wait for it to finish or abort it first", "busy")
+
+
+# ─── Verbs ──────────────────────────────────────────────────────────────────
+
+def verb_inventory(_args):
+    return inventory()
+
+
+def verb_rescan(_args):
+    scanned, resized = [], []
+    try:
+        hosts = sorted(os.listdir(SYS_SCSI_HOST))
+    except OSError:
+        hosts = []
+    for host in hosts:
+        try:
+            with open(os.path.join(SYS_SCSI_HOST, host, "scan"), "w", encoding="ascii") as f:
+                f.write("- - -")
+            scanned.append(host)
+        except OSError:
+            pass
+    try:
+        names = sorted(os.listdir(SYS_CLASS_BLOCK))
+    except OSError:
+        names = []
+    for name in names:
+        rescan = os.path.join(SYS_CLASS_BLOCK, name, "device", "rescan")
+        if os.path.exists(os.path.join(SYS_CLASS_BLOCK, name, "partition")):
+            continue
+        try:
+            with open(rescan, "w", encoding="ascii") as f:
+                f.write("1")
+            resized.append(name)
+        except OSError:
+            pass
+    run(["udevadm", "settle", "--timeout=15"], timeout=30, check=False)
+    return {"scsi_hosts": scanned, "disks_rescanned": resized}
+
+
+def verb_add_disk(args):
+    wipe = "--wipe" in args
+    positional = [a for a in args if a != "--wipe"]
+    if len(positional) != 1:
+        raise Rejected("usage: add-disk DISK [--wipe]")
+    disk = validate_disk(positional[0])
+    no_pvmove()
+    vg = data_vg()
+    devices = lsblk()
+    name = os.path.basename(disk)
+    dev = next((d for d in devices if d.get("name") == name), None)
+    if dev is None or dev.get("type") != "disk":
+        raise Rejected(f"{disk} is not a disk", "invalid_device")
+    if name in system_disks(devices):
+        raise Rejected(f"{disk} holds the operating system or data volume", "system_disk")
+    if _flag(dev.get("ro")):
+        raise Rejected(f"{disk} is read-only", "read_only")
+    if dev.get("mountpoint") or _holders(name):
+        raise Rejected(f"{disk} is in use", "in_use")
+    pv_rows = pvs()
+    names_in_tree = {f"/dev/{n.get('name')}" for n in _walk([dev])}
+    for row in pv_rows:
+        if row.get("pv_name") in names_in_tree and row.get("vg_name"):
+            raise Rejected(f"{row['pv_name']} already belongs to volume group {row['vg_name']}",
+                           "in_use")
+    children = dev.get("children") or []
+    for child in children:
+        if child.get("mountpoint") or child.get("children") or _holders(child.get("name", "")):
+            raise Rejected(f"partition /dev/{child.get('name')} is in use", "in_use")
+    orphan = any(r.get("pv_name") == disk and not r.get("vg_name") for r in pv_rows)
+    found = signatures(disk) + [s for c in children for s in signatures(f"/dev/{c['name']}")]
+    needs_wipe = bool(children) or (bool(found) and not orphan)
+    if needs_wipe and not wipe:
+        kinds = sorted({s.get("type") or "unknown" for s in found}) or ["partition table"]
+        raise Rejected(f"{disk} contains existing data ({', '.join(kinds)}); "
+                       "confirm erasing it to continue", "needs_wipe")
+    if wipe:
+        for child in children:
+            run(["wipefs", "-a", f"/dev/{child['name']}"], timeout=60)
+        run(["wipefs", "-a", disk], timeout=60)
+        run(["udevadm", "settle", "--timeout=15"], timeout=30, check=False)
+        orphan = False
+    if not orphan:
+        run(["pvcreate", "-y", disk], timeout=120)
+    try:
+        run(["vgextend", vg["vg_name"], disk], timeout=120)
+    except Failed:
+        if not orphan:
+            run(["pvremove", "-y", disk], timeout=60, check=False)
+        raise
+    row = next((r for r in pvs() if r.get("pv_name") == disk), {})
+    return {"disk": disk, "vg": vg["vg_name"], "pv_size": _int(row.get("pv_size")),
+            "wiped": wipe}
+
+
+def _grow_filesystem(lv, mount_row):
+    fstype = mount_row.get("fstype") or ""
+    if fstype in ("ext2", "ext3", "ext4"):
+        run(["resize2fs", lv["lv_path"]], timeout=3600)
+    elif fstype == "xfs":
+        run(["xfs_growfs", mount_row["target"]], timeout=3600)
+    else:
+        raise Failed(f"the logical volume was extended but {fstype or 'this'} filesystems "
+                     "cannot be grown online here")
+    return fstype
+
+
+def verb_extend(args):
+    if len(args) != 2:
+        raise Rejected("usage: extend MOUNT all|BYTES")
+    mount, amount = args
+    no_pvmove()
+    lv, vg, mount_row = volume_for_mount(mount)
+    extent = _int(vg.get("vg_extent_size"))
+    free = _int(vg.get("vg_free"))
+    if extent <= 0:
+        raise Rejected("could not read the volume group extent size")
+    if amount == "all":
+        extents = free // extent
+    elif SIZE_RE.match(amount):
+        extents = _int(amount) // extent
+        if extents * extent > free:
+            raise Rejected("requested size exceeds the free space in the volume group", "no_space")
+    else:
+        raise Rejected("size must be 'all' or a byte count")
+    if extents <= 0:
+        raise Rejected("there is no unallocated space in the volume group to add", "no_space")
+    before = _int(lv.get("lv_size"))
+    run(["lvextend", "-l", f"+{extents}", f"{vg['vg_name']}/{lv['lv_name']}"], timeout=600)
+    fstype = _grow_filesystem(lv, mount_row)
+    after = next((r for r in lvs() if r.get("lv_path") == lv.get("lv_path")), {})
+    return {"mount": mount_row.get("target"), "vg": vg["vg_name"], "lv": lv["lv_name"],
+            "fstype": fstype, "added_bytes": extents * extent,
+            "size_before": before, "size_after": _int(after.get("lv_size"), before)}
+
+
+def verb_grow_pv(args):
+    if len(args) != 1:
+        raise Rejected("usage: grow-pv PV")
+    pv_path = validate_pv(args[0])
+    no_pvmove()
+    row, vg = data_pv(pv_path)
+    name = os.path.basename(_real(pv_path))
+    base = os.path.join(SYS_CLASS_BLOCK, name)
+    grew_partition = False
+    if os.path.exists(os.path.join(base, "partition")):
+        disk_name = os.path.basename(os.path.dirname(os.path.realpath(base)))
+        number = _int(_read(os.path.join(base, "partition")))
+        if not DISK_RE.match(f"/dev/{disk_name}") or number <= 0:
+            raise Rejected(f"could not identify the disk that holds {pv_path}")
+        rescan = os.path.join(SYS_CLASS_BLOCK, disk_name, "device", "rescan")
+        if os.path.exists(rescan):
+            try:
+                with open(rescan, "w", encoding="ascii") as f:
+                    f.write("1")
+            except OSError:
+                pass
+        result = run(["growpart", f"/dev/{disk_name}", str(number)], timeout=120, check=False)
+        if result.returncode == 0:
+            grew_partition = True
+        elif "NOCHANGE" not in (result.stdout + result.stderr):
+            raise Failed(f"growpart failed: {(result.stderr or result.stdout).strip()[-600:]}")
+    before = _int(row.get("pv_size"))
+    run(["pvresize", pv_path], timeout=120)
+    after_row = next((r for r in pvs() if r.get("pv_name") == pv_path), {})
+    after = _int(after_row.get("pv_size"), before)
+    return {"pv": pv_path, "vg": vg["vg_name"], "partition_grown": grew_partition,
+            "size_before": before, "size_after": after, "added_bytes": max(0, after - before)}
+
+
+def verb_evacuate(args):
+    if len(args) != 1:
+        raise Rejected("usage: evacuate PV")
+    pv_path = validate_pv(args[0])
+    no_pvmove()
+    pv_rows = pvs()
+    row, vg = data_pv(pv_path, pv_rows)
+    used = _int(row.get("pv_used"))
+    if used <= 0:
+        raise Rejected(f"{pv_path} holds no data; it can be removed directly", "empty")
+    others_free = sum(_int(r.get("pv_free")) for r in pv_rows
+                      if r.get("vg_name") == vg["vg_name"] and r.get("pv_name") != pv_path
+                      and not r.get("pv_missing"))
+    if others_free < used:
+        raise Rejected(f"the other disks in {vg['vg_name']} have only {others_free} bytes free "
+                       f"but {used} bytes must move; add a disk first", "no_space")
+    if not tools().get("pvmove"):
+        raise Rejected("pvmove is not installed", "unsupported")
+    run(["pvmove", "-b", pv_path], timeout=120)
+    return {"pv": pv_path, "vg": vg["vg_name"], "bytes_to_move": used, "started": True}
+
+
+def verb_abort_evacuation(_args):
+    if not active_pvmove():
+        raise Rejected("no data move is in progress", "idle")
+    run(["pvmove", "--abort"], timeout=120)
+    return {"aborted": True}
+
+
+def verb_remove_disk(args):
+    if len(args) != 1:
+        raise Rejected("usage: remove-disk PV")
+    pv_path = validate_pv(args[0])
+    no_pvmove()
+    row, vg = data_pv(pv_path)
+    if _int(vg.get("pv_count")) <= 1:
+        raise Rejected("the last disk of a volume group cannot be removed", "last_pv")
+    if _int(row.get("pv_used")) > 0:
+        raise Rejected(f"{pv_path} still holds data; move its data off first", "not_empty")
+    run(["vgreduce", vg["vg_name"], pv_path], timeout=120)
+    run(["pvremove", "-y", pv_path], timeout=60)
+    return {"pv": pv_path, "vg": vg["vg_name"], "removed": True}
+
+
+def verb_remove_missing(_args):
+    vg = data_vg()
+    if _int(vg.get("vg_missing_pv_count")) <= 0:
+        raise Rejected("no disks are missing from the data volume group", "idle")
+    # Without --force LVM refuses when a logical volume still has extents on a
+    # missing disk, so this can only drop PVs that held nothing.
+    run(["vgreduce", "--removemissing", vg["vg_name"]], timeout=120)
+    return {"vg": vg["vg_name"], "removed_missing": True}
+
+
+VERBS = {
+    "inventory": (verb_inventory, False),
+    "rescan": (verb_rescan, True),
+    "add-disk": (verb_add_disk, True),
+    "extend": (verb_extend, True),
+    "grow-pv": (verb_grow_pv, True),
+    "evacuate": (verb_evacuate, True),
+    "abort-evacuation": (verb_abort_evacuation, True),
+    "remove-disk": (verb_remove_disk, True),
+    "remove-missing": (verb_remove_missing, True),
+}
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] not in VERBS:
+        print(json.dumps({"ok": False, "code": "usage",
+                          "error": "supported verbs: " + ", ".join(VERBS)}))
+        return 2
+    if os.geteuid() != 0:
+        print(json.dumps({"ok": False, "code": "not_root", "error": "must run as root"}))
+        return 2
+    fn, mutating = VERBS[argv[1]]
+    lock = None
+    try:
+        if mutating:
+            lock = open(LOCK_PATH, "w", encoding="ascii")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise Rejected("another storage operation is running", "busy")
+        result = fn(argv[2:])
+        print(json.dumps({"ok": True, **result, "log": LOG if mutating else []}))
+        return 0
+    except Rejected as exc:
+        print(json.dumps({"ok": False, "code": exc.code, "error": str(exc), "log": LOG}))
+        return 2
+    except Exception as exc:
+        print(json.dumps({"ok": False, "code": "failed", "error": str(exc), "log": LOG}))
+        return 1
+    finally:
+        if lock is not None:
+            lock.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

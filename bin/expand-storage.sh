@@ -1,122 +1,97 @@
 #!/bin/bash
 # /opt/zenplus/bin/expand-storage.sh
-# Expand the /data volume by adding a new disk or growing the existing one.
+# Operator CLI for growing the /data volume. Settings -> Storage drives the
+# same operations; both go through the root-owned volume helper, which finds
+# the logical volume behind /data (dedicated data LV or the root LV) and
+# validates every disk before touching it.
 #
 # Usage:
-#   expand-storage.sh /dev/sdb          # Add a new disk to the VG
-#   expand-storage.sh --grow             # Grow LV after VG was expanded externally
-#   expand-storage.sh --status           # Show current storage status
+#   expand-storage.sh /dev/sdb [--wipe]   Add a new disk and give all its space to /data
+#   expand-storage.sh --grow              Claim space after enlarging a virtual disk
+#   expand-storage.sh --status            Show the current storage layout
 #
 set -euo pipefail
 
-VG_NAME="ubuntu-vg"
-LV_NAME="data-lv"
-MOUNT_POINT="/data"
+HELPER="/usr/local/sbin/zenplus-volume-helper"
 
 log() { echo "[storage] $(date +%H:%M:%S) $*"; }
 err() { echo "[storage] ERROR: $*" >&2; }
 
-# Pre-flight: ensure LVM can write metadata archives
-preflight_check() {
-    local archive_dir="/etc/lvm/archive"
-    local backup_dir="/etc/lvm/backup"
+if [ "$(id -u)" -ne 0 ]; then
+    err "must run as root"
+    exit 1
+fi
+if [ ! -x "$HELPER" ]; then
+    err "$HELPER is not installed; run: sudo bash /opt/zenplus/scripts/setup-storage.sh"
+    exit 1
+fi
 
-    # Check root filesystem is writable
-    if ! touch /etc/lvm/.write_test 2>/dev/null; then
-        err "Root filesystem appears read-only. Attempting remount..."
-        mount -o remount,rw / 2>/dev/null || true
-        if ! touch /etc/lvm/.write_test 2>/dev/null; then
-            err "Cannot write to /etc/lvm — root filesystem is read-only."
-            err "Run: mount -o remount,rw /"
-            exit 1
-        fi
+# Run a helper verb, print its error message on failure, propagate its status.
+helper() {
+    local out rc=0
+    out="$("$HELPER" "$@")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        err "$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("error","failed"))' <<<"$out" 2>/dev/null || echo "$out")"
+        return "$rc"
     fi
-    rm -f /etc/lvm/.write_test
+    printf '%s\n' "$out"
+}
 
-    # Ensure archive/backup dirs exist and are writable
-    mkdir -p "$archive_dir" "$backup_dir" 2>/dev/null || true
-    chmod 700 "$archive_dir" "$backup_dir" 2>/dev/null || true
+# Physical volumes of the volume group that holds /data.
+data_pvs() {
+    local inv
+    inv="$("$HELPER" inventory)"
+    python3 - "$inv" <<'PY'
+import json, os, sys
+inv = json.loads(sys.argv[1])
+src = os.path.realpath(((inv.get("mounts") or {}).get("/data") or {}).get("source") or "")
+lv = next((l for l in inv.get("lvs", []) if l.get("lv_path") and os.path.realpath(l["lv_path"]) == src), None)
+for pv in inv.get("pvs", []):
+    if lv and pv.get("vg_name") == lv.get("vg_name") and not pv.get("pv_missing"):
+        print(pv["pv_name"])
+PY
 }
 
 case "${1:-}" in
     --status)
-        echo "=== Volume Group ==="
-        vgs "$VG_NAME"
+        findmnt --target /data -o TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL
         echo ""
-        echo "=== Logical Volumes ==="
-        lvs "$VG_NAME"
-        echo ""
-        echo "=== /data Filesystem ==="
-        df -hT "$MOUNT_POINT"
-        echo ""
-        echo "=== Data Directory Usage ==="
-        du -sh "$MOUNT_POINT"/*/ 2>/dev/null || echo "  (empty)"
-        echo ""
-        echo "=== Physical Volumes ==="
         pvs
+        echo ""
+        vgs
+        echo ""
+        lvs
         ;;
 
     --grow)
-        preflight_check
-        log "Growing LV $LV_NAME to use all free VG space..."
-
-        # Check if there is actually free space
-        FREE_EXTENTS=$(vgs "$VG_NAME" --noheadings --nosuffix -o vg_free_count 2>/dev/null | tr -d ' ')
-        if [ "${FREE_EXTENTS:-0}" -eq 0 ]; then
-            err "No free extents in $VG_NAME. Add a new disk or resize the VM disk first."
+        log "Rescanning disks for size changes..."
+        helper rescan >/dev/null
+        for pv in $(data_pvs); do
+            log "Claiming any new space on $pv..."
+            helper grow-pv "$pv" >/dev/null || true
+        done
+        log "Extending /data with all unallocated space..."
+        rc=0
+        helper extend /data all >/dev/null || rc=$?
+        if [ "$rc" -eq 2 ]; then
+            err "Nothing to grow. Enlarge the virtual disk or add a new disk first."
             exit 5
         fi
-
-        lvextend -l +100%FREE "/dev/$VG_NAME/$LV_NAME"
-        log "Resizing filesystem..."
-        resize2fs "/dev/$VG_NAME/$LV_NAME"
-        log "Done."
-        df -hT "$MOUNT_POINT"
+        [ "$rc" -eq 0 ] || exit "$rc"
+        df -hT /data
         ;;
 
     /dev/*)
-        DISK="$1"
-        preflight_check
-
-        if [ ! -b "$DISK" ]; then
-            err "$DISK is not a valid block device."
-            echo "Available disks:"
-            lsblk -d -o NAME,SIZE,TYPE,MOUNTPOINTS | grep disk
-            exit 1
-        fi
-
-        # Check if already a PV in our VG
-        if pvs "$DISK" --noheadings 2>/dev/null | grep -q "$VG_NAME"; then
-            err "$DISK is already a physical volume in $VG_NAME."
-            pvs "$DISK"
-            exit 1
-        fi
-
-        # If it's a PV but orphaned (not in our VG), just extend the VG
-        if pvs "$DISK" &>/dev/null; then
-            log "$DISK is already a physical volume (orphaned). Adding to $VG_NAME..."
+        log "Adding $1 to the data volume group..."
+        if [ "${2:-}" = "--wipe" ]; then
+            helper add-disk "$1" --wipe >/dev/null
         else
-            log "Creating physical volume on $DISK..."
-            pvcreate -f "$DISK"
+            helper add-disk "$1" >/dev/null
         fi
-
-        log "Extending volume group $VG_NAME with $DISK..."
-        vgextend "$VG_NAME" "$DISK"
-
-        log "Extending logical volume $LV_NAME to use all free space..."
-        lvextend -l +100%FREE "/dev/$VG_NAME/$LV_NAME"
-
-        log "Resizing ext4 filesystem (online)..."
-        resize2fs "/dev/$VG_NAME/$LV_NAME"
-
+        log "Extending /data with the new space..."
+        helper extend /data all >/dev/null
         log "Expansion complete."
-        echo ""
-        echo "=== New Storage Layout ==="
-        pvs
-        echo ""
-        vgs "$VG_NAME"
-        echo ""
-        df -hT "$MOUNT_POINT"
+        df -hT /data
         ;;
 
     *)
@@ -124,20 +99,11 @@ case "${1:-}" in
         echo ""
         echo "Usage:"
         echo "  $0 --status              Show current storage layout"
-        echo "  $0 /dev/sdX              Add a new disk and expand /data"
-        echo "  $0 --grow                Grow /data after external VG expansion"
+        echo "  $0 /dev/sdX [--wipe]     Add a new disk and expand /data"
+        echo "  $0 --grow                Claim space after enlarging a virtual disk"
         echo ""
-        echo "Examples:"
-        echo "  # Add a new 500GB disk:"
-        echo "  sudo $0 /dev/sdb"
-        echo ""
-        echo "  # After expanding a VMware disk:"
-        echo "  sudo pvresize /dev/sda3    # resize existing PV to see new space"
-        echo "  sudo $0 --grow             # extend LV + filesystem"
-        echo ""
-        echo "  # Add multiple disks:"
-        echo "  sudo $0 /dev/sdb"
-        echo "  sudo $0 /dev/sdc"
+        echo "Settings -> Storage -> Disks & Volumes offers the same operations, plus"
+        echo "partial allocation and safe disk removal."
         exit 1
         ;;
 esac

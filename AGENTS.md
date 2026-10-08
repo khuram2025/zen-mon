@@ -19,6 +19,7 @@
 - Service list headlines, daily bars and detail SLA explicitly use `basis=confirmed`: only confirmed incidents affect availability; isolated failed probes remain diagnostic evidence. Keep monitoring gaps unknown and retain configured retry thresholds. Batch list reports share `service_availability` segment conversion with detail and use the browser timezone for calendar days; legacy API defaults remain compatible.
 - Device list/detail availability headlines share `/devices/dashboard/uptime-stats` and two-decimal formatting. Use `uptime_pct` and `sample_count` for partial failures; legacy rollup `is_up` is only a majority flag.
 - Device widget layouts are scoped by user/device/tab in browser storage. Vendor/type templates match normalized vendor + device type + tab + user; device overrides win. Preserve layout preferences for temporarily absent widgets.
+- Storage: the data volume is whatever LV backs `/data` (often the root LV); never hardcode LV names. Disk/LVM changes go only through the root `scripts/zenplus-volume-helper`, which re-validates every request; tests fake its commands and never touch real disks (see `docs/storage-management.md`).
 - F5 overall RAM uses sysGlobalHostMemUsed / sysGlobalHostMemTotal, never the highest TMM/non-TMM percentage. Keep TMM, non-TMM and swap separate; use `f5_system_memory_pct` for corrected history. Missing sensors are not zero, and certificate inventory does not prove active TLS bindings.
 
 ## Device Tracker

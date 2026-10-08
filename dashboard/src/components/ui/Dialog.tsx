@@ -104,10 +104,12 @@ export const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLD
 )
 // Sticks to the bottom of a scrolling dialog so Save / Cancel are always in
 // reach. Negative margins cancel the dialog padding, which is re-added inside,
-// so a dialog that does not overflow looks exactly as before.
+// so a dialog that does not overflow looks exactly as before. The sticky inset
+// is measured inside the dialog padding, so it is offset by that padding too;
+// with bottom-0 the footer rose by the padding and covered the last content.
 export const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
-    className={cn('sticky bottom-0 z-10 -mx-4 -mb-4 flex flex-wrap justify-end gap-2 border-t border-border/50 bg-surface px-4 pb-4 pt-3 sm:-mx-6 sm:-mb-6 sm:px-6 sm:pb-6', className)}
+    className={cn('sticky -bottom-4 z-10 sm:-bottom-6 -mx-4 -mb-4 flex flex-wrap justify-end gap-2 border-t border-border/50 bg-surface px-4 pb-4 pt-3 sm:-mx-6 sm:-mb-6 sm:px-6 sm:pb-6', className)}
     {...props}
   />
 )
