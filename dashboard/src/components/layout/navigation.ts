@@ -14,7 +14,6 @@ import {
   Download,
   FileBarChart,
   FileCode,
-  FileText,
   Fingerprint,
   Gauge,
   GitBranch,
@@ -27,6 +26,7 @@ import {
   Layers,
   LayoutDashboard,
   LayoutTemplate,
+  LibraryBig,
   LifeBuoy,
   ListChecks,
   MapPinned,
@@ -34,7 +34,6 @@ import {
   MousePointerClick,
   Network,
   Palette,
-  PieChart,
   Plug,
   Radar,
   Waypoints,
@@ -278,28 +277,26 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    // Reports are consumed, not configured, so they have their own group.
+    // Every entry needs reports.view (the designer also reports.manage).
+    // The viewer (/reports/view/*) belongs to the library; the legacy persona
+    // paths only redirect to their templates.
+    id: 'reports',
+    label: 'Reports',
+    short: 'Reports',
+    icon: FileBarChart,
+    items: [
+      { to: '/reports', label: 'Report Library', icon: LibraryBig, end: true, extra: ['/reports/view/'], hint: 'Built-in and custom report templates', permission: 'reports.view' },
+      { to: '/reports/builder', label: 'Template Designer', icon: LayoutTemplate, hint: 'Build and customize report templates', requireAll: ['reports.view'], permission: 'reports.manage' },
+      { to: '/reports/schedules', label: 'Schedules', icon: CalendarClock, hint: 'Scheduled delivery by email and channels', permission: 'reports.view' },
+    ],
+  },
+  {
     id: 'administration',
     label: 'Administration',
     short: 'Admin',
     icon: SettingsIcon,
     items: [
-      {
-        to: '/reports',
-        label: 'Reports',
-        icon: FileText,
-        hint: 'Scheduled and on-demand reporting',
-        permission: 'reports.view',
-        children: [
-          { to: '/reports', label: 'Report Library', icon: FileText, end: true },
-          { to: '/reports/executive', label: 'Executive', icon: PieChart },
-          { to: '/reports/technical', label: 'Technical', icon: BarChart3 },
-          { to: '/reports/business', label: 'Business', icon: Building2 },
-          { to: '/reports/inventory', label: 'Inventory', icon: Boxes },
-          { to: '/reports/apm', label: 'Applications', icon: Layers, permission: 'apm.view' },
-          { to: '/reports/builder', label: 'Custom Builder', icon: LayoutTemplate, permission: 'reports.manage' },
-          { to: '/reports/schedules', label: 'Schedules', icon: CalendarClock },
-        ],
-      },
       { to: '/credentials', label: 'Credentials', icon: KeyRound, hint: 'SNMP, Windows, and service credentials', permission: ['devices.manage', 'service_checks.manage'] },
       {
         to: '/settings/general',

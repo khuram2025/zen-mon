@@ -65,6 +65,12 @@ jobs:
       - run: node scripts/test-device-widget-layout.mjs
       - run: node scripts/test-nav-access.mjs
       - run: node scripts/test-role-model.mjs
+      - run: node scripts/test-branding.mjs
+      - run: node scripts/test-report-periods.mjs
+      - run: node scripts/test-report-render.mjs
+      - run: node scripts/test-report-library.mjs
+      - run: node scripts/test-report-schedules.mjs
+      - run: node scripts/test-report-designer.mjs
 
   poller:
     runs-on: ubuntu-24.04

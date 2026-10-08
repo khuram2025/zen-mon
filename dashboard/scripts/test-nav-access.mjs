@@ -114,13 +114,27 @@ const visible = (perms) => {
 // ── the reported bug: a narrow custom role sees only its areas ─────────────
 {
   const v = visible(['dashboard.view', 'devices.view'])
-  for (const hidden of ['servers', 'apm', 'device-tracker', 'nccm']) assert(!v.groups.includes(hidden), `devices-only role sees ${hidden}`)
+  for (const hidden of ['servers', 'apm', 'device-tracker', 'nccm', 'reports']) assert(!v.groups.includes(hidden), `devices-only role sees ${hidden}`)
   assert(v.labels.has('monitoring:Devices') && v.labels.has('monitoring:Link Utilization'))
   // Device events are readable with devices.view (the server's "events" policy); alerts are not.
   assert(v.labels.has('alerting:SNMP Traps') && v.labels.has('alerting:Network Syslog'))
   assert(!v.labels.has('alerting:Active Alerts') && !v.labels.has('alerting:Alert Rules') && !v.labels.has('alerting:Channels'))
-  for (const hidden of ['monitoring:NetFlow', 'monitoring:Services', 'monitoring:Discovery', 'monitoring:Network Maps', 'administration:Reports', 'administration:Credentials', 'administration:Subscription'])
+  for (const hidden of ['monitoring:NetFlow', 'monitoring:Services', 'monitoring:Discovery', 'monitoring:Network Maps', 'reports:Report Library', 'reports:Schedules', 'administration:Credentials', 'administration:Subscription'])
     assert(!v.labels.has(hidden), `devices-only role sees ${hidden}`)
+}
+
+// ── Reports: its own group between Alerting and Administration ─────────────
+{
+  const ids = NAV_GROUPS.map((g) => g.id)
+  assert.equal(ids.indexOf('reports'), ids.indexOf('alerting') + 1, 'Reports follows Alerting')
+  assert.equal(ids.indexOf('administration'), ids.indexOf('reports') + 1, 'Reports precedes Administration')
+  assert(!NAV_GROUPS.find((g) => g.id === 'administration').items.some((i) => i.to.startsWith('/reports')), 'Reports left Administration')
+  const viewer = visible(['reports.view'])
+  assert.deepEqual(viewer.groups.filter((g) => g === 'reports'), ['reports'])
+  assert(viewer.labels.has('reports:Report Library') && viewer.labels.has('reports:Schedules'))
+  assert(!viewer.labels.has('reports:Template Designer'), 'the designer needs reports.manage')
+  assert(visible(['reports.view', 'reports.manage']).labels.has('reports:Template Designer'))
+  assert(!visible(['reports.manage']).labels.has('reports:Template Designer'), 'the designer also needs reports.view')
 }
 
 // ── team roles from the server's built-in definitions ──────────────────────
@@ -159,6 +173,10 @@ assert(allows('/apm/services', app) && allows('/apm/rum?tab=sessions', app))
 assert(!allows('/servers/inventory', app) && !allows('/servers/123e4567', app), 'server detail pages are gated like Inventory')
 assert(!allows('/devices/abc', app) && !allows('/ncm', app) && !allows('/udt/users', app))
 assert(!allows('/apm/settings', ['dashboard.view', 'apm.view']), 'APM settings need apm.manage')
+// The report viewer belongs to the library (reports.view); the designer needs reports.manage.
+assert(allows('/reports/view/availability', ['reports.view']) && !allows('/reports/view/availability', ['devices.view']))
+assert(!allows('/reports/builder', ['reports.view']) && allows('/reports/builder?from=availability', ['reports.view', 'reports.manage']))
+assert(allows('/reports/schedules', ['reports.view']) && !allows('/reports/schedules', ['devices.view']))
 // Settings hides its own tabs and falls back, so only the item is route-gated.
 assert(allows('/settings/general', []) && allows('/settings/general?tab=company', []))
 // Pages without a navigation entry are left to the page and the server.

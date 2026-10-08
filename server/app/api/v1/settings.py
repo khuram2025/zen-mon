@@ -6,15 +6,16 @@ from uuid import UUID
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_admin_user, require_permission
 from app.models.user import User
+from app.services import branding
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
@@ -167,14 +168,106 @@ async def _sync_default_notification_gateway(
 # ---------------------------------------------------------------------------
 
 class CompanySettings(BaseModel):
-    company_name: str = ""
-    company_address: str = ""
-    company_email: str = ""
-    company_phone: str = ""
-    company_website: str = ""
+    """Organisation profile, regional formats and report branding.
+
+    Read back through :func:`app.services.branding.load_branding`, which every
+    report renderer, the scheduler and report emails use."""
+    company_name: str = Field("", max_length=120)
+    company_address: str = Field("", max_length=500)
+    company_email: str = Field("", max_length=254)
+    company_phone: str = Field("", max_length=64)
+    company_website: str = Field("", max_length=255)
+    # Public URL of this appliance, used for "View full report" links in
+    # report emails (APP_BASE_URL in the environment takes precedence).
+    base_url: str = Field("", max_length=255)
     timezone: str = "UTC"
     date_format: str = "YYYY-MM-DD"
     time_format: str = "24h"
+    week_start: str = "monday"
+    brand_color: str = branding.DEFAULT_BRAND_COLOR
+    report_footer: str = Field("", max_length=200)
+    report_disclaimer: str = Field("", max_length=1000)
+    confidentiality: str = ""
+    paper_size: str = "A4"
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v: str) -> str:
+        if not branding.valid_timezone(v):
+            raise ValueError("Unknown timezone")
+        return v
+
+    @field_validator("date_format")
+    @classmethod
+    def _date_format(cls, v: str) -> str:
+        if v not in branding.DATE_FORMATS:
+            raise ValueError(f"Date format must be one of {', '.join(branding.DATE_FORMATS)}")
+        return v
+
+    @field_validator("time_format")
+    @classmethod
+    def _time_format(cls, v: str) -> str:
+        if v not in branding.TIME_FORMATS:
+            raise ValueError("Time format must be 24h or 12h")
+        return v
+
+    @field_validator("week_start")
+    @classmethod
+    def _week_start(cls, v: str) -> str:
+        v = (v or "").lower()
+        if v not in branding.WEEK_STARTS:
+            raise ValueError("Week start must be monday, sunday or saturday")
+        return v
+
+    @field_validator("brand_color")
+    @classmethod
+    def _brand_color(cls, v: str) -> str:
+        if not branding.valid_hex_color(v):
+            raise ValueError("Brand colour must be a hex colour such as #4F6BF6")
+        return v.upper()
+
+    @field_validator("confidentiality")
+    @classmethod
+    def _confidentiality(cls, v: str) -> str:
+        if v not in branding.CONFIDENTIALITY_LEVELS:
+            raise ValueError("Unknown classification label")
+        return v
+
+    @field_validator("paper_size")
+    @classmethod
+    def _paper(cls, v: str) -> str:
+        if v not in branding.PAPER_SIZES:
+            raise ValueError("Paper size must be A4 or Letter")
+        return v
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url(cls, v: str) -> str:
+        v = (v or "").strip().rstrip("/")
+        if v and not branding.valid_base_url(v):
+            raise ValueError("Appliance URL must start with http:// or https://")
+        return v
+
+    @field_validator("company_name", "company_address", "company_email", "company_phone",
+                     "company_website", "report_footer", "report_disclaimer")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return (v or "").strip()
+
+
+def _company_from_stored(raw: Optional[dict]) -> dict:
+    """Stored company values, sanitised so an out-of-range legacy value never
+    breaks the settings page."""
+    b = branding.branding_from_values(raw)
+    return CompanySettings.model_construct(
+        company_name=b.company_name, company_address=b.company_address,
+        company_email=b.company_email, company_phone=b.company_phone,
+        company_website=b.company_website, base_url=b.base_url, timezone=b.timezone,
+        date_format=b.date_format, time_format=b.time_format,
+        week_start=b.week_start, brand_color=b.brand_color,
+        report_footer=b.report_footer, report_disclaimer=b.report_disclaimer,
+        confidentiality=b.confidentiality, paper_size=b.paper_size,
+    ).model_dump()
 
 
 class GrafanaSettings(BaseModel):
@@ -260,9 +353,16 @@ async def get_company_settings(
     user: User = Depends(require_permission("settings.view")),
 ):
     raw = await _get_system_setting(db, "company")
-    if raw:
-        return CompanySettings(**raw).model_dump()
-    return CompanySettings().model_dump()
+    out = _company_from_stored(raw)
+    logos = {}
+    for variant, key in branding.LOGO_KEYS.items():
+        logo = branding.decode_logo(await _get_system_setting(db, key))
+        logos[variant] = None if logo is None else {
+            "content_type": logo.content_type, "filename": logo.filename,
+            "size": len(logo.data), "updated_at": logo.updated_at,
+        }
+    out["logos"] = logos
+    return out
 
 
 @router.put("/company")
@@ -271,59 +371,116 @@ async def update_company_settings(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("settings.manage")),
 ):
-    await _upsert_system_setting(db, "company", data.model_dump())
+    previous = await _get_system_setting(db, "company") or {}
+    new = data.model_dump()
+    # Keep keys this version does not know about (written by a newer release).
+    merged = {**previous, **new} if isinstance(previous, dict) else new
+    await _upsert_system_setting(db, "company", merged)
+    changed = sorted(k for k in new if (previous or {}).get(k) != new[k]) if isinstance(previous, dict) else sorted(new)
     await write_audit_log(
         db,
         actor=user,
         action="settings.company.update",
         resource_type="system_setting",
         resource_id="company",
+        metadata={"changed": changed},
     )
     await db.commit()
     return {"message": "Company settings updated"}
 
 
+def _logo_variant(variant: str) -> str:
+    if variant not in branding.LOGO_KEYS:
+        raise HTTPException(status_code=400, detail="variant must be 'light' or 'dark'")
+    return branding.LOGO_KEYS[variant]
+
+
 @router.post("/company/logo")
 async def upload_company_logo(
     file: UploadFile = File(...),
+    variant: str = Query("light", description="light: for light backgrounds (reports, print); "
+                                                "dark: for dark backgrounds (report cover)"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("settings.manage")),
 ):
-    if file.content_type not in ("image/png", "image/jpeg", "image/svg+xml", "image/webp"):
-        raise HTTPException(status_code=400, detail="Only PNG, JPEG, SVG, or WebP images are allowed")
+    key = _logo_variant(variant)
+    content = await file.read(branding.LOGO_MAX_BYTES + 1)
+    if len(content) > branding.LOGO_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="Logo must be 2 MB or smaller")
+    # Trust the bytes, not the client's declared type.
+    content_type = branding.sniff_logo(content)
+    if not content_type:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a PNG, JPEG, WebP or SVG image. SVG files may not contain scripts, "
+                   "event handlers or embedded objects.",
+        )
 
-    content = await file.read()
-    if len(content) > 2 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Logo must be less than 2MB")
-
-    logo_b64 = base64.b64encode(content).decode()
-    await _upsert_system_setting(db, "company_logo", {
-        "data": logo_b64,
-        "content_type": file.content_type,
-        "filename": file.filename,
+    await _upsert_system_setting(db, key, {
+        "data": base64.b64encode(content).decode(),
+        "content_type": content_type,
+        "filename": (file.filename or "")[:255],
+        "updated_at": branding.utc_now_iso(),
     })
     await write_audit_log(
         db,
         actor=user,
         action="settings.company_logo.upload",
         resource_type="system_setting",
-        resource_id="company_logo",
-        metadata={"filename": file.filename, "content_type": file.content_type, "size": len(content)},
+        resource_id=key,
+        metadata={"filename": file.filename, "content_type": content_type,
+                  "size": len(content), "variant": variant},
     )
     await db.commit()
-    return {"message": "Logo uploaded successfully"}
+    return {"message": "Logo uploaded", "variant": variant, "content_type": content_type}
+
+
+@router.delete("/company/logo")
+async def delete_company_logo(
+    variant: str = Query("light"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("settings.manage")),
+):
+    key = _logo_variant(variant)
+    res = await db.execute(text("DELETE FROM system_settings WHERE key = :key"), {"key": key})
+    if not res.rowcount:
+        raise HTTPException(status_code=404, detail="No logo uploaded")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="settings.company_logo.delete",
+        resource_type="system_setting",
+        resource_id=key,
+        metadata={"variant": variant},
+    )
+    await db.commit()
+    return {"message": "Logo removed", "variant": variant}
+
+
+# An uploaded SVG is served from the application origin: never let it run
+# script or load anything if someone opens the URL directly.
+LOGO_RESPONSE_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "public, max-age=300",
+}
 
 
 @router.get("/company/logo")
 async def get_company_logo(
+    variant: str = Query("light"),
+    fallback: bool = Query(True, description="Serve the other variant when this one is not set"),
     db: AsyncSession = Depends(get_db),
 ):
-    raw = await _get_system_setting(db, "company_logo")
-    if not raw or not raw.get("data"):
+    """Public: the login page and emailed reports show the organisation logo."""
+    key = _logo_variant(variant)
+    logo = branding.decode_logo(await _get_system_setting(db, key))
+    if logo is None and fallback:
+        other = "dark" if variant == "light" else "light"
+        logo = branding.decode_logo(await _get_system_setting(db, branding.LOGO_KEYS[other]))
+    if logo is None:
         raise HTTPException(status_code=404, detail="No logo uploaded")
-
-    content = base64.b64decode(raw["data"])
-    return Response(content=content, media_type=raw.get("content_type", "image/png"))
+    return Response(content=logo.data, media_type=logo.content_type, headers=LOGO_RESPONSE_HEADERS)
 
 
 @router.get("/timezone")

@@ -1,1089 +1,564 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+/**
+ * Report viewer: /reports/view/:key — a built-in template, or `custom` with
+ * `custom_id` for an organisation template.
+ *
+ * URL contract (shared with the library, designer and schedules):
+ *   range=<PeriodId|1h|24h|7d|1M|month|last_month|quarter|custom> &from &to
+ *   custom_id=<uuid>  nodes=<device id,…>  app=<application id>  nf=<NetFlow scope>
+ * No range → the template's default period, else the last 24 hours. Calendar
+ * periods and custom ranges are in the organisation timezone.
+ */
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
 import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
-import {
-  ArrowLeft,
-  Boxes,
-  CalendarClock,
-  Check,
-  ChevronDown,
-  Download,
-  FileCode,
-  FileText,
-  Loader2,
-  Search,
-  Server,
-  X,
+  AppWindow, ArrowLeft, CalendarClock, ChevronDown, CopyPlus, FileQuestion, Pencil, RefreshCw, Server,
+  SlidersHorizontal, Waypoints, X,
 } from 'lucide-react'
-import { api } from '@/lib/api'
-import { apiErrorMessage, cn } from '@/lib/utils'
-import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
-import { ReportScheduleFormDialog } from '@/components/forms/ReportScheduleFormDialog'
+import '@/features/reports/render/print.css'
+import '@/features/reports/viewer/viewer.css'
+import { cn } from '@/lib/utils'
+import { formatPeriod } from '@/lib/branding'
+import { useAuth, useCan } from '@/stores/auth'
 import { Button } from '@/components/ui/Button'
-import { Skeleton } from '@/components/ui/Skeleton'
-import { NetflowScopeChips, NetflowScopePicker, parseReportScope, reportScopeObject, reportScopeParam } from './NetflowReportScope'
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from '@/components/ui/DropdownMenu'
+import { QueryFailure } from '@/components/ui/QueryState'
+import { FilterChips } from '@/components/netflow/FilterChips'
+import { ReportScheduleFormDialog } from '@/components/forms/ReportScheduleFormDialog'
+import { useRenderReport, useReportBranding, useReportCatalog, type RenderParams } from '@/features/reports/api'
+import { bucketNow, PERIODS } from '@/features/reports/periods'
+import { recordRecent, refFor } from '@/features/reports/storage'
+import type { PeriodId, ScopeFilter, SectionDef } from '@/features/reports/types'
+import { ReportDocument, ReportDocumentSkeleton } from '@/features/reports/render/ReportDocument'
+import { ContentsRail, ContentsSelect, useScrollSpy } from '@/features/reports/render/ContentsRail'
+import { sectionAnchorId } from '@/features/reports/render/format'
+import { PeriodPicker } from '@/features/reports/viewer/PeriodPicker'
+import { DeviceScopePicker } from '@/features/reports/viewer/DeviceScopePicker'
+import { ApplicationScopePicker } from '@/features/reports/viewer/ApplicationScopePicker'
+import { ExportMenu } from '@/features/reports/viewer/ExportMenu'
+import { ShareMenu } from '@/features/reports/viewer/ShareMenu'
+import { printReport, ReportPrintStyle, usePrintOnLightTheme } from '@/features/reports/viewer/print'
+import {
+  filterableFor, needsDefaultPeriod, parseNodes, parseSelection, resolveWindow, selectionKey, selectionLabel,
+  selectionParams, type PeriodSelection,
+} from '@/features/reports/viewer/range'
+import { NetflowScopePicker, parseReportScope, reportScopeObject, reportScopeParam } from './NetflowReportScope'
 import type { FlowFilter } from '@/lib/netflow/filters'
 
-/* ------------------------------------------------------------------ */
-/*  Types — GET /reports/render/{key}?format=json                      */
-/* ------------------------------------------------------------------ */
+const ID_PREFIX = 'rpt'
+const CALENDAR = new Set<string>(PERIODS.filter((p) => p.kind === 'calendar').map((p) => p.id))
 
-type KpiAccent = 'primary' | 'success' | 'warning' | 'danger' | 'info'
-
-interface RenderKpi {
-  label: string
-  value: string | number
-  accent?: KpiAccent
-  subtitle?: string
+/** Classic report types that have their own page (the rest are export-only). */
+const LEGACY_PAGES: Record<string, string> = {
+  executive_summary: '/reports/executive',
+  device_health: '/reports/technical',
+  service_health: '/reports/business',
 }
 
-interface ChartSeries {
-  kind: 'area' | 'bars' | 'donut' | 'rank'
-  unit?: string
-  color?: KpiAccent
-  y_domain?: [number, number]
-  points: { t?: string; v?: number; label?: string; value?: number }[]
-}
-
-interface RenderChart {
-  title: string
-  data_uri?: string
-  series?: ChartSeries
-}
-
-type ColStyle = 'text' | 'num' | 'mono' | 'pct' | 'pct-bar' | 'status' | 'severity'
-
-interface RenderTable {
-  title?: string
-  headers: string[]
-  styles?: ColStyle[]
-  rows: (string | number)[][]
-}
-
-interface RenderSection {
-  id: string
-  title: string
-  description?: string
-  half?: boolean
-  kpis: RenderKpi[]
-  charts: RenderChart[]
-  tables: RenderTable[]
-  notes: string[]
-}
-
-interface RenderReport {
-  scope_label?: string
-  key: string
-  title: string
-  description: string
-  from: string
-  to: string
-  period_label: string
-  generated_label: string
-  company_name: string
-  sections: RenderSection[]
-}
-
-/* ------------------------------------------------------------------ */
-/*  Shared chart chrome (matches the app's repaired chart styling)     */
-/* ------------------------------------------------------------------ */
-
-const ACCENT: Record<KpiAccent, string> = {
-  primary: '#3b82f6',
-  success: '#22c55e',
-  warning: '#f59e0b',
-  danger: '#ef4444',
-  info: '#22d3ee',
-}
-const DONUT_COLORS = ['#3b82f6', '#22d3ee', '#22c55e', '#f59e0b', '#ef4444', '#64748b']
-const TICK = { fill: '#94a3b8', fontSize: 10 }
-const GRID = 'rgba(148,163,184,0.15)'
-const TOOLTIP_STYLE = {
-  background: '#0d121b',
-  border: '1px solid #1e293b',
-  borderRadius: 8,
-  color: '#e5e7eb',
-  fontSize: 12,
-} as const
-
-function timeTickFormatter(points: { t?: string }[]): (t: string) => string {
-  const first = points[0]?.t
-  const last = points[points.length - 1]?.t
-  const spanH = first && last ? (new Date(last).getTime() - new Date(first).getTime()) / 3.6e6 : 24
-  return (t: string) => {
-    const d = new Date(t)
-    return spanH <= 48
-      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-      : d.toLocaleDateString([], { month: '2-digit', day: '2-digit' })
-  }
-}
-
-function TimeSeriesChart({ series }: { series: ChartSeries }) {
-  const color = ACCENT[series.color || 'primary']
-  const data = series.points.filter((p) => p.t != null)
-  const fmt = timeTickFormatter(data)
-  const common = (
-    <>
-      <CartesianGrid stroke={GRID} vertical={false} />
-      <XAxis dataKey="t" tick={TICK} tickFormatter={fmt} axisLine={false} tickLine={false} minTickGap={40} />
-      <YAxis
-        tick={TICK}
-        axisLine={false}
-        tickLine={false}
-        width={44}
-        domain={series.y_domain ?? [0, 'auto']}
-        tickFormatter={(v: number) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v))}
-      />
-      <Tooltip
-        contentStyle={TOOLTIP_STYLE}
-        labelFormatter={(t) => new Date(String(t)).toLocaleString()}
-        formatter={(v: number) => [`${Number(v).toLocaleString()} ${series.unit || ''}`.trim(), '']}
-      />
-    </>
-  )
+function NotFoundState({ legacyKey }: { legacyKey?: string | null }) {
+  const page = legacyKey ? LEGACY_PAGES[legacyKey] : undefined
   return (
-    <ResponsiveContainer width="100%" height={220}>
-      {series.kind === 'bars' ? (
-        <BarChart data={data} margin={{ top: 6, right: 6, bottom: 0, left: 0 }}>
-          {common}
-          <Bar dataKey="v" fill={color} radius={[2, 2, 0, 0]} maxBarSize={18} />
-        </BarChart>
-      ) : (
-        <AreaChart data={data} margin={{ top: 6, right: 6, bottom: 0, left: 0 }}>
-          <defs>
-            <linearGradient id={`grad-${series.color || 'primary'}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity={0.28} />
-              <stop offset="100%" stopColor={color} stopOpacity={0.02} />
-            </linearGradient>
-          </defs>
-          {common}
-          <Area
-            type="monotone"
-            dataKey="v"
-            stroke={color}
-            strokeWidth={1.6}
-            fill={`url(#grad-${series.color || 'primary'})`}
-          />
-        </AreaChart>
-      )}
-    </ResponsiveContainer>
-  )
-}
-
-/** Ranked horizontal bars for categorical data (top pages, top talkers).
- *  Distinct from `bars`, which is a time-bucketed column chart. */
-function RankBarChart({ series }: { series: ChartSeries }) {
-  const data = series.points
-    .filter((p) => p.label != null && (p.value ?? 0) > 0)
-    .map((p) => ({ name: p.label!, value: p.value! }))
-    .sort((a, b) => b.value - a.value)
-  if (data.length === 0) {
-    return <p className="py-8 text-center text-sm text-muted">No data for this window</p>
-  }
-  const max = data[0].value || 1
-  return (
-    <div className="space-y-1.5">
-      {data.map((d) => (
-        <div key={d.name} className="flex items-center gap-2.5 text-xs">
-          <span className="w-[42%] shrink-0 truncate font-medium text-text2" title={d.name}>{d.name}</span>
-          <div className="h-3.5 min-w-0 flex-1 overflow-hidden rounded-sm bg-surface2">
-            <div
-              className="h-full rounded-sm"
-              style={{ width: `${Math.max(2, (d.value / max) * 100)}%`, background: ACCENT[series.color || 'primary'] }}
-            />
-          </div>
-          <span className="w-16 shrink-0 text-right tabular-nums text-text">
-            {d.value.toLocaleString()}
-          </span>
-        </div>
-      ))}
-      {series.unit && (
-        <p className="pt-0.5 text-right text-[10px] text-muted">{series.unit}</p>
-      )}
-    </div>
-  )
-}
-
-function DonutChart({ series }: { series: ChartSeries }) {
-  const data = series.points
-    .filter((p) => p.label != null && (p.value ?? 0) > 0)
-    .map((p) => ({ name: p.label!, value: p.value! }))
-  const total = data.reduce((a, d) => a + d.value, 0) || 1
-  if (data.length === 0) {
-    return <p className="py-8 text-center text-sm text-muted">No data for this window</p>
-  }
-  return (
-    // Stacked on narrow screens so the legend keeps room for its names (NF-30).
-    <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:items-center sm:gap-5">
-      <div className="h-[180px] w-[180px] shrink-0 self-center">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie
-              data={data}
-              dataKey="value"
-              innerRadius={52}
-              outerRadius={82}
-              paddingAngle={2}
-              strokeWidth={0}
-            >
-              {data.map((_, i) => (
-                <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />
-              ))}
-            </Pie>
-            <Tooltip
-              contentStyle={TOOLTIP_STYLE}
-              formatter={(v: number, name: string) => [
-                `${Number(v).toLocaleString()} ${series.unit || ''} · ${((v / total) * 100).toFixed(1)}%`,
-                name,
-              ]}
-            />
-          </PieChart>
-        </ResponsiveContainer>
-      </div>
-      <div className="min-w-0 flex-1 space-y-1.5">
-        {data.map((d, i) => (
-          <div key={d.name} className="flex items-center gap-2 text-xs">
-            <span
-              className="h-2.5 w-2.5 shrink-0 rounded-sm"
-              style={{ background: DONUT_COLORS[i % DONUT_COLORS.length] }}
-            />
-            <span className="truncate font-medium text-text2">{d.name}</span>
-            <span className="ml-auto shrink-0 tabular-nums text-muted">
-              {d.value.toLocaleString()} {series.unit || ''}
-            </span>
-            <span className="w-12 shrink-0 text-right tabular-nums text-text">
-              {/* A non-zero slice too small to show is "<0.1%", never "0.0%". */}
-              {d.value > 0 && (d.value / total) * 100 < 0.05 ? '<0.1' : ((d.value / total) * 100).toFixed(1)}%
-            </span>
-          </div>
-        ))}
+    <div className="mx-auto mt-6 max-w-lg rounded-xl border border-border bg-surface px-6 py-12 text-center shadow-card dark:shadow-card-dark">
+      <FileQuestion className="mx-auto h-9 w-9 text-muted" aria-hidden />
+      <h1 className="mt-3 text-lg font-semibold text-text">{legacyKey ? 'This report opens elsewhere' : 'Report not found'}</h1>
+      <p className="mt-1.5 text-sm text-muted">
+        {legacyKey
+          ? 'This is a classic report type that the document viewer does not render.'
+          : 'The link is not valid, or the template was deleted or is private to its owner.'}
+      </p>
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+        {page && (
+          <Button asChild>
+            <Link to={page}>Open the classic report</Link>
+          </Button>
+        )}
+        <Button asChild variant={page ? 'outline' : 'default'}>
+          <Link to="/reports"><ArrowLeft aria-hidden /> Back to the report library</Link>
+        </Button>
       </div>
     </div>
   )
 }
 
-/* ------------------------------------------------------------------ */
-/*  Dense, style-hinted tables                                         */
-/* ------------------------------------------------------------------ */
-
-const NUMERIC_CELL_RE = /^[\d,.\s%—-]+(ms|s|GB|MB|KB|B|bps|Kbps|Mbps|Gbps|min)?$/
-
-const STATUS_TONES: Record<string, string> = {
-  up: 'bg-success/15 text-success-fg',
-  online: 'bg-success/15 text-success-fg',
-  healthy: 'bg-success/15 text-success-fg',
-  success: 'bg-success/15 text-success-fg',
-  'on track': 'bg-success/15 text-success-fg',
-  completed: 'bg-success/15 text-success-fg',
-  resolved: 'bg-success/15 text-success-fg',
-  down: 'bg-danger/15 text-danger-fg',
-  offline: 'bg-danger/15 text-danger-fg',
-  critical: 'bg-danger/15 text-danger-fg',
-  failed: 'bg-danger/15 text-danger-fg',
-  breaching: 'bg-danger/15 text-danger-fg',
-  high: 'bg-danger/15 text-danger-fg',
-  degraded: 'bg-warning/15 text-warning-fg',
-  'at risk': 'bg-warning/15 text-warning-fg',
-  warning: 'bg-warning/15 text-warning-fg',
-  pending: 'bg-warning/15 text-warning-fg',
-  stale: 'bg-warning/15 text-warning-fg',
-  medium: 'bg-warning/15 text-warning-fg',
-  open: 'bg-warning/15 text-warning-fg',
-  acknowledged: 'bg-info/15 text-info-fg',
-  suppressed: 'bg-surface2 text-text2',
-  info: 'bg-info/15 text-info-fg',
-  low: 'bg-info/15 text-info-fg',
-}
-
-function StatusPill({ value }: { value: string }) {
-  const tone = STATUS_TONES[value.trim().toLowerCase()] || 'bg-surface2 text-muted'
-  if (!value.trim() || value.trim() === '—') return <span className="text-muted">—</span>
+function ScopeChip({ icon: Icon, children }: { icon: typeof Server; children: string }) {
   return (
-    <span className={cn('inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide', tone)}>
-      {value}
-    </span>
+    <li className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] font-medium text-text2">
+      <Icon className="h-3 w-3 text-muted" aria-hidden />
+      {children}
+    </li>
   )
 }
 
-/** Inline percent bar; tone depends on whether high values are good or bad. */
-function PctBarCell({ value, header }: { value: string; header: string }) {
-  const num = parseFloat(value.replace(/[^\d.]/g, ''))
-  if (Number.isNaN(num)) return <span className="text-muted">{value || '—'}</span>
-  const h = header.toLowerCase()
-  const badHigh = /used|utili|cpu|mem/.test(h)
-  const goodHigh = /avail|uptime|budget|attain/.test(h)
-  const tone = badHigh
-    ? num >= 90 ? 'bg-danger' : num >= 75 ? 'bg-warning' : 'bg-primary'
-    : goodHigh
-      ? num >= 99 ? 'bg-success' : num >= 90 ? 'bg-warning' : 'bg-danger'
-      : 'bg-primary/70'
-  return (
-    <span className="flex items-center justify-end gap-2">
-      <span className="h-1.5 w-14 overflow-hidden rounded-full bg-surface2">
-        <span className={cn('block h-full rounded-full', tone)} style={{ width: `${Math.min(100, num)}%` }} />
-      </span>
-      <span className="w-12 text-right tabular-nums">{value}</span>
-    </span>
+export function SectionReportViewer() {
+  const { key = '' } = useParams<{ key: string }>()
+  const [sp, setSp] = useSearchParams()
+  const customId = sp.get('custom_id')
+  const can = useCan()
+  const userId = useAuth((s) => s.user?.id)
+
+  usePrintOnLightTheme()
+
+  const catalogQ = useReportCatalog()
+  const catalog = catalogQ.data
+  const brandingQ = useReportBranding()
+  const orgBranding = brandingQ.branding
+
+  /* ── Template ─────────────────────────────────────────────────────── */
+  const custom = key === 'custom' ? catalog?.custom.find((c) => c.id === customId) ?? null : null
+  const builtin = key !== 'custom' ? catalog?.types.find((t) => t.key === key) ?? null : null
+  const catalogSettled = catalog !== undefined || catalogQ.isError
+  const unknownKey = !key || (key === 'custom' && !customId) || (catalog !== undefined && key !== 'custom' && !builtin)
+  const legacy = builtin?.engine === 'legacy'
+  const template = key === 'custom' ? custom : builtin
+  const sectionMeta = useMemo<Record<string, SectionDef>>(
+    () => Object.fromEntries((catalog?.sections ?? []).map((s) => [s.id, s])),
+    [catalog?.sections],
   )
-}
+  const filterable = useMemo(() => filterableFor(template, catalog?.sections), [template, catalog?.sections])
 
-function SectionTable({ table, dense }: { table: RenderTable; dense?: boolean }) {
-  const [expanded, setExpanded] = useState(false)
-  const COLLAPSE_AT = 12
+  /* ── Period ───────────────────────────────────────────────────────── */
+  const rangeParam = sp.get('range')
+  const fromParam = sp.get('from')
+  const toParam = sp.get('to')
+  const defaultPeriod: PeriodId = custom?.default_period || builtin?.default_period || 'last_24h'
+  const needsDefault = needsDefaultPeriod(rangeParam, fromParam, toParam)
+  const selection = useMemo(
+    () => parseSelection(rangeParam, fromParam, toParam, defaultPeriod),
+    [rangeParam, fromParam, toParam, defaultPeriod],
+  )
+  const selKey = selectionKey(selection)
+  const [now, setNow] = useState(() => bucketNow())
+  const tz = orgBranding.timezone
+  const weekStart = orgBranding.week_start
+  const win = useMemo(
+    () => resolveWindow(selection, tz, weekStart, now),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selKey, tz, weekStart, now],
+  )
 
-  const styles: ColStyle[] = table.headers.map((_, i) => {
-    if (table.styles?.[i]) return table.styles[i]
-    if (i === 0) return 'text'
-    const cells = table.rows.map((r) => String(r[i] ?? '').trim()).filter(Boolean)
-    return cells.length > 0 && cells.every((c) => NUMERIC_CELL_RE.test(c)) ? 'num' : 'text'
+  const update = (mutate: (next: URLSearchParams) => void) => {
+    const next = new URLSearchParams(sp)
+    mutate(next)
+    setSp(next, { replace: true })
+  }
+
+  const setSelection = (sel: PeriodSelection) => {
+    const p = selectionParams(sel)
+    setNow(bucketNow())
+    update((next) => {
+      next.set('range', p.range)
+      if (p.from && p.to) {
+        next.set('from', p.from)
+        next.set('to', p.to)
+      } else {
+        next.delete('from')
+        next.delete('to')
+      }
+    })
+  }
+
+  /* ── Scope ────────────────────────────────────────────────────────── */
+  const nodeIds = useMemo(() => parseNodes(sp.get('nodes')), [sp])
+  const appId = sp.get('app') || null
+  const nfScope = useMemo(() => parseReportScope(sp.get('nf')), [sp])
+  const nfParam = reportScopeParam(nfScope.filter)
+  const hasScopeParams = nodeIds.length > 0 || !!appId || !!nfParam
+  // Send a scope only to reports whose sections honour it; if the catalog is
+  // unavailable, send what the link carries (the server ignores the rest).
+  const allows = (f: ScopeFilter) => (template ? filterable.includes(f) : catalogQ.isError)
+  const sentNodes = allows('devices') ? nodeIds : []
+  const sentApp = allows('applications') ? appId : null
+  const sentNf = allows('netflow') ? nfParam : ''
+
+  const setNodeIds = (ids: string[]) => update((n) => (ids.length ? n.set('nodes', ids.join(',')) : n.delete('nodes')))
+  const setAppId = (id: string | null) => update((n) => (id ? n.set('app', id) : n.delete('app')))
+  const setNf = (f: FlowFilter) => {
+    const q = reportScopeParam(f)
+    update((n) => (q ? n.set('nf', q) : n.delete('nf')))
+  }
+  const clearScope = () => update((n) => {
+    n.delete('nodes')
+    n.delete('app')
+    n.delete('nf')
   })
-  const showRank = table.rows.length > 4
-  const rows = expanded ? table.rows : table.rows.slice(0, COLLAPSE_AT)
 
-  return (
-    <div className="min-w-0">
-      {table.title && (
-        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted">{table.title}</p>
+  /* ── Render ───────────────────────────────────────────────────────── */
+  const calendar = selection.kind === 'period' && CALENDAR.has(selection.id)
+  const ready = !unknownKey && !legacy
+    && (!needsDefault || catalogSettled)
+    && (!hasScopeParams || catalogSettled)
+    && (!calendar || !brandingQ.isLoading)
+  const params: RenderParams | null = ready
+    ? {
+        key,
+        customId: key === 'custom' ? customId : null,
+        from: win.from.toISOString(),
+        to: win.to.toISOString(),
+        deviceIds: sentNodes,
+        applicationId: sentApp,
+        netflow: sentNf || null,
+      }
+    : null
+  const renderQ = useRenderReport(params)
+
+  // Keep the previous render while a new period or scope loads — but never
+  // show one report's data under another report's URL.
+  const ref = refFor(key, customId)
+  const [loadedRef, setLoadedRef] = useState<string | null>(null)
+  useEffect(() => {
+    if (renderQ.data && !renderQ.isPlaceholderData) setLoadedRef(ref)
+  }, [renderQ.data, renderQ.isPlaceholderData, ref])
+  const report = renderQ.data && !(renderQ.isPlaceholderData && loadedRef !== ref) ? renderQ.data : undefined
+  const updating = !!report && (renderQ.isPlaceholderData || renderQ.isFetching)
+  const status = (renderQ.error as { response?: { status?: number } } | null)?.response?.status
+  const notFound = unknownKey || status === 404
+
+  const recorded = useRef<string | null>(null)
+  useEffect(() => {
+    if (!report || renderQ.isPlaceholderData || recorded.current === ref) return
+    recorded.current = ref
+    recordRecent(userId, ref)
+  }, [report, renderQ.isPlaceholderData, ref, userId])
+
+  const rerun = () => {
+    const n = bucketNow()
+    if (selection.kind === 'custom' || n.getTime() === now.getTime()) void renderQ.refetch()
+    else setNow(n)
+  }
+
+  /* ── Permissions ──────────────────────────────────────────────────── */
+  const canExport = can('reports.export') && (catalog ? catalog.can.export : true)
+  const canManage = can('reports.manage') && (catalog ? catalog.can.manage : true)
+  // Schedule writes are refused for accounts limited to a visibility scope.
+  const canSchedule = canManage && !report?.scoped
+
+  /* ── Sticky chrome, contents and scroll-spy ───────────────────────── */
+  const toolbarRef = useRef<HTMLDivElement>(null)
+  const [toolbarH, setToolbarH] = useState(52)
+  useLayoutEffect(() => {
+    const el = toolbarRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    // Only a sticky toolbar (md and up) covers the top of the sections.
+    const measure = () => setToolbarH(getComputedStyle(el).position === 'sticky' ? Math.round(el.getBoundingClientRect().height) : 0)
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    window.addEventListener('resize', measure)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [unknownKey, legacy])
+  const remPx = useMemo(() => (typeof document !== 'undefined' ? parseFloat(getComputedStyle(document.documentElement).fontSize) : 14) || 14, [])
+  const offsetPx = Math.round(remPx * 3.5 + toolbarH)
+  const sections = report?.sections ?? []
+  const anchorIds = useMemo(() => sections.map((_, i) => sectionAnchorId(ID_PREFIX, i)), [sections])
+  const active = useScrollSpy(anchorIds, offsetPx)
+  const hasRail = sections.length > 1
+
+  const [pinned, setPinned] = useState(false)
+  useEffect(() => {
+    const el = document.getElementById(`${ID_PREFIX}-title`)
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(
+      ([e]) => setPinned(!e.isIntersecting && e.boundingClientRect.top < offsetPx),
+      { rootMargin: `-${offsetPx}px 0px 0px 0px` },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [report, offsetPx])
+
+  /* ── Derived labels ───────────────────────────────────────────────── */
+  const title = report?.title || custom?.name || builtin?.title || 'Report'
+  const categoryId = report?.category || custom?.category || builtin?.category || null
+  const categoryTitle = catalog?.categories.find((c) => c.id === categoryId || c.title === categoryId)?.title
+    ?? (key !== 'custom' ? builtin?.category_title : null) ?? null
+
+  // The tab title names the report (it is also the default file name of "Save as PDF").
+  useEffect(() => {
+    if (unknownKey || legacy) return
+    const previous = document.title
+    document.title = `${title} · ${orgBranding.display_name || orgBranding.company_name || 'ZenPlus'}`
+    return () => {
+      document.title = previous
+    }
+  }, [title, unknownKey, legacy, orgBranding.display_name, orgBranding.company_name])
+  const branding = useMemo(() => ({ ...orgBranding, ...(report?.branding ?? {}) }), [orgBranding, report?.branding])
+  const periodText = formatPeriod(win.from, win.to, branding)
+
+  const linkFor = (sel: PeriodSelection) => {
+    const q = new URLSearchParams(sp)
+    const p = selectionParams(sel)
+    q.set('range', p.range)
+    if (p.from && p.to) {
+      q.set('from', p.from)
+      q.set('to', p.to)
+    } else {
+      q.delete('from')
+      q.delete('to')
+    }
+    return `${window.location.origin}/reports/view/${encodeURIComponent(key)}?${q.toString()}`
+  }
+  const exactUrl = linkFor({ kind: 'custom', from: win.from, to: win.to })
+  const latestUrl = selection.kind === 'custom' ? null : linkFor(selection)
+
+  const scheduleFilters: Record<string, unknown> = {}
+  if (sentNodes.length) scheduleFilters.device_ids = sentNodes
+  if (sentApp) scheduleFilters.application_id = sentApp
+  if (sentNf) scheduleFilters.netflow = reportScopeObject(nfScope.filter)
+  // Built as a variable: the dialog's prefill type grows over time (name, format).
+  const schedulePrefill = {
+    name: title,
+    report_type: key === 'custom' ? 'custom' : key,
+    custom_report_id: key === 'custom' ? customId : null,
+    period: selection.kind === 'period' ? selection.id : undefined,
+    format: 'pdf',
+    filters: Object.keys(scheduleFilters).length ? scheduleFilters : undefined,
+  }
+  const [scheduleOpen, setScheduleOpen] = useState(false)
+
+  if (notFound || legacy) {
+    return <NotFoundState legacyKey={legacy && !notFound ? key : null} />
+  }
+
+  const scopeSlot = (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <ul role="list" className="flex flex-wrap items-center gap-1.5">
+        {report?.scoped && report.scope_label && <ScopeChip icon={SlidersHorizontal}>{report.scope_label}</ScopeChip>}
+        {sentNodes.length > 0 && (
+          <ScopeChip icon={Server}>{`${sentNodes.length} selected device${sentNodes.length === 1 ? '' : 's'}`}</ScopeChip>
+        )}
+        {sentApp && <ScopeChip icon={AppWindow}>{`Application ${sentApp}`}</ScopeChip>}
+        {!report?.scoped && !sentNodes.length && !sentApp && !sentNf && (
+          <ScopeChip icon={SlidersHorizontal}>All monitored infrastructure</ScopeChip>
+        )}
+      </ul>
+      {sentNf && (
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted">
+          <Waypoints className="h-3 w-3" aria-hidden /> NetFlow
+        </span>
       )}
-      <div className="overflow-x-auto rounded-lg border border-border">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-border bg-surface2/60 text-left">
-              {showRank && <th className="w-8 px-2 py-1.5 font-semibold text-muted">#</th>}
-              {table.headers.map((h, i) => (
-                <th
-                  key={i}
-                  className={cn(
-                    'whitespace-nowrap px-3 py-1.5 font-semibold text-text2',
-                    (styles[i] === 'num' || styles[i] === 'pct' || styles[i] === 'pct-bar') && 'text-right',
-                  )}
-                >
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr>
-                <td
-                  colSpan={table.headers.length + (showRank ? 1 : 0)}
-                  className="px-3 py-5 text-center text-muted"
-                >
-                  No data for this window
-                </td>
-              </tr>
-            ) : (
-              rows.map((row, ri) => (
-                <tr key={ri} className={cn('border-b border-border/40 last:border-0', ri % 2 === 1 && 'bg-surface2/25')}>
-                  {showRank && <td className="px-2 py-1.5 tabular-nums text-muted">{ri + 1}</td>}
-                  {row.map((cell, ci) => {
-                    const s = styles[ci]
-                    const v = String(cell ?? '')
-                    return (
-                      <td
-                        key={ci}
-                        className={cn(
-                          'px-3 text-text2',
-                          dense ? 'py-1' : 'py-1.5',
-                          ci === 0 && 'font-medium text-text',
-                          s === 'mono' && 'font-mono text-[11px]',
-                          (s === 'num' || s === 'pct') && 'text-right tabular-nums',
-                          s === 'pct-bar' && 'text-right',
-                        )}
-                      >
-                        {s === 'status' || s === 'severity' ? (
-                          <StatusPill value={v} />
-                        ) : s === 'pct-bar' ? (
-                          <PctBarCell value={v} header={table.headers[ci] || ''} />
-                        ) : (
-                          v || '—'
-                        )}
-                      </td>
-                    )
-                  })}
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-      {table.rows.length > COLLAPSE_AT && (
+      {sentNf && (
+        <FilterChips
+          filter={nfScope.filter}
+          tz={tz}
+          onRemove={(keys) => {
+            const next = { ...nfScope.filter } as Record<string, unknown>
+            for (const k of keys) delete next[k]
+            setNf(next as FlowFilter)
+          }}
+        />
+      )}
+      {(sentNodes.length > 0 || sentApp || sentNf) && (
         <button
-          onClick={() => setExpanded((v) => !v)}
-          className="mt-1 text-[11px] font-medium text-primary hover:underline"
+          type="button"
+          onClick={clearScope}
+          className="inline-flex items-center gap-0.5 rounded px-1 text-[11px] font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 print:hidden"
         >
-          {expanded ? 'Show fewer' : `Show all ${table.rows.length} rows`}
+          <X className="h-3 w-3" aria-hidden /> Clear scope
         </button>
       )}
     </div>
   )
-}
 
-/* ------------------------------------------------------------------ */
-/*  Section card + layout                                              */
-/* ------------------------------------------------------------------ */
-
-function StatTile({ kpi }: { kpi: RenderKpi }) {
-  const color = ACCENT[kpi.accent || 'primary']
-  return (
-    <div className="rounded-lg border border-border bg-surface px-3.5 py-2.5" style={{ borderTopWidth: 2, borderTopColor: color }}>
-      <div className="text-lg font-semibold leading-tight tabular-nums" style={{ color }}>
-        {kpi.value}
-      </div>
-      <div className="mt-0.5 truncate text-[10px] font-medium uppercase tracking-wide text-muted" title={kpi.label}>
-        {kpi.label}
-      </div>
-      {kpi.subtitle && <div className="text-[10px] text-muted">{kpi.subtitle}</div>}
-    </div>
-  )
-}
-
-function SectionCard({ section, index }: { section: RenderSection; index: number }) {
-  const kpisOnly =
-    section.kpis.length > 0 && section.charts.length === 0 && section.tables.length === 0
-  const multiTable = section.tables.length > 1 && section.tables.every((t) => t.headers.length <= 5)
+  const customBadges = custom ? (
+    <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">
+      {custom.visibility === 'shared' ? 'Shared' : 'Private'}
+      {custom.owner_name && <> · {custom.is_owner ? 'yours' : custom.owner_name}</>}
+    </span>
+  ) : null
 
   return (
-    <section
-      id={`sec-${section.id}`}
-      className="scroll-mt-20 rounded-xl border border-border bg-surface"
+    <div
+      className="zp-report-viewer zp-report-print mx-auto w-full max-w-[1480px]"
+      style={{ '--zp-report-offset': `${offsetPx}px` } as CSSProperties}
     >
-      <header className="flex items-baseline gap-2.5 border-b border-border/60 px-4 py-2.5">
-        <span className="text-[11px] font-bold tabular-nums text-primary">{String(index).padStart(2, '0')}</span>
-        <h2 className="text-sm font-semibold text-text">{section.title}</h2>
-        {section.description && (
-          <p className="hidden min-w-0 truncate text-xs text-muted sm:block">{section.description}</p>
-        )}
-      </header>
-      <div className={cn('space-y-4 p-4', kpisOnly && 'py-3')}>
-        {section.kpis.length > 0 && (
-          <div className={cn('grid grid-cols-2 gap-2.5 sm:grid-cols-3', section.kpis.length >= 4 && 'lg:grid-cols-5')}>
-            {section.kpis.map((kpi, i) => (
-              <StatTile key={i} kpi={kpi} />
-            ))}
-          </div>
-        )}
+      <ReportPrintStyle branding={branding} title={title} />
 
-        {section.charts.map((chart, i) => (
-          <figure key={i} className="min-w-0">
-            {chart.title && (
-              <figcaption className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
-                {chart.title}
-              </figcaption>
-            )}
-            {chart.series?.kind === 'donut' ? (
-              <DonutChart series={chart.series} />
-            ) : chart.series?.kind === 'rank' ? (
-              <RankBarChart series={chart.series} />
-            ) : chart.series ? (
-              <TimeSeriesChart series={chart.series} />
-            ) : chart.data_uri ? (
-              <div className="overflow-hidden rounded-lg border border-border bg-white p-2">
-                <img src={chart.data_uri} alt={chart.title} className="mx-auto max-h-[280px] rounded bg-white" />
-              </div>
-            ) : null}
-          </figure>
-        ))}
-
-        {section.tables.length > 0 && (
-          <div className={cn('grid gap-4', multiTable && 'lg:grid-cols-2')}>
-            {section.tables.map((table, i) => (
-              <SectionTable key={i} table={table} dense={multiTable} />
-            ))}
-          </div>
-        )}
-
-        {section.notes.map((note, i) => (
-          <p key={i} className="rounded-md border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs text-warning">
-            {note}
-          </p>
-        ))}
-      </div>
-    </section>
-  )
-}
-
-/** Pair consecutive half-width sections into two-column rows. */
-function layoutRows(sections: RenderSection[]): RenderSection[][] {
-  const rows: RenderSection[][] = []
-  let i = 0
-  while (i < sections.length) {
-    if (sections[i].half && sections[i + 1]?.half) {
-      rows.push([sections[i], sections[i + 1]])
-      i += 2
-    } else {
-      rows.push([sections[i]])
-      i += 1
-    }
-  }
-  return rows
-}
-
-/* ------------------------------------------------------------------ */
-/*  Node scope picker (reports that support a device filter)           */
-/* ------------------------------------------------------------------ */
-
-interface DeviceLite {
-  id: string
-  hostname: string | null
-  ip_address: string | null
-}
-
-interface RumApplication {
-  application_id: string
-  service_name: string
-  sessions: number
-  last_seen: string | null
-}
-
-/** Scope a browser-RUM report to one application, or leave it across all of them. */
-function ApplicationScopePicker({
-  selected,
-  onChange,
-}: {
-  selected: string | null
-  onChange: (appId: string | null) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  const { data } = useQuery<{ applications: RumApplication[] }>({
-    queryKey: ['reports', 'rum-applications'],
-    queryFn: async () => (await api.get('/reports/rum-applications')).data,
-    staleTime: 5 * 60_000,
-  })
-  const apps = data?.applications ?? []
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
-
-  const label = selected
-    ? apps.find((a) => a.application_id === selected)?.application_id ?? selected
-    : 'All applications'
-
-  return (
-    <div ref={ref} className="relative">
-      <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => setOpen((v) => !v)}>
-        <Boxes className="h-3.5 w-3.5" />
-        <span className="max-w-[160px] truncate text-xs font-semibold">{label}</span>
-        <ChevronDown className="h-3 w-3 opacity-60" />
-      </Button>
-      {open && (
-        <div className="absolute right-0 z-30 mt-1 w-72 overflow-hidden rounded-lg border border-border bg-surface p-1 shadow-elevated">
-          <button
-            type="button"
-            onClick={() => { onChange(null); setOpen(false) }}
-            className={cn('flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-xs hover:bg-surface2',
-              !selected && 'bg-surface2 font-semibold text-text')}
-          >
-            All applications
-            {!selected && <Check className="h-3.5 w-3.5 text-primary" />}
-          </button>
-          {apps.length === 0 && (
-            <div className="px-2.5 py-3 text-center text-[11px] text-muted">
-              No browser telemetry yet — install a RUM key to populate this.
-            </div>
-          )}
-          {apps.map((a) => (
-            <button
-              key={a.application_id}
-              type="button"
-              onClick={() => { onChange(a.application_id); setOpen(false) }}
-              className={cn('flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left hover:bg-surface2',
-                selected === a.application_id && 'bg-surface2')}
-            >
-              <span className="min-w-0">
-                <span className="block truncate text-xs font-medium text-text">{a.application_id}</span>
-                <span className="block truncate text-[10px] text-muted">
-                  {a.service_name || 'no service name'} · {a.sessions.toLocaleString()} sessions
-                </span>
-              </span>
-              {selected === a.application_id && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function DeviceScopePicker({
-  selected,
-  onChange,
-}: {
-  selected: string[]
-  onChange: (ids: string[]) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const [q, setQ] = useState('')
-
-  const { data } = useQuery<DeviceLite[]>({
-    queryKey: ['devices', 'report-picker'],
-    queryFn: async () => {
-      const res = (await api.get('/devices', { params: { limit: 200 } })).data
-      return (res?.data ?? res ?? []) as DeviceLite[]
-    },
-    staleTime: 5 * 60_000,
-  })
-
-  const devices = data ?? []
-  const filtered = q
-    ? devices.filter(
-        (d) =>
-          (d.hostname || '').toLowerCase().includes(q.toLowerCase()) ||
-          (d.ip_address || '').includes(q),
-      )
-    : devices
-  const selectedSet = new Set(selected)
-
-  const toggle = (id: string) => {
-    const next = new Set(selectedSet)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    onChange([...next])
-  }
-
-  return (
-    <div className="relative">
-      <Button
-        variant="outline"
-        size="sm"
-        className={cn('h-8 gap-1.5', selected.length > 0 && 'border-primary/50 text-primary')}
-        onClick={() => setOpen((v) => !v)}
+      {/* Toolbar: sticks under the app header. */}
+      <div
+        ref={toolbarRef}
+        className="relative z-10 -mx-5 -mt-5 mb-4 border-b md:sticky md:top-11 border-border bg-bg/90 px-5 py-2.5 backdrop-blur supports-[backdrop-filter]:bg-bg/75 print:hidden"
       >
-        <Server className="h-3.5 w-3.5" />
-        <span className="text-xs font-semibold">
-          {selected.length > 0 ? `${selected.length} node${selected.length === 1 ? '' : 's'}` : 'All nodes'}
-        </span>
-        <ChevronDown className={cn('h-3 w-3 transition-transform', open && 'rotate-180')} />
-      </Button>
-
-      {open && (
-        <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-40 mt-1 w-80 overflow-hidden rounded-md border border-border bg-surface shadow-xl animate-fade-in">
-            <div className="flex items-center justify-between border-b border-border px-3 py-2">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted">
-                Report scope · {devices.length} nodes
-              </p>
-              {selected.length > 0 && (
-                <button
-                  onClick={() => onChange([])}
-                  className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
-                >
-                  <X className="h-3 w-3" /> All nodes
-                </button>
-              )}
-            </div>
-            <div className="border-b border-border p-2">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
-                <input
-                  autoFocus
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  placeholder="Search hostname or IP…"
-                  className="h-8 w-full rounded-md border border-border bg-surface2/40 pl-7 pr-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60"
-                />
-              </div>
-            </div>
-            <div className="max-h-72 overflow-y-auto p-1">
-              {filtered.length === 0 ? (
-                <p className="px-3 py-4 text-center text-xs text-muted">No matching nodes</p>
-              ) : (
-                filtered.map((d) => {
-                  const on = selectedSet.has(d.id)
-                  return (
-                    <button
-                      key={d.id}
-                      onClick={() => toggle(d.id)}
-                      className={cn(
-                        'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-surface2',
-                        on && 'bg-primary/10',
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border',
-                          on ? 'border-primary bg-primary text-white' : 'border-border',
-                        )}
-                      >
-                        {on && <Check className="h-2.5 w-2.5" />}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate font-medium text-text">
-                        {d.hostname || d.ip_address}
-                      </span>
-                      <span className="shrink-0 font-mono text-[10px] text-muted">
-                        {(d.ip_address || '').split('/')[0]}
-                      </span>
-                    </button>
-                  )
-                })
-              )}
-            </div>
-            <div className="border-t border-border px-3 py-1.5 text-[10px] text-muted">
-              {selected.length > 0
-                ? `Report scoped to ${selected.length} node(s)`
-                : 'No selection — the report covers every monitored node'}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/*  Export dropdown (PDF / HTML via the render endpoint)               */
-/* ------------------------------------------------------------------ */
-
-type RenderFormat = 'pdf' | 'html'
-
-const RENDER_FORMATS: { key: RenderFormat; label: string; ext: string; icon: typeof FileText; mime: string }[] = [
-  { key: 'pdf', label: 'Download PDF', ext: 'pdf', icon: FileText, mime: 'application/pdf' },
-  { key: 'html', label: 'Download HTML', ext: 'html', icon: FileCode, mime: 'text/html' },
-]
-
-function filenameFromDisposition(header: string | undefined): string | null {
-  if (!header) return null
-  const m = header.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
-  return m ? decodeURIComponent(m[1]) : null
-}
-
-function RenderExportMenu({
-  reportKey,
-  customId,
-  fromISO,
-  toISO,
-  deviceIds,
-  applicationId,
-  netflowScope,
-}: {
-  reportKey: string
-  customId: string | null
-  fromISO: string
-  toISO: string
-  deviceIds?: string[]
-  applicationId?: string | null
-  /** Canonical NetFlow scope query string (traffic / NetFlow reports). */
-  netflowScope?: string
-}) {
-  const [open, setOpen] = useState(false)
-  const [busy, setBusy] = useState<RenderFormat | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  async function exportAs(fmt: RenderFormat) {
-    if (busy) return
-    setBusy(fmt)
-    setError(null)
-    try {
-      const res = await api.get(`/reports/render/${reportKey}`, {
-        params: {
-          format: fmt,
-          from: fromISO,
-          to: toISO,
-          ...(customId ? { custom_id: customId } : {}),
-          ...(deviceIds && deviceIds.length > 0 ? { device_ids: deviceIds.join(',') } : {}),
-          ...(applicationId ? { application_id: applicationId } : {}),
-          ...(netflowScope ? { netflow: netflowScope } : {}),
-        },
-        responseType: 'blob',
-        timeout: 120_000,
-      })
-      const meta = RENDER_FORMATS.find((f) => f.key === fmt)!
-      const ts = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
-      const name =
-        filenameFromDisposition(res.headers?.['content-disposition']) ||
-        `ZenPlus-${reportKey}-${ts}.${meta.ext}`
-      const blob = new Blob([res.data], { type: meta.mime })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = name
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      setTimeout(() => URL.revokeObjectURL(url), 5000)
-      setOpen(false)
-    } catch (e) {
-      console.error('Export failed', e)
-      setError('Export failed. Please try again.')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  return (
-    <div className="relative">
-      <Button variant="outline" size="sm" disabled={!!busy} onClick={() => setOpen((v) => !v)} className="h-8 gap-1.5">
-        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-        <span className="text-xs font-semibold">{busy ? `Exporting ${busy.toUpperCase()}…` : 'Export'}</span>
-        <ChevronDown className={cn('h-3 w-3 transition-transform', open && 'rotate-180')} />
-      </Button>
-
-      {open && !busy && (
-        <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-40 mt-1 w-56 overflow-hidden rounded-md border border-border bg-surface shadow-xl animate-fade-in">
-            <div className="border-b border-border px-3 py-2">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted">Export this report</p>
-            </div>
-            {RENDER_FORMATS.map((f) => (
-              <button
-                key={f.key}
-                onClick={() => exportAs(f.key)}
-                className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-text hover:bg-surface2"
-              >
-                <f.icon className="h-4 w-4 text-primary" />
-                <span className="font-medium">{f.label}</span>
-                <span className="ml-auto text-[10px] text-muted">.{f.ext}</span>
-              </button>
-            ))}
-            {error && <div className="border-t border-border bg-danger/5 px-3 py-2 text-xs text-danger">{error}</div>}
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/*  Page                                                               */
-/* ------------------------------------------------------------------ */
-
-export default function SectionReportViewer() {
-  const { key = '' } = useParams<{ key: string }>()
-  const [searchParams, setSearchParams] = useSearchParams()
-  const customId = searchParams.get('custom_id')
-  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
-  const [scheduleOpen, setScheduleOpen] = useState(false)
-
-  // Node scope (availability report): kept in the URL so views are shareable.
-  const nodeIds = useMemo(
-    () => (searchParams.get('nodes') || '').split(',').filter(Boolean),
-    [searchParams],
-  )
-  const setNodeIds = (ids: string[]) => {
-    const next = new URLSearchParams(searchParams)
-    if (ids.length > 0) next.set('nodes', ids.join(','))
-    else next.delete('nodes')
-    setSearchParams(next, { replace: true })
-  }
-
-  const { data: catalog, isError: catalogFailed } = useQuery<{ types: { key: string; filterable?: string[] }[] }>({
-    queryKey: ['reports', 'catalog'],
-    queryFn: async () => (await api.get('/reports/catalog')).data,
-    staleTime: 5 * 60_000,
-  })
-  const supportsDeviceFilter =
-    catalog?.types.find((t) => t.key === key)?.filterable?.includes('devices') ?? false
-  const supportsAppFilter =
-    catalog?.types.find((t) => t.key === key)?.filterable?.includes('applications') ?? false
-  // Custom reports may contain traffic sections too; the server ignores the scope otherwise.
-  const supportsNetflowFilter =
-    key === 'custom' || (catalog?.types.find((t) => t.key === key)?.filterable?.includes('netflow') ?? false)
-
-  // NetFlow scope (traffic / NetFlow reports): canonical flow filter, in the URL as `nf=`.
-  const nfScope = useMemo(() => parseReportScope(searchParams.get('nf')), [searchParams])
-  const nfParam = reportScopeParam(nfScope.filter)
-  // The scope actually sent: only for reports whose sections honour it. A link carrying a scope
-  // waits for the catalog so the first render is never an unscoped one under scoped chips.
-  const nfSent = supportsNetflowFilter ? nfParam : ''
-  const nfReady = !nfParam || key === 'custom' || catalog !== undefined || catalogFailed
-  const setNfScope = (f: FlowFilter) => {
-    const next = new URLSearchParams(searchParams)
-    const q = reportScopeParam(f)
-    if (q) next.set('nf', q)
-    else next.delete('nf')
-    setSearchParams(next, { replace: true })
-  }
-
-  // Application scope (browser-RUM reports): in the URL so a scoped view is shareable.
-  const appId = searchParams.get('app') || null
-  const setAppId = (id: string | null) => {
-    const next = new URLSearchParams(searchParams)
-    if (id) next.set('app', id)
-    else next.delete('app')
-    setSearchParams(next, { replace: true })
-  }
-
-  // Presets slide with the wall clock every minute; bucket the window to 5
-  // minutes so a heavy report isn't refetched (and reset to skeletons) each
-  // tick, and keep the previous render visible while a new one loads.
-  const [fromISO, toISO] = useMemo(() => {
-    const floor = (iso: string) => {
-      const d = new Date(iso)
-      d.setMinutes(Math.floor(d.getMinutes() / 5) * 5, 0, 0)
-      return d.toISOString()
-    }
-    return [floor(range.fromISO), floor(range.toISO)]
-  }, [range.fromISO, range.toISO])
-
-  const { data, isLoading, error, isPlaceholderData } = useQuery<RenderReport>({
-    queryKey: ['reports', 'render', key, customId ?? null, fromISO, toISO, nodeIds.join(','), appId, nfSent],
-    queryFn: async () =>
-      (
-        await api.get(`/reports/render/${key}`, {
-          params: {
-            format: 'json',
-            from: fromISO,
-            to: toISO,
-            ...(customId ? { custom_id: customId } : {}),
-            ...(nodeIds.length > 0 ? { device_ids: nodeIds.join(',') } : {}),
-            ...(appId ? { application_id: appId } : {}),
-            ...(nfSent ? { netflow: nfSent } : {}),
-          },
-          timeout: 120_000,
-        })
-      ).data,
-    enabled: !!key && nfReady,
-    placeholderData: (prev) => prev,
-    staleTime: 4 * 60_000,
-    retry: 1,
-  })
-
-  const rows = useMemo(() => layoutRows(data?.sections ?? []), [data])
-  let sectionNo = 0
-
-  return (
-    <div className="mx-auto max-w-6xl space-y-4">
-      {/* Report header */}
-      <div className="rounded-xl border border-border bg-surface px-5 py-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex min-w-[6rem] flex-1 basis-0 items-center gap-2">
             <Link
               to="/reports"
-              className="inline-flex items-center gap-1 text-xs font-medium text-muted transition-colors hover:text-text"
+              className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
             >
-              <ArrowLeft className="h-3 w-3" /> Report library
+              <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+              <span>Reports</span>
             </Link>
-            <h1 className="mt-1 flex items-center gap-2 text-xl font-semibold tracking-tight">
-              <FileText className="h-5 w-5 text-primary" />
-              {data?.title || 'Report'}
-            </h1>
-            {data?.description && <p className="mt-0.5 text-sm text-muted">{data.description}</p>}
-            {data && (
-              <p className="mt-1 flex items-center gap-2 text-[11px] tabular-nums text-muted">
-                {data.period_label} · Generated {data.generated_label} · {data.company_name}
-                {data.scope_label && data.scope_label !== 'All monitored infrastructure' && <> · {data.scope_label}</>}
-                {isPlaceholderData && <Loader2 className="h-3 w-3 animate-spin text-primary" />}
-              </p>
-            )}
+            <span
+              aria-hidden
+              className={cn(
+                'min-w-0 truncate border-l border-border pl-2 text-sm font-semibold text-text transition-opacity duration-150',
+                pinned ? 'opacity-100' : 'pointer-events-none opacity-0',
+              )}
+            >
+              {title}
+            </span>
           </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
-            <TimeRangePicker
-              rangeIdx={rangeIdx}
-              isCustom={isCustom}
-              customFrom={range.fromISO}
-              customTo={range.toISO}
-              onPreset={setPreset}
-              onCustom={setCustom}
-            />
-            {supportsDeviceFilter && <DeviceScopePicker selected={nodeIds} onChange={setNodeIds} />}
-            {supportsAppFilter && <ApplicationScopePicker selected={appId} onChange={setAppId} />}
-            {supportsNetflowFilter && <NetflowScopePicker value={nfScope.filter} onChange={setNfScope} />}
-            <RenderExportMenu
-              reportKey={key}
-              customId={customId}
-              fromISO={fromISO}
-              toISO={toISO}
-              deviceIds={nodeIds}
-              applicationId={appId}
-              netflowScope={supportsNetflowFilter ? nfParam : undefined}
-            />
-            <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => setScheduleOpen(true)}>
-              <CalendarClock className="h-3.5 w-3.5" />
-              <span className="text-xs font-semibold">Schedule…</span>
+
+          <div role="group" aria-label="Report period and scope" className="flex flex-wrap items-center gap-2">
+            <PeriodPicker value={selection} onChange={setSelection} window={win} branding={branding} defaultPeriod={template ? defaultPeriod : null} />
+            {filterable.includes('devices') && <DeviceScopePicker selected={nodeIds} onChange={setNodeIds} />}
+            {filterable.includes('applications') && <ApplicationScopePicker selected={appId} onChange={setAppId} />}
+            {filterable.includes('netflow') && <NetflowScopePicker value={nfScope.filter} onChange={setNf} />}
+          </div>
+
+          <span aria-hidden className="hidden h-5 w-px bg-border sm:block" />
+
+          <div role="group" aria-label="Report actions" className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 w-8 p-0"
+              onClick={rerun}
+              disabled={!params || renderQ.isFetching}
+              aria-label="Generate again with the latest data"
+              title="Generate again"
+            >
+              <RefreshCw className={cn('h-3.5 w-3.5', renderQ.isFetching && 'animate-spin')} aria-hidden />
             </Button>
+            <ShareMenu exactUrl={exactUrl} exactLabel={periodText} latestUrl={latestUrl} latestLabel={selectionLabel(selection)} />
+            {canManage && (key === 'custom' && customId ? (
+              custom?.can_edit ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-8 gap-1.5" aria-label="Customize this template">
+                      <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+                      <span className="hidden text-xs font-semibold xl:inline">Customize</span>
+                      <ChevronDown className="h-3 w-3 opacity-60" aria-hidden />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent className="w-60">
+                    <DropdownMenuItem asChild>
+                      <Link to={`/reports/builder?edit=${encodeURIComponent(customId)}`}>
+                        <Pencil aria-hidden /> Edit this template
+                      </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                      <Link to={`/reports/builder?clone=${encodeURIComponent(customId)}`}>
+                        <CopyPlus aria-hidden /> Customize a copy
+                      </Link>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : (
+                <Button asChild variant="outline" size="sm" className="h-8 gap-1.5">
+                  <Link to={`/reports/builder?clone=${encodeURIComponent(customId)}`} aria-label="Customize a copy of this template">
+                    <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+                    <span className="hidden text-xs font-semibold xl:inline">Customize</span>
+                  </Link>
+                </Button>
+              )
+            ) : (
+              <Button asChild variant="outline" size="sm" className="h-8 gap-1.5">
+                <Link to={`/reports/builder?from=${encodeURIComponent(key)}`} aria-label="Customize: start a template from this report">
+                  <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+                  <span className="hidden text-xs font-semibold xl:inline">Customize</span>
+                </Link>
+              </Button>
+            ))}
+            {canSchedule && (
+              <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => setScheduleOpen(true)} aria-label="Schedule this report with the current period and scope">
+                <CalendarClock className="h-3.5 w-3.5" aria-hidden />
+                <span className="hidden text-xs font-semibold lg:inline">Schedule</span>
+              </Button>
+            )}
+            {canExport && <ExportMenu params={params} formats={builtin?.formats} onPrint={printReport} />}
           </div>
         </div>
 
-        {supportsNetflowFilter && (
-          <NetflowScopeChips value={nfScope.filter} onChange={setNfScope} className="mt-3" />
+        {catalogQ.isError && (
+          <p role="status" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text">
+            <span>
+              <span className="font-semibold text-warning-fg">Scope filters are unavailable:</span> the report catalog could not be loaded.
+            </span>
+            <button
+              type="button"
+              onClick={() => void catalogQ.refetch()}
+              disabled={catalogQ.isFetching}
+              className="font-semibold text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-60"
+            >
+              {catalogQ.isFetching ? 'Retrying…' : 'Retry'}
+            </button>
+          </p>
         )}
         {nfScope.invalid.length > 0 && (
           <p role="status" className="mt-2 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text">
-            <span className="font-semibold text-warning-fg">Not applied:</span> the link's NetFlow scope has invalid{' '}
-            {nfScope.invalid.join(', ')}.
+            <span className="font-semibold text-warning-fg">Not applied:</span> the link's NetFlow scope has invalid {nfScope.invalid.join(', ')}.
           </p>
         )}
-
-        {/* Contents */}
-        {data && data.sections.length > 1 && (
-          <nav className="mt-3 flex flex-wrap gap-1.5 border-t border-border/60 pt-3">
-            {data.sections.map((s, i) => (
-              <a
-                key={s.id}
-                href={`#sec-${s.id}`}
-                className="rounded-full border border-border bg-surface2/60 px-2.5 py-1 text-[11px] font-medium text-text2 transition-colors hover:border-primary/50 hover:text-primary"
-              >
-                <span className="mr-1 tabular-nums text-muted">{String(i + 1).padStart(2, '0')}</span>
-                {s.title}
-              </a>
-            ))}
-          </nav>
+        {hasScopeParams && template && (nodeIds.length > sentNodes.length || (appId && !sentApp) || (nfParam && !sentNf)) && (
+          <p role="status" className="mt-2 text-[11px] text-muted">
+            Part of the link's scope does not apply to this report's sections and was ignored.
+          </p>
         )}
       </div>
 
-      {/* Body */}
-      {isLoading || (!data && !error) ? (
-        <div className="space-y-4">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton key={i} className="h-[220px] rounded-xl" />
-          ))}
+      {renderQ.isError && !report ? (
+        <div className="mx-auto max-w-2xl">
+          <QueryFailure error={renderQ.error} what="this report" onRetry={() => void renderQ.refetch()} retrying={renderQ.isFetching} />
         </div>
-      ) : error || !data ? (
-        <div className="rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger">
-          Failed to load report: {apiErrorMessage(error)}
-        </div>
-      ) : data.sections.length === 0 ? (
-        <div className="rounded-xl border border-border bg-surface px-4 py-10 text-center text-sm text-muted">
-          This report has no sections for the selected window.
-        </div>
+      ) : !report ? (
+        <ReportDocumentSkeleton />
       ) : (
-        rows.map((row, ri) => (
-          <div key={ri} className={cn('grid gap-4', row.length === 2 && 'lg:grid-cols-2')}>
-            {row.map((section) => {
-              sectionNo += 1
-              return <SectionCard key={section.id} section={section} index={sectionNo} />
-            })}
+        <div className={cn(hasRail && 'lg:grid lg:grid-cols-[11.5rem_minmax(0,1fr)] lg:gap-5 xl:grid-cols-[13.5rem_minmax(0,1fr)] xl:gap-6 print:!block')}>
+          {hasRail && (
+            <div className="hidden lg:block print:hidden">
+              <div className="sticky top-[var(--zp-report-offset)] max-h-[calc(100vh_-_var(--zp-report-offset)_-_1rem)] overflow-y-auto pb-4">
+                <ContentsRail sections={sections} idPrefix={ID_PREFIX} active={active} />
+              </div>
+            </div>
+          )}
+          <div className="min-w-0">
+            {hasRail && (
+              <ContentsSelect sections={sections} idPrefix={ID_PREFIX} active={active} className="mb-3 lg:hidden print:hidden" />
+            )}
+            <p role="status" className="sr-only">
+              {updating ? 'Updating the report…' : `${title}, ${periodText}`}
+            </p>
+            <div className="relative" aria-busy={updating}>
+              {updating && (
+                <div role="progressbar" aria-label="Updating report" className="absolute inset-x-0 -top-2 h-0.5 overflow-hidden rounded-full bg-primary/15 print:hidden">
+                  <div className="zp-report-progress h-full w-1/3 rounded-full bg-primary" />
+                </div>
+              )}
+              {renderQ.isError && (
+                <div className="mb-3 print:hidden">
+                  <QueryFailure compact error={renderQ.error} what="the latest version" onRetry={() => void renderQ.refetch()} retrying={renderQ.isFetching} />
+                </div>
+              )}
+              <div className={cn('transition-opacity duration-200', renderQ.isPlaceholderData && 'opacity-60')}>
+                <ReportDocument
+                  report={report}
+                  branding={orgBranding}
+                  sectionMeta={sectionMeta}
+                  canExport={canExport}
+                  idPrefix={ID_PREFIX}
+                  origin={key === 'custom' ? 'custom' : 'builtin'}
+                  scope={scopeSlot}
+                  badges={customBadges}
+                  categoryTitle={categoryTitle}
+                />
+              </div>
+            </div>
           </div>
-        ))
+        </div>
       )}
 
-      <ReportScheduleFormDialog
-        open={scheduleOpen}
-        onOpenChange={setScheduleOpen}
-        schedule={null}
-        prefill={{
-          report_type: key === 'custom' ? 'custom' : key,
-          custom_report_id: customId,
-          // A schedule keeps this exact scope, and starts from the rolling period being viewed.
-          filters: supportsNetflowFilter && nfParam ? { netflow: reportScopeObject(nfScope.filter) } : undefined,
-          period: ({ '24h': 'last_24h', '7d': 'last_7d', '1M': 'last_30d' } as Record<string, string>)[range.key],
-        }}
-      />
+      {canSchedule && (
+        <ReportScheduleFormDialog
+          open={scheduleOpen}
+          onOpenChange={setScheduleOpen}
+          schedule={null}
+          prefill={schedulePrefill}
+        />
+      )}
     </div>
   )
 }
+
+export default SectionReportViewer
