@@ -260,6 +260,7 @@ Clicking "6 stale" opens Assets filtered `freshness=stale`.
 - **Event list** grouped by day. Each row shows time, asset (link), category icon, and a sentence: "**Google Chrome** upgraded 151.0.7922.110 → 152.0.8001.12", "**FortiOS** changed 7.2.5 → 7.2.8 *(firmware)*", "**TeamViewer 15.5.3** installed".
 - **Filters:** category, action, asset kind, asset, product, search; all in the URL.
 - **Data-integrity footnote:** "History starts 2026-10-xx (when change capture was enabled). Earlier changes were not recorded." This is honest, and auditors ask for it.
+- **Pairing and caveats (from the Phase 0 review):** pair an `added` and a `removed` event with the same `subject_key` on the same asset in the same transaction (`observed_at`) as an **upgrade or downgrade** by comparator, because a product whose display name embeds its version (VC++ redistributables, Java) is stored as a new row. Show events whose `detail.snapshot_truncated` is true with a "list was capped at 1,000 titles" note, and the daily `(change budget exceeded)` marker as a distinct row. Scoped users' feeds must be built asset-first (doc 02 section 14).
 
 ### 3.8 `/inventory/lifecycle` (P4)
 

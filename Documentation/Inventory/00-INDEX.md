@@ -76,7 +76,7 @@ Wiring:
 | Item | Pinned value |
 |---|---|
 | Router | `server/app/api/v1/inventory.py`: `APIRouter(prefix="/inventory", tags=["Inventory"])`, mounted in `main.py` with `dependencies=[policy("inventory")]` |
-| Services | `services/inventory_normalize.py` (OS, firmware, vendor and software normalisation) · `services/versioning.py` (scheme-aware version comparators shared with baselines and compliance) · `services/inventory_query.py` (asset union, facets, aggregates) · `services/inventory_snapshots.py` (daily rollup and retention) |
+| Services | `services/inventory_normalize.py` (OS, firmware, vendor and software normalisation) · `services/versioning.py` (scheme-aware version comparators shared with baselines and compliance) · `services/inventory_query.py` (asset union, facets, aggregates) · `services/inventory_service.py` (normalise loop, software-key backfill, daily snapshot and retention; a later split into `inventory_snapshots.py` is a pure file move) |
 | Background loops | `inventory_normalize_loop` (every 2 min; normalises dirty or outdated identity and software rows in batches of 500, including the post-upgrade backfill) · `inventory_snapshot_loop` (daily 00:15 appliance time, plus retention purge) |
 | Advisory lock keys | **1515074397** (normalise) · **1515074398** (snapshot). The Compliance set reserved …395/…396; re-verify all four are unused at implementation |
 | Settings storage | `system_settings` key **`'inventory'`** (JSON: freshness thresholds, change retention days, snapshot hour, noise-category defaults) |
@@ -86,9 +86,9 @@ Wiring:
 
 | Object | Phase | Role |
 |---|---|---|
-| `inventory_identity` | P0 | **One normalised identity row per asset** (`asset_kind, asset_id`): vendor, os_family/product/release/version/build/edition, hw vendor/model/serial, each with its source; dirty-marked by triggers, filled by the normalise loop. Raw columns are never overwritten |
+| `inventory_identity` | P0 | **One normalised identity row per asset** (`asset_kind, asset_id`): vendor, os_family/product/release/version/build/edition, hw vendor/model/serial, each with its source; dirty-marked by triggers (`norm_rev` NULL), filled by the normalise loop and by ingest; `values_rev` records the rule-pack revision the values were computed under, so a revision change never writes history. Raw columns are never overwritten |
 | `devices` + `sys_descr`, `identity_updated_at` | P0 | Raw sysDescr evidence; time of the last successful system-info poll (freshness) |
-| `servers` + `inventory_updated_at`, `inventory_baselined_at`, `hw_manufacturer`, `hw_model`, `hw_serial`, `bios_version`, `bios_date`, `virtualization` | P0 (hardware filled in P3) | Freshness, first-snapshot gate for change capture, raw hardware evidence |
+| `servers` + `inventory_updated_at`, `inventory_baselined_at`, `inventory_collected_at`, `software_truncated`, `hw_manufacturer`, `hw_model`, `hw_serial`, `bios_version`, `bios_date`, `virtualization` | P0 (hardware filled in P3) | Freshness, first-snapshot gate for change capture, newest accepted snapshot time (ordering guard), truncated-list flag, raw hardware evidence |
 | `server_software_inventory` + `architecture`, `source`, `install_location`, `first_seen_at`, `name_key`, `publisher_key`, `category`, `norm_rev` | P0 | Keep evidence that is dropped today, plus normalised grouping keys |
 | `inventory_change_events` | P0 | Append-only install / remove / version-change / firmware / hardware history, written by triggers |
 | `inventory_daily_snapshots` | P0 | One row per day per metric family: trend charts and point-in-time audit evidence |

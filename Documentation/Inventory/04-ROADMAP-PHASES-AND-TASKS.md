@@ -45,10 +45,10 @@
 | 0.1 | `migrate-154-inventory-foundation.sql` (doc 02 §3.2, §3.3, §5, §6): `inventory_identity`, evidence columns, `inventory_change_events` with triggers and suppression GUC, `inventory_daily_snapshots`, baselined-at seed, indexes, GRANTs. Plus lockfile entry and `lint-migrations` | db | 2 | — |
 | 0.2 | `services/versioning.py` (comparators: win_build, semverish, fortios, panos, cisco_ios/iosxe, junos) and `services/inventory_normalize.py` (OS, network OS, vendor, software name). Rule packs `software_rules.json`, `vendor_aliases.json`, `os_patterns.json`. Golden fixtures cover every row of the tables in doc 02 §4 plus the live values seen on .221 | api | 4 | — |
 | 0.3 | Ingest hardening (`host_metric_service._upsert_inventory`): keep architecture, source and install_location; inline keys and category; same-name dedupe; truncation guard (no prune at ≥ 1,000); stamp `inventory_updated_at` / `inventory_baselined_at`; normalise the server identity inline | api | 1.5 | 0.1, 0.2 |
-| 0.4 | Poller (Go): persist `sys_descr`; stamp `identity_updated_at` on every successful system-info poll. Profiles: `os_family` hint on every built-in profile. Verify the PAN/F5 template-value precedence end to end (no Go change needed for it) | poller, content | 2 | 0.1 |
+| 0.4 | Poller (Go): persist `sys_descr`; stamp `identity_updated_at` on every successful system-info poll. In P0 `os_family` is derived by the normaliser from profile name, then sysObjectID prefix, then sysDescr (`os_patterns.json`); an explicit `device_profiles.os_family` column is deferred because built-in profiles are seeded by shipped migrations that must not be edited. Verify the PAN/F5 template-value precedence end to end (no Go change needed for it) | poller, content | 2 | 0.1 |
 | 0.5 | `inventory_normalize_loop` (2 min, lock 1515074397, batches of 500, `asyncio.to_thread`, suppression on re-normalise) and `inventory_snapshot_loop` (daily 00:15, lock 1515074398, retention purge). Registered in `main.py` startup and shutdown lists | api | 1.5 | 0.2 |
 | 0.6 | RBAC: `inventory` module in `PERMISSION_MODULES`; `_OPERATOR`/`_VIEWER`/`_READ_ONLY` lists; `PERMISSION_IMPLIES`; `PERMISSION_RISK["inventory.export"]="sensitive"`; `BUILTIN_ROLE_DEFINITION_VERSION = 4`; `_POLICIES["inventory"]`; `test_permissions_model.py` and `integration/test_access_control_e2e.py` `READ_ONLY_PERMS` updated | api | 1 | — |
-| 0.7 | Integration tests on a disposable Postgres fixture: trigger and suppression behaviour (T3–T9 below) | test | 2 | 0.1–0.5 |
+| 0.7 | Integration tests on a disposable Postgres fixture: trigger and suppression behaviour (T3–T9 below). The fixture (`server/tests/pg_fixture.py`) provisions its own private cluster (initdb in a temp dir, loopback port, template database from a full migration replay), so the tests also run in the CI `server` job on runners that ship PostgreSQL binaries, and skip where they don't | test | 2 | 0.1–0.5 |
 
 **Exit criteria**
 
@@ -56,6 +56,12 @@
 - `inventory_identity` is populated for 100% of assets.
 - Identity coverage is measured and reported in the PR. Targets on SNMP devices with a profile: vendor ≥ 95%, OS version ≥ 90% (PAN/F5 now filled from templates), model ≥ 90%.
 - Agent-ingest p95 latency is unchanged (± 5%).
+
+**Status (2026-10-08): built and reviewed, pending the Phase 0 pull request and reference-appliance acceptance.** Tasks 0.1 to 0.7 are implemented on `claude/inventory-phase0-foundations`. Verification on a clean checkout: full server suite 3,931 passed and 274 skipped with the PostgreSQL-backed tests required; migration lint passes; poller tests, `go vet` for the touched packages and `go test -race` pass; the loop tests passed 8 out of 8 repeated runs (the cancel tests used to hang about 1 in 10).
+
+A six-reviewer adversarial review (44 agents, every medium-or-worse finding independently verified) found no data-loss bug, but several ways to **write false history**: a rule-pack revision bump producing a fleet-wide false OS change (fixed with `inventory_identity.values_rev`), a transient missing version writing two false events, capped lists leaving stale rows, out-of-order snapshots rewinding state, and silent normaliser failures stamping rows clean. All are fixed with regression tests; the remainder are recorded in doc 02 section 14. Still to do for the exit criteria: measure identity coverage and the ingest latency on the reference appliance, and confirm the migration on a canary (it holds exclusive locks on `devices`, `servers` and `server_software_inventory` for about 0.5 to 1.5 seconds at 5,000 servers by 400 packages, with services stopped by the OTA flow).
+
+**Release coupling:** migration 154, the ingest hardening (0.3) and the poller change must ship together. Without the ingest hardening the triggers would record false events from duplicate names and capped lists.
 
 ### P1 — Inventory dashboard MVP (the request) · ≈ 24 d
 
