@@ -1,379 +1,382 @@
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+/**
+ * Report Library: the template gallery. A rail of views and categories, a
+ * toolbar (search, audience, origin, sort, layout), the "All" overview with
+ * Featured / Recently viewed shelves and category sections, a details drawer,
+ * and the Delivered reports list. View state lives in the URL
+ * (?view=&category=&q=&audience=&origin=&sort=); favourites, recently viewed
+ * and the layout are per-user browser preferences (features/reports/storage).
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
-  Activity,
-  AlertTriangle,
-  AppWindow,
-  BarChart3,
-  Boxes,
-  FileCode,
-  Briefcase,
-  CalendarClock,
-  Clock,
-  ExternalLink,
-  FileText,
-  Gauge,
-  HardDrive,
-  Network,
-  Pencil,
-  PieChart,
-  Plus,
-  Trash2,
-  Lock,
-  Users,
-  Wrench,
-  type LucideIcon,
+  CalendarClock, FileText, FolderOpen, History, Plus, SearchX, Star, UserRound, Users,
 } from 'lucide-react'
-import { api } from '@/lib/api'
-import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
-import { Badge } from '@/components/ui/Badge'
+import { copyText } from '@/lib/utils'
+import { useAuth, useCan } from '@/stores/auth'
 import { Button } from '@/components/ui/Button'
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { QueryFailure } from '@/components/ui/QueryState'
 import { Skeleton } from '@/components/ui/Skeleton'
-import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
-import { ReportSection } from '@/components/reports/ReportSection'
-import { useReportCatalog, type CatalogType, type CustomReport } from '@/hooks/useReportCatalog'
+import { ReportScheduleFormDialog } from '@/components/forms/ReportScheduleFormDialog'
+import { useDuplicateTemplate, useReportBranding, useReportCatalog } from '@/features/reports/api'
+import { describeFailure } from '@/lib/access'
+import { LibraryActionsProvider, type LibraryActions } from '@/features/reports/library/actions'
+import { DeleteTemplateDialog, type DeleteTarget } from '@/features/reports/library/DeleteTemplateDialog'
+import { DeliveredReports } from '@/features/reports/library/DeliveredReports'
+import { LibraryRail, RailSelect, type RailSelection } from '@/features/reports/library/LibraryRail'
+import { LibraryList, LibraryOverview, CARD_GRID } from '@/features/reports/library/LibraryResults'
+import { LibraryFiltersBar, SearchBox } from '@/features/reports/library/LibraryToolbar'
+import {
+  applyFilters, audienceOptions, buildLibraryItems, DEFAULT_FILTERS, filtersFromParams, filtersToParams,
+  isFiltered, LIBRARY_VIEWS, openLink, railCategories, schedulePrefill, sectionMap, showsOverview, viewCounts,
+  type LibraryFilters, type LibraryItem, type SchedulePrefill,
+} from '@/features/reports/library/model'
+import { EmptyState } from '@/features/reports/library/parts'
+import { TemplateDrawer } from '@/features/reports/library/TemplateDrawer'
+import { useReportPrefs } from '@/features/reports/library/usePrefs'
 
-/* ------------------------------------------------------------------ */
-/*  Icon & link maps                                                   */
-/* ------------------------------------------------------------------ */
-
-const TYPE_ICONS: Record<string, LucideIcon> = {
-  executive_summary: BarChart3,
-  device_health: Wrench,
-  service_health: Briefcase,
-  availability: Gauge,
-  performance: Activity,
-  traffic: Network,
-  alerts: AlertTriangle,
-  capacity: HardDrive,
-  apm_performance: AppWindow,
-  usage: PieChart,
-  inventory: Boxes,
-  ncm_protection: FileCode,
-}
-
-const CATEGORY_ORDER = ['Personas', 'Operations', 'Applications', 'Assets']
-const CATEGORY_ICONS: Record<string, LucideIcon> = {
-  Personas: Users,
-  Operations: Gauge,
-  Applications: AppWindow,
-  Assets: Boxes,
-}
-const CATEGORY_BLURBS: Record<string, string> = {
-  Personas: 'Live interactive dashboards tailored to each audience',
-  Operations: 'Network availability, performance, traffic, alerting and capacity',
-  Applications: 'Application performance and usage from the APM pipeline',
-  Assets: 'Inventory and lifecycle of monitored equipment',
-}
-
-/** Where a catalog card should navigate. null = no card for this type. */
-function typeLink(t: CatalogType): string | null {
-  if (t.engine === 'legacy') {
-    const legacyTabs: Record<string, string> = {
-      executive_summary: '/reports/executive',
-      device_health: '/reports/technical',
-      service_health: '/reports/business',
-    }
-    // alert_analysis is superseded by the section-based alerts report and
-    // full_report is an export-only bundle — neither gets a card.
-    return legacyTabs[t.key] ?? null
-  }
-  return `/reports/view/${t.key}`
-}
-
-type ReportRun = {
-  id: string
-  title: string
-  report_type: string
-  period: string
-  /** Null when withheld: only the schedule owner and reports.manage holders get share links. */
-  token: string | null
-  status: string
-  delivered_to: string[]
-  generated_at: string | null
-  schedule_name?: string | null
-}
-
-function runStatusBadge(status?: string | null) {
-  if (!status) return <span className="text-xs text-muted">—</span>
-  const v = status === 'success' ? 'success' : status === 'partial' ? 'warning' : 'danger'
-  return <Badge variant={v as any}>{status}</Badge>
-}
-
-/* ------------------------------------------------------------------ */
-/*  Cards                                                              */
-/* ------------------------------------------------------------------ */
-
-function TypeCard({ type }: { type: CatalogType }) {
-  const to = typeLink(type)
-  if (!to) return null
-  const Icon = TYPE_ICONS[type.key] || FileText
-  return (
-    <Link
-      to={to}
-      className="group flex items-start gap-3 rounded-lg border border-border bg-surface p-4 shadow-card transition-all hover:border-primary/40 dark:shadow-card-dark"
-    >
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-        <Icon className="h-[18px] w-[18px]" />
-      </div>
-      <div className="min-w-0">
-        <p className="text-sm font-semibold tracking-tight text-text group-hover:text-primary">
-          {type.title}
-        </p>
-        <p className="mt-0.5 line-clamp-2 text-xs text-muted">{type.description}</p>
-        {type.formats.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1">
-            {type.formats.map((f) => (
-              <span
-                key={f}
-                className="rounded border border-border bg-surface2 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted"
-              >
-                {f}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-    </Link>
-  )
-}
-
-function CustomCard({ report, onDelete }: { report: CustomReport; onDelete: () => void }) {
-  return (
-    <div className="flex flex-col rounded-lg border border-border bg-surface p-4 shadow-card transition-all hover:border-primary/40 dark:shadow-card-dark">
-      <Link to={`/reports/view/custom?custom_id=${report.id}`} className="group flex flex-1 items-start gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-info/10 text-info">
-          <FileText className="h-[18px] w-[18px]" />
-        </div>
-        <div className="min-w-0">
-          <p className="text-sm font-semibold tracking-tight text-text group-hover:text-primary">{report.name}</p>
-          {report.description && <p className="mt-0.5 line-clamp-2 text-xs text-muted">{report.description}</p>}
-          <p className="mt-1 text-[11px] text-muted">
-            {report.sections.length} section{report.sections.length === 1 ? '' : 's'}
-          </p>
-        </div>
-      </Link>
-      <div className="mt-3 flex items-center gap-1 border-t border-border pt-2">
-        <Button size="sm" variant="ghost" asChild>
-          <Link to={`/reports/view/custom?custom_id=${report.id}`}>
-            <ExternalLink className="h-3.5 w-3.5" /> Open
-          </Link>
-        </Button>
-        <Button size="sm" variant="ghost" asChild>
-          <Link to={`/reports/builder?edit=${report.id}`}>
-            <Pencil className="h-3.5 w-3.5" /> Edit
-          </Link>
-        </Button>
-        <Button size="sm" variant="ghost" className="ml-auto text-muted hover:text-danger" onClick={onDelete} title="Delete">
-          <Trash2 className="h-3.5 w-3.5" />
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/*  Page                                                               */
-/* ------------------------------------------------------------------ */
+const SCOPED_NOTE = 'Your account is limited to a visibility scope, so it cannot create report schedules. Open the report to see the data your scope includes.'
 
 export default function ReportLibrary() {
-  const qc = useQueryClient()
-  const { data: catalog, isLoading, error } = useReportCatalog()
-  const [deleting, setDeleting] = useState<CustomReport | null>(null)
+  const catalogQ = useReportCatalog()
+  const catalog = catalogQ.data
+  const { branding } = useReportBranding()
+  const prefs = useReportPrefs()
+  const can = useCan()
+  const user = useAuth((s) => s.user)
+  const [params, setParams] = useSearchParams()
+  const urlFilters = useMemo(() => filtersFromParams(params), [params])
 
-  const { data: runs = [], isLoading: loadingRuns } = useQuery<ReportRun[]>({
-    queryKey: ['reports', 'runs'],
-    queryFn: async () => {
-      const r = (await api.get('/reports/runs', { params: { limit: 20 } })).data
-      return Array.isArray(r) ? r : r?.data || []
+  // The search box is local state (results follow every keystroke) and
+  // reaches the URL after a pause. Binding the input straight to the URL
+  // drops keystrokes: the router applies the new URL after the input has
+  // already been reset to the old value.
+  const [q, setQ] = useState(urlFilters.q)
+  const writtenQ = useRef(urlFilters.q)
+  useEffect(() => {
+    // The URL changed elsewhere (back / forward, a shared link): adopt it.
+    if (urlFilters.q !== writtenQ.current) {
+      writtenQ.current = urlFilters.q
+      setQ(urlFilters.q)
+    }
+  }, [urlFilters.q])
+  useEffect(() => {
+    if (q === urlFilters.q) return
+    const t = window.setTimeout(() => {
+      writtenQ.current = q
+      setParams(filtersToParams({ ...urlFilters, q }), { replace: true })
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [q, urlFilters, setParams])
+
+  const filters = useMemo<LibraryFilters>(() => ({ ...urlFilters, q }), [urlFilters, q])
+
+  const update = useCallback((patch: Partial<LibraryFilters>, push = false) => {
+    const next = { ...filters, ...patch }
+    if (patch.q !== undefined) setQ(patch.q)
+    writtenQ.current = next.q
+    setParams(filtersToParams(next), { replace: !push })
+  }, [filters, setParams])
+
+  /* --- capabilities ------------------------------------------------ */
+  const canManage = can('reports.manage') && (catalog?.can.manage ?? true)
+  const scoped = (user?.scope_tags?.length ?? 0) + (user?.role_scope_tags?.length ?? 0) > 0
+  const canSchedule = canManage && !scoped
+
+  /* --- data -------------------------------------------------------- */
+  const items = useMemo(() => (catalog ? buildLibraryItems(catalog) : []), [catalog])
+  const sections = useMemo(() => sectionMap(catalog ?? { sections: [] }), [catalog])
+  const ctx = useMemo(() => ({ favorites: prefs.favorites, recent: prefs.recent }), [prefs.favorites, prefs.recent])
+  const result = useMemo(() => applyFilters(items, filters, ctx), [items, filters, ctx])
+  // No counts until the catalog is in: a failed load must not read as "0 templates".
+  const counts = useMemo(() => (catalog ? viewCounts(items, ctx) : {}), [catalog, items, ctx])
+  const categories = useMemo(() => railCategories(items, catalog?.categories ?? []), [items, catalog])
+  const audiences = useMemo(() => audienceOptions(items), [items])
+
+  /* --- dialogs ----------------------------------------------------- */
+  const [detailRef, setDetailRef] = useState<string | null>(null)
+  const detail = detailRef ? items.find((i) => i.ref === detailRef) ?? null : null
+  const [scheduling, setScheduling] = useState<SchedulePrefill | null>(null)
+  const [deleting, setDeleting] = useState<DeleteTarget | null>(null)
+  const duplicate = useDuplicateTemplate()
+
+  /**
+   * Opens a dialog from a card, a row, a menu or the drawer. Whatever it came
+   * from closes first (the drawer, the overflow menu). Radix hands focus back
+   * to their opener in a timeout queued while they unmount; the dialog opens
+   * in the task after that, so it remembers the card or menu button as its
+   * opener and closing it lands there, not on the document body.
+   */
+  const openDialog = (open: () => void) => {
+    if (detailRef) setDetailRef(null)
+    window.setTimeout(() => window.setTimeout(open, 0), 0)
+  }
+
+  const actions: LibraryActions = {
+    canManage,
+    canSchedule,
+    scheduleNote: canManage && scoped ? SCOPED_NOTE : null,
+    isFavorite: (item) => prefs.favorites.includes(item.ref),
+    toggleFavorite: (item) => { prefs.toggleFavorite(item.ref) },
+    showDetails: (item) => setDetailRef(item.ref),
+    opened: (item) => prefs.recordOpened(item.ref),
+    schedule: (item) => openDialog(() => setScheduling(schedulePrefill(item))),
+    duplicate: (item) => {
+      if (!item.customId) return
+      duplicate.mutate(item.customId, {
+        onSuccess: () => toast.success('Template duplicated', `A private copy of “${item.title}” is in My templates.`),
+        onError: (e) => toast.error('The template was not duplicated', describeFailure(e).message),
+      })
     },
-  })
-
-  const delCustom = useMutation({
-    mutationFn: async (id: string) => api.delete(`/reports/custom/${id}`),
-    onSuccess: () => {
-      toast.success('Custom report deleted')
-      setDeleting(null)
-      qc.invalidateQueries({ queryKey: ['reports', 'catalog'] })
+    remove: (item) => openDialog(() => setDeleting({ item, schedules: item.schedules })),
+    copyLink: (item) => {
+      void copyText(`${window.location.origin}${openLink(item)}`).then((ok) =>
+        ok ? toast.success('Link copied', item.title) : toast.error('Could not copy the link', 'Your browser blocked clipboard access.'))
     },
-    onError: (e: any) => toast.error('Delete failed', apiErrorMessage(e)),
-  })
+    busyId: duplicate.isPending ? duplicate.variables ?? null : null,
+  }
 
-  const categories = (() => {
-    if (!catalog) return []
-    const seen = catalog.types.map((t) => t.category)
-    const extras = [...new Set(seen)].filter((c) => !CATEGORY_ORDER.includes(c))
-    return [...CATEGORY_ORDER, ...extras].filter((c) => seen.includes(c))
-  })()
+  const selection: RailSelection = { view: filters.view, category: filters.category }
+  const select = (s: RailSelection) => update({ view: s.view, category: s.category }, true)
+  const clearFilters = () => update({ q: '', audience: null, origin: 'all' })
+  const delivered = filters.view === 'delivered'
+  const filtered = isFiltered(filters)
+  const overview = showsOverview(filters, prefs.layout)
+  const selectionLabel = filters.category
+    ? categories.find((c) => c.id === filters.category)?.title ?? 'Category'
+    : LIBRARY_VIEWS.find((v) => v.id === filters.view)?.label ?? 'All reports'
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-            <FileText className="h-6 w-6 text-primary" />
-            Report library
-          </h1>
-          <p className="mt-1 text-sm text-muted">
-            Ready-made and custom reports — view live, export as PDF/HTML, or schedule delivery to your channels.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" asChild>
-            <Link to="/reports/schedules">
-              <CalendarClock className="h-4 w-4" /> Scheduled reports
-            </Link>
-          </Button>
-          <Button size="sm" asChild>
-            <Link to="/reports/builder">
-              <Plus className="h-4 w-4" /> New custom report
-            </Link>
-          </Button>
+    <LibraryActionsProvider value={actions}>
+      <div className="space-y-5">
+        {/* Header */}
+        <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="min-w-0">
+            <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight text-text">
+              <FileText className="h-5 w-5 shrink-0 text-primary" aria-hidden />
+              Reports
+            </h1>
+            <p className="mt-0.5 max-w-3xl text-xs text-text2">
+              Built-in and organisation report templates. Open one for any period, schedule it for delivery, or customize a copy.
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <Button asChild variant="outline" size="sm">
+              <Link to="/reports/schedules"><CalendarClock aria-hidden /> Schedules</Link>
+            </Button>
+            {canManage && (
+              <Button asChild size="sm">
+                <Link to="/reports/builder"><Plus aria-hidden /> New report</Link>
+              </Button>
+            )}
+          </div>
+        </header>
+
+        <div className="flex gap-6">
+          <LibraryRail
+            selection={selection}
+            viewCounts={counts}
+            categories={categories}
+            onSelect={select}
+            loading={catalogQ.isLoading}
+          />
+
+          <div className="min-w-0 flex-1 space-y-4">
+            {/* Toolbar */}
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="w-full sm:w-56 lg:hidden">
+                  <RailSelect selection={selection} viewCounts={counts} categories={categories} onSelect={select} />
+                </div>
+                <SearchBox
+                  value={q}
+                  onChange={setQ}
+                  label={delivered ? 'Search delivered reports' : 'Search report templates'}
+                  placeholder={delivered ? 'Search delivered reports' : 'Search names, sections, tags'}
+                />
+                {!delivered && (
+                  <LibraryFiltersBar
+                    filters={filters}
+                    audiences={audiences}
+                    layout={prefs.layout}
+                    onChange={(patch) => update(patch)}
+                    onLayout={prefs.setLayout}
+                  />
+                )}
+              </div>
+              {!delivered && catalog && (
+                <div className="flex min-h-[1.25rem] flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                  <p aria-live="polite" className="tabular-nums">
+                    <span className="font-medium text-text2">{selectionLabel}</span>
+                    {' · '}Showing <span className="font-medium text-text">{result.items.length}</span> of {result.scopeTotal} templates
+                  </p>
+                  {filtered && (
+                    <button type="button" onClick={clearFilters} className="rounded font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50">
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Body */}
+            {delivered ? (
+              <DeliveredReports q={filters.q} branding={branding} canSchedule={canSchedule} onClearSearch={() => update({ q: '' })} />
+            ) : catalogQ.isLoading ? (
+              <LibrarySkeleton />
+            ) : catalogQ.isError && !catalog ? (
+              <QueryFailure error={catalogQ.error} what="the report catalog" onRetry={() => void catalogQ.refetch()} retrying={catalogQ.isFetching} />
+            ) : (
+              <>
+                {catalogQ.isError && (
+                  <QueryFailure compact error={catalogQ.error} what="the report catalog" onRetry={() => void catalogQ.refetch()} retrying={catalogQ.isFetching} />
+                )}
+                {items.length === 0 ? (
+                  <EmptyState icon={<FileText className="h-5 w-5" />} title="No reports are available to your role">
+                    Every template reads data from modules your role cannot see. Ask an administrator for access to the areas you report on.
+                  </EmptyState>
+                ) : result.items.length === 0 ? (
+                  <NoResults
+                    filters={filters}
+                    categoryTitle={selectionLabel}
+                    canManage={canManage}
+                    onClear={clearFilters}
+                    onSearchAll={() => update({ view: 'all', category: null }, true)}
+                    onBrowse={() => select({ view: 'builtin', category: null })}
+                  />
+                ) : overview ? (
+                  <LibraryOverview
+                    items={result.items}
+                    categories={catalog?.categories ?? []}
+                    favorites={prefs.favorites}
+                    recent={prefs.recent}
+                    onSelectCategory={(id) => select({ view: 'all', category: id })}
+                    onSelectView={(view) => select({ view, category: null })}
+                  />
+                ) : (
+                  <LibraryList
+                    items={result.items}
+                    layout={prefs.layout}
+                    sort={filters.sort}
+                    onSortByName={() => update({ sort: filters.sort === 'name' ? DEFAULT_FILTERS.sort : 'name' })}
+                    label={`${selectionLabel} report templates`}
+                    showCategory={!filters.category}
+                  />
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
-      {error && (
-        <div className="rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger">
-          Failed to load the report catalog: {apiErrorMessage(error)}
-        </div>
-      )}
-
-      {isLoading && (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={i} className="h-[110px] rounded-lg" />
-          ))}
-        </div>
-      )}
-
-      {/* Preset report groups */}
-      {categories.map((cat) => {
-        const CatIcon = CATEGORY_ICONS[cat] || FileText
-        const types = catalog!.types.filter((t) => t.category === cat && typeLink(t))
-        if (types.length === 0) return null
-        return (
-          <section key={cat}>
-            <div className="mb-2 flex items-center gap-2">
-              <CatIcon className="h-4 w-4 text-muted" />
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-text2">{cat}</h2>
-              {CATEGORY_BLURBS[cat] && <span className="hidden text-xs text-muted sm:inline">· {CATEGORY_BLURBS[cat]}</span>}
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {types.map((t) => (
-                <TypeCard key={t.key} type={t} />
-              ))}
-            </div>
-          </section>
-        )
-      })}
-
-      {/* Custom reports */}
-      {catalog && (
-        <section>
-          <div className="mb-2 flex items-center gap-2">
-            <Pencil className="h-4 w-4 text-muted" />
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-text2">Custom reports</h2>
-            <span className="hidden text-xs text-muted sm:inline">· Your own combinations of report sections</span>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {catalog.custom.map((c) => (
-              <CustomCard key={c.id} report={c} onDelete={() => setDeleting(c)} />
-            ))}
-            <Link
-              to="/reports/builder"
-              className={cn(
-                'flex min-h-[110px] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border bg-surface/40 p-4 text-muted',
-                'transition-colors hover:border-primary/50 hover:text-primary',
-              )}
-            >
-              <Plus className="h-5 w-5" />
-              <span className="text-sm font-medium">New custom report</span>
-            </Link>
-          </div>
-        </section>
-      )}
-
-      {/* Recent generated reports */}
-      <ReportSection
-        title="Recent reports"
-        description="Reports generated by schedules or on demand — links open the shared HTML copy"
-        icon={<Clock className="h-4 w-4" />}
-        padded={false}
-      >
-        {loadingRuns ? (
-          <div className="px-5 py-8 text-center text-sm text-muted">Loading recent runs…</div>
-        ) : runs.length === 0 ? (
-          <div className="px-5 py-8 text-center text-sm text-muted">
-            No reports generated yet — schedule one or use "Run now" on a schedule.
-          </div>
-        ) : (
-          <Table>
-            <THead className="bg-surface2/60">
-              <Tr>
-                <Th>Report</Th>
-                <Th>Schedule</Th>
-                <Th>Status</Th>
-                <Th>Generated</Th>
-                <Th className="w-24 text-right">Link</Th>
-              </Tr>
-            </THead>
-            <TBody>
-              {runs.map((run) => (
-                <Tr key={run.id}>
-                  <Td>
-                    <span className="font-medium text-text">{run.title}</span>
-                  </Td>
-                  <Td>
-                    <span className="text-sm text-text2">{run.schedule_name || '—'}</span>
-                  </Td>
-                  <Td>{runStatusBadge(run.status)}</Td>
-                  <Td>
-                    <span className="text-sm text-text2">{run.generated_at ? relativeTime(run.generated_at) : '—'}</span>
-                  </Td>
-                  <Td className="text-right">
-                    {run.token ? (
-                      <a
-                        href={`${window.location.origin}/api/v1/reports/shared/${run.token}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                      >
-                        <ExternalLink className="h-3 w-3" /> View
-                      </a>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-xs text-muted" title="Report links are shown to the schedule owner and to users who manage reports">
-                        <Lock className="h-3 w-3" aria-hidden /> Restricted
-                      </span>
-                    )}
-                  </Td>
-                </Tr>
-              ))}
-            </TBody>
-          </Table>
-        )}
-      </ReportSection>
-
-      <ConfirmDialog
-        open={!!deleting}
-        onOpenChange={(o) => !o && setDeleting(null)}
-        title="Delete custom report"
-        description={
-          <>
-            Delete <span className="font-semibold text-text">{deleting?.name}</span>? Schedules pointing at it will
-            stop delivering.
-          </>
-        }
-        confirmText="Delete"
-        destructive
-        loading={delCustom.isPending}
-        onConfirm={() => {
-          if (deleting) delCustom.mutate(deleting.id)
-        }}
+      <TemplateDrawer
+        item={detail}
+        open={!!detail}
+        onOpenChange={(o) => { if (!o) setDetailRef(null) }}
+        sections={sections}
+        branding={branding}
       />
+
+      {scheduling && (
+        <ReportScheduleFormDialog
+          open
+          onOpenChange={(o) => { if (!o) setScheduling(null) }}
+          schedule={null}
+          prefill={scheduling}
+        />
+      )}
+
+      <DeleteTemplateDialog target={deleting} onClose={() => setDeleting(null)} />
+    </LibraryActionsProvider>
+  )
+}
+
+function NoResults({ filters, categoryTitle, canManage, onClear, onSearchAll, onBrowse }: {
+  filters: LibraryFilters
+  categoryTitle: string
+  canManage: boolean
+  onClear: () => void
+  onSearchAll: () => void
+  onBrowse: () => void
+}) {
+  if (isFiltered(filters)) {
+    const narrowed = filters.view !== 'all' || !!filters.category
+    return (
+      <EmptyState
+        icon={<SearchX className="h-5 w-5" />}
+        title={filters.q.trim() ? `No templates match “${filters.q.trim()}”` : 'No templates match these filters'}
+        action={(
+          <>
+            <Button size="sm" variant="outline" onClick={onClear}>Clear filters</Button>
+            {narrowed && filters.q.trim() && <Button size="sm" variant="ghost" onClick={onSearchAll}>Search all reports</Button>}
+          </>
+        )}
+      >
+        Search looks at titles, descriptions, tags and section names{narrowed ? ` in ${categoryTitle}` : ''}.
+      </EmptyState>
+    )
+  }
+  switch (filters.view) {
+    case 'favorites':
+      return (
+        <EmptyState icon={<Star className="h-5 w-5" />} title="No favourites yet">
+          Star a template to pin it here.
+        </EmptyState>
+      )
+    case 'recent':
+      return (
+        <EmptyState icon={<History className="h-5 w-5" />} title="Nothing viewed yet">
+          Reports you open appear here so you can get back to them quickly.
+        </EmptyState>
+      )
+    case 'mine':
+      return (
+        <EmptyState
+          icon={<UserRound className="h-5 w-5" />}
+          title="You have no templates yet"
+          action={(
+            <>
+              <Button size="sm" variant="outline" onClick={onBrowse}>Browse built-in templates</Button>
+              {canManage && <Button asChild size="sm"><Link to="/reports/builder"><Plus aria-hidden /> New report</Link></Button>}
+            </>
+          )}
+        >
+          {canManage ? 'Customize any built-in template to make it your own, or design one from scratch.' : 'Templates you create appear here. Creating templates needs the Manage reports permission.'}
+        </EmptyState>
+      )
+    case 'shared':
+      return (
+        <EmptyState icon={<Users className="h-5 w-5" />} title="No shared templates">
+          Templates shared with the organisation appear here.
+        </EmptyState>
+      )
+    default:
+      return (
+        <EmptyState
+          icon={<FolderOpen className="h-5 w-5" />}
+          title={filters.category ? `No templates in ${categoryTitle} yet` : 'No templates here yet'}
+          action={canManage ? <Button asChild size="sm" variant="outline"><Link to="/reports/builder"><Plus aria-hidden /> Design one</Link></Button> : undefined}
+        >
+          {filters.category ? 'Templates in this category are either not built in yet or read data your role cannot see.' : undefined}
+        </EmptyState>
+      )
+  }
+}
+
+function LibrarySkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true" aria-label="Loading report templates">
+      <div className="flex gap-3 overflow-hidden">
+        {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[60px] w-64 shrink-0" />)}
+      </div>
+      {Array.from({ length: 2 }).map((_, g) => (
+        <div key={g} className="space-y-3">
+          <Skeleton className="h-5 w-48" />
+          <div className={CARD_GRID}>
+            {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-[184px]" />)}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

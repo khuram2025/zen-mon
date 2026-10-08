@@ -95,7 +95,7 @@ CATEGORIES = (
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "inventory"
 
-# Column widths of inventory_identity (migrate-154) and server_software_inventory.
+# Column widths of inventory_identity (migrate-157) and server_software_inventory.
 _CAPS = {
     "vendor_key": 64, "vendor_label": 128, "os_family": 32, "os_product": 128,
     "os_release": 64, "os_version": 128, "os_build": 64, "os_edition": 64,

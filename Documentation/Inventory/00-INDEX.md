@@ -66,7 +66,7 @@ Compliance permissions (P5+): keep `compliance.view`, `compliance.triage` and `c
 Wiring:
 
 - `PERMISSION_IMPLIES` gains `inventory.manage → inventory.view` and `inventory.export → inventory.view`.
-- `BUILTIN_ROLE_DEFINITION_VERSION` goes from 3 to **4**. Custom roles are never changed.
+- `BUILTIN_ROLE_DEFINITION_VERSION` goes from 4 to **5** (4 was taken by the `servers.*` split and the team roles in release 1.23.35). Custom roles are never changed. The four team roles (`network_team`, `systems_team`, `application_team`, `security_team`) do **not** get `inventory.*` in Phase 0: nothing is visible yet, and which team sees what is an owner decision (D9 in `04-ROADMAP-PHASES-AND-TASKS.md`) applied together with the UI in P1.
 - `route_policy._POLICIES["inventory"] = (("inventory.view",), ("inventory.manage",))`.
 - Export routes declare `require_permission("inventory.export")` explicitly.
 - The role editor at `/settings/general?tab=users&sub=roles` renders `/roles/catalog`, so the new module row appears with no UI change.
@@ -104,11 +104,11 @@ Wiring:
 
 ### Migrations
 
-Numbered in ship order. **154 is the next free number today**; re-check `scripts/migrations.lock` at implementation, because parallel branches take numbers.
+Numbered in ship order. **157 is the number used by P0**: `main` already holds 154 (role scope and server permissions) and 156 (report templates), and the Compliance set's original 080 to 082 were taken long ago. Re-check `scripts/migrations.lock` before each phase, because parallel branches take numbers.
 
 | File | Phase | Contents |
 |---|---|---|
-| `migrate-154-inventory-foundation.sql` | P0 | `inventory_identity` + dirty-marking triggers; evidence columns on `devices`/`servers`/`server_software_inventory`; `inventory_change_events` + capture triggers; `inventory_daily_snapshots`; baselined-at seed for existing servers; indexes; GRANTs |
+| `migrate-157-inventory-foundation.sql` | P0 | `inventory_identity` + dirty-marking triggers; evidence columns on `devices`/`servers`/`server_software_inventory`; `inventory_change_events` + capture triggers; `inventory_daily_snapshots`; baselined-at seed for existing servers; indexes; GRANTs |
 | `migrate-155-inventory-catalog.sql` | P2 | `inventory_software_products`, `inventory_software_rules`, `inventory_publishers`, `inventory_asset_meta`, `inventory_saved_views` |
 | `migrate-156-inventory-coverage.sql` | P3 | `server_patch_inventory`; `server_software_inventory` key widened to `(server_id, source, package_name, architecture)` |
 | `migrate-157-inventory-lifecycle.sql` | P4 | `eol_definitions`, `inventory_lifecycle_overrides`; alert-metric constraint supersede for `inventory_eol_*` |
@@ -130,7 +130,7 @@ The Compliance set is unbuilt and still valid as the vulnerability engine. These
 | `compliance_oid_dictionary` | Built-in `os_patterns.json` + `inventory_identity.os_family` (P0) | Same data, shipped earlier |
 | CV-E0 columns `devices.os_family`, `servers.distro_*` | `inventory_identity.os_family / os_product / os_release` | One normalised layer for every asset kind |
 | CV-E0 tasks 0.1–0.5 (identity hardening) | **Absorbed into P0 and P3** of this set | They are inventory work |
-| Migrations 080/081/082 | 154–159 (numbers taken since August) | Lockfile reality |
+| Migrations 080/081/082 | 157 and later (numbers taken since August) | Lockfile reality |
 
 Everything else in the Compliance set (feed protocol, matching kinds, confidence tiers, FRS/ARS scoring, SLA policy, triage states) stands as written and becomes Phase P6.
 

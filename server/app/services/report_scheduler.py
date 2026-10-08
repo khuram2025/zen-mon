@@ -1,44 +1,110 @@
 """Background scheduler for recurring report delivery.
 
 A 60-second loop (started from main.py) fires every due, enabled
-``report_schedules`` row: it generates the report data, renders a professional
-HTML summary, stores a token-gated ``report_runs`` artifact (the "View full
-report" share target), attaches the report as PDF/Excel/CSV, and emails it to
-each linked notification channel. Next-run is computed in the appliance's
-configured timezone.
+``report_schedules`` row. Each run:
 
-Mirrors the discovery scheduler's shape (compute_next_run + tick loop) and
-reuses the existing SMTP gateway resolution + report generators.
+* resolves its window with ``report_periods.resolve_period`` in the
+  organisation timezone and week start (Settings -> General -> Company), so
+  "Previous month" is the local calendar month, as in the report viewer;
+* renders built-in templates (``report_sections.REPORT_PRESETS``) and
+  organisation templates (``custom_reports``) with the section engine the way
+  the viewer does, as the schedule's owner; legacy report types keep their
+  executive-summary pipeline;
+* stores a token-gated ``report_runs`` artifact (the "View full report" share
+  target) and attaches the report as PDF, Excel or HTML (CSV for legacy types);
+* emails a branded summary to every linked email channel and to the
+  schedule's direct recipients; other channel types get a KPI line and the
+  link.
+
+Next-run is computed in the appliance's configured timezone. Mirrors the
+discovery scheduler's shape (compute_next_run + tick loop) and reuses the SMTP
+gateway resolution.
 """
 
 from __future__ import annotations
-from app.core.crypto import encrypt_config, decrypt_config
-import ssl
 
 import asyncio
 import json
 import logging
+import re
 import secrets
 import smtplib
+import ssl
 from datetime import datetime, timedelta, timezone
+from email import encoders
 from email.mime.application import MIMEApplication
+from email.mime.base import MIMEBase
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, make_msgid
+from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.crypto import decrypt_config
+from app.services import report_html, report_periods
 from app.services.alert_schedule import get_configured_timezone
-from app.services.report_data_service import build_executive
-from app.services.report_service import generate_report, _resolve_period
+from app.services.branding import Branding, load_branding
 from app.services.export_service import generate_excel_report, generate_csv_report
-from app.services import report_html
+from app.services.report_data_service import build_executive
+from app.services.report_service import generate_report
 
 logger = logging.getLogger("zenplus.report_scheduler")
 
 TICK_INTERVAL_S = 60
+
+# Report types rendered by the legacy executive-summary pipeline. Every other
+# type is a section-engine template: a built-in key or 'custom'.
+LEGACY_REPORT_TYPES = ("executive_summary", "device_health", "service_health", "alert_analysis", "full_report")
+LEGACY_FORMATS = ("pdf", "excel", "csv", "none")
+TEMPLATE_FORMATS = ("pdf", "excel", "html", "none")
+MAX_RECIPIENTS = 50
+
+# Attachment format -> (file extension, MIME type).
+ATTACHMENT_TYPES = {
+    "pdf": ("pdf", "application/pdf"),
+    "excel": ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "html": ("html", "text/html"),
+    "csv": ("csv", "text/csv"),
+}
+FORMAT_NAMES = {"pdf": "PDF", "excel": "Excel", "html": "HTML", "csv": "CSV"}
+
+_EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}"
+    r"@(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+)
+
+
+def is_email(value: Any) -> bool:
+    """A plain addr-spec (no display name, comments or header separators)."""
+    return isinstance(value, str) and len(value) <= 254 and bool(_EMAIL_RE.match(value)) \
+        and ".." not in value.split("@", 1)[0] and not value.startswith(".") \
+        and not value.split("@", 1)[0].endswith(".")
+
+
+def normalize_recipients(values: Iterable[Any] | None) -> list[str]:
+    """Lowercased, de-duplicated (order kept) email addresses. Raises
+    ValueError naming the first invalid address, or when more than
+    MAX_RECIPIENTS remain."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values or ():
+        addr = str(raw if raw is not None else "").strip().lower()
+        if not addr:
+            continue
+        if not is_email(addr):
+            raise ValueError(f"'{str(raw)[:80]}' is not a valid email address")
+        if addr not in seen:
+            seen.add(addr)
+            out.append(addr)
+    if len(out) > MAX_RECIPIENTS:
+        raise ValueError(f"At most {MAX_RECIPIENTS} recipients per schedule")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -109,17 +175,18 @@ def _days_in_month(year: int, month: int) -> int:
     return (nxt - timedelta(days=1)).day
 
 
+
 # ---------------------------------------------------------------------------
-# SMTP resolution + send (with optional attachment)
+# SMTP resolution + send (attachment and inline images)
 # ---------------------------------------------------------------------------
 
-async def _resolve_smtp(db: AsyncSession, channel_row) -> dict | None:
-    """Return SMTP gateway config dict for an email channel, or None."""
-    cfg = decrypt_config(channel_row.config)
-    gw_id = channel_row.gateway_id or cfg.get("gateway_id")
-    if gw_id:
+async def _resolve_smtp_gateway(db: AsyncSession, gateway_id: Any = None) -> dict | None:
+    """SMTP gateway config: ``gateway_id``'s, else the default SMTP gateway,
+    else the legacy ``system_settings['smtp']``. None when nothing usable is
+    configured or the gateway is disabled."""
+    if gateway_id:
         gw = (await db.execute(
-            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"), {"id": gw_id}
+            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"), {"id": gateway_id}
         )).first()
     else:
         gw = (await db.execute(
@@ -142,91 +209,353 @@ async def _resolve_smtp(db: AsyncSession, channel_row) -> dict | None:
     return gw_config
 
 
-def _send_email_with_attachment(gw: dict, recipients: list[str], subject: str,
-                                text_body: str, html_body: str,
-                                attachment: tuple[str, bytes, str] | None = None) -> None:
-    """Send a multipart email. attachment = (filename, bytes, mime_subtype)."""
+async def _resolve_smtp(db: AsyncSession, channel_row) -> dict | None:
+    """Return SMTP gateway config dict for an email channel, or None."""
+    cfg = decrypt_config(channel_row.config)
+    return await _resolve_smtp_gateway(db, channel_row.gateway_id or cfg.get("gateway_id"))
+
+
+def _clean_header(value: str) -> str:
+    return re.sub(r"[\r\n]+", " ", value or "").strip()
+
+
+def _mime_part(payload: bytes, mime: str) -> MIMEBase:
+    """A base64 part for ``mime`` ('application/pdf', 'text/html', or a bare
+    application subtype such as 'pdf' as older callers pass)."""
+    maintype, _, subtype = (mime if "/" in mime else f"application/{mime}").partition("/")
+    if maintype == "application":
+        return MIMEApplication(payload, _subtype=subtype)
+    part = MIMEBase(maintype, subtype)
+    part.set_payload(payload)
+    encoders.encode_base64(part)
+    if maintype == "text":
+        part.set_param("charset", "utf-8")
+    return part
+
+
+def _msgid_domain(gw: dict) -> str:
+    domain = str(gw.get("from_email") or "").rpartition("@")[2].strip()
+    return domain if re.fullmatch(r"[A-Za-z0-9.-]{1,253}", domain or "") else "zenplus.local"
+
+
+def build_email_message(gw: dict, recipients: list[str], subject: str, text_body: str, html_body: str,
+                        attachment: tuple[str, bytes, str] | None = None,
+                        inline_images: Iterable[tuple[str, bytes, str]] | None = None) -> MIMEMultipart:
+    """multipart/mixed { alternative { text, related { html, inline images } }, attachment }.
+
+    ``attachment`` = (filename, bytes, MIME type); ``inline_images`` =
+    (content id, bytes, MIME type) referenced from the HTML as ``cid:<id>``."""
     outer = MIMEMultipart("mixed")
-    outer["From"] = f"{gw.get('from_name', 'ZenPlus')} <{gw.get('from_email', '')}>"
+    outer["From"] = formataddr((_clean_header(str(gw.get("from_name") or "ZenPlus")),
+                                str(gw.get("from_email") or "")), charset="utf-8")
     outer["To"] = ", ".join(recipients)
-    outer["Subject"] = subject
+    outer["Subject"] = _clean_header(subject)
+    outer["Date"] = formatdate(usegmt=True)
+    outer["Message-ID"] = make_msgid(domain=_msgid_domain(gw))
 
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(text_body, "plain"))
-    alt.attach(MIMEText(html_body, "html"))
+    html_part = MIMEText(html_body, "html")
+    images = [i for i in (inline_images or ()) if i and i[0] and i[1]]
+    if images:
+        related = MIMEMultipart("related")
+        related.attach(html_part)
+        for cid, data, mime in images:
+            subtype = (mime or "image/png").partition("/")[2] or "png"
+            img = MIMEImage(data, _subtype=subtype)
+            cid = str(cid).strip("<> ")
+            img.add_header("Content-ID", f"<{cid}>")
+            img.add_header("Content-Disposition", "inline",
+                           filename=f"{re.sub(r'[^A-Za-z0-9_-]+', '-', cid.split('@')[0]) or 'logo'}."
+                                    f"{'jpg' if subtype == 'jpeg' else subtype}")
+            related.attach(img)
+        alt.attach(related)
+    else:
+        alt.attach(html_part)
     outer.attach(alt)
 
     if attachment:
-        fname, payload, subtype = attachment
-        part = MIMEApplication(payload, _subtype=subtype)
+        fname, payload, mime = attachment
+        part = _mime_part(payload, mime)
         part.add_header("Content-Disposition", "attachment", filename=fname)
         outer.attach(part)
+    return outer
 
+
+def _smtp_connect(gw: dict) -> smtplib.SMTP:
     enc = gw.get("encryption", "tls")
     if enc == "ssl":
-        server = smtplib.SMTP_SSL(gw["host"], int(gw.get("port", 465)), timeout=20, context=ssl.create_default_context())
+        server = smtplib.SMTP_SSL(gw["host"], int(gw.get("port", 465)), timeout=20,
+                                  context=ssl.create_default_context())
     else:
         server = smtplib.SMTP(gw["host"], int(gw.get("port", 587)), timeout=20)
-        server.starttls(context=ssl.create_default_context())
-    if gw.get("username"):
-        server.login(gw["username"], gw.get("password", ""))
-    server.sendmail(gw.get("from_email", ""), recipients, outer.as_string())
-    server.quit()
+    try:
+        if enc != "ssl":
+            server.starttls(context=ssl.create_default_context())
+        if gw.get("username"):
+            server.login(gw["username"], gw.get("password", ""))
+    except Exception:
+        server.close()
+        raise
+    return server
+
+
+def _smtp_close(server: smtplib.SMTP) -> None:
+    try:
+        server.quit()
+    except Exception:
+        server.close()
+
+
+def _smtp_error(exc: Exception) -> str:
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        codes = [f"{code} {msg.decode(errors='replace') if isinstance(msg, bytes) else msg}"
+                 for code, msg in exc.recipients.values()]
+        return ("refused: " + "; ".join(codes))[:300]
+    if isinstance(exc, smtplib.SMTPResponseException):
+        msg = exc.smtp_error.decode(errors="replace") if isinstance(exc.smtp_error, bytes) else str(exc.smtp_error)
+        return f"{exc.smtp_code} {msg}"[:300]
+    return f"{type(exc).__name__}: {exc}"[:300]
+
+
+def _send_email_with_attachment(gw: dict, recipients: list[str], subject: str,
+                                text_body: str, html_body: str,
+                                attachment: tuple[str, bytes, str] | None = None,
+                                inline_images: Iterable[tuple[str, bytes, str]] | None = None) -> None:
+    """Send one multipart email to ``recipients`` (an email channel's list).
+    attachment = (filename, bytes, MIME type or bare application subtype)."""
+    msg = build_email_message(gw, recipients, subject, text_body, html_body, attachment, inline_images)
+    server = _smtp_connect(gw)
+    try:
+        server.sendmail(gw.get("from_email", ""), recipients, msg.as_string())
+    finally:
+        _smtp_close(server)
+
+
+def _send_individually(gw: dict, recipients: list[str], subject: str, text_body: str, html_body: str,
+                       attachment: tuple[str, bytes, str] | None = None,
+                       inline_images: Iterable[tuple[str, bytes, str]] | None = None,
+                       ) -> tuple[list[str], list[tuple[str, str]]]:
+    """Send one message per direct recipient over a single SMTP session, so
+    recipients (often external) never see each other's addresses. Returns
+    (delivered addresses, [(address, error)]). Connection or login failures
+    raise."""
+    if not recipients:
+        return [], []
+    msg = build_email_message(gw, recipients[:1], subject, text_body, html_body, attachment, inline_images)
+    domain = _msgid_domain(gw)
+    sent: list[str] = []
+    failed: list[tuple[str, str]] = []
+    server = _smtp_connect(gw)
+    try:
+        for i, addr in enumerate(recipients):
+            del msg["To"]
+            msg["To"] = addr
+            del msg["Message-ID"]
+            msg["Message-ID"] = make_msgid(domain=domain)
+            try:
+                server.sendmail(gw.get("from_email", ""), [addr], msg.as_string())
+                sent.append(addr)
+            except smtplib.SMTPServerDisconnected as exc:
+                failed.extend((a, _smtp_error(exc)) for a in recipients[i:])
+                break
+            except smtplib.SMTPException as exc:
+                # Refused for this recipient only (SMTPException is an OSError,
+                # so this must come before the session-level handler).
+                failed.append((addr, _smtp_error(exc)))
+            except OSError as exc:
+                # The session is gone (timeout, reset): the addresses already
+                # sent stay recorded, the rest failed.
+                failed.extend((a, _smtp_error(exc)) for a in recipients[i:])
+                break
+    finally:
+        _smtp_close(server)
+    return sent, failed
 
 
 # ---------------------------------------------------------------------------
 # Generation + delivery
 # ---------------------------------------------------------------------------
 
-def _base_url(db_company: dict | None) -> str:
+class ReportUnavailable(Exception):
+    """The schedule cannot produce a report (its template is gone, or nothing
+    in it is visible to the owner). The message is shown in the run status."""
+
+
+class _AttachmentUnavailable(Exception):
+    pass
+
+
+def _base_url(branding: Branding | None) -> str:
     s = get_settings()
     base = (s.APP_BASE_URL or "").strip()
-    if not base and isinstance(db_company, dict):
-        base = (db_company.get("base_url") or "").strip()
+    if not base and branding is not None:
+        base = (branding.base_url or "").strip()
     return base.rstrip("/")
 
 
+def email_subject(branding: Branding | None, title: str, period_label: str) -> str:
+    """'[Confidential] Monthly SLA — Previous month (1 Sep 2026 – 30 Sep 2026)'."""
+    prefix = f"[{branding.confidentiality}] " if branding is not None and branding.confidentiality else ""
+    return _clean_header(f"{prefix}{title} — {period_label}")
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """The section engine's window convention (same as the viewer's)."""
+    return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def _legacy_window(period: str, start: datetime, end: datetime) -> tuple[str, datetime | None, datetime | None]:
+    """(period, from, to) for the legacy generators: rolling periods as
+    before; calendar windows as an explicit range. Their custom range pushes
+    a midnight end to 23:59:59 of that day, so an exclusive midnight end is
+    passed as the instant before it."""
+    if period in report_periods.ROLLING_HOURS:
+        return period, None, None
+    if (end.hour, end.minute, end.second, end.microsecond) == (0, 0, 0, 0):
+        end = end - timedelta(microseconds=1)
+    return "custom", start, end
+
+
+async def _schedule_owner(db: AsyncSession, schedule: dict):
+    """The schedule's owner (a User), ORPHANED_OWNER when the owner is gone or
+    deactivated (fail closed), or None for an ad-hoc run without a schedule."""
+    if not schedule.get("id"):
+        return None
+    from app.models.user import User as _User
+    from app.services.netflow_report import ORPHANED_OWNER
+
+    owner_id = (await db.execute(text(
+        "SELECT created_by FROM report_schedules WHERE id = :id"), {"id": schedule["id"]})).scalar()
+    owner = await db.get(_User, owner_id) if owner_id else None
+    if owner is None or not getattr(owner, "is_active", True):
+        return ORPHANED_OWNER
+    return owner
+
+
+def _is_user(owner: Any) -> bool:
+    from app.services.netflow_report import ORPHANED_OWNER
+    return owner is not None and owner is not ORPHANED_OWNER
+
+
+async def _template_for(db: AsyncSession, report_type: str, custom_id: Any,
+                        owner: Any) -> tuple[str, str, str, list]:
+    """(title, description, category label, entries) for a built-in key or the
+    schedule's organisation template; ReportUnavailable when it was deleted
+    or is private to someone other than the owner."""
+    from app.services import report_render
+    from app.services import report_sections as _sections
+
+    if report_type != "custom":
+        preset = _sections.REPORT_PRESETS.get(report_type)
+        if not preset:
+            raise ReportUnavailable(f"The report template '{report_type}' is no longer available; "
+                                    "nothing was generated")
+        return (preset["title"], preset.get("description") or "", preset.get("category") or "",
+                preset.get("entries") or preset["sections"])
+
+    row = await report_render.load_template(db, custom_id) if custom_id else None
+    if row is None:
+        raise ReportUnavailable("The organisation report template this schedule delivers was deleted; "
+                                "nothing was generated. Choose another template or delete the schedule.")
+    if _is_user(owner):
+        from app.core.permissions import SUPERUSER_PERMISSION
+        perms = await _sections.requester_permissions(db, owner)
+        admin = perms is None or SUPERUSER_PERMISSION in perms
+        if not report_render.can_read_template(row, owner, admin):
+            raise ReportUnavailable(f"The report template '{row.name}' is private to another user; "
+                                    "nothing was generated")
+    from app.services import report_templates as _rt
+    category = _rt.CATEGORY_TITLES.get(row.category or "", "") or "Custom report"
+    return row.name, row.description or "", category, report_render.template_entries(row)
+
+
+async def _owner_scope(db: AsyncSession, owner: Any, entries: list,
+                       filters: dict) -> tuple[list[dict], dict, str]:
+    """Entries, filters and scope label as the owner may see them: like the
+    viewer, an owner limited to a visibility scope only runs scope-safe
+    sections, pinned to the devices the owner can see (fail closed)."""
+    from app.core import scoping
+    from app.services import report_render
+    from app.services import report_sections as _sections
+
+    entries = _sections.section_entries(entries)[:report_render.MAX_SECTIONS]
+    if not _is_user(owner):
+        return entries, filters, report_render.scope_label_for(filters)
+    scoped, ids = await scoping.scoped_device_filter(db, owner, filters.get("device_ids"))
+    if not scoped:
+        return entries, filters, report_render.scope_label_for(filters)
+    kept = [e for e in entries if e["id"] in _sections.SCOPE_SAFE_SECTIONS]
+    if not kept:
+        raise ReportUnavailable("The schedule's owner is limited to a visibility scope and this report has "
+                                "only fleet-wide sections; nothing was generated")
+    omitted = len(entries) - len(kept)
+    scoped_filters = {k: v for k, v in filters.items() if k != "application_id"}
+    scoped_filters["device_ids"] = ids
+    label = "Limited to the owner's visibility scope" + (
+        f" ({omitted} fleet-wide section(s) omitted)" if omitted else "")
+    return kept, scoped_filters, label
+
+
+def _email_logo(sections_mod: Any, meta: dict) -> Optional[tuple[str, bytes, str]]:
+    """(content id, bytes, MIME) of the organisation logo for the email body,
+    PNG/JPEG only (``report_sections.email_logo_attachment``)."""
+    fn = getattr(sections_mod, "email_logo_attachment", None)
+    if fn is None:
+        return None
+    try:
+        logo = fn(meta)
+    except Exception:
+        logger.warning("report email logo unavailable", exc_info=True)
+        return None
+    if not logo:
+        return None
+    cid, data, mime = logo
+    if not cid or not data or mime not in ("image/png", "image/jpeg"):
+        return None
+    return str(cid).strip("<> "), bytes(data), mime
+
+
+def _not_generated(message: str) -> dict:
+    return {"run_id": None, "token": None, "view_url": None,
+            "delivered": [], "errors": [message], "status": "failed"}
+
+
 async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by: str = "scheduled") -> dict:
-    """Render a report for ``schedule`` and email it to its channels.
+    """Render a report for ``schedule`` and deliver it to its channels and
+    direct recipients.
 
-    Returns a summary dict {run_id, token, delivered, errors}. Always records a
-    report_runs row (even on partial delivery) so the share link works.
-    """
+    Returns a summary dict {run_id, token, view_url, delivered, errors,
+    status}. Records a report_runs row (even on partial delivery) so the share
+    link works; a schedule whose template is gone records nothing and fails
+    with a clear error."""
     report_type = schedule["report_type"]
-    period = schedule["period"]
-    fmt = schedule.get("format", "pdf")
-    filters = schedule.get("filters") or {}
+    period = schedule.get("period") or "last_24h"
+    fmt = schedule.get("format") or "pdf"
+    filters = {k: v for k, v in (schedule.get("filters") or {}).items() if k != "netflow_withheld"}
 
-    start, end, plabel = _resolve_period(period, None, None)
+    branding = await load_branding(db)
+    start, end, plabel = report_periods.resolve_period(period, branding.timezone, branding.week_start)
 
+    from app.services import report_render
     from app.services import report_sections as _sections
     is_sections = report_type == "custom" or report_type in _sections.REPORT_PRESETS
-
-    company_row = (await db.execute(
-        text("SELECT value FROM system_settings WHERE key='company'")
-    )).first()
-    company = company_row[0] if company_row and isinstance(company_row[0], dict) else {}
-    company_name = company.get("company_name") or company.get("name") or "ZenPlus"
+    if not is_sections and report_type not in LEGACY_REPORT_TYPES:
+        return _not_generated(f"The report template '{report_type}' is no longer available; nothing was generated")
 
     data = None
     secs: list[dict] = []
     sec_meta: dict = {}
-    scope_error: str | None = None
-    # NetFlow data sees what the schedule's owner may see. A schedule whose
-    # owner is gone or deactivated withholds NetFlow data (it would otherwise
-    # run with the appliance's unrestricted view).
-    owner = None
-    if schedule.get("id"):
-        from app.models.user import User as _User
-        from app.services.netflow_report import ORPHANED_OWNER
-        owner_id = (await db.execute(text(
-            "SELECT created_by FROM report_schedules WHERE id = :id"), {"id": schedule["id"]})).scalar()
-        owner = await db.get(_User, owner_id) if owner_id else None
-        if owner is None or not getattr(owner, "is_active", True):
-            owner = ORPHANED_OWNER
+    # Problems that do not stop delivery but make the run less than a clean success.
+    run_notes: list[str] = []
+    # Data follows the schedule owner's permissions and visibility. A schedule
+    # whose owner is gone or deactivated withholds them (it would otherwise run
+    # with the appliance's unrestricted view).
+    owner = await _schedule_owner(db, schedule)
     # Legacy attachments list alert messages: a NetFlow alert's is withheld
-    # unless the owner has netflow.view (X-01). Decided here, before the run
-    # row is committed (a commit may expire the owner's loaded attributes).
+    # unless the owner has netflow.view (X-01). Everything about the owner is
+    # decided before the run row is committed (a commit may expire the owner's
+    # loaded attributes).
     netflow_withheld = False
     if not is_sections:
         from app.api.v1.netflow.access import VIEW_PERMISSION
@@ -234,13 +563,15 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
 
         netflow_withheld = not (await flow_visibility_for(db, owner)).can(VIEW_PERMISSION)
     if is_sections:
-        # Section-engine report types (availability/performance/traffic/…/custom).
-        custom_id = schedule.get("custom_report_id")
-        preset_title, _desc, section_ids = await _sections.resolve_report(
-            db, "custom" if report_type == "custom" else report_type,
-            str(custom_id) if custom_id else None)
-        title = schedule.get("name") or preset_title
-        if (filters or {}).get("netflow") is not None:
+        try:
+            default_title, description, category, entries = await _template_for(
+                db, report_type, schedule.get("custom_report_id"), owner)
+            entries, filters, scope_label = await _owner_scope(db, owner, entries, filters)
+        except ReportUnavailable as exc:
+            logger.warning("report schedule %s not generated: %s", schedule.get("id"), exc)
+            return _not_generated(str(exc))
+        title = schedule.get("name") or default_title
+        if filters.get("netflow") is not None:
             # A stored scope the API would now reject (saved before
             # validation existed): the run cannot be a clean success.
             from app.api.v1.netflow.common import NetflowError
@@ -251,19 +582,13 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             try:
                 _nfr.scope_from_mapping(filters["netflow"])
             except NetflowError as exc:
-                scope_error = f"NetFlow scope is not valid ({exc.detail}); NetFlow sections were not generated"
-        secs = await _sections.build_sections(db, section_ids, start, end, filters or None,
-                                              requester=owner)
-        cat = (_sections.REPORT_PRESETS.get(report_type) or {}).get("category") or \
-            ("Custom Report" if report_type == "custom" else "")
-        dev_filter = (filters or {}).get("device_ids")
-        scope_bits = [f"{len(dev_filter)} selected device(s)"] if dev_filter else []
-        if (filters or {}).get("netflow"):
-            from app.services import netflow_report
-            scope_bits.append(f"NetFlow: {netflow_report.describe(filters['netflow'])}")
+                run_notes.append(f"NetFlow scope is not valid ({exc.detail}); NetFlow sections were not generated")
+        frm, to = _naive_utc(start), _naive_utc(end)
+        secs = await _sections.build_sections(db, entries, frm, to, filters or None,
+                                              requester=owner, branding=branding)
         sec_meta = await _sections.build_report_meta(
-            db, title, start, end, description=_desc, category=cat,
-            scope_label=" · ".join(scope_bits) if scope_bits else "All monitored infrastructure")
+            db, title, frm, to, description=description, category=category,
+            scope_label=scope_label, branding=branding)
     else:
         # Legacy types: executive dataset drives the universal HTML/email summary.
         data = await build_executive(db, start, end)
@@ -275,16 +600,26 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         "period": period,
         "period_label": plabel,
         "generated_at": datetime.now(timezone.utc),
-        "company_name": company_name,
+        "company_name": branding.display_name,
         "product_name": "ZenPlus",
     }
+    if not is_sections:
+        # Legacy reports carry the same branding as template reports: logo,
+        # colour, footer, disclaimer, window and generated time in the
+        # organisation timezone (report_html reads these keys).
+        legacy_meta = await _sections.build_report_meta(
+            db, title, _naive_utc(start), _naive_utc(end), branding=branding)
+        meta = {**legacy_meta, **meta, "start": start, "end": end,
+                "generated_label": legacy_meta["generated_label"]}
 
     # Persist a shareable HTML artifact.
     token = secrets.token_urlsafe(24)
+    # Rendering is CPU-bound (matplotlib charts, fpdf2, openpyxl): keep it off
+    # the event loop, which also serves API requests on this worker.
     if is_sections:
-        html_page = _sections.render_html(sec_meta, secs)
+        html_page = await asyncio.to_thread(_sections.render_html, sec_meta, secs)
     else:
-        html_page = report_html.build_report_html(meta, data)
+        html_page = await asyncio.to_thread(report_html.build_report_html, meta, data)
     run_row = (await db.execute(
         text("""INSERT INTO report_runs
                 (schedule_id, report_type, period, title, token, html, status, generated_at)
@@ -296,23 +631,32 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
     run_id = str(run_row.id)
     await db.commit()
 
-    base = _base_url(company)
+    base = _base_url(branding)
     view_url = f"{base}/api/v1/reports/shared/{token}" if base else None
 
     # Build the formal attachment.
     attachment = None
     if fmt != "none":
         try:
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-            safe = (meta["title"] or "Report").replace(" ", "-")[:40]
-            if is_sections:
-                # Section reports ship as PDF (excel/csv are legacy-only formats).
+            ext, mime = ATTACHMENT_TYPES.get(fmt) or ("", "")
+            if not ext:
+                raise _AttachmentUnavailable(f"Unknown attachment format '{fmt}'")
+            if fmt == "html":
+                payload = html_page.encode("utf-8")
+            elif is_sections:
                 if fmt == "pdf":
-                    attachment = (f"ZenPlus-{safe}-{ts}.pdf",
-                                  bytes(_sections.render_pdf(sec_meta, secs)), "pdf")
+                    payload = bytes(await asyncio.to_thread(_sections.render_pdf, sec_meta, secs))
+                elif fmt == "excel":
+                    from app.services import report_xlsx
+                    payload = bytes(await asyncio.to_thread(report_xlsx.render_xlsx, sec_meta, secs))
+                else:
+                    raise _AttachmentUnavailable(
+                        f"{FORMAT_NAMES.get(fmt, fmt)} attachments are only available for legacy report "
+                        "types; choose PDF, Excel or HTML")
             else:
-                common = dict(db=db, report_type=report_type, period=period,
-                              from_time=None, to_time=None,
+                legacy_period, legacy_from, legacy_to = _legacy_window(period, start, end)
+                common = dict(db=db, report_type=report_type, period=legacy_period,
+                              from_time=legacy_from, to_time=legacy_to,
                               device_ids=filters.get("device_ids"),
                               group_ids=filters.get("group_ids"),
                               locations=filters.get("locations"),
@@ -320,28 +664,36 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                               redact_netflow=netflow_withheld)
                 if fmt == "excel":
                     payload = await generate_excel_report(**common)
-                    attachment = (f"ZenPlus-{safe}-{ts}.xlsx", bytes(payload),
-                                  "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 elif fmt == "csv":
                     payload = await generate_csv_report(**common)
                     if isinstance(payload, str):
                         payload = payload.encode("utf-8")
-                    attachment = (f"ZenPlus-{safe}-{ts}.csv", bytes(payload), "csv")
                 else:
-                    attachment = (f"ZenPlus-{safe}-{ts}.pdf",
-                                  bytes(await generate_report(**common)), "pdf")
-        except Exception:
+                    payload = await generate_report(**common)
+            attachment = (report_render.report_filename(title, ext, branding), bytes(payload), mime)
+        except _AttachmentUnavailable as exc:
+            run_notes.append(str(exc))
+        except Exception as exc:
             logger.exception("report attachment generation failed (schedule %s)", schedule.get("id"))
-            attachment = None
+            run_notes.append(f"The {FORMAT_NAMES.get(fmt, fmt)} attachment could not be generated "
+                             f"({type(exc).__name__}); the email was sent without it")
 
+    inline_images: list[tuple[str, bytes, str]] = []
+    logo = _email_logo(_sections, sec_meta if is_sections else meta)
+    if logo:
+        inline_images.append(logo)
     if is_sections:
-        email_html = _sections.email_summary_html(sec_meta, secs, view_url,
-                                                  attached=attachment is not None)
+        extra: dict[str, Any] = {"logo_cid": logo[0]} if logo else {}
+        email_html = await asyncio.to_thread(
+            lambda: _sections.email_summary_html(sec_meta, secs, view_url,
+                                                 attached=attachment is not None, **extra))
         email_text = _sections.email_summary_text(sec_meta, secs, view_url)
     else:
-        email_html = report_html.build_report_email_html(meta, data, view_url, attached=attachment is not None)
+        email_meta = {**meta, "logo_cid": logo[0]} if logo else meta
+        email_html = report_html.build_report_email_html(email_meta, data, view_url,
+                                                         attached=attachment is not None)
         email_text = report_html.build_report_email_text(meta, data, view_url)
-    subject = f"[Report] {meta['title']} — {plabel}"
+    subject = email_subject(branding, meta["title"], plabel)
 
     # Compact KPI pairs for non-email channel payloads.
     kpi_pairs: list[tuple[str, str]] = []
@@ -383,7 +735,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                 if not gw:
                     errors.append(f"{ch.name}: no SMTP gateway")
                     continue
-                _send_email_with_attachment(gw, recipients, subject, email_text, email_html, attachment)
+                await asyncio.to_thread(_send_email_with_attachment, gw, recipients, subject, email_text,
+                                        email_html, attachment, inline_images)
                 delivered.append(ch.name)
                 continue
 
@@ -395,7 +748,7 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                 body_msg += f"\n{view_url}"
             ctx = {
                 "subject": subject, "message": body_msg, "body": body_msg,
-                "hostname": company_name, "ip_address": "",
+                "hostname": branding.display_name, "ip_address": "",
                 "status": "REPORT", "severity": "info",
                 "details": kpi_pairs + ([("View report", view_url)] if view_url else []),
                 "triggered_at": datetime.now(timezone.utc).isoformat(),
@@ -421,9 +774,26 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             logger.exception("report delivery to channel %s failed", cid)
             errors.append(f"{cid}: {exc}")
 
-    # No channels linked just means the artifact was generated with nothing to
-    # deliver — that's a success, not a failure.
-    if not channel_ids:
+    # Deliver to the schedule's direct recipients through the default SMTP gateway.
+    direct = [r for r in (str(x).strip().lower() for x in (schedule.get("recipients") or [])) if is_email(r)]
+    direct = list(dict.fromkeys(direct))[:MAX_RECIPIENTS]
+    if direct:
+        try:
+            gw = await _resolve_smtp_gateway(db)
+            if not gw:
+                errors.append(f"{len(direct)} direct recipient(s): no SMTP gateway is configured")
+            else:
+                sent, failed = await asyncio.to_thread(_send_individually, gw, direct, subject, email_text,
+                                                       email_html, attachment, inline_images)
+                delivered.extend(sent)
+                errors.extend(f"{addr}: {err}" for addr, err in failed)
+        except Exception as exc:
+            logger.exception("report delivery to direct recipients failed (schedule %s)", schedule.get("id"))
+            errors.append(f"{len(direct)} direct recipient(s): {_smtp_error(exc)}")
+
+    # No delivery targets just means the artifact was generated with nothing
+    # to deliver — that's a success, not a failure.
+    if not channel_ids and not direct:
         status = "success"
     elif delivered and not errors:
         status = "success"
@@ -431,8 +801,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         status = "partial"
     else:
         status = "failed"
-    if scope_error:
-        errors.append(scope_error)
+    if run_notes:
+        errors.extend(run_notes)
         if status == "success":
             status = "partial"
     await db.execute(
@@ -465,43 +835,73 @@ def _row_to_sched(row) -> dict:
         "day_of_week": row.day_of_week,
         "day_of_month": row.day_of_month,
         "notify_channels": row.notify_channels or [],
+        # Custom (template) schedules render by this id; without it every
+        # timer-fired custom schedule failed and only "Run now" worked.
+        "custom_report_id": getattr(row, "custom_report_id", None),
+        # Direct email recipients (migrate-156); absent before the migration.
+        "recipients": list(getattr(row, "recipients", None) or []),
     }
 
 
+MAX_RUNS_PER_TICK = 100
+
+
 async def run_scheduler_tick(db: AsyncSession) -> dict:
+    """Run every due schedule, one at a time.
+
+    Each schedule is claimed on its own (row lock, next_run_at advanced,
+    marked running, committed) and only then generated: both API workers run
+    this loop, so the claim keeps a slow run from being delivered twice, and
+    claiming one at a time means a worker that dies mid-batch loses at most the
+    run in progress — the other due schedules stay due for either worker."""
     now = datetime.now(timezone.utc)
     tz_name = await get_configured_timezone(db)
-    rows = (await db.execute(
-        text("""SELECT * FROM report_schedules
-                WHERE enabled = TRUE AND next_run_at IS NOT NULL AND next_run_at <= :now
-                FOR UPDATE SKIP LOCKED"""),
-        {"now": now},
-    )).fetchall()
-
     fired: list[str] = []
-    for row in rows:
+    done: list[str] = []
+    while len(done) < MAX_RUNS_PER_TICK:
+        row = (await db.execute(
+            text("""SELECT * FROM report_schedules
+                    WHERE enabled = TRUE AND next_run_at IS NOT NULL AND next_run_at <= :now
+                      AND NOT (id::text = ANY(:done))
+                    ORDER BY next_run_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED"""),
+            {"now": now, "done": done},
+        )).first()
+        if row is None or str(row.id) in done:
+            break
         sched = _row_to_sched(row)
+        done.append(sched["id"])
+        nxt = compute_next_run(sched, tz_name, after=now + timedelta(seconds=1))
+        await db.execute(
+            text("""UPDATE report_schedules
+                    SET last_run_at = :now, next_run_at = :nxt, last_status = 'running',
+                        last_error = NULL, updated_at = NOW()
+                    WHERE id = :id"""),
+            {"now": now, "nxt": nxt, "id": sched["id"]},
+        )
+        await db.commit()
+
         try:
             result = await generate_and_deliver(db, sched)
             last_status = result["status"]
             last_error = "; ".join(result["errors"]) if result["errors"] else None
         except Exception as exc:
             logger.exception("report schedule %s failed", sched["id"])
-            last_status, last_error = "failed", str(exc)
-        nxt = compute_next_run(sched, tz_name, after=now + timedelta(seconds=1))
+            await db.rollback()
+            last_status, last_error = "failed", type(exc).__name__
         await db.execute(
             text("""UPDATE report_schedules
-                    SET last_run_at = :now, last_status = :st, last_error = :err,
-                        next_run_at = :nxt, updated_at = NOW()
+                    SET last_status = :st, last_error = :err, updated_at = NOW()
                     WHERE id = :id"""),
-            {"now": now, "st": last_status, "err": last_error, "nxt": nxt, "id": sched["id"]},
+            {"st": last_status, "err": last_error, "id": sched["id"]},
         )
         await db.commit()
         fired.append(sched["id"])
 
     if fired:
         logger.info("report scheduler tick: fired %d schedule(s)", len(fired))
-    return {"fired": fired, "checked": len(rows)}
+    return {"fired": fired, "checked": len(done)}
 
 
 async def report_scheduler_loop() -> None:

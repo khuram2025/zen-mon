@@ -226,7 +226,7 @@ def module_access(
 
 _POLICIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "devices": (("devices.view",), ("devices.manage",)),
-    "tags": ((ANY_VIEW,), ("devices.manage", "service_checks.manage", "apm.manage")),
+    "tags": ((ANY_VIEW,), ("devices.manage", "service_checks.manage", "servers.manage", "apm.manage")),
     "monitoring_sites": ((ANY_VIEW,), ("devices.manage", "service_checks.manage")),
     "alerts": (("alerts.view",), ("alerts.manage",)),
     "events": (("alerts.view", "devices.view"), ("alerts.manage",)),
@@ -239,6 +239,7 @@ _POLICIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "netflow": (("netflow.view",), ("netflow.manage",)),
     "link_utilization": (("devices.view",), ("devices.manage",)),
     "maps": (("maps.view",), ("maps.manage",)),
+    "servers": (("servers.view",), ("servers.manage",)),
     "apm": (("apm.view",), ("apm.manage",)),
     "udt": (("udt.view",), ("udt.manage",)),
     "netpath": (("netpath.view",), ("netpath.manage",)),

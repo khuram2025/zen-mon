@@ -475,14 +475,14 @@ const systemInfoSetSQL = `
 // upsertSystemInfoSQL also keeps the raw sysDescr evidence ($7, sticky like
 // the other fields) and stamps identity_updated_at on every successful
 // system-info poll, so "last successful inventory" can be told from
-// last_seen. Both columns come from migration 154.
+// last_seen. Both columns come from migration 157.
 const upsertSystemInfoSQL = `
 		UPDATE devices` + systemInfoSetSQL + `,
 		    sys_descr           = COALESCE(NULLIF($7,''), sys_descr),
 		    identity_updated_at = now()
 		WHERE id = $1`
 
-// upsertSystemInfoLegacySQL is the statement from before migration 154. It is
+// upsertSystemInfoLegacySQL is the statement from before migration 157. It is
 // only used while those columns are missing (poller binary running ahead of
 // the schema), so identity writeback keeps working instead of failing whole.
 const upsertSystemInfoLegacySQL = `
@@ -512,7 +512,7 @@ const (
 // values are cut to their column width in SQL (see systemInfoSetSQL), so one
 // over-long value cannot fail the whole identity write.
 //
-// If the schema predates migration 154 (undefined sys_descr or
+// If the schema predates migration 157 (undefined sys_descr or
 // identity_updated_at), the legacy statement is used instead and a warning
 // is printed, so a binary that starts ahead of its migrations still records
 // vendor/model/OS. The current statement is retried every sysInfoLegacyRetry
@@ -543,7 +543,7 @@ func (s *PostgresStore) UpsertSystemInfo(
 }
 
 // isIdentityColumnMissing reports whether err is PostgreSQL's undefined_column
-// (42703) for one of the columns added by migration 154. Any other failure
+// (42703) for one of the columns added by migration 157. Any other failure
 // is not a schema-lag problem and must surface unchanged.
 func isIdentityColumnMissing(err error) bool {
 	var pgErr *pgconn.PgError
@@ -565,9 +565,9 @@ func (s *PostgresStore) noteIdentityColumnsMissing(now time.Time, cause error) {
 	}
 	if s.sysInfoWarnedAt.CompareAndSwap(last, now.UnixNano()) {
 		fmt.Printf("WARN: devices.sys_descr / identity_updated_at are missing (%v): "+
-			"migration 154 (migrate-154-inventory-foundation.sql) has not been applied, so "+
+			"migration 157 (migrate-157-inventory-foundation.sql) has not been applied, so "+
 			"sysDescr is not stored and identity freshness is not stamped. Falling back to "+
-			"the pre-154 statement. Do not apply migration 154 to the running appliance: it "+
+			"the pre-157 statement. Do not apply migration 157 to the running appliance: it "+
 			"locks the devices table while it runs and stalls this poller. Finish the update "+
 			"with services stopped, or run scripts/sync-schema.py in a maintenance window.\n", cause)
 	}

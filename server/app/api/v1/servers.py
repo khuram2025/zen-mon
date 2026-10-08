@@ -518,7 +518,7 @@ async def servers_latest_metrics(
 async def bulk_server_action(
     data: ServerBulkAction,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     if not data.server_ids:
         raise HTTPException(400, "server_ids required")
@@ -607,7 +607,7 @@ async def bulk_server_action(
 async def create_server(
     data: ServerCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     row = (await db.execute(
         text("""INSERT INTO servers (display_name, hostname, fqdn, primary_ip, site_id, device_id,
@@ -671,7 +671,7 @@ async def update_server(
     server_id: UUID,
     data: ServerUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     sets = []
     params: dict[str, Any] = {"id": server_id}
@@ -710,7 +710,7 @@ async def update_server(
 async def delete_server(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     # Revoke every host/APM credential while the agent-to-key provenance still
     # exists. The server FK is ON DELETE SET NULL, so relying on the server
@@ -736,7 +736,7 @@ async def delete_server(
 async def decommission_server(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     await db.execute(
         text("UPDATE servers SET status = 'disabled', updated_at = NOW() WHERE id = :id"),
@@ -1074,7 +1074,7 @@ async def server_compliance(
 async def server_evaluate_baselines(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     from app.services.baseline_service import evaluate_server
     summary = await evaluate_server(db, str(server_id))
@@ -1296,7 +1296,7 @@ async def start_network_capture(
     server_id: UUID,
     data: NetworkCaptureStart,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Queue a capture on this server's agent."""
     interface = data.interface.strip() if data.interface else None
@@ -1406,7 +1406,7 @@ async def list_network_captures(
 async def archive_network_capture(
     capture_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Retain a capture until an operator unarchives or purges it."""
     row = (await db.execute(
@@ -1443,7 +1443,7 @@ async def archive_network_capture(
 async def unarchive_network_capture(
     capture_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Resume normal retention, granting a fresh window if already terminal."""
     row = (await db.execute(
@@ -1496,7 +1496,7 @@ async def unarchive_network_capture(
 async def purge_network_capture(
     capture_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Permanently remove one terminal capture and all of its flow data."""
     row = (await db.execute(
@@ -1545,7 +1545,7 @@ async def purge_network_capture(
 async def cancel_network_capture(
     capture_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Idempotently stop an active capture on the host agent."""
     capture = (await db.execute(
@@ -2072,7 +2072,7 @@ async def server_install_token(
     request: Request,
     data: Optional[InstallTokenCreate] = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     server_row = (await db.execute(
         text("SELECT site_id, hostname FROM servers WHERE id = :id"),
@@ -2130,7 +2130,7 @@ async def standalone_install_token(
     request: Request,
     data: InstallTokenCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Generate an install token not bound to an existing server.
 
@@ -2271,7 +2271,7 @@ async def list_enrollment_tokens(
 async def revoke_enrollment_token(
     token_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     res = await db.execute(
         text("""UPDATE agent_enrollment_tokens SET revoked_at = NOW()
@@ -2315,7 +2315,7 @@ async def list_policies(
 async def create_policy(
     data: AgentPolicyCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     row = (await db.execute(
         text("""INSERT INTO agent_policies
@@ -2372,7 +2372,7 @@ async def update_policy(
     policy_id: UUID,
     data: AgentPolicyUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     sets = []
     params: dict[str, Any] = {"id": policy_id}
@@ -2405,7 +2405,7 @@ async def update_policy(
 async def delete_policy(
     policy_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     row = (await db.execute(
         text("SELECT is_builtin FROM agent_policies WHERE id = :id"),
@@ -2710,7 +2710,7 @@ async def list_agent_packages(
 @fleet_router.post("/packages/publish")
 async def publish_agent_packages(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Force a re-scan of the on-disk package store.
 
@@ -2756,7 +2756,7 @@ async def download_preconfigured_package(
     data: AgentPackageDownloadRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Stream the immutable package without creating an enrollment secret."""
     from app.api.v1.agents import (
@@ -2855,7 +2855,7 @@ async def get_agent(
 async def authorize_agent(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     conflict = (await db.execute(
         text("SELECT pending_conflict_secret_hash FROM agents WHERE id = :id"),
@@ -2878,7 +2878,7 @@ async def decide_pending_clone(
     agent_id: UUID,
     data: AgentCloneDecision,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Reinstall-or-block outcome for a pending cloned installation.
 
@@ -2970,7 +2970,7 @@ async def resolve_registration_conflict(
     agent_id: UUID,
     data: AgentRegistrationConflictResolve,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Apply an administrator-reviewed outcome to a conflicting installation.
 
@@ -3219,7 +3219,7 @@ async def resolve_registration_conflict(
 async def revoke_agent(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     affected = await _revoke_agents([agent_id], user.id, db)
     await db.commit()
@@ -3233,7 +3233,7 @@ async def revoke_agent(
 async def rotate_certificate(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     await db.execute(
         text("""INSERT INTO agent_commands (agent_id, command, requested_by)
@@ -3248,7 +3248,7 @@ async def rotate_certificate(
 async def request_diagnostics(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     row = (await db.execute(
         text("""INSERT INTO agent_commands (agent_id, command, requested_by)
@@ -3282,7 +3282,7 @@ async def queue_agent_command(
     agent_id: UUID,
     command: str,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     if command not in AGENT_ON_DEMAND_COMMANDS:
         raise HTTPException(
@@ -3325,7 +3325,7 @@ async def set_update_ring(
     agent_id: UUID,
     ring: str = Query(..., regex="^(canary|beta|stable|pinned)$"),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     await db.execute(
         text("UPDATE agents SET update_ring = :r, updated_at = NOW() WHERE id = :id"),
@@ -3339,7 +3339,7 @@ async def set_update_ring(
 async def delete_agent(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     """Remove an agent record (offline leftovers, decommissioned hosts).
 
@@ -3425,7 +3425,7 @@ async def _queue_profile_change(
 async def fleet_bulk_action(
     data: AgentBulkAction,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     if not data.agent_ids:
         return {"ok": True, "affected": 0}
@@ -3709,7 +3709,7 @@ async def _insert_rules(db: AsyncSession, baseline_id: str, rules) -> None:
 async def create_baseline(
     data: BaselineCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     dup = (await db.execute(
         text("SELECT 1 FROM software_baselines WHERE name = :n"), {"n": data.name},
@@ -3749,7 +3749,7 @@ async def update_baseline(
     baseline_id: UUID,
     data: BaselineUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     sets, params = [], {"id": baseline_id}
     for field in ("name", "description", "enabled", "alerting"):
@@ -3793,7 +3793,7 @@ async def update_baseline(
 async def delete_baseline(
     baseline_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     res = await db.execute(
         text("DELETE FROM software_baselines WHERE id = :id"), {"id": baseline_id},
@@ -3814,7 +3814,7 @@ async def delete_baseline(
 async def evaluate_baseline_now(
     baseline_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("apm.manage")),
+    user: User = Depends(require_permission("servers.manage")),
 ):
     from app.services.baseline_service import evaluate_baseline
     n = await evaluate_baseline(db, str(baseline_id))

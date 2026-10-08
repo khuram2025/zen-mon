@@ -771,7 +771,7 @@ async def test_T8_a_real_change_writes_exactly_one_event_per_asset(inv_db):
 @pytest.mark.asyncio
 async def test_T8_a_real_change_in_the_same_tick_as_a_revision_bump_is_absorbed_and_the_next_one_recorded(
         inv_db, monkeypatch):
-    """Contract C1 (migration 154): the capture trigger fires only under an unchanged values_rev.
+    """Contract C1 (migration 157): the capture trigger fires only under an unchanged values_rev.
     A genuine change that lands in the very write that moves the revision cannot be told from the
     new pack re-rendering the old data, and a false event is worse than a missing one, so it is
     absorbed (this test used to expect the event). The row is current, and history resumes."""
@@ -1620,7 +1620,7 @@ async def test_CS3_a_software_walk_that_runs_out_of_batches_resumes_where_it_sto
 
 @pytest.mark.asyncio
 async def test_CS1_unsourced_software_on_a_non_windows_server_is_left_unkeyed_for_the_next_upload(inv_db):
-    """Rows migration 154 leaves have no source. Without one a dpkg/rpm package name is keyed as a
+    """Rows migration 157 leaves have no source. Without one a dpkg/rpm package name is keyed as a
     generic title and stamped clean, and nothing would ever correct it."""
     win = add_server(inv_db, "legacy-win", os_type="windows")
     lin = add_server(inv_db, "legacy-lin", os_type="linux")

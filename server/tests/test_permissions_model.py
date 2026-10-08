@@ -107,8 +107,9 @@ def test_builtin_roles_hold_everything_their_permissions_imply():
 
 def test_builtin_definition_version_covers_the_inventory_permissions():
     # Built-in rows are rewritten at startup only when the code version is newer than
-    # the persisted one; v3 shipped before any inventory.* permission existed.
-    assert BUILTIN_ROLE_DEFINITION_VERSION >= 4
+    # the persisted one; v4 (servers.* split, team roles) shipped before any inventory.*
+    # permission existed, so the inventory grants need at least v5.
+    assert BUILTIN_ROLE_DEFINITION_VERSION >= 5
 
 
 def test_roles_catalog_endpoint_lists_inventory(client, as_admin):
@@ -141,7 +142,9 @@ class _Result:
 
 class _RolesDB:
     """In-memory ``roles`` / ``role_history`` that interprets only the statements
-    ``reconcile_builtin_roles`` issues, honouring its ``AND is_system`` filter."""
+    ``reconcile_builtin_roles`` issues. Like the real statement it returns every row with
+    that name and reports ``is_system`` as the fourth column; the function itself skips
+    custom roles."""
 
     def __init__(self, roles):
         self.roles = roles
@@ -153,10 +156,10 @@ class _RolesDB:
         if sql.startswith("SELECT pg_advisory_xact_lock"):
             return _Result()
         if sql.startswith("SELECT id, permissions"):
-            system_only = "AND is_system" in sql
             for r in self.roles:
-                if r["name"] == p["n"] and (r["is_system"] or not system_only):
-                    return _Result(_Row(r["id"], r["permissions"], r["definition_version"] or 0))
+                if r["name"] == p["n"]:
+                    return _Result(_Row(r["id"], r["permissions"], r["definition_version"] or 0,
+                                        r["is_system"]))
             return _Result()
         if sql.startswith("UPDATE roles SET"):
             target = next(r for r in self.roles if r["id"] == p["id"])
@@ -175,18 +178,19 @@ class _RolesDB:
         raise AssertionError("reconciliation rolled back")
 
 
-def _roles_at_definition_v3():
-    """Built-in rows as persisted by release 1.23.33 (no inventory.* anywhere), plus
-    custom roles that hold hand-picked permissions."""
+def _roles_at_definition_v4():
+    """Built-in rows as persisted by release 1.23.35 (definition version 4: the servers.*
+    split and the four team roles, no inventory.* anywhere), plus custom roles that hold
+    hand-picked permissions."""
     rows = [
-        {"id": i, "name": name, "is_system": True, "definition_version": 3, "revision": 7,
+        {"id": i, "name": name, "is_system": True, "definition_version": 4, "revision": 7,
          "permissions": sorted(p for p in perms if not p.startswith("inventory."))}
         for i, (name, perms) in enumerate(BUILTIN_ROLE_DEFINITIONS.items(), start=1)
     ]
     rows += [
         {"id": 100, "name": "helpdesk", "is_system": False, "definition_version": None, "revision": 3,
          "permissions": ["alerts.view", "devices.view", "apm.view"]},
-        {"id": 101, "name": "net-managers", "is_system": False, "definition_version": 3, "revision": 1,
+        {"id": 101, "name": "net-managers", "is_system": False, "definition_version": 4, "revision": 1,
          "permissions": ["devices.view", "devices.manage", "reports.export"]},
     ]
     return rows
@@ -194,24 +198,29 @@ def _roles_at_definition_v3():
 
 @pytest.mark.asyncio
 async def test_reconcile_gives_builtins_inventory_but_never_custom_roles():
-    db = _RolesDB(_roles_at_definition_v3())
+    db = _RolesDB(_roles_at_definition_v4())
     custom_before = {r["name"]: dict(r) for r in db.roles if not r["is_system"]}
 
     changed = await reconcile_builtin_roles(db)
 
     added = {c["role"]: c["added"] for c in changed}
+    # The reconcile also re-stamps the team roles (their rows are below the new version) but
+    # they gain nothing: inventory.* is deliberately not part of any team role yet.
     assert added == {
         "admin": sorted(INVENTORY_PERMS),
         "operator": sorted(INVENTORY_PERMS),
         "viewer": ["inventory.view"],
         "read_only": ["inventory.view"],
+        "network_team": [], "systems_team": [], "application_team": [], "security_team": [],
     }
     assert all(c["removed"] == [] for c in changed)
     by_name = {r["name"]: r for r in db.roles}
-    for name in ("admin", "operator", "viewer", "read_only"):
+    for name in BUILTIN_ROLE_DEFINITIONS:
         assert set(by_name[name]["permissions"]) == set(BUILTIN_ROLE_DEFINITIONS[name]), name
         assert by_name[name]["definition_version"] == BUILTIN_ROLE_DEFINITION_VERSION
         assert by_name[name]["revision"] == 8
+    for name in ("network_team", "systems_team", "application_team", "security_team"):
+        assert not set(INVENTORY_PERMS) & set(by_name[name]["permissions"]), name
     # custom roles: permissions, version and revision are byte-for-byte what they were
     for name, before in custom_before.items():
         assert by_name[name] == before, name
@@ -223,9 +232,55 @@ async def test_reconcile_gives_builtins_inventory_but_never_custom_roles():
 
 @pytest.mark.asyncio
 async def test_reconcile_is_a_noop_once_rows_are_at_the_current_version():
-    db = _RolesDB(_roles_at_definition_v3())
+    db = _RolesDB(_roles_at_definition_v4())
     assert await reconcile_builtin_roles(db)
     snapshot = json.dumps(db.roles, sort_keys=True)
     history = len(db.history)
     assert await reconcile_builtin_roles(db) == []
     assert json.dumps(db.roles, sort_keys=True) == snapshot and len(db.history) == history
+
+# ── team roles and the Servers / APM split (migrate-154) ────────────────────
+
+from app.core.permissions import BUILTIN_ROLE_META, MODULE_AREAS, PERMISSION_MODULES  # noqa: E402
+
+TEAM_ROLES = ("network_team", "systems_team", "application_team", "security_team")
+
+
+def test_servers_and_apm_are_separate_modules():
+    modules = {m["module"]: m for m in catalog()}
+    assert {p["id"] for p in modules["servers"]["permissions"]} == {"servers.view", "servers.manage"}
+    assert {p["id"] for p in modules["apm"]["permissions"]} == {"apm.view", "apm.manage"}
+    assert PERMISSION_IMPLIES["servers.manage"] == ["servers.view"]
+
+
+def test_every_module_has_an_area():
+    assert set(MODULE_AREAS) == {m for m, _l, _p in PERMISSION_MODULES}
+    assert all(m["area"] for m in catalog())
+
+
+def test_existing_builtins_keep_server_access_after_the_split():
+    for name in ("operator", "viewer", "read_only"):
+        perms = set(BUILTIN_ROLE_DEFINITIONS[name])
+        assert "servers.view" in perms, name
+        assert ("apm.manage" in perms) == ("servers.manage" in perms), name
+
+
+def test_team_roles_are_built_in_described_and_reserved():
+    for name in TEAM_ROLES:
+        assert name in BUILTIN_ROLE_DEFINITIONS and name in BUILTIN_ROLE_META and name in RESERVED_ROLE_NAMES
+        perms = set(BUILTIN_ROLE_DEFINITIONS[name])
+        assert "dashboard.view" in perms
+        # Team roles never change who can do what.
+        assert not perms & {"users.manage", "roles.manage", "settings.manage", SUPERUSER_PERMISSION}, name
+        for p in perms:
+            assert set(PERMISSION_IMPLIES.get(p, [])) <= perms, (name, p)
+
+
+def test_application_and_systems_teams_are_separated():
+    app_team = set(BUILTIN_ROLE_DEFINITIONS["application_team"])
+    sys_team = set(BUILTIN_ROLE_DEFINITIONS["systems_team"])
+    net_team = set(BUILTIN_ROLE_DEFINITIONS["network_team"])
+    assert {"apm.view", "apm.manage"} <= app_team and not app_team & {"servers.view", "servers.manage"}
+    assert {"servers.view", "servers.manage"} <= sys_team and not sys_team & {"apm.view", "apm.manage"}
+    assert not net_team & {"servers.view", "apm.view"}
+    assert not (app_team | sys_team) & {"devices.view", "netflow.view", "ncm.view", "udt.view"}

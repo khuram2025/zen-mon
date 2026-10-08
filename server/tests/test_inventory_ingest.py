@@ -8,7 +8,7 @@ Two layers:
   degradation, planning failures and the snapshot ordering statements.
 * Database tests run the real ``_upsert_inventory`` through an AsyncSession on
   the private PostgreSQL cluster from ``pg_fixture`` (never the appliance
-  database), with migration 154's triggers live: first snapshot without events,
+  database), with migration 157's triggers live: first snapshot without events,
   a diff snapshot with exactly three, capped lists that prune only what the cut
   cannot hide, same name duplicates that do not flap, version gaps, rule-pack
   revision bumps, out-of-order snapshots, the per-server change budget, hostile

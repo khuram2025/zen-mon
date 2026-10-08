@@ -16,6 +16,7 @@ import { toast } from '@/components/ui/Toast'
 import { useCan } from '@/stores/auth'
 import { RoleEditorDialog } from './RoleEditorDialog'
 import { RoleViewDialog } from './RoleViewDialog'
+import { ScopeChips } from './MenuPreview'
 
 type Dependencies = { users: number; provider_references: { provider_label: string; kind: string; match: string }[] }
 
@@ -45,7 +46,7 @@ export function RolesSection() {
   function openEdit(r: Role) { setEditing(r); setTemplate(null); setEditorOpen(true) }
 
   const custom = (roles || []).filter((r) => !r.is_system).length
-  const colSpan = canManage ? 6 : 5
+  const colSpan = canManage ? 7 : 6
 
   // Keep the dialog's role in step with the list after a save (revision!).
   const fresh = (r: Role | null) => (r && roles?.find((x) => x.id === r.id)) || r
@@ -55,7 +56,7 @@ export function RolesSection() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs text-muted">
           {roles && <>{roles.length} roles · {custom} custom. </>}
-          Built-in roles are read-only; duplicate one to start a custom role. You can only grant permissions you hold yourself.
+          Built-in roles (including the Network, Systems, Application and Security team roles) are read-only; start a new role from one to change its access or limit it to tagged resources. You can only grant permissions you hold yourself.
         </p>
         {canManage && (
           <Button onClick={() => openCreate()} disabled={!catalog} title={!catalog ? 'The permission catalog has not loaded' : undefined}>
@@ -80,6 +81,7 @@ export function RolesSection() {
                   <Th>Role</Th>
                   <Th>Description</Th>
                   <Th>Access</Th>
+                  <Th>Visibility</Th>
                   <Th className="text-right">Users</Th>
                   <Th>Type</Th>
                   {canManage && <Th className="w-28 text-right">Actions</Th>}
@@ -119,16 +121,20 @@ export function RolesSection() {
                           </div>
                         )}
                       </Td>
+                      <Td>{full ? <span className="text-xs text-muted">Everything</span> : <ScopeChips tags={r.scope_tags} max={3} />}</Td>
                       <Td className="text-right text-sm tabular-nums">{r.user_count}</Td>
                       <Td>
-                        {r.is_system
-                          ? <Badge variant="outline"><Lock className="h-3 w-3" /> Built-in</Badge>
-                          : <Badge variant="info">Custom</Badge>}
+                        <div className="flex gap-1 whitespace-nowrap">
+                          {r.is_system
+                            ? <Badge variant="outline"><Lock className="h-3 w-3" /> Built-in</Badge>
+                            : <Badge variant="info">Custom</Badge>}
+                          {r.is_system && r.name.endsWith('_team') && <Badge variant="outline">Team</Badge>}
+                        </div>
                       </Td>
                       {canManage && (
                         <Td onClick={(e) => e.stopPropagation()}>
                           <div className="flex justify-end gap-0.5">
-                            <Button variant="ghost" size="icon" className="h-7 w-7" title="Duplicate" aria-label={`Duplicate ${r.display_name}`} onClick={() => openCreate(r)} disabled={!catalog}><Copy className="h-3.5 w-3.5" /></Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7" title={r.is_system ? 'New role from this one' : 'Duplicate'} aria-label={`Duplicate ${r.display_name}`} onClick={() => openCreate(r)} disabled={!catalog}><Copy className="h-3.5 w-3.5" /></Button>
                             <Button variant="ghost" size="icon" className="h-7 w-7" title={r.is_system ? 'Built-in roles cannot be edited' : 'Edit'} aria-label={`Edit ${r.display_name}`} disabled={r.is_system || !catalog} onClick={() => openEdit(r)}><Pencil className="h-3.5 w-3.5" /></Button>
                             <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
                               title={r.is_system ? 'Built-in roles cannot be deleted' : r.user_count ? 'Reassign its users first' : 'Delete'}
@@ -157,6 +163,7 @@ export function RolesSection() {
         role={fresh(editing)}
         template={template}
         catalog={catalog}
+        roles={roles}
       />
 
       <RoleViewDialog

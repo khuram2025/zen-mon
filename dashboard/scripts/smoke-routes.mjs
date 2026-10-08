@@ -42,11 +42,14 @@ for (const parentMatch of app.matchAll(/<Route\s+path="([^"]+)"[\s\S]*?<\/Route>
   }
 }
 
-if (app.includes('path="reports"')) {
-  for (const child of ['executive', 'technical', 'business', 'inventory']) {
-    if (app.includes(`path="${child}"`)) {
-      routePaths.add(`/reports/${child}`)
-    }
+// The generic pass above pairs a child with the nearest earlier <Route path>,
+// which is wrong for /reports (its children are self-closing). Read the
+// reports block itself: the library, viewer, designer, schedules and the
+// legacy persona paths that now redirect to their templates.
+const reportsBlock = /<Route\s+path="reports"\s*>([\s\S]*?)<\/Route>/.exec(app)
+if (reportsBlock) {
+  for (const child of reportsBlock[1].matchAll(/<Route\s+path="([^"]+)"/g)) {
+    routePaths.add(`/reports/${child[1]}`)
   }
 }
 
@@ -74,6 +77,10 @@ const requiredRoutes = [
   '/reports/technical',
   '/reports/business',
   '/reports/inventory',
+  '/reports/apm',
+  '/reports/view/:key',
+  '/reports/builder',
+  '/reports/schedules',
   '/users',
   '/channels',
   '/notifications',

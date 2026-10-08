@@ -119,7 +119,7 @@ Clicking "6 stale" opens Assets filtered `freshness=stale`.
 | **Numbers** | `tabular-nums`; `fmtCount`; versions, builds and serials in `font-mono text-xs`; percentages to one decimal place |
 | **Color** | Series use `CATEGORICAL` (`pages/dashboards/shared.tsx`). Status tokens are reserved for state (freshness, health, and lifecycle stage in P4). Color is never the only signal: every slice also has a text label or legend count |
 | **Export** | `ExportCsvButton` on every table, shown only when `useCan('inventory.export')`. It calls the server-side `/inventory/export` with the current filters (full result, not just the page), and a toast reads "Export started — 2,410 rows" |
-| **Links to existing pages** | Asset names link to `/servers/:id` or `/devices/:id` only if the user holds `apm.view` / `devices.view`; otherwise plain text with a tooltip |
+| **Links to existing pages** | Asset names link to `/servers/:id` or `/devices/:id` only if the user holds `servers.view` / `devices.view`; otherwise plain text with a tooltip |
 | **Charts** | Recharts, `chartTooltipStyle`, a faint grid. Every chart has a **"View as table"** toggle (accessibility, and copying numbers) |
 | **Density** | 13 px table text, row height 36 px, sticky table headers, 50 rows per page by default (`PAGE_SIZES`) |
 

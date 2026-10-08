@@ -24,30 +24,6 @@ export function isElevated(risk: PermissionRisk) {
   return risk === 'privileged' || risk === 'critical'
 }
 
-/** Add a permission together with the ones it depends on (view for manage, …). */
-export function withImplied(catalog: Catalog | undefined, granted: Set<string>, id: string): Set<string> {
-  const next = new Set(granted)
-  const byId = new Map<string, string[]>()
-  for (const m of catalog?.modules || []) for (const p of m.permissions) byId.set(p.id, p.implies || [])
-  const stack = [id]
-  while (stack.length) {
-    const cur = stack.pop()!
-    if (next.has(cur) && cur !== id) continue
-    next.add(cur)
-    for (const dep of byId.get(cur) || []) if (!next.has(dep)) stack.push(dep)
-  }
-  return next
-}
-
-/** Permissions that depend on `id` and are currently granted (removing `id` would orphan them). */
-export function dependentsOf(catalog: Catalog | undefined, granted: Set<string>, id: string): string[] {
-  const out: string[] = []
-  for (const m of catalog?.modules || []) {
-    for (const p of m.permissions) if (granted.has(p.id) && (p.implies || []).includes(id)) out.push(p.id)
-  }
-  return out
-}
-
 export type ApiFailure = {
   kind: 'forbidden' | 'conflict' | 'validation' | 'network' | 'timeout' | 'server' | 'unknown'
   status?: number

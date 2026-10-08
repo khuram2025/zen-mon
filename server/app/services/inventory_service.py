@@ -45,7 +45,7 @@ cycle with it, so:
 
 Change history
 --------------
-The normaliser writes ``inventory_identity``; the migration-154 trigger on that
+The normaliser writes ``inventory_identity``; the migration-157 trigger on that
 table turns a real OS/firmware/serial/model change into an event. A false event
 is worse than a missing one (history cannot be corrected afterwards), so:
 
@@ -609,7 +609,7 @@ DELETE FROM inventory_identity
 # SOFTWARE_IDLE_RECHECK_S).
 #
 # A row without a source on a server that is not a Windows machine is never selected.
-# Rows from before migration 154 have no source, and only the Windows agent has ever
+# Rows from before migration 157 have no source, and only the Windows agent has ever
 # produced software rows, so in practice those are Windows rows. On any other OS a NULL
 # source would be keyed as a generic package title (dpkg/rpm names need their source to
 # be read as identifiers) and stamped clean; leaving it unkeyed lets the next upload,

@@ -138,7 +138,7 @@ def change_pct(cur: float | None, prev: float | None) -> float | None:
 
 
 def _aware(dt: datetime) -> datetime:
-    # The report engine hands over UTC (the period label says UTC); naive = UTC.
+    # The report engine hands over UTC instants; naive = UTC.
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
@@ -148,8 +148,39 @@ def _iso(dt: datetime | None) -> str | None:
     return _aware(dt).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _label_time(dt: datetime | None) -> str:
-    return "—" if dt is None else _aware(dt).strftime("%Y-%m-%d %H:%M UTC")
+def _label_time(dt: datetime | None, branding: Any = None) -> str:
+    """A human timestamp in the organisation's time zone, date and time format
+    with its zone label ('2026-10-07 14:05 GMT+3'); UTC without branding."""
+    if dt is None:
+        return "—"
+    if branding is not None:
+        try:
+            return branding.fmt_datetime(_aware(dt), with_tz=True)
+        except Exception:
+            logger.debug("netflow report: branding time format failed", exc_info=True)
+    return _aware(dt).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _ctx_branding(ctx) -> Any:
+    """The report's organisation branding (SectionCtx._brand(): the loaded
+    branding, or the defaults)."""
+    brand = getattr(ctx, "_brand", None)
+    if callable(brand):
+        try:
+            return brand()
+        except Exception:
+            return None
+    return getattr(ctx, "branding", None)
+
+
+def _ctx_tz(ctx) -> str:
+    return getattr(_ctx_branding(ctx), "timezone", None) or "UTC"
+
+
+def _point_time(ctx, dt: datetime) -> str | None:
+    """Chart point timestamp: aware UTC ISO-8601 with 'Z'."""
+    iso = getattr(ctx, "iso", None)
+    return iso(dt) if callable(iso) else _iso(dt)
 
 
 def _section(id: str, title: str, **parts: Any) -> dict:
@@ -172,6 +203,8 @@ class NfScope:
     scope: dict
     label: str
     notes: list[str] = field(default_factory=list)
+    # Organisation branding: every human timestamp is in its time zone.
+    branding: Any = None
 
 
 def describe(scope: Mapping | None) -> str:
@@ -243,7 +276,8 @@ async def resolve_scope(ctx) -> NfScope:
             else:
                 notes.append(f"Restricted to the {n} flow exporter{'s' if n != 1 else ''} the report's "
                              "requester may see (tag scope).")
-        nf = NfScope(f=f, vis=vis, win=win, scope=scope, label=describe(scope), notes=notes)
+        nf = NfScope(f=f, vis=vis, win=win, scope=scope, label=describe(scope), notes=notes,
+                     branding=_ctx_branding(ctx))
     except ScopeError as exc:
         ctx._cache[key] = exc
         raise
@@ -255,12 +289,12 @@ def _blocked(section_id: str, title: str, message: str, **parts) -> dict:
     return _section(section_id, title, notes=[message], **parts)
 
 
-def _plan_notes(plan) -> list[str]:
+def _plan_notes(plan, branding: Any = None) -> list[str]:
     notes = []
     for code, message in plan.warnings:
         if code in ("raw_retention", "rollup_retention"):
-            notes.append(message + f" (data from {_label_time(plan.effective_from)} to "
-                         f"{_label_time(plan.effective_to)}).")
+            notes.append(message + f" (data from {_label_time(plan.effective_from, branding)} to "
+                         f"{_label_time(plan.effective_to, branding)}).")
     return notes
 
 
@@ -288,9 +322,11 @@ class Totals:
         return self.bytes * 8 / self.seconds
 
 
-async def totals(win: Window, f: FlowFilter, vis: FlowVisibility, *, label: str = "report-totals") -> Totals:
+async def totals(win: Window, f: FlowFilter, vis: FlowVisibility, *, label: str = "report-totals",
+                 branding: Any = None) -> Totals:
     """Bytes/packets/flows over the window (hybrid: rollup hours + raw edges).
-    ``bytes`` is None when no retained table covers any of the window."""
+    ``bytes`` is None when no retained table covers any of the window.
+    ``branding`` formats the retention notes' timestamps."""
     plan = await plan_source(win, f, rollup=CONVERSATIONS_1H, record=False)
     sub, params = plan.from_sql({"b": "bytes", "p": "packets", "n": ("flows", "toUInt64(1)")}, f, vis)
     res = await run_query(f"SELECT sum(b), sum(p), sum(n) FROM {sub} AS src", params,
@@ -299,9 +335,9 @@ async def totals(win: Window, f: FlowFilter, vis: FlowVisibility, *, label: str 
     seconds = max(0.0, (plan.effective_to - plan.effective_from).total_seconds())
     if plan.empty:
         return Totals(None, None, None, 0.0, plan.source, plan.effective_from, plan.effective_to,
-                      _plan_notes(plan) or ["No retained flow data covers this period."])
+                      _plan_notes(plan, branding) or ["No retained flow data covers this period."])
     return Totals(int(row[0] or 0), int(row[1] or 0), int(row[2] or 0), seconds, plan.source,
-                  plan.effective_from, plan.effective_to, _plan_notes(plan))
+                  plan.effective_from, plan.effective_to, _plan_notes(plan, branding))
 
 
 async def ranked(win: Window, f: FlowFilter, vis: FlowVisibility, key: str | tuple[str, str], *,
@@ -351,7 +387,7 @@ async def sec_traffic_kpis(ctx) -> dict:
         nf = await resolve_scope(ctx)
     except ScopeError as exc:
         return _blocked(sid, title, str(exc))
-    t = await totals(nf.win, nf.f, nf.vis)
+    t = await totals(nf.win, nf.f, nf.vis, branding=nf.branding)
     unknown = t.bytes is None
     kpis = [
         {"label": "Total volume", "value": fmt_bytes(t.bytes), "accent": "primary",
@@ -379,32 +415,75 @@ def _span_text(seconds: float) -> str:
 _BUCKETS = {"5 MINUTE": 300, "30 MINUTE": 1800, "2 HOUR": 7200, "1 DAY": 86400}
 
 
-async def trend_series(win: Window, f: FlowFilter, vis: FlowVisibility, bucket: str) -> tuple[list, list, list[str]]:
+def _local_buckets(tz: str, secs: int) -> bool:
+    """Whether buckets of this width follow the organisation's local day.
+    Hour-and-longer buckets do (a "day" starts at local midnight, as ClickHouse
+    counts hours from local midnight); minute buckets are identical in every
+    whole- or half-hour zone and stay on UTC."""
+    return secs >= 3600 and tz not in ("UTC", "Etc/UTC")
+
+
+def _bucket_starts(frm: datetime, to: datetime, secs: int, tz: str) -> list[datetime]:
+    """Aware-UTC starts of every bucket overlapping [frm, to). Local buckets
+    step through wall-clock time, so a DST day keeps local-midnight days."""
+    if not _local_buckets(tz, secs):
+        out, cursor = [], floor_to(frm, secs)
+        while cursor < to:
+            out.append(cursor)
+            cursor = cursor + timedelta(seconds=secs)
+        return out
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(tz)
+    local = _aware(frm).astimezone(zone).replace(tzinfo=None)
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    step = timedelta(seconds=secs)
+    wall = midnight if secs >= 86400 else midnight + step * int((local - midnight) / step)
+    out = []
+    while True:
+        start = wall.replace(tzinfo=zone).astimezone(timezone.utc)
+        if start >= to:
+            return out
+        out.append(start)
+        nxt = wall + step
+        if secs < 86400 and nxt.date() != wall.date():
+            nxt = nxt.replace(hour=0, minute=0)   # ClickHouse restarts hour buckets at midnight
+        wall = nxt
+
+
+async def trend_series(win: Window, f: FlowFilter, vis: FlowVisibility, bucket: str, *,
+                       tz: str = "UTC", branding: Any = None) -> tuple[list, list, list[str]]:
     """[(bucket start, bps | None)] over the window. A bucket in which no
     exporter in scope delivered anything is a gap (None), not zero; partial
-    buckets at the edges are divided by the seconds they actually cover."""
+    buckets at the edges are divided by the seconds they actually cover.
+    Hour and day buckets start at the organisation's local midnight (``tz``)."""
     secs = _BUCKETS[bucket]
+    local = _local_buckets(tz, secs)
     rollup = TRAFFIC_5M if secs < 3600 else CONVERSATIONS_1H
     plan = await plan_source(win, f, rollup=rollup, record=False, min_rollup_span=timedelta(0))
     sub, params = plan.from_sql({"t": "timestamp", "b": "bytes"}, f, vis)
+    zone_sql = "%(nf_trend_tz)s" if local else "'UTC'"
+    if local:
+        params["nf_trend_tz"] = tz
     res = await run_query(
-        f"SELECT toStartOfInterval(t, INTERVAL {bucket}, 'UTC') AS k, sum(b) FROM {sub} AS src "
+        f"SELECT toStartOfInterval(t, INTERVAL {bucket}, {zone_sql}) AS k, sum(b) FROM {sub} AS src "
         "GROUP BY k ORDER BY k", params, budget_s=REPORT_BUDGET_S, label="report-trend")
     volume = {_aware(r[0]): int(r[1] or 0) for r in res.result_rows}
     ef = FlowFilter(exporter=f.exporter or (f.iface.exporter if f.iface else None), count=f.count,
                     counting=f.counting)
     where, cparams = compile_filter(ef, EXPORTER_MINUTES, vis)
     cparams.update({"nf_cv_from": floor_to(plan.effective_from, 60), "nf_cv_to": plan.effective_to})
+    if local:
+        cparams["nf_trend_tz"] = tz
     cov = await run_query(
-        f"SELECT toStartOfInterval(minute, INTERVAL {bucket}, 'UTC') AS k, count() "
+        f"SELECT toStartOfInterval(minute, INTERVAL {bucket}, {zone_sql}) AS k, count() "
         f"FROM {table_ref(EXPORTER_MINUTES)} WHERE minute >= %(nf_cv_from)s AND minute < %(nf_cv_to)s "
         f"AND {where} GROUP BY k", cparams, budget_s=REPORT_BUDGET_S, label="report-trend-coverage")
     covered = {_aware(r[0]) for r in cov.result_rows}
     ts, vals = [], []
-    start = floor_to(plan.effective_from, secs)
-    cursor = start
-    while cursor < plan.effective_to:
-        b_end = cursor + timedelta(seconds=secs)
+    starts = _bucket_starts(plan.effective_from, plan.effective_to, secs, tz)
+    for i, cursor in enumerate(starts):
+        b_end = starts[i + 1] if i + 1 < len(starts) else cursor + timedelta(seconds=secs)
         span = (min(b_end, plan.effective_to) - max(cursor, plan.effective_from)).total_seconds()
         if cursor in volume and span > 0:
             vals.append(volume[cursor] * 8 / span)
@@ -413,34 +492,29 @@ async def trend_series(win: Window, f: FlowFilter, vis: FlowVisibility, bucket: 
         else:
             vals.append(None)      # collection gap
         ts.append(cursor)
-        cursor = b_end
-    return ts, vals, _plan_notes(plan)
+    return ts, vals, _plan_notes(plan, branding)
 
 
 async def sec_traffic_trend(ctx) -> dict:
-    from app.services.report_service import HEX_INFO, _make_line_chart
-
     sid, title = "traffic_trend", "Traffic Trend"
     try:
         nf = await resolve_scope(ctx)
     except ScopeError as exc:
         return _blocked(sid, title, str(exc))
     bucket = ctx.bucket()
-    ts, vals, notes = await trend_series(nf.win, nf.f, nf.vis, bucket)
+    ts, vals, notes = await trend_series(nf.win, nf.f, nf.vis, bucket, tz=_ctx_tz(ctx), branding=nf.branding)
     mbps = [None if v is None else v / 1e6 for v in vals]
-    # The PDF chart plots measured intervals only (the note states the gaps);
-    # the on-screen series keeps them as nulls so the chart breaks there.
-    known = [(t, v) for t, v in zip(ts, mbps) if v is not None]
-    png = _make_line_chart([t for t, _ in known], [v for _, v in known], ylabel="Mbps", color=HEX_INFO)
     gaps = sum(1 for v in vals if v is None)
     if gaps:
         notes = notes + [f"{gaps} of {len(vals)} intervals have no flow data from the exporters in scope "
                          "(collection gap, shown as a break, not as zero)."]
+    # Collection gaps stay nulls so every renderer breaks the line there.
     return _section(sid, title,
                     description=_scope_description(nf, f"Average throughput per {bucket.lower()} interval."),
-                    charts=[{"title": "", "png": png,
+                    charts=[{"title": "",
                              "series": {"kind": "area", "unit": "Mbps", "color": "info",
-                                        "points": [{"t": t.isoformat(), "v": None if v is None else round(v, 3)}
+                                        "points": [{"t": _point_time(ctx, t),
+                                                    "v": None if v is None else round(v, 3)}
                                                    for t, v in zip(ts, mbps)]}}],
                     notes=nf.notes + notes)
 
@@ -448,27 +522,23 @@ async def sec_traffic_trend(ctx) -> dict:
 # ── traffic_protocols ────────────────────────────────────────────────────────
 
 async def sec_traffic_protocols(ctx) -> dict:
-    from app.services.report_service import _make_donut
-
     sid, title = "traffic_protocols", "Traffic by Protocol"
     try:
         nf = await resolve_scope(ctx)
     except ScopeError as exc:
         return _blocked(sid, title, str(exc), half=True)
     t, rows = await asyncio.gather(
-        totals(nf.win, nf.f, nf.vis, label="report-proto-total"),
+        totals(nf.win, nf.f, nf.vis, label="report-proto-total", branding=nf.branding),
         ranked(nf.win, nf.f, nf.vis, "protocol", limit=6, rollup=QOS_1H, label="report-protocols"),
     )
     items = [(_PROTO.get(int(p), f"Protocol {int(p)}"), b, n) for p, b, n in rows]
     items = with_remainder(items, t.bytes, 5, "Other protocols")
     labels = [i[0] for i in items]
     gb = [gb_value(i[1]) for i in items]
-    png = _make_donut(labels, gb, center_text=fmt_bytes(t.bytes) if t.bytes else "",
-                      center_sub="total in scope", unit="GB")
     table_rows = [[lbl, fmt_bytes(b), fmt_pct(share(b, t.bytes))] for lbl, b, _ in items]
     return _section(sid, title, half=True,
                     description=_scope_description(nf, "Share of all bytes in scope, per IP protocol."),
-                    charts=[{"title": "Share of total bytes", "png": png,
+                    charts=[{"title": "Share of total bytes",
                              "series": {"kind": "donut", "unit": "GB",
                                         "points": [{"label": l, "value": v} for l, v in zip(labels, gb)]}}],
                     tables=[{"headers": ["Protocol", "Volume", "Share of total"],
@@ -485,7 +555,7 @@ async def sec_traffic_ports(ctx) -> dict:
     except ScopeError as exc:
         return _blocked(sid, title, str(exc), half=True)
     t, rows = await asyncio.gather(
-        totals(nf.win, nf.f, nf.vis, label="report-apps-total"),
+        totals(nf.win, nf.f, nf.vis, label="report-apps-total", branding=nf.branding),
         ranked(nf.win, nf.f, nf.vis, application_exprs(), limit=11, label="report-apps"),
     )
     items = with_remainder([(a or "Unclassified", b, n) for a, b, n in rows], t.bytes, 10,
@@ -510,7 +580,7 @@ async def sec_traffic_talkers(ctx) -> dict:
     except ScopeError as exc:
         return _blocked(sid, title, str(exc))
     t, src_rows, dst_rows = await asyncio.gather(
-        totals(nf.win, nf.f, nf.vis, label="report-talkers-total"),
+        totals(nf.win, nf.f, nf.vis, label="report-talkers-total", branding=nf.branding),
         ranked(nf.win, nf.f, nf.vis, SRC, limit=10, label="report-top-src", display_key=True),
         ranked(nf.win, nf.f, nf.vis, DST, limit=10, label="report-top-dst", display_key=True),
     )
@@ -746,19 +816,18 @@ async def sec_executive_summary(ctx) -> dict:
     change, top capacity risks, coverage and data-quality limits, notable
     findings, top applications and talkers with whole-scope shares, and
     recommended actions."""
-    from app.services.report_service import HEX_PRIMARY, _make_bar_chart
-
     sid, title = "netflow_executive_summary", "NetFlow Executive Summary"
     try:
         nf = await resolve_scope(ctx)
     except ScopeError as exc:
         return _blocked(sid, title, str(exc))
     win = nf.win
+    brand = nf.branding
     prior = win.shifted(-(win.end - win.start))
     app_expr = application_exprs()
     (cur, prev, apps, prev_apps, talkers, cov, known, retention) = await asyncio.gather(
-        totals(win, nf.f, nf.vis, label="exec-total"),
-        totals(prior, nf.f, nf.vis, label="exec-prior"),
+        totals(win, nf.f, nf.vis, label="exec-total", branding=nf.branding),
+        totals(prior, nf.f, nf.vis, label="exec-prior", branding=nf.branding),
         ranked(win, nf.f, nf.vis, app_expr, limit=6, label="exec-apps"),
         ranked(prior, nf.f, nf.vis, app_expr, limit=50, label="exec-prior-apps"),
         # Each flow counted once for each endpoint: exact sent + received.
@@ -879,7 +948,7 @@ async def sec_executive_summary(ctx) -> dict:
     if findings.get("available"):
         frows = [[i["severity"].capitalize(),
                   (i["title"] or i["kind"] or "Finding") + (" (acknowledged)" if i["status"] == "acknowledged" else ""),
-                  _list(i["hosts"]) if i["hosts"] else "—", f"{i['findings']:,}", _label_time(i["last_seen"])]
+                  _list(i["hosts"]) if i["hosts"] else "—", f"{i['findings']:,}", _label_time(i["last_seen"], brand)]
                  for i in findings["items"]]
         tables.append({"title": "Notable findings",
                        "headers": ["Severity", "Finding", "Hosts", "Findings", "Last seen"],
@@ -911,9 +980,9 @@ async def sec_executive_summary(ctx) -> dict:
 
     # Coverage & data quality.
     dq = [
-        ["Period", f"{_label_time(win.start)} → {_label_time(win.end)}",
-         f"data {_label_time(cur.effective_from)} → {_label_time(cur.effective_to)} ({cur.source})"],
-        ["Previous period", f"{_label_time(prior.start)} → {_label_time(prior.end)}",
+        ["Period", f"{_label_time(win.start, brand)} → {_label_time(win.end, brand)}",
+         f"data {_label_time(cur.effective_from, brand)} → {_label_time(cur.effective_to, brand)} ({cur.source})"],
+        ["Previous period", f"{_label_time(prior.start, brand)} → {_label_time(prior.end, brand)}",
          "complete" if prior_complete else
          "no flow records in scope" if prev.bytes == 0 and not prev.notes else
          "partly outside retention" if prev_has_data else "no retained data"],
@@ -951,15 +1020,13 @@ async def sec_executive_summary(ctx) -> dict:
     charts = []
     bar_items = [(a, b) for a, b, n in app_items if n is not None][:5]
     if bar_items:
-        png = _make_bar_chart([a for a, _ in bar_items], [b / 1e9 for _, b in bar_items],
-                              colors=HEX_PRIMARY, ylabel="GB")
-        charts.append({"title": "Top applications (GB)", "png": png,
+        charts.append({"title": "Top applications (GB)",
                        "series": {"kind": "rank", "unit": "GB", "color": "primary",
                                   "points": [{"label": a, "value": gb_value(b)} for a, b in bar_items]}})
 
     return _section(
         sid, title,
-        description=(f"{_label_time(win.start)} → {_label_time(win.end)}, compared with the previous "
+        description=(f"{_label_time(win.start, brand)} → {_label_time(win.end, brand)}, compared with the previous "
                      f"{_span_text((win.end - win.start).total_seconds())}. Scope: {nf.label}."),
         kpis=kpis, charts=charts, tables=tables, notes=list(dict.fromkeys(notes)),
     )

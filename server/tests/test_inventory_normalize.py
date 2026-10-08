@@ -87,7 +87,7 @@ PAIRED_DEVICES = [c for c in GOLDEN["devices"] if c.get("agrees_without_sys_desc
 
 @pytest.mark.parametrize("case", PAIRED_DEVICES, ids=lambda c: c["id"])
 def test_sysdescr_does_not_change_the_os_identity(case):
-    """The poller starts writing sys_descr after migration 154: rows that were right without it must stay right."""
+    """The poller starts writing sys_descr after migration 157: rows that were right without it must stay right."""
     inp = dict(case["input"])
     with_descr = normalize_device(**inp)
     inp.pop("sys_descr")
@@ -224,9 +224,9 @@ def test_lifecycle_slug_is_never_set_in_this_phase():
 
 
 def test_identity_matches_the_migration_columns():
-    sql = REPO_ROOT / "scripts" / "migrate-154-inventory-foundation.sql"
+    sql = REPO_ROOT / "scripts" / "migrate-157-inventory-foundation.sql"
     if not sql.exists():
-        pytest.skip("migrate-154 is not in this checkout")
+        pytest.skip("migrate-157 is not in this checkout")
     text = sql.read_text(encoding="utf-8")
     m = re.search(r"CREATE TABLE IF NOT EXISTS inventory_identity \((.*?)\n\);", text, re.S)
     assert m, "inventory_identity DDL not found"

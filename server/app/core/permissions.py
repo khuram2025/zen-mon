@@ -62,9 +62,15 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         ("ncm.baseline", "Baselines", "Pin and approve configuration recovery points"),
         ("ncm.compliance", "Compliance", "Manage compliance policies, rules and exceptions"),
     ]),
-    ("apm", "APM & Servers", [
-        ("apm.view", "View", "View APM services, traces, and server metrics"),
-        ("apm.manage", "Manage", "Manage APM agents, policies, SLOs, and synthetics"),
+    ("servers", "Servers & Agents", [
+        ("servers.view", "View",
+         "View servers, their metrics, agent fleet, agent policies and software baselines"),
+        ("servers.manage", "Manage",
+         "Add and edit servers; manage agents, agent policies, baselines and server diagnostics"),
+    ]),
+    ("apm", "Applications (APM)", [
+        ("apm.view", "View", "View APM services, service map, traces, errors, SLOs, synthetics and RUM"),
+        ("apm.manage", "Manage", "Manage APM ingest keys, SLOs, synthetics, RUM applications and APM settings"),
     ]),
     ("inventory", "Inventory", [
         ("inventory.view", "View",
@@ -164,6 +170,7 @@ PERMISSION_IMPLIES: dict[str, list[str]] = {
     "ncm.export": ["ncm.view"],
     "ncm.baseline": ["ncm.view"],
     "ncm.compliance": ["ncm.view"],
+    "servers.manage": ["servers.view"],
     "apm.manage": ["apm.view"],
     "inventory.manage": ["inventory.view"],
     "inventory.export": ["inventory.view"],
@@ -181,7 +188,7 @@ _OPERATOR = [
     "service_checks.view", "service_checks.manage", "netflow.view",
     "netflow.manage", "netflow.manage_shared", "netflow.export",
     "udt.view", "udt.view_users", "udt.manage", "netpath.view", "netpath.manage",
-    "ncm.view", "ncm.manage", "apm.view",
+    "ncm.view", "ncm.manage", "servers.view", "servers.manage", "apm.view",
     "apm.manage", "inventory.view", "inventory.export", "inventory.manage",
     "reports.view", "reports.export", "reports.manage", "maps.view",
     "maps.manage", "settings.view",
@@ -190,27 +197,85 @@ _OPERATOR = [
 _VIEWER = [
     "dashboard.view", "devices.view", "discovery.view", "alerts.view",
     "alerts.acknowledge", "service_checks.view", "netflow.view",
-    "udt.view", "netpath.view", "ncm.view", "apm.view", "inventory.view",
+    "udt.view", "netpath.view", "ncm.view", "servers.view", "apm.view", "inventory.view",
     "reports.view", "reports.export", "maps.view",
 ]
 
 _READ_ONLY = [
     "dashboard.view", "devices.view", "alerts.view",
     "service_checks.view", "netflow.view", "udt.view", "netpath.view",
-    "apm.view", "inventory.view", "reports.view", "maps.view",
+    "servers.view", "apm.view", "inventory.view", "reports.view", "maps.view",
+]
+
+# Team roles: least-privilege starting points for the teams that share the
+# appliance. Each sees only its own area of the product; pair one with a
+# visibility scope (tags on a custom copy of the role, or on the user) to
+# limit it to that team's resources as well.
+_NETWORK_TEAM = [
+    "dashboard.view", "devices.view", "devices.manage", "discovery.view", "discovery.run",
+    "alerts.view", "alerts.acknowledge", "service_checks.view", "netflow.view",
+    "udt.view", "netpath.view", "netpath.manage", "ncm.view", "ncm.manage", "ncm.baseline",
+    "reports.view", "reports.export", "maps.view", "maps.manage",
+]
+
+_SYSTEMS_TEAM = [
+    "dashboard.view", "servers.view", "servers.manage", "service_checks.view",
+    "service_checks.manage", "alerts.view", "alerts.acknowledge", "reports.view", "reports.export",
+]
+
+_APPLICATION_TEAM = [
+    "dashboard.view", "apm.view", "apm.manage", "service_checks.view", "service_checks.manage",
+    "alerts.view", "alerts.acknowledge", "reports.view", "reports.export",
+]
+
+_SECURITY_TEAM = [
+    "dashboard.view", "devices.view", "alerts.view", "alerts.acknowledge", "netflow.view",
+    "netflow.export", "udt.view", "udt.view_users", "ncm.view", "ncm.compliance", "audit.view",
+    "reports.view", "reports.export",
 ]
 
 # Version of the built-in role definitions below. Persisted on is_system role
 # rows (roles.definition_version); when the code's version is newer the
 # built-in rows are reconciled at startup. Custom roles are NEVER touched, so a
 # newly introduced permission is never granted to a custom role implicitly.
-BUILTIN_ROLE_DEFINITION_VERSION = 4
+#   4 - servers.* split out of apm.*; built-in team roles added.
+#   5 - inventory.* added (operator: view, export, manage; viewer and read_only: view).
+#       The team roles deliberately do not get inventory.* yet; see
+#       Documentation/Inventory (decision D9).
+BUILTIN_ROLE_DEFINITION_VERSION = 5
 
 BUILTIN_ROLE_DEFINITIONS: dict[str, list[str]] = {
     "admin": list(ALL_PERMISSIONS),
     "operator": _OPERATOR,
     "viewer": _VIEWER,
     "read_only": _READ_ONLY,
+    "network_team": _NETWORK_TEAM,
+    "systems_team": _SYSTEMS_TEAM,
+    "application_team": _APPLICATION_TEAM,
+    "security_team": _SECURITY_TEAM,
+}
+
+# Display name and description used when a built-in role row is created at
+# startup. The four original built-ins were seeded by migrate-074 and are only
+# reconciled (permissions), never renamed.
+BUILTIN_ROLE_META: dict[str, tuple[str, str]] = {
+    "network_team": (
+        "Network Team",
+        "Network devices, discovery, NetFlow, NetPath, Device Tracker, configuration backups and maps.",
+    ),
+    "systems_team": (
+        "Systems Team",
+        "Servers, agents, agent policies and baselines, plus the service checks that watch them.",
+    ),
+    "application_team": (
+        "Application Team",
+        "Application performance (APM): services, traces, errors, SLOs, synthetics and RUM, plus service checks.",
+    ),
+    "security_team": (
+        "Security Team",
+        "Read-mostly security view: NetFlow (with raw export), user-to-device activity, "
+        "configuration compliance and the audit log.",
+    ),
 }
 
 # Fallback when the roles table is unavailable or the role has no DB row.
@@ -233,6 +298,7 @@ RESERVED_ROLE_NAMES = frozenset({
     "admin", "administrator", "owner", "root", "superuser", "super_admin",
     "system", "operator", "editor", "viewer", "read_only", "readonly",
     "guest", "anonymous", "service", "agent", "sensor",
+    *BUILTIN_ROLE_DEFINITIONS,
 })
 
 
@@ -263,12 +329,39 @@ def risk_of(perm: str) -> str:
     return PERMISSION_RISK.get(perm, "standard")
 
 
+# Product area each module belongs to, so the role editor can group modules
+# the way teams think about them (and the way the sidebar is organised).
+MODULE_AREAS: dict[str, str] = {
+    "dashboard": "General",
+    "service_checks": "Operations",
+    "alerts": "Operations",
+    "reports": "Operations",
+    # Inventory spans network devices and servers; Operations is where the other
+    # cross-cutting modules (alerts, reports) sit in the role editor.
+    "inventory": "Operations",
+    "devices": "Network",
+    "discovery": "Network",
+    "netflow": "Network",
+    "netpath": "Network",
+    "udt": "Network",
+    "ncm": "Network",
+    "maps": "Network",
+    "servers": "Systems",
+    "apm": "Applications",
+    "users": "Administration",
+    "audit": "Administration",
+    "settings": "Administration",
+    "system": "Administration",
+}
+
+
 def catalog() -> list[dict]:
     """Module-grouped catalog for the role-editor UI."""
     return [
         {
             "module": module_id,
             "label": label,
+            "area": MODULE_AREAS.get(module_id, "Other"),
             "permissions": [
                 {
                     "id": pid,

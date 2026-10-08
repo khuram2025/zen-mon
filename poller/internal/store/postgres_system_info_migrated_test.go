@@ -22,8 +22,8 @@ var (
 )
 
 // newMigratedPool returns a pool on a database that carries the repository's
-// real schema (init-postgres.sql plus every migration, 154 included), so real
-// column widths and the migration 154 triggers are exercised. The database is
+// real schema (init-postgres.sql plus every migration, 157 included), so real
+// column widths and the migration 157 triggers are exercised. The database is
 // one of:
 //
 //   - SYSINFO_TEST_MIGRATED_DSN, a disposable database you migrated yourself
@@ -94,7 +94,7 @@ func addMigratedDevice(t *testing.T, pool *pgxpool.Pool, hostname string) (uuid.
 
 // The same statements against the real schema. This is what the TEMP-table
 // test cannot show: the real column types and widths, and that the
-// migration 154 triggers on devices never turn an identity write into an error.
+// migration 157 triggers on devices never turn an identity write into an error.
 //
 //	SYSINFO_TEST_PG=1 go test ./internal/store/ -run UpsertSystemInfoMigratedSchema -v
 func TestUpsertSystemInfoMigratedSchema(t *testing.T) {
@@ -109,7 +109,7 @@ func TestUpsertSystemInfoMigratedSchema(t *testing.T) {
 			t.Fatalf("UpsertSystemInfo on the migrated schema: %v", err)
 		}
 		if s.sysInfoLegacyUntil.Load() != 0 || s.sysInfoWarnedAt.Load() != 0 {
-			t.Fatal("fell back to the pre-154 statement on a schema that has migration 154")
+			t.Fatal("fell back to the pre-157 statement on a schema that has migration 157")
 		}
 		var descr *string
 		var stamped *time.Time

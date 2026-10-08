@@ -500,10 +500,10 @@ As specified in `Documentation/Compliance/03` and `04`, with these inputs re-poi
 | Concern | Rule |
 |---|---|
 | Route guards | Router `policy("inventory")` plus explicit `require_permission("inventory.export")` on export, and `inventory.manage` on every mutation (precise permissions, no operator shortcut: RP-05). `test_route_policy_contract.py` covers the router. New `test_inventory_route_guards.py` asserts that every non-GET route declares more than `.view` (pattern: `test_netflow_route_guards.py`) |
-| Cross-module visibility | `inventory.view` alone shows asset identity and software inventory **within tag scope**. This intentionally widens server software visibility, which today needs `apm.view`. Links to `/devices/:id` and `/servers/:id` render as links only when `useCan('devices.view')` / `useCan('apm.view')`; otherwise as plain text |
+| Cross-module visibility | `inventory.view` alone shows asset identity and software inventory **within tag scope**. This intentionally widens server software visibility, which today needs `servers.view` (split out of `apm.view` in release 1.23.35). Role-level visibility scope (`roles.scope_tags`, added in the same release) combines with the user's own scope inside `scoping.visible_tags`, so the inventory queries inherit it. Links to `/devices/:id` and `/servers/:id` render as links only when `useCan('devices.view')` / `useCan('servers.view')`; otherwise as plain text |
 | Scope | Tag scope on every query. Detail endpoints return 404 out of scope. Trends and reports refuse scoped users, consistent with `reports.py` `/data/inventory` |
 | Audit | `write_audit_log` on export, catalog rule and product changes, asset-meta changes, settings changes, and (P5) policy and exception changes |
-| Built-ins | `BUILTIN_ROLE_DEFINITION_VERSION` 3 → 4. Release notes announce the new permissions and that **custom roles must be granted `inventory.view` explicitly** (doc §4 of the roles assessment) |
+| Built-ins | `BUILTIN_ROLE_DEFINITION_VERSION` 4 → 5. Release notes announce the new permissions and that **custom roles must be granted `inventory.view` explicitly** (doc §4 of the roles assessment) |
 
 ## 12. Reports integration (P2)
 
@@ -554,4 +554,4 @@ A six-reviewer adversarial review of Phase 0 produced 44 findings; the confirmed
 | Rule-pack fingerprint | The pinned fingerprint per revision covers the packs and the golden-corpus output, but nothing ties 'has shipped' to a released revision, so a shipped entry can still be edited in place. A CI step comparing against `origin/main` would close it. |
 | Poison pill outside this module | A lone surrogate in an agent batch makes `_host_results_batch_digest` (agents.py) raise before ingest runs, so the agent receives a 500 and retries for ever. Pre-existing. |
 | Poller database tests in CI | The Go PostgreSQL tests (42703 fallback, sticky semantics, migrated schema) run only where a PostgreSQL is available (`SYSINFO_TEST_DSN`, or `SYSINFO_TEST_PG=1` for the self-provisioning cluster); the required poller check does not run them. |
-| Poller start against an older schema | `install.sh` treats a failed migration runner as a warning, and the poller unit has no schema check. The poller degrades to the pre-154 statement and logs a WARN every 10 minutes; the degraded state is not yet shown in its health JSON. |
+| Poller start against an older schema | `install.sh` treats a failed migration runner as a warning, and the poller unit has no schema check. The poller degrades to the pre-157 statement and logs a WARN every 10 minutes; the degraded state is not yet shown in its health JSON. |

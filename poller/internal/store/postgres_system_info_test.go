@@ -42,7 +42,7 @@ func TestIsIdentityColumnMissing(t *testing.T) {
 }
 
 // sysInfoLegacyDDL is the part of the schema UpsertSystemInfo reads and
-// writes, as it stood before migration 154, with the real column widths
+// writes, as it stood before migration 157, with the real column widths
 // (init-postgres.sql, migrate-004-snmp.sql): an over-long value must fail
 // here exactly as it does on the appliance.
 const sysInfoLegacyDDL = `
@@ -245,12 +245,12 @@ func TestUpsertSystemInfoPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1. Poller binary ahead of the schema: the pre-154 identity writeback
+	// 1. Poller binary ahead of the schema: the pre-157 identity writeback
 	// must keep working instead of failing as a whole.
-	t.Run("schema before migration 154 degrades to the legacy statement", func(t *testing.T) {
+	t.Run("schema before migration 157 degrades to the legacy statement", func(t *testing.T) {
 		err := s.UpsertSystemInfo(ctx, id, "1.3.6.1.4.1.9.1.1", "Cisco", "C9300", "17.3.4", "sw-new", "Cisco IOS XE Software")
 		if err != nil {
-			t.Fatalf("UpsertSystemInfo on a pre-154 schema: %v", err)
+			t.Fatalf("UpsertSystemInfo on a pre-157 schema: %v", err)
 		}
 		r := readSysInfoRow(t, pool, id, false)
 		if str(r.sysObjectID) != "1.3.6.1.4.1.9.1.1" || str(r.vendor) != "Cisco" ||
@@ -283,7 +283,7 @@ func TestUpsertSystemInfoPostgres(t *testing.T) {
 		}
 	})
 
-	// 2. Migration 154 lands while the poller runs.
+	// 2. Migration 157 lands while the poller runs.
 	if _, err := pool.Exec(ctx, `
 		ALTER TABLE devices ADD COLUMN sys_descr text, ADD COLUMN identity_updated_at timestamptz`); err != nil {
 		t.Fatal(err)
@@ -521,7 +521,7 @@ func TestSystemInfoSQLBoundsEveryCollectedValue(t *testing.T) {
 }
 
 // The remedy named by the fallback warning must not be a live schema sync.
-// Migration 154 locks devices while it runs, so applying it under the running
+// Migration 157 locks devices while it runs, so applying it under the running
 // poller stalls the whole pool. The once-per-interval rate limit stays.
 func TestIdentityColumnsMissingWarning(t *testing.T) {
 	cause := &pgconn.PgError{Code: "42703", Message: `column "sys_descr" of relation "devices" does not exist`}
@@ -529,7 +529,7 @@ func TestIdentityColumnsMissingWarning(t *testing.T) {
 	start := time.Now()
 
 	first := captureStdout(t, func() { s.noteIdentityColumnsMissing(start, cause) })
-	for _, want := range []string{"WARN", "migration 154", "services stopped", "maintenance window"} {
+	for _, want := range []string{"WARN", "migration 157", "services stopped", "maintenance window"} {
 		if !strings.Contains(first, want) {
 			t.Errorf("warning does not mention %q: %s", want, first)
 		}

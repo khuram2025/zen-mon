@@ -635,18 +635,20 @@ def test_html_report_renders_unmeasured_executive(monkeypatch):
     assert "0.0%" not in html and "0%" not in html.split("Availability", 1)[1][:400]
 
 
-def test_longest_outages_section_shows_unknown_and_ongoing():
+def test_longest_outages_section_shows_unknown_and_ongoing(monkeypatch):
     from app.services import report_sections
 
-    class Ctx:
-        async def dataset(self, name):
-            return {"outage_timeline": [
-                {"hostname": "a", "started_at": START.isoformat(), "duration_minutes": None,
-                 "in_window_minutes": 5, "ongoing": False},
-                {"hostname": "b", "started_at": START.isoformat(), "duration_minutes": 90,
-                 "ongoing": True},
-            ]}
-    section = asyncio.run(report_sections._sec_top_outages(Ctx()))
+    # Longest Outages ranks the paired episodes of the report's node
+    # availability (every episode, organisation-timezone start times).
+    async def node_availability(ctx):
+        return {"outage_list": [
+            {"hostname": "a", "started_at": START, "duration_s": None, "in_window_s": 300,
+             "ongoing": False},
+            {"hostname": "b", "started_at": START, "duration_s": 5400, "in_window_s": 5400,
+             "ongoing": True},
+        ]}
+    monkeypatch.setattr(report_sections, "_node_availability", node_availability)
+    section = asyncio.run(report_sections._sec_top_outages(report_sections.SectionCtx(None, START, END)))
     rows = section["tables"][0]["rows"]
     assert rows[0][2] == "90 min (ongoing)" and rows[1][2] == "unknown"
 

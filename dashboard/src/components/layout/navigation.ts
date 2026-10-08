@@ -14,7 +14,6 @@ import {
   Download,
   FileBarChart,
   FileCode,
-  FileText,
   Fingerprint,
   Gauge,
   GitBranch,
@@ -27,6 +26,7 @@ import {
   Layers,
   LayoutDashboard,
   LayoutTemplate,
+  LibraryBig,
   LifeBuoy,
   ListChecks,
   MapPinned,
@@ -34,7 +34,6 @@ import {
   MousePointerClick,
   Network,
   Palette,
-  PieChart,
   Plug,
   Radar,
   Waypoints,
@@ -56,9 +55,14 @@ import {
   Wrench,
 } from 'lucide-react'
 
+import type { NavGate } from './navAccess'
+
 export type NavIcon = React.ComponentType<{ className?: string }>
 
-export type NavNode = {
+// Every entry names the permission its page needs (the same one the server's
+// route policy checks), so a role only sees what it can open. Children also
+// need their parent's permission. scripts/test-nav-access.mjs keeps it so.
+export type NavNode = NavGate & {
   /** Router target, may carry a query string (e.g. `/settings/general?tab=users`). */
   to: string
   label: string
@@ -67,8 +71,8 @@ export type NavNode = {
   hint?: string
   /** Active only on an exact pathname match (for section landing pages). */
   end?: boolean
-  /** Hidden unless the signed-in role grants this permission. */
-  permission?: string | readonly string[]
+  /** The page hides the tabs a role lacks itself (Settings): only the item is route-gated. */
+  selfGated?: boolean
   /** Live counter rendered as a pill on the right of the row. */
   badge?: 'alerts'
   /** Extra path prefixes this node also owns (detail routes that have no row). */
@@ -116,10 +120,10 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Home',
     icon: LayoutDashboard,
     items: [
-      { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true, hint: 'Network operations at a glance' },
-      { to: '/dashboards/network', label: 'Network & Security', icon: ShieldCheck, hint: 'Reachability, traffic, WAN paths and threat signals' },
-      { to: '/dashboards/servers', label: 'Server Team', icon: Server, hint: 'Fleet health, resource pressure and agents' },
-      { to: '/dashboards/apps', label: 'Application Team', icon: Layers, hint: 'Golden signals, SLOs and user journeys' },
+      { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true, hint: 'Network operations at a glance', requireAll: ['dashboard.view'], permission: 'devices.view' },
+      { to: '/dashboards/network', label: 'Network & Security', icon: ShieldCheck, hint: 'Reachability, traffic, WAN paths and threat signals', requireAll: ['dashboard.view'], permission: ['devices.view', 'netflow.view'] },
+      { to: '/dashboards/servers', label: 'Server Team', icon: Server, hint: 'Fleet health, resource pressure and agents', requireAll: ['dashboard.view'], permission: 'servers.view' },
+      { to: '/dashboards/apps', label: 'Application Team', icon: Layers, hint: 'Golden signals, SLOs and user journeys', requireAll: ['dashboard.view'], permission: 'apm.view' },
     ],
   },
   {
@@ -128,14 +132,15 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Monitor',
     icon: Radar,
     items: [
-      { to: '/devices', label: 'Devices', icon: Router, hint: 'Inventory, health and interfaces' },
-      { to: '/link-utilization', label: 'Link Utilization', icon: Gauge, hint: 'Interface bandwidth and errors' },
-      { to: '/availability', label: 'Availability', icon: HeartPulse, hint: 'Uptime and SLA compliance' },
+      { to: '/devices', label: 'Devices', icon: Router, hint: 'Inventory, health and interfaces', permission: 'devices.view' },
+      { to: '/link-utilization', label: 'Link Utilization', icon: Gauge, hint: 'Interface bandwidth and errors', permission: 'devices.view' },
+      { to: '/availability', label: 'Availability', icon: HeartPulse, hint: 'Uptime and SLA compliance', permission: ['devices.view', 'service_checks.view', 'servers.view'] },
       {
         to: '/services',
         label: 'Services',
         icon: Activity,
         hint: 'HTTP, TCP and DNS service checks',
+        permission: 'service_checks.view',
         children: [
           { to: '/services', label: 'All Checks', icon: Activity, end: true },
           { to: '/services/groups', label: 'Check Groups', icon: Boxes },
@@ -173,16 +178,17 @@ export const NAV_GROUPS: NavGroup[] = [
         label: 'Discovery',
         icon: Radar,
         hint: 'Scan the network for new devices',
+        permission: 'discovery.view',
         children: [
           { to: '/discovery', label: 'Profiles', icon: Layers, end: true },
           { to: '/discovery/scheduled', label: 'Scheduled', icon: CalendarClock },
           { to: '/discovery/reports', label: 'Scan Results', icon: FileBarChart },
           { to: '/discovery/imports', label: 'Import Queue', icon: Inbox },
           { to: '/discovery/ignored', label: 'Ignored', icon: SlashSquare },
-          { to: '/discovery/credentials', label: 'Credentials', icon: Key },
+          { to: '/discovery/credentials', label: 'Credentials', icon: Key, permission: ['devices.manage', 'service_checks.manage'] },
         ],
       },
-      { to: '/maps/manual', label: 'Network Maps', icon: MapPinned, hint: 'Hand-drawn topology views' },
+      { to: '/maps/manual', label: 'Network Maps', icon: MapPinned, hint: 'Hand-drawn topology views', permission: 'maps.view', extra: ['/maps'] },
     ],
   },
   {
@@ -191,7 +197,7 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'NCCM',
     icon: FileCode,
     items: [
-      { to: '/ncm', label: 'NCCM Overview', icon: FileCode, hint: 'NCM configuration backups, change tracking and compliance' },
+      { to: '/ncm', label: 'NCCM Overview', icon: FileCode, hint: 'NCM configuration backups, change tracking and compliance', permission: 'ncm.view' },
     ],
   },
   {
@@ -200,13 +206,13 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Tracker',
     icon: ScanSearch,
     items: [
-      { to: '/udt', label: 'Endpoints', icon: ScanSearch, end: true, extra: ['/udt/endpoints/'], hint: 'Track endpoints, IP history, switches and ports' },
-      { to: '/udt/ports', label: 'Switch Ports', icon: Server },
-      { to: '/udt/users', label: 'User Logins', icon: UserRound },
-      { to: '/udt/classification', label: 'Classification', icon: Shapes },
-      { to: '/udt/watch-lists', label: 'Watch Lists', icon: ListChecks },
-      { to: '/udt/activity', label: 'Activity', icon: Activity },
-      { to: '/udt/settings', label: 'Tracker Settings', icon: SlidersHorizontal },
+      { to: '/udt', label: 'Endpoints', icon: ScanSearch, end: true, extra: ['/udt/endpoints/'], hint: 'Track endpoints, IP history, switches and ports', permission: 'udt.view' },
+      { to: '/udt/ports', label: 'Switch Ports', icon: Server, permission: 'udt.view' },
+      { to: '/udt/users', label: 'User Logins', icon: UserRound, requireAll: ['udt.view'], permission: ['udt.view_users', 'udt.manage'] },
+      { to: '/udt/classification', label: 'Classification', icon: Shapes, permission: 'udt.view' },
+      { to: '/udt/watch-lists', label: 'Watch Lists', icon: ListChecks, permission: 'udt.view' },
+      { to: '/udt/activity', label: 'Activity', icon: Activity, permission: 'udt.view' },
+      { to: '/udt/settings', label: 'Tracker Settings', icon: SlidersHorizontal, permission: 'udt.manage' },
     ],
   },
   {
@@ -215,12 +221,12 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Servers',
     icon: Server,
     items: [
-      { to: '/servers', label: 'Server Overview', icon: Gauge, end: true, hint: 'Fleet CPU, memory and disk' },
+      { to: '/servers', label: 'Server Overview', icon: Gauge, end: true, hint: 'Fleet CPU, memory and disk', permission: 'servers.view' },
       // `/servers/:id` detail pages have no row of their own — Inventory owns them.
-      { to: '/servers/inventory', label: 'Inventory', icon: Server, hint: 'Every monitored host', extra: ['/servers/'] },
-      { to: '/server-agents', label: 'Agent Fleet', icon: Bot, hint: 'Installed agents and versions' },
-      { to: '/agent-policies', label: 'Agent Policies', icon: SlidersHorizontal, hint: 'What each agent collects' },
-      { to: '/server-baselines', label: 'Baselines', icon: ClipboardCheck, hint: 'Config drift and compliance' },
+      { to: '/servers/inventory', label: 'Inventory', icon: Server, hint: 'Every monitored host', extra: ['/servers/'], permission: 'servers.view' },
+      { to: '/server-agents', label: 'Agent Fleet', icon: Bot, hint: 'Installed agents and versions', permission: 'servers.view' },
+      { to: '/agent-policies', label: 'Agent Policies', icon: SlidersHorizontal, hint: 'What each agent collects', permission: 'servers.view' },
+      { to: '/server-baselines', label: 'Baselines', icon: ClipboardCheck, hint: 'Config drift and compliance', permission: 'servers.view' },
     ],
   },
   {
@@ -229,18 +235,19 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Apps',
     icon: Layers,
     items: [
-      { to: '/apm', label: 'APM Overview', icon: Layers, end: true, hint: 'Golden signals across services' },
-      { to: '/apm/services', label: 'Services', icon: Boxes, hint: 'Latency, throughput and errors' },
-      { to: '/apm/service-map', label: 'Service Map', icon: Network, hint: 'Dependencies between services' },
-      { to: '/apm/slos', label: 'SLOs', icon: Target, hint: 'Objectives and error budgets' },
-      { to: '/apm/synthetics', label: 'Synthetics', icon: Workflow, hint: 'Scripted uptime journeys' },
-      { to: '/apm/errors', label: 'Errors', icon: Bug, hint: 'Grouped exception inbox' },
-      { to: '/apm/traces', label: 'Traces', icon: GitBranch, hint: 'Distributed trace explorer' },
+      { to: '/apm', label: 'APM Overview', icon: Layers, end: true, hint: 'Golden signals across services', permission: 'apm.view' },
+      { to: '/apm/services', label: 'Services', icon: Boxes, hint: 'Latency, throughput and errors', permission: 'apm.view' },
+      { to: '/apm/service-map', label: 'Service Map', icon: Network, hint: 'Dependencies between services', permission: 'apm.view' },
+      { to: '/apm/slos', label: 'SLOs', icon: Target, hint: 'Objectives and error budgets', permission: 'apm.view' },
+      { to: '/apm/synthetics', label: 'Synthetics', icon: Workflow, hint: 'Scripted uptime journeys', permission: 'apm.view' },
+      { to: '/apm/errors', label: 'Errors', icon: Bug, hint: 'Grouped exception inbox', permission: 'apm.view' },
+      { to: '/apm/traces', label: 'Traces', icon: GitBranch, hint: 'Distributed trace explorer', permission: 'apm.view' },
       {
         to: '/apm/rum',
         label: 'RUM',
         icon: Globe2,
         hint: 'Real-user vitals and sessions',
+        permission: 'apm.view',
         children: [
           rumTab('overview', 'Overview', LayoutDashboard),
           rumTab('web-vitals', 'Web Vitals', Gauge),
@@ -251,8 +258,8 @@ export const NAV_GROUPS: NavGroup[] = [
           rumTab('actions', 'Actions', MousePointerClick),
         ],
       },
-      { to: '/apm/usage', label: 'Usage', icon: BarChart3, hint: 'Pages, users and span volume' },
-      { to: '/apm/settings', label: 'APM Settings', icon: SlidersHorizontal },
+      { to: '/apm/usage', label: 'Usage', icon: BarChart3, hint: 'Pages, users and span volume', permission: 'apm.view' },
+      { to: '/apm/settings', label: 'APM Settings', icon: SlidersHorizontal, permission: 'apm.manage' },
     ],
   },
   {
@@ -261,12 +268,27 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Alerts',
     icon: Siren,
     items: [
-      { to: '/alerts', label: 'Active Alerts', icon: AlertTriangle, badge: 'alerts', hint: 'Everything firing right now' },
-      { to: '/alert-rules', label: 'Alert Rules', icon: Bell, hint: 'Thresholds and escalation' },
-      { to: '/traps', label: 'SNMP Traps', icon: Inbox, hint: 'Unsolicited device events' },
-      { to: '/network-events', label: 'Network Syslog', icon: Inbox, hint: 'Device log events and alert rules' },
-      { to: '/channels', label: 'Channels', icon: BellRing, hint: 'Where notifications are delivered' },
-      { to: '/gateways', label: 'Gateways', icon: Mail, hint: 'SMTP, SMS and webhook transports' },
+      { to: '/alerts', label: 'Active Alerts', icon: AlertTriangle, badge: 'alerts', hint: 'Everything firing right now', permission: 'alerts.view' },
+      { to: '/alert-rules', label: 'Alert Rules', icon: Bell, hint: 'Thresholds and escalation', permission: 'alerts.view' },
+      { to: '/traps', label: 'SNMP Traps', icon: Inbox, hint: 'Unsolicited device events', permission: ['alerts.view', 'devices.view'] },
+      { to: '/network-events', label: 'Network Syslog', icon: Inbox, hint: 'Device log events and alert rules', permission: ['alerts.view', 'devices.view'] },
+      { to: '/channels', label: 'Channels', icon: BellRing, hint: 'Where notifications are delivered', permission: ['alerts.manage', 'settings.manage'] },
+      { to: '/gateways', label: 'Gateways', icon: Mail, hint: 'SMTP, SMS and webhook transports', permission: 'settings.manage' },
+    ],
+  },
+  {
+    // Reports are consumed, not configured, so they have their own group.
+    // Every entry needs reports.view (the designer also reports.manage).
+    // The viewer (/reports/view/*) belongs to the library; the legacy persona
+    // paths only redirect to their templates.
+    id: 'reports',
+    label: 'Reports',
+    short: 'Reports',
+    icon: FileBarChart,
+    items: [
+      { to: '/reports', label: 'Report Library', icon: LibraryBig, end: true, extra: ['/reports/view/'], hint: 'Built-in and custom report templates', permission: 'reports.view' },
+      { to: '/reports/builder', label: 'Template Designer', icon: LayoutTemplate, hint: 'Build and customize report templates', requireAll: ['reports.view'], permission: 'reports.manage' },
+      { to: '/reports/schedules', label: 'Schedules', icon: CalendarClock, hint: 'Scheduled delivery by email and channels', permission: 'reports.view' },
     ],
   },
   {
@@ -275,29 +297,15 @@ export const NAV_GROUPS: NavGroup[] = [
     short: 'Admin',
     icon: SettingsIcon,
     items: [
-      {
-        to: '/reports',
-        label: 'Reports',
-        icon: FileText,
-        hint: 'Scheduled and on-demand reporting',
-        children: [
-          { to: '/reports', label: 'Report Library', icon: FileText, end: true },
-          { to: '/reports/executive', label: 'Executive', icon: PieChart },
-          { to: '/reports/technical', label: 'Technical', icon: BarChart3 },
-          { to: '/reports/business', label: 'Business', icon: Building2 },
-          { to: '/reports/inventory', label: 'Inventory', icon: Boxes },
-          { to: '/reports/apm', label: 'Applications', icon: Layers },
-          { to: '/reports/builder', label: 'Custom Builder', icon: LayoutTemplate },
-          { to: '/reports/schedules', label: 'Schedules', icon: CalendarClock },
-        ],
-      },
-      { to: '/credentials', label: 'Credentials', icon: KeyRound, hint: 'SNMP, Windows, and service credentials' },
+      { to: '/credentials', label: 'Credentials', icon: KeyRound, hint: 'SNMP, Windows, and service credentials', permission: ['devices.manage', 'service_checks.manage'] },
       {
         to: '/settings/general',
         label: 'Settings',
         icon: SettingsIcon,
         hint: 'Appliance and company configuration',
         // Mirrors the tab strip on the Settings page, permissions included.
+        // The page falls back to a tab the role holds, so only the item is route-gated.
+        selfGated: true,
         children: [
           settingsTab('company', 'Company', Building2, 'settings.manage'),
           settingsTab('smtp', 'SMTP / Email', Mail, 'settings.manage'),
@@ -314,7 +322,7 @@ export const NAV_GROUPS: NavGroup[] = [
           settingsTab('profile', 'My Profile', UserRound),
         ],
       },
-      { to: '/subscription', label: 'Subscription', icon: CreditCard, hint: 'Plan, seats and billing' },
+      { to: '/subscription', label: 'Subscription', icon: CreditCard, hint: 'Plan, seats and billing', permission: 'settings.view' },
     ],
   },
 ]

@@ -34,7 +34,8 @@ STRONG = "Correct-Horse-Battery-Staple-9"
 # What the built-in Read Only role grants: a delegated manager must hold at least
 # this to assign it.
 READ_ONLY_PERMS = ["dashboard.view", "devices.view", "alerts.view", "service_checks.view", "netflow.view",
-                   "udt.view", "netpath.view", "apm.view", "inventory.view", "reports.view", "maps.view"]
+                   "udt.view", "netpath.view", "servers.view", "apm.view", "inventory.view", "reports.view",
+                   "maps.view"]
 
 
 class Client:
@@ -229,6 +230,52 @@ def test_zero_permission_role_is_denied_on_every_protected_read(admin):
         if r.status_code not in (403, 404, 405):  # 404/405: path shape varies; never 200
             leaked[path] = r.status_code
     assert not leaked, f"zero-permission role reached: {leaked}"
+
+
+def test_server_and_application_teams_are_separated(admin):
+    """migrate-154: servers.* is separate from apm.*."""
+    apps = make_user(admin, "application_team")
+    systems = make_user(admin, "systems_team")
+    for path in ("/servers", "/agent-policies", "/server-baselines"):
+        assert apps.get(path).status_code == 403, path
+        assert systems.get(path).status_code != 403, path
+    assert systems.post("/apm/ingest-keys", json={"name": uniq("k")}).status_code == 403
+    assert apps.get("/devices").status_code == 403 and systems.get("/devices").status_code == 403
+
+
+def test_role_scope_limits_every_member_and_cannot_be_widened_by_a_scoped_manager(admin):
+    """migrate-154: roles.scope_tags is inherited by every member, unioned with
+    the member's own scope tags, and delegated managers stay inside their scope."""
+    tag = uniq("team").lower()
+    scoped_role = admin.post("/roles", json={"display_name": uniq("Scoped "), "permissions": ["devices.view"],
+                                             "scope_tags": [tag]})
+    assert scoped_role.status_code == 201 and scoped_role.json()["scope_tags"] == [tag]
+    member = make_user(admin, scoped_role.json()["name"])
+    me = member.get("/auth/me").json()
+    assert me["scope_tags"] == [] and me["role_scope_tags"] == [tag]
+    # No device carries the fresh tag, so the member sees none (fail-closed).
+    rows = member.get("/devices", params={"limit": 5}).json()
+    assert (rows.get("data", rows) if isinstance(rows, dict) else rows) == []
+    built_in = next(r for r in admin.get("/roles").json() if r["name"] == "network_team")
+    assert admin.put(f"/roles/{built_in['id']}", json={"scope_tags": [tag]}).status_code == 400
+
+    lead_role = admin.post("/roles", json={"display_name": uniq("Lead "), "scope_tags": [tag], "permissions": [
+        "devices.view", "users.view", "users.manage", "roles.view", "roles.manage"]}).json()
+    lead = make_user(admin, lead_role["name"])
+    plain = make_role(admin, ["devices.view"], display="Plain")
+    other = admin.post("/roles", json={"display_name": uniq("Other "), "permissions": ["devices.view"],
+                                       "scope_tags": [uniq("other").lower()]}).json()
+
+    def create(role, tags):
+        n = uniq("d")
+        return lead.post("/users", json={"username": n, "email": f"{n}@example.test", "password": STRONG,
+                                         "role": role, "scope_tags": tags})
+    assert create(plain["name"], []).status_code == 403            # would be unrestricted
+    assert create(other["name"], []).status_code == 403            # another team's role
+    assert create(scoped_role.json()["name"], []).status_code == 201
+    assert lead.put(f"/roles/{scoped_role.json()['id']}", json={"scope_tags": []}).status_code == 403
+    assert lead.post("/roles", json={"display_name": uniq("Wide "), "permissions": ["devices.view"],
+                                     "scope_tags": [other["scope_tags"][0]]}).status_code == 403
 
 
 def test_live_streams_require_authentication_and_a_view_permission(admin):
