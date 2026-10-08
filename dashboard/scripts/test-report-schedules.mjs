@@ -197,9 +197,9 @@ assert.deepEqual(m.scopeOf({ device_ids: ['a', 'b'], application_id: 'app' }), {
 
 /* List helpers -------------------------------------------------------------- */
 const list = [
-  { id: '1', name: 'Daily SLA', enabled: true, last_status: 'failed', created_by: 'me', report_type: 'availability', period: 'yesterday', format: 'pdf', next_run_at: '2026-10-08T05:00:00Z', notify_channels: [] },
-  { id: '2', name: 'Weekly NOC', enabled: false, last_status: 'success', created_by: 'other', report_type: 'availability', period: 'previous_week', format: 'excel', recipients: ['noc@example.com'], notify_channels: [] },
-  { id: '3', name: 'Monthly exec', enabled: true, last_status: null, created_by: 'me', report_type: 'executive_summary', period: 'previous_month', format: 'pdf', next_run_at: '2026-10-07T12:00:00Z', notify_channels: [] },
+  { id: '1', name: 'Daily SLA', enabled: true, last_status: 'failed', owner_id: 'me', is_owner: true, report_type: 'availability', period: 'yesterday', format: 'pdf', next_run_at: '2026-10-08T05:00:00Z', notify_channels: [] },
+  { id: '2', name: 'Weekly NOC', enabled: false, last_status: 'success', owner_id: 'other', is_owner: false, report_type: 'availability', period: 'previous_week', format: 'excel', recipients: ['noc@example.com'], notify_channels: [] },
+  { id: '3', name: 'Monthly exec', enabled: true, last_status: null, owner_id: 'me', is_owner: true, report_type: 'executive_summary', period: 'previous_month', format: 'pdf', next_run_at: '2026-10-07T12:00:00Z', notify_channels: [] },
 ]
 const titleOf = (s) => m.templateTitle(s, catalog)
 assert.deepEqual(m.filterSchedules(list, { q: '', status: 'failing', titleOf }).map((s) => s.id), ['1'])
@@ -207,6 +207,11 @@ assert.deepEqual(m.filterSchedules(list, { q: '', status: 'paused', titleOf }).m
 assert.deepEqual(m.filterSchedules(list, { q: 'noc@example', status: 'all', titleOf }).map((s) => s.id), ['2'])
 assert.deepEqual(m.filterSchedules(list, { q: 'executive', status: 'all', titleOf }).map((s) => s.id), ['3'])
 assert.deepEqual(m.filterSchedules(list, { q: '', status: 'all', mineOnly: true, userId: 'me', titleOf }).map((s) => s.id), ['1', '3'])
+// The API returns owner_id and is_owner (never created_by); is_owner wins.
+assert.deepEqual(m.filterSchedules(list, { q: '', status: 'all', mineOnly: true, titleOf }).map((s) => s.id), ['1', '3'])
+assert.equal(m.isMine({ owner_id: 'me' }, 'me'), true)
+assert.equal(m.isMine({ owner_id: 'me', is_owner: false }, 'me'), false)
+assert.equal(m.isMine({ owner_id: null }, 'me'), false)
 assert.equal(m.soonestRun(list, t).schedule.id, '3')
 assert.equal(m.runHealth('partial'), 'partial')
 assert.equal(m.runHealth(null), 'never')

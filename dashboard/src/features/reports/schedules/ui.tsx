@@ -4,13 +4,11 @@
  * its colour with an icon and a text label.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import {
   AppWindow, Bell, CheckCircle2, CircleDashed, ExternalLink, FileCode2, FileSpreadsheet, FileText, FileType,
   Info, Lock, Mail, Server, TriangleAlert, XCircle,
 } from 'lucide-react'
-import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { serverNow } from '@/lib/serverClock'
 import { describeFailure } from '@/lib/access'
@@ -19,6 +17,7 @@ import { QueryFailure } from '@/components/ui/QueryState'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { FilterChips } from '@/components/netflow/FilterChips'
 import { flowFilterFromDraft, type FlowFilterDraft } from '@/lib/netflow/filters'
+import { useRumApplications } from '../api'
 import { useScheduleRuns } from './api'
 import {
   SCOPED_EXPLANATION, formatLabel, relativeTo, runHealth, runLabel, scopeOf, toInstant,
@@ -83,7 +82,8 @@ const HEALTH: Record<RunHealth, { label: string; cls: string; Icon: typeof Check
 export function RunStatusBadge({ status, className }: { status: string | null | undefined; className?: string }) {
   const h = runHealth(status)
   const meta = HEALTH[h]
-  const label = h === 'other' ? String(status) : meta.label
+  const raw = String(status)
+  const label = h === 'other' ? (raw === 'running' ? 'Running…' : raw.charAt(0).toUpperCase() + raw.slice(1)) : meta.label
   return (
     <span className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-md border px-1.5 py-0.5 text-xs font-medium', meta.cls, className)}>
       <meta.Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -215,19 +215,12 @@ function netflowDraft(scope: Record<string, unknown>): FlowFilterDraft {
   return out as FlowFilterDraft
 }
 
-type RumApp = { application_id: string; service_name: string }
-
 /** Read-only scope chips: NetFlow filter, selected devices, application; or the withheld notice. */
 export function ScopeChips({ filters, withheld, tz }: { filters: ScheduleFilters | null | undefined; withheld?: boolean; tz?: string }) {
   const scope = scopeOf(filters)
-  const apps = useQuery<{ applications: RumApp[] }>({
-    queryKey: ['reports', 'rum-applications'],
-    queryFn: async () => (await api.get('/reports/rum-applications')).data,
-    enabled: !!scope.applicationId,
-    staleTime: 5 * 60_000,
-  })
+  const apps = useRumApplications(!!scope.applicationId)
   const appName = useMemo(
-    () => apps.data?.applications?.find((a) => a.application_id === scope.applicationId)?.service_name,
+    () => apps.data?.find((a) => a.application_id === scope.applicationId)?.service_name,
     [apps.data, scope.applicationId],
   )
   const nf = useMemo(() => (scope.netflow ? flowFilterFromDraft(netflowDraft(scope.netflow)).filter : null), [scope.netflow])

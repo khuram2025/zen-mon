@@ -405,6 +405,8 @@ export interface Issue {
 export interface EntryProblems {
   /** The section no longer exists in the catalog. */
   unknown?: string
+  /** The author's role cannot view the section and the saved template does not already hold it. */
+  restricted?: string
   title?: string
   options: Record<string, string>
 }
@@ -421,7 +423,16 @@ export interface Validation {
 export function validateDraft(
   draft: Draft,
   sections: SectionIndex,
-  known: { categories?: readonly string[]; periods?: readonly string[] } = {},
+  known: {
+    categories?: readonly string[]
+    periods?: readonly string[]
+    /**
+     * Section ids the saved template already holds. Saving it in place may keep
+     * them even when the author's role cannot view them; any other copy may not
+     * (the server refuses sections the author cannot view).
+     */
+    kept?: ReadonlySet<string>
+  } = {},
 ): Validation {
   const issues: Issue[] = []
   const fields: Partial<Record<DraftField, string>> = {}
@@ -461,6 +472,10 @@ export function validateDraft(
       issues.push({ key: `entry:${e.uid}`, message: `${where}: ${p.unknown}`, target: { kind: 'entry', uid: e.uid } })
     } else {
       const label = entryTitle(e, def)
+      if (def.available === false && !known.kept?.has(e.id)) {
+        p.restricted = "Your role can't view this section, so a template you save can't include it; remove it"
+        issues.push({ key: `entry:${e.uid}:access`, message: `${where} (${label}): ${p.restricted}`, target: { kind: 'entry', uid: e.uid } })
+      }
       if (e.title.length > TITLE_MAX) {
         p.title = `Keep the title to ${TITLE_MAX} characters`
         issues.push({ key: `entry:${e.uid}:title`, message: `${where} (${label}): ${p.title}`, target: { kind: 'entry', uid: e.uid } })
@@ -477,7 +492,7 @@ export function validateDraft(
         })
       }
     }
-    if (p.unknown || p.title || Object.keys(p.options).length) entries[e.uid] = p
+    if (p.unknown || p.restricted || p.title || Object.keys(p.options).length) entries[e.uid] = p
   })
 
   return { valid: issues.length === 0, issues, fields, entries, optionIssueCount }

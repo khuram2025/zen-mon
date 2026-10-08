@@ -138,8 +138,9 @@ export function firstSortDir(style: ColStyle | undefined): SortDir {
 function csvCell(v: Cell): string {
   let s = cellText(v)
   // Spreadsheet formula injection: neutralise cells that would be evaluated
-  // (but keep plain negative numbers such as "-5" or "-1.2 ms" readable).
-  if (/^[=+\-@\t\r]/.test(s) && !/^-[\d.,]+(\s*\S+)?$/.test(s)) s = `'${s}`
+  // (but keep plain negative numbers such as "-5", "-1.2 ms" or "-3 %" readable;
+  // a unit is letters, µ, % or / only, so "-1+SUM(A1)" is still neutralised).
+  if (/^[=+\-@\t\r]/.test(s) && !/^-[\d.,]+\s*[A-Za-zµ%/]*$/.test(s)) s = `'${s}`
   return /[",\r\n]/.test(s) || /^\s|\s$/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 

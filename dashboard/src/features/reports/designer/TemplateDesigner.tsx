@@ -94,9 +94,14 @@ export function TemplateDesigner({ mode, initial, catalog, branding, template, b
   const [draft, setDraft] = useState<Draft>(initial)
   const [baseline] = useState(() => draftSignature(initial, sections))
   const dirty = useMemo(() => draftSignature(draft, sections), [draft, sections]) !== baseline
-  const validation = useMemo(() => validateDraft(draft, sections, known), [draft, sections, known])
-
   const editing = mode === 'edit'
+  // Saving in place may keep sections the stored template already holds; a new copy may not.
+  const kept = useMemo(
+    () => new Set<string>(editing && template ? (template.entries?.length ? template.entries.map((e) => e.id) : template.sections ?? []) : []),
+    [editing, template],
+  )
+  const validation = useMemo(() => validateDraft(draft, sections, { ...known, kept }), [draft, sections, known, kept])
+
   const canEdit = !editing || !!template?.can_edit
   const canChangeVisibility = !editing || !!template?.can_change_visibility
 
@@ -138,7 +143,7 @@ export function TemplateDesigner({ mode, initial, catalog, branding, template, b
   const selectedEntry = selectedIndex >= 0 ? draft.entries[selectedIndex] : null
   const selectedDef = selectedEntry ? sections[selectedEntry.id] : undefined
   const usage = useMemo(() => usageCounts(draft.entries), [draft.entries])
-  const blockingIssues = Object.values(validation.entries).filter((p) => p.unknown || Object.keys(p.options).length).length
+  const blockingIssues = Object.values(validation.entries).filter((p) => p.unknown || p.restricted || Object.keys(p.options).length).length
   const categoryTitle = catalog.categories.find((c) => c.id === draft.category)?.title ?? null
   const builtinTemplates = useMemo(
     () => catalog.types.filter((t) => t.engine === 'sections' && (t.entries?.length || t.sections?.length)),

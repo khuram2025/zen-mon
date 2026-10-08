@@ -5,6 +5,7 @@
  *   ['reports', 'render', key, params]   a rendered report (viewer)
  *   ['reports', 'template', id]          one organisation template (designer)
  *   ['reports', 'runs']                  recent generated reports
+ *   ['reports', 'rum-applications']      RUM applications (scope picker, schedule chips)
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
@@ -30,6 +31,23 @@ export function useReportBranding() {
     staleTime: 5 * 60_000,
   })
   return { ...q, branding: q.data ?? DEFAULT_BRANDING }
+}
+
+export interface RumApplication {
+  application_id: string
+  service_name: string
+  sessions: number
+  last_seen: string | null
+}
+
+/** Browser-RUM applications the caller can see; one cache entry, always an array. */
+export function useRumApplications(enabled = true) {
+  return useQuery<RumApplication[]>({
+    queryKey: ['reports', 'rum-applications'],
+    queryFn: async () => ((await api.get('/reports/rum-applications')).data?.applications ?? []) as RumApplication[],
+    enabled,
+    staleTime: 5 * 60_000,
+  })
 }
 
 export interface RenderParams {

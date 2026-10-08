@@ -50,8 +50,10 @@ export type ReportSchedule = {
   last_status?: string | null
   last_error?: string | null
   next_run_at?: string | null
-  created_by?: string | null
+  owner_id?: string | null
   owner_name?: string | null
+  /** The caller owns the schedule (it runs with their permissions). */
+  is_owner?: boolean
   report_title?: string | null
   can_edit?: boolean
   netflow_withheld?: boolean
@@ -657,6 +659,12 @@ export function isFailing(s: Pick<ReportSchedule, 'last_status'>): boolean {
 
 export type StatusFilter = 'all' | 'active' | 'paused' | 'failing'
 
+/** The caller owns the schedule: the server's flag, else the owner id. */
+export function isMine(s: Pick<ReportSchedule, 'is_owner' | 'owner_id'>, userId?: string): boolean {
+  if (typeof s.is_owner === 'boolean') return s.is_owner
+  return !!userId && !!s.owner_id && s.owner_id === userId
+}
+
 export function filterSchedules(
   list: ReportSchedule[],
   opts: { q: string; status: StatusFilter; mineOnly?: boolean; userId?: string; titleOf: (s: ReportSchedule) => string },
@@ -666,7 +674,7 @@ export function filterSchedules(
     if (opts.status === 'active' && !s.enabled) return false
     if (opts.status === 'paused' && s.enabled) return false
     if (opts.status === 'failing' && !isFailing(s)) return false
-    if (opts.mineOnly && (!opts.userId || s.created_by !== opts.userId)) return false
+    if (opts.mineOnly && !isMine(s, opts.userId)) return false
     if (!terms.length) return true
     const hay = [
       s.name, s.description, opts.titleOf(s), s.owner_name, periodLabel(s.period), formatLabel(s.format),

@@ -35,7 +35,7 @@ import {
   useToggleSchedule,
 } from '@/features/reports/schedules/api'
 import {
-  SCOPED_EXPLANATION, buildBody, filterSchedules, frequencyText, isFailing, isNetflowWithheld, isVisibilityScoped,
+  SCOPED_EXPLANATION, buildBody, filterSchedules, frequencyText, isFailing, isMine, isNetflowWithheld, isVisibilityScoped,
   periodLabel, relativeTo, runHealth, runLabel, scheduleToForm, scopeOf, soonestRun, templateTitle, toInstant,
   type NotificationChannel, type ReportSchedule, type StatusFilter,
 } from '@/features/reports/schedules/model'
@@ -110,7 +110,7 @@ export default function SchedulesPage() {
     failing: failing.length,
   }
   const soonest = soonestRun(list, now)
-  const hasOwners = list.some((s) => s.created_by)
+  const hasOwners = list.some((s) => s.owner_id)
   const filtered = q.trim() !== '' || status !== 'all' || mine
 
   const toggleExpanded = (id: string) =>
@@ -409,8 +409,8 @@ function EmptyState({ title, body, action, secondary }: { title: string; body?: 
 }
 
 function ownerLabel(s: ReportSchedule, userId?: string): string {
-  if (userId && s.created_by === userId) return 'You'
-  return s.owner_name || (s.created_by ? 'Another user' : '—')
+  if (isMine(s, userId)) return 'You'
+  return s.owner_name || (s.owner_id ? 'Another user' : '—')
 }
 
 function NextRun({ s, ctx, compact }: { s: ReportSchedule; ctx: Ctx; compact?: boolean }) {

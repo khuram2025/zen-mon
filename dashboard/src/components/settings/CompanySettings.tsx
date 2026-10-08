@@ -77,7 +77,23 @@ export function CompanySettings() {
   })
   const saved = useMemo(() => pick(data), [data])
   const [form, setForm] = useState<CompanyForm>(EMPTY)
-  useEffect(() => { if (data) setForm(pick(data)) }, [data])
+  // Refetches after a logo upload or removal change only the logo metadata:
+  // keep the form as it is. When saved values do change, take them for the
+  // fields the user has not edited since the last load.
+  const lastSaved = useRef<CompanyForm | null>(null)
+  useEffect(() => {
+    if (!data) return
+    const next = pick(data)
+    const prev = lastSaved.current
+    lastSaved.current = next
+    if (prev && FIELDS.every((k) => prev[k] === next[k])) return
+    setForm((f) => {
+      if (!prev) return next
+      const merged = { ...next }
+      for (const k of FIELDS) if (f[k] !== prev[k]) (merged as any)[k] = f[k]
+      return merged
+    })
+  }, [data])
   const set = <K extends keyof CompanyForm>(k: K, v: CompanyForm[K]) => setForm((f) => ({ ...f, [k]: v }))
 
   const dirty = FIELDS.some((k) => form[k] !== saved[k])

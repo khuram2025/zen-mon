@@ -172,7 +172,12 @@ export function Inspector({ entry, def, index, total, problems, full, onChange, 
                     {def.requires.length ? def.requires.map(permissionLabel).join(', ') : 'Report access only'}
                   </dd>
                 </dl>
-                {!def.available && (
+                {problems?.restricted ? (
+                  <p role="alert" className="rounded-md border border-danger/40 bg-danger/5 px-2.5 py-2 text-[11px] leading-relaxed text-text2">
+                    <span className="font-semibold text-danger-fg">Remove this section to save.</span> Your role lacks this data
+                    permission, and a template can only gain sections its author is allowed to view.
+                  </p>
+                ) : !def.available && (
                   <p className="rounded-md border border-warning/40 bg-warning/5 px-2.5 py-2 text-[11px] leading-relaxed text-text2">
                     Your role lacks this data permission, so your preview shows the section as restricted. Viewers who have it
                     see the data; others see it as restricted.

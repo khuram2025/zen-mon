@@ -251,6 +251,17 @@ assert.equal(m.validateDraft({ ...fromBuiltin, tags: Array.from({ length: 13 }, 
 assert.equal(m.validateDraft({ ...fromBuiltin, defaultPeriod: 'fortnight' }, sections, known).fields.defaultPeriod, 'Choose a default period from the list')
 assert.equal(m.validateDraft({ ...fromBuiltin, name: '   ' }, sections).fields.name, 'Give the template a name')
 
+// A section the author's role cannot view blocks saving a new copy (e.g. a
+// customised built-in), but editing in place may keep one the template holds.
+const withFlows = { ...fromBuiltin, entries: [...fromBuiltin.entries, { uid: 'f1', id: flows.id, title: '', options: {} }] }
+v = m.validateDraft(withFlows, sections, known)
+assert.equal(v.valid, false)
+assert.match(v.entries.f1.restricted, /can't view this section/)
+assert.equal(v.issues.find((i) => i.key === 'entry:f1:access').target.uid, 'f1')
+v = m.validateDraft(withFlows, sections, { ...known, kept: new Set([flows.id]) })
+assert.equal(v.valid, true, JSON.stringify(v.issues))
+assert.equal(v.entries.f1, undefined)
+
 /* ── Payloads and dirty tracking ────────────────────────────────────── */
 const draft = {
   ...fromBuiltin,

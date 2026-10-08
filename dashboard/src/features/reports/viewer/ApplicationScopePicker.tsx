@@ -1,19 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import * as Popover from '@radix-ui/react-popover'
-import { useQuery } from '@tanstack/react-query'
 import { AppWindow, Check, ChevronDown, Loader2, Search } from 'lucide-react'
-import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { QueryFailure } from '@/components/ui/QueryState'
+import { useRumApplications } from '../api'
 import { fmtNumber } from '../render/format'
-
-interface RumApplication {
-  application_id: string
-  service_name: string
-  sessions: number
-  last_seen: string | null
-}
 
 /** One option per application, plus "All applications" (value null) first. */
 type Option = { value: string | null; title: string; detail?: string }
@@ -29,12 +21,7 @@ export function ApplicationScopePicker({ selected, onChange }: { selected: strin
   const listRef = useRef<HTMLUListElement>(null)
   const id = useId()
 
-  const apps = useQuery<RumApplication[]>({
-    queryKey: ['reports', 'rum-applications'],
-    queryFn: async () => ((await api.get('/reports/rum-applications')).data?.applications ?? []) as RumApplication[],
-    staleTime: 5 * 60_000,
-    enabled: open || !!selected,
-  })
+  const apps = useRumApplications(open || !!selected)
 
   const options = useMemo<Option[]>(() => {
     const s = q.trim().toLowerCase()

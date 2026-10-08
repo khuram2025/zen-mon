@@ -324,7 +324,7 @@ export const Outline = forwardRef<OutlineHandle, OutlineProps>(function Outline(
             {entries.map((e, i) => {
               const def = sections[e.id]
               const p = problems[e.uid]
-              const issueCount = p ? Object.keys(p.options).length + (p.title ? 1 : 0) + (p.unknown ? 1 : 0) : 0
+              const issueCount = p ? Object.keys(p.options).length + (p.title ? 1 : 0) + (p.unknown || p.restricted ? 1 : 0) : 0
               const selected = e.uid === selectedUid
               const grabbed = grab?.uid === e.uid
               const title = titleOf(e)
@@ -407,7 +407,7 @@ export const Outline = forwardRef<OutlineHandle, OutlineProps>(function Outline(
                       {issueCount > 0 && (
                         <span className="mt-1 flex items-center gap-1 text-[11px] font-medium text-danger-fg">
                           <AlertCircle className="h-3 w-3 shrink-0" aria-hidden />
-                          {p?.unknown ? 'Remove this section to save' : `${issueCount} option${issueCount === 1 ? '' : 's'} to fix`}
+                          {p?.unknown || p?.restricted ? 'Remove this section to save' : `${issueCount} option${issueCount === 1 ? '' : 's'} to fix`}
                         </span>
                       )}
                     </button>
