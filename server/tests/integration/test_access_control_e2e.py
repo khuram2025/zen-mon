@@ -751,7 +751,7 @@ def test_catalog_marks_risk_and_dependencies(admin):
 
 
 def test_builtin_roles_gain_inventory_but_custom_roles_do_not(admin):
-    # The API reconciles built-in rows to the code definitions at startup (definition v4);
+    # The API reconciles built-in rows to the code definitions at startup (definition v6);
     # a custom role is exactly what its administrator saved.
     by_name = {r["name"]: r for r in admin.get("/roles").json() if r["is_system"]}
     assert {"inventory.view", "inventory.export", "inventory.manage"} <= set(by_name["operator"]["permissions"])
@@ -759,6 +759,12 @@ def test_builtin_roles_gain_inventory_but_custom_roles_do_not(admin):
     assert "inventory.view" in by_name["read_only"]["permissions"]
     for name in ("viewer", "read_only"):  # owner decision D4: no export, no writes
         assert not {"inventory.export", "inventory.manage"} & set(by_name[name]["permissions"]), name
+    # owner decision D9: three team roles may view the inventory, none may export or manage,
+    # and the application team gets nothing
+    for name in ("network_team", "systems_team", "security_team"):
+        assert "inventory.view" in by_name[name]["permissions"], name
+        assert not {"inventory.export", "inventory.manage"} & set(by_name[name]["permissions"]), name
+    assert not [p for p in by_name["application_team"]["permissions"] if p.startswith("inventory.")]
     custom = make_role(admin, ["devices.view", "apm.view"])
     listed = {r["id"]: r for r in admin.get("/roles").json()}[custom["id"]]
     assert not [p for p in listed["permissions"] if p.startswith("inventory.")]

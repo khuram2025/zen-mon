@@ -215,12 +215,13 @@ _NETWORK_TEAM = [
     "dashboard.view", "devices.view", "devices.manage", "discovery.view", "discovery.run",
     "alerts.view", "alerts.acknowledge", "service_checks.view", "netflow.view",
     "udt.view", "netpath.view", "netpath.manage", "ncm.view", "ncm.manage", "ncm.baseline",
-    "reports.view", "reports.export", "maps.view", "maps.manage",
+    "inventory.view", "reports.view", "reports.export", "maps.view", "maps.manage",
 ]
 
 _SYSTEMS_TEAM = [
     "dashboard.view", "servers.view", "servers.manage", "service_checks.view",
-    "service_checks.manage", "alerts.view", "alerts.acknowledge", "reports.view", "reports.export",
+    "service_checks.manage", "alerts.view", "alerts.acknowledge", "inventory.view",
+    "reports.view", "reports.export",
 ]
 
 _APPLICATION_TEAM = [
@@ -231,7 +232,7 @@ _APPLICATION_TEAM = [
 _SECURITY_TEAM = [
     "dashboard.view", "devices.view", "alerts.view", "alerts.acknowledge", "netflow.view",
     "netflow.export", "udt.view", "udt.view_users", "ncm.view", "ncm.compliance", "audit.view",
-    "reports.view", "reports.export",
+    "inventory.view", "reports.view", "reports.export",
 ]
 
 # Version of the built-in role definitions below. Persisted on is_system role
@@ -240,9 +241,12 @@ _SECURITY_TEAM = [
 # newly introduced permission is never granted to a custom role implicitly.
 #   4 - servers.* split out of apm.*; built-in team roles added.
 #   5 - inventory.* added (operator: view, export, manage; viewer and read_only: view).
-#       The team roles deliberately do not get inventory.* yet; see
+#       The team roles deliberately did not get inventory.* yet; see
 #       Documentation/Inventory (decision D9).
-BUILTIN_ROLE_DEFINITION_VERSION = 5
+#   6 - inventory.view added to network_team, systems_team and security_team (D9: view only,
+#       never export or manage); application_team gets no inventory.* because it sees
+#       applications, not the estate.
+BUILTIN_ROLE_DEFINITION_VERSION = 6
 
 BUILTIN_ROLE_DEFINITIONS: dict[str, list[str]] = {
     "admin": list(ALL_PERMISSIONS),
@@ -261,11 +265,13 @@ BUILTIN_ROLE_DEFINITIONS: dict[str, list[str]] = {
 BUILTIN_ROLE_META: dict[str, tuple[str, str]] = {
     "network_team": (
         "Network Team",
-        "Network devices, discovery, NetFlow, NetPath, Device Tracker, configuration backups and maps.",
+        "Network devices, discovery, NetFlow, NetPath, Device Tracker, configuration backups and maps. "
+        "Includes read access to Inventory (inventory.view).",
     ),
     "systems_team": (
         "Systems Team",
-        "Servers, agents, agent policies and baselines, plus the service checks that watch them.",
+        "Servers, agents, agent policies and baselines, plus the service checks that watch them. "
+        "Includes read access to Inventory (inventory.view).",
     ),
     "application_team": (
         "Application Team",
@@ -274,7 +280,7 @@ BUILTIN_ROLE_META: dict[str, tuple[str, str]] = {
     "security_team": (
         "Security Team",
         "Read-mostly security view: NetFlow (with raw export), user-to-device activity, "
-        "configuration compliance and the audit log.",
+        "configuration compliance and the audit log. Includes read access to Inventory (inventory.view).",
     ),
 }
 

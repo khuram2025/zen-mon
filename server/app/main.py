@@ -34,6 +34,7 @@ from app.api.v1 import apm_insights as apm_insights_api
 from app.api.websocket import realtime
 from app.api.v1 import service_checks_ops
 from app.api.v1 import system_time as system_time_api
+from app.api.v1 import inventory as inventory_api
 
 settings = get_settings()
 
@@ -189,6 +190,7 @@ def create_app() -> FastAPI:
     app.include_router(apm_p3_api.router, dependencies=[policy("apm", allow_public=True)])
 
     app.include_router(system_time_api.router, prefix="/api/v1")
+    app.include_router(inventory_api.router, prefix="/api/v1", dependencies=[policy("inventory")])
 
     @app.get("/api/v1/system/health")
     async def health_check():
@@ -293,6 +295,10 @@ def create_app() -> FastAPI:
         from app.services.inventory_service import inventory_normalize_loop, inventory_snapshot_loop
         app.state.inventory_normalize = asyncio.create_task(inventory_normalize_loop())
         app.state.inventory_snapshot = asyncio.create_task(inventory_snapshot_loop())
+        # The Software catalog's whole-estate table is cached per worker process; this keeps it (and the default
+        # views on it) fresh before it expires, so no request waits for the scan.
+        from app.services.inventory_software_query import catalog_warmer_loop
+        app.state.inventory_catalog_warmer = asyncio.create_task(catalog_warmer_loop())
 
     async def _sync_agent_packages_once():
         _pkg_logger = logging.getLogger("zenplus.agent_packages")
@@ -308,7 +314,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot"):
+        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

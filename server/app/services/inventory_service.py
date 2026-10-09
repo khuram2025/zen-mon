@@ -15,7 +15,12 @@ Two loops, started from ``main.py`` in every API worker:
 ``inventory_snapshot_loop``
     Wakes every 5 minutes. From ``snapshot_hour``:15 appliance time it writes
     the day's ``inventory_daily_snapshots`` rows once (also catching up after
-    downtime), then purges expired change events and old snapshots.
+    downtime), then purges expired change events and old snapshots. The loop
+    holds the write while the process is younger than SNAPSHOT_SETTLE_S or the
+    normalise backlog is not empty (UP-07), so the first point of every series
+    is not an artefact of an upgrade that has not settled; during the first 24
+    hours after the capture start the current day's row is refreshed (see
+    ``run_snapshot_pass``).
 
 Concurrency
 -----------
@@ -68,6 +73,9 @@ is worse than a missing one (history cannot be corrected afterwards), so:
   (the lowest-ranked evidence) instead of being dropped. A device that has not
   been polled for that long and whose stored version came from a template keeps it
   against a sticky, older profile value, so an outage never reads as a downgrade.
+  A write that moves ``values_rev`` (a rule-pack re-render) is the exception: the new
+  pack's answer replaces the stored block, so a value the pack no longer accepts (a
+  MikroTik board name stored as the RouterOS version) is cleared, silently (NL-02).
 * The loop never writes ``lifecycle_slug`` (the lifecycle phase owns it).
 
 Failures
@@ -105,6 +113,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import dataclasses
+import functools
 import json
 import logging
 import math
@@ -130,6 +139,7 @@ __all__ = [
     "run_normalise_tick", "inventory_normalize_loop",
     "get_appliance_zone", "snapshot_due", "snapshot_local_day", "day_bounds",
     "snapshot_day", "purge_expired", "run_snapshot_pass", "inventory_snapshot_loop",
+    "NormaliseBacklog", "normalise_backlog", "SnapshotState", "get_capture_started_at",
 ]
 
 # Advisory lock keys, pinned in Documentation/Inventory/00-INDEX.md. Nothing else
@@ -172,6 +182,26 @@ MAX_FAILURE_LOGS_PER_BATCH = 5
 SNAPSHOT_START_DELAY_S = 60
 SNAPSHOT_POLL_S = 300
 SNAPSHOT_MINUTE = 15
+# UP-07. The first daily row after an upgrade used to be written 60 s after the process started, before the
+# agents had reported (a server reports every 6 h) and before the normalise backlog had drained, and was then
+# frozen for three years. A snapshot is therefore held until the process has been up for SNAPSHOT_SETTLE_S and
+# no row waits for the normaliser; it is not held for ever (a row that fails to normalise would otherwise stop
+# the history): SNAPSHOT_HOLD_MAX_S after the day's snapshot became due (or the process started, if later) it is
+# written anyway.
+SNAPSHOT_SETTLE_S = 30 * 60
+SNAPSHOT_HOLD_MAX_S = 12 * 3600
+# During the first 24 hours after the capture start (system_settings['inventory.capture_started_at'], written by
+# migration 158) today's row is refreshed, at most once per SNAPSHOT_REFRESH_S per process, while the estate
+# settles. A day that has closed is never rewritten, and outside that window a day is written exactly once.
+SNAPSHOT_REFRESH_WINDOW_S = 24 * 3600
+SNAPSHOT_REFRESH_S = 3600
+CAPTURE_KEY = "inventory.capture_started_at"
+# Mirrors inventory_query.ENDPOINT_PROTECTION_CATEGORY / _SERVICES (a test keeps the two equal; this module
+# cannot import that one, which imports this).
+ENDPOINT_PROTECTION_CATEGORY = "endpoint-protection"
+ENDPOINT_PROTECTION_SERVICES = ("WinDefend", "Sense")
+# The most backlog rows a count looks at: the answer is "none" or "at least this many".
+BACKLOG_COUNT_CAP = 100_000
 PURGE_BATCH = 10_000
 SNAPSHOT_RETENTION_YEARS = 3
 
@@ -181,7 +211,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stale_days": 7,
     "change_retention_days": 400,
     "snapshot_hour": 0,
-    "hide_categories_by_default": ["update", "driver", "os-component"],
+    # Runtimes join the noise categories (UI-03 / DT-08): the Visual C++ redistributables, .NET and Java
+    # runtimes top every catalog by installs and say nothing about what a server is for. An install that
+    # already saved this list keeps exactly what it saved (merge_inventory_settings); only an install that
+    # never stored the key gets the new default.
+    "hide_categories_by_default": ["update", "driver", "os-component", "runtime"],
     "trends_enabled": True,
 }
 _FRESH_HOURS_RANGE = (1, 720)
@@ -553,13 +587,20 @@ SELECT i.asset_id
 #    triggers fire for rows whose os_version, hw_serial or hw_model really changed
 #    under an unchanged values_rev, unless the caller turned suppression on.
 #
-#    The stored OS block (_OS_BLOCK) is kept, as a whole, when
+#    The stored OS block (_OS_BLOCK) is kept, as a whole, when the write does not move
+#    values_rev (it re-keys the same rule-pack revision) and
 #    * the recomputed identity has no OS version (a source that went missing is a
 #      gap, not a change), unless it names a different known OS family; or
 #    * the version was stored from a template, the device has not been polled for a
 #      day (``tpl_aged``), and the recomputed version only comes from a source that
 #      the template outranks in reality (an older, sticky profile or firmware value).
-_KEEP_STORED_OS = """(i.os_version IS NOT NULL AND (
+#    A write that moves values_rev is a rule-pack re-render and is authoritative (NL-02):
+#    the new pack decided that the stored value is no longer a value (a MikroTik board
+#    name stored as the RouterOS version by revision 1), so keeping it would make the
+#    correction apply to new devices only. It is silent, as every re-render is: the capture
+#    trigger ignores a write that moves values_rev, and a version that becomes NULL emits
+#    no event anyway.
+_KEEP_STORED_OS = """(i.values_rev IS NOT DISTINCT FROM :rev AND i.os_version IS NOT NULL AND (
           (v.os_version IS NULL AND (v.os_family = 'unknown' OR v.os_family IS NOT DISTINCT FROM i.os_family))
        OR (v.tpl_aged AND i.os_source IN ('template', 'template_stale')
            AND v.os_source IS DISTINCT FROM 'template' AND v.os_source IS DISTINCT FROM 'template_stale')))"""
@@ -614,6 +655,36 @@ DELETE FROM inventory_identity
 # source would be keyed as a generic package title (dpkg/rpm names need their source to
 # be read as identifiers) and stamped clean; leaving it unkeyed lets the next upload,
 # which carries the source, key it correctly.
+#
+# "A Windows machine" is a server whose os_type says so or whose recorded OS name does
+# (UP-12): an operator edit or a discovery that filed a Windows server under 'other' or
+# 'linux' must not leave its pre-157 rows unkeyed for as long as it stays silent.
+#
+# normalise_backlog counts exactly these rows, so a row the loop never selects cannot hold
+# a daily snapshot for ever. data_status, the endpoint-protection state of the Assets queries,
+# the flyout and the daily snapshot ask the same question through ``software_eligible_sql``
+# (UP-R2-01, X10): one rule, two renderings, so the banner, the backlog and the 'unknown' state
+# can never disagree about which rows are waiting.
+_WINDOWS_SERVER_SQL = r"COALESCE({sv}.os_type = 'windows' OR {sv}.os_name ~* '\mwindows\M', false)"
+
+
+def software_eligible_sql(row: str = "s", server: Optional[str] = None) -> str:
+    """SQL predicate: the normalise loop will pick up (or has picked up) the software row aliased ``row``.
+
+    A row with a source is always eligible; a row without one (written before migration 157) only when its server is a
+    Windows machine (see the comment above). ``server`` is the alias of an already joined ``servers`` row, which the
+    predicate then reads directly; without it the predicate asks with a correlated EXISTS of its own (alias ``sv``,
+    so a caller that has its own ``sv`` must pass ``server``). Both renderings are the same rule, and neither is ever
+    NULL (a server without an os_name is simply not a Windows machine), so ``NOT software_eligible_sql(...)`` is safe."""
+    if server is not None:
+        return f"({row}.source IS NOT NULL OR {_WINDOWS_SERVER_SQL.format(sv=server)})"
+    return (f"({row}.source IS NOT NULL OR EXISTS (SELECT 1 FROM servers sv WHERE sv.id = {row}.server_id AND "
+            f"{_WINDOWS_SERVER_SQL.format(sv='sv')}))")
+
+
+_SOFTWARE_ELIGIBLE = software_eligible_sql("s")
+
+
 def _select_software_sql(*, include_stale: bool, after: bool) -> str:
     pending = "(s.norm_rev IS NULL OR s.norm_rev < :rev)" if include_stale else "s.norm_rev IS NULL"
     cursor = ("\n   AND (s.server_id, s.package_name) > (CAST(:after_server AS uuid), CAST(:after_package AS varchar))"
@@ -622,8 +693,7 @@ def _select_software_sql(*, include_stale: bool, after: bool) -> str:
 SELECT s.server_id, s.package_name, s.vendor, s.source
   FROM server_software_inventory s
  WHERE {pending}{cursor}
-   AND (s.source IS NOT NULL
-        OR EXISTS (SELECT 1 FROM servers sv WHERE sv.id = s.server_id AND sv.os_type = 'windows'))
+   AND {_SOFTWARE_ELIGIBLE}
    AND NOT (CAST(s.server_id AS text) || '/' || s.package_name = ANY(CAST(:skip AS text[])))
  ORDER BY s.server_id, s.package_name
  LIMIT :n"""
@@ -1221,6 +1291,72 @@ async def inventory_normalize_loop(*, start_delay: float = NORMALIZE_START_DELAY
         await asyncio.sleep(interval)
 
 
+# ── Normalise backlog ────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class NormaliseBacklog:
+    """What the normalise loop still has to do, install-wide. ``software_rows`` are software rows with no key or a
+    key from an older rule-pack revision that the loop will pick up (a row the loop never selects, see
+    _select_software_sql, is not backlog: it would hold a snapshot for ever); ``identity_rows`` are identity rows
+    that are dirty or old plus assets that have no identity row yet. Each count stops at ``cap``."""
+
+    software_rows: int = 0
+    identity_rows: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.software_rows + self.identity_rows
+
+    @property
+    def normalising(self) -> bool:
+        return self.total > 0
+
+
+async def normalise_backlog(db: AsyncSession, *, cap: int = BACKLOG_COUNT_CAP) -> NormaliseBacklog:
+    """Rows still waiting for the normaliser, install-wide. Cheap: the unkeyed software rows are found through the
+    partial index idx_ssi_unkeyed, the identity table is small, and the old-revision software scan (no index)
+    stops at ``cap`` rows (it reads the whole table only when nothing is old, once per call)."""
+    rev = inventory_normalize.RULEPACK_REV
+    unkeyed = (await db.execute(text(
+        f"SELECT count(*) FROM (SELECT 1 FROM server_software_inventory s WHERE s.norm_rev IS NULL "
+        f"AND {_SOFTWARE_ELIGIBLE} LIMIT :cap) q"), {"cap": cap})).scalar() or 0
+    old = 0
+    if unkeyed < cap:
+        old = (await db.execute(text(
+            f"SELECT count(*) FROM (SELECT 1 FROM server_software_inventory s WHERE s.norm_rev < :rev "
+            f"AND {_SOFTWARE_ELIGIBLE} LIMIT :cap) q"), {"rev": rev, "cap": cap - int(unkeyed)})).scalar() or 0
+    dirty = (await db.execute(text(
+        f"SELECT count(*) FROM (SELECT 1 FROM inventory_identity i WHERE (i.norm_rev IS NULL OR i.norm_rev < :rev) "
+        f"AND {_ASSET_EXISTS} LIMIT :cap) q"), {"rev": rev, "cap": cap})).scalar() or 0
+    missing = (await db.execute(text(
+        "SELECT (SELECT count(*) FROM (SELECT 1 FROM servers a WHERE NOT EXISTS (SELECT 1 FROM inventory_identity i "
+        "WHERE i.asset_kind = 'server' AND i.asset_id = a.id) LIMIT :cap) x) "
+        "+ (SELECT count(*) FROM (SELECT 1 FROM devices a WHERE NOT EXISTS (SELECT 1 FROM inventory_identity i "
+        "WHERE i.asset_kind = 'device' AND i.asset_id = a.id) LIMIT :cap) y)"), {"cap": cap})).scalar() or 0
+    return NormaliseBacklog(software_rows=int(unkeyed) + int(old), identity_rows=int(dirty) + int(missing))
+
+
+async def get_capture_started_at(db: AsyncSession) -> Optional[datetime]:
+    """When change capture began (``system_settings['inventory.capture_started_at']``, an ISO-8601 UTC string
+    written by migration 158), or None when it is missing or unreadable."""
+    row = (await db.execute(text("SELECT value FROM system_settings WHERE key = :k"), {"k": CAPTURE_KEY})).first()
+    raw = row[0] if row else None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    if isinstance(raw, str) and raw.startswith('"'):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
 # ── Snapshot time arithmetic ─────────────────────────────────────────
 
 async def get_appliance_zone(db: AsyncSession) -> tzinfo:
@@ -1266,6 +1402,13 @@ def day_bounds(day: date, zone: tzinfo) -> tuple[datetime, datetime]:
 
 SNAPSHOT_METRICS = ("assets", "os_release", "software_products", "coverage", "health", "changes")
 
+# The health dimensions, named like the predicates of the live Overview and the Assets ?health= filter.
+SNAPSHOT_HEALTH_KEYS = ("missing_os_version", "missing_model", "missing_serial", "unknown_vendor", "stale", "never",
+                        "software_truncated", "missing_security_agent")
+# Fresh, aging, stale and never describe assets that can report; not_applicable counts the ones that cannot, by
+# design, so fresh / (fresh + aging + stale + never) is the share of the assets that could have reported.
+SNAPSHOT_COVERAGE_KEYS = ("fresh", "aging", "stale", "never", "not_applicable")
+
 # Every change category/action the capture triggers can emit; always written, so a
 # quiet day is a recorded zero rather than a gap.
 _CHANGE_DIMENSIONS = ("software/added", "software/removed", "software/changed",
@@ -1284,7 +1427,48 @@ WITH assets AS (
      WHERE NOT EXISTS (SELECT 1 FROM servers s WHERE s.device_id = d.id)
 )"""
 
-_SNAPSHOT_BY_KIND = _ASSETS_CTE + """
+# The same union with the evidence the health predicates need, evaluated per asset. The definitions here are the
+# ones inventory_query.py uses for its live Overview (HEALTH_SQL, _SERVER_FRESHNESS_SQL, _DEVICE_FRESHNESS_SQL,
+# _SEC_STATE_SQL): the snapshot and the live panel must answer the same question, or a trend line starts at a
+# different number than the tile it sits next to (UP-07). test_inventory_fix_loops.py compares the two on one fleet.
+#   by_design  the asset cannot report an inventory and never did (freshness 'not_applicable', X3): a server whose
+#              collection mode is not the agent, a device that is ping-only, controller-managed or via a controller
+#   baselined / has_ep / has_defender / pending / stuck / has_services  the inputs of sec_state (X1, X9, X10): a
+#              complete, normalised software list with no endpoint-protection row and no running Defender service, and a
+#              service list to look in, is the only 'missing'. ``pending`` are the rows the normaliser will still key;
+#              ``stuck`` are unkeyed rows it never selects (no source on a server that is not a Windows machine): the
+#              list cannot be read, so the server is unknown, not missing. ``has_services`` is false for a server that
+#              never uploaded services (the APM-only agent profile): built-in Defender cannot be judged.
+_EP_SERVICE_LIST = ", ".join("'" + n + "'" for n in ENDPOINT_PROTECTION_SERVICES)    # constants, never input
+_SERVER_ELIGIBLE = software_eligible_sql("w", server="s")
+_ASSETS_HEALTH_CTE = f"""
+WITH assets AS (
+    SELECT 'server'::text AS kind, s.id AS id, s.inventory_updated_at AS seen_at,
+           (s.inventory_updated_at IS NULL AND s.collection_mode <> 'agent') AS by_design,
+           s.software_truncated AS truncated,
+           (s.inventory_baselined_at IS NOT NULL) AS baselined,
+           EXISTS (SELECT 1 FROM server_software_inventory w
+                    WHERE w.server_id = s.id AND w.category = '{ENDPOINT_PROTECTION_CATEGORY}') AS has_ep,
+           EXISTS (SELECT 1 FROM server_service_inventory v
+                    WHERE v.server_id = s.id AND v.service_name IN ({_EP_SERVICE_LIST})
+                      AND lower(v.state) = 'running') AS has_defender,
+           EXISTS (SELECT 1 FROM server_software_inventory w
+                    WHERE w.server_id = s.id AND (w.norm_rev IS NULL OR w.norm_rev < :rev)
+                      AND {_SERVER_ELIGIBLE}) AS pending,
+           EXISTS (SELECT 1 FROM server_software_inventory w
+                    WHERE w.server_id = s.id AND w.norm_rev IS NULL AND NOT {_SERVER_ELIGIBLE}) AS stuck,
+           EXISTS (SELECT 1 FROM server_service_inventory v WHERE v.server_id = s.id) AS has_services
+      FROM servers s
+    UNION ALL
+    SELECT 'device'::text, d.id, d.identity_updated_at,
+           (d.identity_updated_at IS NULL AND (NOT COALESCE(d.snmp_enabled, false)
+             OR d.managed_by_device_id IS NOT NULL OR d.poll_mode = 'via_controller')),
+           false, false, false, false, false, false, false
+      FROM devices d
+     WHERE NOT EXISTS (SELECT 1 FROM servers s WHERE s.device_id = d.id)
+)"""
+
+_SNAPSHOT_BY_KIND = _ASSETS_HEALTH_CTE + """
 , cuts AS (
     SELECT now() - make_interval(hours => CAST(:fresh_server AS integer)) AS fresh_server,
            now() - make_interval(hours => CAST(:fresh_device AS integer)) AS fresh_device,
@@ -1295,15 +1479,22 @@ _SNAPSHOT_BY_KIND = _ASSETS_CTE + """
 )
 SELECT t.kind,
        count(*)                                                                      AS total,
-       count(*) FILTER (WHERE t.seen_at IS NULL)                                     AS never,
+       count(*) FILTER (WHERE t.by_design)                                           AS not_applicable,
+       count(*) FILTER (WHERE t.seen_at IS NULL AND NOT t.by_design)                 AS never,
        count(*) FILTER (WHERE t.seen_at >= t.fresh_cut)                              AS fresh,
        count(*) FILTER (WHERE t.seen_at < t.fresh_cut AND t.seen_at >= t.stale_cut)  AS aging,
        count(*) FILTER (WHERE t.seen_at < t.stale_cut)                               AS stale,
-       count(*) FILTER (WHERE i.os_version IS NULL)                                  AS missing_os_version,
-       count(*) FILTER (WHERE i.hw_model IS NULL)                                    AS missing_model,
-       count(*) FILTER (WHERE i.hw_serial IS NULL)                                   AS missing_serial,
-       count(*) FILTER (WHERE i.vendor_key IS NULL)                                  AS unknown_vendor,
-       count(*) FILTER (WHERE t.truncated)                                           AS software_truncated
+       count(*) FILTER (WHERE NOT t.by_design AND NULLIF(i.os_version, '') IS NULL)  AS missing_os_version,
+       count(*) FILTER (WHERE NOT t.by_design AND t.kind = 'device'
+                          AND NULLIF(i.hw_model, '') IS NULL)                        AS missing_model,
+       count(*) FILTER (WHERE NOT t.by_design AND t.kind = 'device'
+                          AND NULLIF(i.hw_serial, '') IS NULL)                       AS missing_serial,
+       count(*) FILTER (WHERE NOT t.by_design AND t.kind = 'device'
+                          AND COALESCE(NULLIF(i.vendor_label, ''), NULLIF(i.hw_vendor, '')) IS NULL) AS unknown_vendor,
+       count(*) FILTER (WHERE t.kind = 'server' AND t.truncated)                     AS software_truncated,
+       count(*) FILTER (WHERE t.kind = 'server' AND t.baselined AND NOT t.truncated AND NOT t.has_ep
+                          AND NOT t.has_defender AND NOT t.pending AND NOT t.stuck
+                          AND t.has_services)                                        AS missing_security_agent
   FROM tagged t
   LEFT JOIN inventory_identity i ON i.asset_kind = t.kind AND i.asset_id = t.id
  GROUP BY t.kind"""
@@ -1368,9 +1559,14 @@ async def snapshot_day(db: AsyncSession, day: date, *, zone: Optional[tzinfo] = 
     * software_products  'products' (distinct name keys) and 'installs', keyed rows only,
                          without the categories in ``hide_categories_by_default``
     * coverage           'fresh', 'aging', 'stale', 'never': servers by inventory_updated_at,
-                         devices by identity_updated_at, against the settings thresholds
-    * health             missing_os_version, missing_model, missing_serial, unknown_vendor,
-                         software_truncated, stale, never
+                         devices by identity_updated_at, against the settings thresholds; and
+                         'not_applicable', the assets that cannot report by design (they are in none
+                         of the other four)
+    * health             the predicates of the live Overview, by the same names and definitions
+                         (SNAPSHOT_HEALTH_KEYS): missing_os_version for every reporting asset,
+                         missing_model / missing_serial / unknown_vendor for network devices only,
+                         stale, never, software_truncated and missing_security_agent (servers). Assets
+                         that cannot report by design are skipped by the identity predicates
     * changes            'category/action' events observed on the local calendar day. A day's
                          row is only complete once the day is over, so the daily pass also
                          refreshes the previous day (see run_snapshot_pass).
@@ -1384,22 +1580,21 @@ async def snapshot_day(db: AsyncSession, day: date, *, zone: Optional[tzinfo] = 
     fresh = settings["fresh_hours"]
     rows: dict[tuple[str, str], int] = {}
 
-    kinds = {k: dict.fromkeys(("total", "never", "fresh", "aging", "stale", "missing_os_version",
-                               "missing_model", "missing_serial", "unknown_vendor", "software_truncated"), 0)
+    kinds = {k: dict.fromkeys(("total", "not_applicable", "never", "fresh", "aging", "stale", "missing_os_version",
+                               "missing_model", "missing_serial", "unknown_vendor", "software_truncated",
+                               "missing_security_agent"), 0)
              for k in ("server", "device")}
     for r in (await db.execute(text(_SNAPSHOT_BY_KIND), {
             "fresh_server": fresh["server"], "fresh_device": fresh["device"],
-            "stale_days": settings["stale_days"]})).mappings().all():
+            "stale_days": settings["stale_days"], "rev": inventory_normalize.RULEPACK_REV})).mappings().all():
         kinds[r["kind"]] = {k: int(v) for k, v in r.items() if k != "kind"}
     total = {k: sum(v[k] for v in kinds.values()) for k in kinds["server"]}
     for kind, v in kinds.items():
         rows[("assets", kind)] = v["total"]
-    for bucket in ("fresh", "aging", "stale", "never"):
+    for bucket in SNAPSHOT_COVERAGE_KEYS:
         rows[("coverage", bucket)] = total[bucket]
-    for key in ("missing_os_version", "missing_model", "missing_serial", "unknown_vendor", "software_truncated"):
+    for key in SNAPSHOT_HEALTH_KEYS:
         rows[("health", key)] = total[key]
-    rows[("health", "stale")] = total["stale"]
-    rows[("health", "never")] = total["never"]
 
     for family, product, release, n in (await db.execute(text(_SNAPSHOT_OS))).all():
         dim = "/".join(_dimension_part(p) for p in (family, product, release))
@@ -1497,6 +1692,30 @@ class SnapshotPassResult:
     rows: int = 0
     purged_events: int = 0
     purged_snapshots: int = 0
+    refreshed: bool = False          # the pass re-wrote a row that already existed (first 24 h after the capture start)
+    held: Optional[str] = None       # why a due snapshot was not written: 'settling' or 'normalising'
+
+
+@dataclass
+class SnapshotState:
+    """What one snapshot loop remembers: when its process came up and when it last wrote a day.
+
+    Passed to ``run_snapshot_pass`` it switches on the rules that only make sense for a running loop: the settle
+    time after a restart, the normalise-backlog hold and the refresh during the first 24 h after the capture
+    start. A direct call without a state writes the day's snapshot as soon as it is due (tests, manual repair).
+    """
+
+    started_at: float = field(default_factory=time.monotonic)
+    settle_s: float = SNAPSHOT_SETTLE_S
+    refresh_every_s: float = SNAPSHOT_REFRESH_S
+    clock: Callable[[], float] = time.monotonic
+    last_write: Optional[float] = None
+
+    def settled(self) -> bool:
+        return self.clock() - self.started_at >= self.settle_s
+
+    def refresh_due(self) -> bool:
+        return self.last_write is None or self.clock() - self.last_write >= self.refresh_every_s
 
 
 async def _day_has_snapshot(db: AsyncSession, day: date) -> bool:
@@ -1504,10 +1723,37 @@ async def _day_has_snapshot(db: AsyncSession, day: date) -> bool:
         "SELECT EXISTS (SELECT 1 FROM inventory_daily_snapshots WHERE day = :d)"), {"d": day})).scalar())
 
 
+def _held_for_s(now: datetime, zone: tzinfo, snapshot_hour: int, state: SnapshotState) -> float:
+    """How long a due snapshot has been waiting: since the local day's snapshot became due (snapshot_hour:15) or
+    since this process started, whichever is later. A process that comes up in the afternoon of a day whose
+    snapshot has been due since the morning has been holding for minutes, not for the whole day: it must still
+    settle (UP-07)."""
+    local = now.astimezone(zone)
+    due_at = datetime.combine(local.date(), dtime(snapshot_hour, SNAPSHOT_MINUTE), tzinfo=zone)
+    up_for = max(0.0, state.clock() - state.started_at)
+    started = (now - timedelta(seconds=up_for)).astimezone(zone)
+    return max(0.0, (local - max(due_at, started)).total_seconds())
+
+
 async def run_snapshot_pass(session_factory=None, *, now: Optional[datetime] = None,
-                            zone: Optional[tzinfo] = None) -> SnapshotPassResult:
+                            zone: Optional[tzinfo] = None,
+                            state: Optional[SnapshotState] = None) -> SnapshotPassResult:
     """One wake-up of the snapshot loop: if today's snapshot is due and missing, write it
-    (and refresh yesterday's change counts), then run retention."""
+    (and refresh yesterday's change counts), then run retention.
+
+    With a ``state`` (the loop always passes one) three rules apply that keep the first point of every series
+    honest (UP-07):
+
+    * Hold. A due snapshot is not written while the process is younger than ``state.settle_s`` or any row waits
+      for the normaliser (``normalise_backlog``): the numbers of an upgrade that has not settled are an artefact,
+      and a day is written once. The hold ends ``SNAPSHOT_HOLD_MAX_S`` after the day's snapshot became due or the
+      process started (the later), so a row that can never be normalised cannot stop the history; the result says
+      ``held``.
+    * Refresh. During the first 24 hours after the capture start (migration 158) today's row, once written, is
+      recomputed at most every ``state.refresh_every_s``: servers report every few hours, so the first reading
+      is partial. A day that has closed is never rewritten, and outside that window a day is written exactly once.
+    * The same health predicates as the live Overview (see ``snapshot_day``).
+    """
     factory = session_factory or _default_session_factory()
     now = now or datetime.now(timezone.utc)
 
@@ -1517,11 +1763,38 @@ async def run_snapshot_pass(session_factory=None, *, now: Optional[datetime] = N
             zone = await get_appliance_zone(db)
         today = snapshot_local_day(now, zone)
         have_today = await _day_has_snapshot(db, today)
+        capture = await get_capture_started_at(db) if state is not None else None
         await db.rollback()
     result = SnapshotPassResult(day=today)
-    result.due = snapshot_due(now, zone, settings["snapshot_hour"], have_today=have_today)
+    first_due = snapshot_due(now, zone, settings["snapshot_hour"], have_today=have_today)
+    refresh = bool(
+        state is not None and have_today and capture is not None
+        and capture <= now < capture + timedelta(seconds=SNAPSHOT_REFRESH_WINDOW_S)
+        and state.refresh_due())
+    result.due = first_due or refresh
     if not result.due:
         return result
+
+    if state is not None:
+        hold = None
+        if not state.settled():
+            hold = "settling"
+        else:
+            async with _session(factory) as db:
+                backlog = await normalise_backlog(db, cap=1)
+                await db.rollback()
+            if backlog.normalising:
+                hold = "normalising"
+        if hold and refresh and not first_due:
+            result.held = hold              # a refresh simply waits for the next wake-up
+            return result
+        if hold and _held_for_s(now, zone, settings["snapshot_hour"], state) < SNAPSHOT_HOLD_MAX_S:
+            result.held = hold
+            logger.info("inventory snapshot for %s held (%s)", today, hold)
+            return result
+        if hold:
+            logger.warning("inventory snapshot for %s written while %s: it was held for %d h",
+                           today, hold, SNAPSHOT_HOLD_MAX_S // 3600)
 
     async with _session(factory) as db:
         try:
@@ -1531,17 +1804,25 @@ async def run_snapshot_pass(session_factory=None, *, now: Optional[datetime] = N
                 return result
             await _set_lock_timeout(db)
             # Another worker may have finished between the check above and the lock.
-            if await _day_has_snapshot(db, today):
+            exists = await _day_has_snapshot(db, today)
+            if exists and not refresh:
                 await db.rollback()
                 return result
             rows = await snapshot_day(db, today, zone=zone, settings=settings, commit=False)
-            await _refresh_previous_changes(db, today, zone)
+            if not exists:
+                await _refresh_previous_changes(db, today, zone)
             await db.commit()
         except Exception:
             await _rollback_quietly(db)
             raise
     result.ran = True
+    result.refreshed = bool(exists)
     result.rows = len(rows)
+    if state is not None:
+        state.last_write = state.clock()
+    if exists:
+        logger.info("inventory snapshot for %s refreshed: %d rows", today, result.rows)
+        return result
 
     async with _session(factory) as db:
         purged = await purge_expired(db, retention_days=settings["change_retention_days"], today=today)
@@ -1556,8 +1837,10 @@ async def inventory_snapshot_loop(*, start_delay: float = SNAPSHOT_START_DELAY_S
                                   interval: float = SNAPSHOT_POLL_S, tick=None) -> None:
     """Background task: wake every 5 minutes and write the day's snapshot when it is due.
     Never dies; cancellation propagates. ``tick`` as in inventory_normalize_loop
-    (default ``run_snapshot_pass``)."""
-    tick = tick or run_snapshot_pass
+    (default ``run_snapshot_pass`` with this loop's ``SnapshotState``)."""
+    if tick is None:
+        state = SnapshotState()
+        tick = functools.partial(run_snapshot_pass, state=state)
     await asyncio.sleep(start_delay)
     while True:
         try:
