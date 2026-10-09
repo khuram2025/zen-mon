@@ -1,0 +1,271 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-software-catalog.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-software-catalog.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Software and versions", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_software' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "What is the difference between hosts and installs in the ZenPlus software catalog?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Hosts is the number of distinct servers that have the product. Installs is the number of software entries, so a server that lists the same product twice, for example a 32-bit and a 64-bit copy, counts once as a host and twice as installs."}},
+    {"@type": "Question", "name": "Why are some software products not listed in the catalog?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Updates, drivers, operating-system components and runtimes are hidden by default so the list shows real applications. A note under the table says how many products are hidden and links to the full list. An administrator can change the default under Inventory Settings."}},
+    {"@type": "Question", "name": "What does an Unmatched software product mean?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Neither the product nor its publisher is recognised by the software rule packs, so the product is grouped under a name derived from its title. It is still counted and listed; only its category and grouping may be less precise."}},
+    {"@type": "Question", "name": "What do N, N-1 and Older mean on a software product page?",
+     "acceptedAnswer": {"@type": "Answer", "text": "They are generations of the versions seen on your own servers: N is the newest version seen, N-1 the one before, and Older anything earlier. It is not the vendor's latest release."}}
+  ]
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Software and versions</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Software and versions</h1>
+        <p class="lede">Every product installed on your servers as one row, with how many servers have it and how its versions
+        are spread. Open a product to see its versions, the servers it is installed on, its history and the raw names that
+        were grouped into it.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~9 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#catalog">The catalog</a></li>
+            <li><a href="#how-grouped">How raw names become products</a></li>
+            <li><a href="#hidden">Hidden categories</a></li>
+            <li><a href="#product-page">The product page</a></li>
+            <li><a href="#generations">Versions, N and N-1</a></li>
+            <li><a href="#upgrades">Upgrades that look like an install and a removal</a></li>
+            <li><a href="#limits">What the catalog cannot see</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="catalog">
+            <h2><span class="num">01</span> The catalog <a class="kb-anchor" href="#catalog">#</a></h2>
+
+            <p><strong>Inventory &amp; Compliance &rarr; Software</strong> lists one row per product. Software comes from the
+            Windows agent&rsquo;s list of installed programs, so the catalog covers servers that report through the agent. A
+            server that stopped reporting keeps the last list it sent, and that list stays in the host and install counts
+            until the server is removed or reports again (the line under the tabs shows how many assets are stale or never
+            reported).</p>
+
+            <p>Right after an upgrade the catalog fills in step by step while existing lists are processed. Until it is
+            done the page says <em>Normalising existing software lists; figures are incomplete</em>, and an empty catalog
+            with that message means the lists are not processed yet, not that nothing is installed.</p>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-software-catalog.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus Inventory Software page listing products with publisher, category, host count, install count, a stacked bar of version distribution, latest version and first-seen date, with search, category and publisher filters">
+                <figcaption><strong>The software catalog.</strong> One row per product; the bar in the Versions column shows how
+                the hosts are spread across versions. The data shown is example data.</figcaption>
+            </figure>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Product</strong>, <strong>Publisher</strong>, <strong>Category</strong></td><td>As normalised. Click the product name for its page</td></tr>
+                        <tr><td><strong>Hosts</strong></td><td>Distinct servers that have the product. A link: it opens the Assets list of exactly those servers, and the list total equals the number</td></tr>
+                        <tr><td><strong>Installs</strong></td><td>Software entries. A server that lists the product twice (a 32-bit and a 64-bit copy, or a per-user copy) counts once as a host and twice as installs</td></tr>
+                        <tr><td><strong>Versions</strong></td><td>Number of distinct versions, with a stacked bar of hosts per version, newest on the left. Two spellings of one version (<code>7.2</code> and <code>7.2.0</code>) are one version</td></tr>
+                        <tr><td><strong>Latest</strong></td><td>The newest version seen on your own servers</td></tr>
+                        <tr><td><strong>First seen</strong></td><td>The earliest first-seen date among the product&rsquo;s installations that are stored now: when Inventory first saw it on a server whose entry still exists (a server that was deleted no longer counts). A product that was already installed when Inventory began recording reads <em>before</em> and the date recording began (point at it for the earliest date known). The CSV export of this table carries the stored date without that word: see <a href="{% url 'core:kb_zenplus_inventory_export' %}#first-seen">CSV export</a></td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <ul>
+                <li>Search needs every word you type to appear in the product name or the publisher (<code>visual c++</code>,
+                    <code>microsoft</code>). <em>Category</em> can be chosen several at a time; <em>Publisher</em> shows how many
+                    products each choice would give.</li>
+                <li>Filters, sort and page are in the address bar, so a view can be bookmarked and shared.</li>
+                <li>The default sort (most hosts first) is the quickest. Sorting by version count or latest version has to
+                    read every product and can take a second or more on a very large estate.</li>
+                <li>With the <code>inventory.export</code> permission, <em>Export</em> downloads the filtered catalog. See
+                    <a href="{% url 'core:kb_zenplus_inventory_export' %}">CSV export</a>.</li>
+            </ul>
+        </section>
+
+        <section id="how-grouped">
+            <h2><span class="num">02</span> How raw names become products <a class="kb-anchor" href="#how-grouped">#</a></h2>
+
+            <p>A raw program name rarely says what the product is: it may carry a version, a language, an architecture or a
+            build number. Inventory groups titles with rule packs that ship with ZenPlus, so that the many names of one
+            product count as one:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Raw name reported by the server</th><th>Product in the catalog</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.38.33135</code></td><td>Microsoft Visual C++ 2015-2022 Redistributable (category Runtime); the 2005, 2008, 2010, 2012 and 2013 redistributables are separate products, because they are installed side by side on purpose</td></tr>
+                        <tr><td><code>Java 8 Update 391 (64-bit)</code></td><td>Java SE Runtime (category Runtime)</td></tr>
+                        <tr><td><code>Google Chrome</code></td><td>Google Chrome (category Browser)</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Each product carries a normalisation status, shown as a pill on the product page:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Normalized</strong></td><td>A catalog rule placed the product</td></tr>
+                        <tr><td><strong>Publisher only</strong></td><td>No product rule matched, but the publisher is recognised</td></tr>
+                        <tr><td><strong>Unmatched</strong></td><td>Neither the product nor the publisher is recognised. It is grouped under a name derived from its title and is still counted</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Under the table, <em>N titles unmatched</em> is a link to the unmatched products. Editing catalog rules is not
+            part of this release; the product page&rsquo;s <em>Evidence</em> tab shows the raw names behind a product so a
+            wrong grouping can be reported to Zentryc support.</p>
+        </section>
+
+        <section id="hidden">
+            <h2><span class="num">03</span> Hidden categories <a class="kb-anchor" href="#hidden">#</a></h2>
+
+            <p>Windows updates, drivers, operating-system components and runtimes make a software list long without
+            telling you much about the applications you run. By default these four categories (<em>Update</em>,
+            <em>Driver</em>, <em>OS component</em> and <em>Runtime</em>) are left out of the catalog, the Overview and the
+            flyout&rsquo;s top list.</p>
+
+            <ul>
+                <li>The switch above the table is on by default and its label is built from the categories hidden by
+                    default, so with the shipped settings it reads <strong>Hide updates, drivers, OS components and
+                    runtimes</strong>. An administrator chooses the categories in
+                    <a href="{% url 'core:kb_zenplus_inventory_settings' %}">Inventory settings</a> and the label follows;
+                    with more than four it counts them (<em>Hide 5 categories hidden by default</em>) and the tooltip lists
+                    them. A list that an administrator has saved is used exactly as saved: if it does not contain
+                    <em>Runtime</em>, runtimes such as Java or the Visual C++ redistributables are listed.</li>
+                <li>A note under the table says how many products and installations are hidden, with a
+                    <em>Show all N</em> link that includes them and <em>Hide them again</em> to go back.</li>
+                <li>Choosing a category in the Category filter always lists it, hidden or not.</li>
+                <li>Hidden software is still stored and counted; nothing is deleted.</li>
+            </ul>
+        </section>
+
+        <section id="product-page">
+            <h2><span class="num">04</span> The product page <a class="kb-anchor" href="#product-page">#</a></h2>
+
+            <p>Click a product name. The page has a header with the product&rsquo;s status pill, publisher, category and
+            product key (the key is the last part of the address and the value of the <code>product</code> filter), four
+            figures, and four tabs. The tab is kept in the address (<code>?tab=</code>).</p>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-product-versions.webp' %}" width="1600" height="585" loading="lazy"
+                     alt="ZenPlus Inventory product page showing the Google Chrome header with hosts, versions, latest seen and behind latest figures, and a Versions tab with one bar per version and an N, N-1 or Older pill">
+                <figcaption><strong>A product page, Versions tab.</strong> One bar per version, newest first, each with its
+                generation. The data shown is example data.</figcaption>
+            </figure>
+
+            <div class="kb-deflist">
+                <div><dt>Figures</dt><dd><strong>Hosts</strong> (a link to those servers), <strong>Versions</strong>,
+                    <strong>Latest seen</strong> (a link to the servers on it) and <strong>Behind latest</strong>, the
+                    number of hosts without the newest version. <em>Behind latest</em> is plain text: a host that runs two
+                    versions counts once, and the filters cannot say &ldquo;not this version&rdquo;.</dd></div>
+                <div><dt>Versions</dt><dd>A bar per version with its host count and a generation pill (N, N-1, Older). Click
+                    a version to open the servers that run exactly that version. Installations with no version reported are
+                    listed as <em>No version reported</em>.</dd></div>
+                <div><dt>Installed on</dt><dd>The servers with the product: server, package name, version, architecture,
+                    source (the registry area the entry was read from: <em>HKLM</em>, <em>HKCU (current user)</em> or, for 32-bit programs on 64-bit Windows, <em>HKLM (32-bit)</em>), install date, first seen and last report.
+                    Searchable and sortable; a server opens in the asset flyout. With <code>inventory.export</code>, the
+                    same rows download as CSV.</dd></div>
+                <div><dt>Timeline</dt><dd>Installs, removals and version changes of this product over 7, 30 or 90 days,
+                    newest first, grouped by day, as on the Changes page.</dd></div>
+                <div><dt>Evidence</dt><dd>The raw package names and publishers that were grouped into this product, how many
+                    hosts and installations report each, and how the normaliser reads each one today. Read-only.</dd></div>
+            </div>
+        </section>
+
+        <section id="generations">
+            <h2><span class="num">05</span> Versions, N and N-1 <a class="kb-anchor" href="#generations">#</a></h2>
+
+            <p>Versions are ordered with the product&rsquo;s own version rules, not as text, so <code>9.2</code> is older
+            than <code>10.1</code>. The newest version <em>seen on your servers</em> is <strong>N</strong>, the one before it
+            is <strong>N-1</strong>, and everything earlier is <strong>Older</strong>: two or more versions behind the newest
+            seen. This is a view of your own estate; it does not know the vendor&rsquo;s latest release.</p>
+
+            <ul>
+                <li>Two spellings of one version (<code>1.0</code> and <code>1.0.0</code>) share a generation.</li>
+                <li>A version the rules cannot parse (for example <code>nightly-build</code>) is shown as
+                    <strong>Unordered</strong> and follows the ordered ones. ZenPlus does not guess where it belongs.</li>
+                <li>A product that has packages from more than one system, for example a Windows installer and a Linux
+                    package, is ranked in one group per system, because their version numbers cannot be compared. The page
+                    says <em>Versions that follow different numbering schemes are ranked apart: one scheme&rsquo;s version is never compared with another&rsquo;s, so each group has its own N</em>.</li>
+                <li>A missing version is not a version. It is reported separately and never counted as the oldest.</li>
+            </ul>
+        </section>
+
+        <section id="upgrades">
+            <h2><span class="num">06</span> Upgrades that look like an install and a removal <a class="kb-anchor" href="#upgrades">#</a></h2>
+
+            <p>Some products put their version in their name (Java 8 Update 391, the Visual C++ redistributables). When one
+            is upgraded, the old title disappears and a new title appears: the agent&rsquo;s list shows one removal and one
+            installation. Inventory recognises the pair, when both happened on the same server at the same moment, and shows
+            it as <strong>one upgrade</strong> in the Timeline and on the Changes page, with the count of such pairs noted
+            beside the statistics. See <a href="{% url 'core:kb_zenplus_inventory_changes' %}#pairs">Changes</a>.</p>
+        </section>
+
+        <section id="limits">
+            <h2><span class="num">07</span> What the catalog cannot see <a class="kb-anchor" href="#limits">#</a></h2>
+
+            <ul>
+                <li><strong>Servers without a software report</strong> (no agent, Linux, a new agent that has not run its
+                    first inventory) have no software in the catalog. Linux software is not collected in this release.</li>
+                <li><strong>Servers that stopped reporting</strong> are still in the figures with the last list they sent;
+                    nothing in this release excludes them by age.</li>
+                <li><strong>Titles beyond the 1,000th</strong> of a server. The agent sorts its list by name and cuts it at
+                    1,000. The server is flagged <em>Software list truncated</em> (see
+                    <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}#health-panel">health</a>), and the
+                    titles beyond the cap are not counted anywhere.</li>
+                <li><strong>Programs that do not register themselves</strong> as installed (portable applications, files
+                    copied into a folder) are invisible to the Windows list of installed programs.</li>
+            </ul>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_operating_systems' %}">&larr; Operating systems and firmware</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_hardware' %}">Hardware &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

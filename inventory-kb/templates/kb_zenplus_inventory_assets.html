@@ -1,0 +1,282 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-assets-list.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-assets-list.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Assets", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_assets' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Assets and the asset flyout",
+  "description": "How to use the ZenPlus Inventory Assets page: one list of servers and network devices, filters that follow each other, shareable addresses, and the asset flyout with identity, source and age of every value.",
+  "datePublished": "2026-10-09",
+  "dateModified": "2026-10-09",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_inventory_assets' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus Inventory", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Assets</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Assets and the asset flyout</h1>
+        <p class="lede">Servers and network devices in one list, filtered and sorted on the server, with a flyout that shows
+        what a machine is, where each fact came from and how old it is. This article covers the list, the filters, the
+        shareable address and the flyout.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~8 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#the-list">The list</a></li>
+            <li><a href="#filters">Searching and filtering</a></li>
+            <li><a href="#address">Filters live in the address</a></li>
+            <li><a href="#flyout">The asset flyout</a></li>
+            <li><a href="#sources">Where a value came from</a></li>
+            <li><a href="#links">Opening the server or device page</a></li>
+            <li><a href="#keyboard">Keyboard</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="the-list">
+            <h2><span class="num">01</span> The list <a class="kb-anchor" href="#the-list">#</a></h2>
+
+            <p><strong>Inventory &amp; Compliance &rarr; Assets</strong> lists every server and every network device you are
+            allowed to see, one row per machine. A server that is linked to its SNMP device is one row, not two; a server and a
+            device that are not linked stay two rows (see
+            <a href="{% url 'core:kb_zenplus_inventory_getting_started' %}">Getting started</a>).</p>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-assets-list.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus Inventory Assets page with a filter pane on the left listing kind, OS family, vendor, source, freshness and inventory health with counts, and a table of servers and network devices with name, IP address, vendor, model, operating system or firmware and a freshness badge">
+                <figcaption><strong>Assets.</strong> The filter pane on the left shows a count for every choice and follows the
+                other active filters. The data shown is example data.</figcaption>
+            </figure>
+
+            <p>The columns shown by default are <strong>Name</strong>, <strong>IP address</strong>, <strong>Vendor</strong>,
+            <strong>Model</strong>, <strong>OS / Firmware</strong> and <strong>Last inventory</strong>. The column menu
+            adds <em>Kind</em>, <em>Serial</em>, <em>Site / Location</em>, <em>Sources</em>, <em>Type</em>, <em>Status</em>,
+            <em>Tags</em> and <em>Last seen</em>, and switches between comfortable and compact rows. These choices are
+            remembered in your browser only.</p>
+
+            <ul>
+                <li>Click a column heading to sort by it; click again to reverse. Sorting, filtering and paging all happen
+                    on the server, so they cover the whole result and not just the rows on the page.</li>
+                <li>A value that is not known is shown as <em>Unknown</em> (or a dash), never left blank without a reason.</li>
+                <li>The page size is 50 rows by default and can be changed at the foot of the table.</li>
+                <li>Server vendor, model and serial are filled from the linked SNMP device when the agent has none. Servers
+                    otherwise show a dash there: the Windows agent in this release does not report a hardware identity.</li>
+            </ul>
+        </section>
+
+        <section id="filters">
+            <h2><span class="num">02</span> Searching and filtering <a class="kb-anchor" href="#filters">#</a></h2>
+
+            <p>The search box matches text in the <strong>name, IP address, serial number, model, vendor, operating-system
+            product and operating-system version</strong>. Press <code>/</code> to jump to it.</p>
+
+            <p>The filter pane groups the same choices as facets. Each choice shows how many machines it would give,
+            <strong>counting the other active filters</strong>, so you can see the effect before you click.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Facet</th><th>Choices</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Kind</strong></td><td>Server, Network device</td></tr>
+                        <tr><td><strong>OS family</strong></td><td>Windows, Linux, FortiOS, PAN-OS, IOS XE, NX-OS, Junos, TMOS and so on, plus <em>Unknown</em></td></tr>
+                        <tr><td><strong>OS / firmware</strong></td><td>The product within a family, for example Windows Server, FortiOS</td></tr>
+                        <tr><td><strong>Vendor</strong>, <strong>Model</strong></td><td>As reported or read from the device</td></tr>
+                        <tr><td><strong>Site / Location</strong></td><td>A server&rsquo;s site, or a device&rsquo;s location text</td></tr>
+                        <tr><td><strong>Tags</strong></td><td>Several tags can be combined; a machine must carry every one</td></tr>
+                        <tr><td><strong>Source</strong></td><td>Agent, SNMP, WMI, WinRM, SSH, Controller, ICMP</td></tr>
+                        <tr><td><strong>Freshness</strong></td><td>Fresh, Aging, Stale, Never, Not reported by design</td></tr>
+                        <tr><td><strong>Inventory health</strong></td><td>The eight checks described in <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}">health and freshness</a></td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p><em>Unknown</em> is a real choice in the OS facets and is never hidden behind <em>Show more</em>. Active
+            filters appear as chips above the table; click a chip to remove it, or <em>Clear all filters</em>. Filters
+            combine with AND: a machine must match all of them.</p>
+
+            <p>On a narrow screen the filter pane becomes a drawer opened by a <em>Filters</em> button, and its footer
+            button reads <em>Show N assets</em>.</p>
+        </section>
+
+        <section id="address">
+            <h2><span class="num">03</span> Filters live in the address <a class="kb-anchor" href="#address">#</a></h2>
+
+            <p>Every filter, the sort, the page and the open flyout are in the address bar. Copy the address and anyone
+            with Inventory access sees the same list (limited, as always, to the assets <em>their</em> role covers).
+            The Back button steps through your filters. The names are the same ones the Overview, OS, Software and
+            Hardware pages use when you click a number, which is why those lists match the numbers you clicked.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table mono">
+                    <thead><tr><th>Parameter</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>q</code></td><td>Search text</td></tr>
+                        <tr><td><code>kind</code></td><td><code>server</code> or <code>device</code></td></tr>
+                        <tr><td><code>os_family</code>, <code>os_product</code>, <code>os_release</code>, <code>os_version</code></td><td>Operating system level; the value <code>unknown</code> selects machines with none</td></tr>
+                        <tr><td><code>vendor</code>, <code>model</code>, <code>site</code></td><td>Exact match, not case-sensitive; <code>unknown</code> selects machines with no vendor or model</td></tr>
+                        <tr><td><code>tag</code></td><td>Repeatable; every tag given must be present</td></tr>
+                        <tr><td><code>source</code></td><td><code>agent</code>, <code>snmp</code>, <code>wmi</code>, <code>winrm</code>, <code>ssh</code>, <code>controller</code> or <code>icmp</code></td></tr>
+                        <tr><td><code>freshness</code></td><td><code>fresh</code>, <code>aging</code>, <code>stale</code>, <code>never</code>, <code>not_applicable</code> (not reported by design) or <code>stale_or_never</code></td></tr>
+                        <tr><td><code>health</code></td><td>One of the eight health checks, for example <code>missing_serial</code></td></tr>
+                        <tr><td><code>product</code>, <code>product_version</code></td><td>Servers that have a software product (by its product key), optionally one version; versions are compared by value, so <code>7.2</code> also finds <code>7.2.0</code></td></tr>
+                        <tr><td><code>security_agent</code>, <code>cpu_model</code>, <code>memory</code>, <code>disks</code>, <code>virtualization</code>, <code>module_class</code>, <code>module_model</code></td><td>Reached from the Overview and Hardware pages and shown as chips, not as facets. <code>security_agent</code> is <code>present</code>, <code>missing</code> or <code>unknown</code> and means endpoint protection</td></tr>
+                        <tr><td><code>sort</code>, <code>order</code>, <code>page</code>, <code>page_size</code></td><td>Sorting and paging; <code>page_size</code> up to 500</td></tr>
+                        <tr><td><code>asset</code></td><td>The open flyout, written <code>server:&lt;id&gt;</code> or <code>device:&lt;id&gt;</code></td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>A value the page does not understand is ignored and listed in a yellow notice, <em>Ignored in the
+            address</em>, rather than silently changing the list.</p>
+        </section>
+
+        <section id="flyout">
+            <h2><span class="num">04</span> The asset flyout <a class="kb-anchor" href="#flyout">#</a></h2>
+
+            <p>Click a row (or focus its name and press <code>Enter</code>) to open the flyout, a panel on the right. The
+            address gains <code>?asset=&hellip;</code>, so the panel can be shared and survives a reload. There is no
+            separate asset page: the existing server and device pages remain the detail pages, linked from the flyout.</p>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-asset-flyout.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="Asset flyout of a firewall showing identity values each with a source badge and age, device profile details, high-availability state, a chassis module group and a recent firmware change">
+                <figcaption><strong>The asset flyout.</strong> Identity values carry a source badge and an age. Modules are grouped
+                by class and model. The data shown is example data.</figcaption>
+            </figure>
+
+            <div class="kb-deflist">
+                <div><dt>Header</dt><dd>The kind (server or network device), status, IP address and the freshness badge, with
+                    links to the machine&rsquo;s own page when you may open it.</dd></div>
+                <div><dt>Identity</dt><dd>Vendor, model, serial number, operating system or firmware (family, product,
+                    release, version, build and edition), each with a <strong>source badge</strong> and the age of the
+                    value. <em>Raw evidence</em> expands to the unprocessed text the device or agent reported, so you can see
+                    how a value was normalised.</dd></div>
+                <div><dt>Hardware (servers)</dt><dd>CPU model and core count, memory, disks, architecture and, once reported,
+                    virtualization.</dd></div>
+                <div><dt>Software (servers)</dt><dd>How many titles the server has (and how many are in hidden categories), a
+                    <strong>endpoint protection</strong> pill (present with the products and services that count, no endpoint protection found, or unknown with the reason), and up to ten titles with their versions, security products first.
+                    Each title with a catalog entry links to its product page. <em>View all N on the server page</em> opens
+                    the full list. If the list was cut at the agent&rsquo;s cap, a note says so.</dd></div>
+                <div><dt>Device, High availability, Modules (network devices)</dt><dd>Profile, group, type and sysObjectID;
+                    for clustered firewalls the mode, role, peer and sync state; and the chassis, modules, power supplies and
+                    fans read from ENTITY-MIB, grouped by class and model, each expandable to its components and serial
+                    numbers.</dd></div>
+                <div><dt>Recent changes</dt><dd>The latest ten changes of this machine, with <em>View all N</em> opening the
+                    Changes page filtered to it.</dd></div>
+                <div><dt>Placement</dt><dd>The server&rsquo;s site or the device&rsquo;s location, and its tags.</dd></div>
+            </div>
+        </section>
+
+        <section id="sources">
+            <h2><span class="num">05</span> Where a value came from <a class="kb-anchor" href="#sources">#</a></h2>
+
+            <p>A small badge beside each identity value says which collector supplied it. The tooltip adds the age. For
+            network firmware, several sources can know the version; the most exact fresh one wins.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Badge</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Agent</strong></td><td>Reported by the Windows agent on the server</td></tr>
+                        <tr><td><strong>Template</strong></td><td>Read by a vendor monitoring template (for example the exact FortiOS version of a FortiGate), within the last 24 hours</td></tr>
+                        <tr><td><strong>SNMP profile</strong></td><td>Read from the device&rsquo;s system group and matched to a device profile</td></tr>
+                        <tr><td><strong>ENTITY-MIB</strong></td><td>Read from the chassis information the device publishes</td></tr>
+                        <tr><td><strong>sysDescr</strong></td><td>Parsed out of the device&rsquo;s own description text</td></tr>
+                        <tr><td><strong>Template (old)</strong></td><td>A template value more than 24 hours old, kept only because nothing fresher exists, so a device that was unreachable for a day keeps its last known firmware</td></tr>
+                        <tr><td><strong>Managed</strong></td><td>Reported by the controller that manages the device</td></tr>
+                        <tr><td><strong>Unknown source</strong></td><td>The value exists but its source was not recorded</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The order of preference for a network device&rsquo;s version is: a fresh template value, the device
+            profile, the chassis firmware, the version found in the description text, and last an old template value.</p>
+        </section>
+
+        <section id="links">
+            <h2><span class="num">06</span> Opening the server or device page <a class="kb-anchor" href="#links">#</a></h2>
+
+            <p>The flyout header offers <em>Open server page</em> or <em>Open device page</em> (and, for a server that is
+            also an SNMP device, <em>Open SNMP device page</em>). The links appear only if your role holds
+            <code>servers.view</code> or <code>devices.view</code>. Without that permission the entry is shown locked,
+            with the permission named, so you know what to ask for. Seeing an asset in Inventory never gives access to its
+            page.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    &ldquo;Asset not found&rdquo; can mean two things
+                </div>
+                <p>An address that names a machine that was deleted, or one outside the assets your role covers, opens a
+                panel that says <em>Asset not found</em>. Both cases look the same on purpose, so the message does not
+                reveal whether a machine exists outside your scope.</p>
+            </div>
+        </section>
+
+        <section id="keyboard">
+            <h2><span class="num">07</span> Keyboard <a class="kb-anchor" href="#keyboard">#</a></h2>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Key</th><th>Does</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>/</code></td><td>Focus the search box</td></tr>
+                        <tr><td><code>&uarr;</code> <code>&darr;</code></td><td>Move between rows in the table</td></tr>
+                        <tr><td><code>Enter</code></td><td>Open the flyout of the focused row</td></tr>
+                        <tr><td><code>Esc</code></td><td>Close the flyout; focus returns to the row that opened it</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_getting_started' %}">&larr; Getting started</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_operating_systems' %}">Operating systems and firmware &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

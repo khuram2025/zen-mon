@@ -1,0 +1,232 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-hardware.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-hardware.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Hardware", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_hardware' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Hardware: vendors, models, modules and server hardware",
+  "description": "How the ZenPlus Inventory Hardware page shows network vendors and models with serial-number coverage, a models-by-firmware matrix, chassis and module groups, and CPU, memory and disk distributions for servers.",
+  "datePublished": "2026-10-09",
+  "dateModified": "2026-10-09",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_inventory_hardware' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus Inventory", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Hardware</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Hardware</h1>
+        <p class="lede">Which network vendors and models you run, how complete their serial numbers are, which firmware
+        each model is on, what chassis and modules the devices contain, and what your servers are built from. This article
+        explains each panel and what is, and is not, reported for servers.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~6 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#network-hardware">Network hardware</a></li>
+            <li><a href="#serial-coverage">Serial coverage</a></li>
+            <li><a href="#matrix">Models by firmware</a></li>
+            <li><a href="#modules">Modules and components</a></li>
+            <li><a href="#servers">Server hardware</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="network-hardware">
+            <h2><span class="num">01</span> Network hardware <a class="kb-anchor" href="#network-hardware">#</a></h2>
+
+            <p><strong>Inventory &amp; Compliance &rarr; Hardware</strong> opens with a summary line (the number of network
+            devices and vendors, the number of known models and how many devices have no model, and the number of servers)
+            and the <em>Network hardware</em> table: one row per vendor, and under it one row per model. A model count
+            always means <em>known</em> models; a device with no model is not a model, so the line reads, for example,
+            <em>12 models plus 3 devices with no model</em>.</p>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-hardware.webp' %}" width="1600" height="2187" loading="lazy"
+                     alt="ZenPlus Inventory Hardware page with a network hardware table of vendors and models showing device counts, firmware versions and serial coverage, a models by firmware matrix, a modules and components panel and server hardware distributions">
+                <figcaption><strong>Hardware.</strong> Network vendors and models, the firmware matrix, modules and server
+                hardware. The data shown is example data.</figcaption>
+            </figure>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Vendor / model</strong></td><td>The vendor, then its models. A vendor row counts every device of that vendor; its model rows add up to it</td></tr>
+                        <tr><td><strong>Devices</strong></td><td>A link to the Assets list of exactly those devices, whose total equals the number</td></tr>
+                        <tr><td><strong>Firmware versions</strong></td><td>How many different firmware versions those devices run</td></tr>
+                        <tr><td><strong>Serial coverage</strong></td><td>The share of the devices <em>that can report</em> that report a serial number. See below</td></tr>
+                        <tr><td><strong>Modules</strong></td><td>Number of module components read from the devices&rsquo; ENTITY-MIB. Text, not a link: components are not machines</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>A device with no known vendor is a row called <em>Unknown vendor</em>, and a vendor with devices whose model
+            could not be read has an <em>Unknown model</em> row. Both are counted and open lists (<code>vendor=unknown</code> and
+            <code>model=unknown</code> in the address). A device that cannot report by design (ping-only, or managed
+            through a controller) stays in its row; the row says <em>N not reported by design</em> with a link, and those
+            devices are left out of the serial coverage. A vendor row with a known vendor has a <em>Firmware matrix</em>
+            action that shows its models in the matrix (see below).</p>
+        </section>
+
+        <section id="serial-coverage">
+            <h2><span class="num">02</span> Serial coverage <a class="kb-anchor" href="#serial-coverage">#</a></h2>
+
+            <p>Serial numbers matter for support contracts, RMA and audit, so each vendor and model shows the share of its
+            devices that can report one, as a percentage in a pill (green at 100%, amber from 80%, red below). The
+            pill&rsquo;s tooltip and screen readers add the words, so the colour is never the only signal:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Coverage</th><th>Words shown</th></tr></thead>
+                    <tbody>
+                        <tr><td>100%</td><td>All serials known</td></tr>
+                        <tr><td>80% to under 100%</td><td>Some serials missing</td></tr>
+                        <tr><td>Under 80%</td><td>Many serials missing</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Next to the percentage, <em>N missing</em> is a link to the devices without a serial number (the same list as
+            the <em>missing serial</em> health check, with the row&rsquo;s own filters).</p>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    The percentage never hides a missing serial number
+                </div>
+                <p>The percentage is rounded to one decimal place, but it only reads <em>100.0%</em> (and the pill
+                <em>All serials known</em>) when every device that can report a serial number has one. A group with even
+                one missing serial reads at most <em>99.9%</em>. The <em>N missing</em> link beside it always shows the exact
+                number and opens the list.</p>
+            </div>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    Some platforms never publish a serial number over SNMP
+                </div>
+                <p>A device that does not expose the standard chassis table (ENTITY-MIB) cannot report a serial number to
+                ZenPlus. A low coverage for one vendor usually points at the SNMP view or at that platform, not at
+                ZenPlus. See <a href="{% url 'core:kb_zenplus_inventory_troubleshooting' %}#unknown-device">why a device is
+                Unknown</a>.</p>
+            </div>
+        </section>
+
+        <section id="matrix">
+            <h2><span class="num">03</span> Models by firmware <a class="kb-anchor" href="#matrix">#</a></h2>
+
+            <p>The matrix answers &ldquo;is every device of this model on the same firmware?&rdquo;. Pick a vendor (the
+            choice is kept in the address as <code>?vendor=</code>). Rows are models, columns are firmware releases, newest
+            first with <em>Unknown</em> last, and each cell is the number of devices of that model on that release.</p>
+
+            <ul>
+                <li>Every cell shows its number; the shade of the cell only reinforces it, so the matrix never depends on
+                    colour. A legend gives the shade steps.</li>
+                <li>Each non-empty cell is a link to the devices of that model on that release.</li>
+                <li>The summary above the matrix says, for example, <em>Cisco: 12 models, 4 of them on more than one
+                    release</em>. A model on more than one release is the one to look at first.</li>
+            </ul>
+        </section>
+
+        <section id="modules">
+            <h2><span class="num">04</span> Modules and components <a class="kb-anchor" href="#modules">#</a></h2>
+
+            <p>Devices that answer ENTITY-MIB publish the parts they are made of. Inventory groups them by <strong>class and
+            model</strong>. The classes are Chassis, Backplane, Module, Power supply, Fan, CPU and Stack.</p>
+
+            <ul>
+                <li>The link on a group counts the <strong>devices</strong> that have it and opens that device list. The
+                    number of <strong>components</strong> (and how many report a serial number) is plain text: a device can
+                    hold several, so components can outnumber devices &mdash; two power supplies in one switch are two
+                    components in one device.</li>
+                <li>The serial numbers of a device&rsquo;s components are in that device&rsquo;s flyout, under
+                    <em>Modules</em>, which is the list you want for RMA planning.</li>
+                <li>A group whose model is not reported shows as <em>model unknown</em> and is still counted.</li>
+            </ul>
+        </section>
+
+        <section id="servers">
+            <h2><span class="num">05</span> Server hardware <a class="kb-anchor" href="#servers">#</a></h2>
+
+            <p>For servers, the Windows agent reports the CPU, the installed memory and the physical disks. The
+            <em>Server hardware</em> panel shows the distributions, and every row links to the servers behind it:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Distribution</th><th>Groups</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>CPU models</strong></td><td>The 25 most common models; a note says how many more models on how many servers are not listed</td></tr>
+                        <tr><td><strong>Installed memory</strong></td><td>Up to 8 GB, 9 to 16, 17 to 32, 33 to 64, 65 to 128, over 128 GB (binary gigabytes)</td></tr>
+                        <tr><td><strong>Physical disks</strong></td><td>1 disk, 2, 3 to 4, 5 to 8, 9 or more</td></tr>
+                        <tr><td><strong>Virtualization</strong></td><td>Physical or virtual, when reported</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    Manufacturer, model, serial number and BIOS of servers are not reported
+                </div>
+                <p>A server&rsquo;s manufacturer, model, serial number, BIOS version and whether it is physical or virtual
+                are not reported by the Windows agent in this release. The
+                <em>Virtualization</em> section says so instead of showing an empty chart, and servers do not count toward
+                the missing-model, missing-serial and unknown-vendor health checks. A server that is also polled over SNMP
+                takes its vendor, model and serial number from that device.</p>
+            </div>
+
+            <p>Servers that have not reported their hardware yet appear under <em>Unknown</em> in every distribution, and
+            the panel says so when no server has reported at all. Unknown is a row, not a gap.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_software' %}">&larr; Software and versions</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_changes' %}">Changes &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

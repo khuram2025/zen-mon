@@ -1,0 +1,275 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Getting started", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_getting_started' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Getting started with ZenPlus Inventory: what feeds it and how fresh it is",
+  "description": "What data sources feed the ZenPlus Inventory module (the Windows agent and SNMP polling), how often each one reports, how fresh the data is, and what is not collected.",
+  "datePublished": "2026-10-09",
+  "dateModified": "2026-10-09",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_inventory_getting_started' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus Inventory", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Getting started</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Getting started: what feeds Inventory</h1>
+        <p class="lede">Inventory has nothing to install or configure. It is built from what ZenPlus already collects. This
+        article explains which collector supplies which fact, how often each one reports, why servers and network devices
+        age at different speeds, and what is not collected.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Administrators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~7 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#what-feeds-it">What feeds Inventory</a></li>
+            <li><a href="#what-you-do">What you need to do</a></li>
+            <li><a href="#how-fresh">How fresh the data is, and why</a></li>
+            <li><a href="#first-days">What the first days look like</a></li>
+            <li><a href="#not-collected">What is not collected</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="what-feeds-it">
+            <h2><span class="num">01</span> What feeds Inventory <a class="kb-anchor" href="#what-feeds-it">#</a></h2>
+
+            <p>Inventory does not poll or scan anything itself. It reads facts the existing collectors already store, and
+            normalises them into one identity per machine.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Source</th><th>Feeds</th><th>Reports</th><th>Counts as fresh for</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Windows agent</strong> (servers)</td>
+                            <td>Operating system name, version and build; CPU model and core count; installed memory; physical disks; the list of installed software</td>
+                            <td>The inventory (operating system, hardware and software list) is collected by default every <strong>6 hours</strong>. The interval is a setting of the agent on each server (<code>collectors.inventory.interval_seconds</code> in <code>%ProgramData%\ZenPlus\Agent\config\agent.yaml</code>); it is <strong>not</strong> a field of <em>Agent Policies</em>. The agent also runs one collection when it starts</td>
+                            <td><strong>24 hours</strong> by default</td></tr>
+                        <tr><td><strong>SNMP polling</strong> (network devices)</td>
+                            <td>Vendor, model, serial number, operating system or firmware version, the device&rsquo;s own description text, and chassis and module details (ENTITY-MIB)</td>
+                            <td>On every successful SNMP poll of the device</td>
+                            <td><strong>2 hours</strong> by default</td></tr>
+                        <tr><td><strong>Vendor monitoring templates</strong> (FortiGate, Palo Alto, F5)</td>
+                            <td>The exact firmware version, and for F5 the serial number, where the plain SNMP system group does not carry it</td>
+                            <td>With the device&rsquo;s regular poll</td>
+                            <td>A template value older than 24 hours is only used when nothing fresher exists, and is marked <em>Template (old)</em></td></tr>
+                        <tr><td><strong>Discovery</strong></td>
+                            <td>Registers servers and network devices so the collectors above have something to report on</td>
+                            <td>When you run or schedule discovery</td>
+                            <td>Not applicable</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The freshness targets in the last column are the defaults. An administrator can change them under
+            <strong>Inventory Settings</strong>; see
+            <a href="{% url 'core:kb_zenplus_inventory_settings' %}">Inventory settings</a>.</p>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    One machine is one asset
+                </div>
+                <p>A Windows server that is also polled over SNMP exists twice in ZenPlus: as a server (from the agent) and
+                as a network device (from SNMP). When the server is <strong>linked</strong> to its SNMP device,
+                Inventory counts the machine <strong>once</strong>, as the server, and uses the SNMP side to fill gaps,
+                for example a serial number the agent does not report. The <em>Sources</em> column of the Assets list
+                shows both sources.</p>
+                <p>Inventory never guesses the link from an IP address. The link exists when the server was created or
+                matched by a discovery import that also holds its SNMP device, or when it was set through the API
+                (<code>device_id</code> of the server). Enrolling an agent does not create it, and the Servers page has no
+                control for it. A machine that was added as an agent server and, separately, as a device therefore
+                appears <strong>twice</strong> in Inventory, once as a server and once as a device; search for its address
+                on the Assets list to see both rows. See
+                <a href="{% url 'core:kb_zenplus_inventory_troubleshooting' %}#counts-differ">why the counts differ from other pages</a>.</p>
+            </div>
+        </section>
+
+        <section id="what-you-do">
+            <h2><span class="num">02</span> What you need to do <a class="kb-anchor" href="#what-you-do">#</a></h2>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Put the Windows agent on your servers</h4>
+                    <p>The agent is what reports the operating system, hardware and installed software of a server. Servers
+                    appear in Inventory as soon as they exist in ZenPlus, but without the agent they have no software
+                    list and may have no operating-system version. The installed agents are listed under
+                    <strong>Servers &rarr; Agent Fleet</strong>.</p></div></div>
+                <div class="step"><div><h4>Make sure your network devices answer SNMP</h4>
+                    <p>A device that is added but does not answer SNMP has no model, serial or firmware, and shows as
+                    <em>Never</em> or <em>Stale</em>. Add devices through <strong>Discovery</strong> and confirm the SNMP
+                    credential works; the device&rsquo;s own page shows the last poll.</p></div></div>
+                <div class="step"><div><h4>Give it a few minutes</h4>
+                    <p>A background task normalises raw values every two minutes. A server&rsquo;s own upload is
+                    normalised straight away, so an agent server appears within seconds of its report. The Overview
+                    refreshes itself every minute; the line under the tabs shows when the figures were computed.</p></div></div>
+                <div class="step"><div><h4>Open the Overview and read the health panel</h4>
+                    <p>It lists what is still missing. See
+                    <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}">Reading the health panel and
+                    freshness badges</a>.</p></div></div>
+            </div>
+
+            <p>If the Overview shows <em>Nothing in the inventory yet</em> with three cards, no server or device exists
+            yet: the cards link to the Agent Fleet and to Discovery (each only if your role may open it).</p>
+        </section>
+
+        <section id="how-fresh">
+            <h2><span class="num">03</span> How fresh the data is, and why <a class="kb-anchor" href="#how-fresh">#</a></h2>
+
+            <p>Each asset has a <strong>last inventory</strong> time: the last time one of the sources above successfully
+            reported its identity. That is a different thing from <strong>last seen</strong>, which only says the machine
+            answered a ping or a heartbeat. A server can be up and answering while its agent has stopped sending
+            inventory, and Inventory tells the two apart.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Badge</th><th>Server (default)</th><th>Network device (default)</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Fresh</strong></td><td>Reported within 24 hours</td><td>Reported within 2 hours</td></tr>
+                        <tr><td><strong>Aging</strong></td><td>Older than 24 hours, up to 7 days</td><td>Older than 2 hours, up to 7 days</td></tr>
+                        <tr><td><strong>Stale</strong></td><td>Older than 7 days</td><td>Older than 7 days</td></tr>
+                        <tr><td><strong>Never</strong></td><td>An agent server that has not delivered an inventory report</td><td>A device polled over SNMP that has not completed a poll since Inventory was installed</td></tr>
+                        <tr><td><strong>Not reported by design</strong></td><td>A server whose collection mode has no inventory upload (SSH, WMI, WinRM, SNMP-only or none) and that never reported</td><td>A ping-only device, or a child device managed through a controller</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p><strong>Not reported by design</strong> is not a gap. The asset stays in the Assets list and is counted
+            (<code>freshness=not_applicable</code>, its own line on the line under the tabs and in the health panel),
+            but it is not counted as <em>Never</em>, it is left out of the <em>fresh</em> percentage, and the checks for
+            a missing OS version, model, serial number or vendor skip it, because it has nothing to report. Only a
+            server with the ZenPlus agent can send an inventory in this release, so a server that is monitored over
+            SSH, WMI, WinRM or SNMP only will never become <em>Fresh</em>: install the agent if you want its operating
+            system, hardware and software here. A server that has ever delivered a report keeps a normal badge.</p>
+
+            <p>Servers get a longer target than devices because the software list is large and the agent sends it every
+            six hours by default, while a device is re-read on every poll. The time of the oldest figures on a page is
+            also limited by caching: the summary behind the Overview is computed at most once a minute, and the
+            operating-system and hardware pages refresh every five minutes. The line under the tabs always shows the
+            time the figures were computed.</p>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    If you lengthen the agent&rsquo;s inventory interval, change the target too
+                </div>
+                <p>If you set the inventory interval of the agents (<code>collectors.inventory.interval_seconds</code> in the
+                agent configuration file) higher than the server freshness target (24 hours by default), servers will
+                show <em>Aging</em> between reports even though nothing is wrong. Raise the server target in
+                <strong>Inventory Settings</strong> to match.</p>
+            </div>
+        </section>
+
+        <section id="first-days">
+            <h2><span class="num">04</span> What the first days look like <a class="kb-anchor" href="#first-days">#</a></h2>
+
+            <ul>
+                <li><strong>For the first minutes the screens say they are still working.</strong> Raw names and versions
+                    that were stored before Inventory existed are normalised in the background, in steps of 100,000
+                    software rows about every two minutes, so roughly two minutes for every 100,000 rows (the first step about 45 seconds after the services start). Until
+                    that is done every Inventory page shows <em>Normalising existing software lists; figures are
+                    incomplete</em>, the software catalog is partial, and the endpoint-protection line counts servers
+                    whose list has not been processed as <em>unknown</em>, not as missing. An estate of 500 servers with 400
+                    titles each (200,000 rows) is complete in about three minutes; 2,500 servers about 20 minutes; 5,000
+                    servers about 40 minutes. The page refreshes its figures when processing finishes; read no figure as a
+                    finding while the banner is shown.</li>
+                <li><strong>Network devices read <em>Never</em> until their next SNMP poll; servers that already had a
+                    software list keep their real age.</strong> A server that held a software list when the release was
+                    installed is given the time of its last list as its last inventory, so it reads <em>Fresh</em>, <em>Aging</em>
+                    or <em>Stale</em> as it truly is. A server that never delivered a list reads <em>Never</em> (agent) or
+                    <em>Not reported by design</em> (other collection modes) until it reports, up to 6 hours with the default
+                    agent interval. The <em>Fresh inventory</em> figure climbs as they report. Nothing is wrong.</li>
+                <li><strong>The first report of a server records nothing as a change.</strong> It becomes the baseline;
+                    only differences from the next report on are history. Servers that already held a software list when
+                    the release was installed were baselined at that moment.</li>
+                <li><strong>History starts at installation and cannot be reconstructed.</strong> ZenPlus never invents
+                    events from the past. The Changes page prints the day change capture began, and that is the day to
+                    quote even if the first recorded change came later. See
+                    <a href="{% url 'core:kb_zenplus_inventory_changes' %}#history-start">When history starts</a>.</li>
+                <li><strong>Trend lines appear after the third daily snapshot.</strong> The key figures <em>Assets</em>,
+                    <em>Software titles</em> and <em>Fresh inventory</em> show a small trend line once at least three daily
+                    snapshots exist; <em>Changes per day</em> needs three complete days before today, so it appears one day
+                    later. Until then there is no line and no placeholder. The first snapshot is written only after the
+                    services have been up for half an hour and the normalising backlog is empty, so the lines do not begin
+                    with the half-finished state of the upgrade.</li>
+                <li><strong>A few changes may appear on the first software report after the upgrade.</strong> A server whose
+                    list names the same program twice (for example a 32-bit and a 64-bit entry with different versions)
+                    used to keep the last one listed; Inventory keeps the highest, so each such program records one
+                    version change on that first report.</li>
+                <li><strong>&ldquo;First seen&rdquo; of software that was already installed reads &ldquo;before
+                    <em>date</em>&rdquo;.</strong> The date is the day Inventory began recording (the day change capture
+                    began), not the day the program was installed; point at it to see the earliest date known, which is
+                    the install date the machine reported when it reported one. Software that appears after that day
+                    shows the day it was first seen.</li>
+            </ul>
+        </section>
+
+        <section id="not-collected">
+            <h2><span class="num">05</span> What is not collected <a class="kb-anchor" href="#not-collected">#</a></h2>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Not collected</th><th>Consequence today</th></tr></thead>
+                    <tbody>
+                        <tr><td>Installed software on <strong>Linux servers</strong> and on servers monitored <strong>without the Windows agent</strong></td><td>Their software list is empty, and a server with no software report counts as <em>unknown</em> in the endpoint-protection coverage rather than as missing. Servers that stopped reporting keep the last list they sent, and it stays in the software figures until the server is removed or reports again</td></tr>
+                        <tr><td>Server <strong>manufacturer, model, serial number, BIOS</strong> and physical-or-virtual</td><td>The Windows agent in this release does not report them. Those fields are blank for servers, and the health checks for missing model, serial and vendor apply to <strong>network devices only</strong>, so servers are not counted as gaps</td></tr>
+                        <tr><td>Installed Windows updates (KB numbers)</td><td>Not shown. Update entries that a software list contains are filed under the hidden <em>update</em> category</td></tr>
+                        <tr><td>Software beyond the first 1,000 titles of a server</td><td>The agent sends at most 1,000 titles, sorted by name, and drops the tail. The server is flagged <em>Software list truncated</em></td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Questions about gaps are answered in
+            <a href="{% url 'core:kb_zenplus_inventory_troubleshooting' %}">Troubleshooting</a>.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory' %}">&larr; Inventory overview</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_assets' %}">Assets and the asset flyout &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,243 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-assets-list.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-assets-list.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "CSV export", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_export' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "What does a ZenPlus Inventory CSV export contain?",
+     "acceptedAnswer": {"@type": "Answer", "text": "The full result of the list you exported, not just the page on screen, with the filters and sort in force. It holds the same rows the list shows that user, so a user limited to tags exports only the assets they can see."}},
+    {"@type": "Question", "name": "Is there a limit to the size of an Inventory export?",
+     "acceptedAnswer": {"@type": "Answer", "text": "A file holds at most 200,000 rows. If the filters select more, the file is cut at the limit and a message says how many rows it holds; narrow the filters to export the rest."}},
+    {"@type": "Question", "name": "Why do some cells in the export start with an apostrophe?",
+     "acceptedAnswer": {"@type": "Answer", "text": "A text value that starts with =, +, - or @, or with a tab or carriage return, would be run as a formula by spreadsheet programs. ZenPlus prefixes such a cell with an apostrophe so it stays text."}},
+    {"@type": "Question", "name": "Who can export Inventory data and is it logged?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Only users with the inventory.export permission, which is classified as sensitive. Every export is written to the audit log with the dataset, the filters and the number of rows before any data is sent. If the audit entry cannot be stored, nothing is sent."}},
+    {"@type": "Question", "name": "Why does an Inventory export say another export is running?",
+     "acceptedAnswer": {"@type": "Answer", "text": "To protect the database, an export holds a connection while it runs, so the number of exports that can run at once is limited, for each person and for the appliance. A request over the limit is refused with a message saying to wait for the first to finish or to try again shortly. The appliance counts the limit separately in each of its two API processes, so a second export that starts while the first is still running is sometimes accepted; do not rely on that. A download that the browser stops reading is abandoned after two minutes."}}
+  ]
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">CSV export</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>CSV export</h1>
+        <p class="lede">Download what you are looking at as a spreadsheet-ready file. This article lists where the Export
+        buttons are, exactly what a file contains and leaves out, how it is protected against spreadsheet formula
+        injection, and what is logged.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators and auditors</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~6 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#where">Where to export</a></li>
+            <li><a href="#what-it-is">What a file contains</a></li>
+            <li><a href="#columns">Datasets and columns</a></li>
+            <li><a href="#first-seen">First-seen dates in the files</a></li>
+            <li><a href="#format">File format and safety</a></li>
+            <li><a href="#limits">Row limit</a></li>
+            <li><a href="#not-included">What is not included</a></li>
+            <li><a href="#audit">Permissions and audit</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="where">
+            <h2><span class="num">01</span> Where to export <a class="kb-anchor" href="#where">#</a></h2>
+
+            <p>An <strong>Export</strong> button (a download icon) appears on a page only for people with the
+            <code>inventory.export</code> permission. It is not on the Overview.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Page</th><th>Exports</th></tr></thead>
+                    <tbody>
+                        <tr><td><a href="{% url 'core:kb_zenplus_inventory_assets' %}">Assets</a></td><td>The assets list with the active filters and sort</td></tr>
+                        <tr><td><a href="{% url 'core:kb_zenplus_inventory_software' %}">Software</a></td><td>The product catalog with the active filters and sort</td></tr>
+                        <tr><td>Product page, <em>Installed on</em> tab</td><td>The installations of that product (one row per server entry), with the version filter and search</td></tr>
+                        <tr><td><a href="{% url 'core:kb_zenplus_inventory_operating_systems' %}">Operating Systems</a></td><td>One row per version, for the <em>All</em>, <em>Servers</em> or <em>Network</em> choice</td></tr>
+                        <tr><td><a href="{% url 'core:kb_zenplus_inventory_hardware' %}">Hardware</a></td><td>The vendor, model, module and server-hardware tables</td></tr>
+                        <tr><td><a href="{% url 'core:kb_zenplus_inventory_changes' %}">Changes</a></td><td>The change events in the window, with the filters</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>A toast confirms the start: <em>Export started</em>, with the number of rows. If the file was cut at the row
+            limit it reads <em>Export started, cut at the row limit</em>.</p>
+        </section>
+
+        <section id="what-it-is">
+            <h2><span class="num">02</span> What a file contains <a class="kb-anchor" href="#what-it-is">#</a></h2>
+
+            <ul>
+                <li><strong>The whole result, not the page.</strong> The file holds every row that matches your filters,
+                    not just the 50 on screen, in the same order as the list.</li>
+                <li><strong>Exactly what the list shows you.</strong> The export is produced by the same code as the list,
+                    with your tag scope. A person limited to tags exports only the assets they can see.</li>
+                <li><strong>One consistent moment.</strong> The assets, installations, operating-system, hardware and change
+                    files are read in a single consistent view of the database, so they never mix the state before and after
+                    a change that happened while the file was being written. The <strong>software</strong> file is built from
+                    the same product table that the Software page shows: its rows and their order are consistent, but each
+                    figure in it (hosts, versions, latest version) is a value that page showed within the minutes around the
+                    export, not one instant.</li>
+                <li><strong>Unknown is kept.</strong> Assets with an unknown OS, vendor or model are rows like any other,
+                    with empty cells.</li>
+            </ul>
+
+            <p>The file is named <code>zenplus-inventory-&lt;dataset&gt;-&lt;YYYYMMDD&gt;.csv</code> with the date in UTC,
+            for example <code>zenplus-inventory-assets-20261009.csv</code>.</p>
+        </section>
+
+        <section id="columns">
+            <h2><span class="num">03</span> Datasets and columns <a class="kb-anchor" href="#columns">#</a></h2>
+
+            <div class="kb-table-wrap scroll">
+                <table class="kb-table">
+                    <thead><tr><th>Dataset</th><th>Columns, in order</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>assets</strong></td><td><code>key, kind, name, ip, asset_type, status, vendor, model, serial, os_family, os_product, os_release, os_version, os_build, os_edition, os_source, hw_source, site, tags, sources, last_seen, inventory_at, inventory_age_s, freshness, software_truncated</code></td></tr>
+                        <tr><td><strong>software</strong></td><td><code>product_key, name, publisher, category, norm_status, hosts, installs, version_count, latest_version, top_versions, first_seen, last_change</code>. <code>top_versions</code> reads <code>version (hosts);&hellip;</code> as in the version bar, then <code>other N versions (hosts)</code></td></tr>
+                        <tr><td><strong>installations</strong></td><td><code>product_key, asset_key, asset_name, package_name, version, architecture, source, install_date, first_seen_at, updated_at</code></td></tr>
+                        <tr><td><strong>os</strong></td><td><code>family, family_label, product, release, version, assets, release_assets, release_latest_version, build_currency, raw_example</code>. <code>build_currency</code> is <code>latest</code>, <code>previous</code>, <code>older</code> or <code>unknown</code>, and empty when the versions of a release cannot be ordered</td></tr>
+                        <tr><td><strong>hardware</strong></td><td><code>section, vendor, model, class, value, label, count, devices, firmware_versions, serial_missing, serial_coverage_pct, modules</code>. <code>section</code> says which table the row belongs to: network vendor, network model, module, server CPU models, memory, disks or virtualization</td></tr>
+                        <tr><td><strong>changes</strong></td><td><code>id, observed_at, asset_key, asset_name, asset_present, category, action, subject, subject_key, old_value, new_value, label, paired_event_id, paired_label, marker, snapshot_truncated</code></td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Useful conventions: <code>key</code> and <code>asset_key</code> are the asset address
+            (<code>server:&lt;id&gt;</code> or <code>device:&lt;id&gt;</code>) that also appears in the
+            <code>?asset=</code> of the Assets page; <code>tags</code> and <code>sources</code> are written
+            <code>a;b;c</code>; timestamps are UTC; <code>marker</code> is true for the daily
+            <em>Change budget exceeded</em> row and <code>snapshot_truncated</code> for changes recorded while a software
+            list was capped (see <a href="{% url 'core:kb_zenplus_inventory_changes' %}#capped">Changes</a>).</p>
+        </section>
+
+        <section id="first-seen">
+            <h2><span class="num">04</span> First-seen dates in the files <a class="kb-anchor" href="#first-seen">#</a></h2>
+
+            <p>The <code>first_seen</code> column of the software dataset and the <code>first_seen_at</code> column of the
+            installations dataset are written <strong>as stored</strong>, in UTC, with no <em>before</em> marker. The screens
+            print a first-seen date at or before the day Inventory began recording as <em>before &lt;that day&gt;</em>,
+            because for software that was already installed it is not the day Inventory saw it:</p>
+
+            <ul>
+                <li>When Inventory was installed, every software entry that already existed was stamped with the time of the
+                    upgrade, and where the machine had reported a plausible install date the stamp was replaced by that
+                    install date (for example <code>2024-08-04T17:15:03Z</code>). Both are dates <strong>on or before the
+                    capture start</strong>, and neither is when Inventory first saw the product.</li>
+                <li>A value <strong>after</strong> the capture start is the day the product first appeared on that server.</li>
+                <li>The capture start is printed in the footnote of the <a href="{% url 'core:kb_zenplus_inventory_changes' %}#history-start">Changes page</a>.
+                    Compare the column with it before you use it as an observation date, for example in an audit.</li>
+            </ul>
+        </section>
+
+        <section id="format">
+            <h2><span class="num">05</span> File format and safety <a class="kb-anchor" href="#format">#</a></h2>
+
+            <div class="kb-deflist">
+                <div><dt>Encoding</dt><dd>UTF-8 <strong>with a byte-order mark</strong>, so Excel opens accented and
+                    non-Latin names correctly. Lines end with CRLF and there is one header row.</dd></div>
+                <div><dt>Values</dt><dd>Numbers are written as numbers, booleans as <code>true</code> and
+                    <code>false</code>, lists as <code>a;b;c</code>. A cell containing a quote, comma or line break is
+                    quoted.</dd></div>
+                <div><dt>Formula injection guard</dt><dd>A spreadsheet runs a cell that starts with <code>=</code>,
+                    <code>+</code>, <code>-</code> or <code>@</code> (or a tab or carriage return) as a formula. A hostile
+                    software title or hostname can be written that way, so such text cells get a leading apostrophe and
+                    stay text. If you see a leading <code>'</code> in a name, that is the guard, not part of the name.</dd></div>
+                <div><dt>Not cached</dt><dd>The download is marked no-store, so a proxy does not keep a copy.</dd></div>
+            </div>
+        </section>
+
+        <section id="limits">
+            <h2><span class="num">06</span> Row limit <a class="kb-anchor" href="#limits">#</a></h2>
+
+            <p>A file holds at most <strong>200,000 rows</strong>. If your filters select more, the file holds the first
+            200,000 in the list&rsquo;s order (newest first for changes) and the toast says
+            <em>Only the first N of M rows are in the file. Narrow the filters to export the rest.</em> The audit entry
+            records that the file was cut. Exports of tens of thousands of rows finish in a few seconds.</p>
+
+            <p><strong>Few at a time.</strong> An export keeps a database connection and a consistent view open while it
+            streams, so each person is limited to <strong>one export at a time</strong> and the appliance to two at
+            once. Both limits are counted separately in each of the appliance&rsquo;s two API processes, so in practice a
+            person can sometimes have two running and the appliance four. A request over a limit is refused at once with the message <em>you already have an export running;
+            wait for it to finish</em> or <em>too many exports are running; try again shortly</em> (with a retry hint of 10
+            seconds); start it again when the other one has finished. A download that the browser stops reading for two
+            minutes is abandoned and its connection is released.</p>
+        </section>
+
+        <section id="not-included">
+            <h2><span class="num">07</span> What is not included <a class="kb-anchor" href="#not-included">#</a></h2>
+
+            <ul>
+                <li>The flyout&rsquo;s detail: <strong>per-component serial numbers</strong> of a device&rsquo;s modules and
+                    the <strong>full software list of one server</strong> are not in the assets file. Use the product
+                    pages&rsquo; <em>Installed on</em> export for who has a product, and the flyout for one machine.</li>
+                <li><strong>Raw evidence</strong> (the unprocessed text a device or agent reported) and the source age of
+                    each identity value.</li>
+                <li><strong>Credentials</strong> of any kind: no Inventory dataset contains an SNMP community, password or key.</li>
+                <li>Anything outside your <a href="{% url 'core:kb_zenplus_inventory_permissions' %}#scope">tag scope</a>.</li>
+            </ul>
+        </section>
+
+        <section id="audit">
+            <h2><span class="num">08</span> Permissions and audit <a class="kb-anchor" href="#audit">#</a></h2>
+
+            <p>Serial numbers, software lists and version numbers are what an attacker looks for first, so
+            <code>inventory.export</code> is classed as <strong>sensitive</strong> and is granted separately from viewing:
+            a Viewer can browse everything and download nothing. Among the built-in roles only Operator and Admin can
+            export. See <a href="{% url 'core:kb_zenplus_inventory_permissions' %}">Permissions</a>.</p>
+
+            <p>Each export is written to the audit log <strong>before the first byte is sent</strong>, with the person, the
+            dataset, the non-empty filters applied (and the effective sort), the number of rows and whether the file was
+            cut at the limit. The record exists whether or not the browser finishes the download. If the audit entry cannot be
+            stored, the export is refused before any data is sent, with a message that the audit log is unavailable; try
+            again, and contact an administrator if it persists.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_permissions' %}">&larr; Permissions</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_troubleshooting' %}">Troubleshooting &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

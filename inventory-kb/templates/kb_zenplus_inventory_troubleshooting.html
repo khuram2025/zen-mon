@@ -1,0 +1,349 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Troubleshooting", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_troubleshooting' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "Why is a network device Unknown in ZenPlus Inventory?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Inventory shows what the SNMP poller read. A device is Unknown when it has not completed an SNMP poll, when its vendor identifier is not recognised by any device profile, when its description text names no operating system, or when it does not publish ENTITY-MIB so no model or serial number can be read. The asset flyout shows the source and age of each value and the raw text the device reported."}},
+    {"@type": "Question", "name": "Why does a server show no software in ZenPlus Inventory?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Only the Windows agent reports installed software. A server without the agent, a Linux server, or a server whose agent has not yet completed its first inventory collection has no software list in this release. A server with no software report counts as unknown in the endpoint-protection coverage rather than as missing."}},
+    {"@type": "Question", "name": "Why are the Inventory counts different from the Servers page?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Inventory counts servers and network devices together, counts a server and its linked SNMP device once (a server and a device that are not linked are two assets), applies your tag scope, and hides update, driver, OS-component and runtime software by default. The Servers page lists servers only and may apply its own filters. Clear the filters on both to compare."}},
+    {"@type": "Question", "name": "Why are the Inventory figures incomplete right after the upgrade?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Software lists and names that were stored before Inventory existed are processed in the background, about 100,000 rows every two minutes, starting about 45 seconds after the services start; until that is done every Inventory page says Normalising existing software lists; figures are incomplete, and endpoint-protection coverage counts those servers as unknown. A network device reads Never until its next SNMP poll, and an agent server that never sent a list reads Never until its next inventory report, every 6 hours by default."}},
+    {"@type": "Question", "name": "Why does a server show Not reported by design?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Only the ZenPlus agent can send a server's inventory in this release. A server monitored over SSH, WMI, WinRM or SNMP only, or with collection off, and a ping-only or controller-managed device, cannot report one, so it is listed and counted but is not treated as Never and is left out of the fresh percentage."}}
+  ]
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Troubleshooting</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Troubleshooting Inventory</h1>
+        <p class="lede">The questions operators ask most, in order of how often they come up: why a value is Unknown, why a
+        server has no software, why a count differs from another page, and why something you expected is missing.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators and administrators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~10 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#unknown-device">Why is a device Unknown?</a></li>
+            <li><a href="#unknown-server">Why is a server&rsquo;s operating system Unknown?</a></li>
+            <li><a href="#no-software">Why does a server show no software?</a></li>
+            <li><a href="#counts-differ">Why are the counts different from the Servers page?</a></li>
+            <li><a href="#never">Everything says Never after the upgrade</a></li>
+            <li><a href="#first-hour">The figures look incomplete right after the upgrade</a></li>
+            <li><a href="#stale">A machine is up but shows Stale</a></li>
+            <li><a href="#security">The endpoint-protection figure looks wrong</a></li>
+            <li><a href="#history">Changes I expected are missing, or odd ones appear</a></li>
+            <li><a href="#access">I cannot see a page, a button or an asset</a></li>
+            <li><a href="#trends">There are no trend lines</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="unknown-device">
+            <h2><span class="num">01</span> Why is a device Unknown? <a class="kb-anchor" href="#unknown-device">#</a></h2>
+
+            <p>For a network device, Inventory shows what the SNMP poller read. An empty or <em>Unknown</em> operating system,
+            model, serial number or vendor means one of these. Open the device in the
+            <a href="{% url 'core:kb_zenplus_inventory_assets' %}#flyout">asset flyout</a> first: the source badge and age
+            of each value and the <em>Raw evidence</em> list narrow it down in seconds.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>What you see</th><th>Cause</th><th>What to do</th></tr></thead>
+                    <tbody>
+                        <tr><td>Freshness <em>Never</em>, every field blank</td><td>The device has not completed an SNMP poll since Inventory was installed (new device, wrong SNMP credential, ACL, or it is down)</td><td>Check the device&rsquo;s own page for its last poll and fix the SNMP credential or reachability</td></tr>
+                        <tr><td>Vendor <em>Unknown</em>, other fields filled</td><td>The device&rsquo;s vendor identifier (sysObjectID) is not matched by any device profile</td><td>Note the <code>sysObjectID</code> in the flyout&rsquo;s <em>Device</em> section and send it to Zentryc support so a profile can be added</td></tr>
+                        <tr><td>OS or firmware <em>Unknown</em>, vendor known</td><td>The description text (sysDescr) of the device does not carry a version, and no vendor template supplies one</td><td>Look at <em>Raw evidence</em>. For FortiGate, Palo Alto and F5 the version comes from a monitoring template; make sure the device is polled with its template</td></tr>
+                        <tr><td>Model and serial missing, vendor and OS known</td><td>The device does not answer ENTITY-MIB, so no chassis can be read</td><td>Make sure the SNMP view includes ENTITY-MIB; test it below</td></tr>
+                        <tr><td>Values present but badge says <em>Template (old)</em></td><td>The vendor template was not read in the last 24 hours, so an older value is being used</td><td>The device&rsquo;s template group is not being polled, or the device was unreachable; fix polling and the badge returns to <em>Template</em></td></tr>
+                        <tr><td>The flyout says the device is managed by a controller</td><td>Its inventory comes from the controller, not from SNMP</td><td>Check the controller integration</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Prove it with two commands</h3>
+
+            <p>Run these from any Linux host with the credential ZenPlus uses. The first returns the description text and
+            vendor identifier; the second returns the chassis model and serial number if the device publishes ENTITY-MIB:</p>
+
+<pre><code># sysDescr and sysObjectID
+snmpget -v2c -c &lt;community&gt; &lt;device-ip&gt; 1.3.6.1.2.1.1.1.0 1.3.6.1.2.1.1.2.0
+
+# entPhysicalSerialNum (.11) and entPhysicalModelName (.13)
+snmpwalk -v2c -c &lt;community&gt; &lt;device-ip&gt; 1.3.6.1.2.1.47.1.1.1.1.11
+snmpwalk -v2c -c &lt;community&gt; &lt;device-ip&gt; 1.3.6.1.2.1.47.1.1.1.1.13
+</code></pre>
+
+            <p>If the second returns nothing, the device (or its SNMP view) does not publish ENTITY-MIB and ZenPlus cannot
+            learn a model or serial number from it. That is a property of the device, not a fault in Inventory. For SNMPv3,
+            use <code>-v3</code> with your user and keys instead of <code>-v2c -c</code>.</p>
+        </section>
+
+        <section id="unknown-server">
+            <h2><span class="num">02</span> Why is a server&rsquo;s operating system Unknown? <a class="kb-anchor" href="#unknown-server">#</a></h2>
+
+            <ol>
+                <li><strong>The server has never reported.</strong> Freshness is <em>Never</em>. Servers report their
+                    operating system through the Windows agent; check <strong>Servers &rarr; Agent Fleet</strong> for the
+                    server and its last report.</li>
+                <li><strong>The server was registered without the agent</strong> (for example by discovery). It is counted, and its
+                    operating system is whatever the discovery scan recorded, which can be blank or coarse. The agent&rsquo;s
+                    own report replaces it once the agent is installed.</li>
+                <li><strong>The agent reported text the rules do not recognise.</strong> The flyout&rsquo;s <em>Raw evidence</em>
+                    shows the name and version the agent sent. Send it to Zentryc support if it is an operating system that
+                    should be recognised.</li>
+            </ol>
+
+            <p>Unknown is a value on purpose: click the <em>Unknown</em> row on the
+            <a href="{% url 'core:kb_zenplus_inventory_operating_systems' %}">Operating Systems</a> page to list exactly these
+            machines.</p>
+        </section>
+
+        <section id="no-software">
+            <h2><span class="num">03</span> Why does a server show no software? <a class="kb-anchor" href="#no-software">#</a></h2>
+
+            <p>Installed software reaches Inventory from one place only: the <strong>Windows agent&rsquo;s list of installed
+            programs</strong>. A server therefore has no software when:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Situation</th><th>What Inventory shows</th></tr></thead>
+                    <tbody>
+                        <tr><td>No agent is installed (agentless monitoring)</td><td>No software list. Install the agent</td></tr>
+                        <tr><td>It is a Linux server</td><td>No software list: the agent in this release collects software on Windows only</td></tr>
+                        <tr><td>The agent was installed recently and has not run its first inventory collection</td><td>The flyout says <em>No software report has been accepted yet</em>. The first collection runs when the agent starts and then every 6 hours by default</td></tr>
+                        <tr><td>The inventory collector of the agent is switched off</td><td>Check <code>collectors.inventory.enabled</code> in the agent&rsquo;s own configuration file (<code>%ProgramData%\ZenPlus\Agent\config\agent.yaml</code>). A policy can also switch it off through its <code>feature_flags</code> (<code>inventory</code> or <code>collect_inventory</code> set to false), which are set through the API; the <strong>Agent Policies</strong> page has no switch or interval for the inventory</td></tr>
+                        <tr><td>The title is in a hidden category</td><td>The flyout and catalog leave out Update, Driver, OS-component and Runtime software by default. The flyout counts them as hidden; the catalog note under the table shows how to list them</td></tr>
+                        <tr><td>The title sorts after the 1,000th</td><td>The agent cut its list; the server is flagged <em>Software list truncated</em></td></tr>
+                        <tr><td>The program is portable and never registered itself as installed</td><td>Not visible to the Windows list of installed programs</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>A server that has never delivered a software list is neither &ldquo;covered&rdquo; nor &ldquo;without&rdquo;
+            in the endpoint-protection figure: its state is <em>unknown</em>, because nothing can be said about it. A server
+            that reports no services at all is unknown as well, because built-in Defender shows only as a running service.</p>
+        </section>
+
+        <section id="counts-differ">
+            <h2><span class="num">04</span> Why are the counts different from the Servers page? <a class="kb-anchor" href="#counts-differ">#</a></h2>
+
+            <p>Inventory and the other pages answer slightly different questions. Compare like with like:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Difference</th><th>Explanation</th></tr></thead>
+                    <tbody>
+                        <tr><td>Servers <strong>and</strong> network devices</td><td>Inventory&rsquo;s <em>Assets</em> total includes both. The Servers page lists servers only; the Devices page lists network devices. Use the <em>Kind</em> filter to compare</td></tr>
+                        <tr><td>One machine, one asset &mdash; only when linked</td><td>A server that is also polled over SNMP exists as a server and as a network device. When the server is linked to that device, Inventory counts it once, as the server; the Devices page also lists the SNMP side. The link is made by a discovery import or through the API, never from an IP address and not by enrolling an agent. A machine that was added as an agent server and separately as a device, with no link, is <strong>two assets</strong> (one of kind server, one of kind device); search for its address on the Assets list to see both</td></tr>
+                        <tr><td>No status filter</td><td>Inventory lists every server and device that exists, including ones that are down or not reporting; those show as Stale or Never. A page that defaults to a status or site filter shows fewer. Clear its filters before comparing</td></tr>
+                        <tr><td>Your tag scope</td><td>If your role or account is limited to tags, Inventory counts only those assets (a badge under the tabs says so). A colleague without a scope sees larger numbers</td></tr>
+                        <tr><td>The Devices page counts a device&rsquo;s own values</td><td>The Vendor and Model menus of the Devices page count what each device itself reported, as the poller stored it, and its OS version menu counts the normalised version where Inventory has one. Inventory counts the <strong>normalised</strong> vendor, in which spellings and aliases are merged (<em>Cisco</em> and <em>Cisco Systems</em> are one), so a vendor can show different counts on the two pages. Neither is wrong, and the list behind each number has exactly that many rows</td></tr>
+                        <tr><td>Software: products, not titles</td><td>Inventory groups many raw titles into one product, so the number of products is lower than the number of raw titles. <em>Hosts</em> counts servers; <em>Installs</em> counts entries. A server&rsquo;s own software tab lists every raw entry</td></tr>
+                        <tr><td>Hidden categories</td><td>Update, Driver, OS-component and Runtime software is left out of the catalog and Overview by default. Switch the hiding off to compare totals</td></tr>
+                        <tr><td>Servers that stopped reporting</td><td>A server that stopped reporting keeps the last software list it sent, and that list stays in the host, install and version figures until the server is removed or reports again. The line under the tabs counts how many assets are stale or never reported</td></tr>
+                        <tr><td>Timing</td><td>The Overview summary is computed at most once a minute, and the OS and hardware pages every five minutes. The time is in the line under the tabs</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Inside Inventory the numbers always agree with each other: click any number and the list that opens has
+            exactly that total. If that is ever not so, please tell Zentryc support, because it is a defect.</p>
+        </section>
+
+        <section id="never">
+            <h2><span class="num">05</span> Everything says Never after the upgrade <a class="kb-anchor" href="#never">#</a></h2>
+
+            <p>This is expected for a short while, and it is not the same for every asset:</p>
+            <ul>
+                <li>A <strong>network device</strong> reads <em>Never</em> until its next successful SNMP poll (minutes).</li>
+                <li>A <strong>server that already had a software list</strong> when the release was installed shows its
+                    true age (the time of its last list), so a server that stopped reporting long ago reads
+                    <em>Stale</em>, not <em>Never</em>.</li>
+                <li>An <strong>agent server that never sent a list</strong> reads <em>Never</em> until its next inventory
+                    report (up to 6 hours with the default interval).</li>
+                <li>A server monitored <strong>without the ZenPlus agent</strong>, and a ping-only or controller-managed
+                    device, reads <em>Not reported by design</em>. It never becomes <em>Fresh</em> in this release and is
+                    not counted as <em>Never</em>. See
+                    <a href="{% url 'core:kb_zenplus_inventory_getting_started' %}#how-fresh">how fresh the data is</a>.</li>
+            </ul>
+            <p><em>Fresh inventory</em> on the Overview climbs as the rest report; nothing needs to be done. If a
+            specific machine that can report is still <em>Never</em> a day later, follow
+            <a href="#unknown-device">section 1</a> or <a href="#no-software">section 3</a>.</p>
+        </section>
+
+        <section id="first-hour">
+            <h2><span class="num">06</span> The figures look incomplete right after the upgrade <a class="kb-anchor" href="#first-hour">#</a></h2>
+
+            <p>Software lists and names that were stored before Inventory existed have to be normalised once, in the
+            background: about <strong>100,000 software rows every two minutes</strong>, the first step about 45 seconds
+            after the services start. Until it has finished:</p>
+
+            <ul>
+                <li>Every Inventory page shows <em>Normalising existing software lists; figures are incomplete</em>, with
+                    the number of rows still to process at the last check. It disappears when the backlog is empty, and the page then
+                    refreshes its figures once. The number counts only rows that Inventory will process, so it never
+                    stays up for rows that it ignores.</li>
+                <li>The software catalog, the host and install counts and the version figures are <strong>partial</strong>. An
+                    empty catalog with that message means the lists are not processed yet, not that nothing is installed.</li>
+                <li>The endpoint-protection line counts a server whose list is not processed yet as <strong>unknown</strong>,
+                    never as <em>without</em>, so the gap does not flash up as a worklist of every server.</li>
+                <li>The Overview does not show its all-clear sentence while the message is up.</li>
+            </ul>
+
+            <p>How long: roughly <strong>two minutes for every 100,000 software rows</strong> (servers &times; titles),
+            plus the first 45 seconds. 200,000 rows take about 3 minutes, 1,000,000 about 20 minutes, 2,000,000 about 40
+            minutes. Network devices and servers without a software list are done in the first step. If the message is still
+            there after twice that long, contact Zentryc support with the numbers shown in it.</p>
+        </section>
+
+        <section id="stale">
+            <h2><span class="num">07</span> A machine is up but shows Stale <a class="kb-anchor" href="#stale">#</a></h2>
+
+            <p>Freshness measures the last <strong>inventory</strong>, not whether the machine answers. Hover over the badge:
+            <em>Last seen</em> (reachability) is recent and <em>Last inventory</em> (data) is old.</p>
+
+            <ul>
+                <li><strong>A server:</strong> the agent still sends heartbeats but its inventory collector is not running or
+                    its interval (<code>collectors.inventory.interval_seconds</code> in the agent&rsquo;s own configuration
+                    file) was lengthened beyond the freshness target. Check that file and the agent version in the Agent
+                    Fleet.</li>
+                <li><strong>A device:</strong> it answers ping but not SNMP (a changed community or user, an ACL, SNMP
+                    disabled).</li>
+                <li><strong>Targets too tight:</strong> if your agents send inventory every 24 hours, a 24-hour target
+                    makes servers flicker to <em>Aging</em>. Raise it in
+                    <a href="{% url 'core:kb_zenplus_inventory_settings' %}">Inventory settings</a>.</li>
+            </ul>
+        </section>
+
+        <section id="security">
+            <h2><span class="num">08</span> The endpoint-protection figure looks wrong <a class="kb-anchor" href="#security">#</a></h2>
+
+            <p>The figure counts servers with a complete, processed software list: <em>covered</em> when the list holds an
+            antivirus, endpoint-protection or EDR product of the catalog category <em>Endpoint protection</em>, or when the
+            Defender service (<code>WinDefend</code> or <code>Sense</code>) is running. Servers whose list is missing, cut at
+            the 1,000-title cap or not yet processed, and servers that have reported no service list at all, are
+            <em>unknown</em>, on a line of their own; the asset flyout names which of the four reasons applies. It shows that such a
+            product is installed; it is not proof that it is current or working. If a server you know is protected is listed
+            as <em>without</em>, check that its product is one the catalog knows (open the server in the flyout and read its
+            software; an unknown product can be reported with its <em>Evidence</em> names) and that its list is complete.
+            Details are in
+            <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}#security-software">health and freshness</a>.</p>
+        </section>
+
+        <section id="history">
+            <h2><span class="num">09</span> Changes I expected are missing, or odd ones appear <a class="kb-anchor" href="#history">#</a></h2>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Symptom</th><th>Explanation</th></tr></thead>
+                    <tbody>
+                        <tr><td>Nothing before a certain date</td><td>History starts when Inventory was installed (the Changes page footnote names the day capture began, even if the first change came later); earlier changes cannot be reconstructed. See <a href="{% url 'core:kb_zenplus_inventory_changes' %}#history-start">when history starts</a></td></tr>
+                        <tr><td>A new server shows no installs</td><td>Its first report is the baseline; only later differences are changes</td></tr>
+                        <tr><td>A device&rsquo;s first model or serial is not a change</td><td>A value appearing for the first time is discovery. Only a change from one known value to another is recorded</td></tr>
+                        <tr><td>A <em>Change budget exceeded</em> row</td><td>That server had reached about 2,000 software changes in 24 hours when a report arrived; the software changes of that report were not recorded. See <a href="{% url 'core:kb_zenplus_inventory_changes' %}#budget">the change budget</a></td></tr>
+                        <tr><td>A removal that may not be real</td><td>The note says the list was capped at 1,000 titles; the title may have been cut off. See <a href="{% url 'core:kb_zenplus_inventory_changes' %}#capped">capped lists</a></td></tr>
+                        <tr><td>A handful of &ldquo;version changed&rdquo; rows on the first day</td><td>A server that lists the same program twice (32-bit and 64-bit entries with different versions) used to keep the last one and now keeps the highest, so the first report after the upgrade records one change per such program</td></tr>
+                        <tr><td>One upgrade appears as a removal and an installation</td><td>Products that carry their version in their name are stored as a new title; the list shows the pair as one upgrade when both are on the same page</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="access">
+            <h2><span class="num">10</span> I cannot see a page, a button or an asset <a class="kb-anchor" href="#access">#</a></h2>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Problem</th><th>Cause and fix</th></tr></thead>
+                    <tbody>
+                        <tr><td>The Inventory group is not in the sidebar</td><td>Your role lacks <code>inventory.view</code>. A custom role must be granted it by hand after the upgrade. See <a href="{% url 'core:kb_zenplus_inventory_permissions' %}#custom-roles">custom roles</a></td></tr>
+                        <tr><td>There is no <em>Export</em> button</td><td>You need <code>inventory.export</code>, which is separate from viewing</td></tr>
+                        <tr><td>The settings are greyed out with a note</td><td>You can read them with <code>inventory.view</code>; changing them needs <code>inventory.manage</code></td></tr>
+                        <tr><td>A link in the flyout is locked</td><td>The server or device page needs <code>servers.view</code> or <code>devices.view</code></td></tr>
+                        <tr><td><em>Asset not found</em> in the flyout</td><td>The machine was deleted, or it is outside the assets your role covers</td></tr>
+                        <tr><td>The lists are empty with a message about tags</td><td>Your role or account is limited to tags and no asset carries them yet. Tag the assets, or ask an administrator to adjust the scope</td></tr>
+                        <tr><td>A colleague sees more than you</td><td>Their scope is wider or they have none. The badge under the tabs shows yours</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="trends">
+            <h2><span class="num">11</span> There are no trend lines <a class="kb-anchor" href="#trends">#</a></h2>
+
+            <ul>
+                <li><strong>Too early.</strong> They need at least three daily snapshots (<em>Changes per day</em> needs three
+                    complete days before today, so it appears one day later). One snapshot is written each day at 15
+                    minutes past the snapshot hour (00:15 by default, in the appliance time zone), and the first one only
+                    after the services have been up for half an hour and the normalising has finished.</li>
+                <li><strong>Scoped users do not get them.</strong> Trend data is fleet-wide and carries no tags, so it is
+                    withheld from anyone limited to tags. A note says so.</li>
+                <li><strong>They are switched off.</strong> <em>Show trends on the Overview</em> in
+                    <a href="{% url 'core:kb_zenplus_inventory_settings' %}#history">Inventory settings</a>. Recording
+                    continues while they are hidden.</li>
+            </ul>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Still stuck?
+                </div>
+                <p>Collect the asset address from the flyout (<code>?asset=&hellip;</code> in the address bar), what the
+                flyout shows under <em>Raw evidence</em>, the freshness badge tooltip, and the line under the tabs, then
+                <a href="{% url 'core:contact' %}">contact Zentryc support</a>. Those four facts identify nearly every
+                Inventory question without a further round trip.</p>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_export' %}">&larr; CSV export</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory' %}">Back to the Inventory overview &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

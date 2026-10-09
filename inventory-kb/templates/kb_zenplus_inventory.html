@@ -1,0 +1,239 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Inventory (Inventory & Compliance)",
+  "description": "How the ZenPlus Inventory module brings every operating system, firmware release, software title and hardware model on your servers and network devices into one drillable inventory, with change history and data-age badges.",
+  "datePublished": "2026-10-09",
+  "dateModified": "2026-10-09",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus Inventory", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <span class="current">Inventory</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Inventory</h1>
+        <p class="lede">Every operating system, firmware release, software title and hardware model across your servers
+        and network devices, in one place. Nearly every count is a link to the machines behind it. This is the overview: what
+        Inventory answers, what each screen is for, and where to start.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators and administrators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~6 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#what-inventory-answers">What Inventory answers</a></li>
+            <li><a href="#the-screens">The screens</a></li>
+            <li><a href="#three-rules">Three rules the screens follow</a></li>
+            <li><a href="#not-yet">What is not in this release</a></li>
+            <li><a href="#where-to-start">Where to start</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="what-inventory-answers">
+            <h2><span class="num">01</span> What Inventory answers <a class="kb-anchor" href="#what-inventory-answers">#</a></h2>
+
+            <p>ZenPlus already collected most of what an asset inventory needs: the Windows agent reports the operating
+            system and the installed programs of a server, and the SNMP poller reads the vendor, model, serial number and
+            firmware of a network device. <strong>Inventory</strong> puts those facts side by side, normalises the names
+            so that &ldquo;Windows Server 2019 Standard&rdquo; and &ldquo;Microsoft Windows Server 2019 Datacenter&rdquo;
+            land in the same release, and keeps a history of what changed.</p>
+
+            <p>It exists to answer the questions that are otherwise a spreadsheet exercise:</p>
+
+            <ul>
+                <li><strong>How many of X do we have?</strong> How many servers run Windows Server 2019, how many
+                    FortiGates, how many hosts have Chrome.</li>
+                <li><strong>Which machines run version Y?</strong> Every count opens the list of machines behind it, so
+                    &ldquo;which FortiGates run 7.2.x&rdquo; is two clicks from the Overview.</li>
+                <li><strong>What changed?</strong> Installs, removals, upgrades, operating-system changes, firmware
+                    changes and hardware swaps are recorded as they are reported, with the date.</li>
+                <li><strong>What is missing?</strong> Devices without a model or serial number, servers that stopped
+                    reporting, and servers with no endpoint protection are shown as a worklist, not hidden. Where the
+                    data cannot answer (for example a server whose software list has not arrived), the screen says
+                    <em>unknown</em> rather than guessing.</li>
+            </ul>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-overview.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus Inventory overview: the Inventory &amp; Compliance sidebar group, the tab strip, a line with the data age, six key figures for assets, OS releases, software titles, hardware models, fresh inventory and changes, a donut of server operating systems and bars of network firmware versions">
+                <figcaption><strong>Overview.</strong> Six key figures, the operating systems of servers and the firmware of
+                network devices, the most widely installed software, the products with the most versions (on a very large estate,
+                the most installed products are ranked and the panel says so), the hardware,
+                the latest changes and the inventory health worklist. The data shown is example data.</figcaption>
+            </figure>
+
+            <div class="pill-row">
+                <a href="{% url 'core:kb_zenplus_inventory_getting_started' %}">Getting started</a>
+                <a href="{% url 'core:kb_zenplus_inventory_assets' %}">Assets</a>
+                <a href="{% url 'core:kb_zenplus_inventory_operating_systems' %}">Operating systems</a>
+                <a href="{% url 'core:kb_zenplus_inventory_software' %}">Software</a>
+                <a href="{% url 'core:kb_zenplus_inventory_hardware' %}">Hardware</a>
+                <a href="{% url 'core:kb_zenplus_inventory_changes' %}">Changes</a>
+                <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}">Health and freshness</a>
+                <a href="{% url 'core:kb_zenplus_inventory_settings' %}">Settings</a>
+                <a href="{% url 'core:kb_zenplus_inventory_permissions' %}">Permissions</a>
+                <a href="{% url 'core:kb_zenplus_inventory_export' %}">CSV export</a>
+                <a href="{% url 'core:kb_zenplus_inventory_troubleshooting' %}">Troubleshooting</a>
+            </div>
+        </section>
+
+        <section id="the-screens">
+            <h2><span class="num">02</span> The screens, and what each one answers <a class="kb-anchor" href="#the-screens">#</a></h2>
+
+            <p>Inventory lives in the <strong>Inventory &amp; Compliance</strong> group of the sidebar (shown as
+            <strong>Inventory</strong> when the sidebar is collapsed). Its screens are also a tab strip under the
+            <em>Inventory</em> heading, so you can move between them without the sidebar. A line under the tabs says how
+            fresh the data is and how many assets are not reporting; each count in it is a link.</p>
+
+            <dl class="kb-deflist">
+                <div><dt><a href="{% url 'core:kb_zenplus_inventory' %}">Overview</a></dt>
+                    <dd>The whole estate at a glance: six key figures, the operating-system and firmware mix, the top
+                    software and the products with the most versions (on a very large estate, among the most installed products; a note
+                    under the panel says how many were ranked), hardware, the latest changes and the inventory
+                    health worklist.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_inventory_assets' %}">Assets</a></dt>
+                    <dd>Servers and network devices in one filterable list. Click a row for the asset flyout: identity
+                    with the source and age of each value, software or modules, and recent changes.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_inventory_operating_systems' %}">Operating Systems</a></dt>
+                    <dd>A family, release and version tree for server operating systems and network firmware, with the
+                    share of machines on the newest version seen.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_inventory_software' %}">Software</a></dt>
+                    <dd>One row per installed product, with host counts and the distribution of versions. Open a product
+                    for its versions, the servers it is installed on, its timeline and the raw names behind it.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_inventory_hardware' %}">Hardware</a></dt>
+                    <dd>Network vendors and models with serial-number coverage, a models-by-firmware matrix, chassis and
+                    module groups, and CPU, memory and disk distributions for servers.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_inventory_changes' %}">Changes</a></dt>
+                    <dd>What was installed, removed, upgraded or swapped, newest first, grouped by day, over 24 hours, 7,
+                    30 or 90 days.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_inventory_settings' %}">Inventory Settings</a></dt>
+                    <dd>Freshness targets, how long change history is kept, the daily snapshot time and the software
+                    categories hidden by default. Everyone who can open Inventory can read it; changing it needs the <code>inventory.manage</code>
+                    permission.</dd></div>
+            </dl>
+        </section>
+
+        <section id="three-rules">
+            <h2><span class="num">03</span> Three rules the screens follow <a class="kb-anchor" href="#three-rules">#</a></h2>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Counts of machines are links, and the list matches the number</h4>
+                    <p>Click &ldquo;23 servers on Windows Server 2019&rdquo; and the Assets list that opens has a total
+                    of 23. The filters are in the address bar, so you can bookmark or send the exact view. Figures that
+                    are not a count of machines (for example the number of components in a chassis, or the
+                    <em>Behind latest</em> figure of a product) are plain text, not links.</p></div></div>
+                <div class="step"><div><h4>Unknown is a value</h4>
+                    <p>A machine whose operating system, vendor or model could not be identified is shown as
+                    <em>Unknown</em>. It is counted, it has its own row or slice, and you can click it. Nothing is
+                    quietly dropped or counted as healthy.</p></div></div>
+                <div class="step"><div><h4>Every value has an age</h4>
+                    <p>Freshness badges say whether a machine reported recently, and the asset flyout shows the source and
+                    age of each identity value. See
+                    <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}">Reading the health panel and
+                    freshness badges</a>.</p></div></div>
+            </div>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    You only see what your role covers
+                </div>
+                <p>If your role or your user account is limited to tags, every number on every Inventory screen covers the
+                assets with those tags only, and a badge under the tabs says so. See
+                <a href="{% url 'core:kb_zenplus_inventory_permissions' %}">Permissions, tag scope and team roles</a>.</p>
+            </div>
+        </section>
+
+        <section id="not-yet">
+            <h2><span class="num">04</span> What is not in this release <a class="kb-anchor" href="#not-yet">#</a></h2>
+
+            <p>This release delivers the inventory itself. These are not part of it, so you do not look for them:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Not in this release</th><th>What you see</th></tr></thead>
+                    <tbody>
+                        <tr><td>End-of-life and end-of-support dates</td><td>Build currency compares versions with the newest version <em>seen on your own assets</em>, not with the vendor&rsquo;s latest release</td></tr>
+                        <tr><td>Compliance policies and vulnerability matching</td><td>Nothing; the sidebar group has no Compliance rows</td></tr>
+                        <tr><td>Editing software catalog rules, owners, criticality and saved views</td><td>Read-only: the Evidence tab shows the raw names behind a product, and unmatched titles are counted</td></tr>
+                        <tr><td>Server manufacturer, model, serial number, BIOS and physical-or-virtual</td><td>The Windows agent in this release does not report them. The Hardware page says so, and servers show CPU, memory and disks</td></tr>
+                        <tr><td>Software on Linux servers and on servers without the agent</td><td>No software list. See <a href="{% url 'core:kb_zenplus_inventory_getting_started' %}#not-collected">what is not collected</a></td></tr>
+                        <tr><td>History from before the module was installed</td><td>History starts when the release that introduced Inventory was installed (the Changes page prints that date) and cannot be reconstructed. See <a href="{% url 'core:kb_zenplus_inventory_changes' %}#history-start">when history starts</a></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="where-to-start">
+            <h2><span class="num">05</span> Where to start <a class="kb-anchor" href="#where-to-start">#</a></h2>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Make sure the sources are reporting</h4>
+                    <p>Inventory needs no setup of its own, but it is only as complete as the agent and SNMP coverage
+                    behind it. See
+                    <a href="{% url 'core:kb_zenplus_inventory_getting_started' %}">Getting started</a>.</p></div></div>
+                <div class="step"><div><h4>Read the health panel</h4>
+                    <p>The <em>Inventory health</em> panel at the bottom of the Overview is the quickest list of gaps to
+                    close: devices without a model or serial, servers that never reported, servers with no endpoint
+                    protection. See
+                    <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}">health and freshness</a>.</p></div></div>
+                <div class="step"><div><h4>Ask your first question</h4>
+                    <p>&ldquo;Which servers run Windows Server 2019?&rdquo; Click the operating-system row on the
+                    Overview. &ldquo;Which hosts have an old Chrome?&rdquo; Open the product on the
+                    <a href="{% url 'core:kb_zenplus_inventory_software' %}">Software</a> page and click a version.</p></div></div>
+                <div class="step"><div><h4>Give the right people access</h4>
+                    <p>Custom roles do not receive Inventory access automatically. See
+                    <a href="{% url 'core:kb_zenplus_inventory_permissions' %}">Permissions</a>.</p></div></div>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus' %}">&larr; ZenPlus documentation</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_getting_started' %}">Getting started &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}
