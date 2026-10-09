@@ -25,6 +25,7 @@ import { UpdateNotificationBell } from '@/components/UpdateNotificationBell'
 import { Sidebar, SIDEBAR_RAIL, SIDEBAR_WIDE } from '@/components/layout/Sidebar'
 import { trailForLocation } from '@/components/layout/navigation'
 import { RouteGate } from '@/components/layout/RouteGate'
+import { useBreadcrumbDetailFor } from '@/components/layout/breadcrumbDetail'
 
 type HeaderAlert = {
   id: string
@@ -45,6 +46,8 @@ function Breadcrumbs() {
   const { pathname, search } = useLocation()
   const params = useMemo(() => new URLSearchParams(search), [search])
   const trail = trailForLocation(pathname, params)
+  // The record a detail page shows (a software product), named by the page itself; "Detail" until it has loaded.
+  const detailName = useBreadcrumbDetailFor(pathname)
 
   if (!trail) {
     return <span className="text-xs font-medium text-text">{pathname.split('/').pop() || 'ZenPlus'}</span>
@@ -58,7 +61,7 @@ function Breadcrumbs() {
     { label: trail.group.label, muted: true },
     ...(trail.child ? [{ label: trail.item.label, muted: true }] : []),
     { label: leaf.label, muted: isDetail },
-    ...(isDetail ? [{ label: 'Detail', muted: false }] : []),
+    ...(isDetail ? [{ label: detailName ?? 'Detail', muted: false }] : []),
   ]
 
   return (

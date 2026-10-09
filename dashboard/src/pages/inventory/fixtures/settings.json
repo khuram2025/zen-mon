@@ -1,0 +1,74 @@
+{
+  "settings": {
+    "fresh_hours": {
+      "server": 24,
+      "device": 2
+    },
+    "stale_days": 7,
+    "change_retention_days": 400,
+    "snapshot_hour": 0,
+    "hide_categories_by_default": [
+      "update",
+      "driver",
+      "os-component",
+      "runtime"
+    ],
+    "trends_enabled": true
+  },
+  "defaults": {
+    "fresh_hours": {
+      "server": 24,
+      "device": 2
+    },
+    "stale_days": 7,
+    "change_retention_days": 400,
+    "snapshot_hour": 0,
+    "hide_categories_by_default": [
+      "update",
+      "driver",
+      "os-component",
+      "runtime"
+    ],
+    "trends_enabled": true
+  },
+  "limits": {
+    "fresh_hours": {
+      "min": 1,
+      "max": 720
+    },
+    "stale_days": {
+      "min": 1,
+      "max": 365
+    },
+    "change_retention_days": {
+      "min": 30,
+      "max": 3650
+    },
+    "snapshot_hour": {
+      "min": 0,
+      "max": 23
+    }
+  },
+  "categories": [
+    "browser",
+    "security",
+    "endpoint-protection",
+    "remote-access",
+    "database",
+    "web-server",
+    "runtime",
+    "development",
+    "productivity",
+    "monitoring",
+    "backup",
+    "virtualization",
+    "networking",
+    "driver",
+    "os-component",
+    "update",
+    "other"
+  ],
+  "updated_at": null,
+  "changed": [],
+  "adjusted": []
+}

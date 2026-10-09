@@ -1,6 +1,11 @@
 import { formatDeviceAvailability } from '@/components/devices/availability'
+import {
+  ADDED_COLUMNS, buildDevicesCsv, cellText, deviceListFiltersFromParams, deviceListParams, facetMenu, identitySortValue, identityValue, isUnknownValue,
+  listCoverage, matchesIdentity, resolveColumnVisibility, selectedValue, without,
+  type IdentityFilters, type ServerFacet,
+} from '@/components/devices/deviceInventory'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Activity,
@@ -100,6 +105,8 @@ type Device = {
   vendor: string | null
   model: string | null
   os_version: string | null
+  /** The normalised Inventory version where there is one, else the device's own (every item of GET /devices). */
+  os_version_display?: string | null
   profile_id?: string | null
   profile_name?: string | null
   managed_by_device_id?: string | null
@@ -126,6 +133,8 @@ type SortKey =
   | 'ip_address'
   | 'device_type'
   | 'vendor'
+  | 'model'
+  | 'os_version'
   | 'location'
   | 'group_name'
   | 'status'
@@ -166,6 +175,9 @@ const DEVICE_TYPES = [
 
 const HIDEABLE_COLUMNS = [
   'type',
+  'vendor',
+  'model',
+  'os_version',
   'group_location',
   'tags',
   'cpu',
@@ -175,8 +187,15 @@ const HIDEABLE_COLUMNS = [
 ] as const
 type HideableCol = (typeof HIDEABLE_COLUMNS)[number]
 
+// What a user with no saved choice sees. The identity columns are opt-in (Columns): on by default they pushed Status, CPU
+// and Memory off the first screen (RG-02, UI-17). Measured with the sidebar open: Vendor + Model + OS version moved Status
+// from x=455 to x=773 of a 783 px table box at 1440 px, and even the OS version alone (90 px) pushes Status past the edge
+// of the 623 px box at 1280 px. The OS version filter stays in "More filters" and every device keeps its Inventory link.
 const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
   type: true,
+  vendor: false,
+  model: false,
+  os_version: false,
   group_location: true,
   tags: true,
   cpu: true,
@@ -187,6 +206,9 @@ const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
 
 const COLUMN_LABELS: Record<HideableCol, string> = {
   type: 'Type',
+  vendor: 'Vendor',
+  model: 'Model',
+  os_version: 'OS version',
   group_location: 'Group / Location',
   tags: 'Tags',
   cpu: 'CPU',
@@ -205,7 +227,8 @@ function loadPrefs(): Prefs {
     if (raw) {
       const p = JSON.parse(raw)
       return {
-        visible: { ...DEFAULT_VISIBLE, ...(p.visible || {}) },
+        // A choice saved before the identity columns existed keeps its layout: they stay off until it opts in.
+        visible: resolveColumnVisibility(DEFAULT_VISIBLE, p.visible, ADDED_COLUMNS),
         pageSize: PAGE_SIZE_OPTIONS.includes(p.pageSize) ? p.pageSize : 10,
       }
     }
@@ -237,6 +260,9 @@ export function DevicesPage() {
   const typeFilter = params.get('type') || ''
   const locationFilter = params.get('loc') || ''
   const groupFilter = params.get('group') || ''
+  // Inventory identity filters (the device's own vendor / OS version columns); `unknown` is "no value".
+  const vendorFilter = params.get('vendor') || ''
+  const osVersionFilter = params.get('os_version') || ''
   const tagParam = params.get('tag') || ''
   const tagFilter = useMemo(
     () => tagParam.split(',').map((t) => t.trim()).filter(Boolean),
@@ -282,20 +308,22 @@ export function DevicesPage() {
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [bulkTagOpen, setBulkTagOpen] = useState(false)
   const [columnsOpen, setColumnsOpen] = useState(false)
-  const [filtersOpen, setFiltersOpen] = useState(false)
+  // Arriving with a vendor / OS version in the address (a bookmark or a link) shows the panel that holds them.
+  const [filtersOpen, setFiltersOpen] = useState(() => !!(params.get('vendor') || params.get('os_version')))
   const [manageTagsOpen, setManageTagsOpen] = useState(false)
   const [tagEditDevice, setTagEditDevice] = useState<Device | null>(null)
 
+  // Everything the API applies exactly goes into the request, so the (at most 200) devices that come back are the right
+  // ones and `meta.total` and the menus' `facets` count ALL devices, not just the first page (RG-03).
+  const listParams = useMemo(() => deviceListParams(deviceListFiltersFromParams(params)), [params])
   const { data, isLoading, isFetching, refetch } = useQuery<{
     data: Device[]
-    meta: any
+    meta: { total?: number; skip?: number; limit?: number } | null
+    facets?: { vendor?: ServerFacet; model?: ServerFacet; os_version?: ServerFacet }
   }>({
-    queryKey: ['devices', 'list', { search }],
-    queryFn: async () => {
-      const qs: string[] = ['limit=200']
-      if (search) qs.push(`search=${encodeURIComponent(search)}`)
-      return (await api.get(`/devices?${qs.join('&')}`)).data
-    },
+    queryKey: ['devices', 'list', listParams],
+    queryFn: async () => (await api.get('/devices', { params: listParams })).data,
+    placeholderData: keepPreviousData,
     refetchInterval: 15_000,
   })
 
@@ -398,7 +426,7 @@ export function DevicesPage() {
 
   // Every filter except status — KPIs/sidebar are computed from this so they
   // match the table, while the status KPI cards keep working as toggles.
-  const scoped = useMemo(() => {
+  const scopedBase = useMemo(() => {
     return enriched.filter(({ device: d }) => {
       if (typeFilter && d.device_type !== typeFilter) return false
       if (groupFilter && d.group_id !== groupFilter) return false
@@ -416,18 +444,41 @@ export function DevicesPage() {
     })
   }, [enriched, typeFilter, groupFilter, locationFilter, managedByFilter, tagFilter, tagMode])
 
+  // Vendor / OS version join the other scope filters: the KPIs and charts reflect them too.
+  const identityFilters = useMemo<IdentityFilters>(
+    () => ({ vendor: vendorFilter, os_version: osVersionFilter }),
+    [vendorFilter, osVersionFilter],
+  )
+  const scoped = useMemo(
+    () => scopedBase.filter(({ device }) => matchesIdentity(device, identityFilters)),
+    [scopedBase, identityFilters],
+  )
+
   const filtered = useMemo(() => {
-    return scoped.filter(({ health }) => {
-      if (statusFilter) {
-        if (statusFilter === 'healthy' && health !== 'healthy') return false
-        if (statusFilter === 'warning' && health !== 'warning') return false
-        if (statusFilter === 'critical' && health !== 'critical') return false
-        if (statusFilter === 'offline' && health !== 'offline') return false
-        if (statusFilter === 'maintenance' && health !== 'maintenance') return false
-      }
-      return true
-    })
+    return scoped.filter(({ health }) => statusAllows(statusFilter, health))
   }, [scoped, statusFilter])
+
+  // Menu entries of the two identity filters. The counts are the API's, over ALL devices, whenever the browser applies no
+  // filter of its own: each then equals the list's total once the option is picked (principle 1). The health status chip
+  // (derived here from alerts and metrics) and the location (the API matches it as a fragment, the page exactly) are the
+  // two the API cannot reproduce; with either on, the menu counts the rows loaded, with every filter in force, which is
+  // exact unless the list is cut short (the notice above the table says so). Unknown is an entry of its own.
+  const coverage = listCoverage(devices.length, data?.meta?.total)
+  const serverMenus = !statusFilter && !locationFilter && !!data?.facets
+  const vendorMenu = useMemo(() => {
+    const rows = scopedBase
+      .filter(({ device, health }) => matchesIdentity(device, without(identityFilters, 'vendor')) && statusAllows(statusFilter, health))
+      .map((r) => r.device)
+    return facetMenu({ field: 'vendor', server: data?.facets?.vendor, rows, selected: vendorFilter, useServer: serverMenus })
+  }, [scopedBase, identityFilters, statusFilter, vendorFilter, data?.facets?.vendor, serverMenus])
+  const osVersionMenu = useMemo(() => {
+    const rows = scopedBase
+      .filter(({ device, health }) => matchesIdentity(device, without(identityFilters, 'os_version')) && statusAllows(statusFilter, health))
+      .map((r) => r.device)
+    return facetMenu({ field: 'os_version', server: data?.facets?.os_version, rows, selected: osVersionFilter, useServer: serverMenus })
+  }, [scopedBase, identityFilters, statusFilter, osVersionFilter, data?.facets?.os_version, serverMenus])
+  const vendorOptions = vendorMenu.options
+  const osVersionOptions = osVersionMenu.options
 
   const sorted = useMemo(() => {
     const arr = [...filtered]
@@ -448,6 +499,8 @@ export function DevicesPage() {
   const currentPage = Math.min(page, totalPages)
   const pageStart = (currentPage - 1) * prefs.pageSize
   const pageRows = sorted.slice(pageStart, pageStart + prefs.pageSize)
+  // Checkbox, name / IP, status and actions are pinned; the rest follow the Columns dialog.
+  const columnCount = 4 + HIDEABLE_COLUMNS.filter((c) => prefs.visible[c]).length
 
   useEffect(() => {
     // Reset to page 1 when filters/size cause overflow.
@@ -496,7 +549,11 @@ export function DevicesPage() {
   )
 
   const scopeFilterActive =
-    !!(typeFilter || groupFilter || locationFilter || managedByFilter || tagFilter.length > 0)
+    !!(typeFilter || groupFilter || locationFilter || managedByFilter || vendorFilter || osVersionFilter || tagFilter.length > 0)
+
+  // The API applies most filters, so "no rows" no longer means "no devices": with a search or any filter on, the empty
+  // state says to change them, and offers discovery only when nothing narrows the list (NF-EP-03).
+  const filtersNarrowTheList = !!search.trim() || !!(typeFilter || groupFilter || locationFilter || statusFilter || managedByFilter || vendorFilter || osVersionFilter || tagFilter.length > 0)
 
   const activeFilterCount =
     (typeFilter ? 1 : 0) +
@@ -504,12 +561,18 @@ export function DevicesPage() {
     (locationFilter ? 1 : 0) +
     (statusFilter ? 1 : 0) +
     (managedByFilter ? 1 : 0) +
+    (vendorFilter ? 1 : 0) +
+    (osVersionFilter ? 1 : 0) +
     (tagFilter.length > 0 ? 1 : 0)
 
   const managedByName = useMemo(() => {
     if (!managedByFilter) return ''
     const ctrl = enriched.find(({ device }) => device.id === managedByFilter)
-    return ctrl?.device.hostname || 'controller'
+    if (ctrl?.device.hostname) return ctrl.device.hostname
+    // The API returns only the controller's children, so the controller itself is usually not in the list: every
+    // child carries its controller's name (NF-EP-02).
+    const child = enriched.find(({ device }) => device.managed_by_device_id === managedByFilter && device.managed_by_hostname)
+    return child?.device.managed_by_hostname || 'controller'
   }, [enriched, managedByFilter])
 
   function toggleTag(name: string) {
@@ -610,30 +673,13 @@ export function DevicesPage() {
   }
 
   function clearFilters() {
-    patchParams({ type: null, group: null, loc: null, status: null, tag: null, tagmode: null, managed_by: null })
+    patchParams({ type: null, group: null, loc: null, status: null, tag: null, tagmode: null, managed_by: null, vendor: null, os_version: null })
   }
 
   function exportCsv() {
-    const cols: Array<[string, (row: (typeof sorted)[number]) => string]> = [
-      ['hostname', (r) => r.device.hostname],
-      ['ip_address', (r) => r.device.ip_address || r.device.managed_ip || ''],
-      ['managed_via', (r) => r.device.managed_by_hostname || ''],
-      ['serial_number', (r) => r.device.serial_number || ''],
-      ['device_type', (r) => r.device.device_type],
-      ['group', (r) => r.device.group_name || ''],
-      ['location', (r) => r.device.location || ''],
-      ['tags', (r) => (r.device.tags || []).join('; ')],
-      ['status', (r) => (r.snmpNoData ? 'warning (snmp: no data)' : r.health)],
-      ['cpu_pct', (r) => r.cpu == null ? '' : String(r.cpu)],
-      ['memory_pct', (r) => r.mem == null ? '' : String(r.mem)],
-      ['uptime', (r) => r.uptime],
-      ['last_seen', (r) => r.device.last_seen || ''],
-    ]
-    const rows = [
-      cols.map(([h]) => h).join(','),
-      ...sorted.map((r) => cols.map(([, f]) => csvEscape(f(r))).join(',')),
-    ]
-    const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' })
+    // The columns that always existed keep their positions; vendor, model and os_version follow them (RG-08).
+    const csv = buildDevicesCsv(sorted)
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -759,7 +805,11 @@ export function DevicesPage() {
       {scopeFilterActive && (
         <div className="-mb-1 flex items-center gap-1.5 text-xs text-muted">
           <Filter className="h-3.5 w-3.5" />
-          Filtered: <span className="font-medium text-text">{scoped.length}</span> of {enriched.length} devices
+          Filtered: <span className="font-medium text-text">{scoped.length.toLocaleString()}</span>
+          {scoped.length !== enriched.length
+            ? ` of ${enriched.length.toLocaleString()} devices that match the other filters`
+            : scoped.length === 1 ? ' device' : ' devices'}
+          {coverage.truncated && ` (${coverage.text} loaded)`}
           <span className="text-muted/70">· cards and charts reflect the filter</span>
         </div>
       )}
@@ -830,7 +880,7 @@ export function DevicesPage() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-semibold">Devices List</h2>
-                <span className="rounded-md bg-surface2 px-2 py-0.5 text-xs font-medium text-muted">
+                <span className="rounded-md bg-surface2 px-2 py-0.5 text-xs font-medium text-text2">
                   {sorted.length.toLocaleString()}
                 </span>
               </div>
@@ -851,11 +901,28 @@ export function DevicesPage() {
                   className={`h-8 w-8 p-0 ${activeFilterCount > 0 ? 'border-primary/40 text-primary' : ''}`}
                   onClick={() => setFiltersOpen((o) => !o)}
                   title="More filters"
+                  aria-label="More filters"
+                  aria-expanded={filtersOpen}
                 >
                   <Filter className="h-3.5 w-3.5" />
                 </Button>
               </div>
             </div>
+
+            {coverage.truncated && (
+              <p
+                role="status"
+                data-list-coverage=""
+                className="flex items-start gap-1.5 rounded-md border border-warning/35 bg-warning/10 px-3 py-1.5 text-xs text-warning-fg"
+              >
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                <span>
+                  Showing the {coverage.text} devices that match{statusFilter || locationFilter ? ' the other filters' : ''}, in name order. Narrow the list with the search or a filter to see the others.
+                  {(statusFilter || locationFilter) && ' The status and location filters are applied to these devices only.'}
+                  {!serverMenus && ' With a status or location filter on, the Vendor and OS version menus count only the devices shown here.'}
+                </span>
+              </p>
+            )}
 
             {/* Inline extra filters */}
             {filtersOpen && (
@@ -865,6 +932,20 @@ export function DevicesPage() {
                   value={groupFilter}
                   onChange={(v) => patchParams({ group: v || null, page: '1' })}
                   options={(groups || []).map((g) => ({ value: g.id, label: g.name }))}
+                />
+                <FilterInline
+                  label="Vendor"
+                  allText="All vendors"
+                  value={selectedValue(vendorOptions, vendorFilter)}
+                  onChange={(v) => patchParams({ vendor: v || null, page: '1' })}
+                  options={vendorOptions}
+                />
+                <FilterInline
+                  label="OS version"
+                  allText="All OS versions"
+                  value={selectedValue(osVersionOptions, osVersionFilter)}
+                  onChange={(v) => patchParams({ os_version: v || null, page: '1' })}
+                  options={osVersionOptions}
                 />
                 {activeFilterCount > 0 && (
                   <Button
@@ -952,6 +1033,15 @@ export function DevicesPage() {
                     {prefs.visible.type && (
                       <SortableTh label="Type" col="device_type" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
+                    {prefs.visible.vendor && (
+                      <SortableTh label="Vendor" col="vendor" current={sortKey} order={sortOrder} onClick={onSortClick} className="whitespace-nowrap" />
+                    )}
+                    {prefs.visible.model && (
+                      <SortableTh label="Model" col="model" current={sortKey} order={sortOrder} onClick={onSortClick} className="whitespace-nowrap" />
+                    )}
+                    {prefs.visible.os_version && (
+                      <SortableTh label="OS version" col="os_version" current={sortKey} order={sortOrder} onClick={onSortClick} className="whitespace-nowrap" />
+                    )}
                     {prefs.visible.group_location && (
                       <SortableTh label="Group / Location" col="group_name" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
@@ -973,19 +1063,19 @@ export function DevicesPage() {
                 <TBody>
                   {isLoading && (
                     <Tr>
-                      <Td colSpan={11}>
-                        <SkeletonTable rows={6} cols={10} />
+                      <Td colSpan={columnCount}>
+                        <SkeletonTable rows={6} cols={columnCount - 1} />
                       </Td>
                     </Tr>
                   )}
                   {!isLoading && pageRows.length === 0 && (
                     <Tr>
-                      <Td colSpan={11} className="py-14">
+                      <Td colSpan={columnCount} className="py-14">
                         <div className="flex flex-col items-center gap-2 text-center text-muted">
                           <Server className="h-8 w-8 opacity-50" />
                           <div className="text-sm font-medium text-text">No devices match</div>
                           <div className="text-xs">
-                            {enriched.length === 0 ? (
+                            {!filtersNarrowTheList ? (
                               <>
                                 Add one manually, or{' '}
                                 <Link to="/discovery" className="text-primary hover:underline">
@@ -993,14 +1083,16 @@ export function DevicesPage() {
                                 </Link>
                                 .
                               </>
-                            ) : (
+                            ) : activeFilterCount > 0 ? (
                               <>
                                 Try{' '}
                                 <button type="button" onClick={clearFilters} className="text-primary hover:underline">
                                   clearing filters
                                 </button>
-                                .
+                                {search.trim() ? ' or changing the search' : ''}.
                               </>
+                            ) : (
+                              <>Try a different search.</>
                             )}
                           </div>
                         </div>
@@ -1082,6 +1174,21 @@ export function DevicesPage() {
                         {prefs.visible.type && (
                           <Td className="text-sm capitalize">
                             {titleCase(d.device_type.replace('_', ' '))}
+                          </Td>
+                        )}
+                        {prefs.visible.vendor && (
+                          <Td className="max-w-[150px] text-sm">
+                            <IdentityCell value={d.vendor} />
+                          </Td>
+                        )}
+                        {prefs.visible.model && (
+                          <Td className="max-w-[170px] text-sm">
+                            <IdentityCell value={d.model} />
+                          </Td>
+                        )}
+                        {prefs.visible.os_version && (
+                          <Td className="max-w-[170px] text-xs">
+                            <IdentityCell value={identityValue(d, 'os_version')} mono />
                           </Td>
                         )}
                         {prefs.visible.group_location && (
@@ -1431,18 +1538,22 @@ function HealthPill({ kind, snmpNoData }: { kind: HealthKind; snmpNoData?: boole
 // =========================================================================
 
 function FilterInline({
-  label, value, onChange, options,
+  label, value, onChange, options, allText,
 }: {
   label: string
   value: string
   onChange: (v: string) => void
-  options: Array<{ value: string; label: string }>
+  /** `count`: how many rows the option leaves in the list, shown beside it. */
+  options: Array<{ value: string; label: string; count?: number }>
+  allText?: string
 }) {
   const sel = options.find((o) => o.value === value)
   return (
     <div className="w-[160px] flex-none">
       <Select value={value || '__all__'} onValueChange={(v) => onChange(v === '__all__' ? '' : v)}>
+        {/* A combobox takes its name from the author, not from its content: name it by the filter and its value (NF-5). */}
         <SelectTrigger
+          aria-label={`${label}: ${sel?.label || 'All'}`}
           className={`h-10 gap-2 px-3 text-sm ${
             value ? 'border-primary/40 bg-primary/5' : ''
           }`}
@@ -1454,10 +1565,17 @@ function FilterInline({
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="__all__">
-            <span className="text-muted">All {label.toLowerCase()}</span>
+            <span className="text-muted">{allText ?? `All ${label.toLowerCase()}`}</span>
           </SelectItem>
           {options.map((o) => (
-            <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+            <SelectItem key={o.value} value={o.value} className="[&>span:last-child]:flex-1">
+              {o.count === undefined ? o.label : (
+                <span className="flex w-full items-center justify-between gap-4">
+                  <span className={o.value === 'unknown' ? 'italic text-text2' : undefined}>{o.label}</span>
+                  <span className="tabular-nums text-muted">{o.count.toLocaleString()}</span>
+                </span>
+              )}
+            </SelectItem>
           ))}
         </SelectContent>
       </Select>
@@ -2105,7 +2223,7 @@ function Pagination({
   const pages = buildPageList(page, totalPages)
   return (
     <div className="flex items-center gap-0.5">
-      <IconBtn onClick={() => onPage(Math.max(1, page - 1))} disabled={page <= 1}>
+      <IconBtn label="Previous page" onClick={() => onPage(Math.max(1, page - 1))} disabled={page <= 1}>
         <ChevronLeft className="h-3.5 w-3.5" />
       </IconBtn>
       {pages.map((p, i) =>
@@ -2114,6 +2232,9 @@ function Pagination({
         ) : (
           <button
             key={p}
+            type="button"
+            aria-label={`Page ${p}`}
+            aria-current={p === page ? 'page' : undefined}
             onClick={() => onPage(p as number)}
             className={`h-8 min-w-[28px] rounded px-2 text-xs ${
               p === page
@@ -2125,15 +2246,17 @@ function Pagination({
           </button>
         ),
       )}
-      <IconBtn onClick={() => onPage(Math.min(totalPages, page + 1))} disabled={page >= totalPages}>
+      <IconBtn label="Next page" onClick={() => onPage(Math.min(totalPages, page + 1))} disabled={page >= totalPages}>
         <ChevronRight className="h-3.5 w-3.5" />
       </IconBtn>
     </div>
   )
 }
-function IconBtn({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
+function IconBtn({ children, onClick, disabled, label }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; label: string }) {
   return (
     <button
+      type="button"
+      aria-label={label}
       onClick={onClick}
       disabled={disabled}
       className="flex h-8 w-8 items-center justify-center rounded text-muted hover:bg-surface2 hover:text-text disabled:opacity-40 disabled:hover:bg-transparent"
@@ -2160,7 +2283,7 @@ function buildPageList(page: number, total: number): Array<number | '…'> {
 function PageSizeSelect({ value, onChange }: { value: number; onChange: (n: number) => void }) {
   return (
     <Select value={String(value)} onValueChange={(v) => onChange(Number(v))}>
-      <SelectTrigger className="h-8 w-[96px] text-xs">
+      <SelectTrigger className="h-8 w-[96px] text-xs" aria-label="Rows per page">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -2575,6 +2698,28 @@ function UptimePctCell({ pct, fallback }: { pct: number | undefined; fallback: s
 }
 
 // =========================================================================
+// Vendor / model / OS version cell
+// =========================================================================
+
+/** A device-reported text. No value is a dash with a screen-reader word, never an empty cell. */
+function IdentityCell({ value, mono }: { value: string | null | undefined; mono?: boolean }) {
+  if (isUnknownValue(value)) {
+    return (
+      <span className="text-muted" title="Not reported">
+        <span aria-hidden>—</span>
+        <span className="sr-only">Not reported</span>
+      </span>
+    )
+  }
+  const text = cellText(value)
+  return (
+    <div className={`truncate ${mono ? 'font-mono tabular-nums text-text2' : ''}`} title={text}>
+      {text}
+    </div>
+  )
+}
+
+// =========================================================================
 // Sortable header
 // =========================================================================
 
@@ -2657,6 +2802,13 @@ function categoryOf(t: string): 'Server' | 'Network' | 'Security' | 'Wireless' |
   return 'Other'
 }
 
+const STATUS_FILTERS: readonly string[] = ['healthy', 'warning', 'critical', 'offline', 'maintenance']
+
+/** The status KPI / filter: a known status keeps its rows only; an empty or unrecognised value keeps everything. */
+function statusAllows(filter: string, health: HealthKind): boolean {
+  return !filter || !STATUS_FILTERS.includes(filter) || health === filter
+}
+
 function healthOf(d: Device): HealthKind {
   if (d.status === 'up') return 'healthy'
   if (d.status === 'degraded') return 'warning'
@@ -2670,7 +2822,10 @@ function extractSortVal(d: Device, k: SortKey): string | number | null {
     case 'hostname':     return d.hostname.toLowerCase()
     case 'ip_address':   return ipToInt(d.ip_address)
     case 'device_type':  return d.device_type
-    case 'vendor':       return (d.vendor || '').toLowerCase()
+    // Unknown (no value) is null, which the comparator keeps last in either direction.
+    case 'vendor':       return identitySortValue(d.vendor)
+    case 'model':        return identitySortValue(d.model)
+    case 'os_version':   return identitySortValue(identityValue(d, 'os_version'))
     case 'location':     return (d.location || '').toLowerCase()
     case 'group_name':   return (d.group_name || '').toLowerCase()
     case 'status':       return d.status
@@ -2684,12 +2839,6 @@ function ipToInt(ip: string): number {
   if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return Number.MAX_SAFE_INTEGER
   return (parts[0] << 24) + (parts[1] << 16) + (parts[2] << 8) + parts[3]
 }
-function csvEscape(v: string): string {
-  if (v == null) return ''
-  if (/[",\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`
-  return v
-}
-
 function buildAvailabilityRows(
   rows: Array<{ device: Device; health: HealthKind; uptimePct?: number }>,
   getKey: (row: { device: Device; health: HealthKind; uptimePct?: number }) => string,

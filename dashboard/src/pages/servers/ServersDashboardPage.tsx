@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn, formatBps, relativeTime } from '@/lib/utils'
+import { useCan } from '@/stores/auth'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -133,6 +134,9 @@ function HealthRow({ color, label, value, total }: {
 
 export function ServersDashboardPage() {
   const navigate = useNavigate()
+  // The OS tile opens the Inventory module's OS breakdown of the servers (versions and builds, which this
+  // tile does not show); the rows keep their own link, because their counts are the servers' os_type.
+  const canInventory = useCan()('inventory.view')
   const [deployOpen, setDeployOpen] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
 
@@ -216,7 +220,7 @@ export function ServersDashboardPage() {
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" asChild>
             <Link to="/servers/inventory">
-              <LayoutList className="h-3.5 w-3.5" /> View inventory
+              <LayoutList className="h-3.5 w-3.5" /> View all servers
             </Link>
           </Button>
           <Button variant="outline" size="sm" onClick={() => setFormOpen(true)}>
@@ -389,7 +393,21 @@ export function ServersDashboardPage() {
       {/* OS + agents + sites */}
       <div className="grid gap-4 md:grid-cols-3">
         <Card className="overflow-hidden">
-          <PanelHeader icon={<Server className="h-3.5 w-3.5" />} title="By operating system" />
+          <PanelHeader
+            icon={<Server className="h-3.5 w-3.5" />}
+            title="By operating system"
+            right={canInventory
+              ? (
+                <Link
+                  to="/inventory/os?kind=server"
+                  className="rounded-sm text-xs text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary"
+                  title="Operating system families, releases and versions of the servers, in Inventory"
+                >
+                  OS inventory →
+                </Link>
+              )
+              : undefined}
+          />
           <CardContent className="space-y-2 px-4 pb-4 pt-3">
             {Object.entries(overview?.os_counts || {}).length === 0 ? (
               <div className="py-4 text-center text-xs text-muted">No servers yet</div>

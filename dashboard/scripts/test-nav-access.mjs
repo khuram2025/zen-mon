@@ -114,7 +114,7 @@ const visible = (perms) => {
 // ── the reported bug: a narrow custom role sees only its areas ─────────────
 {
   const v = visible(['dashboard.view', 'devices.view'])
-  for (const hidden of ['servers', 'apm', 'device-tracker', 'nccm', 'reports']) assert(!v.groups.includes(hidden), `devices-only role sees ${hidden}`)
+  for (const hidden of ['servers', 'apm', 'device-tracker', 'nccm', 'reports', 'inventory']) assert(!v.groups.includes(hidden), `devices-only role sees ${hidden}`)
   assert(v.labels.has('monitoring:Devices') && v.labels.has('monitoring:Link Utilization'))
   // Device events are readable with devices.view (the server's "events" policy); alerts are not.
   assert(v.labels.has('alerting:SNMP Traps') && v.labels.has('alerting:Network Syslog'))
@@ -137,6 +137,41 @@ const visible = (perms) => {
   assert(!visible(['reports.manage']).labels.has('reports:Template Designer'), 'the designer also needs reports.view')
 }
 
+// ── Inventory & Compliance: after Servers, before Applications; every row (settings included) needs only view ──
+{
+  const ids = NAV_GROUPS.map((g) => g.id)
+  assert.equal(ids.indexOf('inventory'), ids.indexOf('servers') + 1, 'Inventory follows Servers')
+  assert.equal(ids.indexOf('apm'), ids.indexOf('inventory') + 1, 'Inventory precedes Applications')
+  const group = NAV_GROUPS.find((g) => g.id === 'inventory')
+  assert.equal(group.label, 'Inventory & Compliance')
+  assert.equal(group.short, 'Inventory', 'UI-23: the collapsed rail names the module, not its first tab')
+  assert.notEqual(group.short, group.items[1].label)
+  assert.deepEqual(group.items.map((i) => i.label), ['Overview', 'Assets', 'Operating Systems', 'Software', 'Hardware', 'Changes', 'Inventory Settings'])
+  assert.deepEqual(group.items.map((i) => i.to), [
+    '/inventory', '/inventory/assets', '/inventory/os', '/inventory/software', '/inventory/hardware', '/inventory/changes', '/inventory/settings',
+  ])
+  // "Inventory" means one thing: the Servers row is All Servers (same route).
+  const servers = NAV_GROUPS.find((g) => g.id === 'servers').items
+  assert(servers.some((i) => i.label === 'All Servers' && i.to === '/servers/inventory'))
+  assert(!servers.some((i) => i.label === 'Inventory'))
+  // Every row needs inventory.view, the settings row too: it opens read-only without inventory.manage (UI-07), and
+  // a role that holds manage WITHOUT view cannot read the settings at all, so it sees nothing (RG-06).
+  for (const item of group.items) {
+    assert.deepEqual(gatePermissions(item), ['inventory.view'], item.to)
+    assert(!item.children, `${item.to} is a plain row`)
+  }
+  const viewer = visible(['dashboard.view', 'inventory.view'])
+  assert(viewer.groups.includes('inventory'))
+  for (const label of ['Overview', 'Assets', 'Operating Systems', 'Software', 'Hardware', 'Changes', 'Inventory Settings']) assert(viewer.labels.has(`inventory:${label}`), label)
+  assert(!visible(['inventory.manage']).groups.includes('inventory'), 'manage without view shows nothing (the API refuses the read)')
+  assert(visible(['inventory.view', 'inventory.manage']).labels.has('inventory:Inventory Settings'))
+  assert(!visible(['inventory.export']).groups.includes('inventory'), 'export alone shows nothing')
+  assert(!visible(['servers.view', 'devices.view', 'apm.view']).groups.includes('inventory'), 'estate access alone is not inventory access')
+  // The group disappears for a role with none of it.
+  assert(!visible([]).groups.includes('inventory'))
+  assert(visible(['system.admin']).labels.has('inventory:Inventory Settings'))
+}
+
 // ── team roles from the server's built-in definitions ──────────────────────
 const teams = {
   network: visible(pyList('_NETWORK_TEAM')),
@@ -154,6 +189,15 @@ assert(!teams.network.groups.includes('servers') && !teams.network.groups.includ
 assert(!teams.network.labels.has('device-tracker:User Logins'), 'user activity is sensitive and not part of the network team')
 assert(teams.security.labels.has('device-tracker:User Logins') && teams.security.labels.has('monitoring:NetFlow'))
 assert(!teams.security.groups.includes('servers') && !teams.security.groups.includes('apm'))
+// Owner decision D9: network, systems and security teams see the inventory (view only); the application team does not.
+for (const name of ['network', 'systems', 'security']) {
+  assert(teams[name].groups.includes('inventory'), `${name} team sees Inventory`)
+  for (const label of ['Overview', 'Assets', 'Operating Systems', 'Software', 'Hardware', 'Changes', 'Inventory Settings']) {
+    assert(teams[name].labels.has(`inventory:${label}`), `${name} team: ${label}`)
+  }
+  assert(!pyList(`_${name.toUpperCase()}_TEAM`).includes('inventory.manage'), `${name} team can read the inventory settings but never change them`)
+}
+assert(!teams.application.groups.includes('inventory'), 'the application team sees applications, not the estate')
 for (const [name, v] of Object.entries(teams)) {
   assert(!v.labels.has('administration:Settings:Users & Access'), `${name} team can open Users & Access`)
   assert(!v.labels.has('alerting:Gateways'), `${name} team can open Gateways`)
@@ -177,9 +221,60 @@ assert(!allows('/apm/settings', ['dashboard.view', 'apm.view']), 'APM settings n
 assert(allows('/reports/view/availability', ['reports.view']) && !allows('/reports/view/availability', ['devices.view']))
 assert(!allows('/reports/builder', ['reports.view']) && allows('/reports/builder?from=availability', ['reports.view', 'reports.manage']))
 assert(allows('/reports/schedules', ['reports.view']) && !allows('/reports/schedules', ['devices.view']))
+// Inventory: every page needs inventory.view, the product page included; the settings page opens read-only with view only.
+const inv = ['inventory.view']
+for (const url of ['/inventory', '/inventory/assets?os_family=windows', '/inventory/os', '/inventory/software', '/inventory/software/google-chrome?tab=versions', '/inventory/hardware', '/inventory/changes']) {
+  assert(allows(url, inv), `${url} opens with inventory.view`)
+  assert(!allows(url, ['devices.view', 'servers.view']), `${url} is closed without inventory.view`)
+}
+assert(allows('/inventory/settings', inv) && allows('/inventory/settings', ['inventory.view', 'inventory.manage']), 'UI-07: a view-only role reaches the read-only settings page')
+assert(!allows('/inventory/settings', ['inventory.manage']) && !allows('/inventory/settings', ['devices.view']), 'RG-06: manage without view opens nothing')
+// FE-10: the router matches paths case-insensitively, so the gate must too.
+for (const url of ['/Inventory/Settings', '/INVENTORY/SETTINGS', '/Inventory/Assets', '/inventory/Software/Google-Chrome']) {
+  assert(!allows(url, ['devices.view']), `${url} is closed without inventory.view, whatever its case`)
+  assert(allows(url, inv), `${url} opens with inventory.view`)
+}
+assert(!allows('/Servers/Inventory', app) && !allows('/DEVICES/abc', app), 'case variants of other gated pages are closed too')
+for (const [name, perms] of [['network', pyList('_NETWORK_TEAM')], ['systems', pyList('_SYSTEMS_TEAM')], ['security', pyList('_SECURITY_TEAM')]]) {
+  assert(allows('/inventory/assets', perms) && allows('/inventory/software/some-product', perms), `${name} team opens Inventory`)
+  assert(allows('/inventory/settings', perms), `${name} team reads the Inventory settings (read-only)`)
+}
+assert(!allows('/inventory', app) && !allows('/inventory/assets', app), 'the application team has no Inventory')
+// Breadcrumbs and group auto-open: the product page belongs to Software, All Servers keeps its own routes.
+{
+  const at = (url) => { const u = new URL(url, 'http://x'); return trailForLocation(u.pathname, u.searchParams) }
+  assert.equal(at('/inventory').item.label, 'Overview')
+  assert.equal(at('/Inventory/Settings').item.label, 'Inventory Settings', 'FE-10: a differently cased address finds the same entry')
+  assert.equal(at('/inventory/assets?health=stale').item.label, 'Assets')
+  assert.equal(at('/inventory/software/google-chrome').item.label, 'Software')
+  assert.equal(at('/inventory/software/google-chrome').group.id, 'inventory')
+  assert.equal(at('/servers/inventory').group.id, 'servers')
+  assert.equal(at('/servers/inventory').item.label, 'All Servers')
+  assert.equal(at('/servers/3f2a0000-0000-4000-8000-000000000000').item.label, 'All Servers', 'server detail still belongs to All Servers')
+}
+
 // Settings hides its own tabs and falls back, so only the item is route-gated.
 assert(allows('/settings/general', []) && allows('/settings/general?tab=company', []))
 // Pages without a navigation entry are left to the page and the server.
 assert(allows('/sensors/abc', []))
 
-console.log('Navigation access: every entry gated by catalog permissions; children inherit; team roles (network, systems, application, security) see only their areas; direct URLs follow the sidebar.')
+// RG-04, (h), (u): the Servers list is "All Servers" everywhere it is named, so "Inventory" means the module only.
+// Grep-style: the labels live in page sources, outside the navigation tree.
+{
+  const page = (rel) => fs.readFileSync(path.join(root, rel), 'utf8')
+  const team = page('src/pages/dashboards/ServerTeamDashboard.tsx')
+  assert(team.includes('>All servers →</Link>'), 'Server Team dashboard: the Fleet Status link reads "All servers"')
+  assert(team.includes('add one from Servers → All Servers'), 'Server Team dashboard: the empty state names the page that exists')
+  assert(!/>Inventory →</.test(team) && !team.includes('Servers → Inventory'), 'Server Team dashboard: no "Inventory" for the Servers list')
+  const list = page('src/pages/servers/ServersPage.tsx')
+  assert(/<span className="text-text2">All Servers<\/span>/.test(list), 'Servers list: the breadcrumb says All Servers')
+  assert(/<Server className="h-5 w-5 text-primary" \/>\s*All Servers\s*<\/h1>/.test(list), 'Servers list: the heading says All Servers')
+  assert(!list.includes('Server Inventory</h1>') && !/<span className="text-text2">Inventory<\/span>/.test(list), 'Servers list: the old heading and breadcrumb are gone')
+  const fleet = page('src/pages/servers/ServersDashboardPage.tsx')
+  assert(fleet.includes('View all servers') && !fleet.includes('View inventory'), 'Server Fleet: the button says View all servers')
+  // And the sidebar row they point at.
+  const row = NAV_GROUPS.find((g) => g.id === 'servers').items.find((i) => i.to === '/servers/inventory')
+  assert.equal(row.label, 'All Servers')
+}
+
+console.log('Navigation access: every entry gated by catalog permissions; children inherit; team roles (network, systems, application, security) see only their areas, Inventory included per D9; direct URLs follow the sidebar.')

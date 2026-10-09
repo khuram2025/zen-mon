@@ -1,0 +1,531 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "total": 145,
+  "facets": {
+    "kind": {
+      "distinct": 2,
+      "items": [
+        {
+          "value": "server",
+          "label": "server",
+          "count": 60
+        },
+        {
+          "value": "device",
+          "label": "device",
+          "count": 85
+        }
+      ]
+    },
+    "os_family": {
+      "distinct": 12,
+      "items": [
+        {
+          "value": "windows",
+          "label": "Windows",
+          "count": 46
+        },
+        {
+          "value": "ios-xe",
+          "label": "IOS XE",
+          "count": 18
+        },
+        {
+          "value": "unknown",
+          "label": "Unknown",
+          "count": 17
+        },
+        {
+          "value": "fortios",
+          "label": "FortiOS",
+          "count": 14
+        },
+        {
+          "value": "aos-cx",
+          "label": "AOS-CX",
+          "count": 10
+        },
+        {
+          "value": "junos",
+          "label": "Junos",
+          "count": 8
+        },
+        {
+          "value": "panos",
+          "label": "PAN-OS",
+          "count": 8
+        },
+        {
+          "value": "ios",
+          "label": "IOS",
+          "count": 6
+        },
+        {
+          "value": "linux",
+          "label": "Linux",
+          "count": 6
+        },
+        {
+          "value": "nx-os",
+          "label": "NX-OS",
+          "count": 4
+        },
+        {
+          "value": "other",
+          "label": "Other",
+          "count": 4
+        },
+        {
+          "value": "tmos",
+          "label": "TMOS",
+          "count": 4
+        }
+      ]
+    },
+    "os_product": {
+      "distinct": 14,
+      "items": [
+        {
+          "value": "Windows Server",
+          "label": "Windows Server",
+          "count": 41
+        },
+        {
+          "value": "unknown",
+          "label": "Unknown",
+          "count": 21
+        },
+        {
+          "value": "IOS XE",
+          "label": "IOS XE",
+          "count": 18
+        },
+        {
+          "value": "FortiOS",
+          "label": "FortiOS",
+          "count": 14
+        },
+        {
+          "value": "AOS-CX",
+          "label": "AOS-CX",
+          "count": 10
+        },
+        {
+          "value": "Junos OS",
+          "label": "Junos OS",
+          "count": 8
+        },
+        {
+          "value": "PAN-OS",
+          "label": "PAN-OS",
+          "count": 8
+        },
+        {
+          "value": "IOS",
+          "label": "IOS",
+          "count": 6
+        },
+        {
+          "value": "NX-OS",
+          "label": "NX-OS",
+          "count": 4
+        },
+        {
+          "value": "TMOS",
+          "label": "TMOS",
+          "count": 4
+        },
+        {
+          "value": "Ubuntu",
+          "label": "Ubuntu",
+          "count": 4
+        },
+        {
+          "value": "Windows 10",
+          "label": "Windows 10",
+          "count": 3
+        },
+        {
+          "value": "RHEL",
+          "label": "RHEL",
+          "count": 2
+        },
+        {
+          "value": "Windows 11",
+          "label": "Windows 11",
+          "count": 2
+        }
+      ]
+    },
+    "vendor": {
+      "distinct": 8,
+      "items": [
+        {
+          "value": "Cisco",
+          "label": "Cisco",
+          "count": 28
+        },
+        {
+          "value": "Fortinet",
+          "label": "Fortinet",
+          "count": 14
+        },
+        {
+          "value": "HPE Aruba Networking",
+          "label": "HPE Aruba Networking",
+          "count": 10
+        },
+        {
+          "value": "Juniper Networks",
+          "label": "Juniper Networks",
+          "count": 8
+        },
+        {
+          "value": "Palo Alto Networks",
+          "label": "Palo Alto Networks",
+          "count": 8
+        },
+        {
+          "value": "Dell",
+          "label": "Dell",
+          "count": 5
+        },
+        {
+          "value": "F5",
+          "label": "F5",
+          "count": 4
+        },
+        {
+          "value": "Ubiquiti",
+          "label": "Ubiquiti",
+          "count": 4
+        }
+      ]
+    },
+    "model": {
+      "distinct": 20,
+      "items": [
+        {
+          "value": "C9200L-24P-4G",
+          "label": "C9200L-24P-4G",
+          "count": 6
+        },
+        {
+          "value": "WS-C2960X-48TS-L",
+          "label": "WS-C2960X-48TS-L",
+          "count": 6
+        },
+        {
+          "value": "6300M",
+          "label": "6300M",
+          "count": 5
+        },
+        {
+          "value": "C9300-24T",
+          "label": "C9300-24T",
+          "count": 5
+        },
+        {
+          "value": "PowerEdge R650",
+          "label": "PowerEdge R650",
+          "count": 5
+        },
+        {
+          "value": "6200F",
+          "label": "6200F",
+          "count": 4
+        },
+        {
+          "value": "BIG-IP i2800",
+          "label": "BIG-IP i2800",
+          "count": 4
+        },
+        {
+          "value": "C9300-48P",
+          "label": "C9300-48P",
+          "count": 4
+        },
+        {
+          "value": "EX4300-48T",
+          "label": "EX4300-48T",
+          "count": 4
+        },
+        {
+          "value": "FortiGate-100F",
+          "label": "FortiGate-100F",
+          "count": 4
+        },
+        {
+          "value": "N9K-C93180YC-FX",
+          "label": "N9K-C93180YC-FX",
+          "count": 4
+        },
+        {
+          "value": "PA-3220",
+          "label": "PA-3220",
+          "count": 4
+        },
+        {
+          "value": "FortiGate-200F",
+          "label": "FortiGate-200F",
+          "count": 3
+        },
+        {
+          "value": "FortiGate-600E",
+          "label": "FortiGate-600E",
+          "count": 3
+        },
+        {
+          "value": "USW-24-PoE",
+          "label": "USW-24-PoE",
+          "count": 3
+        },
+        {
+          "value": "EX2300-24T",
+          "label": "EX2300-24T",
+          "count": 2
+        },
+        {
+          "value": "FortiGate-60F",
+          "label": "FortiGate-60F",
+          "count": 2
+        },
+        {
+          "value": "PA-440",
+          "label": "PA-440",
+          "count": 2
+        },
+        {
+          "value": "PA-5220",
+          "label": "PA-5220",
+          "count": 2
+        },
+        {
+          "value": "QFX5120-48Y",
+          "label": "QFX5120-48Y",
+          "count": 1
+        }
+      ]
+    },
+    "site": {
+      "distinct": 12,
+      "items": [
+        {
+          "value": "Branch-1",
+          "label": "Branch-1",
+          "count": 18
+        },
+        {
+          "value": "DR",
+          "label": "DR",
+          "count": 18
+        },
+        {
+          "value": "HQ",
+          "label": "HQ",
+          "count": 18
+        },
+        {
+          "value": "DR / rack 2",
+          "label": "DR / rack 2",
+          "count": 10
+        },
+        {
+          "value": "HQ / rack 1",
+          "label": "HQ / rack 1",
+          "count": 10
+        },
+        {
+          "value": "HQ / rack 4",
+          "label": "HQ / rack 4",
+          "count": 10
+        },
+        {
+          "value": "DR / rack 5",
+          "label": "DR / rack 5",
+          "count": 9
+        },
+        {
+          "value": "DR / rack 8",
+          "label": "DR / rack 8",
+          "count": 9
+        },
+        {
+          "value": "HQ / rack 7",
+          "label": "HQ / rack 7",
+          "count": 9
+        },
+        {
+          "value": "Branch-1 / rack 3",
+          "label": "Branch-1 / rack 3",
+          "count": 5
+        },
+        {
+          "value": "Branch-1 / rack 9",
+          "label": "Branch-1 / rack 9",
+          "count": 5
+        },
+        {
+          "value": "Branch-1 / rack 6",
+          "label": "Branch-1 / rack 6",
+          "count": 4
+        }
+      ]
+    },
+    "tag": {
+      "distinct": 9,
+      "items": [
+        {
+          "value": "prod",
+          "label": "prod",
+          "count": 98
+        },
+        {
+          "value": "team-a",
+          "label": "team-a",
+          "count": 50
+        },
+        {
+          "value": "team-net",
+          "label": "team-net",
+          "count": 49
+        },
+        {
+          "value": "dc-west",
+          "label": "dc-west",
+          "count": 42
+        },
+        {
+          "value": "dc-east",
+          "label": "dc-east",
+          "count": 40
+        },
+        {
+          "value": "dev",
+          "label": "dev",
+          "count": 40
+        },
+        {
+          "value": "pci",
+          "label": "pci",
+          "count": 33
+        },
+        {
+          "value": "team-b",
+          "label": "team-b",
+          "count": 24
+        },
+        {
+          "value": "team-edge",
+          "label": "team-edge",
+          "count": 15
+        }
+      ]
+    },
+    "source": {
+      "distinct": 5,
+      "items": [
+        {
+          "value": "snmp",
+          "label": "snmp",
+          "count": 84
+        },
+        {
+          "value": "agent",
+          "label": "agent",
+          "count": 50
+        },
+        {
+          "value": "icmp",
+          "label": "icmp",
+          "count": 6
+        },
+        {
+          "value": "ssh",
+          "label": "ssh",
+          "count": 6
+        },
+        {
+          "value": "controller",
+          "label": "controller",
+          "count": 2
+        }
+      ]
+    },
+    "freshness": {
+      "distinct": 5,
+      "items": [
+        {
+          "value": "fresh",
+          "label": "fresh",
+          "count": 105
+        },
+        {
+          "value": "aging",
+          "label": "aging",
+          "count": 12
+        },
+        {
+          "value": "stale",
+          "label": "stale",
+          "count": 8
+        },
+        {
+          "value": "never",
+          "label": "never",
+          "count": 12
+        },
+        {
+          "value": "not_applicable",
+          "label": "Not applicable",
+          "count": 8
+        }
+      ]
+    },
+    "health": {
+      "distinct": 8,
+      "items": [
+        {
+          "value": "missing_os_version",
+          "label": "missing_os_version",
+          "count": 14
+        },
+        {
+          "value": "missing_model",
+          "label": "missing_model",
+          "count": 13
+        },
+        {
+          "value": "missing_serial",
+          "label": "missing_serial",
+          "count": 15
+        },
+        {
+          "value": "unknown_vendor",
+          "label": "unknown_vendor",
+          "count": 5
+        },
+        {
+          "value": "stale",
+          "label": "stale",
+          "count": 8
+        },
+        {
+          "value": "never",
+          "label": "never",
+          "count": 12
+        },
+        {
+          "value": "software_truncated",
+          "label": "software_truncated",
+          "count": 2
+        },
+        {
+          "value": "missing_security_agent",
+          "label": "missing_security_agent",
+          "count": 13
+        }
+      ]
+    }
+  }
+}

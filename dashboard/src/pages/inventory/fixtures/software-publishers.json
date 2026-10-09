@@ -1,0 +1,163 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "scope": {
+    "restricted": false,
+    "tags": []
+  },
+  "total": 24,
+  "distinct": 21,
+  "items": [
+    {
+      "value": "microsoft",
+      "label": "Microsoft",
+      "products": 4,
+      "installs": 62,
+      "hosts": 41
+    },
+    {
+      "value": "google",
+      "label": "Google",
+      "products": 1,
+      "installs": 41,
+      "hosts": 41
+    },
+    {
+      "value": "igor-pavlov",
+      "label": "Igor Pavlov",
+      "products": 1,
+      "installs": 34,
+      "hosts": 34
+    },
+    {
+      "value": "crowdstrike",
+      "label": "CrowdStrike",
+      "products": 1,
+      "installs": 28,
+      "hosts": 28
+    },
+    {
+      "value": "simon-tatham",
+      "label": "Simon Tatham",
+      "products": 1,
+      "installs": 21,
+      "hosts": 21
+    },
+    {
+      "value": "git",
+      "label": "Git",
+      "products": 1,
+      "installs": 19,
+      "hosts": 19
+    },
+    {
+      "value": "notepad-team",
+      "label": "Notepad++ Team",
+      "products": 1,
+      "installs": 18,
+      "hosts": 18
+    },
+    {
+      "value": "adobe",
+      "label": "Adobe",
+      "products": 1,
+      "installs": 17,
+      "hosts": 17
+    },
+    {
+      "value": "mozilla",
+      "label": "Mozilla",
+      "products": 1,
+      "installs": 16,
+      "hosts": 16
+    },
+    {
+      "value": "vmware",
+      "label": "VMware",
+      "products": 1,
+      "installs": 14,
+      "hosts": 14
+    },
+    {
+      "value": "winscp",
+      "label": "WinSCP",
+      "products": 1,
+      "installs": 11,
+      "hosts": 11
+    },
+    {
+      "value": "python-software-foundation",
+      "label": "Python Software Foundation",
+      "products": 1,
+      "installs": 9,
+      "hosts": 9
+    },
+    {
+      "value": "splunk",
+      "label": "Splunk",
+      "products": 1,
+      "installs": 9,
+      "hosts": 9
+    },
+    {
+      "value": "zoom",
+      "label": "Zoom",
+      "products": 1,
+      "installs": 7,
+      "hosts": 7
+    },
+    {
+      "value": "ubuntu-developers",
+      "label": "Ubuntu Developers",
+      "products": 1,
+      "installs": 6,
+      "hosts": 6
+    },
+    {
+      "value": "videolan",
+      "label": "VideoLAN",
+      "products": 1,
+      "installs": 6,
+      "hosts": 6
+    },
+    {
+      "value": "wireshark",
+      "label": "Wireshark Foundation",
+      "products": 1,
+      "installs": 6,
+      "hosts": 6
+    },
+    {
+      "value": "fortinet",
+      "label": "Fortinet",
+      "products": 1,
+      "installs": 4,
+      "hosts": 4
+    },
+    {
+      "value": "teamviewer",
+      "label": "TeamViewer",
+      "products": 1,
+      "installs": 3,
+      "hosts": 3
+    },
+    {
+      "value": "veeam",
+      "label": "Veeam",
+      "products": 1,
+      "installs": 3,
+      "hosts": 3
+    },
+    {
+      "value": "zentryc",
+      "label": "Zentryc",
+      "products": 1,
+      "installs": 3,
+      "hosts": 3
+    }
+  ],
+  "data_status": {
+    "normalising": false,
+    "pending_software_rows": 0,
+    "pending_identity_rows": 0
+  }
+}

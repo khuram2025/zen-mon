@@ -67,4 +67,44 @@ assert.deepEqual(M.cleanTags([' Network ', 'network', '', 'Riyadh']), ['Network'
 assert(M.sameTags(['Network', 'riyadh'], ['RIYADH', 'network ']))
 assert(!M.sameTags(['network'], []))
 
-console.log('Role model: presets stay standard-risk, dependencies stay consistent, grants stay within the editor’s own access.')
+// ── Inventory: the real catalog entry and the built-in grants (owner decisions D4 and D9) ─────────────
+// Built from server/app/core/permissions.py, so the editor's presets are checked against what the
+// server really defines rather than against a hand-written copy.
+{
+  const py = fs.readFileSync('../server/app/core/permissions.py', 'utf8')
+  const list = (name) => {
+    const m = py.match(new RegExp(`^${name} = \\[([\\s\\S]*?)\\n\\]`, 'm'))
+    assert(m, `${name} not found in permissions.py`)
+    return [...m[1].matchAll(/"([a-z_]+\.[a-z_]+)"/g)].map((x) => x[1])
+  }
+  const ids = ['inventory.view', 'inventory.export', 'inventory.manage']
+  const risk = (id) => (py.match(new RegExp(`"${id.replace('.', '\\.')}": "(sensitive|privileged|critical)"`)) || [])[1] || 'standard'
+  const implies = (id) => {
+    const m = py.match(new RegExp(`"${id.replace('.', '\\.')}": \\[([^\\]]*)\\]`))
+    return m ? [...m[1].matchAll(/"([a-z_]+\.[a-z_]+)"/g)].map((x) => x[1]) : []
+  }
+  const inventory = { module: 'inventory', label: 'Inventory', area: 'Operations', permissions: ids.map((id) => P(id, risk(id), implies(id))) }
+  assert.equal(risk('inventory.export'), 'sensitive', 'export is classified sensitive')
+  assert.deepEqual(implies('inventory.manage'), ['inventory.view'])
+  assert.deepEqual(M.levelsFor(inventory), ['none', 'view', 'full'])
+  assert.equal(M.fullLabel(inventory), 'Full')
+  assert.deepEqual(M.extraPermissions(inventory).map((p) => p.id), ['inventory.export'], 'export is ticked on its own, never by a preset')
+  assert.deepEqual([...M.applyLevel([inventory], inventory, 'full', set())].sort(), ['inventory.manage', 'inventory.view'])
+  assert.deepEqual([...M.applyLevel([inventory], inventory, 'view', set('inventory.manage', 'inventory.view'))], ['inventory.view'])
+
+  // What each built-in role shows as its Inventory level in the editor.
+  const level = (name) => M.moduleLevel(inventory, set(...list(name)))
+  assert.equal(level('_OPERATOR'), 'full')
+  assert.equal(level('_VIEWER'), 'view')
+  assert.equal(level('_READ_ONLY'), 'view')
+  // D9: network, systems and security teams view the inventory; the application team has none; no team role exports or manages.
+  for (const team of ['_NETWORK_TEAM', '_SYSTEMS_TEAM', '_SECURITY_TEAM']) {
+    assert.equal(level(team), 'view', `${team} gets the inventory view`)
+    assert(!list(team).some((id) => id === 'inventory.export' || id === 'inventory.manage'), `${team} never exports or manages inventory`)
+  }
+  assert.equal(level('_APPLICATION_TEAM'), 'none')
+  // D4: viewers and read-only roles never hold the sensitive export or any write.
+  for (const name of ['_VIEWER', '_READ_ONLY']) assert(!list(name).some((id) => id === 'inventory.export' || id === 'inventory.manage'), name)
+}
+
+console.log('Role model: presets stay standard-risk, dependencies stay consistent, grants stay within the editor’s own access; Inventory levels follow the built-in roles.')

@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "product_key": "git",
+  "version": null,
+  "items": [
+    {
+      "asset_key": "server:1f31fc20-d963-591e-bbaf-c4c97045ddaa",
+      "asset_id": "1f31fc20-d963-591e-bbaf-c4c97045ddaa",
+      "asset_name": "srv-ub-02",
+      "package_name": "git",
+      "version": "1:2.34.1-1ubuntu1.11",
+      "architecture": null,
+      "source": "dpkg",
+      "install_date": "2025-04-19T12:00:00Z",
+      "first_seen_at": "2026-07-23T12:00:00Z",
+      "updated_at": "2026-10-07T15:49:00Z"
+    },
+    {
+      "asset_key": "server:21425323-806a-5f88-ae32-6694c3c52a0c",
+      "asset_id": "21425323-806a-5f88-ae32-6694c3c52a0c",
+      "asset_name": "srv-w16-02",
+      "package_name": "Git",
+      "version": "2.46.2",
+      "architecture": "x64",
+      "source": "hklm",
+      "install_date": "2025-08-21T12:00:00Z",
+      "first_seen_at": "2026-07-31T12:00:00Z",
+      "updated_at": "2026-10-08T09:51:00Z"
+    },
+    {
+      "asset_key": "server:faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+      "asset_id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+      "asset_name": "srv-w19-03",
+      "package_name": "Git",
+      "version": "2.46.2",
+      "architecture": "x64",
+      "source": "hklm",
+      "install_date": "2026-01-11T12:00:00Z",
+      "first_seen_at": "2026-08-13T12:00:00Z",
+      "updated_at": "2026-10-08T10:40:00Z"
+    },
+    {
+      "asset_key": "server:9de74a06-b712-5604-8b0a-b6a58c0ec6b6",
+      "asset_id": "9de74a06-b712-5604-8b0a-b6a58c0ec6b6",
+      "asset_name": "srv-w22-04",
+      "package_name": "Git",
+      "version": "2.46.2",
+      "architecture": "x64",
+      "source": "hklm",
+      "install_date": "2026-07-17T12:00:00Z",
+      "first_seen_at": "2026-08-30T12:00:00Z",
+      "updated_at": "2026-10-07T23:21:00Z"
+    }
+  ],
+  "total": 4,
+  "page": 1,
+  "page_size": 50,
+  "sort": "asset_name",
+  "order": "asc"
+}

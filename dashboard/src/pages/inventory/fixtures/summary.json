@@ -1,0 +1,311 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "scope": {
+    "restricted": false,
+    "tags": []
+  },
+  "assets": {
+    "total": 145,
+    "server": 60,
+    "device": 85,
+    "linked_devices": 5
+  },
+  "coverage": {
+    "fresh": 105,
+    "aging": 12,
+    "stale": 8,
+    "never": 12,
+    "not_applicable": 8,
+    "fresh_pct": 76.6,
+    "fresh_hours": {
+      "server": 24,
+      "device": 2
+    },
+    "stale_days": 7
+  },
+  "os": {
+    "families": 12,
+    "releases": 33,
+    "unknown": 17,
+    "top": [
+      {
+        "family": "windows",
+        "product": "Windows Server",
+        "release": "2022",
+        "count": 18
+      },
+      {
+        "family": "windows",
+        "product": "Windows Server",
+        "release": "2019",
+        "count": 14
+      },
+      {
+        "family": "windows",
+        "product": "Windows Server",
+        "release": "2016",
+        "count": 9
+      },
+      {
+        "family": "ios-xe",
+        "product": "IOS XE",
+        "release": "17.9",
+        "count": 8
+      },
+      {
+        "family": "fortios",
+        "product": "FortiOS",
+        "release": "7.2",
+        "count": 7
+      },
+      {
+        "family": "ios",
+        "product": "IOS",
+        "release": "15.2",
+        "count": 6
+      },
+      {
+        "family": "aos-cx",
+        "product": "AOS-CX",
+        "release": "10.13",
+        "count": 5
+      },
+      {
+        "family": "panos",
+        "product": "PAN-OS",
+        "release": "10.2",
+        "count": 5
+      },
+      {
+        "family": "fortios",
+        "product": "FortiOS",
+        "release": "7.4",
+        "count": 4
+      },
+      {
+        "family": "junos",
+        "product": "Junos OS",
+        "release": "21.4",
+        "count": 4
+      }
+    ]
+  },
+  "software": {
+    "products": 24,
+    "installs": 337,
+    "publishers": 21,
+    "hidden_categories": [
+      "update",
+      "driver",
+      "os-component",
+      "runtime"
+    ],
+    "top": [
+      {
+        "product_key": "google-chrome",
+        "name": "Google Chrome",
+        "category": "browser",
+        "hosts": 41,
+        "versions": 3
+      },
+      {
+        "product_key": "microsoft-edge",
+        "name": "Microsoft Edge",
+        "category": "browser",
+        "hosts": 41,
+        "versions": 2
+      },
+      {
+        "product_key": "7-zip",
+        "name": "7-Zip",
+        "category": "productivity",
+        "hosts": 34,
+        "versions": 4
+      },
+      {
+        "product_key": "crowdstrike-falcon-sensor",
+        "name": "CrowdStrike Falcon Sensor",
+        "category": "endpoint-protection",
+        "hosts": 28,
+        "versions": 3
+      },
+      {
+        "product_key": "putty",
+        "name": "PuTTY",
+        "category": "remote-access",
+        "hosts": 21,
+        "versions": 3
+      },
+      {
+        "product_key": "git",
+        "name": "Git",
+        "category": "development",
+        "hosts": 19,
+        "versions": 5
+      },
+      {
+        "product_key": "notepad-plus-plus",
+        "name": "Notepad++",
+        "category": "development",
+        "hosts": 18,
+        "versions": 3
+      },
+      {
+        "product_key": "adobe-acrobat-reader",
+        "name": "Adobe Acrobat Reader",
+        "category": "productivity",
+        "hosts": 17,
+        "versions": 2
+      }
+    ],
+    "sprawl": [
+      {
+        "product_key": "git",
+        "name": "Git",
+        "category": "development",
+        "hosts": 19,
+        "versions": 5
+      },
+      {
+        "product_key": "7-zip",
+        "name": "7-Zip",
+        "category": "productivity",
+        "hosts": 34,
+        "versions": 4
+      },
+      {
+        "product_key": "google-chrome",
+        "name": "Google Chrome",
+        "category": "browser",
+        "hosts": 41,
+        "versions": 3
+      },
+      {
+        "product_key": "crowdstrike-falcon-sensor",
+        "name": "CrowdStrike Falcon Sensor",
+        "category": "endpoint-protection",
+        "hosts": 28,
+        "versions": 3
+      },
+      {
+        "product_key": "putty",
+        "name": "PuTTY",
+        "category": "remote-access",
+        "hosts": 21,
+        "versions": 3
+      },
+      {
+        "product_key": "notepad-plus-plus",
+        "name": "Notepad++",
+        "category": "development",
+        "hosts": 18,
+        "versions": 3
+      },
+      {
+        "product_key": "mozilla-firefox-esr",
+        "name": "Mozilla Firefox ESR",
+        "category": "browser",
+        "hosts": 16,
+        "versions": 3
+      },
+      {
+        "product_key": "visual-studio-code",
+        "name": "Visual Studio Code",
+        "category": "development",
+        "hosts": 11,
+        "versions": 3
+      }
+    ],
+    "sprawl_basis": {
+      "scope": "all_products",
+      "candidates": 24,
+      "products": 24
+    },
+    "security_agent_coverage": {
+      "covered": 36,
+      "missing": 13,
+      "unknown": 11,
+      "total": 60
+    }
+  },
+  "hardware": {
+    "devices": 85,
+    "vendors": 7,
+    "models": 19,
+    "top_models": [
+      {
+        "vendor": "Cisco",
+        "model": "C9200L-24P-4G",
+        "count": 6
+      },
+      {
+        "vendor": "Cisco",
+        "model": "WS-C2960X-48TS-L",
+        "count": 6
+      },
+      {
+        "vendor": "Cisco",
+        "model": "C9300-24T",
+        "count": 5
+      },
+      {
+        "vendor": "HPE Aruba Networking",
+        "model": "6300M",
+        "count": 5
+      },
+      {
+        "vendor": "Cisco",
+        "model": "C9300-48P",
+        "count": 4
+      },
+      {
+        "vendor": "Cisco",
+        "model": "N9K-C93180YC-FX",
+        "count": 4
+      },
+      {
+        "vendor": "F5",
+        "model": "BIG-IP i2800",
+        "count": 4
+      },
+      {
+        "vendor": "Fortinet",
+        "model": "FortiGate-100F",
+        "count": 4
+      }
+    ]
+  },
+  "changes_7d": {
+    "since": "2026-10-01T12:00:00Z",
+    "total": 56,
+    "software": {
+      "added": 12,
+      "removed": 12,
+      "changed": 15,
+      "upgraded": 12,
+      "downgraded": 1
+    },
+    "os": 4,
+    "firmware": 11,
+    "hardware": 2
+  },
+  "health": {
+    "missing_os_version": 14,
+    "missing_model": 13,
+    "missing_serial": 15,
+    "unknown_vendor": 5,
+    "stale": 8,
+    "never": 12,
+    "software_truncated": 2,
+    "missing_security_agent": 13,
+    "not_collected_by_design": {
+      "count": 8
+    }
+  },
+  "data_status": {
+    "normalising": false,
+    "pending_software_rows": 0,
+    "pending_identity_rows": 0
+  },
+  "lifecycle": null
+}

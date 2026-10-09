@@ -10,6 +10,7 @@ import {
   Building2,
   CalendarClock,
   ClipboardCheck,
+  Cpu,
   CreditCard,
   Download,
   FileBarChart,
@@ -20,6 +21,7 @@ import {
   Globe2,
   HardDrive,
   HeartPulse,
+  History,
   Inbox,
   Key,
   KeyRound,
@@ -31,8 +33,11 @@ import {
   ListChecks,
   MapPinned,
   Mail,
+  MonitorCog,
   MousePointerClick,
   Network,
+  Package,
+  PackageSearch,
   Palette,
   Plug,
   Radar,
@@ -222,11 +227,32 @@ export const NAV_GROUPS: NavGroup[] = [
     icon: Server,
     items: [
       { to: '/servers', label: 'Server Overview', icon: Gauge, end: true, hint: 'Fleet CPU, memory and disk', permission: 'servers.view' },
-      // `/servers/:id` detail pages have no row of their own — Inventory owns them.
-      { to: '/servers/inventory', label: 'Inventory', icon: Server, hint: 'Every monitored host', extra: ['/servers/'], permission: 'servers.view' },
+      // `/servers/:id` detail pages have no row of their own — All Servers owns them. ("Inventory"
+      // now means the Inventory & Compliance module below, so this row is not called that.)
+      { to: '/servers/inventory', label: 'All Servers', icon: Server, hint: 'Every monitored host', extra: ['/servers/'], permission: 'servers.view' },
       { to: '/server-agents', label: 'Agent Fleet', icon: Bot, hint: 'Installed agents and versions', permission: 'servers.view' },
       { to: '/agent-policies', label: 'Agent Policies', icon: SlidersHorizontal, hint: 'What each agent collects', permission: 'servers.view' },
       { to: '/server-baselines', label: 'Baselines', icon: ClipboardCheck, hint: 'Config drift and compliance', permission: 'servers.view' },
+    ],
+  },
+  {
+    // One module for what the estate is made of: operating systems, software and hardware across
+    // servers and network devices (Documentation/Inventory/03-UI-UX-SPEC.md section 1.1). Rows ship
+    // with their phase; Lifecycle (P4) and Compliance (P5) join this group when their pages exist.
+    id: 'inventory',
+    label: 'Inventory & Compliance',
+    short: 'Inventory',
+    icon: PackageSearch,
+    items: [
+      { to: '/inventory', label: 'Overview', icon: Gauge, end: true, hint: 'Every OS, software title and hardware model at a glance', permission: 'inventory.view' },
+      { to: '/inventory/assets', label: 'Assets', icon: Boxes, hint: 'Servers and network devices in one list', permission: 'inventory.view' },
+      { to: '/inventory/os', label: 'Operating Systems', icon: MonitorCog, hint: 'OS and firmware releases, versions and builds', permission: 'inventory.view' },
+      { to: '/inventory/software', label: 'Software', icon: Package, extra: ['/inventory/software/'], hint: 'Installed software catalog and versions', permission: 'inventory.view' },
+      { to: '/inventory/hardware', label: 'Hardware', icon: Cpu, hint: 'Vendors, models, modules and server hardware', permission: 'inventory.view' },
+      { to: '/inventory/changes', label: 'Changes', icon: History, hint: 'Installs, removals, upgrades and firmware changes', permission: 'inventory.view' },
+      // inventory.view opens the page; without inventory.manage it is read-only (a note names the permission). A role
+      // that holds manage WITHOUT view sees nothing: the API refuses the settings read without view (review finding RG-06).
+      { to: '/inventory/settings', label: 'Inventory Settings', icon: SlidersHorizontal, hint: 'Freshness targets and change retention', permission: 'inventory.view' },
     ],
   },
   {
@@ -341,10 +367,15 @@ function isNetflowOverviewPath(pathname: string): boolean {
   return !NETFLOW_OWN_PAGES.includes(pathname.slice('/netflow/'.length).split('/')[0])
 }
 
-export function isNodeActive(node: NavNode, pathname: string, params: URLSearchParams): boolean {
+export function isNodeActive(node: NavNode, rawPathname: string, params: URLSearchParams): boolean {
+  // The router matches paths case-insensitively (/Inventory/Settings is the Settings page), so the gate and the
+  // sidebar must too, or a differently spelled address would skip the gate (review finding FE-10).
+  // The router also ignores a trailing slash (/reports/ is the Reports page): an `end` node compared the raw text, so
+  // that address matched no entry and the gate let the page render (review finding NF-FE-4).
+  const pathname = (rawPathname.length > 1 ? rawPathname.replace(/\/+$/, '') : rawPathname).toLowerCase() || '/'
   if (node.match) return node.match({ pathname, params })
-  if (node.extra?.some((p) => pathname.startsWith(p))) return true
-  const path = node.to.split('?')[0]
+  if (node.extra?.some((p) => pathname.startsWith(p.toLowerCase()))) return true
+  const path = node.to.split('?')[0].toLowerCase()
   if (node.end) return pathname === path
   return pathname === path || pathname.startsWith(`${path}/`)
 }

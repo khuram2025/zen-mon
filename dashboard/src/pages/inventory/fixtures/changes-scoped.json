@@ -1,0 +1,303 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "window": {
+    "since": "2026-10-01T12:00:00Z",
+    "until": null,
+    "tz": "UTC",
+    "tz_fallback": false
+  },
+  "items": [
+    {
+      "id": 55,
+      "observed_at": "2026-10-08T03:27:00Z",
+      "asset_key": "device:9e59b873-2f7f-5bfd-80ad-5432a66c8bf9",
+      "asset_kind": "device",
+      "asset_id": "9e59b873-2f7f-5bfd-80ad-5432a66c8bf9",
+      "asset_name": "pa-02",
+      "asset_present": true,
+      "server_id": null,
+      "category": "firmware",
+      "action": "changed",
+      "subject": "PAN-OS",
+      "subject_key": null,
+      "old_value": "10.2.3-h4",
+      "new_value": "10.2.7-h3",
+      "label": null,
+      "pair": null,
+      "marker": false,
+      "snapshot_truncated": false,
+      "detail": {
+        "os_family": "panos",
+        "os_source": "template",
+        "os_release": "10.2"
+      }
+    },
+    {
+      "id": 54,
+      "observed_at": "2026-10-08T02:30:00Z",
+      "asset_key": "server:9de74a06-b712-5604-8b0a-b6a58c0ec6b6",
+      "asset_kind": "server",
+      "asset_id": "9de74a06-b712-5604-8b0a-b6a58c0ec6b6",
+      "asset_name": "srv-w22-04",
+      "asset_present": true,
+      "server_id": null,
+      "category": "software",
+      "action": "added",
+      "subject": "Wireshark 4.4.0 x64",
+      "subject_key": "wireshark",
+      "old_value": null,
+      "new_value": "4.4.0",
+      "label": null,
+      "pair": null,
+      "marker": false,
+      "snapshot_truncated": false,
+      "detail": {
+        "source": "hklm",
+        "vendor": "The Wireshark developer community",
+        "architecture": "x64"
+      }
+    },
+    {
+      "id": 49,
+      "observed_at": "2026-10-07T21:50:00Z",
+      "asset_key": "device:a8d490b8-97c2-5a52-bc70-e1181b21f217",
+      "asset_kind": "device",
+      "asset_id": "a8d490b8-97c2-5a52-bc70-e1181b21f217",
+      "asset_name": "twin-srv-w19-03",
+      "asset_present": true,
+      "server_id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+      "category": "firmware",
+      "action": "changed",
+      "subject": "os_version",
+      "subject_key": null,
+      "old_value": "1.0.0",
+      "new_value": "1.1.0",
+      "label": null,
+      "pair": null,
+      "marker": false,
+      "snapshot_truncated": false,
+      "detail": {
+        "os_source": "profile"
+      }
+    },
+    {
+      "id": 42,
+      "observed_at": "2026-10-07T11:50:57Z",
+      "asset_key": "server:9de74a06-b712-5604-8b0a-b6a58c0ec6b6",
+      "asset_kind": "server",
+      "asset_id": "9de74a06-b712-5604-8b0a-b6a58c0ec6b6",
+      "asset_name": "srv-w22-04",
+      "asset_present": true,
+      "server_id": null,
+      "category": "software",
+      "action": "changed",
+      "subject": "Google Chrome",
+      "subject_key": "google-chrome",
+      "old_value": "151.0.7922.110",
+      "new_value": "152.0.8001.12",
+      "label": "upgrade",
+      "pair": null,
+      "marker": false,
+      "snapshot_truncated": false,
+      "detail": {
+        "source": "hklm",
+        "vendor": "Google LLC",
+        "architecture": "x64"
+      }
+    },
+    {
+      "id": 26,
+      "observed_at": "2026-10-06T15:45:00Z",
+      "asset_key": "device:91ac6381-9468-5381-aa22-d4b9bfeac043",
+      "asset_kind": "device",
+      "asset_id": "91ac6381-9468-5381-aa22-d4b9bfeac043",
+      "asset_name": "sw-cx-02",
+      "asset_present": true,
+      "server_id": null,
+      "category": "firmware",
+      "action": "changed",
+      "subject": "AOS-CX",
+      "subject_key": null,
+      "old_value": "10.12.1010",
+      "new_value": "10.13.1000",
+      "label": null,
+      "pair": null,
+      "marker": false,
+      "snapshot_truncated": false,
+      "detail": {
+        "os_family": "aos-cx",
+        "os_source": "profile",
+        "os_release": "10.13"
+      }
+    },
+    {
+      "id": 24,
+      "observed_at": "2026-10-06T13:38:48Z",
+      "asset_key": "server:faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+      "asset_kind": "server",
+      "asset_id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+      "asset_name": "srv-w19-03",
+      "asset_present": true,
+      "server_id": null,
+      "category": "software",
+      "action": "removed",
+      "subject": "Java 8 Update 391",
+      "subject_key": "java-se-runtime",
+      "old_value": "8.0.3910.11",
+      "new_value": null,
+      "label": null,
+      "pair": {
+        "event_id": 23,
+        "label": "upgrade"
+      },
+      "marker": false,
+      "snapshot_truncated": false,
+      "detail": {
+        "source": "hklm",
+        "vendor": "Oracle Corporation",
+        "architecture": "x64"
+      }
+    },
+    {
+      "id": 23,
+      "observed_at": "2026-10-06T13:38:48Z",
+      "asset_key": "server:faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+      "asset_kind": "server",
+      "asset_id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+      "asset_name": "srv-w19-03",
+      "asset_present": true,
+      "server_id": null,
+      "category": "software",
+      "action": "added",
+      "subject": "Java 8 Update 401",
+      "subject_key": "java-se-runtime",
+      "old_value": null,
+      "new_value": "8.0.4010.10",
+      "label": null,
+      "pair": {
+        "event_id": 24,
+        "label": "upgrade"
+      },
+      "marker": false,
+      "snapshot_truncated": false,
+      "detail": {
+        "source": "hklm",
+        "vendor": "Oracle Corporation",
+        "architecture": "x64"
+      }
+    },
+    {
+      "id": 12,
+      "observed_at": "2026-10-05T17:32:51Z",
+      "asset_key": "server:5cfa6932-3bb1-5786-9722-ddf3fecd580e",
+      "asset_kind": "server",
+      "asset_id": "5cfa6932-3bb1-5786-9722-ddf3fecd580e",
+      "asset_name": "srv-w22-11",
+      "asset_present": true,
+      "server_id": null,
+      "category": "software",
+      "action": "changed",
+      "subject": "Google Chrome",
+      "subject_key": "google-chrome",
+      "old_value": "151.0.7922.110",
+      "new_value": "152.0.8001.12",
+      "label": "upgrade",
+      "pair": null,
+      "marker": false,
+      "snapshot_truncated": false,
+      "detail": {
+        "source": "hklm",
+        "vendor": "Google LLC",
+        "architecture": "x64"
+      }
+    }
+  ],
+  "total": 8,
+  "page": 1,
+  "page_size": 50,
+  "stats": {
+    "total": 8,
+    "software": {
+      "added": 2,
+      "removed": 1,
+      "changed": 2,
+      "upgraded": 2,
+      "downgraded": 0,
+      "paired": {
+        "upgraded": 1,
+        "downgraded": 0
+      }
+    },
+    "os": 0,
+    "firmware": 3,
+    "hardware": 0
+  },
+  "series": [
+    {
+      "day": "2026-10-01",
+      "software": 0,
+      "os": 0,
+      "firmware": 0,
+      "hardware": 0,
+      "total": 0
+    },
+    {
+      "day": "2026-10-02",
+      "software": 0,
+      "os": 0,
+      "firmware": 0,
+      "hardware": 0,
+      "total": 0
+    },
+    {
+      "day": "2026-10-03",
+      "software": 0,
+      "os": 0,
+      "firmware": 0,
+      "hardware": 0,
+      "total": 0
+    },
+    {
+      "day": "2026-10-04",
+      "software": 0,
+      "os": 0,
+      "firmware": 0,
+      "hardware": 0,
+      "total": 0
+    },
+    {
+      "day": "2026-10-05",
+      "software": 1,
+      "os": 0,
+      "firmware": 0,
+      "hardware": 0,
+      "total": 1
+    },
+    {
+      "day": "2026-10-06",
+      "software": 2,
+      "os": 0,
+      "firmware": 1,
+      "hardware": 0,
+      "total": 3
+    },
+    {
+      "day": "2026-10-07",
+      "software": 1,
+      "os": 0,
+      "firmware": 1,
+      "hardware": 0,
+      "total": 2
+    },
+    {
+      "day": "2026-10-08",
+      "software": 1,
+      "os": 0,
+      "firmware": 1,
+      "hardware": 0,
+      "total": 2
+    }
+  ],
+  "history_start": "2026-08-24T12:00:00Z",
+  "retention_days": 400
+}

@@ -1,5 +1,7 @@
 import { DeviceWidgetGrid, type DeviceWidget } from '@/components/devices/DeviceWidgetGrid'
 import { alignDeviceRange, autoDetectState } from '@/components/devices/templatePresentation'
+import { deviceOsLink } from '@/components/devices/deviceInventory'
+import { inventoryApi } from '@/pages/inventory/api'
 import { deviceAvailabilityBuckets, formatDeviceAvailability, type DeviceAvailabilityPoint } from '@/components/devices/availability'
 import { DeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
 import { MonitoringSites } from '@/components/MonitoringSites'
@@ -1532,7 +1534,7 @@ function HealthGauge({ value, color }: { value: number; color: string }) {
    Device Inventory & Configuration
    ════════════════════════════════════════════════════════════ */
 
-function InventoryConfigCard({
+export function InventoryConfigCard({
   device, entities, snmpHasData, onDetails,
 }: { device: any; entities: any[]; snmpHasData?: boolean; onDetails: () => void }) {
   const { data: templateInsights } = useQuery<Insights>({
@@ -1546,6 +1548,29 @@ function InventoryConfigCard({
   const snmp = !!device.snmp_enabled
   // ENTITY-MIB chassis row — fallback when the device record has no serial/firmware yet.
   const chassis = entities.find((e) => e.class === 'chassis')
+  // Inventory & Compliance: the OS / firmware value links to the network devices on the same release. The
+  // family and release are the normalised ones (inventory_identity), so they come from Inventory's own
+  // asset endpoint; without inventory.view nothing is requested and the value stays text. An answer of
+  // 404 (an SNMP twin of a server, or out of scope) or any failure also leaves plain text.
+  const canInventory = useCan()('inventory.view')
+  const { data: invAsset } = useQuery({
+    queryKey: ['inventory', 'asset', `device:${device.id}`],
+    queryFn: () => inventoryApi.assetDetail(`device:${device.id}`),
+    enabled: canInventory && !!device.id,
+    staleTime: 5 * 60_000,
+    retry: false,
+  })
+  const osLink = canInventory ? deviceOsLink(invAsset?.asset) : null
+  const inventoryValue = (row: 'os' | 'firmware', text: string, reported: boolean): React.ReactNode =>
+    osLink && osLink.row === row && reported ? (
+      <Link
+        to={osLink.href}
+        className="text-primary hover:underline"
+        title={`Open the network devices running ${osLink.release} in Inventory`}
+      >
+        {text}
+      </Link>
+    ) : text
   const auto = autoDetectState(snmpHasData)
   const { data: tagDefs } = useTags()
   const tagColors = useMemo(() => tagColorMap(tagDefs), [tagDefs])
@@ -1553,11 +1578,14 @@ function InventoryConfigCard({
   // header already states all three, and repeating them here was the biggest
   // source of duplicated content on the page. This card covers how the device
   // is *monitored*, which the header does not.
+  const NOT_REPORTED = 'Not reported'
+  const osVersionText: string = device.os_version || templateText(['tmos version', 'os version', 'software version']) || NOT_REPORTED
+  const firmwareText: string = device.firmware_version || chassis?.fw_revision || templateText(['firmware version']) || NOT_REPORTED
   const rows: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode }> = [
     { icon: HardDrive, label: 'Serial number', value: device.serial_number || chassis?.serial_number || templateText(['chassis serial', 'serial number', 'system serial number']) || 'Not reported' },
     ...(!device.model && chassis?.model_name ? [{ icon: Box, label: 'Model', value: chassis.model_name }] : []),
-    { icon: GitBranch, label: 'OS / version', value: device.os_version || templateText(['tmos version', 'os version', 'software version']) || 'Not reported' },
-    { icon: GitBranch, label: 'Firmware', value: device.firmware_version || chassis?.fw_revision || templateText(['firmware version']) || 'Not reported' },
+    { icon: GitBranch, label: 'OS / version', value: inventoryValue('os', osVersionText, osVersionText !== NOT_REPORTED) },
+    { icon: GitBranch, label: 'Firmware', value: inventoryValue('firmware', firmwareText, firmwareText !== NOT_REPORTED) },
     { icon: Shield, label: 'SNMP', value: snmp ? `v${device.snmp_version} · port ${device.snmp_port}` : 'Disabled' },
     {
       icon: Layers, label: 'Monitoring Template',
