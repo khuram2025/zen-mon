@@ -1448,10 +1448,12 @@ const checkDrills = (html, where) => {
     assert(view.includes('data-changes-list'), 'the request carries the Overview\'s since unchanged')
     assert(textOf(view).includes('12 events'))
   }
-  // An old address: the window is no preset (Custom), and says what it is.
+  // An old address: the window is no preset (Custom), and says what it is. The span is relative to the real
+  // clock the page uses (4.5 days: far from every preset), so the case cannot drift into a preset as days pass.
   {
-    const f = { since: '2026-10-03T12:00:00Z' }
-    const view = page(h(m.InventoryChangesPage), seeded(feed, f), '/inventory/changes?since=2026-10-03T12:00:00Z')
+    const since = new Date(Math.floor((Date.now() - 4.5 * 86400000) / 1000) * 1000).toISOString().replace('.000Z', 'Z')
+    const f = { since }
+    const view = page(h(m.InventoryChangesPage), seeded(feed, f), `/inventory/changes?since=${since}`)
     assert(view.includes('data-window-text') && /Custom/.test(view) && decode(view).includes('Window:'), 'a custom window is a marked segment and a removable chip')
   }
   // Bad values are reported and never sent on.
