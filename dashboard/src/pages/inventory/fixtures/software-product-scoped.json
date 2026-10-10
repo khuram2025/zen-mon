@@ -1,0 +1,77 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "scope": {
+    "restricted": true,
+    "tags": [
+      "team-edge"
+    ]
+  },
+  "header": {
+    "product_key": "git",
+    "name": "Git",
+    "publisher": "Git",
+    "publisher_key": "git",
+    "category": "development",
+    "norm_status": "normalized",
+    "rule_id": "git",
+    "hosts": 4,
+    "installs": 4,
+    "version_count": 2,
+    "latest_version": "2.46.2",
+    "first_seen": "2026-07-23T12:00:00Z",
+    "last_change": null,
+    "mixed_schemes": true
+  },
+  "versions": [
+    {
+      "version": "2.46.2",
+      "hosts": 3,
+      "installs": 3,
+      "scheme": "semverish",
+      "rank": 1,
+      "generation": "N"
+    },
+    {
+      "version": "1:2.34.1-1ubuntu1.11",
+      "hosts": 1,
+      "installs": 1,
+      "scheme": "dpkg",
+      "rank": 1,
+      "generation": "N"
+    }
+  ],
+  "unversioned": {
+    "hosts": 0,
+    "installs": 0,
+    "address": "__none__"
+  },
+  "evidence": {
+    "items": [
+      {
+        "package_name": "Git",
+        "vendor": "The Git Development Community",
+        "source": "hklm",
+        "hosts": 3,
+        "installs": 3,
+        "status": "normalized",
+        "rule_id": "git"
+      },
+      {
+        "package_name": "git",
+        "vendor": "Ubuntu Developers",
+        "source": "dpkg",
+        "hosts": 1,
+        "installs": 1,
+        "status": "normalized",
+        "rule_id": "git"
+      }
+    ],
+    "total": 2,
+    "truncated": false
+  },
+  "data_status": {
+    "normalising": false,
+    "pending_software_rows": 0,
+    "pending_identity_rows": 0
+  }
+}

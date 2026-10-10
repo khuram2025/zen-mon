@@ -98,6 +98,22 @@ def test_inventory_builtin_role_grants():
     assert set(LEGACY_ROLE_PERMISSIONS["editor"]) == op
 
 
+def test_team_roles_follow_owner_decision_d9_for_inventory():
+    # D9: the network, systems and security teams get inventory.view (the estate is core to
+    # their work); the application team sees applications, not the estate, so it gets nothing.
+    # No team role ever gets the sensitive export or any write.
+    for name in ("network_team", "systems_team", "security_team"):
+        perms = set(BUILTIN_ROLE_DEFINITIONS[name])
+        assert "inventory.view" in perms, name
+        assert not perms & {"inventory.export", "inventory.manage"}, name
+    assert not any(p.startswith("inventory.") for p in BUILTIN_ROLE_DEFINITIONS["application_team"])
+    # the grant is exactly the single view permission, nothing implied or hidden
+    for name in ("network_team", "systems_team", "security_team"):
+        assert {p for p in BUILTIN_ROLE_DEFINITIONS[name] if p.startswith("inventory.")} == {"inventory.view"}
+        assert {p for p in effective_permissions(BUILTIN_ROLE_DEFINITIONS[name]) if p.startswith("inventory.")} == {
+            "inventory.view"}
+
+
 def test_builtin_roles_hold_everything_their_permissions_imply():
     for name, perms in BUILTIN_ROLE_DEFINITIONS.items():
         held = effective_permissions(perms)
@@ -110,6 +126,13 @@ def test_builtin_definition_version_covers_the_inventory_permissions():
     # the persisted one; v4 (servers.* split, team roles) shipped before any inventory.*
     # permission existed, so the inventory grants need at least v5.
     assert BUILTIN_ROLE_DEFINITION_VERSION >= 5
+
+
+def test_builtin_definition_version_covers_the_team_role_inventory_grants():
+    # v5 introduced inventory.* for operator, viewer and read_only; v6 added inventory.view to
+    # three team roles. Appliances already at v5 only reconcile their team rows if the code
+    # version is strictly newer, so a change to the team grants must come with a bump.
+    assert BUILTIN_ROLE_DEFINITION_VERSION >= 6
 
 
 def test_roles_catalog_endpoint_lists_inventory(client, as_admin):
@@ -204,14 +227,15 @@ async def test_reconcile_gives_builtins_inventory_but_never_custom_roles():
     changed = await reconcile_builtin_roles(db)
 
     added = {c["role"]: c["added"] for c in changed}
-    # The reconcile also re-stamps the team roles (their rows are below the new version) but
-    # they gain nothing: inventory.* is deliberately not part of any team role yet.
+    # Owner decision D9: the network, systems and security teams gain inventory.view (view
+    # only); the application team is re-stamped but gains nothing.
     assert added == {
         "admin": sorted(INVENTORY_PERMS),
         "operator": sorted(INVENTORY_PERMS),
         "viewer": ["inventory.view"],
         "read_only": ["inventory.view"],
-        "network_team": [], "systems_team": [], "application_team": [], "security_team": [],
+        "network_team": ["inventory.view"], "systems_team": ["inventory.view"],
+        "application_team": [], "security_team": ["inventory.view"],
     }
     assert all(c["removed"] == [] for c in changed)
     by_name = {r["name"]: r for r in db.roles}
@@ -219,8 +243,9 @@ async def test_reconcile_gives_builtins_inventory_but_never_custom_roles():
         assert set(by_name[name]["permissions"]) == set(BUILTIN_ROLE_DEFINITIONS[name]), name
         assert by_name[name]["definition_version"] == BUILTIN_ROLE_DEFINITION_VERSION
         assert by_name[name]["revision"] == 8
-    for name in ("network_team", "systems_team", "application_team", "security_team"):
-        assert not set(INVENTORY_PERMS) & set(by_name[name]["permissions"]), name
+    for name in ("network_team", "systems_team", "security_team"):
+        assert {p for p in by_name[name]["permissions"] if p.startswith("inventory.")} == {"inventory.view"}, name
+    assert not [p for p in by_name["application_team"]["permissions"] if p.startswith("inventory.")]
     # custom roles: permissions, version and revision are byte-for-byte what they were
     for name, before in custom_before.items():
         assert by_name[name] == before, name
@@ -228,6 +253,77 @@ async def test_reconcile_gives_builtins_inventory_but_never_custom_roles():
     # one history entry per changed built-in and none for a custom role
     assert sorted(h["id"] for h in db.history) == [r["id"] for r in db.roles if r["is_system"]]
     assert db.commits == 1
+
+
+TEAM_ROLES_WITH_INVENTORY = ("network_team", "systems_team", "security_team")
+
+
+def _roles_at_definition_v5():
+    """Built-in rows as persisted by definition version 5: inventory.* is already granted to
+    admin, operator, viewer and read_only, but no team role holds any inventory permission
+    yet. Custom roles are the same hand-picked ones as at v4."""
+    teams = {"network_team", "systems_team", "application_team", "security_team"}
+    rows = _roles_at_definition_v4()
+    for r in rows:
+        if r["is_system"]:
+            r["definition_version"] = 5
+            r["permissions"] = sorted(
+                p for p in BUILTIN_ROLE_DEFINITIONS[r["name"]]
+                if not (r["name"] in teams and p.startswith("inventory.")))
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_reconcile_from_v5_gives_exactly_three_team_roles_inventory_view():
+    db = _RolesDB(_roles_at_definition_v5())
+    before = {r["name"]: dict(r) for r in db.roles}
+    # sanity: the modelled v5 state has no team role with inventory.* and everyone else has it
+    for name in ("network_team", "systems_team", "application_team", "security_team"):
+        assert not [p for p in before[name]["permissions"] if p.startswith("inventory.")], name
+    assert "inventory.view" in before["viewer"]["permissions"]
+
+    changed = await reconcile_builtin_roles(db)
+
+    added = {c["role"]: c["added"] for c in changed}
+    # Every built-in row is below the new version so every one is re-stamped; only the
+    # three team roles of decision D9 gain a permission, and that permission is the view.
+    assert added == {
+        "admin": [], "operator": [], "viewer": [], "read_only": [],
+        "network_team": ["inventory.view"], "systems_team": ["inventory.view"],
+        "application_team": [], "security_team": ["inventory.view"],
+    }
+    assert all(c["removed"] == [] for c in changed)
+    by_name = {r["name"]: r for r in db.roles}
+    for name in TEAM_ROLES_WITH_INVENTORY:
+        assert set(by_name[name]["permissions"]) == set(before[name]["permissions"]) | {"inventory.view"}, name
+        assert not {"inventory.export", "inventory.manage"} & set(by_name[name]["permissions"]), name
+    # the application team and the four older built-ins keep exactly their permissions
+    for name in ("application_team", "admin", "operator", "viewer", "read_only"):
+        assert set(by_name[name]["permissions"]) == set(before[name]["permissions"]), name
+    for name in BUILTIN_ROLE_DEFINITIONS:
+        assert set(by_name[name]["permissions"]) == set(BUILTIN_ROLE_DEFINITIONS[name]), name
+        assert by_name[name]["definition_version"] == BUILTIN_ROLE_DEFINITION_VERSION
+        assert by_name[name]["revision"] == before[name]["revision"] + 1
+    # custom roles: permissions, version and revision are byte-for-byte what they were
+    for name in ("helpdesk", "net-managers"):
+        assert by_name[name] == before[name], name
+    # one history entry per built-in and none for a custom role
+    assert sorted(h["id"] for h in db.history) == [r["id"] for r in db.roles if r["is_system"]]
+    history = {h["id"]: h for h in db.history}
+    for r in db.roles:
+        if r["name"] in TEAM_ROLES_WITH_INVENTORY:
+            assert json.loads(history[r["id"]]["added"]) == ["inventory.view"], r["name"]
+            assert json.loads(history[r["id"]]["removed"]) == []
+    assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_from_v5_is_a_noop_the_second_time():
+    db = _RolesDB(_roles_at_definition_v5())
+    assert await reconcile_builtin_roles(db)
+    snapshot = json.dumps(db.roles, sort_keys=True)
+    assert await reconcile_builtin_roles(db) == []
+    assert json.dumps(db.roles, sort_keys=True) == snapshot
 
 
 @pytest.mark.asyncio
@@ -274,6 +370,20 @@ def test_team_roles_are_built_in_described_and_reserved():
         assert not perms & {"users.manage", "roles.manage", "settings.manage", SUPERUSER_PERMISSION}, name
         for p in perms:
             assert set(PERMISSION_IMPLIES.get(p, [])) <= perms, (name, p)
+
+
+def test_team_role_descriptions_say_which_teams_read_inventory():
+    """The role cards are what an administrator reads before assigning a role: a team role that grants
+    inventory.view (D9) must say so, and one that does not must not claim it."""
+    for name in ("network_team", "systems_team", "security_team"):
+        assert "inventory.view" in BUILTIN_ROLE_DEFINITIONS[name], name
+        label, description = BUILTIN_ROLE_META[name]
+        assert "read access to Inventory (inventory.view)" in description, name
+        assert description.count("Inventory") == 1, name
+    assert "inventory.view" not in BUILTIN_ROLE_DEFINITIONS["application_team"]
+    assert "Inventory" not in BUILTIN_ROLE_META["application_team"][1]
+    for name in TEAM_ROLES:
+        assert BUILTIN_ROLE_META[name][1].rstrip().endswith("."), name      # one tidy sentence each, no trailing noise
 
 
 def test_application_and_systems_teams_are_separated():

@@ -1,0 +1,308 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "scope": {
+    "restricted": true,
+    "tags": [
+      "team-edge"
+    ]
+  },
+  "assets": {
+    "total": 15,
+    "server": 6,
+    "device": 9,
+    "linked_devices": 1
+  },
+  "coverage": {
+    "fresh": 14,
+    "aging": 0,
+    "stale": 1,
+    "never": 0,
+    "not_applicable": 0,
+    "fresh_pct": 93.3,
+    "fresh_hours": {
+      "server": 24,
+      "device": 2
+    },
+    "stale_days": 7
+  },
+  "os": {
+    "families": 8,
+    "releases": 12,
+    "unknown": 0,
+    "top": [
+      {
+        "family": "fortios",
+        "product": "FortiOS",
+        "release": "7.4",
+        "count": 2
+      },
+      {
+        "family": "ios-xe",
+        "product": "IOS XE",
+        "release": "17.3",
+        "count": 2
+      },
+      {
+        "family": "windows",
+        "product": "Windows Server",
+        "release": "2022",
+        "count": 2
+      },
+      {
+        "family": "aos-cx",
+        "product": "AOS-CX",
+        "release": "10.13",
+        "count": 1
+      },
+      {
+        "family": "ios-xe",
+        "product": "IOS XE",
+        "release": "17.6",
+        "count": 1
+      },
+      {
+        "family": "junos",
+        "product": "Junos OS",
+        "release": "20.4",
+        "count": 1
+      },
+      {
+        "family": "linux",
+        "product": "Ubuntu",
+        "release": "22.04",
+        "count": 1
+      },
+      {
+        "family": "other",
+        "product": null,
+        "release": null,
+        "count": 1
+      },
+      {
+        "family": "panos",
+        "product": "PAN-OS",
+        "release": "10.2",
+        "count": 1
+      },
+      {
+        "family": "windows",
+        "product": "Windows 10",
+        "release": "22H2",
+        "count": 1
+      }
+    ]
+  },
+  "software": {
+    "products": 17,
+    "installs": 37,
+    "publishers": 15,
+    "hidden_categories": [
+      "update",
+      "driver",
+      "os-component",
+      "runtime"
+    ],
+    "top": [
+      {
+        "product_key": "crowdstrike-falcon-sensor",
+        "name": "CrowdStrike Falcon Sensor",
+        "category": "endpoint-protection",
+        "hosts": 5,
+        "versions": 2
+      },
+      {
+        "product_key": "microsoft-edge",
+        "name": "Microsoft Edge",
+        "category": "browser",
+        "hosts": 5,
+        "versions": 2
+      },
+      {
+        "product_key": "git",
+        "name": "Git",
+        "category": "development",
+        "hosts": 4,
+        "versions": 2
+      },
+      {
+        "product_key": "google-chrome",
+        "name": "Google Chrome",
+        "category": "browser",
+        "hosts": 4,
+        "versions": 3
+      },
+      {
+        "product_key": "7-zip",
+        "name": "7-Zip",
+        "category": "productivity",
+        "hosts": 3,
+        "versions": 3
+      },
+      {
+        "product_key": "putty",
+        "name": "PuTTY",
+        "category": "remote-access",
+        "hosts": 3,
+        "versions": 2
+      },
+      {
+        "product_key": "adobe-acrobat-reader",
+        "name": "Adobe Acrobat Reader",
+        "category": "productivity",
+        "hosts": 2,
+        "versions": 2
+      },
+      {
+        "product_key": "wireshark",
+        "name": "Wireshark",
+        "category": "networking",
+        "hosts": 2,
+        "versions": 2
+      }
+    ],
+    "sprawl": [
+      {
+        "product_key": "google-chrome",
+        "name": "Google Chrome",
+        "category": "browser",
+        "hosts": 4,
+        "versions": 3
+      },
+      {
+        "product_key": "7-zip",
+        "name": "7-Zip",
+        "category": "productivity",
+        "hosts": 3,
+        "versions": 3
+      },
+      {
+        "product_key": "crowdstrike-falcon-sensor",
+        "name": "CrowdStrike Falcon Sensor",
+        "category": "endpoint-protection",
+        "hosts": 5,
+        "versions": 2
+      },
+      {
+        "product_key": "microsoft-edge",
+        "name": "Microsoft Edge",
+        "category": "browser",
+        "hosts": 5,
+        "versions": 2
+      },
+      {
+        "product_key": "git",
+        "name": "Git",
+        "category": "development",
+        "hosts": 4,
+        "versions": 2
+      },
+      {
+        "product_key": "putty",
+        "name": "PuTTY",
+        "category": "remote-access",
+        "hosts": 3,
+        "versions": 2
+      },
+      {
+        "product_key": "adobe-acrobat-reader",
+        "name": "Adobe Acrobat Reader",
+        "category": "productivity",
+        "hosts": 2,
+        "versions": 2
+      },
+      {
+        "product_key": "wireshark",
+        "name": "Wireshark",
+        "category": "networking",
+        "hosts": 2,
+        "versions": 2
+      }
+    ],
+    "sprawl_basis": {
+      "scope": "all_products",
+      "candidates": 17,
+      "products": 17
+    },
+    "security_agent_coverage": {
+      "covered": 5,
+      "missing": 1,
+      "unknown": 0,
+      "total": 6
+    }
+  },
+  "hardware": {
+    "devices": 9,
+    "vendors": 6,
+    "models": 7,
+    "top_models": [
+      {
+        "vendor": "Cisco",
+        "model": "C9200L-24P-4G",
+        "count": 2
+      },
+      {
+        "vendor": "Cisco",
+        "model": "C9300-48P",
+        "count": 1
+      },
+      {
+        "vendor": "Fortinet",
+        "model": "FortiGate-600E",
+        "count": 1
+      },
+      {
+        "vendor": "Fortinet",
+        "model": "FortiGate-60F",
+        "count": 1
+      },
+      {
+        "vendor": "HPE Aruba Networking",
+        "model": "6300M",
+        "count": 1
+      },
+      {
+        "vendor": "Juniper Networks",
+        "model": "EX2300-24T",
+        "count": 1
+      },
+      {
+        "vendor": "Palo Alto Networks",
+        "model": "PA-5220",
+        "count": 1
+      }
+    ]
+  },
+  "changes_7d": {
+    "since": "2026-10-01T12:00:00Z",
+    "total": 8,
+    "software": {
+      "added": 2,
+      "removed": 1,
+      "changed": 2,
+      "upgraded": 2,
+      "downgraded": 0
+    },
+    "os": 0,
+    "firmware": 3,
+    "hardware": 0
+  },
+  "health": {
+    "missing_os_version": 0,
+    "missing_model": 1,
+    "missing_serial": 1,
+    "unknown_vendor": 0,
+    "stale": 1,
+    "never": 0,
+    "software_truncated": 0,
+    "missing_security_agent": 1,
+    "not_collected_by_design": {
+      "count": 0
+    }
+  },
+  "data_status": {
+    "normalising": false,
+    "pending_software_rows": 0,
+    "pending_identity_rows": 0
+  },
+  "lifecycle": null
+}

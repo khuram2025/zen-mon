@@ -1,6 +1,6 @@
 # 02 — Architecture, Data Model & API
 
-*Status: Design proposal · 2026-10-07. Names pinned in `00-INDEX.md`. DDL is a design sketch. The shipped migration must also pass `build-release.py lint-migrations`: idempotent (`IF NOT EXISTS`, `ON CONFLICT`), probeable, `BEGIN/COMMIT`, and with GRANTs for tables and sequences.*
+*Status: designed 2026-10-07; sections 3 to 6 (asset model, normalisation, change capture, snapshots) are built (Phase 0), and sections 8, 9, 11 and 13 are built for Phase 1 and **superseded in detail by `05-P1-API-CONTRACT.md`**. Updated 2026-10-09 after the Phase 1 review fix round and its re-check (migrations 158 and 159 added to 157; endpoint protection, the `not_applicable` freshness value, `data_status`, equivalence-key versions and the capture start are described where they apply). Names pinned in `00-INDEX.md`. DDL is a design sketch. The shipped migration must also pass `build-release.py lint-migrations`: idempotent (`IF NOT EXISTS`, `ON CONFLICT`), probeable, `BEGIN/COMMIT`, and with GRANTs for tables and sequences.*
 
 ---
 
@@ -8,7 +8,7 @@
 
 1. **Raw evidence is never overwritten.** Collectors keep writing raw strings exactly as today. Normalised identity lives in its own layer, so a bad rule can be fixed and re-run without loss.
 2. **Capture history at the database, not in each writer.** The Go poller, the agent ingest and the API all write identity. Triggers record changes no matter which writer made them.
-3. **One asset model, many sources.** Servers and network devices are queried through one asset union. UDT endpoints join it in P3. A server linked to its SNMP device row (`servers.device_id`) counts **once**.
+3. **One asset model, many sources.** Servers and network devices are queried through one asset union. UDT endpoints join it in P3. A server linked to its SNMP device row (`servers.device_id`) counts **once**; an unlinked pair counts twice (the link is never guessed from an address; section 3.1).
 4. **Unknown is a value.** Missing OS, model or lifecycle data is shown as *Unknown*, counted, and surfaced as an Inventory-health worklist. It is never dropped or treated as compliant.
 5. **Fail closed on scope.** Every endpoint applies tag scope. Aggregates for scoped users are computed over visible assets only. Fleet-wide trend data is hidden from scoped users rather than leaked.
 6. **Inventory first, compliance consumes.** Lifecycle, policies and CVE matching read `inventory_identity` and the software keys. None of them builds its own identity layer.
@@ -53,9 +53,11 @@ This is a CTE built in Python, not a database view, so it can change without a m
 | `sources` | `collection_mode` (+ `'snmp'` when a linked device exists) | `'snmp'` / `managed_source` |
 | `last_seen` | `servers.last_seen` | `devices.last_seen` |
 | `inventory_at` | `servers.inventory_updated_at` | `devices.identity_updated_at` |
-| `freshness` | computed: `fresh` / `aging` / `stale` / `never` (thresholds in settings §9) | same |
+| `freshness` | computed: `fresh` / `aging` / `stale` / `never` (thresholds in settings §9), or `not_applicable` for a server with no `inventory_updated_at` whose `collection_mode` is not `agent` (only the agent upload writes it) | computed the same way from `identity_updated_at`, or `not_applicable` when it has none and SNMP is off, or it is managed through a controller (`managed_by_device_id`, `poll_mode = 'via_controller'`) |
 
-Dedupe rule: `devices d WHERE NOT EXISTS (SELECT 1 FROM servers s WHERE s.device_id = d.id)`. A linked device's SNMP data enriches the server row, for example its serial when the agent has none.
+Dedupe rule: `devices d WHERE NOT EXISTS (SELECT 1 FROM servers s WHERE s.device_id = d.id)`. A linked device's SNMP data enriches the server row, for example its serial when the agent has none. **Only the link folds a device into a server.** `servers.device_id` is set by a discovery import that holds both rows or through the API (`POST /servers`, `PATCH /servers/{id}`); agent enrolment never sets it and the Servers page has no control for it. A machine that was added as an agent server and separately as a device with the same address is therefore two assets (one of each kind). Automatic pairing by address is not implemented: a wrong guess would hide a real asset.
+
+A freshness of `not_applicable` means the asset cannot send an inventory by design. It stays in the list and in the counts and is drillable (`freshness=not_applicable`), but it is not `never`, it is not in `stale_or_never`, it is out of the fresh percentage (`coverage.fresh_pct` = fresh / (assets − not_applicable)), the four identity health predicates skip it, and it does not prevent the all-clear. `summary.health.not_collected_by_design` counts it.
 
 ### 3.2 `inventory_identity`: one normalised identity row per asset (P0)
 
@@ -98,14 +100,14 @@ CREATE INDEX IF NOT EXISTS idx_inv_identity_dirty  ON inventory_identity (asset_
 
 **Two revision columns, two jobs.** `norm_rev` is the dirty flag: dirty-marking sets it to NULL, and a normalised write sets it to the current revision. `values_rev` records the rule-pack revision under which the stored *values* were computed; every writer of normalised values sets it to `RULEPACK_REV` in the same statement as `norm_rev`, and dirty-marking never touches it. The identity capture trigger fires only when `OLD.values_rev IS NOT DISTINCT FROM NEW.values_rev`, so **a rule-pack revision change can never write history**, whichever writer made it and whether or not the row was dirty. The price: a genuine change that lands in the very write that moves the revision is absorbed. A false event is worse than a missing one.
 
-**`inventory_normalize_loop`** runs every 2 min (45 s start delay) with advisory lock 1515074397, in separate short transactions for identity, software-key backfill and orphan cleanup:
+**`inventory_normalize_loop`** runs 2 min after each run ends (45 s start delay) with advisory lock 1515074397, in separate short transactions for identity, software-key backfill and orphan cleanup, at most 40 identity batches (20,000 rows) and 50 software batches (100,000 rows) per run, so a first-run backlog of N software rows takes about 45 s + (⌈N / 100,000⌉ − 1) × (120 s + the run's own time, about 6 s per 100,000 rows) per loop; `06-RELEASE-NOTES-DRAFT.md` section 5 tabulates it:
 
 1. Reads raw inputs **without locks** and normalises the batch off the event loop (`asyncio.to_thread`).
 2. Locks only inside the write step: `SELECT … FOR UPDATE SKIP LOCKED` over the rows whose `source_changed_at` still equals the value read, then writes just those rows. A row an upload or the poller holds is skipped and stays dirty; nothing waits on it, and each transaction sets `lock_timeout = 3 s`. A timeout reports `contended`. A deadlock is deliberately not swallowed.
 3. Order inside a tick: missing identity rows are created; **dirty** rows are written with capture enabled; **stale-revision** rows are written under the suppression setting (belt and braces beside `values_rev`).
 4. Normalisers are called with `strict=True`, so an internal exception reaches the per-row failure handling (row stays dirty, hour-long back-off, one logged line with `%r` of the asset id) instead of being stamped clean with generic output. If `packs_healthy()` is False nothing is stamped at all.
 5. `lifecycle_slug` is never written by the loop (the lifecycle phase owns it), and a known OS block is never replaced by an empty one: a source going missing is a gap.
-6. Software keys are backfilled in 2,000-row keyset batches. The NULL-keyed scan uses the partial index `idx_ssi_unkeyed`; the `norm_rev < RULEPACK_REV` scan runs once per process start (a revision bump ships with a restart). The backfill never writes `version` or `updated_at` (the ingest prune depends on it). A row with no `source` on a non-Windows server is left unkeyed for its next upload.
+6. Software keys are backfilled in 2,000-row keyset batches. The NULL-keyed scan uses the partial index `idx_ssi_unkeyed`; the `norm_rev < RULEPACK_REV` scan runs once per process start (a revision bump ships with a restart). The backfill never writes `version` or `updated_at` (the ingest prune depends on it). A row with no `source` on a non-Windows server is left unkeyed for its next upload. One predicate (`inventory_service.software_eligible_sql`) decides which rows the loop selects, and the backlog count of `data_status`, the endpoint-protection joins, the flyout and the snapshot use the same predicate: a row the loop never selects is not backlog, so it never keeps the *normalising* message on screen, and a server that holds only such rows stays `unknown` for endpoint protection with the reason `no_software_list`.
 
 Agent ingest also normalises its server inline, so a server's dashboard updates within seconds.
 
@@ -124,9 +126,9 @@ The chosen source is recorded in `os_source` and shown in the UI ("from FortiGat
 ```sql
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS sys_descr text;                    -- poller persists (Go change)
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS identity_updated_at timestamptz;   -- stamped on each successful system-info poll
-ALTER TABLE servers ADD COLUMN IF NOT EXISTS inventory_updated_at timestamptz;  -- last accepted software/OS section
+ALTER TABLE servers ADD COLUMN IF NOT EXISTS inventory_updated_at timestamptz;  -- last accepted software/OS section; 158 seeds it for baselined servers from max(server_software_inventory.updated_at)
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS inventory_baselined_at timestamptz;-- first full software snapshot accepted
-ALTER TABLE servers ADD COLUMN IF NOT EXISTS hw_manufacturer varchar(128);      -- filled by agent from P3
+ALTER TABLE servers ADD COLUMN IF NOT EXISTS hw_manufacturer varchar(128);      -- empty in this release; the agent report is planned (P3)
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS hw_model varchar(255);
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS hw_serial varchar(128);
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS bios_version varchar(128);
@@ -135,9 +137,9 @@ ALTER TABLE servers ADD COLUMN IF NOT EXISTS virtualization varchar(32);        
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS software_truncated boolean NOT NULL DEFAULT false; -- agent list hit its 1,000-entry cap on the last upload
 
 ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS architecture varchar(16);   -- x64 / x86 / user
-ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS source varchar(32);         -- hklm / hklm_wow6432 / hkcu / dpkg / rpm
+ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS source varchar(32);         -- hklm / hklm_wow6432 / hkcu in this release (dpkg / rpm: planned, P3)
 ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS install_location text;
-ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS first_seen_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS first_seen_at timestamptz NOT NULL DEFAULT now(); -- 157 stamped existing rows with the migration time; 158 repairs them from install_date
 ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS name_key varchar(160);      -- normalised product key
 ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS publisher_key varchar(96);
 ALTER TABLE server_software_inventory ADD COLUMN IF NOT EXISTS category varchar(32);       -- browser, security, runtime, os-component …
@@ -151,6 +153,8 @@ UPDATE servers s SET inventory_baselined_at = now()
    AND EXISTS (SELECT 1 FROM server_software_inventory i WHERE i.server_id = s.id);
 ```
 
+**Migration 158** (`migrate-158-inventory-phase1-followups.sql`, Phase 1 fix round) changes no table shape and is idempotent. It (1) writes `system_settings['inventory.capture_started_at']` (a UTC ISO-8601 JSON string with microseconds and a `Z`) from `schema_migrations.applied_at` of 157, or the time of 158 when 157 has no ledger row; the Changes endpoint returns it as `history_start`; (2) sets `servers.inventory_updated_at` to the newest `updated_at` of the server's software rows for every server that is baselined and has none (every upload rewrites `updated_at` of every row it lists, so that is the last time a list was received); (3) sets `first_seen_at = install_date` for rows whose `first_seen_at` is at or before the capture start and whose install date is plausible (after 1995, before the stamp), one `UPDATE` under the suppression setting; and (4) creates the partial indexes `idx_ssi_endpoint_protection` (`category = 'endpoint-protection'`), `idx_ssvc_endpoint_protection` (`service_name IN ('WinDefend', 'Sense')`) and `idx_servers_device_id`. **Migration 159** widens `audit_logs.actor_role` to `VARCHAR(50)`.
+
 **Ingest changes** in `host_metric_service._upsert_inventory`:
 
 - Keep `architecture`, `source` and `install_location`. Every agent string that reaches PostgreSQL in this path (software fields, the OS section, the CPU model) goes through one sanitiser: NUL bytes dropped, lone surrogates replaced.
@@ -160,7 +164,7 @@ UPDATE servers s SET inventory_baselined_at = now()
 - **Server-side cap:** `SOFTWARE_LIST_SERVER_CAP = 5000` entries; the excess is dropped and the snapshot counts as truncated.
 - **Truncation guard:** a list of ≥ 1,000 entries (`SOFTWARE_LIST_AGENT_CAP`, the agent's cap) is upserted, `servers.software_truncated` is stamped **before** the writes (so the capture triggers tag the events) and the final value after. The blanket prune is skipped; only rows that sort at or before the last listed name (compared in Go-compatible lower-cased code-point order, only when the list is verifiably in the agent's order) and are absent are pruned, and a `removed` event is written for them.
 - **Ordering guard:** `servers.inventory_collected_at` holds the agent-side timestamp of the newest accepted snapshot. A snapshot older than it is ignored for the software, OS and identity sections (other sections still apply), so a deferred or replayed older batch cannot rewind state or write events in both directions. A stored value more than a day in the future, or older than 24 hours (agent clocks are not monotonic and the agent spools a batch for at most 24 hours), never blocks a snapshot. The timestamp is the batch's `collected_at` for `batch.inventory` and the sample's own timestamp for `inventory` samples, neither clock-skew-corrected.
-- **Event budget:** at `SOFTWARE_EVENT_BUDGET_24H = 2000` software events for a server in the last 24 hours, the software section is captured silently and at most one marker event per server per day is written.
+- **Event budget:** the count of a server's software events in the last 24 hours is read **once per upload**; at `SOFTWARE_EVENT_BUDGET_24H = 2000` or more the software section of that upload is captured silently and at most one marker event per server per day is written. An upload that starts below the budget is recorded whole, so the budget is "about 2,000": a server at 1,999 that uploads 1,000 changes ends at about 2,999.
 - **Failure isolation:** every piece of inventory work inside ingest (planning, stamps, inline identity, the guards above) runs in a savepoint or a guarded call. An exception is logged and leaves the row unkeyed or dirty for `inventory_normalize_loop` to repair. It must never fail or roll back an agent upload, and the existing error behaviour of the other sections is unchanged.
 - Stamp `inventory_updated_at` after a non-empty software list or an OS section; stamp `inventory_baselined_at` after the first accepted non-empty software snapshot, **after** the row writes, so the first snapshot of a server is silent and every later one diffs.
 - Inline identity: after the OS update, `normalize_server` runs on the server's raw columns and the result is written to `inventory_identity` with `norm_rev` and `values_rev` set, unless the stored row already equals it.
@@ -177,8 +181,10 @@ Pure functions with no I/O, driven by versioned JSON rule packs under `server/ap
 | `Microsoft Windows Server 2022 Standard Evaluation \| 21H2 \| 10.0.20348.587 Build 20348.587` | windows | Windows Server | 2022 | Standard Evaluation | 10.0.20348.587 / 20348.587 |
 | `Microsoft Windows Server 2019 Datacenter \| 1809 \| 10.0.17763.6532` | windows | Windows Server | 2019 | Datacenter | 10.0.17763.6532 |
 | `Microsoft Windows 11 Pro \| 23H2 \| 10.0.22631.4317` | windows | Windows 11 | 23H2 | Pro | 10.0.22631.4317 |
-| `Ubuntu 22.04.4 LTS` (P3 SSH) | linux | Ubuntu | 22.04 | LTS | 22.04.4 |
-| `Red Hat Enterprise Linux 9.4 (Plow)` (P3) | linux | RHEL | 9 | — | 9.4 |
+| `Ubuntu 22.04.4 LTS` (planned, P3 SSH; Linux is not collected in this release) | linux | Ubuntu | 22.04 | LTS | 22.04.4 |
+| `Red Hat Enterprise Linux 9.4 (Plow)` (planned, P3) | linux | RHEL | 9 | — | 9.4 |
+
+Recognised since the review round, with the family, product and release shown: VMware ESXi (family `other`, release major.minor, version full), Hyper-V Server (Windows Server, edition *Hyper-V Server*), Azure Stack HCI (release from the build, for example 23H2), Photon OS, CBL-Mariner, Azure Linux, CloudLinux, Scientific Linux, XenServer, XCP-ng, Pop!_OS, Flatcar, Proxmox VE and TrueNAS (SCALE is Linux, CORE is `bsd`). A fallback name has its version stripped from the product and placed in the version. MikroTik reports a board name in place of a RouterOS version, so its OS version stays empty (RouterOS needs the poller's `mtxrLicVersion` OID, which is not read in this release) and its model is read from sysDescr (up to the first space or caret, so boards that differ after a space can share a model). This holds for a device registered after the upgrade and for one whose row an earlier build of the rule pack had filled with the board name: a write that moves `values_rev` (a rule-pack re-render) replaces the stored OS block, so the first normalise run after the upgrade clears the board name, silently and with no event; the keep-the-stored-OS rule applies only to a write that does not move `values_rev` (a source that went missing is a gap, a re-render is a decision).
 
 The Windows release comes **from the build number**, not the marketing string. The build-to-release table lives in the pack: 17763 → 2019, 20348 → 2022, 26100 → 2025 / 24H2, 19045 → 22H2, 22631 → 23H2, and so on.
 
@@ -207,6 +213,11 @@ Normaliser API: every `normalize_*` stays total by default; with `strict=True` a
 | "Cisco Systems", "Cisco", "ciscoSystems" | Cisco / `cisco` |
 | "Microsoft Corporation", "Microsoft Corp." | Microsoft / `microsoft` |
 | "Google LLC", "Google Inc." | Google / `google` |
+| "HP", "Hewlett-Packard", "Hewlett Packard" on a printer, PC or workstation | HP Inc. / `hp` |
+| "HP", "Hewlett-Packard" on a ProCurve or Aruba-branded switch (sysObjectID subtree `1.3.6.1.4.1.11.2.3.7.11`) | HPE Aruba Networking / `aruba` |
+| "APC", "APC by Schneider Electric", enterprise 318 | Schneider Electric / `schneider` (the vendor key `apc` is gone) |
+
+HP Inc. and Hewlett Packard Enterprise have been separate companies since 2015, so the raw vendor "HP" is decided by the device's kind and sysObjectID rather than by the text alone. The review round also added the vendors `brocade`, `kyocera` and `brother` and the aliases "PaloAlto", "Routerboard" and "CommScope Ruckus", so that one vendor no longer appears under two labels on the Hardware page.
 
 ### 4.4 Software names
 
@@ -226,9 +237,9 @@ The rule pipeline runs in order, stops at the first product match, and records w
    - collapse whitespace and slugify.
    - Result: `name_key = slug(publisher_key + '-' + residual)`, `category = 'other'`, and the row is flagged *unmatched* (P2's "Match not found" queue).
 
-**Category set:** `browser, security, remote-access, database, web-server, runtime, development, productivity, monitoring, backup, virtualization, networking, driver, os-component, update, other`.
+**Category set:** `browser, security, endpoint-protection, remote-access, database, web-server, runtime, development, productivity, monitoring, backup, virtualization, networking, driver, os-component, update, other`.
 
-`security` covers AV, EDR, firewall agents and the ZenPlus agent. It powers the P5 *required agent* policy and the Overview's *security agent coverage* figure.
+`endpoint-protection` holds only antivirus, endpoint-protection-platform and EDR engines and sensors (CrowdStrike Falcon, SentinelOne, Sophos, ESET, Trend Micro, Symantec/Broadcom, McAfee/Trellix, Bitdefender, Kaspersky, Cortex XDR, Carbon Black, Malwarebytes, Cylance, Webroot, Avast/AVG, Defender for Endpoint and similar). It powers the Overview's endpoint-protection coverage, the Assets filter `security_agent` (`present` | `missing` | `unknown`; the pinned parameter name is kept) and the health key `missing_security_agent`, and it will power the P5 *required agent* policy. A server is `present` when one of its software rows has that category or the service `WinDefend` or `Sense` (built-in Microsoft Defender has no Uninstall entry) is running in `server_service_inventory`; it is `unknown` when the question cannot be answered, for one of four reasons, tried in this order: `no_software_list` (not baselined, or it holds unkeyed rows that the loop never selects), `list_truncated` (`software_truncated`), `normalising` (rows the loop will still key) and `no_service_list` (a complete, normalised list without an endpoint-protection title, and **no service rows at all**, so a running built-in Defender could not be seen); otherwise it is `missing`. A server that is `present` wins over every reason: a truncated list that already shows a product counts as covered, because only the verdict *missing* needs a complete list. The live SQL (`_SEC_STATE_SQL`, `_SEC_REASON_SQL`), the Python twin (`iq.security_assessment`), the snapshot CTE and the flyout payload use the same rule. `security` stays the broad bucket for VPN and SSE clients, vulnerability-scanner agents, password managers, Sysmon, Wazuh/HIDS and management agents; the ZenPlus Agent is filed as `monitoring`. `runtime` is hidden by default together with `update`, `driver` and `os-component`.
 
 ### 4.5 Version comparators (`services/versioning.py`)
 
@@ -290,7 +301,7 @@ NULL → value is *discovery*, not change, and is never emitted. Value → NULL 
 - **P3 key-widening migration** and bulk admin operations also run with the setting on.
 - **Truncated snapshots** (a list that reached the agent's 1,000-entry cap) never trigger the blanket prune. Only rows that sort at or before the last listed name, and are absent, are pruned: the agent sorts by lower-cased name and cuts the tail, so those rows are provably uninstalled and the rest are unknown (§3.3).
 - **Stale or reordered snapshots** are ignored (§3.3), so a deferred older snapshot cannot rewind state or write events in both directions.
-- **Event budget**: a server with 2,000 or more software events in the last 24 hours has the software section of further uploads captured silently, with one marker event per day (`(change budget exceeded)`), so one misbehaving agent cannot write unbounded history.
+- **Event budget**: a server with 2,000 or more software events in the last 24 hours at the start of an upload has the software section of that upload captured silently, with one marker event per day (`(change budget exceeded)`), so one misbehaving agent cannot write unbounded history. The check is made once per upload, so one large upload that starts below the budget can exceed it.
 - **Never backfill events from history counts.** This is the project rule (AGENTS.md, UDT section) and applies equally here.
 
 ### 5.4 Retention
@@ -309,9 +320,9 @@ CREATE TABLE IF NOT EXISTS inventory_daily_snapshots (
 );
 ```
 
-`inventory_snapshot_loop` wakes every 5 minutes and runs once per day at or after the configured hour:15 in the **appliance timezone** (the `company` setting's timezone, default UTC: the zone report schedules and alert quiet hours already use) under advisory lock 1515074398. A missed day is caught up on the next wake. `snapshot_day` deletes the day's rows of its six metric families and rewrites them in one transaction, so a re-run never leaves rows that no longer apply, and the previous day's `changes` family is recomputed once the day is over. It writes a few hundred rows a day and keeps 3 years. `trends_enabled` is a display switch only: recording continues, because history cannot be backfilled.
+`inventory_snapshot_loop` wakes every 5 minutes and runs once per day at or after the configured hour:15 in the **appliance timezone** (the `company` setting's timezone, default UTC: the zone report schedules and alert quiet hours already use) under advisory lock 1515074398. A missed day is caught up on the next wake. A due snapshot is **held** until the process has been up for 30 minutes (`SNAPSHOT_SETTLE_S`) and no row waits for the normaliser, so the first point of a series is not the half-finished state of an upgrade; it is written anyway 12 hours after it became due (`SNAPSHOT_HOLD_MAX_S`), so a row that cannot be normalised never stops the history. During the first 24 hours after the capture start the current day's row is refreshed, at most hourly, while the estate settles; a closed day is never rewritten. The `coverage` family has the dimensions `fresh`, `aging`, `stale`, `never` and `not_applicable` (the last is excluded from the other four) and the `health` family counts the same predicates as the live panel (model, serial and vendor for network devices only, `missing_security_agent` for servers). `snapshot_day` deletes the day's rows of its six metric families and rewrites them in one transaction, so a re-run never leaves rows that no longer apply, and the previous day's `changes` family is recomputed once the day is over. It writes a few hundred rows a day and keeps 3 years. `trends_enabled` is a display switch only: recording continues, because history cannot be backfilled.
 
-It feeds the Overview's 30/90-day trend lines and the reports' "as of" snapshots. It is fleet-wide (unscoped), so **scoped users don't receive trend series**: the widget shows "Trends are available to unrestricted users".
+It feeds the Overview's trend lines (drawn from three days of data; the changes line needs three complete days before today) and, in P2, the reports' "as of" snapshots. It is fleet-wide (unscoped), so **scoped users don't receive trend series**: the widget shows "Trends are available to unrestricted users".
 
 ## 7. Catalog (P2) and asset metadata (P2)
 
@@ -365,6 +376,29 @@ CREATE TABLE IF NOT EXISTS inventory_saved_views (
 
 ## 8. API contract (`server/app/api/v1/inventory.py`)
 
+> **The authoritative contract is `05-P1-API-CONTRACT.md`.** It describes what Phase 1 shipped, with real request and response examples cut from the golden fixtures, and it wins over this section wherever they differ. The rest of this section is the original design sketch, kept for the endpoints Phase 1 did not build (the catalog, asset metadata and saved views of Phase 2). What changed between the sketch and the built API:
+>
+> | Topic | Sketch | Built in Phase 1 |
+> |---|---|---|
+> | Endpoints | 14 read routes plus catalog, meta and views | All 14 read routes (summary, assets, facets, flyout, os, hardware, changes, software, publishers, product, installations, trends, settings, export). The catalog, `PATCH …/meta` and `…/views` routes are Phase 2 |
+> | Filters | `q, kind, os_family, os_release, vendor, model, site, location, tag, source, freshness, category` | One **asset filter vocabulary** shared by `/assets`, `/assets/facets`, the `assets` export and the address bar of `/inventory/assets` (scope decision S6): `q, kind, os_family, os_product, os_release, os_version, vendor, model, site, tag, source, freshness, health, product, product_version`, plus `cpu_model, memory, disks, virtualization, security_agent, module_class, module_model` for the Overview and Hardware drill-downs. `location` is folded into `site`. `category` belongs to the software and changes endpoints |
+> | Address of an asset | `{kind}/{id}` | `'<kind>:<uuid>'` as one string (`device:3f2a…`), the `key` of every row and the value of `?asset=` |
+> | List response | `{items, total, page, page_size, generated_at}` | The same, plus `sort` and `order` echoed on `/assets`, `scope` on the aggregates, and `hidden_products`, `hidden_installs`, `unmatched_titles`, `hidden_categories` on the software catalog. A page past the end is `200` with no items |
+> | Summary | The block below | Adds `scope`, `data_status` (`normalising`, `pending_software_rows`, `pending_identity_rows`), `assets.linked_devices`, `coverage.not_applicable`, `os.unknown`, `hardware.devices`, `software.sprawl_basis`, `software.security_agent_coverage` as `{covered, missing, unknown, total}`, `changes_7d.since`/`total` and the upgrade/downgrade split; `health` carries all eight predicates (S3) plus `not_collected_by_design`, but not `unmatched_software` (the software catalog reports `unmatched_titles` itself; the health item is planned with the P2 catalog); `lifecycle` is `null` until P4 |
+> | Health predicates | One set for both kinds | `missing_model`, `missing_serial` and `unknown_vendor` count **network devices only**; `missing_security_agent` and `software_truncated` count servers only (S3); the four identity predicates skip assets that cannot report by design (`freshness = not_applicable`); `missing_security_agent` means a complete, normalised software list **and** a service list that show no endpoint-protection software and no running Defender service (a server with no service rows is `unknown`, not missing) |
+> | OS tree | Counts and versions | Adds the latest observed version per release, `currency` (latest, N-1, older, unknown) and `raw_example` for normalised firmware strings |
+> | Hardware | `serial_coverage` per model | `serial_missing` and `serial_coverage_pct` per vendor and model, the models x firmware `matrix` for one vendor, ENTITY-MIB `modules` groups, and server CPU, memory, disk and virtualization distributions (`virtualization` is `null` until a server reports one) |
+> | Changes | `category, action, kind, asset_id, subject_key, since, until` | Adds `asset` (the address), `q`, `label` (`upgrade`/`downgrade`), `tz`; returns `stats`, a daily `series`, the installation/removal `pair` of an upgrade, `asset_present`, `marker`, `snapshot_truncated`, `window.tz_fallback`, `history_start` (when capture began; install-wide) and `retention_days`. Scoped feeds are asset-driven (section 14) |
+> | Software | Catalog rows with `norm_status` stored on the product | `norm_status` is **derived** from the rule packs in P1 (`normalized`, `publisher_only`, `unmatched`); filters `category` (repeatable), `publisher`, `hidden`, `unmatched`; the product page ranks versions per version scheme and groups raw names as evidence |
+> | Trends | A series per metric | `200` with `restricted: true` and no series for a scoped caller; also `enabled`, `window`, `first_day`, `days_with_data` (the Overview draws a sparkline from 3), at most 60 series |
+> | Export | Streaming CSV | Six datasets; UTF-8 with a byte-order mark and CRLF; formula-injection guard; at most **200,000 rows** (`X-Export-Truncated: true` past that); audit entry written before the first byte, and the export is refused with `503` when it cannot be stored; one `REPEATABLE READ` transaction; admission control: one export per user and two in all, **counted in memory per API worker process** (the appliance starts two workers, so a person can run two and the appliance four; `429` with `Retry-After`), abandoned after 120 s without reading; the software dataset is built from the catalog's in-process read model, so each of its figures is a value the catalog showed within the minutes around the file, not one instant (the other datasets are one snapshot) |
+> | Settings | A blob | `GET` returns `settings`, `defaults`, `limits`, `categories`; `PUT` merges a subset, clamps out-of-range numbers (reported in `adjusted`, which also lists a value reduced although nobody asked) instead of rejecting them, serialises concurrent writers, audits only a real change and refuses with `503` when the audit entry cannot be stored |
+> | Permissions | `policy("inventory")` for the router | The same, with `GET /export` declaring `inventory.export` and `PUT /settings` declaring `inventory.manage`. Permissions are **not implied at request time**: only the role editor offers the implied `inventory.view` |
+>
+> Phase 1 itself added no table; its fix round added migrations 158 and 159 (section 3.3). The software catalog is served from a per-scope aggregate table cached in process for 60 s (up to five minutes, served stale while rebuilt, for the whole-estate table, which a background warmer rebuilds every 40 s while the catalog is in use), which is the light alternative to the `inventory_software_rollup` table of section 13.
+
+*The sketch follows.*
+
 Mounted with `policy("inventory")`: GET needs `inventory.view`, writes need `inventory.manage`. Every handler resolves `scope = await scoping.visible_tags(db, user)` and applies `jsonb_tags_visible('s.tags')` / `('d.tags')` inside the asset union.
 
 List endpoints share these conventions:
@@ -417,13 +451,15 @@ Each `health` key maps one-to-one to an `/inventory/assets?health=<key>` filter,
 
 ## 9. Settings (`system_settings['inventory']`)
 
+The defaults are below; a list an administrator has saved is returned exactly as saved, so an installation whose list lacks `runtime` keeps listing runtimes. Each `fresh_hours` value is capped at `stale_days × 24`.
+
 ```json
 {
   "fresh_hours":  {"server": 24, "device": 2},
   "stale_days":   7,
   "change_retention_days": 400,
   "snapshot_hour": 0,
-  "hide_categories_by_default": ["update", "driver", "os-component"],
+  "hide_categories_by_default": ["update", "driver", "os-component", "runtime"],
   "trends_enabled": true
 }
 ```
@@ -455,7 +491,7 @@ This generalises `software_baselines` (servers) and borrows NCM compliance's exc
 | Rule | Example |
 |---|---|
 | `software_prohibited` | No TeamViewer on servers tagged `pci` |
-| `software_required` | EDR category present on every Windows server |
+| `software_required` | `endpoint-protection` category present on every Windows server |
 | `software_min_version` | Chrome ≥ 150 |
 | `software_currency` | Within N-1 of the observed or feed latest |
 | `os_min_build` | Windows Server 2022 ≥ 20348.2700 |
@@ -503,7 +539,7 @@ As specified in `Documentation/Compliance/03` and `04`, with these inputs re-poi
 | Cross-module visibility | `inventory.view` alone shows asset identity and software inventory **within tag scope**. This intentionally widens server software visibility, which today needs `servers.view` (split out of `apm.view` in release 1.23.35). Role-level visibility scope (`roles.scope_tags`, added in the same release) combines with the user's own scope inside `scoping.visible_tags`, so the inventory queries inherit it. Links to `/devices/:id` and `/servers/:id` render as links only when `useCan('devices.view')` / `useCan('servers.view')`; otherwise as plain text |
 | Scope | Tag scope on every query. Detail endpoints return 404 out of scope. Trends and reports refuse scoped users, consistent with `reports.py` `/data/inventory` |
 | Audit | `write_audit_log` on export, catalog rule and product changes, asset-meta changes, settings changes, and (P5) policy and exception changes |
-| Built-ins | `BUILTIN_ROLE_DEFINITION_VERSION` 4 → 5. Release notes announce the new permissions and that **custom roles must be granted `inventory.view` explicitly** (doc §4 of the roles assessment) |
+| Built-ins | `BUILTIN_ROLE_DEFINITION_VERSION` 4 → 5 (Phase 0: operator, viewer, read_only) → **6** (Phase 1, decision D9: `network_team`, `systems_team` and `security_team` get `inventory.view` only; `application_team` nothing). Built-in rows are reconciled once at start-up and the change is written to the role history. Release notes announce the new permissions and that **custom roles must be granted `inventory.view` explicitly** (doc §4 of the roles assessment) |
 
 ## 12. Reports integration (P2)
 
@@ -536,6 +572,26 @@ New sections in `services/report_sections.py`, registered in `SECTION_REGISTRY`:
 
 If the software catalog exceeds budget on the perf fixture, add an `inventory_software_rollup` table refreshed by the normalise loop. This is the documented escape hatch and is not built unless the test fails.
 
+**Measured in Phase 1** on this sizing target (scratch PostgreSQL 16, default settings, 4-CPU shared host; 5,000 servers with about 400 software rows each, 10,000 devices, 1 M change events; the full tables, the plans and what each measurement changed in the code are in `05-P1-API-CONTRACT.md` section 6.5). The figures are from the code after the review fix round (the earlier build measured the same endpoints and several numbers moved):
+
+| Endpoint | Result (p50 / p95) | Against the budget |
+|---|---|---|
+| `/inventory/summary`, cold, unrestricted | 230 to 265 ms (p50) | Within 300 ms. Cached: 0.3 ms. `data_status` alone: 1.7 / 3.3 ms |
+| `/inventory/summary`, cold, scope of 40 percent of assets | about 255 ms (p50) | Within 300 ms |
+| `/assets` default page; `/assets/facets` | 34 / 37 ms; 93 / 101 ms | Within 400 ms |
+| `/assets/{kind}/{id}`, `/os`, `/hardware` | 6.5 / 10 ms; 29 / 31 ms; 48 / 53 ms | Within 400 ms |
+| `/changes`, 7 / 90 days; 400 days (the whole retention, 1 M events) | 15 / 61 ms; 89 / 100 ms; 199 / 248 ms | Within 400 ms |
+| `/software`, warm (any scope) | 15 to 20 / 16 to 62 ms | Within 400 ms. The whole-estate table is rebuilt in the background every 40 s |
+| `/software`, process-cold, unrestricted | 477 / 556 ms | **Over** |
+| `/software`, process-cold, a scope of 63 / 31 / 0.8 percent | 458 / 371 / 87 ms (p50); 530 / 379 / 105 ms (p95) | **Over** for the widest scope |
+| `/software/publishers`, process-cold, unrestricted; warm | 573 / 617 ms; 3 to 5 ms | **Over** cold |
+| `/software` page 5 by hosts; `page_size=500` | 558 / 594 ms; 802 / 963 ms | **Over** |
+| `/software` sorts that need a figure per product: `version_count`, `latest_version`, `hosts&order=asc` | 217, 383, 657 ms (p50); 272, 428, 671 ms (p95) | `hosts&order=asc` over; `latest_version` at the limit; on a catalog of 24,000 products about 1.1 s (`hosts&order=asc`) and 3.3 s (`latest_version`) |
+| `/software/{product_key}`, installations, trends, settings | 1 to 18 ms | Within |
+| Export of 14,750 assets; of 50,000 change events | 1.7 s; 1.4 s | Within the 5 s exit criterion for 10,000 rows |
+
+The software catalog misses its budget on the first request after a worker starts or after a scope's table expired and on the large, deep or product-ranking sorts listed, not on the default page of a warmed estate (a warmer keeps the whole-estate table and the publisher facet hot; a scoped caller's table is built on demand and cached for 60 seconds). On a fleet a tenth of this size every one of those requests is under 150 ms. The rollup-table escape hatch is not built.
+
 ## 14. Known limitations and notes for later phases (from the Phase 0 review)
 
 A six-reviewer adversarial review of Phase 0 produced 44 findings; the confirmed ones that threaten history, uploads or CI are fixed. These are consciously **not** fixed in Phase 0 and are inputs to later phases.
@@ -555,3 +611,34 @@ A six-reviewer adversarial review of Phase 0 produced 44 findings; the confirmed
 | Poison pill outside this module | A lone surrogate in an agent batch makes `_host_results_batch_digest` (agents.py) raise before ingest runs, so the agent receives a 500 and retries for ever. Pre-existing. |
 | Poller database tests in CI | The Go PostgreSQL tests (42703 fallback, sticky semantics, migrated schema) run only where a PostgreSQL is available (`SYSINFO_TEST_DSN`, or `SYSINFO_TEST_PG=1` for the self-provisioning cluster); the required poller check does not run them. |
 | Poller start against an older schema | `install.sh` treats a failed migration runner as a warning, and the poller unit has no schema check. The poller degrades to the pre-157 statement and logs a WARN every 10 minutes; the degraded state is not yet shown in its health JSON. |
+
+### Known limitations after Phase 1
+
+What the review fix rounds left open on purpose, and what they closed. None blocks the release. They are inputs to Phase 2 and to the later phases; the release notes (`06-RELEASE-NOTES-DRAFT.md` section 8) state the ones an operator meets, and `07-PHASE1-FOLLOWUPS.md` lists every finding that is still open, with its severity and the phase that should take it.
+
+| Topic | State |
+|---|---|
+| Cold software catalog over budget | **Open.** A process-cold request takes 477 ms (unrestricted) and 458 ms (a scope of 63 percent of the estate) at the p50, and the publisher facet 573 ms, against 400 ms; deep pages, `page_size=500` and the per-product sorts also exceed it (section 13, `05` section 6.5). The whole-estate tables are now kept warm by a background warmer (15 to 20 ms warm); a scoped caller's table is built on demand. A rollup table refreshed by the normalise loop would need a migration |
+| Presence check without an index | **Closed** by migration 158 (`idx_servers_device_id`) |
+| History-start footnote | **Closed.** `GET /changes` returns `history_start` (the capture start written by migration 158) and `retention_days`; the footnote no longer probes the series |
+| Servers that stopped reporting count in software figures | **Open (UP-10).** Hosts, installs, versions, sprawl and endpoint-protection coverage include the last software list of every visible server until it is deleted or reports again. A staleness setting (ignore servers silent for more than N days, with a footnote) is not built |
+| A server and its SNMP device are two assets unless linked | **Open (UP-05).** Automatic pairing by address is not implemented (section 3.1). Counted once only for linked pairs; the link comes from a discovery import or the API |
+| Sprawl is exact only up to 400,000 visible software rows | **Open (BN-02).** Above that the panel ranks the most installed products and `software.sprawl_basis` says so (*N most installed of M products*) |
+| Time zone database | **Open.** `tzdata` is not in `server/requirements.txt`: legacy browser zone ids are mapped, any other unknown zone falls back to UTC and `window.tz_fallback` is true. Outside the module, and older than it, the Services daily bars and the Services reports open the browser's zone directly and answer `422` for a legacy name such as `Asia/Calcutta` on a host without `tzdata-legacy`; filed as a separate task (`06` section 8) |
+| Role descriptions | **Open.** `BUILTIN_ROLE_META` text applies only to a built-in row created by the reconcile; existing rows keep their old description (their permissions are reconciled) |
+| Sibling `GET /servers/{id}/…` sub-routes, `GET /server-baselines/{id}/results` and `GET /agent-fleet` | **Open, separate task, older than the module.** Only `/software` received the tag-scope check in this round. A tag-limited user with `servers.view` can still read the network, filesystems, services, compliance, agent, commands and capture sub-routes of a server outside their scope, and the baseline results and the agent fleet list hand out the ids, names, hostnames and addresses of every server they cover. The Inventory endpoints are scoped and leak none of it (`06` section 8) |
+| Forced-colors mode | **Open (UI-16).** Windows High Contrast support is incomplete for the data bars and the selected tab |
+| Shared `VersionDistributionBar` | **Closed in the component, not in a caller.** The bar now takes a `total` prop (the distinct hosts). Without it the shares are of the **sum** of the per-version host counts, which is right where a host has one version (network firmware, its only caller, which does not pass it) and wrong where a host runs several. The software pages use `SoftwareVersionBar`, which prints no percentages |
+| Device-page numbers | **Open.** The Devices page KPIs, charts and *Filtered* line still describe the loaded devices (at most 200); a notice says *first N of M*. Its Vendor and Model menus count the device's own stored columns and its OS version menu the `os_version_display`, so a vendor count there can differ from Inventory's normalised one (the Vendor, Model and OS version columns are off by default, also for users with a saved column choice) |
+| MikroTik, Cisco FTD, Aruba AOS-CX versions | **Open.** RouterOS needs the poller's `mtxrLicVersion` OID (not read in this release); FTD and AOS-CX versions appear only when sysDescr or the profile carries them |
+| Endpoint-protection definition | **Closed (X1, X9, X10).** Defined on the category `endpoint-protection` plus the Defender services; a missing, truncated or not yet normalised list, rows the loop never selects, and a server with no service rows are `unknown`, each with its reason (section 4.4) |
+| Freshness after the upgrade | **Closed.** Migration 158 seeds the freshness of servers that already reported from their newest software row; assets that cannot report are `not_applicable`, not `never`. A device reads `never` until its next successful poll, and an agent server that never sent a list until its next report |
+| Export concurrency | **Closed, with two edges open.** One export per user and two in all, per API worker process (two workers run), `429` with `Retry-After`; a 120 s read stall abandons the stream. Open: a client that disconnects while the response is inside a slow send can keep the slot, the connection and the snapshot until the stall timer ends (NF-1), and a reader that drips one chunk per 100 s holds a slot with no overall time cap (NF-2) |
+| First seen in the CSV exports | **Open (UP-06).** The pages print a first-seen at or before the capture start as *before <date>*; the `first_seen` and `first_seen_at` columns of the software exports carry the stored value (the reported install date or the upgrade time) with no marker. The export article and `06` section 3 say so |
+| Age of twin-supplied identity values | **Open (DTN-01).** A linked server shows its vendor, model and serial from the SNMP device but the age beside them is the agent's last inventory, not the device's last poll; no count or filter is affected |
+| Controller-managed children list `icmp` | **Open (UP-R2-04).** A FortiAP or FortiSwitch child shows `icmp` among its sources and matches `source=icmp`, although nothing pings it |
+| Facet values ending in a tab or a no-break space | **Open (NF-FE-6, NB-05).** A stored site, vendor, model or version whose end is not a plain space is counted but cannot be opened by its link (the UI shows it as text with the reason): the backend compares with a different trim than the address parser |
+| Hardware page, *Unknown vendor* row | **Open (NQ-03).** Devices that report a model but no vendor form the vendor-less row, which counts their models (`models`, `models_known`) but has no model rows to open, so those models appear nowhere else on the page and the vendor rows' `models_known` add up to more than `network.models_known`. The drills of the row itself are exact |
+| Settings write is not locked | **Closed.** Writers are serialised and the audit entry is required |
+| Health trends vs Overview predicates | **Closed.** The snapshot loop counts the model, serial and vendor gaps of network devices only, like the live predicates |
+| Security category | **Closed (X1)** as above |

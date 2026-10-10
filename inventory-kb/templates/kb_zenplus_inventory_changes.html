@@ -1,0 +1,270 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-changes.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-changes.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Changes", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_changes' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "What does ZenPlus Inventory record as a change?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Software installations, removals and version changes on servers; operating-system version changes on servers; firmware version changes on network devices; and hardware model or serial-number changes. A value appearing for the first time, a value going missing, the first report of a server and changes caused by updated normalisation rules are not recorded as changes."}},
+    {"@type": "Question", "name": "When does the Inventory change history start, and can earlier changes be added?",
+     "acceptedAnswer": {"@type": "Answer", "text": "History starts when the release that introduced Inventory was installed, which is when change capture began. Earlier changes were never recorded and cannot be reconstructed, so ZenPlus does not invent them. The Changes page footnote names the day capture began, even when the first recorded change came later."}},
+    {"@type": "Question", "name": "What does a capped software list mean?",
+     "acceptedAnswer": {"@type": "Answer", "text": "The Windows agent sends at most 1,000 installed titles, sorted by name, and drops the rest. A change recorded while a server's list was capped carries a note, because a title near the cut may have been cut off rather than removed."}},
+    {"@type": "Question", "name": "What is the change budget?",
+     "acceptedAnswer": {"@type": "Answer", "text": "About 2,000 software changes per server are recorded in any rolling 24 hours. The limit is checked once per report: a report that starts below it is recorded whole, so one large report can take a server past 2,000, and once a server is at or over it the software changes of further reports are not recorded and one 'Change budget exceeded' row marks the day. The server's current software list stays accurate; only its history is bounded."}}
+  ]
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Changes</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Changes</h1>
+        <p class="lede">What was installed, removed, upgraded or swapped, on which machine and when. This article explains what
+        is recorded, when the history starts, how upgrades are shown, what a <em>capped list</em> means and what the
+        <em>change budget</em> does.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators and auditors</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~9 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#what-is-recorded">What is recorded</a></li>
+            <li><a href="#the-page">The Changes page</a></li>
+            <li><a href="#history-start">When history starts</a></li>
+            <li><a href="#pairs">Upgrades shown as one row</a></li>
+            <li><a href="#capped">Capped lists</a></li>
+            <li><a href="#budget">The change budget</a></li>
+            <li><a href="#retention">Deleted assets and retention</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="what-is-recorded">
+            <h2><span class="num">01</span> What is recorded <a class="kb-anchor" href="#what-is-recorded">#</a></h2>
+
+            <p>Changes are recorded <strong>inside the database</strong> at the moment a value changes, no matter which
+            part of ZenPlus wrote it (the agent upload, the SNMP poller or the API). Four categories exist:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Category</th><th>On</th><th>Recorded when</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Software</strong></td><td>Servers</td><td>A title appears in a server&rsquo;s list (installed), disappears (removed), or its version changes (upgraded, downgraded or changed)</td></tr>
+                        <tr><td><strong>OS</strong></td><td>Servers</td><td>The normalised operating-system version changes</td></tr>
+                        <tr><td><strong>Firmware</strong></td><td>Network devices</td><td>The normalised firmware version changes</td></tr>
+                        <tr><td><strong>Hardware</strong></td><td>Network devices</td><td>The model or the serial number changes, which is the signature of a chassis swap or an RMA</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>What is deliberately not a change</h3>
+            <ul>
+                <li><strong>The first report of a server.</strong> It becomes the baseline; nothing is an &ldquo;install&rdquo;
+                    on day one.</li>
+                <li><strong>A value appearing for the first time</strong> (a device whose model was blank and is now known).
+                    That is discovery, not change.</li>
+                <li><strong>A value going missing.</strong> A collector that momentarily reports nothing is a gap, not an
+                    upgrade, so the version is never recorded as changing to &ldquo;nothing&rdquo; and back.</li>
+                <li><strong>An update to the normalisation rules.</strong> If a ZenPlus release reads
+                    <code>10.0.20348.2700</code> differently, no history is written for any machine.</li>
+                <li><strong>Deleting a server.</strong> Its software is not logged as removed; its earlier history is kept.</li>
+            </ul>
+            <p>The rule behind all of these is the same: a false entry in an audit trail is worse than a missing one, because
+            history cannot be corrected afterwards.</p>
+        </section>
+
+        <section id="the-page">
+            <h2><span class="num">02</span> The Changes page <a class="kb-anchor" href="#the-page">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-changes.webp' %}" width="1600" height="1200" loading="lazy"
+                     alt="ZenPlus Inventory Changes page with a time window switch, eight statistic chips for installed, removed, upgraded, downgraded, OS, firmware and hardware changes, a daily stacked chart by category and a day-grouped list of change sentences">
+                <figcaption><strong>Changes.</strong> The statistics strip filters the list, the chart shows changes per day and
+                the list is grouped by day. The data shown is example data.</figcaption>
+            </figure>
+
+            <div class="kb-deflist">
+                <div><dt>Time window</dt><dd>24 h, 7 d (the default), 30 d or 90 d. The window is stored in the address as a
+                    <code>since</code> time, so the exact view can be shared. A custom range from a link shows as
+                    <em>Custom</em>.</dd></div>
+                <div><dt>Statistics strip</dt><dd>Eight chips with the numbers in the window: <em>All changes</em>,
+                    <em>Installed</em>, <em>Removed</em>, <em>Upgraded</em>, <em>Downgraded</em>, <em>OS changes</em>,
+                    <em>Firmware changes</em> and <em>Hardware changes</em>. Click a chip to show only those changes;
+                    <em>All changes</em> shows everything again. Each number equals the total of the list it opens.</dd></div>
+                <div><dt>Changes per day</dt><dd>A stacked chart by category with a <em>View as table</em> toggle. A day with
+                    no change is still a day. Click a day to list it.</dd></div>
+                <div><dt>Search and filters</dt><dd>Search asset, product or version; switch between <em>All assets</em>,
+                    <em>Servers</em> and <em>Network devices</em>; narrow to one asset or one product from the links in a
+                    row. Active filters appear as chips that you can remove. The days follow your browser&rsquo;s time zone.</dd></div>
+                <div><dt>The list</dt><dd>Grouped by day, newest first, one sentence per change:
+                    <em>Google Chrome upgraded 151.0.7922.110 &rarr; 152.0.8001.12</em>,
+                    <em>Windows Server changed 10.0.20348.2402 &rarr; 10.0.20348.2700</em> (OS),
+                    <em>FortiOS changed 7.2.5 &rarr; 7.2.8</em> (firmware),
+                    <em>Serial number changed FCW2312L002 &rarr; FCW2399X777</em> (hardware),
+                    <em>TeamViewer installed 15.5.3</em>. A small label at the end of the row names the category. The
+                    machine&rsquo;s name opens its flyout on the Assets page.</dd></div>
+            </div>
+
+            <p>An <em>upgrade</em> or <em>downgrade</em> is called that only when ZenPlus can order the two versions with the
+            product&rsquo;s own version rules. Otherwise the row says <em>changed</em>; it never guesses.</p>
+        </section>
+
+        <section id="history-start">
+            <h2><span class="num">03</span> When history starts <a class="kb-anchor" href="#history-start">#</a></h2>
+
+            <p>History starts when the ZenPlus release that introduced Inventory was installed on your appliance, because
+            that is when change capture began. Anything installed, removed or upgraded earlier was never recorded,
+            <strong>cannot be reconstructed</strong>, and ZenPlus does not guess it from other data.</p>
+
+            <p>The footnote at the foot of the Changes page names that day: <em>History starts Wed 7 Oct 2026, when change
+            capture began. Changes older than 400 days are removed.</em> Hover over it for the exact time and time zone.
+            The date is the day <strong>capture began</strong>, not the day of the earliest change in the list: on a quiet
+            estate the first recorded change may come days later, and the days between are covered by the recording, not
+            gaps. Once the retention period has passed that day the footnote says so: <em>Change capture began &hellip;
+            The history you can see therefore starts &hellip;</em>. Until the page has the date it says <em>History starts
+            when change capture was enabled</em> without a day.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    For auditors
+                </div>
+                <p>The footnote exists so a gap before the start date is never mistaken for a quiet period. Quote the capture
+                start date together with any change report you hand over (not the date of the first change in the list),
+                and export the list for the period with
+                <a href="{% url 'core:kb_zenplus_inventory_export' %}">CSV export</a>.</p>
+            </div>
+        </section>
+
+        <section id="pairs">
+            <h2><span class="num">04</span> Upgrades shown as one row <a class="kb-anchor" href="#pairs">#</a></h2>
+
+            <p>Some products carry their version in their name (Java 8 Update 391, the Visual C++ redistributables). Upgrading
+            one makes the old title disappear and a new title appear, so the server&rsquo;s list shows a <em>removal</em> and
+            an <em>installation</em> written together. Inventory pairs them: same server, same product, same moment, one added
+            and one removed. The list shows the pair as <strong>one upgrade</strong> (or downgrade, when the versions can be
+            ordered), for example <em>Java 8 Update 401 upgraded 8.0.351 &rarr; 8.0.401 (replaces Java 8 Update 351) on
+            dc1-dc-01</em>, with a small note <em>1 change, 2 events</em>. Elsewhere, such as the Overview&rsquo;s recent changes
+            and a machine&rsquo;s flyout, each half is listed on its own and says <em>(part of an upgrade)</em>.</p>
+
+            <ul>
+                <li>The count above the list says it plainly: <em>56 events, 50 rows on this page (6 pairs of installation
+                    and removal shown as one upgrade)</em>. Events and rows are different numbers on purpose.</li>
+                <li>Below the statistics strip, a line such as <em>Plus 3 upgrades and 1 downgrade recorded as an installation and a removal. The list shows each pair as one row.</em> tells you
+                    how many such pairs the window holds. The <em>Upgraded</em> and <em>Downgraded</em> chips count only
+                    versions changed in place, so they equal the lists they open.</li>
+                <li>If a pair is split across two pages, each half says <em>The other half of this change is on another
+                    page.</em></li>
+            </ul>
+        </section>
+
+        <section id="capped">
+            <h2><span class="num">05</span> Capped lists <a class="kb-anchor" href="#capped">#</a></h2>
+
+            <p>The Windows agent sends at most <strong>1,000 installed titles</strong> per server. It sorts the list by name
+            and cuts the end off. A server with more installed programs than that has a <em>capped</em> list: the titles
+            at the end of the alphabet are missing from every report, whether or not they are installed.</p>
+
+            <p>That makes changes near the cut unreliable, so ZenPlus does two things:</p>
+            <ul>
+                <li>It does <strong>not</strong> treat a title that falls off the end of a capped list as removed. Only
+                    titles that sort <em>before</em> the last title the agent sent, and are absent, are provably
+                    uninstalled.</li>
+                <li>Every change recorded while a server&rsquo;s list is capped carries a note in the Changes list:
+                    <em>The list was capped at 1,000 titles when this was recorded, so this title may have been cut off
+                    rather than removed</em> (or, for other changes, <em>so the picture may be incomplete</em>).</li>
+            </ul>
+
+            <p>The server is also flagged <em>Software list truncated</em> in the Inventory health panel and in its flyout.
+            The fix is on the agent side; the 1,000-title cap is part of the agent. See
+            <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}#health-panel">health and freshness</a>.</p>
+        </section>
+
+        <section id="budget">
+            <h2><span class="num">06</span> The change budget <a class="kb-anchor" href="#budget">#</a></h2>
+
+            <p>A mass reinstall, a deployment that rewrites every package, or a misbehaving agent could write thousands of
+            events for one server and drown the history. Each server therefore has a <strong>budget of about 2,000
+            software changes per rolling 24 hours</strong>.</p>
+
+            <ul>
+                <li>Within the budget everything is recorded as usual.</li>
+                <li>The budget is checked <strong>once per report</strong>, when the report arrives. A report that starts
+                    below 2,000 is recorded whole, so one very large report can take a server past 2,000 (a server at
+                    1,999 that reports 1,000 changes ends the day with about 3,000). That is why the limit is
+                    &ldquo;about&rdquo; 2,000.</li>
+                <li>Once a server is at or over the budget, the software part of further reports is applied to the server&rsquo;s
+                    current software list <strong>but not written to history</strong>. The inventory stays correct; only
+                    the history is bounded.</li>
+                <li>One marker row is written for the day so the gap is visible. In the Changes list it is a dashed row
+                    that starts <em>Change budget exceeded</em>, then <em>for &lt;server&gt;: further changes of that report were
+                    not recorded</em>, with the note <em>This marks a gap in the history. It is not a change of the asset.</em>
+                    and a <em>Gap</em> badge at its right end. (Elsewhere the marker is an italic line without a category.)</li>
+            </ul>
+
+            <p>Operating-system, firmware and hardware changes are not subject to the budget. A server that hits the budget
+            regularly is worth investigating: something on it is rewriting its program list.</p>
+        </section>
+
+        <section id="retention">
+            <h2><span class="num">07</span> Deleted assets and retention <a class="kb-anchor" href="#retention">#</a></h2>
+
+            <ul>
+                <li><strong>Deleted assets.</strong> History outlives the machine. The row keeps the name the machine had
+                    at the time, shown as plain text with the tooltip <em>This asset has been deleted; its history is
+                    kept</em>. A user whose role is limited to tags does not see the changes of deleted assets, because
+                    their tags are gone with them. The footnote says so.</li>
+                <li><strong>Retention.</strong> Changes are kept for <strong>400 days</strong> by default, enough for a
+                    twelve-month audit window plus margin. An administrator can set it from 30 to 3,650 days in
+                    <a href="{% url 'core:kb_zenplus_inventory_settings' %}">Inventory settings</a>. Older events are
+                    removed once a day, and once that has started the history footnote names the earliest day still kept.
+                    Lengthening the retention does not bring back events that are already gone.</li>
+            </ul>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_hardware' %}">&larr; Hardware</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}">Health and freshness &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

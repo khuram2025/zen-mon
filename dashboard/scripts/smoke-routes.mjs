@@ -53,6 +53,17 @@ if (reportsBlock) {
   }
 }
 
+// Same pairing problem for /inventory: it sits behind a path-less InventoryAccessGate route and
+// follows self-closing routes, so the generic pass above attaches its children to the wrong parent.
+// scripts/test-inventory-ui.mjs validates the whole route tree; here the module's own paths are read
+// from its block so the required list below can name them.
+const inventoryBlock = /<Route\s+path="inventory"[^>]*>([\s\S]*?)<\/Route>/.exec(app)
+if (inventoryBlock) {
+  for (const child of inventoryBlock[1].matchAll(/<Route\s+path="([^"]+)"/g)) {
+    routePaths.add(`/inventory/${child[1]}`)
+  }
+}
+
 const requiredRoutes = [
   '/',
   '/login',
@@ -94,6 +105,14 @@ const requiredRoutes = [
   '/server-agents',
   '/agent-policies',
   '/server-baselines',
+  '/inventory',
+  '/inventory/assets',
+  '/inventory/os',
+  '/inventory/software',
+  '/inventory/software/:productKey',
+  '/inventory/hardware',
+  '/inventory/changes',
+  '/inventory/settings',
 ]
 
 for (const route of requiredRoutes) {

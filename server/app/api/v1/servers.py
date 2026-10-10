@@ -1010,8 +1010,20 @@ async def server_software(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # The server must exist and be visible to the caller, exactly as GET /servers/{id} decides: an unknown id and a server
+    # outside the caller's tag scope answer the same 404 (RG-05 / F6: a scoped user could read the package list of any
+    # server whose id they knew, and an unknown id answered 200 with an empty list).
+    head = (await db.execute(
+        text("SELECT tags, software_truncated FROM servers WHERE id = :id"), {"id": server_id},
+    )).mappings().first()
+    if not head or not scoping.entity_visible(head["tags"], await scoping.visible_tags(db, user)):
+        raise HTTPException(404, "Server not found")
+    # product_key is the stored name_key (the Inventory catalog's product address, null while a row is
+    # not yet normalised) and category the normaliser's category; both let the Software tab link a
+    # package to /inventory/software/<product_key>.
     rows = (await db.execute(
-        text("""SELECT package_name, version, vendor, install_date, updated_at
+        text("""SELECT package_name, version, vendor, install_date, updated_at,
+                       name_key AS product_key, category
                 FROM server_software_inventory
                 WHERE server_id = :id
                 ORDER BY lower(package_name)
@@ -1022,8 +1034,10 @@ async def server_software(
         text("SELECT COUNT(*) FROM server_software_inventory WHERE server_id = :id"),
         {"id": server_id},
     )).scalar_one()
+    # `truncated`: this response is cut at `limit`. `agent_truncated`: the agent itself stopped listing at
+    # its cap (servers.software_truncated), so the stored list is incomplete however large `limit` is.
     return {"items": [dict(r) for r in rows], "total": int(total),
-            "truncated": int(total) > len(rows)}
+            "truncated": int(total) > len(rows), "agent_truncated": bool(head["software_truncated"])}
 
 
 @router.get("/{server_id}/compliance")

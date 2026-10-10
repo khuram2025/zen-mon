@@ -406,7 +406,7 @@ def test_reapplying_to_a_database_that_ran_an_earlier_cut_adds_what_is_missing(p
 def upgraded(pg_cluster, tmp_path_factory):
     """A database built from every migration except 157, populated the way a
     running appliance would be, then upgraded through run-migrations.py."""
-    scripts, lock = copy_migration_set(tmp_path_factory.mktemp("n_minus_1"), exclude=[MIGRATION])
+    scripts, lock = copy_migration_set(tmp_path_factory.mktemp("n_minus_1"), exclude=[MIGRATION, "migrate-158-inventory-phase1-followups.sql"])
     db = pg_cluster.create_database(f"zp_n1_{uuid.uuid4().hex[:8]}", template=None)
     try:
         pg_cluster.replay_migrations(db.name, scripts_dir=scripts, lock=lock)

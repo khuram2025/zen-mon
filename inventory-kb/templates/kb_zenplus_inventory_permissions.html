@@ -1,0 +1,234 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Permissions", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_permissions' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "Which permissions does ZenPlus Inventory use?",
+     "acceptedAnswer": {"@type": "Answer", "text": "inventory.view opens every Inventory page within the user's tag scope. inventory.export allows CSV downloads and is classified as sensitive because serial numbers and software lists are reconnaissance data. inventory.manage allows changing Inventory settings. The role editor adds inventory.view when you tick export or manage."}},
+    {"@type": "Question", "name": "Do custom roles get Inventory access after upgrading?",
+     "acceptedAnswer": {"@type": "Answer", "text": "No. Custom roles are never changed by an upgrade, so an administrator must grant inventory.view (and export or manage where needed) to each custom role by hand. Only the built-in roles are updated."}},
+    {"@type": "Question", "name": "Which built-in roles can see ZenPlus Inventory?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Admin, Operator, Viewer, Read Only, Network Team, Systems Team and Security Team can view it. Operator and Admin can also export and manage. Application Team has no Inventory access."}},
+    {"@type": "Question", "name": "What does tag scope do in Inventory?",
+     "acceptedAnswer": {"@type": "Answer", "text": "If a user or their role is limited to tags, every Inventory figure, list, export and flyout covers only the assets carrying one of those tags. Untagged assets are invisible to such a user, and trend lines, which are fleet-wide, are not shown to them."}}
+  ]
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Permissions</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Permissions, tag scope and team roles</h1>
+        <p class="lede">Three permissions control Inventory, tag scope narrows what each person sees, and the built-in roles
+        come with sensible defaults. <strong>Custom roles do not get Inventory access automatically.</strong> This article
+        explains who can see, export and change what.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Administrators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~7 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#permissions">The three permissions</a></li>
+            <li><a href="#built-in">Built-in roles</a></li>
+            <li><a href="#custom-roles">Custom roles</a></li>
+            <li><a href="#scope">Tag scope</a></li>
+            <li><a href="#links">Links to other pages</a></li>
+            <li><a href="#audit">What is audited</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="permissions">
+            <h2><span class="num">01</span> The three permissions <a class="kb-anchor" href="#permissions">#</a></h2>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Permission</th><th>Grants</th><th>Risk level</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>inventory.view</code></td><td>Every Inventory page and the data behind it, within the person&rsquo;s tag scope. The Inventory group appears in the sidebar only with this permission</td><td>Standard</td></tr>
+                        <tr><td><code>inventory.export</code></td><td>The <em>Export</em> buttons: CSV downloads of assets, software, installations, operating systems, hardware and changes. See <a href="{% url 'core:kb_zenplus_inventory_export' %}">CSV export</a></td><td><strong>Sensitive</strong>: serial numbers and software lists are reconnaissance data</td></tr>
+                        <tr><td><code>inventory.manage</code></td><td>Changing the settings on the <em>Inventory Settings</em> page: freshness targets, history retention, snapshot time, trends switch and hidden categories. Anyone with <code>inventory.view</code> can open the page and read the values</td><td>Standard</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <ul>
+                <li>In the role editor (<strong>Settings &rarr; Users &amp; Access &rarr; Roles &amp; Permissions</strong>), ticking Export or
+                    Manage also adds View (&ldquo;Also adds: inventory.view&rdquo;). The server checks each permission
+                    separately at the time of a request: a role that somehow holds only <code>inventory.export</code> can
+                    download but cannot browse the pages.</li>
+                <li>A person without <code>inventory.view</code> does not see the Inventory group in the sidebar. Opening an
+                    Inventory address directly shows an explanation that names the missing permission and says to ask an
+                    administrator, not a blank page.</li>
+                <li><code>inventory.view</code> shows what is <em>installed</em> on servers, including software that the
+                    separate <code>servers.view</code> permission also protects on the server pages. Inventory deliberately
+                    makes that visible to anyone you give it to, within their tag scope. Grant it with that in mind.</li>
+            </ul>
+        </section>
+
+        <section id="built-in">
+            <h2><span class="num">02</span> Built-in roles <a class="kb-anchor" href="#built-in">#</a></h2>
+
+            <p>When ZenPlus is upgraded to this release, the built-in roles are brought to their new definition once
+            (built-in role definition version 6). Each change is written to the role history, showing exactly which
+            permissions were added.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Role</th><th>View</th><th>Export</th><th>Manage</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Admin</strong></td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+                        <tr><td><strong>Operator</strong></td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+                        <tr><td><strong>Viewer</strong></td><td>Yes</td><td>No</td><td>No</td></tr>
+                        <tr><td><strong>Read Only</strong></td><td>Yes</td><td>No</td><td>No</td></tr>
+                        <tr><td><strong>Network Team</strong></td><td>Yes</td><td>No</td><td>No</td></tr>
+                        <tr><td><strong>Systems Team</strong></td><td>Yes</td><td>No</td><td>No</td></tr>
+                        <tr><td><strong>Security Team</strong></td><td>Yes</td><td>No</td><td>No</td></tr>
+                        <tr><td><strong>Application Team</strong></td><td>No</td><td>No</td><td>No</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The reasoning: inventory of devices and servers is core to the network, systems and security teams&rsquo; work,
+            and CIS controls 1 and 2 are a security-team concern, so those three can look. The Application Team sees
+            applications, not the estate, so it gets nothing. No team role can export or change settings; those stay with
+            operators and administrators. If a built-in team role does not suit you, create a custom copy and tick what you
+            need.</p>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    The one-line descriptions of the team roles may not mention Inventory
+                </div>
+                <p>The upgrade brings the <em>permissions</em> of the built-in roles to the new definition; it does not
+                rewrite their one-line descriptions. On an appliance that already had the team roles, the descriptions of
+                Network Team, Systems Team and Security Team in the role list therefore still do not mention Inventory.
+                (A new installation shows them ending <em>Includes read access to Inventory (inventory.view)</em>.) The
+                permission matrix of the role is the source of truth.</p>
+            </div>
+        </section>
+
+        <section id="custom-roles">
+            <h2><span class="num">03</span> Custom roles <a class="kb-anchor" href="#custom-roles">#</a></h2>
+
+            <p>An upgrade never changes a custom role, on purpose: a new permission must never be granted to a role that an
+            administrator wrote by hand. So after the upgrade:</p>
+
+            <div class="step-list">
+                <div class="step"><div><h4>List the custom roles whose members should see Inventory</h4>
+                    <p>Typical candidates: roles copied from Operator or Viewer, and roles for auditors and security staff.</p></div></div>
+                <div class="step"><div><h4>Grant <code>inventory.view</code> in the role editor</h4>
+                    <p>In the <em>Access</em> step, set the <em>Inventory</em> module to <strong>View</strong>. Choose
+                    <strong>Full</strong> only for administrators of the module: it adds
+                    <code>inventory.manage</code>. <code>inventory.export</code> is listed separately as a sensitive
+                    permission and is ticked on its own, only for those who must download CSV files. The
+                    <em>Review</em> step previews the menu the role will see.</p></div></div>
+                <div class="step"><div><h4>Check the tag scope</h4>
+                    <p>If the role has a visibility scope, Inventory follows it. Confirm the tags match the assets the team
+                    should see (next section).</p></div></div>
+            </div>
+        </section>
+
+        <section id="scope">
+            <h2><span class="num">04</span> Tag scope <a class="kb-anchor" href="#scope">#</a></h2>
+
+            <p>A person&rsquo;s visibility scope is the tags set on their own account plus the tags set on their role
+            (the <em>Visibility</em> step of the role editor). A person with no scope sees everything; a person with a scope
+            sees only assets that carry at least one of the tags, compared without regard to case. Administrators
+            (<code>system.admin</code>) are never scoped.</p>
+
+            <p>Inventory applies the scope to <strong>everything</strong>, so a scoped person does not see the rest of the
+            estate even in a total:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Where</th><th>What a scoped person gets</th></tr></thead>
+                    <tbody>
+                        <tr><td>Every figure, chart and list</td><td>Counts over the visible assets only. A badge under the tabs says <em>Showing assets tagged &hellip;</em></td></tr>
+                        <tr><td>Assets without tags</td><td>Invisible to a scoped person. Tag the assets that a team should see</td></tr>
+                        <tr><td>The asset flyout of an asset outside the scope</td><td><em>Asset not found</em>, exactly as for a deleted asset</td></tr>
+                        <tr><td>Software</td><td>Hosts, installs, versions and the publisher list are those of the visible servers; a product that none of them has is absent</td></tr>
+                        <tr><td>Changes</td><td>Only changes of visible assets. Changes of an asset that has since been deleted are not shown, because its tags are gone</td></tr>
+                        <tr><td>Trend lines</td><td>Not shown. They are fleet-wide and carry no tags, so a scoped person sees a note that trends are available to unrestricted users</td></tr>
+                        <tr><td>CSV exports</td><td>The same rows the list shows that person</td></tr>
+                        <tr><td>Inventory settings</td><td>Not tag-scoped: settings are appliance-wide</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>A scope that matches no asset is not an error: every list is empty and every count is zero, and the page
+            says <em>Your role limits Inventory to assets tagged &hellip;, and none carry those tags yet</em>.</p>
+        </section>
+
+        <section id="links">
+            <h2><span class="num">05</span> Links to other pages <a class="kb-anchor" href="#links">#</a></h2>
+
+            <p>Seeing a machine in Inventory does not open its own page. Links from the asset flyout to
+            <em>Open server page</em> and <em>Open device page</em> appear only if the person also holds
+            <code>servers.view</code> or <code>devices.view</code>; otherwise the entry is shown locked with the permission
+            named. The Overview&rsquo;s first-run cards to the Agent Fleet and to Discovery follow the same rule
+            (<code>servers.view</code> and <code>discovery.view</code>).</p>
+        </section>
+
+        <section id="audit">
+            <h2><span class="num">06</span> What is audited <a class="kb-anchor" href="#audit">#</a></h2>
+
+            <ul>
+                <li><strong>Every CSV export</strong> is written to the audit log <em>before</em> the first byte is sent:
+                    who, which dataset, the filters used, how many rows and whether the file was cut at the row cap.</li>
+                <li><strong>Every change to Inventory settings</strong> is written with the old and new value of each
+                    setting that changed.</li>
+                <li>If the audit entry cannot be stored, an export is refused before any byte is sent and a settings save
+                    is refused and changes nothing: the request answers with an error that says the audit log is
+                    unavailable. Try again, and contact an administrator if it persists.</li>
+                <li>A refused or invalid request writes nothing.</li>
+            </ul>
+            <p>Browsing is not audited.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_settings' %}">&larr; Inventory settings</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_export' %}">CSV export &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

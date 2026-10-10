@@ -1,0 +1,217 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-settings.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-settings.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Inventory settings", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_settings' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Inventory settings: freshness targets, history retention and trends",
+  "description": "The ZenPlus Inventory Settings page: freshness targets for servers and network devices, how long change history is kept, the daily snapshot time, the trends switch and the software categories hidden by default.",
+  "datePublished": "2026-10-09",
+  "dateModified": "2026-10-09",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_inventory_settings' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus Inventory", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Settings</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Inventory settings</h1>
+        <p class="lede">Five numbers, one switch and one list control how Inventory judges freshness, how long it remembers
+        changes and what the software catalog leaves out. This article lists every setting, its limits and what changes
+        when you save.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Administrators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~5 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#where">Where to find it, and who can change it</a></li>
+            <li><a href="#freshness">Freshness targets</a></li>
+            <li><a href="#history">History and trends</a></li>
+            <li><a href="#catalog">Software catalog defaults</a></li>
+            <li><a href="#saving">Saving, limits and the audit log</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="where">
+            <h2><span class="num">01</span> Where to find it, and who can change it <a class="kb-anchor" href="#where">#</a></h2>
+
+            <p><strong>Inventory &amp; Compliance &rarr; Inventory Settings</strong> has one tab in this release,
+            <strong>Data &amp; retention</strong>. This release has no catalog rules, lifecycle overrides or saved views.</p>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-settings.webp' %}" width="1600" height="980" loading="lazy"
+                     alt="ZenPlus Inventory Settings page with Data and retention tab showing freshness targets, history and trends settings with a trends switch, and checkboxes for software categories hidden by default">
+                <figcaption><strong>Inventory Settings.</strong> Freshness targets, history and trends, and software catalog
+                defaults.</figcaption>
+            </figure>
+
+            <ul>
+                <li>The sidebar row and the tab appear for every role with <code>inventory.view</code>. Changing a setting
+                    needs <code>inventory.manage</code>: a role with only <code>inventory.view</code> sees the same values
+                    <strong>read-only</strong>, with the note <em>You can read these settings but not change them</em>
+                    and the permission named. A role without any Inventory permission sees the access-denied page.</li>
+                <li>The settings are appliance-wide. They are not tag-scoped: a manager limited to some tags changes the same
+                    values everyone else sees.</li>
+            </ul>
+        </section>
+
+        <section id="freshness">
+            <h2><span class="num">02</span> Freshness targets <a class="kb-anchor" href="#freshness">#</a></h2>
+
+            <p>These decide when the <em>Fresh</em>, <em>Aging</em> and <em>Stale</em> badges change. See
+            <a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}">health and freshness</a>.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Setting</th><th>Unit</th><th>Range</th><th>Default</th><th>Effect</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Servers are fresh for</strong></td><td>hours</td><td>1 to 720</td><td>24</td><td>A server whose last inventory is newer than this is <em>Fresh</em></td></tr>
+                        <tr><td><strong>Network devices are fresh for</strong></td><td>hours</td><td>1 to 720</td><td>2</td><td>The same for network devices</td></tr>
+                        <tr><td><strong>Stale after</strong></td><td>days</td><td>1 to 365</td><td>7</td><td>Between the fresh target and this, an asset is <em>Aging</em>; older than this it is <em>Stale</em></td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>A fresh target can never be longer than the stale limit (<em>stale days &times; 24 hours</em>); if you ask
+            for more, it is reduced to that and the save message says so. A line under the fields restates the rule in
+            words with your numbers, for example <em>A server is Fresh for 24 h after its last inventory, then Aging, and
+            Stale after 7 days.</em></p>
+
+            <p>Assets that cannot report an inventory by design (a ping-only device, a server monitored without the Windows
+            agent) are not judged by these targets: they read <em>Not reported by design</em>.</p>
+
+            <p>Match the server target to the interval of the agents. By default an agent sends its inventory every 6 hours
+            (the setting <code>collectors.inventory.interval_seconds</code> in the agent&rsquo;s own configuration file,
+            not a field of Agent Policies), and 24 hours leaves room for three missed reports. If you lengthen the interval
+            beyond the target, servers will flicker to <em>Aging</em>.</p>
+        </section>
+
+        <section id="history">
+            <h2><span class="num">03</span> History and trends <a class="kb-anchor" href="#history">#</a></h2>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Setting</th><th>Unit</th><th>Range</th><th>Default</th><th>Effect</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Keep change history for</strong></td><td>days</td><td>30 to 3,650</td><td>400</td><td>Changes older than this are deleted by a daily clean-up. 400 days covers a twelve-month audit window with margin. Shortening it deletes data at the next clean-up</td></tr>
+                        <tr><td><strong>Daily snapshot at</strong></td><td>hour, 0 to 23</td><td>0 to 23</td><td>0</td><td>The hour of the daily counts snapshot that feeds the trend lines. It runs at 15 minutes past, in the <em>appliance</em> time zone (Settings &rarr; General &rarr; Company), so the default is 00:15. A missed day is caught up on the next run</td></tr>
+                        <tr><td><strong>Show trends on the Overview</strong></td><td>switch</td><td>on or off</td><td>on</td><td>Controls the small trend lines on the key figures. Switching it off only hides them: snapshots keep being recorded, so the history is there when you switch it on again</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <ul>
+                <li>Trend lines need <strong>at least three days</strong> of snapshots (the <em>Changes per day</em> line
+                    needs three complete days before today). Before that there is no line and no placeholder. The first
+                    snapshot after an upgrade is written once the services have been up for half an hour and the existing
+                    software lists are processed, so the lines do not start from the half-finished state.</li>
+                <li>Trend lines are fleet-wide, so they are <strong>not shown to users whose role or account is limited to
+                    tags</strong>. They see a note that trends are available to unrestricted users.</li>
+                <li>Snapshots are kept for three years. That period is fixed.</li>
+            </ul>
+        </section>
+
+        <section id="catalog">
+            <h2><span class="num">04</span> Software catalog defaults <a class="kb-anchor" href="#catalog">#</a></h2>
+
+            <p><strong>Hidden by default</strong> is a list of software categories (Browser, Security, Endpoint protection,
+            Remote access, Database, Web server, Runtime, Development, Productivity, Monitoring, Backup, Virtualization,
+            Networking, Driver, OS component, Update, Other). Products in a ticked category are left out of the Software catalog, the
+            Overview&rsquo;s software panels and the flyout&rsquo;s top list, unless someone switches the hiding off or names
+            the category in the filter.</p>
+
+            <ul>
+                <li>The default ticks <em>Update</em>, <em>Driver</em>, <em>OS component</em> and <em>Runtime</em>. The
+                    label of the switch on the Software page follows this list.</li>
+                <li>Hiding <em>Endpoint protection</em> only hides the products from the lists; the endpoint-protection
+                    coverage on the Overview does not change.</li>
+                <li>Hidden products stay stored, keep generating change history and are still counted in the footnote under
+                    the catalog.</li>
+                <li>Unticking everything lists every category; the catalog switch is then disabled with the tooltip
+                    <em>No category is hidden by default</em>.</li>
+            </ul>
+        </section>
+
+        <section id="saving">
+            <h2><span class="num">05</span> Saving, limits and the audit log <a class="kb-anchor" href="#saving">#</a></h2>
+
+            <div class="kb-deflist">
+                <div><dt>Save changes</dt><dd>Active once something changed and every field is valid. The page tells you what
+                    now applies in words, for example that servers are fresh within 48 h.</dd></div>
+                <div><dt>Discard</dt><dd>Puts the form back to the saved values.</dd></div>
+                <div><dt>Restore defaults</dt><dd>Fills the form with the factory values. Nothing changes until you save.</dd></div>
+                <div><dt>Out-of-range numbers</dt><dd>The form shows the limits and refuses what it can. A number the server
+                    still has to adjust (for example a fresh target above the stale limit) is saved at the adjusted value and
+                    the message lists which one, including a value that was reduced although you did not change it (for
+                    example the server target, when you lower the stale limit).</dd></div>
+                <div><dt>How fast it takes effect</dt><dd>Freshness and the hidden categories apply to the Overview, the Assets
+                    freshness filters and the Software catalog at once on the server that saved. Another API worker may show
+                    the old summary for up to a minute. The retention and the snapshot hour are read by the background tasks on
+                    their next pass.</dd></div>
+                <div><dt>Audit</dt><dd>Every change is recorded in the audit log (action <code>inventory.settings.update</code>)
+                    with the old and new value of each changed setting. Saving without a change writes nothing. If the audit entry
+                    cannot be stored the save is refused and nothing changes; try again, and contact an administrator if it
+                    persists.</dd></div>
+            </div>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    Shortening the retention is permanent
+                </div>
+                <p>Reducing <em>Keep change history for</em> removes the older changes at the next daily clean-up and they
+                cannot be restored. If you keep change history for audit evidence, check your audit period before lowering
+                the number.</p>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_health_and_freshness' %}">&larr; Health and freshness</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_permissions' %}">Permissions &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

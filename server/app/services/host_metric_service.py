@@ -13,7 +13,6 @@ import dataclasses
 import hashlib
 import json
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from uuid import UUID
@@ -708,30 +707,15 @@ def _inventory_packs_usable() -> bool:
     return False
 
 
-_DIGIT_RUN = re.compile(r"[0-9]+")
-
-
 def _natural_key(version: Optional[str]) -> tuple:
-    """Total order over version text: digit runs by value, other text lower-cased.
+    """Total order over version text: digit runs by value, other text lower-cased (``versioning.natural_key``).
 
     Used only where versioning.py refuses to order two versions (``9.6p1``,
     ``1.2.3-1``). It is not a claim about which release is newer; it is a
     deterministic choice that does not depend on the order the agent listed
     the entries in.
     """
-    if not version:
-        return ()
-    parts: list[tuple[int, int, str]] = []
-    position = 0
-    for match in _DIGIT_RUN.finditer(version):
-        if match.start() > position:
-            parts.append((1, 0, version[position:match.start()].lower()))
-        digits = match.group().lstrip("0")
-        parts.append((0, len(digits), digits))
-        position = match.end()
-    if position < len(version):
-        parts.append((1, 0, version[position:].lower()))
-    return tuple(parts)
+    return versioning.natural_key(version)
 
 
 def _highest_entry(group: list[dict[str, Any]]) -> dict[str, Any]:

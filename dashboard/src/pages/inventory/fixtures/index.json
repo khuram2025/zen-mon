@@ -1,0 +1,180 @@
+{
+  "about": "Golden responses of the phase-1 Inventory API for the seeded fleet (server/tests/inventory_fleet.py). Regenerate with ZENPLUS_UPDATE_FIXTURES=1 python -m pytest server/tests/test_inventory_fixtures.py.",
+  "pinned_now": "2026-10-08T12:00:00Z",
+  "scoped_tag": "team-edge",
+  "assets": {
+    "servers": 60,
+    "devices": 85,
+    "total": 145,
+    "snmp_twins_not_counted": 5
+  },
+  "fixtures": {
+    "summary": {
+      "file": "summary.json",
+      "request": "GET /api/v1/inventory/summary",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "assets": {
+      "file": "assets.json",
+      "request": "GET /api/v1/inventory/assets",
+      "params": {
+        "page_size": 50
+      },
+      "caller": "unrestricted"
+    },
+    "facets": {
+      "file": "facets.json",
+      "request": "GET /api/v1/inventory/assets/facets",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "asset-server": {
+      "file": "asset-server.json",
+      "request": "GET /api/v1/inventory/assets/server/faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "asset-device": {
+      "file": "asset-device.json",
+      "request": "GET /api/v1/inventory/assets/device/ce9a854d-ce49-5f31-9e6a-9790ac0bae6b",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "asset-device-ha": {
+      "file": "asset-device-ha.json",
+      "request": "GET /api/v1/inventory/assets/device/c8c15245-72b8-5a06-9210-3f47094d22f4",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "os": {
+      "file": "os.json",
+      "request": "GET /api/v1/inventory/os",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "hardware": {
+      "file": "hardware.json",
+      "request": "GET /api/v1/inventory/hardware",
+      "params": {
+        "vendor": "Cisco"
+      },
+      "caller": "unrestricted"
+    },
+    "changes": {
+      "file": "changes.json",
+      "request": "GET /api/v1/inventory/changes",
+      "params": {
+        "page_size": 50
+      },
+      "caller": "unrestricted"
+    },
+    "summary-scoped": {
+      "file": "summary-scoped.json",
+      "request": "GET /api/v1/inventory/summary",
+      "params": {},
+      "caller": "scoped to team-edge"
+    },
+    "assets-scoped": {
+      "file": "assets-scoped.json",
+      "request": "GET /api/v1/inventory/assets",
+      "params": {
+        "page_size": 50
+      },
+      "caller": "scoped to team-edge"
+    },
+    "changes-scoped": {
+      "file": "changes-scoped.json",
+      "request": "GET /api/v1/inventory/changes",
+      "params": {
+        "page_size": 50
+      },
+      "caller": "scoped to team-edge"
+    },
+    "software": {
+      "file": "software.json",
+      "request": "GET /api/v1/inventory/software",
+      "params": {
+        "page_size": 50
+      },
+      "caller": "unrestricted"
+    },
+    "software-publishers": {
+      "file": "software-publishers.json",
+      "request": "GET /api/v1/inventory/software/publishers",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "software-product": {
+      "file": "software-product.json",
+      "request": "GET /api/v1/inventory/software/git",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "software-installations": {
+      "file": "software-installations.json",
+      "request": "GET /api/v1/inventory/software/git/installations",
+      "params": {
+        "page_size": 50
+      },
+      "caller": "unrestricted"
+    },
+    "trends": {
+      "file": "trends.json",
+      "request": "GET /api/v1/inventory/trends",
+      "params": {
+        "metric": "assets"
+      },
+      "caller": "unrestricted"
+    },
+    "settings": {
+      "file": "settings.json",
+      "request": "GET /api/v1/inventory/settings",
+      "params": {},
+      "caller": "unrestricted"
+    },
+    "software-scoped": {
+      "file": "software-scoped.json",
+      "request": "GET /api/v1/inventory/software",
+      "params": {
+        "page_size": 50
+      },
+      "caller": "scoped to team-edge"
+    },
+    "software-product-scoped": {
+      "file": "software-product-scoped.json",
+      "request": "GET /api/v1/inventory/software/git",
+      "params": {},
+      "caller": "scoped to team-edge"
+    },
+    "software-installations-scoped": {
+      "file": "software-installations-scoped.json",
+      "request": "GET /api/v1/inventory/software/git/installations",
+      "params": {
+        "page_size": 50
+      },
+      "caller": "scoped to team-edge"
+    },
+    "trends-scoped": {
+      "file": "trends-scoped.json",
+      "request": "GET /api/v1/inventory/trends",
+      "params": {
+        "metric": "assets"
+      },
+      "caller": "scoped to team-edge"
+    }
+  },
+  "samples": {
+    "export-assets": {
+      "file": "export-assets.csv",
+      "request": "GET /api/v1/inventory/export",
+      "params": {
+        "dataset": "assets",
+        "tag": "team-edge"
+      },
+      "caller": "unrestricted, with inventory.export",
+      "content_type": "text/csv; charset=utf-8",
+      "note": "UTF-8 with a byte-order mark, CRLF line ends; the response also carries Content-Disposition, X-Export-Rows and, past 200,000 rows, X-Export-Truncated: true"
+    }
+  }
+}

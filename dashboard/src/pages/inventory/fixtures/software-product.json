@@ -1,0 +1,99 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "scope": {
+    "restricted": false,
+    "tags": []
+  },
+  "header": {
+    "product_key": "git",
+    "name": "Git",
+    "publisher": "Git",
+    "publisher_key": "git",
+    "category": "development",
+    "norm_status": "normalized",
+    "rule_id": "git",
+    "hosts": 19,
+    "installs": 19,
+    "version_count": 5,
+    "latest_version": "2.47.0",
+    "first_seen": "2026-07-19T12:00:00Z",
+    "last_change": "2026-10-05T07:00:00Z",
+    "mixed_schemes": true
+  },
+  "versions": [
+    {
+      "version": "2.47.0",
+      "hosts": 5,
+      "installs": 5,
+      "scheme": "semverish",
+      "rank": 1,
+      "generation": "N"
+    },
+    {
+      "version": "2.46.2",
+      "hosts": 6,
+      "installs": 6,
+      "scheme": "semverish",
+      "rank": 2,
+      "generation": "N-1"
+    },
+    {
+      "version": "2.43.0",
+      "hosts": 2,
+      "installs": 2,
+      "scheme": "semverish",
+      "rank": 3,
+      "generation": "older"
+    },
+    {
+      "version": "1:2.34.1-1ubuntu1.11",
+      "hosts": 3,
+      "installs": 3,
+      "scheme": "dpkg",
+      "rank": 1,
+      "generation": "N"
+    },
+    {
+      "version": "1:2.34.1-1ubuntu1.10",
+      "hosts": 3,
+      "installs": 3,
+      "scheme": "dpkg",
+      "rank": 2,
+      "generation": "N-1"
+    }
+  ],
+  "unversioned": {
+    "hosts": 0,
+    "installs": 0,
+    "address": "__none__"
+  },
+  "evidence": {
+    "items": [
+      {
+        "package_name": "Git",
+        "vendor": "The Git Development Community",
+        "source": "hklm",
+        "hosts": 13,
+        "installs": 13,
+        "status": "normalized",
+        "rule_id": "git"
+      },
+      {
+        "package_name": "git",
+        "vendor": "Ubuntu Developers",
+        "source": "dpkg",
+        "hosts": 6,
+        "installs": 6,
+        "status": "normalized",
+        "rule_id": "git"
+      }
+    ],
+    "total": 2,
+    "truncated": false
+  },
+  "data_status": {
+    "normalising": false,
+    "pending_software_rows": 0,
+    "pending_identity_rows": 0
+  }
+}

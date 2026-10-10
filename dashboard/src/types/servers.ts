@@ -296,6 +296,10 @@ export interface ServerSoftware {
   vendor: string | null
   install_date: string | null
   updated_at: string
+  /** The Inventory catalog's address of the product (`/inventory/software/<product_key>`); null while the row is not normalised. */
+  product_key: string | null
+  /** The normaliser's category (browser, security, ...); null while the row is not normalised. */
+  category: string | null
 }
 
 export interface ServerEventRow {
@@ -317,7 +321,10 @@ export interface ServerEventsResponse {
 export interface ServerSoftwareResponse {
   items: ServerSoftware[]
   total: number
+  /** This response was cut at its `limit`: `total` is larger than `items`. */
   truncated: boolean
+  /** The agent itself stopped at its cap (1,000 titles): the stored list is incomplete however much is requested. */
+  agent_truncated: boolean
 }
 
 export interface ServerCommand {

@@ -6,6 +6,7 @@
  *  · software). */
 
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   AlertTriangle, ArrowDownToLine, ArrowUpFromLine, CalendarClock, Clock3, Cpu, Database, Fingerprint,
@@ -14,6 +15,8 @@ import {
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn, formatBps, formatBytes, relativeTime } from '@/lib/utils'
+import { useCan } from '@/stores/auth'
+import { productPath } from '@/components/inventory/softwareModel'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -24,7 +27,7 @@ import {
 } from '@/components/servers/tables'
 import { NetworkCapturePanel } from '@/components/servers/NetworkCapture'
 import type {
-  ServerFilesystem, ServerItem, ServerNetworkInterface, ServerPhysicalDisk, ServerSoftware,
+  ServerFilesystem, ServerItem, ServerNetworkInterface, ServerPhysicalDisk, ServerSoftware, ServerSoftwareResponse,
 } from '@/types/servers'
 import {
   C, EmptyState, KeyValues, Meter, Panel, Pill, SectionHeading, Segmented, Sparkline, StatTile,
@@ -185,7 +188,7 @@ function useNetwork(id: string) {
 }
 
 function useSoftware(id: string, enabled: boolean) {
-  return useQuery<{ items: ServerSoftware[] }>({
+  return useQuery<ServerSoftwareResponse>({
     queryKey: ['servers', id, 'software'],
     queryFn: async () => (await api.get(`/servers/${id}/software`)).data,
     refetchInterval: 60_000,
@@ -818,6 +821,11 @@ function SoftwareSection({ server, swQ }: { server: ServerItem; swQ: SwQuery }) 
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const { data, isLoading, isError, error, refetch } = swQ
   const items = useMemo(() => data?.items || [], [data])
+  // Each package with a catalog key links to its Inventory product page (inventory.view); the others stay text.
+  const canInventory = useCan()('inventory.view')
+  // Two different cuts: the agent stopped listing at its cap, or this response stopped at its request limit.
+  const agentTruncated = data?.agent_truncated === true
+  const responseTruncated = data?.truncated === true
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase()
@@ -880,6 +888,26 @@ function SoftwareSection({ server, swQ }: { server: ServerItem; swQ: SwQuery }) 
         </div>
       )}
 
+      {(agentTruncated || responseTruncated) && (
+        <div role="status" className="space-y-1 rounded-lg border border-warning/35 bg-warning/10 px-3 py-2 text-xs text-warning-fg">
+          {agentTruncated && (
+            <p className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>The agent reported its first 1,000 software titles only; titles beyond that are not listed.</span>
+            </p>
+          )}
+          {responseTruncated && (
+            <p className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>
+                Showing the first {items.length.toLocaleString()} of {(data?.total ?? items.length).toLocaleString()} stored
+                packages; filtering and export cover only these.
+              </span>
+            </p>
+          )}
+        </div>
+      )}
+
       <Panel
         title="Installed software" icon={Package} flush
         subtitle={items.length ? `${filtered.length.toLocaleString()} of ${items.length.toLocaleString()} packages` : undefined}
@@ -926,7 +954,7 @@ function SoftwareSection({ server, swQ }: { server: ServerItem; swQ: SwQuery }) 
                   title={items.length ? 'No packages match this filter' : 'No software inventory yet'}
                   hint={items.length
                     ? 'Clear the filter to see the full inventory.'
-                    : 'The agent uploads software inventory with its periodic inventory snapshot (every 6 hours by default).'}
+                    : 'The Windows agent uploads the software list with its periodic inventory snapshot (every 6 hours by default). Linux servers and servers without the agent do not report software yet.'}
                   action={items.length ? (
                     <Button size="sm" variant="outline" onClick={() => { setQ(''); pager.reset() }}>Clear filter</Button>
                   ) : undefined}
@@ -937,7 +965,17 @@ function SoftwareSection({ server, swQ }: { server: ServerItem; swQ: SwQuery }) 
               return (
                 <Tr key={`${s.package_name}::${s.version || ''}`} className={rowCls}>
                   <Td className={cn(td, 'max-w-[380px] pl-4')}>
-                    <div className="truncate font-medium text-text" title={s.package_name}>{s.package_name}</div>
+                    {canInventory && s.product_key ? (
+                      <Link
+                        to={productPath(s.product_key)}
+                        className="block truncate rounded-sm font-medium text-primary underline decoration-primary/40 underline-offset-2 outline-none hover:decoration-primary focus-visible:ring-2 focus-visible:ring-primary"
+                        title={`${s.package_name} — open in the Inventory software catalog`}
+                      >
+                        {s.package_name}
+                      </Link>
+                    ) : (
+                      <div className="truncate font-medium text-text" title={s.package_name}>{s.package_name}</div>
+                    )}
                   </Td>
                   <Td className={cn(td, 'max-w-[160px]')}>
                     <div className="truncate font-mono text-xs tabular-nums text-text2" title={s.version || undefined}>{s.version || '—'}</div>

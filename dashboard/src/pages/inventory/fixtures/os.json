@@ -1,0 +1,901 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "scope": {
+    "restricted": false,
+    "tags": []
+  },
+  "kind": null,
+  "total": 145,
+  "families": [
+    {
+      "family": "windows",
+      "label": "Windows",
+      "count": 46,
+      "products": [
+        {
+          "product": "Windows Server",
+          "count": 41,
+          "releases": [
+            {
+              "release": "2022",
+              "count": 18,
+              "latest_version": "10.0.20348.2700",
+              "distinct_versions": 3,
+              "currency": {
+                "latest": 9,
+                "previous": 6,
+                "older": 3,
+                "unknown": 0,
+                "latest_version": "10.0.20348.2700",
+                "previous_version": "10.0.20348.2402"
+              },
+              "versions": [
+                {
+                  "version": "10.0.20348.2700",
+                  "count": 9,
+                  "raw_example": null
+                },
+                {
+                  "version": "10.0.20348.2402",
+                  "count": 6,
+                  "raw_example": null
+                },
+                {
+                  "version": "10.0.20348.587",
+                  "count": 3,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "2019",
+              "count": 14,
+              "latest_version": "10.0.17763.6293",
+              "distinct_versions": 3,
+              "currency": {
+                "latest": 4,
+                "previous": 7,
+                "older": 3,
+                "unknown": 0,
+                "latest_version": "10.0.17763.6293",
+                "previous_version": "10.0.17763.6189"
+              },
+              "versions": [
+                {
+                  "version": "10.0.17763.6293",
+                  "count": 4,
+                  "raw_example": null
+                },
+                {
+                  "version": "10.0.17763.6189",
+                  "count": 7,
+                  "raw_example": null
+                },
+                {
+                  "version": "10.0.17763.5696",
+                  "count": 3,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "2016",
+              "count": 9,
+              "latest_version": "10.0.14393.7159",
+              "distinct_versions": 2,
+              "currency": {
+                "latest": 4,
+                "previous": 5,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "10.0.14393.7159",
+                "previous_version": "10.0.14393.6709"
+              },
+              "versions": [
+                {
+                  "version": "10.0.14393.7159",
+                  "count": 4,
+                  "raw_example": null
+                },
+                {
+                  "version": "10.0.14393.6709",
+                  "count": 5,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "product": "Windows 10",
+          "count": 3,
+          "releases": [
+            {
+              "release": "22H2",
+              "count": 3,
+              "latest_version": "10.0.19045.4529",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 3,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "10.0.19045.4529",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "10.0.19045.4529",
+                  "count": 3,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "product": "Windows 11",
+          "count": 2,
+          "releases": [
+            {
+              "release": "23H2",
+              "count": 2,
+              "latest_version": "10.0.22631.4317",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 2,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "10.0.22631.4317",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "10.0.22631.4317",
+                  "count": 2,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "ios-xe",
+      "label": "IOS XE",
+      "count": 18,
+      "products": [
+        {
+          "product": "IOS XE",
+          "count": 18,
+          "releases": [
+            {
+              "release": "17.12",
+              "count": 3,
+              "latest_version": "17.12.3",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 3,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "17.12.3",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "17.12.3",
+                  "count": 3,
+                  "raw_example": "17.12.03"
+                }
+              ]
+            },
+            {
+              "release": "17.9",
+              "count": 8,
+              "latest_version": "17.9.4a",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 8,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "17.9.4a",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "17.9.4a",
+                  "count": 8,
+                  "raw_example": "17.09.04a"
+                }
+              ]
+            },
+            {
+              "release": "17.6",
+              "count": 3,
+              "latest_version": "17.6.4",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 3,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "17.6.4",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "17.6.4",
+                  "count": 3,
+                  "raw_example": "17.06.04"
+                }
+              ]
+            },
+            {
+              "release": "17.3",
+              "count": 3,
+              "latest_version": "17.3.5",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 3,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "17.3.5",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "17.3.5",
+                  "count": 3,
+                  "raw_example": "17.03.05"
+                }
+              ]
+            },
+            {
+              "release": null,
+              "count": 1,
+              "latest_version": null,
+              "distinct_versions": 0,
+              "currency": null,
+              "versions": [
+                {
+                  "version": null,
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "fortios",
+      "label": "FortiOS",
+      "count": 14,
+      "products": [
+        {
+          "product": "FortiOS",
+          "count": 14,
+          "releases": [
+            {
+              "release": "7.4",
+              "count": 4,
+              "latest_version": "7.4.4",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 4,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "7.4.4",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "7.4.4",
+                  "count": 4,
+                  "raw_example": "v7.4.4,build2662,240614 (GA.M)"
+                }
+              ]
+            },
+            {
+              "release": "7.2",
+              "count": 7,
+              "latest_version": "7.2.8",
+              "distinct_versions": 2,
+              "currency": {
+                "latest": 5,
+                "previous": 2,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "7.2.8",
+                "previous_version": "7.2.5"
+              },
+              "versions": [
+                {
+                  "version": "7.2.8",
+                  "count": 5,
+                  "raw_example": "v7.2.8,build1639,240614 (GA.M)"
+                },
+                {
+                  "version": "7.2.5",
+                  "count": 2,
+                  "raw_example": "v7.2.5,build1517,230606 (GA.F)"
+                }
+              ]
+            },
+            {
+              "release": "6.4",
+              "count": 2,
+              "latest_version": "6.4.14",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 2,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "6.4.14",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "6.4.14",
+                  "count": 2,
+                  "raw_example": "v6.4.14,build2093,231206 (GA)"
+                }
+              ]
+            },
+            {
+              "release": null,
+              "count": 1,
+              "latest_version": null,
+              "distinct_versions": 0,
+              "currency": null,
+              "versions": [
+                {
+                  "version": null,
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "aos-cx",
+      "label": "AOS-CX",
+      "count": 10,
+      "products": [
+        {
+          "product": "AOS-CX",
+          "count": 10,
+          "releases": [
+            {
+              "release": "10.13",
+              "count": 5,
+              "latest_version": "10.13.1010",
+              "distinct_versions": 2,
+              "currency": {
+                "latest": 1,
+                "previous": 4,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "10.13.1010",
+                "previous_version": "10.13.1000"
+              },
+              "versions": [
+                {
+                  "version": "10.13.1010",
+                  "count": 1,
+                  "raw_example": null
+                },
+                {
+                  "version": "10.13.1000",
+                  "count": 4,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "10.12",
+              "count": 2,
+              "latest_version": "10.12.1010",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 2,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "10.12.1010",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "10.12.1010",
+                  "count": 2,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "10.10",
+              "count": 2,
+              "latest_version": "10.10.1100",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 2,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "10.10.1100",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "10.10.1100",
+                  "count": 2,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": null,
+              "count": 1,
+              "latest_version": null,
+              "distinct_versions": 0,
+              "currency": null,
+              "versions": [
+                {
+                  "version": null,
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "junos",
+      "label": "Junos",
+      "count": 8,
+      "products": [
+        {
+          "product": "Junos OS",
+          "count": 8,
+          "releases": [
+            {
+              "release": "22.2",
+              "count": 2,
+              "latest_version": "22.2R3-S3.4",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 2,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "22.2R3-S3.4",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "22.2R3-S3.4",
+                  "count": 2,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "21.4",
+              "count": 4,
+              "latest_version": "21.4R3-S7.3",
+              "distinct_versions": 2,
+              "currency": {
+                "latest": 1,
+                "previous": 3,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "21.4R3-S7.3",
+                "previous_version": "21.4R3-S5.4"
+              },
+              "versions": [
+                {
+                  "version": "21.4R3-S7.3",
+                  "count": 1,
+                  "raw_example": null
+                },
+                {
+                  "version": "21.4R3-S5.4",
+                  "count": 3,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "20.4",
+              "count": 2,
+              "latest_version": "20.4R3-S9.2",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 2,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "20.4R3-S9.2",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "20.4R3-S9.2",
+                  "count": 2,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "panos",
+      "label": "PAN-OS",
+      "count": 8,
+      "products": [
+        {
+          "product": "PAN-OS",
+          "count": 8,
+          "releases": [
+            {
+              "release": "11.1",
+              "count": 3,
+              "latest_version": "11.1.4-h7",
+              "distinct_versions": 2,
+              "currency": {
+                "latest": 2,
+                "previous": 1,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "11.1.4-h7",
+                "previous_version": "11.1.2-h3"
+              },
+              "versions": [
+                {
+                  "version": "11.1.4-h7",
+                  "count": 2,
+                  "raw_example": null
+                },
+                {
+                  "version": "11.1.2-h3",
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "10.2",
+              "count": 5,
+              "latest_version": "10.2.7-h3",
+              "distinct_versions": 2,
+              "currency": {
+                "latest": 4,
+                "previous": 1,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "10.2.7-h3",
+                "previous_version": "10.2.3-h4"
+              },
+              "versions": [
+                {
+                  "version": "10.2.7-h3",
+                  "count": 4,
+                  "raw_example": null
+                },
+                {
+                  "version": "10.2.3-h4",
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "ios",
+      "label": "IOS",
+      "count": 6,
+      "products": [
+        {
+          "product": "IOS",
+          "count": 6,
+          "releases": [
+            {
+              "release": "15.2",
+              "count": 6,
+              "latest_version": "15.2(7)E10",
+              "distinct_versions": 3,
+              "currency": {
+                "latest": 1,
+                "previous": 3,
+                "older": 2,
+                "unknown": 0,
+                "latest_version": "15.2(7)E10",
+                "previous_version": "15.2(7)E8"
+              },
+              "versions": [
+                {
+                  "version": "15.2(7)E10",
+                  "count": 1,
+                  "raw_example": null
+                },
+                {
+                  "version": "15.2(7)E8",
+                  "count": 3,
+                  "raw_example": null
+                },
+                {
+                  "version": "15.2(4)E10",
+                  "count": 2,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "linux",
+      "label": "Linux",
+      "count": 6,
+      "products": [
+        {
+          "product": "Ubuntu",
+          "count": 4,
+          "releases": [
+            {
+              "release": "22.04",
+              "count": 4,
+              "latest_version": "22.04.4",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 4,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "22.04.4",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "22.04.4",
+                  "count": 4,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "product": "RHEL",
+          "count": 2,
+          "releases": [
+            {
+              "release": "9",
+              "count": 2,
+              "latest_version": "9.4",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 2,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "9.4",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "9.4",
+                  "count": 2,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "nx-os",
+      "label": "NX-OS",
+      "count": 4,
+      "products": [
+        {
+          "product": "NX-OS",
+          "count": 4,
+          "releases": [
+            {
+              "release": "10.2",
+              "count": 1,
+              "latest_version": null,
+              "distinct_versions": 1,
+              "currency": null,
+              "versions": [
+                {
+                  "version": "10.2(5)",
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "9.3",
+              "count": 3,
+              "latest_version": null,
+              "distinct_versions": 2,
+              "currency": null,
+              "versions": [
+                {
+                  "version": "9.3(12)",
+                  "count": 2,
+                  "raw_example": null
+                },
+                {
+                  "version": "9.3(10)",
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "other",
+      "label": "Other",
+      "count": 4,
+      "products": [
+        {
+          "product": null,
+          "count": 4,
+          "releases": [
+            {
+              "release": null,
+              "count": 4,
+              "latest_version": "6.5.59",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 4,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "6.5.59",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "6.5.59",
+                  "count": 4,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "tmos",
+      "label": "TMOS",
+      "count": 4,
+      "products": [
+        {
+          "product": "TMOS",
+          "count": 4,
+          "releases": [
+            {
+              "release": "17.1",
+              "count": 2,
+              "latest_version": "17.1.1.3",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 2,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "17.1.1.3",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "17.1.1.3",
+                  "count": 2,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "16.1",
+              "count": 1,
+              "latest_version": "16.1.4.1",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 1,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "16.1.4.1",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "16.1.4.1",
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            },
+            {
+              "release": "15.1",
+              "count": 1,
+              "latest_version": "15.1.10.4",
+              "distinct_versions": 1,
+              "currency": {
+                "latest": 1,
+                "previous": 0,
+                "older": 0,
+                "unknown": 0,
+                "latest_version": "15.1.10.4",
+                "previous_version": null
+              },
+              "versions": [
+                {
+                  "version": "15.1.10.4",
+                  "count": 1,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "family": "unknown",
+      "label": "Unknown",
+      "count": 17,
+      "products": [
+        {
+          "product": null,
+          "count": 17,
+          "releases": [
+            {
+              "release": null,
+              "count": 17,
+              "latest_version": null,
+              "distinct_versions": 0,
+              "currency": null,
+              "versions": [
+                {
+                  "version": null,
+                  "count": 17,
+                  "raw_example": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
