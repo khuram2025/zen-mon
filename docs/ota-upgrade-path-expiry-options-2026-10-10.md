@@ -1,5 +1,7 @@
 # OTA upgrade-path expiry: why no rollout can be created, and the options
 
+> **Decision (2026-10-10): option A.** The owner confirmed that no appliance is older than 1.23.9, so the guard now judges the path from the supported floor (PR #46). 1.24.0 is promoted unchanged once that guard is deployed on the portal. The rest of this document is the analysis that led to the decision.
+
 Written 2026-10-10 while releasing 1.24.0. This is a decision document. It changes nothing on the Zentryc portal, in the release builder or in the release policy.
 
 ## What happened
