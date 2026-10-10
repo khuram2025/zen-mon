@@ -204,6 +204,13 @@ def test_live_cache_matches_uncached_census_and_refreshes_late_data_and_mutation
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("completed,expected", [(100, None), (200, 300.0), (201, 300.0), (None, None), (True, None)])
+def test_shared_schedule_preserves_startup_check_and_then_defers_duplicate_workers(monkeypatch, completed, expected):
+    monkeypatch.setattr(nr, 'SWEEP_PROCESS_STARTED_AT', 200)
+    saved = {'census': {'format':1}, 'completed_at':completed, 'next_due':600}
+    assert nr._scheduled_wait(saved, 300) == expected
+
+
 PG_URL = os.environ.get('NETFLOW_TEST_PG_URL')
 
 

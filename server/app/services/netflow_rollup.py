@@ -123,6 +123,7 @@ HEALER_MAX_THREADS = 4
 NETFLOW_ROLLUP_ADVISORY_LOCK = 1515074392
 NETFLOW_SWEEP_ADVISORY_LOCK = 1515074393
 CENSUS_SETTINGS_KEY = "netflow_rollup_census"
+SWEEP_PROCESS_STARTED_AT = time.time()
 REPAIR_SETTINGS_KEY = "netflow_rollup_repair"
 
 
@@ -1264,6 +1265,18 @@ class _SweepLease:
         await asyncio.shield(self._release())
 
 
+def _scheduled_wait(saved: dict, now: int) -> float | None:
+    """A completion from before this worker started cannot defer startup checks."""
+    stored = saved.get("census")
+    due = saved.get("next_due", 0)
+    completed = saved.get("completed_at", 0)
+    valid = isinstance(stored, dict) and stored.get("format") == CENSUS_FORMAT
+    if (valid and type(completed) in (int, float) and completed >= SWEEP_PROCESS_STARTED_AT
+            and type(due) in (int, float) and now < due <= now + SWEEP_INTERVAL_S):
+        return max(float(MUTATION_RECHECK_S), due - now)
+    return None
+
+
 async def coordinated_sweep(t: ChTarget = DEFAULT_TARGET) -> float:
     """Single appliance-wide pass with durable cache and next-due scheduling.
 
@@ -1280,14 +1293,12 @@ async def coordinated_sweep(t: ChTarget = DEFAULT_TARGET) -> float:
         )).scalar()
         saved = saved if isinstance(saved, dict) else {}
         stored = saved.get("census")
-        now = _now_s()
-        due = saved.get("next_due", 0)
-        valid = isinstance(stored, dict) and stored.get("format") == CENSUS_FORMAT
-        if valid and type(due) in (int, float) and now < due <= now + SWEEP_INTERVAL_S:
-            return max(float(MUTATION_RECHECK_S), due - now)
+        wait = _scheduled_wait(saved, _now_s())
+        if wait is not None:
+            return wait
         cache = _raw_cache(t, stored)
         delay = await sweep_once(t, cache)
-        state = {"next_due": _now_s() + delay, "census": cache.export()}
+        state = {"next_due": _now_s() + delay, "completed_at": time.time(), "census": cache.export()}
         await lease.connection.execute(
             text("INSERT INTO system_settings (key, value) VALUES (:k, CAST(:v AS jsonb)) "
                  "ON CONFLICT (key) DO UPDATE SET value = CAST(EXCLUDED.value AS jsonb), updated_at = NOW()"),

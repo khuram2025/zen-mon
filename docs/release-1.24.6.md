@@ -1,6 +1,6 @@
 # Release 1.24.6
 
-Flow-history reconciliation now shares a completion schedule across API workers, preventing repeated simultaneous scans of the same history. A session advisory lock coordinates the census while the existing short per-hour locks continue to protect repairs. Failed passes retry shortly without publishing a successful completion.
+Flow-history reconciliation now shares a completion schedule across API workers, preventing repeated simultaneous scans of the same history. A session advisory lock coordinates the census while the existing short per-hour locks continue to protect repairs. Failed passes retry shortly without publishing a successful completion. Startup checks still run after a worker restart or restore; a completion from before that worker started cannot defer them.
 
 An exact census cache reuses unchanged raw-data partitions. Inserts, merges, mutations, partition deletion/replacement, or schema changes invalidate affected results. Changed partitions are queried in bounded batches, and partitions changing during measurement are checked again before their results can be cached. The stored cache is capped at 2 MiB; evicting an entry causes a later rescan. Reuse includes the oldest-record and sampling-repair checks, removing their repeated raw scans as well.
 
