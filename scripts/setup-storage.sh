@@ -116,15 +116,18 @@ log "Journal capped at 1 GiB with 4 GiB kept free"
 # Size ceiling for rsyslog files where rsyslog is installed. Edit its own
 # stanza: a second stanza for the same files makes logrotate reject both.
 if [ -f /etc/logrotate.d/rsyslog ] && ! grep -q 'maxsize' /etc/logrotate.d/rsyslog; then
-    cp /etc/logrotate.d/rsyslog /etc/logrotate.d/.rsyslog.zenplus-bak
+    # A backup inside logrotate.d is itself included (even with a dot prefix),
+    # so validation would reject duplicate log declarations and undo the cap.
+    rsyslog_backup=$(mktemp /var/tmp/zenplus-rsyslog.XXXXXX)
+    cp -p /etc/logrotate.d/rsyslog "$rsyslog_backup"
     sed -i -E 's/^([[:space:]]*)rotate ([0-9]+)/\1rotate \2\n\1maxsize 500M/' /etc/logrotate.d/rsyslog
     # Validate in the installed global context: Ubuntu defines `su root adm`
     # in logrotate.conf. Checking the snippet alone incorrectly rejects /var/log.
     if logrotate -d /etc/logrotate.conf >/dev/null 2>&1; then
         log "rsyslog files rotate at 500 MiB"
-        rm -f /etc/logrotate.d/.rsyslog.zenplus-bak
+        rm -f "$rsyslog_backup"
     else
-        mv /etc/logrotate.d/.rsyslog.zenplus-bak /etc/logrotate.d/rsyslog
+        mv "$rsyslog_backup" /etc/logrotate.d/rsyslog
         warn "logrotate rejected the size ceiling — rsyslog rotation left unchanged"
     fi
 fi
