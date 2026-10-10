@@ -1229,9 +1229,10 @@ async def post_results(
         )
     except TimeoutError as exc:
         # The ledger claim is part of this transaction, so rollback makes the
-        # same batch id immediately claimable. A ClickHouse worker thread may
-        # finish after cancellation; its stable deduplication token makes the
-        # subsequent replay harmless.
+        # same batch id immediately claimable. The shielded group-commit write
+        # may finish after cancellation; a replay reaching this worker joins
+        # that write instead of inserting again (host_insert_batcher), and a
+        # single-upload batch keeps its stable per-upload deduplication token.
         await db.rollback()
         logger.warning(
             "host-results ingest deadline exceeded agent=%s batch=%s timeout_s=%s",

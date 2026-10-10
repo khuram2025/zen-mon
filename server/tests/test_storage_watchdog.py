@@ -264,9 +264,10 @@ def env(tmp_path, monkeypatch):
     disk = FakeDisk(90, 10)
     ch = FakeClickHouse(PARTITIONS, disk, lambda: clock["t"])
 
-    def make():
-        return W.Watchdog(sampler=lambda: disk.sample(clock["t"]),
-                          client_factory=lambda: ch, clock=lambda: clock["t"])
+    def make(ch_device=1, sampler=None):
+        return W.Watchdog(sampler=sampler or (lambda: disk.sample(clock["t"])),
+                          client_factory=lambda: ch, clock=lambda: clock["t"],
+                          ch_device=lambda: ch_device)
     return W, make, clock, disk, ch, tmp_path
 
 
@@ -426,3 +427,43 @@ def test_monitoring_history_is_last_resort_above_95_percent(env):
     disk.used, disk.avail = int(96 * GIB), int(4 * GIB)
     make().tick()
     assert "ALTER TABLE zenplus.flow_records DROP PARTITION ID '20260901'" in ch.commands
+
+
+def test_full_separate_root_never_costs_monitoring_data(env):
+    W, make, clock, disk, ch, tmp = env
+    # / is its own filesystem (device 2), full of OS files; ClickHouse lives on /data (device 1).
+    root = P.FsSample("/", 2, 55 * GIB, 49 * GIB, int(0.5 * GIB))
+    data = P.FsSample("/data", 1, 105 * GIB, 20 * GIB, 80 * GIB)
+    dog = make(ch_device=1, sampler=lambda: [root, data])
+    for _ in range(4):
+        state = dog.tick()
+        clock["t"] += 20 * 60
+    assert not any("ALTER TABLE zenplus" in c for c in ch.commands)
+    assert state["ingest_paused"] is False          # pausing telemetry cannot help /
+    root_eval = next(f for f in state["filesystems"] if f["mount"] == "/")
+    assert root_eval["exhausted"] is True and root_eval["holds_clickhouse"] is False
+
+
+def test_pause_marker_survives_a_full_disk(env, monkeypatch):
+    W, make, clock, disk, ch, tmp = env
+    real_open = open
+
+    def enospc_on_marker(path, mode="r", *a, **k):
+        if str(path).endswith("ingest-paused") and "w" in mode:
+            raise OSError(28, "No space left on device")
+        return real_open(path, mode, *a, **k)
+    monkeypatch.setattr("builtins.open", enospc_on_marker)
+    ch.down = True
+    disk.used, disk.avail = int(99 * GIB), int(1 * GIB)
+    state = make().tick()
+    assert (tmp / "ingest-paused").exists()          # empty-file fallback
+    assert state["ingest_paused"] is True
+
+
+def test_growth_need_accounts_for_pending_reclamation():
+    rate = 8 * GIB / 3600
+    p = P.evaluate_pressure(fs(60, 40), P.DEFAULT_POLICY, 60 * GIB, rate)
+    # With 60 GiB about to return the runway is long enough: no more shedding.
+    assert p.state == "ok"
+    p = P.evaluate_pressure(fs(60, 30), P.DEFAULT_POLICY, 5 * GIB, rate)
+    assert p.state == "growth" and p.need_bytes == int(rate * 6 * 3600) - 5 * GIB

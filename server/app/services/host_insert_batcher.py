@@ -14,11 +14,14 @@ and the agent replays from its spool.
 
 Retry identity: a batch of one upload keeps that upload's own deduplication
 token, exactly as before. A combined batch gets a token derived from its
-members and is retried with that same token, so ClickHouse deduplicates a
-retry of a block that did land. If the outcome is still unknown after the
-retries, the batcher checks whether the block's rows are present before
-failing its members, so a lost response does not make every member replay
-data that is already stored.
+members and is retried, for up to RETRY_WINDOW_S, as the identical block with
+that token, so ClickHouse deduplicates a retry of a block that did land. If
+the outcome is still unknown after that, each upload is acknowledged only
+when all of its rows are verified stored; the rest replay from their spools.
+Residual window: a combined block that landed but could neither be confirmed
+nor verified (ClickHouse unreachable) can be stored twice when its uploads
+replay under their own tokens, as can an upload replayed to another worker
+while its first write is still in flight.
 """
 
 from __future__ import annotations
@@ -28,16 +31,20 @@ import hashlib
 import logging
 import os
 import threading
+import time
 import weakref
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("zenplus.host_insert_batcher")
 
 MAX_ROWS = int(os.environ.get("HOST_INSERT_BATCH_MAX_ROWS", "20000"))
 MAX_DELAY_S = float(os.environ.get("HOST_INSERT_BATCH_DELAY_S", "1.0"))
-RETRIES = 2
+# Retry the identical block for this long before failing its uploads; the
+# host-results endpoint gives up after 20 s (HOST_RESULTS_INGEST_TIMEOUT_S).
+RETRY_WINDOW_S = float(os.environ.get("HOST_INSERT_RETRY_WINDOW_S", "12"))
 # How long a written upload token is remembered for replay detection.
 RECENT_TOKEN_S = 600.0
 
@@ -86,17 +93,35 @@ def insert_rows(client, table: str, columns: list[str], rows: list[list], token:
             raise
 
 
+def _ts_literal(value: Any) -> str:
+    """DateTime64(3) literal in UTC with milliseconds (the driver drops them)."""
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    return str(value)
+
+
 def rows_present(client, table: str, columns: list[str], rows: list[list]) -> bool:
-    """Whether one upload's rows are stored (probe its first row)."""
+    """Whether ALL of one upload's rows are stored (after an unknown outcome).
+
+    Counts stored rows matching the upload's (agent_id, timestamp) keys; a
+    partially stored upload (e.g. an insert spanning partitions that failed
+    half-way) is not acknowledged and replays.
+    """
     if "agent_id" not in columns or "timestamp" not in columns or not rows:
         return False
     ai, ti = columns.index("agent_id"), columns.index("timestamp")
-    probe = rows[0]
+    agents = {r[ai] for r in rows}
+    if len(agents) != 1:
+        return False
+    stamps = sorted({_ts_literal(r[ti]) for r in rows})
     result = client.query(
-        f"SELECT count() FROM {table} WHERE agent_id = %(a)s AND timestamp = %(t)s",
-        parameters={"a": probe[ai], "t": probe[ti]},
+        f"SELECT count() FROM {table} WHERE agent_id = %(a)s "
+        "AND timestamp IN (SELECT toDateTime64(arrayJoin(%(ts)s), 3, 'UTC'))",
+        parameters={"a": next(iter(agents)), "ts": stamps},
     ).result_rows
-    return bool(result and result[0][0])
+    return bool(result) and int(result[0][0]) >= len(rows)
 
 
 # ─── Batcher ─────────────────────────────────────────────────────────────────
@@ -219,14 +244,26 @@ class HostInsertBatcher:
                 m.future.set_exception(error)
 
     def _write(self, table: str, columns: list[str], rows: list[list], token: str) -> None:
-        """Insert, retrying the identical block with the same token."""
+        """Insert, retrying the identical block with the same token.
+
+        Retrying the same block is what keeps a combined batch idempotent: if an
+        earlier attempt landed, ClickHouse deduplicates the retry by token.
+        Members only fail (and replay under their own tokens) after the retry
+        window, which stays inside the HTTP ingest deadline.
+        """
         last: Optional[Exception] = None
-        for _attempt in range(1 + RETRIES):
+        deadline = time.monotonic() + RETRY_WINDOW_S
+        delay = 0.25
+        while True:
             try:
                 insert_rows(self.client_factory(), table, columns, rows, token)
                 return
             except Exception as exc:
                 last = exc
+            if time.monotonic() + delay > deadline:
+                break
+            time.sleep(delay)
+            delay = min(delay * 2, 4.0)
         raise last  # type: ignore[misc]
 
     def _stored_members(self, batch: _Batch) -> set[int]:

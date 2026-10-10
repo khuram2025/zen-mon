@@ -267,7 +267,7 @@ def evaluate_pressure(fs: FsSample, policy: dict, pending_bytes: int,
     reasons: list[str] = []
     runway = None
     if rate_bps and rate_bps > 0:
-        runway = fs.avail_bytes / rate_bps / 3600
+        runway = avail / rate_bps / 3600      # includes space about to return
     rate_h = rate_bps * 3600 if rate_bps is not None else None
 
     need = 0
@@ -293,7 +293,7 @@ def evaluate_pressure(fs: FsSample, policy: dict, pending_bytes: int,
         # Fast growth below the thresholds: shed diagnostics only, never
         # monitoring history.
         reasons.append(f"projected full in {runway:.1f} h")
-        need = int(rate_bps * policy["runway_hours"] * 3600)
+        need = max(0, int(rate_bps * policy["runway_hours"] * 3600) - pending_bytes)
         return Pressure("growth", need, ("legacy", "diagnostic"), reasons, runway, rate_h)
     return Pressure("ok", 0, (), [], runway, rate_h)
 

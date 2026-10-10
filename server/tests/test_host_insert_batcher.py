@@ -27,8 +27,9 @@ class FakeClickHouse:
             self.describes += 1
             return self._R([["server_id", "String"], ["agent_id", "String"],
                             ["timestamp", "DateTime64(3)"], ["v", "Float64"]])
-        a, t = parameters["a"], parameters["t"]
-        return self._R([[sum(1 for r in self.stored if r[1] == a and r[2] == t)]])
+        assert "toDateTime64" in sql and "'UTC'" in sql
+        a, ts = parameters["a"], set(parameters["ts"])
+        return self._R([[sum(1 for r in self.stored if r[1] == a and B._ts_literal(r[2]) in ts)]])
 
     def insert(self, table, rows, column_names=None, column_type_names=None, settings=None):
         assert column_type_names, "column types must be passed (no per-insert DESCRIBE)"
@@ -51,7 +52,8 @@ def row(agent, i=0):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_type_cache():
+def _fresh_type_cache(monkeypatch):
+    monkeypatch.setattr(B, "RETRY_WINDOW_S", 0.3)
     B._column_types.clear()
     yield
     B._column_types.clear()
@@ -217,3 +219,25 @@ def test_schema_change_is_described_again(monkeypatch):
     monkeypatch.setattr(B, "column_type_names", stale_then_real)
     B.insert_rows(ch, "t", COLS, [row("a")], "tok")
     assert len(ch.inserts) == 1 and ch.describes == 1
+
+
+def test_verification_uses_milliseconds_and_all_rows():
+    # Clock-skew correction leaves sub-second timestamps; the probe must match them.
+    ms = TS.replace(microsecond=123000)
+    assert B._ts_literal(ms) == "2026-10-10 00:00:00.123"
+    ch = FakeClickHouse()
+    ch.stored.append(("srv", "a", ms, 1.0))
+    assert B.rows_present(ch, "t", COLS, [["srv", "a", ms, 1.0]])
+    # Only one of two rows stored (an insert that failed half-way): not acknowledged.
+    assert not B.rows_present(ch, "t", COLS, [["srv", "a", ms, 1.0], ["srv", "a", TS, 2.0]])
+
+
+def test_identical_block_is_retried_through_a_longer_outage():
+    ch = FakeClickHouse(fail_times=3)        # more than the old 2 retries
+
+    async def main():
+        b = B.HostInsertBatcher(lambda: ch, max_delay_s=0.01)
+        await asyncio.gather(*(b.insert("t", COLS, [row(f"a{i}")], f"tok{i}") for i in range(3)))
+    B.RETRY_WINDOW_S = 5
+    run(main())
+    assert len(ch.inserts) == 1 and len(ch.stored) == 3

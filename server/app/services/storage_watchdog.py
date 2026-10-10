@@ -118,6 +118,23 @@ def sample_filesystems() -> list[P.FsSample]:
     return P.dedupe_filesystems(out)
 
 
+CLICKHOUSE_DATA_PATHS = ("/data/clickhouse", "/data", "/var/lib/clickhouse")
+
+
+def clickhouse_device() -> Optional[int]:
+    """Device of the filesystem holding ClickHouse data.
+
+    Deleting ClickHouse data only frees space there: a full separate root
+    filesystem must never cost monitoring history on /data.
+    """
+    for path in CLICKHOUSE_DATA_PATHS:
+        try:
+            return os.stat(path).st_dev
+        except OSError:
+            continue
+    return None
+
+
 def clickhouse_client():
     import clickhouse_connect
 
@@ -185,8 +202,10 @@ class Watchdog:
     def __init__(self,
                  sampler: Callable[[], list[P.FsSample]] = sample_filesystems,
                  client_factory: Callable[[], Any] = clickhouse_client,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 ch_device: Callable[[], Optional[int]] = clickhouse_device):
         self.sampler = sampler
+        self.ch_device = ch_device
         self.client_factory = client_factory
         self.clock = clock
         self._client = None
@@ -299,7 +318,8 @@ class Watchdog:
                          "partition_id": c.partition_id, "bytes": c.bytes,
                          "newest": c.newest.isoformat() if c.newest else None})
             if not c.reclaims_immediately:
-                self.pending.append({"at": now, "bytes": c.bytes, "pass_id": pass_id})
+                self.pending.append({"at": now, "bytes": c.bytes, "pass_id": pass_id,
+                                     "device": str(fs.device) if fs else None})
         record = {"pass_id": pass_id, "reason": reason, "actions": done, "errors": errors,
                   "scheduled_bytes": scheduled,
                   "avail_before": fs.avail_bytes if fs else None,
@@ -313,19 +333,41 @@ class Watchdog:
         return record
 
     def _set_paused(self, paused: bool, reason: str, now: float) -> None:
-        if paused == self.paused:
+        """Create/remove the pause marker; the in-memory flag follows the file.
+
+        The marker is needed exactly when the disk is (nearly) full: write it
+        before flipping the flag, and fall back to an empty file, which needs
+        an inode but no data block, if writing its contents fails.
+        """
+        if paused == self.paused and paused == os.path.exists(_path("ingest-paused")):
             return
-        self.paused = paused
+        marker = _path("ingest-paused")
         if paused:
-            with open(_path("ingest-paused"), "w", encoding="utf-8") as f:
-                json.dump({"since": now, "reason": reason}, f)
-            os.chmod(_path("ingest-paused"), 0o644)
-            append_audit("watchdog_ingest_paused", {"reason": reason}, now)
+            try:
+                with open(marker, "w", encoding="utf-8") as f:
+                    json.dump({"since": now, "reason": reason}, f)
+            except OSError:
+                try:
+                    os.close(os.open(marker, os.O_CREAT | os.O_WRONLY, 0o644))
+                except OSError:
+                    logger.exception("cannot create the ingest pause marker")
+                    return
+            try:
+                os.chmod(marker, 0o644)
+            except OSError:
+                pass
+            if not self.paused:
+                self.paused = True
+                append_audit("watchdog_ingest_paused", {"reason": reason}, now)
         else:
             try:
-                os.unlink(_path("ingest-paused"))
+                os.unlink(marker)
             except FileNotFoundError:
                 pass
+            except OSError:
+                logger.exception("cannot remove the ingest pause marker")
+                return
+            self.paused = False
             append_audit("watchdog_ingest_resumed", {"reason": reason}, now)
 
     def tick(self) -> dict:
@@ -346,13 +388,29 @@ class Watchdog:
 
         evaluations = []
         worst = "ok"
+        try:
+            ch_dev = self.ch_device()
+        except OSError:
+            ch_dev = None
         for fs in fss:
-            pending = P.pending_bytes(self.pending, now)
+            pending = P.pending_bytes(
+                [p for p in self.pending if p.get("device") in (None, str(fs.device))], now)
             rate = P.growth_rate([tuple(s) for s in self.samples.get(str(fs.device), [])])
             pressure = P.evaluate_pressure(fs, policy, pending, rate)
             plan: list[P.Candidate] = []
             exhausted = False
-            if pressure.need_bytes > 0 and policy["enabled"]:
+            holds_clickhouse = ch_dev is None or fs.device == ch_dev
+            if pressure.need_bytes > 0 and not holds_clickhouse:
+                # Nothing ZenPlus can delete lives here (e.g. a separate root
+                # filesystem full of OS files): report, never purge /data.
+                exhausted = True
+                self._event_once(f"foreign:{fs.device}", "watchdog_exhausted", {
+                    "mount": fs.mount, "usage_pct": fs.usage_pct,
+                    "need_bytes": pressure.need_bytes, "reasons": pressure.reasons,
+                    "note": "this filesystem does not hold monitoring data; free space "
+                            "here by removing other files or expanding it",
+                }, now)
+            elif pressure.need_bytes > 0 and policy["enabled"]:
                 try:
                     candidates = P.build_candidates(self._ch(ch_partitions), today, policy)
                     allow_app = P.application_allowed(candidates, pressure, fs.usage_pct)
@@ -377,7 +435,9 @@ class Watchdog:
                         }, now)
                 except Exception as exc:
                     error = f"ClickHouse: {str(exc)[:300]}"
-            if pressure.state == "critical" and (exhausted or error or not policy["enabled"]):
+            # Pausing telemetry only helps the filesystem it is written to.
+            if holds_clickhouse and pressure.state == "critical" and (
+                    exhausted or error or not policy["enabled"]):
                 self._set_paused(True, f"{fs.mount}: {', '.join(pressure.reasons)}", now)
             evaluations.append({
                 "mount": fs.mount, "device": fs.device, "total_bytes": fs.total_bytes,
@@ -388,13 +448,16 @@ class Watchdog:
                 "runway_hours": pressure.runway_hours,
                 "growth_bytes_per_hour": pressure.rate_bytes_per_hour,
                 "exhausted": exhausted, "planned_actions": len(plan),
+                "holds_clickhouse": holds_clickhouse,
             })
             if STATE_RANK[pressure.state] > STATE_RANK[worst]:
                 worst = pressure.state
 
         # Resume only with margin above the free-space floor (hysteresis).
-        if self.paused and worst in ("ok", "growth") and all(
-                e["avail_bytes"] >= policy["min_free_gib"] * P.GIB for e in evaluations):
+        ch_evals = [e for e in evaluations if e["holds_clickhouse"]]
+        if self.paused and ch_evals and all(
+                e["state"] in ("ok", "growth") and e["avail_bytes"] >= policy["min_free_gib"] * P.GIB
+                for e in ch_evals):
             self._set_paused(False, "free space recovered", now)
 
         if error:
@@ -410,6 +473,7 @@ class Watchdog:
             "state": worst,
             "filesystems": evaluations,
             "pending_bytes": P.pending_bytes(self.pending, now),
+            "clickhouse_device": ch_dev,
             "pending": self.pending,
             "open_passes": self.passes,
             "last_pass": self.last_pass,
@@ -421,7 +485,11 @@ class Watchdog:
             "table_snapshots": self.snapshots,
             "last_event_at": self.last_event_at,
         }
-        _atomic_write("state.json", state)
+        try:
+            _atomic_write("state.json", state)
+        except OSError:
+            # A full disk must not stop protection: keep evaluating next tick.
+            logger.exception("cannot write the watchdog state file")
         return state
 
 
