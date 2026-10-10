@@ -481,14 +481,21 @@ async def import_watchdog_audit(db: AsyncSession, limit: int = 200) -> int:
 # ─── OS disk overview & cleanup ──────────────────────────────────────────────
 
 def _os_usage_extras() -> dict:
-    out = {"journal_bytes": 0, "apt_cache_bytes": 0, "var_log_bytes": 0}
+    fields = ("journal_bytes", "apt_cache_bytes", "var_log_bytes")
     try:
         r = _run_helper("os-usage", timeout=60)
-        if r.returncode == 0:
-            out.update(json.loads(r.stdout.strip()))
-    except Exception:
-        pass
-    return out
+        if r.returncode != 0:
+            raise ValueError("storage helper failed")
+        measured = json.loads(r.stdout.strip())
+        if not isinstance(measured, dict) or any(
+            type(measured.get(k)) is not int or measured[k] < 0 for k in fields
+        ):
+            raise ValueError("invalid storage helper measurement")
+        return {**{k: measured[k] for k in fields}, "os_usage_error": None}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        logger.warning("System log and package cache measurement unavailable")
+        return {**{k: None for k in fields}, "os_usage_error":
+                "System log and package cache sizes are unavailable. Refresh or check the storage helper."}
 
 
 async def os_overview() -> dict:
@@ -571,7 +578,7 @@ def _diagnostic_logs_sync() -> list[dict]:
             "legacy": kind == "legacy",
             "evidence": kind == "evidence",
             "disabled": name in storage_policy.DISABLED_DIAGNOSTIC_LOGS,
-            "protected": kind == "current" and base in storage_policy.PROTECTED_DIAGNOSTIC_LOGS,
+            "protected": base in storage_policy.PROTECTED_DIAGNOSTIC_LOGS,
             "retention_days": storage_policy.diagnostic_retention_days(base),
             "ttl_active": " TTL " in f" {engine_full or ''} ",
             "bytes": sizes.get(name, 0),
@@ -623,6 +630,7 @@ async def space_consumers(db: AsyncSession, ch: Optional[dict], extras: dict) ->
         {"id": cid, "label": label, "bytes": int(size or 0), "human": human_size(int(size or 0)),
          "mount": _mount_of(path), "hint": hint}
         for cid, label, size, path, hint in rows
+        if cid not in ("journal", "os_logs", "apt_cache") or not extras.get("os_usage_error")
     ]
 
 

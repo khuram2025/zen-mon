@@ -143,9 +143,10 @@ export interface Overview {
   mounts: MountInfo[]
   data_shares_os: boolean
   sampled_at: string
-  journal_bytes: number
-  var_log_bytes: number
-  apt_cache_bytes: number
+  journal_bytes: number | null
+  var_log_bytes: number | null
+  apt_cache_bytes: number | null
+  os_usage_error?: string | null
   consumers: Consumer[]
   clickhouse: ClickHouseBreakdown | null
   diagnostic_logs: DiagnosticLog[]

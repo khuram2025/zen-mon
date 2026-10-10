@@ -343,6 +343,13 @@ class Candidate:
     priority: int = 0
 
     @property
+    def pressure_eligible(self) -> bool:
+        # Legacy error/crash/session/backup copies may expire by age, but
+        # must retain their incident history during emergency reclamation.
+        kind = diagnostic_log(self.table) if self.database == "system" else None
+        return not kind or kind[0] not in PROTECTED_DIAGNOSTIC_LOGS
+
+    @property
     def action(self) -> str:
         if self.tier == "legacy":
             return "drop_table"
@@ -435,6 +442,9 @@ def legacy_expired(candidates: list[Candidate], today: date) -> list[Candidate]:
         if c.tier != "legacy":
             continue
         base = (diagnostic_log(c.table) or (c.table, True))[0]
+        # An unknown age is not proof that protected incident history expired.
+        if base in PROTECTED_DIAGNOSTIC_LOGS and c.newest is None:
+            continue
         if c.newest is None or c.newest < today - timedelta(days=diagnostic_retention_days(base)):
             out.append(c)
     return out
@@ -454,7 +464,7 @@ def application_allowed(candidates: list[Candidate], pressure: Pressure, usage_p
         return True
     # A table's truncate candidate already covers its dated partitions.
     reclaimable = sum(c.bytes for c in candidates
-                      if c.tier in ("legacy", "diagnostic_truncate", "application"))
+                      if c.pressure_eligible and c.tier in ("legacy", "diagnostic_truncate", "application"))
     return reclaimable >= pressure.need_bytes
 
 
@@ -466,7 +476,7 @@ def plan_pass(candidates: list[Candidate], pressure: Pressure,
         return []
     plan, scheduled = [], 0
     for c in candidates:
-        if c.tier not in pressure.tiers or c.bytes <= 0:
+        if not c.pressure_eligible or c.tier not in pressure.tiers or c.bytes <= 0:
             continue
         if c.tier == "application" and not allow_application:
             continue

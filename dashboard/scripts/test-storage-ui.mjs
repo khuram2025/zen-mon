@@ -39,6 +39,9 @@ const tight = m.forecastSummary({ daily_bytes: GIB, current_bytes: 10 * GIB, ste
   growth_remaining_bytes: 20 * GIB, free_bytes: 5 * GIB, fits: false, days_until_full: 5, unbounded_categories: [] })
 assert.equal(tight.tone, 'critical')
 assert.match(tight.text, /about 5 days/)
+assert.match(tight.text, /Historical metrics footprint/)
+assert.match(tight.text, /estimated free space/)
+assert(!tight.text.includes('Metrics grow'))
 
 // Activity: repeated no-op auto-purges collapse into one row.
 const noop = (id, at) => ({ id, created_at: at, event_type: 'auto_purge', actor: 'system', freed_bytes: 0,

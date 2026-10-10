@@ -116,13 +116,13 @@ def test_diagnostic_log_sizes_cover_every_table_with_bare_names(monkeypatch):
                 r.result_rows = many + [("text_log", 1234), ("text_log_0", 5678),
                                         ("processors_profile_log", 99),
                                         ("query_log_pre_recovery_20261007", 7),
-                                        ("my_custom_log", 11)]
+                                        ("my_custom_log", 11), ("error_log_0", 100)]
             else:
                 r.result_rows = [("text_log", "MergeTree PARTITION BY event_date TTL event_date + toIntervalDay(3)"),
                                  ("text_log_0", "MergeTree PARTITION BY toYYYYMM(event_date)"),
                                  ("processors_profile_log", "MergeTree PARTITION BY toYYYYMM(event_date)"),
                                  ("query_log_pre_recovery_20261007", "MergeTree"),
-                                 ("my_custom_log", "MergeTree")]
+                                 ("my_custom_log", "MergeTree"), ("error_log_0", "MergeTree")]
             return r
     monkeypatch.setattr(svc, "get_ch_client", lambda: Client())
     rows = {r["table"]: r for r in svc._diagnostic_logs_sync()}
@@ -130,6 +130,7 @@ def test_diagnostic_log_sizes_cover_every_table_with_bare_names(monkeypatch):
     assert rows["text_log_0"]["bytes"] == 5678 and rows["text_log_0"]["kind"] == "legacy"
     assert rows["processors_profile_log"]["disabled"] and rows["processors_profile_log"]["kind"] == "legacy"
     assert rows["query_log_pre_recovery_20261007"]["evidence"]
+    assert rows["error_log_0"]["protected"] and rows["error_log_0"]["legacy"]
     assert "my_custom_log" not in rows                          # unknown tables are not diagnostics
 
 
