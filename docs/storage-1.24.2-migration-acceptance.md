@@ -30,7 +30,7 @@ as doing so.
 Manifest `rollback_steps` run from the signed payload: stop services →
 `ota-restore-backup.py` → `enforce-support-security-floor.sh` →
 **`ota-reconcile-storage-rollback.sh`** → start services → health.
-Right after the backup, `ota-snapshot-units.py` records every systemd unit the package
+Right after preflight and before `stop_services` (so running state is real), `ota-snapshot-units.py` records every systemd unit the package
 installs (`install_systemd` steps: NetFlow collector, NCM backup/delivery/worker, syslog;
 plus the storage watchdog): present/absent, enabled, active, and a copy of the file, tagged
 with the package version. The reconcile hook restores that exact state: units that existed

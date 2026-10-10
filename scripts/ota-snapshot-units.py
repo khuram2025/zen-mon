@@ -8,9 +8,10 @@ version does not have (e.g. 1.23.9 appliances never installed the NetFlow
 collector), and the rollback ``start_services`` step would start them into a
 restart loop or a failed unit.
 
-Default mode (manifest hook, right after ota-create-backup.py): record, for
-every unit this package installs, whether it existed, its enablement, whether
-it was active, and a copy of the file.
+Default mode (manifest hook right after ota-preflight.py, BEFORE
+stop_services, so "active" is the real running state): record, for every unit
+this package installs, whether it existed, its enablement, whether it was
+active, and a copy of the file.
 
 ``--restore`` (called by ota-reconcile-storage-rollback.sh after the code is
 restored): put every recorded unit back exactly as it was: restore the old

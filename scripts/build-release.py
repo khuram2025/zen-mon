@@ -959,14 +959,15 @@ def build_package(version: str, changelog: str, severity: str,
     # 6. Create manifest.json
     print("[6/7] Creating manifest ...")
     steps = [{"type": "run_hook", "script": "code/scripts/ota-preflight.py", "timeout": 30}]
+    # Record the systemd units this package installs as they are now, so a
+    # rollback can restore exactly that state (ota-reconcile-storage-rollback.sh).
+    # Before stop_services: the snapshot must capture which units were running.
+    steps.append({"type": "run_hook", "script": "code/scripts/ota-snapshot-units.py", "timeout": 60})
 
     # Stop services before update
     steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector", "zenplus-syslog",
         "zenplus-ncm-backup.timer", "zenplus-ncm-delivery.timer", "zenplus-ncm-backup.service", "zenplus-ncm-delivery.service", "zenplus-ncm-worker.service"]})
     steps.append({"type": "run_hook", "script": "code/scripts/ota-create-backup.py", "timeout": 600})
-    # Record the systemd units this package installs as they are now, so a
-    # rollback can restore exactly that state (ota-reconcile-storage-rollback.sh).
-    steps.append({"type": "run_hook", "script": "code/scripts/ota-snapshot-units.py", "timeout": 60})
 
     # Heal the OS prerequisites every appliance needs but older installers
     # missed. apt_install is idempotent — already-present packages are a

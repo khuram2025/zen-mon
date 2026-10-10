@@ -351,10 +351,42 @@ def test_rollback_hook_is_compatible_with_the_1_23_9_executor():
     assert "ZENPLUS_DIR" in text and "set -e" not in text.replace("set -euo", "")
 
 
-def test_manifest_snapshots_units_right_after_the_backup():
+def _manifest_steps():
+    """Build the real manifest step list from build-release.py's source order."""
     src = (ROOT / "scripts" / "build-release.py").read_text()
-    backup = src.index('"code/scripts/ota-create-backup.py"')
-    snap = src.index('"code/scripts/ota-snapshot-units.py"')
-    assert backup < snap < src.index("apt_install")
+    body = src[src.index('    steps = [{"type": "run_hook", "script": "code/scripts/ota-preflight.py"'):
+               src.index('"rollback_steps": [')]
+    return [m.group(0) for m in re.finditer(
+        r'"code/scripts/[a-z0-9_.-]+"|"type": "stop_services"|"type": "apt_install"|"type": "apply_code"', body)]
+
+
+def test_manifest_snapshots_running_units_before_stopping_them():
+    order = _manifest_steps()
+    preflight = order.index('"code/scripts/ota-preflight.py"')
+    snap = order.index('"code/scripts/ota-snapshot-units.py"')
+    stop = order.index('"type": "stop_services"')
+    backup = order.index('"code/scripts/ota-create-backup.py"')
+    assert preflight < snap < stop < backup, order[:6]
+    assert snap == preflight + 1, "nothing may change unit state before the snapshot"
     assert os.access(ROOT / "scripts" / "ota-snapshot-units.py", os.X_OK)
     assert (ROOT / "scripts" / "ota-snapshot-units.py").read_text().startswith("#!/usr/bin/python3\n")
+
+
+def test_units_stopped_by_the_update_are_started_again_after_rollback(tmp_path):
+    """Snapshot sees NCM worker/timers and syslog running; the update stops them;
+    the rollback restores and starts them (start_services does not list them all)."""
+    env, log = stubs(tmp_path, [])
+    zen = restored_tree(tmp_path, with_watchdog=False)
+    unit_env(tmp_path, env, zen)
+    running = ["zenplus-ncm-worker.service", "zenplus-ncm-delivery.timer", "zenplus-syslog.service"]
+    for u in running:
+        body = "[Timer]\nOnCalendar=hourly\n" if u.endswith(".timer") else "[Service]\nExecStart=/usr/bin/true\n"
+        (tmp_path / "systemd" / u).write_text(body)
+    assert run_snapshot(tmp_path, env, zen).returncode == 0   # stub reports them active
+    snap = json.loads((tmp_path / "ota-state" / "snapshot.json").read_text())
+    assert all(snap["units"][u]["active"] for u in running)
+    r = run_reconcile(tmp_path, env, zen)
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = log.read_text()
+    for u in running:
+        assert f"systemctl start {u}" in calls
