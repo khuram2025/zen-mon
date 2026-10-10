@@ -479,6 +479,8 @@ class Watchdog:
                 "exhausted": exhausted, "insufficient": insufficient,
                 "planned_actions": len(plan),
                 "holds_clickhouse": holds_clickhouse,
+                "minimum_free_bytes": P.effective_free_limits(policy, fs.capacity)[0],
+                "critical_free_bytes": P.effective_free_limits(policy, fs.capacity)[1],
             })
             if STATE_RANK[pressure.state] > STATE_RANK[worst]:
                 worst = pressure.state
@@ -486,7 +488,7 @@ class Watchdog:
         # Resume only with margin above the free-space floor (hysteresis).
         ch_evals = [e for e in evaluations if e["holds_clickhouse"]]
         if self.paused and ch_evals and all(
-                e["state"] in ("ok", "growth") and e["avail_bytes"] >= policy["min_free_gib"] * P.GIB
+                e["state"] in ("ok", "growth") and e["avail_bytes"] >= e["minimum_free_bytes"]
                 for e in ch_evals):
             self._set_paused(False, "free space recovered", now)
 

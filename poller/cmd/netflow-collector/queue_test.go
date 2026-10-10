@@ -178,3 +178,57 @@ func TestSpoolReloadAndCorruptSegment(t *testing.T) {
 		t.Fatalf("spool dir after reload: %v", names)
 	}
 }
+
+// Reproduce the exact handoff interleaving without sleeps or scheduling luck:
+// Next observed an empty spool, then the spiller committed the oldest batch
+// before Next could take the memory head. The newer batch must not overtake it.
+func TestQueueSpillCommittedBeforeMemoryHandoff(t *testing.T) {
+	sp, err := openDiskSpool(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := newBatchQueue(1, 4, time.Hour, "handoff", sp)
+	q.Add(testRecords(1, "192.0.2.1"))
+	q.Add(testRecords(1, "192.0.2.2"))
+	if !sp.empty() {
+		t.Fatal("expected initial empty-spool observation")
+	}
+	oldest := q.sealed[0]
+	newer := q.sealed[1]
+	data, err := encodeSegment(oldest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp, err := sp.writeTemp(oldest, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.mu.Lock()
+	_, err = sp.commit(tmp, oldest)
+	if err == nil {
+		q.sealed = q.sealed[1:]
+		q.memRecords -= len(oldest.Records)
+	}
+	q.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _, retry := q.takeMemory()
+	if b != nil || !retry {
+		t.Fatal("newer memory batch overtook the committed disk batch")
+	}
+	if n, _ := q.Len(); n != 1 {
+		t.Fatalf("memory batch was lost: %d", n)
+	}
+	q.Close()
+	for _, token := range []string{oldest.Token, newer.Token} {
+		b := q.Next(context.Background())
+		if b == nil || b.Token != token {
+			t.Fatalf("wanted token %s, got %+v", token, b)
+		}
+		q.Delivered(b)
+	}
+	if q.Next(context.Background()) != nil || !q.Finished() {
+		t.Fatal("queue did not drain")
+	}
+}

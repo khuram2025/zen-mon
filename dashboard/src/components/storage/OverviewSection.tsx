@@ -1,377 +1,113 @@
-import {
-  AlertOctagon, AlertTriangle, CheckCircle2, FileText, HardDrive, Info, Loader2, ShieldCheck, TrendingUp,
-} from 'lucide-react'
+import { AlertTriangle, CheckCircle2, FileText, HardDrive, Loader2, ShieldCheck } from 'lucide-react'
 import { cn, relativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import {
-  SEVERITY_STYLE, bytes, forecastSummary, spaceSegments, usageTextTone,
-} from './storageMath'
-import type { DiagnosticLog, MountInfo, Overview, StorageIssue, StorageSection, StorageStatus } from './types'
+import { bytes, forecastSummary, issueText, logGroups, spaceSegments, usageTextTone } from './storageMath'
+import type { Overview, StorageSection } from './types'
 import { useOverview, useStorageStatus } from './useStorage'
 
-const SEGMENT_COLORS: Record<string, string> = {
-  clickhouse: 'bg-primary',
-  clickhouse_diagnostic: 'bg-danger/70',
-  clickhouse_inactive: 'bg-warning/70',
-  clickhouse_detached: 'bg-warning',
-  postgres: 'bg-info',
-  backups: 'bg-accent',
-  journal: 'bg-success/70',
-  os_logs: 'bg-success',
-  apt_cache: 'bg-info/50',
-  other: 'bg-text2/30',
-}
-
-const ACTION_LABEL: Record<NonNullable<StorageIssue['action']>, { label: string; section: StorageSection }> = {
-  expand: { label: 'Expand storage', section: 'disks' },
-  claim: { label: 'Claim space', section: 'disks' },
-  extend: { label: 'Allocate', section: 'disks' },
-  add: { label: 'Add disk', section: 'disks' },
-  rescan: { label: 'Disks & volumes', section: 'disks' },
-  remove_missing: { label: 'Review', section: 'disks' },
+const COLORS: Record<string, string> = {
+  clickhouse: 'bg-primary', clickhouse_diagnostic: 'bg-warning', clickhouse_inactive: 'bg-info/60',
+  clickhouse_detached: 'bg-danger/70', postgres: 'bg-info', backups: 'bg-accent',
+  journal: 'bg-success/70', os_logs: 'bg-success', apt_cache: 'bg-info/50', other: 'bg-text2/30',
 }
 
 export function OverviewSection({ onNavigate }: { onNavigate: (s: StorageSection) => void }) {
-  const { data: overview, isLoading: overviewLoading } = useOverview()
-  const { data: status } = useStorageStatus()
-
-  return (
-    <div className="space-y-4">
-      <HealthCard status={status} onNavigate={onNavigate} />
-      {overviewLoading || !overview ? (
-        <Card>
-          <CardContent className="flex items-center gap-2 py-6 text-sm text-muted">
-            <Loader2 className="h-4 w-4 animate-spin" /> Measuring storage…
-          </CardContent>
-        </Card>
-      ) : (
-        <>
-          <CapacityCard overview={overview} onNavigate={onNavigate} />
-          <ProtectionCard overview={overview} />
-          <DiagnosticLogsCard overview={overview} />
-        </>
-      )}
+  const { data: overview, isLoading, isError, refetch } = useOverview()
+  const { data: status, isError: statusError } = useStorageStatus()
+  const issues = status?.issues || []
+  return <div className="space-y-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div><h3 className="text-base font-semibold">Appliance storage</h3>
+        <p className="text-xs text-muted">Capacity, automatic protection and data lifecycle in one place.</p></div>
+      <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => onNavigate('retention')}>Manage retention</Button>
+        <Button size="sm" onClick={() => onNavigate('disks')}>Expand capacity</Button></div>
     </div>
-  )
-}
-
-function HealthCard({ status, onNavigate }: { status?: StorageStatus; onNavigate: (s: StorageSection) => void }) {
-  if (!status) {
-    return (
-      <Card>
-        <CardContent className="flex items-center gap-2 py-5 text-sm text-muted">
-          <Loader2 className="h-4 w-4 animate-spin" /> Checking disks and volumes…
-        </CardContent>
-      </Card>
-    )
-  }
-  const issues = status.issues || []
-  if (issues.length === 0) {
-    return (
-      <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-4 py-3 text-sm text-success">
-        <CheckCircle2 className="h-4 w-4 shrink-0" /> Storage is healthy. No action needed.
+    {isError && <div role="alert" className="rounded-lg border border-warning/40 p-3 text-sm">Storage measurements are unavailable.
+      <Button variant="ghost" size="sm" onClick={() => refetch()}>Retry</Button></div>}
+    {statusError && <p role="status" className="text-sm text-warning">Disk health could not be checked. Refresh or review Disks &amp; capacity.</p>}
+    {status && issues.length === 0 && <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-3 text-sm text-success">
+      <CheckCircle2 className="h-4 w-4" /> Storage is healthy. No action needed.</div>}
+    {issues.length > 0 && <div role="list" aria-label="Storage findings" className="space-y-2">{issues.map((issue, i) => {
+      const [title, detail] = issueText(issue)
+      return <div role="listitem" key={`${issue.code}-${i}`} className={cn('flex flex-wrap items-center gap-3 rounded-lg border p-3', issue.severity === 'critical' ? 'border-danger/40 bg-danger/10' : issue.severity === 'info' ? 'border-info/30 bg-info/5' : 'border-warning/30 bg-warning/5')}>
+        <AlertTriangle className="h-4 w-4 shrink-0" /><div className="flex-1"><div className="text-sm font-medium">{title}</div><p className="text-xs text-text2">{detail}</p></div>
+        {issue.action && <Button variant="outline" size="sm" onClick={() => onNavigate('disks')}>Review capacity</Button>}
       </div>
-    )
-  }
-  return (
-    <div className="space-y-2" role="list" aria-label="Storage findings">
-      {issues.map((issue, i) => {
-        const style = SEVERITY_STYLE[issue.severity]
-        const Icon = issue.severity === 'critical' ? AlertOctagon
-          : issue.severity === 'info' ? Info : AlertTriangle
-        const action = issue.action ? ACTION_LABEL[issue.action] : null
-        return (
-          <div key={`${issue.code}-${i}`} role="listitem"
-            className={cn('flex flex-wrap items-center gap-3 rounded-lg border px-4 py-2.5', style.box)}>
-            <Icon className={cn('h-4 w-4 shrink-0', style.text)} />
-            <div className="min-w-0 flex-1">
-              <div className={cn('text-sm font-medium', style.text)}>{issue.title}</div>
-              {issue.detail && <div className="text-xs text-text2">{issue.detail}</div>}
-            </div>
-            {action && (
-              <Button size="sm" variant="outline" onClick={() => onNavigate(action.section)}>
-                {action.label}
-              </Button>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
+    })}</div>}
+    {isLoading && <div className="flex items-center gap-2 p-4 text-sm text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Measuring storage…</div>}
+    {overview && <><Capacity overview={overview} /><Protection overview={overview} /><Logs overview={overview} /></>}
+  </div>
 }
 
-function CapacityCard({ overview, onNavigate }: { overview: Overview; onNavigate: (s: StorageSection) => void }) {
+function Capacity({ overview }: { overview: Overview }) {
   const forecast = forecastSummary(overview.forecast)
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2">
-          <HardDrive className="h-4 w-4 text-primary" /> Capacity
-        </CardTitle>
-        <p className="text-xs text-muted">
-          {overview.data_shares_os
-            ? <>/data shares the root filesystem on this appliance (there is no separate data volume), so every file on it counts toward the usage thresholds. Adding a disk extends this filesystem. </>
-            : null}
-          Usage is used ÷ (used + available), as <span className="font-mono">df</span> reports it.
-          Sampled {relativeTime(overview.sampled_at)}.
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        {overview.mounts.map((m) => (
-          <MountUsage key={m.mount} mount={m} overview={overview} />
-        ))}
-
-        {overview.os_usage_error && (
-          <div role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {overview.os_usage_error} Unmeasured space is included in Other.
-          </div>
-        )}
-
-        {overview.clickhouse_error && (
-          <div className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {overview.clickhouse_error}
-          </div>
-        )}
-
-        {forecast && (
-          <div className={cn(
-            'flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2.5 text-sm',
-            forecast.tone === 'ok' ? 'border-border/60 bg-surface2/30'
-              : forecast.tone === 'warning' ? 'border-warning/40 bg-warning/10' : 'border-danger/40 bg-danger/10',
-          )}>
-            <TrendingUp className={cn('h-4 w-4 shrink-0',
-              forecast.tone === 'ok' ? 'text-primary' : forecast.tone === 'warning' ? 'text-warning' : 'text-danger')} />
-            <span className="min-w-0 flex-1 text-text2">{forecast.text}<span className="mt-1 block text-xs text-muted">This retention estimate uses stored history, not the current write rate. Allow space for logs, backups and merges; the watchdog shows measured filesystem growth.</span></span>
-            <Button size="sm" variant="ghost" onClick={() => onNavigate('retention')}>Retention</Button>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
+  return <Card><CardHeader className="pb-3"><CardTitle className="flex items-center gap-2"><HardDrive className="h-4 w-4 text-primary" /> Capacity &amp; usage</CardTitle>
+    <p className="text-xs text-muted">Updated {relativeTime(overview.sampled_at)}. Usage excludes the system reserve. {overview.data_shares_os ? 'System and monitoring data share this capacity.' : 'System and monitoring data have separate capacity.'}</p></CardHeader>
+    <CardContent className="space-y-5">{overview.mounts.map(m => {
+      const segments = spaceSegments(m, overview.consumers || [], overview.data_shares_os)
+      const measured = segments.reduce((s, c) => s + c.bytes, 0)
+      const capacity = m.used_bytes + m.free_bytes
+      // Preserve the real total used/free ratio even when category samples overlap.
+      const scale = measured > m.used_bytes && measured > 0 ? m.used_bytes / measured : 1
+      return <section key={m.mount} className="space-y-3" aria-label={m.roles.includes('system') && m.roles.includes('data') ? 'Appliance capacity' : m.roles.includes('data') ? 'Monitoring capacity' : 'System capacity'}>
+        <div className="flex flex-wrap justify-between gap-2"><span className="text-sm font-semibold">{m.roles.includes('system') && m.roles.includes('data') ? 'Appliance capacity' : m.roles.includes('data') ? 'Monitoring capacity' : 'System capacity'}</span>
+          <span className={cn('text-lg font-semibold tabular-nums', usageTextTone(m.usage_percent))}>{m.usage_percent.toFixed(1)}% used</span></div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <Stat label="Available" value={bytes(m.free_bytes)} /><Stat label="Used" value={bytes(m.used_bytes)} />
+          <Stat label="Total capacity" value={bytes(m.total_bytes)} /><Stat label="System reserve" value={bytes(m.reserved_bytes)} />
+        </div>
+        <div className="relative flex h-3 overflow-hidden rounded-full bg-surface2" role="img" aria-label={`${m.usage_percent.toFixed(1)}% used, ${bytes(m.free_bytes)} available`}>
+          {segments.map(c => <div key={c.id} className={COLORS[c.id] || COLORS.other} style={{ width: `${capacity > 0 ? c.bytes * scale / capacity * 100 : 0}%` }} title={`${c.label}: ${bytes(c.bytes)}`} />)}
+          {overview.auto_purge.enabled && <div className="absolute inset-y-0 w-px bg-text/60" style={{ left: `${overview.auto_purge.threshold_pct}%` }} title={`Automatic cleanup at ${overview.auto_purge.threshold_pct}%`} />}
+        </div>
+        <div className="grid gap-x-8 gap-y-2 sm:grid-cols-2">{segments.map(c => <div key={c.id} className="flex items-center gap-2 text-xs" title={c.hint || undefined}>
+          <span className={cn('h-2 w-2 shrink-0 rounded-full', COLORS[c.id] || COLORS.other)} /><span className="flex-1 text-text2">{c.label}</span><span className="tabular-nums">{bytes(c.bytes)}</span></div>)}</div>
+        {measured > m.used_bytes && <p className="text-xs text-muted">Category samples overlap during background cleanup; the capacity total remains authoritative.</p>}
+      </section>
+    })}
+    {(overview.os_usage_error || overview.clickhouse_error) && <p role="status" className="text-xs text-warning">Some category measurements are unavailable. Total capacity remains visible; refresh to retry.</p>}
+    {forecast && <div className="rounded-lg border border-border/60 bg-surface2/20 p-3 text-xs text-text2"><p>{forecast.text}</p><p className="mt-1 text-muted">Estimate from stored history. Allow additional room for logs, backups and background maintenance.</p></div>}
+    </CardContent></Card>
 }
 
-function MountUsage({ mount, overview }: { mount: MountInfo; overview: Overview }) {
-  const pct = Math.min(100, mount.usage_percent || 0)
-  const segments = spaceSegments(mount, overview.consumers || [], overview.data_shares_os)
-  const capacity = mount.used_bytes + mount.free_bytes
-  return (
-    <div>
-      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-        <div className="flex items-baseline gap-2">
-          <span className="text-sm font-semibold">{mount.label}</span>
-          <span className="font-mono text-[11px] text-muted">
-            {mount.roles.includes('data') && mount.mount === '/' ? '/ and /data' : mount.mount}
-          </span>
-        </div>
-        <div className="text-xs tabular-nums text-text2">
-          <span className={cn('text-base font-semibold', usageTextTone(pct))}>{pct.toFixed(1)}%</span>
-          <span className="ml-2">{bytes(mount.used_bytes)} used</span>
-          <span className="ml-2">· {bytes(mount.free_bytes)} available</span>
-          {mount.reserved_bytes > 0 && (
-            <span className="ml-2 text-muted" title="Blocks reserved for the root user: neither used nor available to ZenPlus">
-              · {bytes(mount.reserved_bytes)} reserved
-            </span>
-          )}
-          <span className="ml-2 text-muted">· {bytes(mount.total_bytes)} filesystem</span>
-        </div>
-      </div>
-      <div
-        className="flex h-3 w-full overflow-hidden rounded-full bg-surface2"
-        role="img"
-        aria-label={`${mount.label}: ${pct.toFixed(1)}% used`}
-      >
-        {segments.map((s) => (
-          <div
-            key={s.id}
-            title={`${s.label}: ${bytes(s.bytes)}`}
-            className={cn('h-full', SEGMENT_COLORS[s.id] || 'bg-primary')}
-            style={{ width: `${Math.max(0.4, (s.bytes / Math.max(1, capacity)) * 100)}%` }}
-          />
-        ))}
-      </div>
-      {/* Threshold markers make the warning levels visible on the bar. */}
-      <div className="relative mt-0.5 h-2" aria-hidden>
-        {[85, 95].map((t) => (
-          <span key={t} className={cn('absolute top-0 h-2 w-px', t === 95 ? 'bg-danger/60' : 'bg-warning/60')}
-            style={{ left: `${t}%` }} />
-        ))}
-      </div>
-      <div className="mt-1 grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
-        {segments.map((s) => (
-          <div key={s.id} className="flex items-center justify-between gap-2 text-xs">
-            <span className="flex min-w-0 items-center gap-2 text-text2">
-              <span className={cn('h-2.5 w-2.5 shrink-0 rounded-sm', SEGMENT_COLORS[s.id] || 'bg-primary')} />
-              <span className="truncate" title={s.hint ? `${s.label} — ${s.hint}` : s.label}>{s.label}</span>
-            </span>
-            <span className="shrink-0 tabular-nums text-text">{bytes(s.bytes)}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ProtectionCard({ overview }: { overview: Overview }) {
+function Protection({ overview }: { overview: Overview }) {
   const wd = overview.watchdog
-  const fs = wd.filesystems?.[0]
-  const growth = overview.clickhouse?.growth || []
-  const stateTone = !wd.alive ? 'warning'
-    : wd.state === 'critical' ? 'danger' : wd.state === 'pressure' || wd.state === 'growth' ? 'warning' : 'success'
-  const stateLabel = !wd.installed ? 'Not installed' : !wd.alive ? 'Not reporting'
-    : ({ ok: 'Healthy', growth: 'Fast growth', pressure: 'Freeing space', critical: 'Critical' } as const)[wd.state || 'ok']
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="flex items-center gap-2">
-            <ShieldCheck className="h-4 w-4 text-primary" /> Low-space protection
-          </CardTitle>
-          <Badge variant={stateTone as any}>{stateLabel}</Badge>
-        </div>
-        <p className="text-xs text-muted">
-          An independent watchdog checks free space every 30 seconds, even when the API or PostgreSQL is
-          down. Under pressure it removes, in order: leftover copies of diagnostic logs, the oldest
-          diagnostic log days, whole diagnostic logs, then the least valuable monitoring data older than
-          the minimum keep window. If nothing more is eligible it pauses host-agent and APM uploads
-          (agents keep them) before the disk fills.
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {wd.installed ? (
-          <div className="grid gap-3 sm:grid-cols-4">
-            <Stat label="Last check" value={wd.heartbeat ? relativeTime(new Date(wd.heartbeat * 1000).toISOString()) : '—'}
-              sub={wd.alive ? 'Watchdog running' : 'Check zenplus-storage-watchdog'} warn={!wd.alive} />
-            <Stat label="Growth" value={fs?.growth_bytes_per_hour != null ? `${bytes(Math.max(0, fs.growth_bytes_per_hour))}/h` : '—'}
-              sub={fs?.runway_hours != null ? `Full in ~${fs.runway_hours < 48 ? `${fs.runway_hours.toFixed(1)} h` : `${Math.round(fs.runway_hours / 24)} days`} at this rate`
-                : 'Not growing (15-minute sample)'} warn={fs?.state === 'growth'} />
-            <Stat label="Pending deletion" value={bytes(wd.pending_bytes || 0)}
-              sub="Scheduled, not yet returned to disk" />
-            <Stat label="Last purge" value={wd.last_pass ? bytes(wd.last_pass.scheduled_bytes) : 'None'}
-              sub={wd.last_pass ? `${wd.last_pass.action_count} action(s) ${relativeTime(new Date(wd.last_pass.at * 1000).toISOString())}` : 'No purge needed so far'} />
-          </div>
-        ) : (
-          <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-            The watchdog is not installed on this appliance yet; the API applies the same policy every 5 minutes
-            while it is running. It is installed by the storage setup that runs on upgrade.
-          </div>
-        )}
-        {wd.ingest_paused && (
-          <div className="flex items-center gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
-            <AlertOctagon className="h-4 w-4 shrink-0" /> Host-agent and APM ingestion is paused until free space recovers.
-          </div>
-        )}
-        {fs && fs.reasons.length > 0 && (
-          <div className="text-xs text-text2">Current trigger: {fs.reasons.join('; ')}</div>
-        )}
-        {wd.last_error && (
-          <div className="text-xs text-warning">Last error {relativeTime(new Date(wd.last_error.at * 1000).toISOString())}: {wd.last_error.message}</div>
-        )}
-        {growth.length > 0 && (
-          <div>
-            <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">Fastest-growing tables (last hour)</div>
-            <div className="space-y-1">
-              {growth.slice(0, 6).map((g) => (
-                <div key={g.table} className="flex items-center justify-between gap-3 text-xs">
-                  <span className="truncate font-mono text-text2">{g.table}</span>
-                  <span className="shrink-0 tabular-nums">+{bytes(g.bytes_per_hour)}/h <span className="text-muted">· {bytes(g.bytes)}</span></span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-function Stat({ label, value, sub, warn }: { label: string; value: string; sub: string; warn?: boolean }) {
-  return (
-    <div className="rounded-lg border border-border/50 bg-surface2/20 p-3">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</div>
-      <div className={cn('mt-0.5 text-lg font-semibold tabular-nums', warn && 'text-warning')}>{value}</div>
-      <div className="text-[11px] text-muted">{sub}</div>
+  const enabled = overview.auto_purge.enabled
+  const label = !wd.installed || !wd.alive || wd.last_error ? 'Needs attention' : !enabled ? 'Automatic cleanup off' : wd.state === 'critical' ? 'Critical' : wd.state === 'pressure' ? 'Freeing space' : wd.state === 'growth' ? 'Fast growth' : 'Protected'
+  const healthy = wd.alive && !wd.last_error && enabled && (!wd.state || wd.state === 'ok')
+  return <Card><CardHeader className="pb-3"><div className="flex flex-wrap justify-between gap-2"><CardTitle className="flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-primary" /> Automatic protection</CardTitle><Badge variant={healthy ? 'success' : 'warning'}>{label}</Badge></div>
+    <p className="text-xs text-muted">Checks free space every 30 seconds. Eligible old logs are removed first, then older monitoring history within your retention policy. Protected recovery records are kept.</p></CardHeader>
+    <CardContent className="space-y-3"><div className="grid gap-3 sm:grid-cols-4">
+      <Stat label="Start cleanup" value={enabled ? `${overview.auto_purge.threshold_pct}% used` : 'Disabled'} />
+      <Stat label="Cleanup target" value={`${overview.auto_purge.target_pct}% used`} />
+      <Stat label="Minimum history" value={`${overview.auto_purge.min_keep_days} days`} />
+      <Stat label="Pending reclaim" value={bytes(wd.pending_bytes || 0)} />
     </div>
-  )
+    {(wd.filesystems || []).map((fs, i) => <div key={fs.mount} className="rounded-lg border border-border/50 p-3 text-xs text-text2">
+      <div className="flex flex-wrap justify-between gap-2"><span className="font-medium">{overview.data_shares_os ? 'Appliance capacity' : `Storage area ${i + 1}`}</span><span>{fs.usage_pct.toFixed(1)}% used</span></div>
+      <p className="mt-1">Free-space reserve: {bytes(fs.minimum_free_bytes ?? Math.min(overview.auto_purge.min_free_gib * 1024 ** 3, (fs.used_bytes + fs.avail_bytes) * 0.1))} · adapts to available disk capacity.</p>
+      <p className="mt-1">{fs.growth_bytes_per_hour == null ? 'Collecting a growth sample.' : fs.growth_bytes_per_hour <= 0 ? 'No net growth in the recent sample.' : `Recent growth: ${bytes(fs.growth_bytes_per_hour)}/hour.`}{fs.runway_hours != null ? ` Estimated remaining capacity: ${fs.runway_hours.toFixed(1)} hours at this rate.` : ''}</p>
+      {(fs.exhausted || fs.insufficient) && <p className="mt-1 text-warning">Cleanup cannot recover enough space. Expand capacity or review retention.</p>}
+    </div>)}
+    <p className="text-xs text-muted">Last check: {wd.heartbeat ? relativeTime(new Date(wd.heartbeat * 1000).toISOString()) : 'Awaiting first report'}. Capacity may take several minutes to return after cleanup.</p>
+    {wd.ingest_paused && <p role="status" className="text-sm text-warning">Agent and application uploads are paused until free space recovers. Expand capacity if cleanup is insufficient.</p>}
+    {wd.last_error && <p role="status" className="text-xs text-warning">A recent protection check failed. Contact support if this continues.</p>}
+    </CardContent></Card>
 }
 
-function diagnosticStatus(l: DiagnosticLog): { label: string; variant: 'success' | 'warning' | 'default' | 'info'; title: string } {
-  if (l.evidence) return { label: 'recovery evidence', variant: 'info', title: 'Copied during a storage recovery. Never deleted automatically; remove it manually once no longer needed.' }
-  if (l.disabled) return { label: `disabled · expires`, variant: 'warning', title: `This log is switched off. Its remaining data is removed ${l.retention_days} days after its last entry.` }
-  if (l.legacy && l.protected) return { label: 'retained copy · expires', variant: 'default', title: `Protected under pressure; removed only ${l.retention_days} days after its last entry.` }
-  if (l.legacy) return { label: 'legacy copy · expires', variant: 'warning', title: `Left behind when ClickHouse re-created the table. Removed ${l.retention_days} days after its last entry.` }
-  if (l.protected) return { label: 'kept', variant: 'default', title: 'Small and useful after an incident: never removed under pressure.' }
-  if (l.ttl_active) return { label: 'bounded', variant: 'success', title: `Daily partitions, removed after ${l.retention_days} days.` }
-  return { label: 'no TTL yet', variant: 'warning', title: 'ClickHouse re-creates this table with retention on its next write.' }
+function Logs({ overview }: { overview: Overview }) {
+  const groups = logGroups(overview.diagnostic_logs || [])
+  return <Card><CardHeader className="pb-3"><CardTitle className="flex items-center gap-2"><FileText className="h-4 w-4 text-primary" /> Log lifecycle</CardTitle>
+    <p className="text-xs text-muted">Appliance logs support troubleshooting. Retained logs can remain large after an update until their retention expires; they are separate from monitoring history.</p></CardHeader>
+    <CardContent className="space-y-3">
+      {groups.length ? <div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead><tr className="text-muted"><th className="pb-2 font-medium">Category</th><th className="pb-2 text-right font-medium">Used</th><th className="pb-2 pl-4 font-medium">Automatic retention</th></tr></thead>
+      <tbody>{groups.map((g, i) => <tr key={i} className="border-t border-border/40"><td className="py-2">{g.label}</td><td className="py-2 text-right tabular-nums">{bytes(g.bytes)}</td><td className="py-2 pl-4 text-text2">{g.policy}</td></tr>)}</tbody></table></div> : <p className="text-xs text-muted">{overview.clickhouse_error ? 'Log measurements are currently unavailable.' : 'No retained appliance logs measured.'}</p>}
+      <p className="text-xs text-muted">Retained logs are checked hourly after their expiry date. Low-space protection may remove eligible logs earlier; incident and recovery records remain protected.</p>
+    </CardContent></Card>
 }
 
-function DiagnosticLogsCard({ overview }: { overview: Overview }) {
-  const logs = overview.diagnostic_logs || []
-  if (logs.length === 0) return null
-  const total = logs.reduce((a, l) => a + l.bytes, 0)
-  const pending = logs.filter((l) => l.kind === 'current' && !l.protected && !l.ttl_active)
-  const expiring = logs.filter((l) => l.legacy)
-  const evidence = logs.filter((l) => l.evidence)
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2">
-          <FileText className="h-4 w-4 text-primary" /> ClickHouse diagnostic logs
-          <span className="text-sm font-normal text-muted">· {bytes(total)}</span>
-        </CardTitle>
-        <p className="text-xs text-muted">
-          ClickHouse's own query, trace and server logs. They are not monitoring data and are bounded by
-          retention: warnings and errors only, daily partitions, removed after the period shown. Older copies
-          and switched-off logs expire on their own; under disk pressure they are removed first (error and crash
-          logs and recovery evidence are kept).
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {pending.length > 0 && (
-          <div className="flex items-start gap-2 rounded-md border border-border/60 bg-surface2/30 px-3 py-2 text-xs text-text2">
-            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
-            {pending.length} current table(s) have no retention yet ({bytes(pending.reduce((a, l) => a + l.bytes, 0))}).
-            ClickHouse re-creates each with retention on its next write; the old content is then kept as a legacy copy that expires.
-          </div>
-        )}
-        <div className="max-h-72 overflow-y-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wide text-muted">
-                <th className="py-1 font-medium">Table</th>
-                <th className="py-1 text-right font-medium">Size</th>
-                <th className="py-1 text-right font-medium">Kept</th>
-                <th className="py-1 text-right font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {logs.map((l: DiagnosticLog) => {
-                const st = diagnosticStatus(l)
-                return (
-                  <tr key={l.table} className="border-t border-border/40">
-                    <td className="py-1 font-mono">{l.table}</td>
-                    <td className="py-1 text-right tabular-nums">{bytes(l.bytes)}</td>
-                    <td className="py-1 text-right tabular-nums text-text2">{l.evidence ? 'until removed' : `${l.retention_days} days`}</td>
-                    <td className="py-1 text-right" title={st.title}><Badge variant={st.variant}>{st.label}</Badge></td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-        {expiring.length > 0 && (
-          <p className="text-[11px] text-muted">
-            {bytes(expiring.reduce((a, l) => a + l.bytes, 0))} in legacy copies and switched-off logs is removed automatically
-            once older than its log's retention.
-          </p>
-        )}
-        {evidence.length > 0 && (
-          <p className="text-[11px] text-muted">
-            {bytes(evidence.reduce((a, l) => a + l.bytes, 0))} of recovery evidence is kept until removed manually.
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  )
+function Stat({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-lg border border-border/50 bg-surface2/20 p-3"><div className="text-[11px] text-muted">{label}</div><div className="mt-1 text-base font-semibold tabular-nums">{value}</div></div>
 }

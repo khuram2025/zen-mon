@@ -17,12 +17,15 @@ import uuid
 import pytest
 import requests
 
-API = os.environ.get("ZENPLUS_API", "http://localhost:8000")
+API = os.environ.get("ZENPLUS_API", "")
 ADMIN_USER = os.environ.get("ZENPLUS_ADMIN", "admin")
 ADMIN_PASS = os.environ.get("ZENPLUS_ADMIN_PASS", "admin123")
 
 
 def _api_up() -> bool:
+    # Live smoke tests must explicitly target a disposable appliance.
+    if not API:
+        return False
     try:
         r = requests.get(f"{API}/api/v1/system/health", timeout=2)
         return r.status_code == 200
@@ -30,7 +33,7 @@ def _api_up() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(not _api_up(), reason="ZenPlus API not running")
+pytestmark = pytest.mark.skipif(not _api_up(), reason="Set ZENPLUS_API to a disposable test appliance to run live smoke tests")
 
 
 @pytest.fixture(scope="module")

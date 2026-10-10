@@ -640,3 +640,42 @@ def test_protected_bytes_cannot_make_futile_application_purge_look_effective():
     cands = P.build_candidates(rows, TODAY, P.DEFAULT_POLICY)
     pressure = P.Pressure("pressure", 20 * GIB, tuple(P.TIER_ORDER))
     assert not P.application_allowed(cands, pressure, 90)
+
+
+@pytest.mark.parametrize("capacity", [1, 4, 8, 20, 50, 500, 10_000])
+def test_free_space_floors_scale_with_writable_capacity(capacity):
+    minimum, critical = P.effective_free_limits(P.DEFAULT_POLICY, capacity * GIB)
+    assert minimum == min(5 * GIB, int(capacity * GIB * .1))
+    assert critical == min(2 * GIB, int(capacity * GIB * .04))
+    healthy = fs(capacity * .7, capacity * .3, total_gib=capacity * 1.1)
+    assert P.evaluate_pressure(healthy, P.DEFAULT_POLICY, 0, None).state == "ok"
+    pressured = fs(capacity * .9, capacity * .1)
+    assert P.evaluate_pressure(pressured, P.DEFAULT_POLICY, 0, None).need_bytes > 0
+    full = fs(capacity * .99, capacity * .01)
+    assert P.evaluate_pressure(full, P.DEFAULT_POLICY, 0, None).state == "critical"
+    assert P.evaluate_pressure(full, P.DEFAULT_POLICY, capacity * GIB, None).state == "critical"
+
+
+def test_custom_floor_ceiling_and_expansion_recalculated():
+    policy = P.normalize_policy({"min_free_gib": 20, "critical_free_gib": 3})
+    assert P.effective_free_limits(policy, 8 * GIB) == (int(.8 * GIB), int(.32 * GIB))
+    assert P.effective_free_limits(policy, 1000 * GIB) == (20 * GIB, 3 * GIB)
+    assert P.effective_free_limits(policy, 0) == (0, 0)
+
+
+def test_small_appliance_resumes_without_impossible_five_gib_floor(env):
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = []
+    current = [fs(7.92, .08, total_gib=8.5)]
+    dog = make(sampler=lambda: current)
+    state = dog.tick()
+    assert state["ingest_paused"]
+    assert state["filesystems"][0]["minimum_free_bytes"] == int(.8 * GIB)
+    # Real space, not pending deletion, is required before resuming.
+    current[:] = [fs(6, 2, total_gib=8.5)]
+    clock["t"] += 31
+    assert dog.tick()["ingest_paused"] is False
+    # Expanding capacity recalculates reserves without a policy edit/restart.
+    current[:] = [fs(6, 94, total_gib=105)]
+    clock["t"] += 31
+    assert dog.tick()["filesystems"][0]["minimum_free_bytes"] == 5 * GIB

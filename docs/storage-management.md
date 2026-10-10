@@ -152,3 +152,37 @@ pressure. A legacy copy may still expire normally after its newest day exceeds
 retention, but unknown age cannot establish expiry for a protected copy. The
 capacity forecast describes a historical footprint estimate; the watchdog's
 15-minute filesystem samples are the source for observed growth.
+
+
+## Commercial storage experience (1.24.5)
+
+The dashboard uses product-level category labels and structured operation summaries.
+Disk models, serials and capacities remain visible for physical identification;
+filesystem paths, volume-group names, table names and raw service errors are not
+rendered in the Storage interface. Administrator API contracts and support evidence
+remain available internally; this presentation boundary is not a security boundary.
+Disk operations continue through the existing privileged helper with fresh safety
+validation. Typing the displayed disk name confirms the selected operation; the
+request retains the precise device identifier expected by the helper.
+
+Automatic cleanup uses percentage thresholds plus a capacity-aware reserve. The
+configured `min_free_gib` is a ceiling: effective minimum free bytes are the lesser
+of that value and 10% of writable capacity. The critical floor is the lesser of the
+configured critical value, 4% of writable capacity and the effective minimum.
+Writable capacity excludes reserved blocks. Trigger, displayed reserve and resume
+hysteresis use the same per-filesystem limits, recalculated after expansion.
+Cleanup targets, age limits, protected/evidence exclusions, pending reclamation,
+bounded work per pass, separate-volume isolation and critical upload backpressure
+are preserved. Protected/recent data and unrelated files can still require an
+operator to expand storage; protection is not a guarantee against every disk-full
+condition. Availability collection remains active; bulk agent/APM uploads can pause.
+
+Log lifecycle groups old appliance logs by their conservative expiry date. Expiry
+is the day after newest data plus retention, matching the hourly legacy sweep's
+strict whole-day comparison. Unknown dates are not guessed. Evidence has no
+automatic expiry. This reads existing part metadata, not telemetry rows.
+
+The UI stops disk-topology polling on retention, backup and activity tabs, and
+shares recent overview measurements across tab navigation. Mutation invalidation
+still refreshes affected data. Rendered fixture tests cover all five tabs with
+internal names and errors deliberately present in backend-shaped data.

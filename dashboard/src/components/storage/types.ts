@@ -97,6 +97,7 @@ export interface ClickHouseBreakdown {
 }
 
 export interface DiagnosticLog {
+  expires_after?: string | null
   table: string
   log: string
   kind: 'current' | 'legacy' | 'evidence'
@@ -110,6 +111,8 @@ export interface DiagnosticLog {
 }
 
 export interface WatchdogFs {
+  minimum_free_bytes?: number
+  critical_free_bytes?: number
   mount: string
   total_bytes: number
   used_bytes: number

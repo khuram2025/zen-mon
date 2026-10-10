@@ -1,6 +1,6 @@
 // Pure helpers for the Storage tab. Self-contained (no app imports) so
 // scripts/test-storage-ui.mjs can exercise them directly.
-import type { Consumer, Forecast, MountInfo, Severity, StorageEvent } from './types'
+import type { Consumer, Forecast, MountInfo, Severity, StorageEvent, StorageIssue, DiagnosticLog, Layout } from './types'
 
 export const GIB = 1024 ** 3
 
@@ -58,7 +58,7 @@ export function spaceSegments(mount: MountInfo, consumers: Consumer[], allMounts
   const known = mine.reduce((sum, c) => sum + c.bytes, 0)
   const segments: SpaceSegment[] = mine
     .filter((c) => c.bytes > 0)
-    .map((c) => ({ id: c.id, label: c.label, bytes: c.bytes, hint: c.hint }))
+    .map((c) => ({ id: c.id, label: consumerLabel(c.id), bytes: c.bytes, hint: consumerHint(c.id) }))
   // The remainder is shown, not hidden: the reconciliation gap between what
   // the filesystem reports and what ZenPlus can attribute.
   const other = mount.used_bytes - known
@@ -66,10 +66,10 @@ export function spaceSegments(mount: MountInfo, consumers: Consumer[], allMounts
     segments.push({
       id: 'other',
       label: mount.roles.includes('system')
-        ? 'Unclassified (operating system, applications, other files)'
-        : 'Unclassified files',
+        ? 'System & other storage'
+        : 'Other storage',
       bytes: other,
-      hint: 'Used space not attributed to a known consumer (includes metadata and sampling skew)',
+      hint: 'Remaining used capacity; category measurements may update at different times',
     })
   }
   return segments.sort((a, b) => b.bytes - a.bytes)
@@ -110,7 +110,7 @@ export const EVENT_LABELS: Record<string, string> = {
   restore_started: 'Restore started',
   restore_completed: 'Restore completed',
   restore_failed: 'Restore failed',
-  os_cleanup: 'OS cleanup',
+  os_cleanup: 'Appliance cleanup',
   disk_added: 'Disk added',
   volume_extended: 'Volume extended',
   space_claimed: 'Disk space claimed',
@@ -125,90 +125,107 @@ export const EVENT_LABELS: Record<string, string> = {
   watchdog_application_spared: 'Monitoring data spared',
   watchdog_ingest_paused: 'Ingestion paused',
   watchdog_ingest_resumed: 'Ingestion resumed',
-  watchdog_error: 'Watchdog error',
+  watchdog_error: 'Protection check failed',
 }
 
+/** Never render free-form service errors, commands, paths or table names. */
 export function eventSummary(e: StorageEvent): string {
   const d = e.details || {}
-  const parts: string[] = []
+  const amount = (n: unknown) => bytes(typeof n === 'number' ? n : 0)
   switch (e.event_type) {
-    case 'auto_purge':
-      if (Array.isArray(d.dropped_partitions)) parts.push(`${d.dropped_partitions.length} partitions dropped`)
-      if (d.usage_before_pct != null && d.usage_after_pct != null) parts.push(`${d.usage_before_pct}% → ${d.usage_after_pct}%`)
-      else if (d.usage_percent != null) parts.push(`at ${d.usage_percent}% usage`)
-      if (d.note) parts.push(String(d.note))
-      break
-    case 'auto_purge_skipped':
-      if (d.usage_percent != null) parts.push(`at ${d.usage_percent}% usage`)
-      if (d.note) parts.push(String(d.note))
-      break
-    case 'manual_purge':
-      if (d.older_than_days) parts.push(`older than ${d.older_than_days} days`)
-      if (Array.isArray(d.dropped_partitions)) parts.push(`${d.dropped_partitions.length} partitions`)
-      break
-    case 'retention_applied':
-      if (Array.isArray(d.changes)) parts.push(`${d.changes.length} table TTL(s) changed`)
-      break
-    case 'disk_added':
-      parts.push(`${d.disk}${d.pv_size ? ` (${bytes(d.pv_size)})` : ''}`)
-      if (d.added_bytes) parts.push(`${bytes(d.added_bytes)} allocated`)
-      else if (d.allocate === 'none') parts.push('kept unallocated')
-      if (d.extend_error) parts.push(`allocation failed: ${d.extend_error}`)
-      break
-    case 'volume_extended':
-      if (d.added_bytes) parts.push(`+${bytes(d.added_bytes)}`)
-      if (d.mount) parts.push(String(d.mount))
-      if (d.size_after) parts.push(`now ${bytes(d.size_after)}`)
-      break
-    case 'space_claimed':
-      parts.push(`${d.pv}${d.added_bytes ? ` +${bytes(d.added_bytes)}` : ''}`)
-      break
-    case 'disk_evacuation_started':
-      parts.push(`${d.pv}${d.bytes_to_move ? ` (${bytes(d.bytes_to_move)})` : ''}`)
-      break
-    case 'disk_removed':
-      if (d.pv) parts.push(String(d.pv))
-      break
-    case 'backup_created':
-      if (d.kind) parts.push(d.kind === 'full' ? 'full' : 'configuration')
-      if (d.size_bytes) parts.push(bytes(d.size_bytes))
-      break
-    case 'watchdog_purge': {
-      const actions = Array.isArray(d.actions) ? d.actions : []
-      const tables = [...new Set(actions.map((a: any) => String(a.table).replace(/^(system|zenplus)\./, '')))]
-      parts.push(`${bytes(d.scheduled_bytes)} scheduled for deletion`)
-      if (tables.length) parts.push(tables.slice(0, 3).join(', ') + (tables.length > 3 ? ` +${tables.length - 3}` : ''))
-      if (Array.isArray(d.reason) && d.reason.length) parts.push(d.reason.join('; '))
-      else if (d.reason === 'legacy_cleanup') parts.push('expired legacy diagnostic tables')
-      break
-    }
-    case 'watchdog_reclaim':
-      parts.push(`${bytes(d.scheduled_bytes)} scheduled`)
-      if (typeof d.measured_free_change_bytes === 'number') {
-        parts.push(`free space ${d.measured_free_change_bytes >= 0 ? '+' : '−'}${bytes(Math.abs(d.measured_free_change_bytes))} measured`)
-      }
-      break
-    case 'watchdog_insufficient':
-      parts.push(`${bytes(d.planned_bytes)} eligible this pass vs ${bytes(d.need_bytes)} needed`)
-      if (d.usage_pct != null) parts.push(`at ${Number(d.usage_pct).toFixed(1)}%`)
-      break
-    case 'watchdog_exhausted':
-    case 'watchdog_application_spared':
-      if (d.usage_pct != null) parts.push(`at ${Number(d.usage_pct).toFixed(1)}%`)
-      if (d.note) parts.push(String(d.note))
-      break
-    case 'watchdog_ingest_paused':
-    case 'watchdog_ingest_resumed':
-    case 'watchdog_error':
-      if (d.reason) parts.push(String(d.reason))
-      if (d.message) parts.push(String(d.message))
-      break
-    case 'backup_failed':
-    case 'restore_failed':
-      if (d.error) parts.push(String(d.error))
-      break
+    case 'disk_added': return `${amount(d.pv_size)} added · ${amount(d.added_bytes)} allocated${d.extend_error ? ' · Allocation incomplete; review disks before retrying' : ''}`
+    case 'volume_extended': return `${amount(d.added_bytes)} added · capacity ${amount(d.size_after)}`
+    case 'space_claimed': return `${amount(d.added_bytes)} ready to allocate`
+    case 'disk_evacuation_started': return `${amount(d.bytes_to_move)} moving; keep the disk connected until complete`
+    case 'disk_removed': return 'Disk removed from appliance storage'
+    case 'watchdog_purge': return `${amount(d.scheduled_bytes)} scheduled for deletion · ${d.reason === 'legacy_cleanup' ? 'Expired appliance logs' : 'Low-space protection'}`
+    case 'watchdog_reclaim': return `${amount(d.scheduled_bytes)} scheduled` + (typeof d.measured_free_change_bytes === 'number' ? ` · free space ${d.measured_free_change_bytes >= 0 ? '+' : '−'}${amount(Math.abs(d.measured_free_change_bytes))} measured` : '')
+    case 'watchdog_insufficient': return `${amount(d.planned_bytes)} eligible this pass; ${amount(d.need_bytes)} needed. Expand storage or review retention.`
+    case 'watchdog_exhausted': return 'No more eligible data can be removed. Expand storage or review retention.'
+    case 'watchdog_application_spared': return 'Recent and protected history kept; deleting eligible history would not recover enough space.'
+    case 'watchdog_ingest_paused': return 'Agent and application uploads paused until free space recovers.'
+    case 'watchdog_ingest_resumed': return 'Free space recovered; uploads resumed.'
+    case 'watchdog_error': return 'A storage protection check failed. Contact support if this continues.'
+    case 'backup_failed': return 'Backup could not complete. Check capacity and retry; contact support if this continues.'
+    case 'restore_failed': return 'Restore could not complete. Contact support before retrying.'
+    case 'auto_purge_skipped': return 'No eligible old history to remove within the current policy.'
+    case 'auto_purge': return e.freed_bytes ? `${amount(e.freed_bytes)} reclaimed` : 'Retention checked; no space reclaimed.'
+    case 'manual_purge': return `${amount(d.scheduled_bytes ?? e.freed_bytes)} scheduled for deletion`
+    case 'retention_applied': return 'Retention settings applied to monitoring history.'
+    case 'backup_created': return `${d.kind === 'full' ? 'Full' : 'Configuration'} backup · ${amount(d.size_bytes)}`
+    case 'os_cleanup': return `${amount(e.freed_bytes)} reclaimed from appliance logs and temporary files`
+    default: return 'Storage operation recorded.'
   }
-  return parts.join(' · ')
+}
+
+export function storageError(e?: any): string {
+  const status = e?.response?.status
+  if (status === 401) return 'Your session has expired. Sign in again.'
+  if (status === 403) return 'Administrator access is required for this operation.'
+  if (status === 409) return 'Storage changed or another operation is running. Refresh and review the current state.'
+  if (status === 400 || status === 422) return 'The request could not be applied. Check the selected disk, capacity and settings, then refresh before retrying.'
+  return 'The operation could not complete. Refresh to check its status before retrying; contact support if this continues.'
+}
+
+const CONSUMERS: Record<string, [string, string]> = {
+  clickhouse: ['Monitoring history', 'Manage how long monitoring history is retained'],
+  clickhouse_diagnostic: ['Appliance logs', 'Older logs expire automatically; see log lifecycle below'],
+  clickhouse_inactive: ['Space being reclaimed', 'Temporary retained data is removed automatically after background maintenance'],
+  clickhouse_detached: ['Recovery records', 'Retained for recovery; contact support before removing'],
+  postgres: ['Settings & inventory', 'Devices, users, rules and appliance settings'],
+  backups: ['Backups', 'Manage saved backups in the Backups tab'],
+  journal: ['Service logs', 'Size-limited logs used for support'],
+  os_logs: ['System logs', 'Logs rotate automatically by size'],
+  apt_cache: ['Update cache', 'Downloaded update files that can be cleared'],
+}
+export const consumerLabel = (id: string) => CONSUMERS[id]?.[0] || 'Other storage'
+export const consumerHint = (id: string) => CONSUMERS[id]?.[1] || null
+export function diskName(layout: Layout, path: string): string {
+  const index = layout.disks.findIndex(d => d.path === path || d.pvs.some(p => p.path === path))
+  return index >= 0 ? `Disk ${index + 1}` : 'Selected disk'
+}
+export const diskStatus: Record<string, string> = {
+  system: 'System disk', pool: 'In storage pool', unused: 'Available', needs_wipe: 'Contains data',
+  foreign: 'Used by another system', in_use: 'In use', read_only: 'Read only',
+}
+export function issueText(issue: StorageIssue): [string, string] {
+  const messages: Record<string, [string, string]> = {
+    helper_unavailable: ['Disk management unavailable', 'Refresh and contact support if this continues.'],
+    pv_missing: ['A disk containing data is missing', 'Reconnect the disk, then rescan. Affected data may be unavailable.'],
+    pv_missing_empty: ['An empty disk is missing', 'Review the disk list to remove its registration.'],
+    usage_critical: ['Storage is critically low', 'Free space or expand capacity now.'],
+    usage_high: ['Storage is running low', 'Review retention or expand capacity soon.'],
+    usage_elevated: ['Plan for more capacity', 'Review your retention needs and available disk capacity.'],
+    pvmove: ['Data is moving between disks', 'Keep all disks connected until the move completes.'],
+    claimable: ['Additional disk capacity detected', 'Review Disks & capacity to make the new space available.'],
+    unallocated: ['Capacity is ready to allocate', 'Allocate it now or keep it in reserve.'],
+    new_disk: ['A disk is available to add', 'Review its identity and contents before adding it.'],
+    clickhouse_drift: ['Storage configuration needs attention', 'Contact support to verify the appliance storage configuration.'],
+    watchdog_missing: ['Automatic protection is unavailable', 'Contact support to restore storage protection.'],
+    watchdog_stale: ['Storage protection has not reported recently', 'Refresh; contact support if this continues.'],
+    ingest_paused: ['Some uploads are paused to protect storage', 'Agent and application uploads resume when free space recovers.'],
+    purge_insufficient: ['Cleanup cannot recover enough space yet', 'Expand storage or review retention.'],
+    purge_exhausted: ['No more eligible history can be removed', 'Expand storage or review retention; protected records are retained.'],
+    fast_growth: ['Storage is filling quickly', 'Automatic protection is removing eligible logs. Review capacity and retention.'],
+    watchdog_error: ['Storage protection needs attention', 'A recent check failed. Contact support if this continues.'],
+  }
+  return messages[issue.code] || ['Storage needs attention', 'Review capacity and retention; contact support if this continues.']
+}
+export function logGroups(logs: DiagnosticLog[]) {
+  const groups = new Map<string, { label: string; bytes: number; policy: string }>()
+  for (const l of logs) {
+    if (!(l.bytes > 0)) continue
+    const label = l.evidence ? 'Recovery records' : l.legacy ? 'Retained appliance logs' : l.protected ? 'Incident logs' : 'Current appliance logs'
+    const expiry = l.expires_after ? new Date(l.expires_after) : null
+    const validExpiry = expiry && Number.isFinite(expiry.getTime())
+    const policy = l.evidence ? 'Kept for support review'
+      : l.legacy ? (validExpiry ? `Eligible from ${expiry!.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })} (UTC)` : `${l.retention_days} days after the last entry`)
+      : l.ttl_active ? `Rolling ${l.retention_days}-day retention` : 'Retention activates when new entries arrive'
+    const key = `${label}:${policy}:${l.protected}`
+    const old = groups.get(key)
+    groups.set(key, { label, bytes: (old?.bytes || 0) + l.bytes, policy: policy + (l.legacy && l.protected ? ' · protected during low space' : '') })
+  }
+  return [...groups.values()]
 }
 
 export interface GroupedEvent {

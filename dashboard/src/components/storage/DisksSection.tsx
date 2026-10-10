@@ -11,7 +11,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
-import { GIB, allocationBytes, bytes, usageTextTone } from './storageMath'
+import { GIB, allocationBytes, bytes, usageTextTone, diskName, diskStatus } from './storageMath'
 import type { Disk, DiskStatus, Layout, PhysicalVolume, Volume } from './types'
 import { useStorageAction, useStorageStatus } from './useStorage'
 
@@ -26,7 +26,7 @@ const STATUS_BADGE: Record<DiskStatus, 'success' | 'info' | 'warning' | 'danger'
 }
 
 export function DisksSection() {
-  const { data: status, isLoading } = useStorageStatus()
+  const { data: status, isLoading, isError, refetch } = useStorageStatus()
   const [addTarget, setAddTarget] = useState<Disk | null>(null)
   const [extendOpen, setExtendOpen] = useState(false)
   const [claimTarget, setClaimTarget] = useState<{ pv: string; bytes: number } | null>(null)
@@ -34,6 +34,7 @@ export function DisksSection() {
 
   const rescan = useStorageAction('/system/storage/rescan', { title: 'Disk rescan' })
 
+  if (isError) return <Card><CardContent className="py-5 text-sm">Disk information is unavailable. <Button variant="ghost" onClick={() => refetch()}>Retry</Button></CardContent></Card>
   if (isLoading || !status) {
     return (
       <Card>
@@ -51,7 +52,7 @@ export function DisksSection() {
           <div className="flex items-center gap-2 text-sm font-medium text-warning">
             <AlertTriangle className="h-4 w-4" /> Disk management is unavailable
           </div>
-          <p className="text-xs text-text2">{layout.errors.join('; ')}</p>
+          <p className="text-xs text-text2">Refresh to retry. Contact support if disk management remains unavailable.</p>
         </CardContent>
       </Card>
     )
@@ -81,7 +82,7 @@ export function DisksSection() {
       {claimTarget && (
         <ClaimDialog target={claimTarget} layout={layout} onClose={() => setClaimTarget(null)} />
       )}
-      {removeTarget && <RemoveDiskDialog pv={removeTarget} onClose={() => setRemoveTarget(null)} />}
+      {removeTarget && <RemoveDiskDialog layout={layout} pv={removeTarget} onClose={() => setRemoveTarget(null)} />}
     </div>
   )
 }
@@ -110,8 +111,8 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
               <Layers className="h-4 w-4 text-primary" /> Storage pool
             </CardTitle>
             <p className="mt-1 text-xs text-muted">
-              Disks in the pool (LVM volume group <span className="font-mono">{layout.data_vg || '—'}</span>)
-              provide the space for the data volume. Changes apply online — monitoring keeps running.
+              Review connected disks, make added capacity available and allocate it to the appliance.
+              Supported expansion applies online while monitoring continues.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -151,7 +152,7 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
           <div className="rounded-lg border border-info/30 bg-info/5 px-3 py-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
               <span className="flex items-center gap-2 font-medium text-info">
-                <ArrowRightLeft className="h-4 w-4" /> Moving data off {layout.pvmove.pv}
+                <ArrowRightLeft className="h-4 w-4" /> Moving data off {diskName(layout, layout.pvmove.pv)}
               </span>
               <span className="flex items-center gap-3">
                 <span className="tabular-nums text-text2">{layout.pvmove.percent.toFixed(1)}%</span>
@@ -174,7 +175,7 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
             <Maximize2 className="h-4 w-4 shrink-0 text-info" />
             <div className="min-w-0 flex-1 text-sm">
               <span className="font-medium">{bytes(c.bytes)}</span> of new space on{' '}
-              <span className="font-mono">{c.pv}</span>
+              <span className="font-mono">{diskName(layout, c.pv)}</span>
               <div className="text-xs text-text2">The virtual disk was enlarged. Claim the space to use it.</div>
             </div>
             <Button size="sm" onClick={() => onClaim(c.pv, c.bytes)} disabled={!!layout.pvmove}>
@@ -233,9 +234,7 @@ function VolumeRow({ volume }: { volume: Volume }) {
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/50 px-3 py-2 text-sm">
       <div className="min-w-[12rem] flex-1">
         <div className="font-medium">{roles} volume</div>
-        <div className="font-mono text-[11px] text-muted">
-          {volume.on_lvm ? `${volume.vg}/${volume.lv}` : volume.path} · {volume.fstype} · mounted at{' '}
-          {volume.roles.includes('data') && volume.mount_point === '/' ? '/ (holds /data)' : volume.mount_point}
+        <div className="text-[11px] text-muted">{bytes(volume.usage?.free_bytes || 0)} available
         </div>
       </div>
       <div className="w-40">
@@ -290,14 +289,14 @@ function DisksCard({ layout, onAdd, onClaim, onRemove }: {
                   {expanded ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
                   <HardDrive className="h-5 w-5 shrink-0 text-text2" />
                   <span>
-                    <span className="font-mono text-sm font-medium">{d.path}</span>
+                    <span className="font-mono text-sm font-medium">{diskName(layout, d.path)}</span>{' '}
                     <span className="ml-2 text-sm tabular-nums">{bytes(d.size_bytes)}</span>
                     <span className="block text-[11px] text-muted">
                       {[d.model, d.transport?.toUpperCase(), d.rotational ? 'HDD' : 'SSD/virtual'].filter(Boolean).join(' · ')}
                     </span>
                   </span>
                 </button>
-                <Badge variant={STATUS_BADGE[d.status]}>{d.label}</Badge>
+                <Badge variant={STATUS_BADGE[d.status]}>{diskStatus[d.status] || 'Unavailable'}</Badge>
                 {poolPvs.some((p) => p.claimable_bytes > 0) && (
                   <Badge variant="info">+{bytes(poolPvs.reduce((a, p) => a + p.claimable_bytes, 0))} claimable</Badge>
                 )}
@@ -334,7 +333,7 @@ function PvUsage({ pv }: { pv: PhysicalVolume }) {
   return (
     <div className="border-t border-border/40 px-3 py-2 pl-12 text-xs">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="font-mono text-text2">{pv.path}</span>
+        <span className="font-mono text-text2">Allocated capacity</span>
         <div className="h-1.5 min-w-[8rem] flex-1 overflow-hidden rounded-full bg-surface2">
           <div className="h-full bg-primary" style={{ width: `${pct}%` }} />
         </div>
@@ -343,7 +342,7 @@ function PvUsage({ pv }: { pv: PhysicalVolume }) {
         </span>
       </div>
       {!pv.removal.action && pv.removal.reason && (
-        <div className="mt-1 text-[11px] text-muted">{pv.removal.reason}</div>
+        <div className="mt-1 text-[11px] text-muted">This disk cannot currently be removed safely. Keep it connected.</div>
       )}
     </div>
   )
@@ -352,24 +351,10 @@ function PvUsage({ pv }: { pv: PhysicalVolume }) {
 function DiskDetail({ disk }: { disk: Disk }) {
   return (
     <div className="space-y-2 border-t border-border/40 bg-surface2/20 px-3 py-2.5 pl-12 text-xs">
-      {disk.detail && <p className="text-text2">{disk.detail}</p>}
-      {disk.serial && <div className="text-muted">Serial <span className="font-mono">{disk.serial}</span></div>}
-      {disk.partitions.length > 0 ? (
-        <table className="w-full max-w-xl">
-          <tbody>
-            {disk.partitions.map((p) => (
-              <tr key={p.name} className="border-t border-border/30">
-                <td className="py-1 font-mono">{p.path}</td>
-                <td className="py-1 tabular-nums">{bytes(p.size_bytes)}</td>
-                <td className="py-1 text-muted">{p.fstype || '—'}</td>
-                <td className="py-1 font-mono text-muted">{p.mountpoint || ''}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <div className="text-muted">No partitions.</div>
-      )}
+      <p className="text-text2">{diskStatus[disk.status] || 'Status unavailable'}. {disk.needs_wipe ? 'Existing contents must be erased before adding this disk.' : 'Review disk identity before making changes.'}</p>
+      {disk.model && <div className="text-muted">Model: {disk.model}</div>}
+      {disk.serial && <div className="text-muted">Serial: <span className="font-mono">{disk.serial}</span></div>}
+      <div className="text-muted">Capacity: {bytes(disk.size_bytes)}</div>
     </div>
   )
 }
@@ -383,7 +368,7 @@ function ExpansionGuide({ dataSharesOs }: { dataSharesOs: boolean }) {
       <button type="button" className="flex w-full items-center gap-2 px-5 py-3.5 text-left text-sm font-medium"
         onClick={() => setOpen(!open)} aria-expanded={open}>
         {open ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
-        How to expand or shrink storage
+        Expand capacity or safely remove a disk
       </button>
       {open && (
         <CardContent className="grid gap-4 text-xs text-text2 md:grid-cols-3">
@@ -398,7 +383,7 @@ function ExpansionGuide({ dataSharesOs }: { dataSharesOs: boolean }) {
           <div>
             <div className="mb-1 font-semibold text-text">Enlarge an existing disk</div>
             <ol className="list-decimal space-y-0.5 pl-4">
-              <li>Increase the disk size in the hypervisor (snapshots must be removed first on VMware).</li>
+              <li>Increase the disk size in the hypervisor.</li>
               <li>Click <em>Rescan disks</em>, then <em>Claim space</em>.</li>
               <li>Allocate the new space to the {dataSharesOs ? 'system & data' : 'data'} volume.</li>
             </ol>
@@ -473,31 +458,32 @@ function AddDiskDialog({ disk, layout, onClose }: { disk: Disk; layout: Layout; 
   // Free space after the disk joins: what is unallocated now plus the disk.
   const poolFreeAfter = layout.unallocated_bytes + disk.size_bytes
   const custom = allocationBytes(gib, layout.extent_bytes, poolFreeAfter)
-  const valid = (mode !== 'custom' || custom != null) && (!disk.needs_wipe || confirm === disk.path)
+  const name = diskName(layout, disk.path)
+  const valid = (mode !== 'custom' || custom != null) && (!disk.needs_wipe || confirm === name)
 
   function submit() {
     const allocate = mode === 'all' ? 'all' : mode === 'none' ? 'none' : String(custom)
-    add.mutate({ disk: disk.path, allocate, wipe: disk.needs_wipe, confirm: disk.needs_wipe ? confirm : undefined })
+    add.mutate({ disk: disk.path, allocate, wipe: disk.needs_wipe, confirm: disk.needs_wipe ? disk.path : undefined })
   }
 
   return (
     <Dialog open onOpenChange={(o) => !o && !add.isPending && onClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2"><Plus className="h-5 w-5 text-primary" /> Add {disk.path} to the storage pool</DialogTitle>
+          <DialogTitle className="flex items-center gap-2"><Plus className="h-5 w-5 text-primary" /> Add {name} to the storage pool</DialogTitle>
         </DialogHeader>
         <DialogDescription>
-          {bytes(disk.size_bytes)}{disk.model ? ` · ${disk.model}` : ''}. The disk is initialized for LVM and joins
-          volume group <span className="font-mono">{layout.data_vg}</span>.
+          {bytes(disk.size_bytes)}{disk.model ? ` · ${disk.model}` : ''}. This disk will be prepared and added to appliance storage.
+          {disk.serial && <> Serial: {disk.serial}.</>}
         </DialogDescription>
         {disk.needs_wipe && (
           <div className="space-y-2 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm">
             <div className="flex items-center gap-2 font-medium text-danger">
               <AlertTriangle className="h-4 w-4" /> Everything on this disk will be erased
             </div>
-            <p className="text-xs text-text2">{disk.detail}</p>
+            <p className="text-xs text-text2">Check the disk model, serial and capacity above. Existing contents will be permanently lost.</p>
             <label className="block text-xs text-text2">
-              Type <span className="font-mono font-semibold text-text">{disk.path}</span> to confirm
+              Type <span className="font-mono font-semibold text-text">{name}</span> to confirm
               <Input className="mt-1 h-8 font-mono" value={confirm} onChange={(e) => setConfirm(e.target.value)}
                 autoComplete="off" spellCheck={false} />
             </label>
@@ -538,7 +524,7 @@ function ExtendDialog({ layout, onClose }: { layout: Layout; onClose: () => void
           <DialogTitle className="flex items-center gap-2"><Maximize2 className="h-5 w-5 text-primary" /> Allocate pool space</DialogTitle>
         </DialogHeader>
         <DialogDescription>
-          {bytes(layout.unallocated_bytes)} is unallocated. The volume and its filesystem grow online.
+          {bytes(layout.unallocated_bytes)} is unallocated. The selected capacity grows online.
           Allocated space cannot be returned to the pool without downtime, so allocate what you need.
         </DialogDescription>
         {targets.length > 1 && (
@@ -548,7 +534,7 @@ function ExtendDialog({ layout, onClose }: { layout: Layout; onClose: () => void
                 <input type="radio" name="target" checked={mount === v.mount_point}
                   onChange={() => setMount(v.mount_point)} className="accent-[var(--primary,#3b82f6)]" />
                 {v.roles.includes('data') ? 'Data volume' : 'System volume'}
-                <span className="font-mono text-xs text-muted">{v.vg}/{v.lv}</span>
+                <span className="text-xs text-muted">{bytes(v.size_bytes)} currently</span>
               </label>
             ))}
           </div>
@@ -616,8 +602,7 @@ function ClaimDialog({ target, layout, onClose }: {
           <DialogTitle className="flex items-center gap-2"><Maximize2 className="h-5 w-5 text-primary" /> Claim new disk space</DialogTitle>
         </DialogHeader>
         <DialogDescription>
-          Grows the partition and physical volume <span className="font-mono">{target.pv}</span> to use
-          the {bytes(target.bytes)} added to the virtual disk. Existing data is not touched.
+          Makes the additional {bytes(target.bytes)} on {diskName(layout, target.pv)} available to this appliance. Existing data is preserved.
         </DialogDescription>
         <label className="flex items-start gap-2 text-sm">
           <input type="checkbox" checked={allocate} onChange={(e) => setAllocate(e.target.checked)}
@@ -638,7 +623,8 @@ function ClaimDialog({ target, layout, onClose }: {
   )
 }
 
-function RemoveDiskDialog({ pv, onClose }: { pv: PhysicalVolume; onClose: () => void }) {
+function RemoveDiskDialog({ pv, layout, onClose }: { pv: PhysicalVolume; layout: Layout; onClose: () => void }) {
+  const name = diskName(layout, pv.path)
   const [confirm, setConfirm] = useState('')
   const evacuate = pv.removal.action === 'evacuate'
   const action = useStorageAction<{ pv: string; confirm: string }>(
@@ -650,31 +636,30 @@ function RemoveDiskDialog({ pv, onClose }: { pv: PhysicalVolume; onClose: () => 
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Unplug className="h-5 w-5 text-warning" /> {evacuate ? 'Move data off' : 'Remove'} {pv.path}
+            <Unplug className="h-5 w-5 text-warning" /> {evacuate ? 'Move data off' : 'Remove'} {name}
           </DialogTitle>
         </DialogHeader>
         <DialogDescription>
           {evacuate ? (
             <>
-              Step 1 of 2. {pv.removal.reason} This can take a while for large disks; progress shows on
+              Step 1 of 2. Move {bytes(pv.used_bytes)} to other disks before removal. This can take a while; progress shows on
               this page. When it finishes, click <em>Remove</em> again to take the disk out of the pool.
             </>
           ) : (
             <>
-              The disk holds no data. It leaves volume group <span className="font-mono">{pv.vg}</span> and
-              the pool shrinks by {bytes(pv.size_bytes)}. Detach it from the VM afterwards.
+              The disk holds no allocated data. Available pool capacity decreases by {bytes(pv.size_bytes)}. Detach it from the VM afterwards.
             </>
           )}
         </DialogDescription>
         <label className="block text-xs text-text2">
-          Type <span className="font-mono font-semibold text-text">{pv.path}</span> to confirm
+          Type <span className="font-semibold text-text">{name}</span> to confirm
           <Input className="mt-1 h-8 font-mono" value={confirm} onChange={(e) => setConfirm(e.target.value)}
             autoComplete="off" spellCheck={false} />
         </label>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={action.isPending}>Cancel</Button>
-          <Button variant="destructive" disabled={confirm !== pv.path || action.isPending}
-            onClick={() => action.mutate({ pv: pv.path, confirm })}>
+          <Button variant="destructive" disabled={confirm !== name || action.isPending}
+            onClick={() => action.mutate({ pv: pv.path, confirm: pv.path })}>
             {action.isPending && <Loader2 className="animate-spin" />}
             {evacuate ? 'Start moving data' : 'Remove from pool'}
           </Button>

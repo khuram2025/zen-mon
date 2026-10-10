@@ -103,7 +103,8 @@ def test_paused_ingest_rejects_host_results_before_claiming_the_batch(monkeypatc
     assert pause_at < src.index("payload_sha256 = _host_results_batch_digest(data)")
 
 
-def test_diagnostic_log_sizes_cover_every_table_with_bare_names(monkeypatch):
+@pytest.mark.parametrize("date_only", [False, True])
+def test_diagnostic_log_sizes_cover_every_table_with_bare_names(monkeypatch, date_only):
     """Sizes come from system.parts for all tables, not the top-25 breakdown."""
     many = [(f"zz_filler_{i}", 10 ** 9) for i in range(40)]      # pushes logs out of any top 25
 
@@ -117,6 +118,10 @@ def test_diagnostic_log_sizes_cover_every_table_with_bare_names(monkeypatch):
                                         ("processors_profile_log", 99),
                                         ("query_log_pre_recovery_20261007", 7),
                                         ("my_custom_log", 11), ("error_log_0", 100)]
+                from datetime import datetime
+                r.result_rows = [(*row, datetime(2026, 10, 10).date(),
+                                  datetime(1970, 1, 1) if date_only else datetime(2026, 10, 10, 12))
+                                 for row in r.result_rows]
             else:
                 r.result_rows = [("text_log", "MergeTree PARTITION BY event_date TTL event_date + toIntervalDay(3)"),
                                  ("text_log_0", "MergeTree PARTITION BY toYYYYMM(event_date)"),
@@ -131,6 +136,10 @@ def test_diagnostic_log_sizes_cover_every_table_with_bare_names(monkeypatch):
     assert rows["processors_profile_log"]["disabled"] and rows["processors_profile_log"]["kind"] == "legacy"
     assert rows["query_log_pre_recovery_20261007"]["evidence"]
     assert rows["error_log_0"]["protected"] and rows["error_log_0"]["legacy"]
+    assert rows["text_log_0"]["expires_after"] == "2026-10-14"
+    assert rows["error_log_0"]["expires_after"] == "2026-11-10"
+    assert rows["query_log_pre_recovery_20261007"]["expires_after"] is None
+    assert rows["text_log"]["expires_after"] is None
     assert "my_custom_log" not in rows                          # unknown tables are not diagnostics
 
 

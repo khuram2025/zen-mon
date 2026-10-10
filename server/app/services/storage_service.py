@@ -557,8 +557,8 @@ def _diagnostic_logs_sync() -> list[dict]:
     not from the top-25 breakdown, keyed by the table's own name.
     """
     client = get_ch_client()
-    sizes = {r[0]: int(r[1] or 0) for r in client.query(
-        "SELECT table, sum(bytes_on_disk) FROM system.parts "
+    stats = {r[0]: (int(r[1] or 0), storage_policy.newest_date(r[2], r[3])) for r in client.query(
+        "SELECT table, sum(bytes_on_disk), maxIf(max_date, active), maxIf(max_time, active) FROM system.parts "
         "WHERE database = 'system' GROUP BY table"
     ).result_rows}
     rows = client.query(
@@ -581,7 +581,10 @@ def _diagnostic_logs_sync() -> list[dict]:
             "protected": base in storage_policy.PROTECTED_DIAGNOSTIC_LOGS,
             "retention_days": storage_policy.diagnostic_retention_days(base),
             "ttl_active": " TTL " in f" {engine_full or ''} ",
-            "bytes": sizes.get(name, 0),
+            "bytes": stats.get(name, (0, None))[0],
+            "expires_after": ((stats[name][1] + timedelta(
+                days=storage_policy.diagnostic_retention_days(base) + 1)).isoformat()
+                if kind == "legacy" and name in stats and stats[name][1] is not None else None),
         })
     return sorted(out, key=lambda r: -r["bytes"])
 

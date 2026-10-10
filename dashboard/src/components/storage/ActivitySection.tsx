@@ -16,7 +16,7 @@ function tone(type: string) {
 }
 
 export function ActivitySection() {
-  const { data: events, isLoading } = useStorageEvents(100)
+  const { data: events, isLoading, isError } = useStorageEvents(100)
   const grouped = groupEvents(events || [])
 
   return (
@@ -30,7 +30,7 @@ export function ActivitySection() {
         </p>
       </CardHeader>
       <CardContent>
-        {isLoading ? (
+        {isError ? <p role="alert" className="text-sm text-warning">Storage activity is unavailable. Refresh to retry.</p> : isLoading ? (
           <div className="flex items-center gap-2 text-sm text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
         ) : grouped.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border/60 p-6 text-center text-xs text-muted">
@@ -44,7 +44,7 @@ export function ActivitySection() {
                 <li key={e.id} className="flex items-start justify-between gap-4 rounded-md px-2 py-1.5 text-xs hover:bg-surface2/40">
                   <div className="min-w-0">
                     <span className={cn('font-medium', tone(e.event_type))}>
-                      {EVENT_LABELS[e.event_type] || e.event_type}
+                      {EVENT_LABELS[e.event_type] || 'Storage operation'}
                     </span>
                     {count > 1 && (
                       <span className="ml-1.5 rounded bg-surface2 px-1.5 py-0.5 text-[10px] tabular-nums text-text2">×{count}</span>
@@ -52,7 +52,7 @@ export function ActivitySection() {
                     <span className="ml-2 text-muted">
                       {e.freed_bytes > 0 && e.event_type !== 'watchdog_reclaim' && <>freed {bytes(e.freed_bytes)} · </>}
                       {summary && <>{summary} · </>}
-                      by {e.actor}
+                      by {e.actor === 'watchdog' || e.actor === 'system' ? 'Automatic protection' : e.actor}
                     </span>
                   </div>
                   <span className="shrink-0 tabular-nums text-muted" title={new Date(e.created_at).toLocaleString()}>
