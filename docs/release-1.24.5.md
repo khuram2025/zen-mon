@@ -21,3 +21,9 @@ part of release acceptance.
 
 Legacy live smoke tests now require an explicit disposable target through
 `ZENPLUS_API`; collecting the default suite does not contact the installed app.
+
+A delivery race between the disk overflow queue and in-memory batches is fixed.
+The queue now rechecks committed disk work under the handoff lock so newer
+batches cannot overtake older spilled batches. Disk reads remain outside the
+intake lock. A deterministic interleaving regression and repeated race-detector
+checks cover the handoff.

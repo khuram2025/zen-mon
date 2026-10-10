@@ -193,16 +193,13 @@ func (q *batchQueue) Next(ctx context.Context) *flowBatch {
 				return b
 			}
 		}
-		q.mu.Lock()
-		if len(q.sealed) > 0 {
-			b := q.sealed[0]
-			q.sealed = q.sealed[1:]
-			q.memRecords -= len(b.Records)
-			q.mu.Unlock()
+		b, closed, retryDisk := q.takeMemory()
+		if retryDisk {
+			continue
+		}
+		if b != nil {
 			return b
 		}
-		closed := q.closed
-		q.mu.Unlock()
 		if closed && (q.spool == nil || q.spool.empty()) {
 			return nil
 		}
@@ -212,6 +209,25 @@ func (q *batchQueue) Next(ctx context.Context) *flowBatch {
 			return nil
 		}
 	}
+}
+
+// takeMemory makes the disk-to-memory handoff atomic with spill commits.
+// A spiller can publish an older batch after Next observes an empty spool;
+// check again while holding the same lock it uses to remove that batch from
+// memory. Only the spool index is checked here, never disk reads or decoding.
+func (q *batchQueue) takeMemory() (batch *flowBatch, closed bool, retryDisk bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.spool != nil && !q.spool.empty() {
+		return nil, false, true
+	}
+	if len(q.sealed) > 0 {
+		b := q.sealed[0]
+		q.sealed = q.sealed[1:]
+		q.memRecords -= len(b.Records)
+		return b, false, false
+	}
+	return nil, q.closed, false
 }
 
 // Finished reports whether the queue is closed and nothing is left in memory
