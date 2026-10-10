@@ -30,9 +30,17 @@ as doing so.
 Manifest `rollback_steps` run from the signed payload: stop services →
 `ota-restore-backup.py` → `enforce-support-security-floor.sh` →
 **`ota-reconcile-storage-rollback.sh`** → start services → health.
-The reconcile hook: removes/disables the watchdog when the restored code lacks it
-(and its ingest-pause marker), restarts it otherwise; re-creates ClickHouse from the
-restored compose file only if a bind-mount source is missing (or replaced by a directory).
+Right after the backup, `ota-snapshot-units.py` records every systemd unit the package
+installs (`install_systemd` steps: NetFlow collector, NCM backup/delivery/worker, syslog;
+plus the storage watchdog): present/absent, enabled, active, and a copy of the file, tagged
+with the package version. The reconcile hook restores that exact state: units that existed
+are put back (file, enablement, and started again if they were active); units that did not
+exist (e.g. collector/NCM worker/watchdog on 1.23.9) are disabled, stopped, removed and
+reset-failed, so the rollback `start_services` step skips them. Without a matching
+snapshot it removes units whose executable or Python module is missing from the restored
+tree. It also removes a stale ingest-pause marker, restarts a kept watchdog on the restored
+code, and re-creates ClickHouse from the restored compose file only if a bind-mount source
+is missing (or replaced by a directory).
 Kept intentionally: `/etc/zenplus/clickhouse` (container keeps bounded logging until
 re-created), journald/logrotate caps, root helpers and sudoers entries, renamed tables.
 
@@ -48,7 +56,7 @@ PostgreSQL row counts of the seeded probe tables; health endpoint.
 | # | Phase | Pass criteria |
 |---|---|---|
 | A | 1.23.9 baseline (seeded 500 CH + 500 PG probes, diagnostic copies, pre_recovery evidence) | snapshot recorded |
-| B | **Forced failure → rollback** with the candidate (e.g. make a hook after step 10 fail in a lab-signed variant, or stop ClickHouse health during the hook) | updater reports rollback; 1.23.9 code restored; watchdog unit removed; ClickHouse running/healthy; container survives `docker restart`; all seeded rows, detached count and evidence unchanged; health OK |
+| B | **Forced failure → rollback** with the candidate (e.g. make a hook after step 10 fail in a lab-signed variant, or stop ClickHouse health during the hook) | updater reports rollback; 1.23.9 code restored; units compare equal to the pre-update baseline (no collector/NCM worker/watchdog unit where the base had none); `systemctl --failed` empty, no restart loops; ClickHouse running/healthy; container survives `docker restart`; all seeded rows, detached count and evidence unchanged; health OK |
 | C | Candidate upgrade from 1.23.9 | all steps OK; schema gate clean; mounts `/etc/zenplus/clickhouse/...`; effective config TTL/partition per log; `text_log` warning; legacy `_0` tables present; evidence + unknown tables untouched; seeded rows/detached unchanged; watchdog active, heartbeat < 60 s, `last_error` empty |
 | D | Idempotence | re-run `setup-storage.sh` (or re-apply the same package): `changed=0`, no container re-creation, no data change |
 | E | Retention | advance the lab clock (or set newest dates) past 3/7 days: legacy copies + disabled logs dropped by the hourly sweep exactly once; evidence/unknown/current tables and monitoring data unchanged |

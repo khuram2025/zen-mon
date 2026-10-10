@@ -8,10 +8,10 @@
 # action is logged; the exit status reports problems without stopping the
 # remaining rollback steps.
 #
-# 1. Free-space watchdog: the restored code may not contain it. Its unit would
-#    otherwise restart a missing module forever. Disable and remove it then
-#    (state in /var/lib/zenplus-storage is kept); otherwise restart it on the
-#    restored code. A stale ingest-pause marker is removed with it.
+# 1. Systemd units installed by this package (NetFlow collector, NCM, syslog,
+#    storage watchdog): back to their pre-update state (ota-snapshot-units.py),
+#    so start_services never starts a unit whose binary or module the restored
+#    version lacks. A stale ingest-pause marker goes with a removed watchdog.
 # 2. ClickHouse: a container whose bind-mount source no longer exists will not
 #    start again (Docker creates a directory in its place). If any is missing,
 #    recreate the container from the restored docker-compose.yml.
@@ -26,24 +26,24 @@ set -u
 
 ZENPLUS_DIR="${ZENPLUS_DIR:-/opt/zenplus}"
 CH_CONTAINER="zenplus-clickhouse"
-UNIT="${ZENPLUS_WATCHDOG_UNIT:-/etc/systemd/system/zenplus-storage-watchdog.service}"
+UNIT="${ZENPLUS_SYSTEMD_DIR:-/etc/systemd/system}/zenplus-storage-watchdog.service"
 STATE_DIR="${ZENPLUS_STORAGE_STATE_DIR:-/var/lib/zenplus-storage}"
 rc=0
 log() { echo "[storage-rollback] $*"; }
 
-# ── 1. Watchdog ─────────────────────────────────────────────────────────────
-if [ -f "${ZENPLUS_DIR}/server/app/services/storage_watchdog.py" ]; then
-    if [ -f "$UNIT" ]; then
-        systemctl try-restart zenplus-storage-watchdog.service || rc=1
-        log "watchdog restarted on the restored code"
-    fi
+# ── 1. Systemd units ────────────────────────────────────────────────────────
+# Units this package installed (install_systemd steps, the storage watchdog)
+# go back to their pre-update state from the snapshot ota-snapshot-units.py
+# took right after the backup: restored if they existed, otherwise disabled,
+# stopped and removed (e.g. a 1.23.9 appliance never had the NetFlow collector
+# or NCM worker). Without a snapshot, units that cannot run on the restored
+# version are removed.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+python3 -I "$HERE/ota-snapshot-units.py" --restore || rc=1
+if [ -f "$UNIT" ]; then
+    # Run the restored code, not the newer module still loaded in memory.
+    systemctl try-restart zenplus-storage-watchdog.service || rc=1
 else
-    if [ -f "$UNIT" ]; then
-        systemctl disable --now zenplus-storage-watchdog.service >/dev/null 2>&1 || true
-        rm -f "$UNIT"
-        systemctl daemon-reload || rc=1
-        log "watchdog removed: the restored version does not include it"
-    fi
     rm -f "${STATE_DIR}/ingest-paused"
 fi
 

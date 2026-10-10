@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -49,43 +50,131 @@ exit 0
 
 def restored_tree(tmp_path: Path, with_watchdog: bool) -> Path:
     zen = tmp_path / "opt"
-    (zen / "server" / "app" / "services").mkdir(parents=True)
+    (zen / "server" / "app" / "services").mkdir(parents=True, exist_ok=True)
     if with_watchdog:
         (zen / "server" / "app" / "services" / "storage_watchdog.py").write_text("# restored\n")
     return zen
 
 
-def run_reconcile(tmp_path, env, zen, unit, state):
-    env = dict(env, ZENPLUS_DIR=str(zen), ZENPLUS_WATCHDOG_UNIT=str(unit),
-               ZENPLUS_STORAGE_STATE_DIR=str(state))
-    return subprocess.run(["bash", str(RECONCILE)], env=env, capture_output=True, text=True, timeout=30)
+UNITS = ["zenplus-netflow-collector.service", "zenplus-ncm-worker.service",
+         "zenplus-ncm-delivery.service", "zenplus-ncm-delivery.timer", "zenplus-syslog.service"]
 
 
-def test_rollback_to_a_version_without_the_watchdog_removes_its_unit_and_pause_marker(tmp_path):
-    present = tmp_path / "etc-conf.xml"
-    present.write_text("<clickhouse/>")
-    env, log = stubs(tmp_path, [str(present)])
+def payload(tmp_path: Path, version="1.24.2") -> Path:
+    """The extracted package layout the updater runs hooks from."""
+    pay = tmp_path / "payload"
+    scripts = pay / "code" / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    for name in ("ota-reconcile-storage-rollback.sh", "ota-snapshot-units.py"):
+        shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    steps = [{"type": "install_systemd", "source": f"code/x/{u}", "enable": True} for u in UNITS]
+    (pay / "manifest.json").write_text(json.dumps({"version": version, "steps": steps}))
+    return pay
+
+
+def unit_env(tmp_path: Path, env: dict, zen: Path) -> dict:
+    sysd = tmp_path / "systemd"
+    sysd.mkdir(exist_ok=True)
+    return dict(env, ZENPLUS_DIR=str(zen), ZENPLUS_SYSTEMD_DIR=str(sysd),
+                ZENPLUS_OTA_STATE_DIR=str(tmp_path / "ota-state"),
+                ZENPLUS_STORAGE_STATE_DIR=str(tmp_path / "storage-state"))
+
+
+def install_new_units(tmp_path: Path, names=UNITS, exec_start="/opt/zenplus/bin/zenplus-netflow-collector"):
+    for u in names:
+        body = "[Timer]\nOnCalendar=hourly\n" if u.endswith(".timer") else f"[Service]\nExecStart={exec_start}\n"
+        (tmp_path / "systemd" / u).write_text(body)
+
+
+def run_reconcile(tmp_path, env, zen, pay=None):
+    pay = pay or payload(tmp_path)
+    return subprocess.run([str(pay / "code" / "scripts" / "ota-reconcile-storage-rollback.sh")],
+                          env=unit_env(tmp_path, env, zen), capture_output=True, text=True, timeout=60)
+
+
+def run_snapshot(tmp_path, env, zen, pay=None):
+    pay = pay or payload(tmp_path)
+    return subprocess.run([str(pay / "code" / "scripts" / "ota-snapshot-units.py")],
+                          env=unit_env(tmp_path, env, zen), capture_output=True, text=True, timeout=60)
+
+
+def test_rollback_to_1_23_9_removes_units_that_did_not_exist_before(tmp_path):
+    """Oldest base: no collector/NCM/syslog units and no watchdog before the update."""
+    env, log = stubs(tmp_path, [])
     zen = restored_tree(tmp_path, with_watchdog=False)
-    unit = tmp_path / "zenplus-storage-watchdog.service"
-    unit.write_text("[Unit]\n")
-    state = tmp_path / "state"
+    assert run_snapshot(tmp_path, env, zen).returncode == 0      # before install_systemd
+    install_new_units(tmp_path)                                  # the update installed them
+    (tmp_path / "systemd" / "zenplus-storage-watchdog.service").write_text(
+        "[Service]\nExecStart=/opt/zenplus/venv/bin/python -m app.services.storage_watchdog\n")
+    state = tmp_path / "storage-state"
     state.mkdir()
     (state / "ingest-paused").write_text("{}")
-    r = run_reconcile(tmp_path, env, zen, unit, state)
+    r = run_reconcile(tmp_path, env, zen)                        # code already restored to 1.23.9
     assert r.returncode == 0, r.stdout + r.stderr
+    remaining = sorted(p.name for p in (tmp_path / "systemd").iterdir())
+    assert remaining == [], remaining
     calls = log.read_text()
-    assert "systemctl disable --now zenplus-storage-watchdog.service" in calls
+    for u in UNITS + ["zenplus-storage-watchdog.service"]:
+        assert f"systemctl disable --now {u}" in calls
+        assert f"systemctl reset-failed {u}" in calls
     assert "systemctl daemon-reload" in calls
-    assert not unit.exists() and not (state / "ingest-paused").exists()
-    assert "compose" not in calls                       # mount sources intact: no recreate
+    assert "systemctl start" not in calls, "nothing new may be started on the old base"
+    assert not (state / "ingest-paused").exists()
+    assert "compose" not in calls
+
+
+def test_rollback_restores_units_that_existed_before_with_their_state(tmp_path):
+    env, log = stubs(tmp_path, [])
+    zen = restored_tree(tmp_path, with_watchdog=True)
+    unit_env(tmp_path, env, zen)
+    old = "[Service]\nExecStart=/opt/zenplus/bin/zenplus-netflow-collector --old\n"
+    (tmp_path / "systemd" / "zenplus-netflow-collector.service").write_text(old)
+    # systemctl stub: everything reports enabled and active.
+    assert run_snapshot(tmp_path, env, zen).returncode == 0
+    install_new_units(tmp_path)                                  # overwritten by the update
+    r = run_reconcile(tmp_path, env, zen)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "systemd" / "zenplus-netflow-collector.service").read_text() == old
+    calls = log.read_text()
+    assert "systemctl enable zenplus-netflow-collector.service" in calls
+    assert "systemctl start zenplus-netflow-collector.service" in calls
+    # Units the old version never had are still removed.
+    assert not (tmp_path / "systemd" / "zenplus-ncm-worker.service").exists()
+
+
+def test_rollback_without_snapshot_removes_units_that_cannot_run(tmp_path):
+    env, log = stubs(tmp_path, [])
+    zen = restored_tree(tmp_path, with_watchdog=False)
+    unit_env(tmp_path, env, zen)
+    install_new_units(tmp_path, ["zenplus-netflow-collector.service"])        # binary absent
+    install_new_units(tmp_path, ["zenplus-ncm-worker.service"],
+                      exec_start="/opt/zenplus/venv/bin/python -m app.workers.ncm_worker")
+    install_new_units(tmp_path, ["zenplus-ncm-delivery.timer"])               # its service absent
+    (tmp_path / "systemd" / "zenplus-syslog.service").write_text("[Service]\nExecStart=/usr/bin/true\n")
+    r = run_reconcile(tmp_path, env, zen)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(p.name for p in (tmp_path / "systemd").iterdir()) == ["zenplus-syslog.service"]
+
+
+def test_stale_snapshot_from_another_update_is_ignored(tmp_path):
+    env, log = stubs(tmp_path, [])
+    zen = restored_tree(tmp_path, with_watchdog=False)
+    run_snapshot(tmp_path, env, zen, payload(tmp_path, version="1.24.1"))     # old update's snapshot
+    unit_env(tmp_path, env, zen)
+    (tmp_path / "systemd" / "zenplus-syslog.service").write_text("[Service]\nExecStart=/usr/bin/true\n")
+    r = run_reconcile(tmp_path, env, zen, payload(tmp_path, version="1.24.2"))
+    assert "not this package; ignored" in r.stdout
+    assert (tmp_path / "systemd" / "zenplus-syslog.service").exists()        # runnable: kept
 
 
 def test_rollback_keeps_and_restarts_the_watchdog_when_the_restored_code_has_it(tmp_path):
     env, log = stubs(tmp_path, [])
     zen = restored_tree(tmp_path, with_watchdog=True)
-    unit = tmp_path / "unit.service"
-    unit.write_text("[Unit]\n")
-    r = run_reconcile(tmp_path, env, zen, unit, tmp_path)
+    unit_env(tmp_path, env, zen)
+    unit = tmp_path / "systemd" / "zenplus-storage-watchdog.service"
+    unit.write_text("[Service]\nExecStart=/opt/zenplus/venv/bin/python -m app.services.storage_watchdog\n")
+    run_snapshot(tmp_path, env, zen)                             # existed before (1.24.1 base)
+    r = run_reconcile(tmp_path, env, zen)
     assert r.returncode == 0
     assert "systemctl try-restart zenplus-storage-watchdog.service" in log.read_text()
     assert unit.exists()
@@ -96,7 +185,7 @@ def test_missing_bind_source_recreates_clickhouse_from_the_restored_compose(tmp_
     gone = tmp_path / "opt" / "docker" / "clickhouse" / "zenplus_logging.xml"
     env, log = stubs(tmp_path, [str(gone)])
     zen = restored_tree(tmp_path, with_watchdog=False)
-    r = run_reconcile(tmp_path, env, zen, tmp_path / "none.service", tmp_path)
+    r = run_reconcile(tmp_path, env, zen)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "docker compose up -d --force-recreate clickhouse" in log.read_text()
     assert "recreated (healthy)" in r.stdout
@@ -108,7 +197,7 @@ def test_docker_created_directory_in_place_of_a_config_file_is_repaired(tmp_path
     env, log = stubs(tmp_path, [str(bogus)])
     zen = tmp_path / "opt"
     (zen / "server" / "app" / "services").mkdir(parents=True)
-    r = run_reconcile(tmp_path, env, zen, tmp_path / "none.service", tmp_path)
+    r = run_reconcile(tmp_path, env, zen)
     assert r.returncode == 0
     assert not bogus.exists()
     assert "--force-recreate clickhouse" in log.read_text()
@@ -117,7 +206,7 @@ def test_docker_created_directory_in_place_of_a_config_file_is_repaired(tmp_path
 def test_unhealthy_recreate_is_reported_without_aborting(tmp_path):
     env, log = stubs(tmp_path, [str(tmp_path / "missing.xml")], health="starting")
     zen = restored_tree(tmp_path, with_watchdog=True)
-    r = run_reconcile(tmp_path, env, zen, tmp_path / "none.service", tmp_path)
+    r = run_reconcile(tmp_path, env, zen)
     assert r.returncode == 1
     assert "not healthy" in r.stdout
 
@@ -131,7 +220,7 @@ def test_no_clickhouse_container_is_a_no_op(tmp_path):
     (bin_dir / "systemctl").chmod(0o755)
     env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     zen = restored_tree(tmp_path, with_watchdog=True)
-    assert run_reconcile(tmp_path, env, zen, tmp_path / "none.service", tmp_path).returncode == 0
+    assert run_reconcile(tmp_path, env, zen).returncode == 0
 
 
 # ─── ClickHouse configuration outside the code tree ──────────────────────────
@@ -260,3 +349,12 @@ def test_rollback_hook_is_compatible_with_the_1_23_9_executor():
     assert text.startswith("#!/bin/bash\n")
     assert os.access(RECONCILE, os.X_OK)
     assert "ZENPLUS_DIR" in text and "set -e" not in text.replace("set -euo", "")
+
+
+def test_manifest_snapshots_units_right_after_the_backup():
+    src = (ROOT / "scripts" / "build-release.py").read_text()
+    backup = src.index('"code/scripts/ota-create-backup.py"')
+    snap = src.index('"code/scripts/ota-snapshot-units.py"')
+    assert backup < snap < src.index("apt_install")
+    assert os.access(ROOT / "scripts" / "ota-snapshot-units.py", os.X_OK)
+    assert (ROOT / "scripts" / "ota-snapshot-units.py").read_text().startswith("#!/usr/bin/python3\n")
