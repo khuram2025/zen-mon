@@ -308,9 +308,9 @@ function DeviceHeader({
           <div className="flex w-full min-w-0 items-start gap-3 sm:w-auto sm:flex-1">
             <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary"><Icon className="h-5 w-5" /></span>
             <div className="min-w-0">
-              <div className="mb-1 text-xs font-medium text-muted">Network device</div>
+              <div className="mb-1 text-xs font-medium text-muted">{titleCase((device.device_type || 'network device').replaceAll('_', ' '))}</div>
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="break-all text-xl font-semibold tracking-tight md:text-2xl">{device.hostname}</h1>
+                <h1 className="break-words text-xl font-semibold tracking-tight md:text-2xl">{device.hostname}</h1>
                 <span title="Last reported reachability; component and alert states are shown separately" className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${kind.pill}`}>
                   <span className={`h-1.5 w-1.5 rounded-full ${kind.dot}`} />{kind.label}
                 </span>
@@ -827,7 +827,7 @@ function DashboardSection({
     ...(true ? [{ id: 'alerts', title: 'Alerts', width: 4, height: 10, minWidth: 2, minHeight: 5, compact: false, content: (<DeviceAlertsCard alerts={alertPreview} activeCount={activeAlertsResp?.meta?.total} loading={alertsLoading} error={alertsError} deviceId={deviceId} />) }] : []),
     ...(device.ping_enabled ? [{ id: 'availability-timeline', title: 'Availability timeline', width: 8, height: 5, minWidth: 2, minHeight: 4, compact: false, content: (<AvailabilityTimelineCard points={pts} rangeLabel={range.label} fromTs={fromTs} toTs={toTs} availabilityPct={availabilityPct} />) }] : []),
     ...(true ? [{ id: 'reachability', title: 'Reachability details', width: 4, height: 5, minWidth: 2, minHeight: 3, compact: false, content: (<DeviceStatusExplanation deviceId={deviceId} compact />) }] : []),
-    ...(perfSeries.length > 0 ? [{ id: 'performance', title: 'Performance overview', width: 8, height: 10, minWidth: 3, minHeight: 8, compact: false, content: (<PerformanceOverviewCard series={perfSeries} stats={perfStats} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} />) }] : []),
+    ...(perfSeries.length > 0 ? [{ id: 'performance', title: 'Performance overview', width: 12, height: 10, minWidth: 3, minHeight: 8, compact: false, content: (<PerformanceOverviewCard series={perfSeries} stats={perfStats} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} />) }] : []),
     ...(uptimeSec != null ? [{ id: 'boot-time', title: 'Time since reboot', width: 2, height: 2, minWidth: 1, minHeight: 2, compact: true, content: (<div className="device-boot-time rounded-lg border border-border bg-surface text-sm"><div className="device-boot-label text-muted"><Clock className="h-3.5 w-3.5 shrink-0" /><span>Time since reboot</span></div><span className="device-boot-value font-medium">{uptimeDaysCompact}</span></div>) }] : []),
     ...(snmp ? [{ id: 'interfaces', title: 'Interface status', width: 12, height: 10, minWidth: 3, minHeight: 6, compact: false, content: (<InterfaceStatusCard ifs={ifs || []} ifMetrics={ifMetrics || {}} deviceId={deviceId} />) }] : []),
     ...(hasNetflow ? [{ id: 'netflow', title: 'NetFlow', width: 12, height: 11, minWidth: 3, minHeight: 7, compact: false, content: (<DeviceNetflowCard exporterIp={netflowExporter} overview={netflowOverview!} series={netflowSeries || []} applications={netflowApplications || []} conversations={netflowConversations || []} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} openHref={netflowDeviceLink(netflowExporter, range)} />) }] : []),
@@ -853,20 +853,20 @@ function DashboardSection({
         <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} widgets={overviewWidgets} />
       </div>}
 
-      {section === 'metrics' && <TemplateInsightsSection deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} rangeHours={range.hours} initialGroup={metricGroup} snmpHasData={snmpHasData} />}
+      {section === 'metrics' && <TemplateInsightsSection key={deviceId} deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} rangeHours={range.hours} initialGroup={metricGroup} snmpHasData={snmpHasData} />}
 
-      {section === 'events' && <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} section="events" widgets={[
+      {section === 'events' && <section className="space-y-3" aria-label="Device events"><div><h2 className="text-base font-semibold">Events & alerts</h2><p className="mt-1 text-xs text-muted">Active alerts and recent changes for this device.</p></div><DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} section="events" widgets={[
         { id: 'alerts', title: 'Alerts', width: 6, height: 12, minWidth: 2, minHeight: 5, content: <DeviceAlertsCard alerts={alertPreview} activeCount={activeAlertsResp?.meta?.total} loading={alertsLoading} error={alertsError} deviceId={deviceId} /> },
         { id: 'activity', title: 'Recent events', width: 6, height: 12, minWidth: 2, minHeight: 5, content: <ActivityLogCard events={activityEvents.length > 0 ? activityEvents : fallbackEvents} rangeLabel={range.label} showingFallback={activityEvents.length === 0 && fallbackEvents.length > 0} onViewAll={() => setEventsOpen(true)} /> },
-      ]} />}
+      ]} /></section>}
 
-      {section === 'inventory' && <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} section="inventory" widgets={[
+      {section === 'inventory' && <section className="space-y-3" aria-label="Device inventory"><div><h2 className="text-base font-semibold">Inventory & monitoring</h2><p className="mt-1 text-xs text-muted">Hardware, monitoring coverage, and device actions.</p></div><DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} section="inventory" widgets={[
         { id: 'inventory', title: 'Inventory & configuration', width: 6, height: 10, minWidth: 2, minHeight: 4, content: <InventoryConfigCard device={device} entities={entities || []} snmpHasData={snmpHasData} onDetails={() => setInventoryOpen(true)} /> },
         { id: 'monitoring-sites', title: 'Monitoring sites', width: 6, height: 7, minWidth: 2, minHeight: 3, content: <Card><CardContent className="p-4"><MonitoringSites targetType="device" targetId={deviceId} compact /></CardContent></Card> },
         { id: 'environment', title: 'Environment & actions', width: 6, height: 9, minWidth: 2, minHeight: 4, content: <EnvironmentalActionsCard deviceId={deviceId} snmpEnabled={snmp} metrics={metrics || {}} sensors={sensors || []} openAlerts={activeAlertCount} /> },
         ...(snmp && ['switch', 'router', 'firewall'].includes(device.device_type) ? [{ id: 'connected-endpoints', title: 'Connected endpoints', width: 6, height: 9, minWidth: 3, minHeight: 4, content: <ConnectedEndpointsCard deviceId={deviceId} /> }] : []),
         { id: 'reachability', title: 'Reachability details', width: 12, height: 9, minWidth: 2, minHeight: 3, content: <DeviceStatusExplanation deviceId={deviceId} /> },
-      ]} />}
+      ]} /></section>}
 
       <EventsDialog
         open={eventsOpen}
@@ -938,14 +938,14 @@ function KpiTile({
   const good = trend == null || flat ? null : invertTrend ? trend < 0 : trend > 0
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3 transition-colors hover:border-border-strong">
+    <div className="flex min-h-[132px] flex-col gap-1.5 rounded-xl border border-border bg-surface p-3 transition-colors hover:border-border-strong">
       <div className="flex items-center gap-2">
         <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${c.chip}`}>{icon}</span>
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</span>
+        <span className="text-xs font-medium text-muted">{label}</span>
       </div>
 
       <div className="flex flex-wrap items-baseline gap-2">
-        <div className="text-2xl font-semibold leading-none tabular-nums" style={{ color: c.stroke }}>{value}</div>
+        <div className="text-2xl font-semibold leading-tight tabular-nums text-text">{value}</div>
         {trend != null && (
           <span
             className={`inline-flex items-center gap-0.5 text-[11px] font-medium tabular-nums ${
@@ -1027,7 +1027,7 @@ function PerformanceOverviewCard({
           <LegendDot color="rgb(var(--accent))" label="Memory (%)" />
         </div>
 
-        <div className="mt-2 min-h-[160px] flex-1">
+        <div className="device-performance-chart mt-2 min-h-[160px] flex-1">
           {hasData ? (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={series} margin={{ top: 4, right: axisRightPad(rangeHours), bottom: 0, left: 0 }}>

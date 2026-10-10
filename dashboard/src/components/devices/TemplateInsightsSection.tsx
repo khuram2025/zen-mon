@@ -170,6 +170,7 @@ export function TemplateInsightsSection({ deviceId, rangeHours, summary = false,
 } & DeviceLayoutContext) {
   const [chart, setChart] = useState<{ seriesKey: string; title: string; unit?: string | null } | null>(null)
   const [selectedGroup, setSelectedGroup] = useState(initialGroup || 'all')
+  const [groupSearch, setGroupSearch] = useState('')
   const queryClient = useQueryClient()
 
   const { data, isLoading, isError } = useQuery<Insights>({
@@ -201,6 +202,7 @@ export function TemplateInsightsSection({ deviceId, rangeHours, summary = false,
   const groups = (data.groups || []).filter((g) =>
     g.kind === 'table' ? (g.rows?.length || 0) > 0 : (g.metrics || []).some((m) => m.has_data),
   )
+  const activeGroup = selectedGroup === 'all' || groups.some(g => g.key === selectedGroup) ? selectedGroup : 'all'
   const promotedCount = groups
     .filter((g) => g.children_capable)
     .reduce((n, g) => n + (g.rows || []).filter((r) => r.child_device_id).length, 0)
@@ -208,11 +210,11 @@ export function TemplateInsightsSection({ deviceId, rangeHours, summary = false,
   if (summary) return <Card><CardContent className="p-4">
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">Device health & metrics</h3><button type="button" onClick={() => onExplore?.()} className="text-xs font-medium text-primary hover:underline">Explore device metrics →</button></div>
     <p className="mt-1 text-xs text-muted">{data.template.name} · {data.updated_at ? `last collected ${new Date(data.updated_at).toLocaleString()}` : 'awaiting first poll'}</p>
-    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+    <div className="device-health-summary mt-3">
       {[...groups].sort((a, b) => (SEV_RANK[b.status] || 0) - (SEV_RANK[a.status] || 0)).map(group => {
         const attention = (group.rows || []).filter(row => insightRowSeverity(row) >= 3).length
         const readings = (group.metrics || []).filter(metric => metric.has_data).slice(0, 2)
-        return <button key={group.key} type="button" onClick={() => onExplore?.(group.key)} className="min-w-0 rounded-lg border border-border bg-surface2/30 p-3 text-left transition-colors hover:border-primary/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+        return <button key={group.key} type="button" onClick={() => onExplore?.(group.key)} className="min-w-0 rounded-lg border border-border bg-surface2/20 p-3 text-left transition-colors hover:border-primary/50 hover:bg-primary/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
           <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium">{group.name}</span><GroupStatusBadge status={group.status} /></div>
           <div className="mt-1 text-xs leading-relaxed text-muted">{group.kind === 'table' ? `${group.rows?.length || 0} entries${attention ? ` · ${attention} need attention` : ''}` : readings.map(metric => `${metric.name}: ${metric.text || formatValue(metric.value, metric.unit)}`).join(' · ') || 'No readings'}</div>
         </button>
@@ -255,27 +257,34 @@ export function TemplateInsightsSection({ deviceId, rangeHours, summary = false,
         )}
       </div>
 
-      <p className="text-sm text-muted">Latest template readings and component states. Select a metric to view its history for the chosen time range.</p>
-      {groups.length > 1 && <div className="flex flex-wrap gap-2" aria-label="Metric groups">
-        {[{ key: 'all', name: 'All groups' }, ...groups].map(group => <button type="button" key={group.key} aria-pressed={selectedGroup === group.key} onClick={() => setSelectedGroup(group.key)} className={cn('rounded-lg border px-3 py-1.5 text-xs font-medium', selectedGroup === group.key ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-surface text-muted hover:text-text')}>{group.name}</button>)}
-      </div>}
-
-      {groups.length === 0 ? (
-        <Card><CardContent className="p-6 text-center text-xs text-muted">
-          Template attached — collecting vendor metrics… data appears within one or two SNMP polls.
-        </CardContent></Card>
-      ) : (
-        <DeviceWidgetGrid deviceId={deviceId} vendor={vendor || data.template.vendor || undefined} deviceType={deviceType} section="metrics"
-          visibleWidgetIds={selectedGroup === 'all' ? undefined : [selectedGroup]}
-          onStartEdit={() => setSelectedGroup('all')}
-          widgets={groups.map(g => ({
-            id: g.key, title: g.name, width: g.kind === 'table' ? 12 : 6,
-            height: g.kind === 'table' ? 12 : 7, minWidth: g.kind === 'table' ? 3 : 2, minHeight: 4,
-            content: g.kind === 'table'
-              ? <TableGroupCard group={g} onChart={(cell, row, col) => setChart({ seriesKey: cell.series_key, title: `${col.name} — ${row.label}`, unit: col.unit })} />
-              : <ScalarGroupCard group={g} onChart={m => setChart({ seriesKey: m.series_key, title: m.name, unit: m.unit })} />,
-          }))} />
-      )}
+      <div className="device-metric-browser">
+        {groups.length > 1 && <aside className="device-metric-navigation" aria-label="Metric group navigation">
+          <label htmlFor={`metric-groups-${deviceId}`} className="mb-2 block text-xs font-semibold text-muted">METRIC GROUPS</label>
+          <input id={`metric-groups-${deviceId}`} type="search" aria-label="Find metric group" placeholder="Find a group…" value={groupSearch} onChange={event => setGroupSearch(event.target.value)} className="h-9 w-full rounded-lg border border-border bg-surface2/40 px-3 text-sm" />
+          <nav aria-label="Metric groups">
+            <button type="button" aria-pressed={activeGroup === 'all'} onClick={() => setSelectedGroup('all')} className="hover:bg-surface2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"><LayoutTemplate className="h-3.5 w-3.5 shrink-0" /><span className="flex-1">All groups</span><span className="text-muted">{groups.length}</span></button>
+            {groups.filter(group => group.name.toLowerCase().includes(groupSearch.toLowerCase().trim())).map(group => <button type="button" key={group.key} aria-pressed={activeGroup === group.key} onClick={() => setSelectedGroup(group.key)} className="hover:bg-surface2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"><span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', statusDot[group.status] || statusDot.none)} /><span className="min-w-0 flex-1 break-words">{group.name}</span><span className="sr-only">{group.status === 'crit' || group.status === 'warn' ? 'Needs attention' : group.status === 'ok' ? 'Healthy' : ''}</span></button>)}
+            {!groups.some(group => group.name.toLowerCase().includes(groupSearch.toLowerCase().trim())) && <p className="px-2 py-3 text-xs text-muted">No matching groups.</p>}
+          </nav>
+        </aside>}
+        <div className="min-w-0 space-y-3">
+          <p className="text-xs text-muted">{activeGroup === 'all' ? 'All collected readings' : groups.find(group => group.key === activeGroup)?.name} · Select a numeric reading to view its history.</p>
+          {groups.length === 0 ? (
+            <Card><CardContent className="p-6 text-center text-xs text-muted">Template attached — waiting for collected readings.</CardContent></Card>
+          ) : (
+            <DeviceWidgetGrid deviceId={deviceId} vendor={vendor || data.template.vendor || undefined} deviceType={deviceType} section="metrics"
+              visibleWidgetIds={activeGroup === 'all' ? undefined : [activeGroup]}
+              onStartEdit={() => { setSelectedGroup('all'); setGroupSearch('') }}
+              widgets={groups.map(g => ({
+                id: g.key, title: g.name, width: (g.kind === 'table' ? (g.rows?.length || 0) > 1 : (g.metrics || []).filter(m => m.has_data).length > 2) ? 12 : 6,
+                height: g.kind === 'table' ? 12 : 7, minWidth: g.kind === 'table' ? 3 : 2, minHeight: 4,
+                content: g.kind === 'table'
+                  ? <TableGroupCard group={g} onChart={(cell, row, col) => setChart({ seriesKey: cell.series_key, title: `${col.name} — ${row.label}`, unit: col.unit })} />
+                  : <ScalarGroupCard group={g} onChart={m => setChart({ seriesKey: m.series_key, title: m.name, unit: m.unit })} />,
+              }))} />
+          )}
+        </div>
+      </div>
 
       {(data.groups || []).some(g => g.no_data_reason) && <details className="rounded-lg border border-border bg-surface p-3 text-xs text-muted">
         <summary className="cursor-pointer font-medium">Unavailable hardware readings</summary>
@@ -319,7 +328,7 @@ function GroupHeader({ title, count, status }: {
   title: string; count?: number; status: string
 }) {
   return (
-    <div className="mb-3 flex items-center gap-2">
+    <div className="mb-3 flex flex-wrap items-center gap-2">
       <h3 className="text-sm font-semibold">{title}</h3>
       {count != null && (
         <span className="text-[11px] text-muted">{count} row{count === 1 ? '' : 's'}</span>
@@ -337,10 +346,10 @@ function MetricTile({ label, value, status, onChart }: {
     <>
       <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted">
         <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', statusDot[status] || statusDot.none)} />
-        <span className="truncate" title={label}>{label}</span>
+        <span className="min-w-0 break-words" title={label}>{label}</span>
         {onChart && <LineChartIcon className="ml-auto h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover/tile:opacity-60" />}
       </div>
-      <div className={cn('mt-1 truncate text-base font-bold tabular-nums', statusText[status] || statusText.none)}>
+      <div className={cn('mt-1 break-words text-lg font-semibold tabular-nums', statusText[status] || statusText.none)}>
         {value}
       </div>
     </>
@@ -400,7 +409,7 @@ function ScalarGroupCard({ group: g, onChart }: {
     <Card className="h-full">
       <CardContent className="p-4">
         <GroupHeader title={g.name} status={g.status} />
-        {g.description && <p className="mb-3 text-xs leading-relaxed text-muted">{g.description}</p>}
+        {g.description && <details className="mb-3 text-xs text-muted"><summary className="cursor-pointer font-medium hover:text-text">About these readings</summary><p className="mt-2 leading-relaxed">{g.description}</p></details>}
         {numeric.length > 0 && (
           <TileGrid>
             {numeric.map((m) => (
@@ -532,7 +541,7 @@ function TableGroupCard({ group: g, onChart }: {
       <Card className="h-full">
         <CardContent className="p-4">
           <GroupHeader title={g.name} status={g.status} />
-        {g.description && <p className="mb-3 text-xs leading-relaxed text-muted">{g.description}</p>}
+        {g.description && <details className="mb-3 text-xs text-muted"><summary className="cursor-pointer font-medium hover:text-text">About these readings</summary><p className="mt-2 leading-relaxed">{g.description}</p></details>}
           <TileGrid>
             {cols.map((c) => {
               const cell = r.cells[c.key]
@@ -565,7 +574,7 @@ function TableGroupCard({ group: g, onChart }: {
     <Card className="h-full">
       <CardContent className="p-4">
         <GroupHeader title={g.name} count={rows.length} status={g.status} />
-        {g.description && <p className="mb-3 text-xs leading-relaxed text-muted">{g.description}</p>}
+        {g.description && <details className="mb-3 text-xs text-muted"><summary className="cursor-pointer font-medium hover:text-text">About these readings</summary><p className="mt-2 leading-relaxed">{g.description}</p></details>}
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <input type="search" aria-label={`Search ${g.name}`} placeholder={`Search ${g.name.toLowerCase()}…`} value={search} onChange={event => { setSearch(event.target.value); setPage(0) }} className="h-9 w-full rounded-lg border border-border bg-surface2 px-3 text-sm sm:w-72" />
           <label className="inline-flex cursor-pointer items-center gap-2 text-xs"><input type="checkbox" checked={attentionOnly} onChange={event => { setAttentionOnly(event.target.checked); setPage(0) }} />Needs attention ({attentionCount})</label>

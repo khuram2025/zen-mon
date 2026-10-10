@@ -36,6 +36,8 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
   }, [storageKey, templateKey])
   const [draft, setDraft] = useState<WidgetPosition[] | null>(null)
   const editing = draft !== null
+  const [standardDraft, setStandardDraft] = useState(false)
+  const standard = !editing && !(effectiveWidgetLayout(saved, template)?.length)
   const [notice, setNotice] = useState('')
   const [active, setActive] = useState<string | null>(null)
   const grid = useRef<HTMLDivElement>(null)
@@ -52,7 +54,7 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
   const layout = useMemo(() => restoreWidgetLayout(widgets, draft ?? effectiveWidgetLayout(saved, template)), [widgets, draft, saved, template])
   // Keep DOM nodes stationary during pointer capture; reorder reading order after drop.
   const readingOrder = gesture.current?.layout ?? layout
-  const ordered = [...layout].sort((a,b) => {
+  const ordered = standard ? widgets.map(widget => layout.find(item => item.id === widget.id)!) : [...layout].sort((a,b) => {
     const left = readingOrder.find(item => item.id === a.id) || a
     const right = readingOrder.find(item => item.id === b.id) || b
     return left.y - right.y || left.x - right.x
@@ -60,6 +62,7 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
   const definitions = new Map(widgets.map(widget => [widget.id, widget]))
   function apply(widget: DeviceWidget, change: Partial<WidgetPosition>) {
     const next = changeWidgetLayout(layout, widget, change)
+    setStandardDraft(false)
     setDraft(next)
     const item = next.find(item => item.id === widget.id)!
     setNotice(`${widget.title}: column ${item.x + 1}, row ${item.y + 1}, width ${item.w} of 12, height ${item.h * (GRID_ROW + GRID_GAP) - GRID_GAP} pixels.`)
@@ -70,6 +73,7 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
     event.currentTarget.focus()
     event.currentTarget.setPointerCapture(event.pointerId)
     gesture.current = { mode, widget, start: item, layout, clientX: event.clientX, clientY: event.clientY, scrollY: window.scrollY, cell: (width + GRID_GAP) / GRID_COLUMNS, pointerId: event.pointerId }
+    setStandardDraft(false)
     setActive(widget.id)
   }
   function move(event: PointerEvent<HTMLButtonElement>) {
@@ -102,7 +106,9 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
   function save() {
     const destination = saveScope === 'template' ? templateKey : storageKey
     if (!destination) return
-    const items = mergeWidgetLayout(saveScope === 'template' ? template : effectiveWidgetLayout(saved, template), layout)
+    // An empty override intentionally opts into the responsive standard layout.
+    // It also overrides a template without deleting that template's preferences.
+    const items = standardDraft ? [] : mergeWidgetLayout(saveScope === 'template' ? template : effectiveWidgetLayout(saved, template), layout)
     try {
       localStorage.setItem(destination, JSON.stringify({ version: 1, items }))
       if (saveScope === 'template') { localStorage.removeItem(storageKey); setSaved(null); setTemplate(items) }
@@ -129,9 +135,33 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
     onLostPointerCapture: (event: PointerEvent<HTMLButtonElement>) => finish(event),
     onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => keyboard(event, mode, widget, item),
   })
+  const focused = !editing && visibleWidgetIds !== undefined
+  const renderWidget = (item: WidgetPosition) => {
+    const widget = definitions.get(item.id)!
+    const visible = !focused || visibleWidgetIds.includes(item.id)
+    const style: CSSProperties = !visible ? { display: 'none' } : standard || focused ? {
+      gridColumn: focused || width < 900 ? '1 / -1' : `span ${item.w}`,
+    } : desktop ? { gridColumn: `${item.x + 1} / span ${item.w}`, gridRow: `${item.y + 1} / span ${item.h}` } : { gridColumn: widget.compact && width > 340 ? 'span 1' : 'span 2' }
+    return <section key={item.id} aria-label={`${widget.title} widget`} data-widget-id={item.id} data-grid-x={item.x} data-grid-y={item.y} data-grid-width={item.w} data-grid-height={item.h} className={cn('device-widget', active === item.id && 'is-active')} style={style}>
+      {editing && <div className="device-widget-toolbar">
+        <button type="button" aria-label={`Move ${widget.title} widget`} title="Drag to move. Arrow keys move one grid step." className="device-widget-move" {...handlers('move', widget, item)}><GripHorizontal className="h-4 w-4 shrink-0" /><span className="truncate">{widget.title}</span></button>
+        <details className="relative shrink-0">
+          <summary className="cursor-pointer list-none rounded p-1 hover:bg-primary/10 [&::-webkit-details-marker]:hidden" aria-label={`Size options for ${widget.title}`} title="Widget size options"><Settings2 className="h-3.5 w-3.5" /></summary>
+          <div className="absolute right-0 z-40 mt-2 w-48 space-y-3 rounded-lg border border-border bg-surface p-3 shadow-xl">
+            <label className="block text-xs text-muted">Width<select aria-label={`${widget.title} width`} value={item.w} onChange={event => apply(widget, { w: Number(event.target.value) })} className="mt-1 h-8 w-full rounded border border-border bg-surface2 px-2 text-text">{Array.from({length: 13 - (widget.minWidth || 2)},(_,index) => index + (widget.minWidth || 2)).map(value => <option key={value} value={value}>{Math.round(value / 12 * 100)}% of grid</option>)}</select></label>
+            <label className="block text-xs text-muted">Height<select aria-label={`${widget.title} height`} value={item.h} onChange={event => apply(widget, { h: Number(event.target.value) })} className="mt-1 h-8 w-full rounded border border-border bg-surface2 px-2 text-text">{Array.from({length: 25 - (widget.minHeight || 3)},(_,index) => index + (widget.minHeight || 3)).map(value => <option key={value} value={value}>{value * (GRID_ROW + GRID_GAP) - GRID_GAP}px</option>)}</select></label>
+          </div>
+        </details>
+      </div>}
+      <div className="device-widget-content">{widget.content}</div>
+      {editing && <button type="button" aria-label={`Resize ${widget.title} widget`} title="Drag to resize. Left/right adjusts width; up/down adjusts height." className="device-widget-resize" {...handlers('resize', widget, item)}><Maximize2 className="h-3.5 w-3.5" /></button>}
+    </section>
+  }
+  const summaries = ordered.filter(item => definitions.get(item.id)?.compact)
+  const panels = ordered.filter(item => !definitions.get(item.id)?.compact)
   return <div className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
-      <p className="text-xs text-muted">{editing ? 'Drag a widget header to move it. Drag its bottom-right corner to resize. Arrow keys also work on either handle.' : `This tab · ${saved ? 'device-specific layout' : template ? 'vendor / type template' : 'default layout'} · saved for your account in this browser`}</p>
+      <p className="text-xs text-muted" title={editing ? undefined : 'Layouts are saved for your account in this browser, separately for each device section.'}>{editing ? 'Move or resize cards using the handles or arrow keys. Save when finished.' : standard ? 'Standard layout' : saved ? 'Custom layout' : 'Vendor / type layout'}</p>
       <div className="flex flex-wrap items-center gap-2">
         {editing ? <>
           <label className="flex items-center gap-2 text-xs text-muted">Save layout for
@@ -140,39 +170,26 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
               {templateKey && <option value="template">Same vendor and device type</option>}
             </select>
           </label>
-          <Button size="sm" variant="outline" onClick={() => { setDraft(defaultWidgetLayout(widgets)); setNotice('Default arrangement restored in preview. Save to apply it.') }}><RotateCcw className="h-3.5 w-3.5" />Reset layout</Button>
+          <Button size="sm" variant="outline" onClick={() => { setDraft(defaultWidgetLayout(widgets)); setStandardDraft(true); setNotice('Standard layout selected. Save to restore automatic sizing.') }}><RotateCcw className="h-3.5 w-3.5" />Restore standard</Button>
           <Button size="sm" variant="outline" onClick={() => { setDraft(null); setNotice('Layout changes discarded.') }}><X className="h-3.5 w-3.5" />Cancel</Button>
           <Button size="sm" onClick={save}><Save className="h-3.5 w-3.5" />Save layout</Button>
         </> : <>
           {saved && template && <Button size="sm" variant="outline" onClick={inheritTemplate}>Use vendor/type template</Button>}
-          <Button size="sm" variant="outline" onClick={() => { onStartEdit?.(); setSaveScope('device'); setDraft(layout); setNotice('Layout editing enabled.') }}><Settings2 className="h-3.5 w-3.5" />Edit layout</Button>
+          <Button size="sm" variant="outline" onClick={() => { onStartEdit?.(); setSaveScope('device'); setStandardDraft(false); setDraft(layout); setNotice('Layout editing enabled.') }}><Settings2 className="h-3.5 w-3.5" />Edit layout</Button>
         </>}
       </div>
     </div>
     {editing && saveScope === 'template' && <p className="text-xs text-muted">Applies to this tab for {templateLabel} devices in your account on this browser. Device-specific layouts are kept; choose “Use vendor/type template” on those devices to inherit it.</p>}
     {editing && !desktop && <p className="text-xs text-muted">Widgets stack on smaller screens. Use the size controls or arrow keys; desktop positions are preserved.</p>}
     <div role="status" aria-live="polite" className="sr-only">{notice}</div>
-    <div ref={grid} className={cn('device-widget-grid', editing && 'is-editing', desktop && 'is-desktop')} style={desktop ? { gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gridAutoRows: `${GRID_ROW}px`, gap: GRID_GAP } : { gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: GRID_GAP }}>
-      {ordered.map(item => {
-        const widget = definitions.get(item.id)!
-        const focused = !editing && visibleWidgetIds !== undefined
-        const visible = !focused || visibleWidgetIds.includes(item.id)
-        const style: CSSProperties = !visible ? { display: 'none' } : focused ? { gridColumn: '1 / -1', gridRow: desktop ? `span ${item.h}` : undefined } : desktop ? { gridColumn: `${item.x + 1} / span ${item.w}`, gridRow: `${item.y + 1} / span ${item.h}` } : { gridColumn: widget.compact && width > 340 ? 'span 1' : 'span 2' }
-        return <section key={item.id} aria-label={`${widget.title} widget`} data-widget-id={item.id} data-grid-x={item.x} data-grid-y={item.y} data-grid-width={item.w} data-grid-height={item.h} className={cn('device-widget', active === item.id && 'is-active')} style={style}>
-          {editing && <div className="device-widget-toolbar">
-            <button type="button" aria-label={`Move ${widget.title} widget`} title="Drag to move. Arrow keys move one grid step." className="device-widget-move" {...handlers('move', widget, item)}><GripHorizontal className="h-4 w-4 shrink-0" /><span className="truncate">{widget.title}</span></button>
-            <details className="relative shrink-0">
-              <summary className="cursor-pointer list-none rounded p-1 hover:bg-primary/10 [&::-webkit-details-marker]:hidden" aria-label={`Size options for ${widget.title}`} title="Widget size options"><Settings2 className="h-3.5 w-3.5" /></summary>
-              <div className="absolute right-0 z-40 mt-2 w-48 space-y-3 rounded-lg border border-border bg-surface p-3 shadow-xl">
-                <label className="block text-xs text-muted">Width<select aria-label={`${widget.title} width`} value={item.w} onChange={event => apply(widget, { w: Number(event.target.value) })} className="mt-1 h-8 w-full rounded border border-border bg-surface2 px-2 text-text">{Array.from({length: 13 - (widget.minWidth || 2)},(_,index) => index + (widget.minWidth || 2)).map(value => <option key={value} value={value}>{Math.round(value / 12 * 100)}% of grid</option>)}</select></label>
-                <label className="block text-xs text-muted">Height<select aria-label={`${widget.title} height`} value={item.h} onChange={event => apply(widget, { h: Number(event.target.value) })} className="mt-1 h-8 w-full rounded border border-border bg-surface2 px-2 text-text">{Array.from({length: 25 - (widget.minHeight || 3)},(_,index) => index + (widget.minHeight || 3)).map(value => <option key={value} value={value}>{value * (GRID_ROW + GRID_GAP) - GRID_GAP}px</option>)}</select></label>
-              </div>
-            </details>
-          </div>}
-          <div className="device-widget-content">{widget.content}</div>
-          {editing && <button type="button" aria-label={`Resize ${widget.title} widget`} title="Drag to resize. Left/right adjusts width; up/down adjusts height." className="device-widget-resize" {...handlers('resize', widget, item)}><Maximize2 className="h-3.5 w-3.5" /></button>}
-        </section>
-      })}
+    <div ref={grid} className={cn('device-widget-grid', editing && 'is-editing', desktop && 'is-desktop', (standard || focused) && 'is-standard', !standard && !focused && 'is-fixed')} style={standard || focused ? undefined : desktop ? { gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gridAutoRows: `${GRID_ROW}px`, gap: GRID_GAP } : { gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: GRID_GAP }}>
+      {standard || focused ? <>
+        {summaries.length > 0 && <div className="device-summary-grid" aria-label="Key device readings">{summaries.map(item => {
+          const node = renderWidget(item)
+          return <div key={item.id} className="min-w-0">{node}</div>
+        })}</div>}
+        <div className="device-panel-grid">{panels.map(renderWidget)}</div>
+      </> : ordered.map(renderWidget)}
     </div>
   </div>
 }

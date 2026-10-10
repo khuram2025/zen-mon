@@ -1,7 +1,7 @@
 .device-widget-grid { display:grid; align-items:stretch; position:relative; }
 .device-widget { min-width:0; min-height:0; position:relative; display:flex; flex-direction:column; border-radius:12px; }
 .device-widget-content { min-height:0; min-width:0; flex:1; }
-.is-desktop .device-widget-content { overflow:auto; scrollbar-width:thin; }
+.is-fixed.is-desktop .device-widget-content { overflow:auto; scrollbar-width:thin; }
 .device-widget-content > * { min-height:100%; }
 .device-widget-content > .device-performance-card { height:100%; }
 .device-widget-toolbar { display:flex; flex-shrink:0; align-items:center; gap:4px; height:32px; padding:2px 6px; border-radius:10px 10px 0 0; background:rgb(var(--primary) / .09); border:1px solid rgb(var(--primary) / .3); color:rgb(var(--primary)); }
@@ -17,3 +17,31 @@
 .device-boot-label { display:flex; align-items:flex-start; gap:5px; font-size:11px; line-height:1.2; }
 .device-boot-label span { min-width:0; }
 .device-boot-value { font-size:14px; line-height:1.25; }
+
+/* Standard cards fit their contents; saved custom layouts keep explicit sizes. */
+.device-widget-grid.is-standard { display:block; }
+.device-summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,160px),1fr)); gap:12px; margin-bottom:16px; }
+.device-panel-grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); align-items:start; gap:16px; }
+.is-standard .device-widget-content > * { min-height:0; height:auto; }
+.is-standard .device-widget-content { overflow:visible; }
+.device-widget { container-type:inline-size; }
+.device-health-summary { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+@container (min-width: 760px) { .device-health-summary { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@container (max-width: 380px) { .device-health-summary { grid-template-columns:minmax(0,1fr); } }
+.device-metric-browser { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; align-items:start; }
+.device-metric-navigation { border:1px solid rgb(var(--border)); border-radius:12px; background:rgb(var(--surface)); padding:12px; }
+.device-metric-navigation nav { display:flex; flex-wrap:wrap; gap:4px; max-height:240px; overflow:auto; scrollbar-width:thin; margin-top:8px; }
+.device-metric-navigation nav button { display:flex; align-items:center; gap:8px; border-radius:7px; padding:8px 10px; font-size:12px; text-align:left; }
+.device-metric-navigation nav button[aria-pressed=true] { background:rgb(var(--primary)/.1); color:rgb(var(--primary)); font-weight:600; }
+@media (min-width: 1280px) {
+ .device-metric-browser:has(> .device-metric-navigation) { grid-template-columns:220px minmax(0,1fr); }
+ .device-metric-navigation { position:sticky; top:16px; }
+ .device-metric-navigation nav { display:flex; flex-direction:column; flex-wrap:nowrap; max-height:60vh; }
+}
+@media (max-width: 480px) { .device-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+
+.device-summary-grid > div { display:flex; }
+.device-summary-grid .device-widget { width:100%; }
+.is-standard .device-summary-grid .device-widget-content > * { height:100%; min-height:132px; }
+.is-standard .device-performance-chart { height:240px; flex:none; }
+.is-standard .device-widget:has(> .device-widget-content:empty) { display:none; }

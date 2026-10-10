@@ -1,0 +1,9 @@
+# Release 1.24.8 — Device monitoring layout
+
+Standard device pages now use an equal-height summary strip, content-sized monitoring cards, and a full-width performance chart. Metric sections have searchable group navigation with clear health indicators, readable labels and optional descriptions. Events and inventory have consistent section headings. Narrow screens stack cards and keep wide tables within their own scroll areas.
+
+Existing custom card positions and dimensions remain compatible. Restore standard explicitly selects responsive automatic sizing, while vendor/type templates and device overrides retain their existing account, device and tab scopes. Temporarily absent widget preferences remain stored. Layout editing supports pointer and keyboard controls. Device metric navigation resets when changing devices.
+
+No API requests, polling intervals, permissions, monitoring calculations, database schemas or retention policies change. Missing sensor values remain unknown, two-decimal availability is retained, and F5 system, TMM, non-TMM and swap readings remain separate. Existing storage and flow-history optimizations and notification fixes are preserved.
+
+Validation on development 192.168.8.221: strict TypeScript/Vite build, 48 route smoke checks, layout persistence/collision/isolation contracts, template presentation and availability contracts passed. Browser acceptance covered firewall, switch, F5, generic and empty device fixtures; desktop and 390px mobile layouts; light/dark themes; history dialog, filtering, pagination, keyboard resize/save/reload, template inheritance, device override and restore-standard behavior. Synthetic preview operations were isolated from live monitoring data. Release acceptance compares signed payload inventories, service health, table integrity, fixed historical samples and notification/device configuration fingerprints before and after normal updater installation.
