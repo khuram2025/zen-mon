@@ -40,8 +40,9 @@ type blockingProbeRunner struct {
 }
 
 type partialSaturationRunner struct {
-	longRelease chan struct{}
-	started     chan string
+	shortRelease chan struct{}
+	longRelease  chan struct{}
+	started      chan string
 
 	mu    sync.Mutex
 	calls map[string]int
@@ -49,9 +50,10 @@ type partialSaturationRunner struct {
 
 func newPartialSaturationRunner() *partialSaturationRunner {
 	return &partialSaturationRunner{
-		longRelease: make(chan struct{}, 16),
-		started:     make(chan string, 128),
-		calls:       make(map[string]int),
+		shortRelease: make(chan struct{}, 1),
+		longRelease:  make(chan struct{}, 16),
+		started:      make(chan string, 128),
+		calls:        make(map[string]int),
 	}
 }
 
@@ -61,11 +63,13 @@ func (r *partialSaturationRunner) CheckOne(ctx context.Context, sc *checker.Serv
 	r.calls[key]++
 	r.mu.Unlock()
 	r.started <- key
+	release := r.shortRelease
 	if len(key) >= len("long-") && key[:len("long-")] == "long-" {
-		select {
-		case <-ctx.Done():
-		case <-r.longRelease:
-		}
+		release = r.longRelease
+	}
+	select {
+	case <-ctx.Done():
+	case <-release:
 	}
 	return &checker.ServiceCheckResult{ServiceCheckID: sc.ID, CheckType: sc.CheckType, IsUp: true, Timestamp: time.Now().UTC()}
 }
@@ -249,6 +253,7 @@ func TestSchedulerIsFairUnderSustainedSaturation(t *testing.T) {
 
 func TestSchedulerIsFairUnderPartialSaturation(t *testing.T) {
 	runner := newPartialSaturationRunner()
+	t.Cleanup(func() { close(runner.longRelease); close(runner.shortRelease) })
 	scheduler := withoutSchedulerJitter(newCheckScheduler(runner, "test", 10, func(string, any) error { return nil }, zap.NewNop().Sugar()))
 	longChecks := make([]configDevice, 0, 9)
 	for i := 0; i < 9; i++ {
@@ -282,6 +287,10 @@ func TestSchedulerIsFairUnderPartialSaturation(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("cycle %d did not start", cycle)
 		}
+		// Keep the short probe occupying the sole free worker until Schedule
+		// returns. An immediate result can free it mid-scan and legitimately
+		// start another probe, making the one-start assertion timing-dependent.
+		runner.shortRelease <- struct{}{}
 		waitForWorkerCount(t, scheduler, 9)
 	}
 	if len(seen) != 11 {
