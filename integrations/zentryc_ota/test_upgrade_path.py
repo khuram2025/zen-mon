@@ -65,7 +65,7 @@ class RequiredUpgradePathTests(TestCase):
         self.appliance.current_version = "unknown"
         self.assertIsNone(get_available_update(self.appliance))
 
-    def artifact_fixture(self, folder, *, expire=False):
+    def artifact_fixture(self, folder, *, expire=False, expire_old_only=False):
         import hashlib, io, json, tarfile
         from pathlib import Path
         from datetime import timedelta
@@ -76,7 +76,7 @@ class RequiredUpgradePathTests(TestCase):
         public.write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
         for r in self.releases:
             manifest = json.dumps(dict(version=r.version, min_version=r.min_version, arch=r.arch,
-                release_date=(timezone.now() - timedelta(days=31 if expire else 0)).isoformat())).encode()
+                release_date=(timezone.now() - timedelta(days=31 if (expire or (expire_old_only and r != self.releases[-1])) else 0)).isoformat())).encode()
             package = Path(folder) / f"update-{r.version}.zup"
             with tarfile.open(package, "w:gz") as archive:
                 for name, data in [("manifest.json", manifest), ("manifest.json.sig", key.sign(manifest))]:
@@ -93,7 +93,7 @@ class RequiredUpgradePathTests(TestCase):
         from ota.rollout_guard import validate_rollout_path
         with tempfile.TemporaryDirectory() as folder:
             public = self.artifact_fixture(folder)
-            with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public):
+            with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public, ZENPLUS_OTA_VALIDATE_FULL_CHAIN=True):
                 self.assertEqual(validate_rollout_path(self.releases[-1], {}), [r.version for r in self.releases])
                 r = self.releases[1]
                 r.min_version = "1.23.6"
@@ -107,8 +107,36 @@ class RequiredUpgradePathTests(TestCase):
         from ota.rollout_guard import validate_rollout_path
         with tempfile.TemporaryDirectory() as folder:
             public = self.artifact_fixture(folder, expire=True)
+            with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public, ZENPLUS_OTA_VALIDATE_FULL_CHAIN=True):
+                with self.assertRaisesMessage(ValueError, "age window"):
+                    validate_rollout_path(self.releases[-1], {})
+
+    def test_promotion_ignores_bridges_older_than_the_signed_minimum(self):
+        import tempfile
+        from django.test import override_settings
+        from ota.rollout_guard import validate_rollout_path
+        with tempfile.TemporaryDirectory() as folder:
+            public = self.artifact_fixture(folder, expire_old_only=True)
+            with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public):
+                self.assertEqual(validate_rollout_path(self.releases[-1], {}), [self.releases[-1].version])
+            with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public, ZENPLUS_OTA_VALIDATE_FULL_CHAIN=True):
+                with self.assertRaisesMessage(ValueError, "age window"):
+                    validate_rollout_path(self.releases[-1], {})
+
+    def test_promotion_still_rejects_an_expired_or_tampered_target(self):
+        import tempfile
+        from pathlib import Path
+        from django.test import override_settings
+        from ota.rollout_guard import validate_rollout_path
+        with tempfile.TemporaryDirectory() as folder:
+            public = self.artifact_fixture(folder, expire=True)
             with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public):
                 with self.assertRaisesMessage(ValueError, "age window"):
+                    validate_rollout_path(self.releases[-1], {})
+            public = self.artifact_fixture(folder)
+            (Path(folder) / f"update-{self.releases[-1].version}.zup").write_bytes(b"modified")
+            with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public):
+                with self.assertRaisesMessage(ValueError, "hash mismatch"):
                     validate_rollout_path(self.releases[-1], {})
 
     def test_promotion_rejects_paused_or_tampered_bridge(self):
@@ -118,7 +146,7 @@ class RequiredUpgradePathTests(TestCase):
         from ota.rollout_guard import validate_rollout_path
         with tempfile.TemporaryDirectory() as folder:
             public = self.artifact_fixture(folder)
-            with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public):
+            with override_settings(PACKAGE_STORAGE_PATH=folder, ZENPLUS_RELEASE_PUBLIC_KEY=public, ZENPLUS_OTA_VALIDATE_FULL_CHAIN=True):
                 RolloutPolicy.objects.create(release=self.releases[1], stage="paused", target_pct=100)
                 with self.assertRaisesMessage(ValueError, "no active rollout"):
                     validate_rollout_path(self.releases[-1], {})

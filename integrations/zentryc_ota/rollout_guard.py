@@ -14,7 +14,13 @@ def validate_rollout_path(release, data):
     from ota.models import Release
 
     catalog = list(Release.objects.filter(product="ota", arch=release.arch, is_published=True))
-    path = plan_upgrade("0.0.0", release, catalog)
+    # Judge the path for the appliances this release supports: every appliance at or above its signed minimum
+    # (scripts/release_policy.py forces that minimum to be at least the recorded bridge floor). Older bridge releases
+    # are then not part of the promoted path, so their manifests ageing out of the 30-day window cannot block a
+    # fresh release. Everything the promoted path contains is still fully verified below. Set
+    # ZENPLUS_OTA_VALIDATE_FULL_CHAIN = True to verify the whole chain from 0.0.0 as before.
+    start = "0.0.0" if getattr(settings, "ZENPLUS_OTA_VALIDATE_FULL_CHAIN", False) else (release.min_version or "0.0.0")
+    path = plan_upgrade(start, release, catalog)
     key_path = Path(getattr(settings, "ZENPLUS_RELEASE_PUBLIC_KEY", Path(settings.BASE_DIR) / "keys" / "zenplus-release.pub"))
     key = load_pem_public_key(key_path.read_bytes())
     for step in path:
