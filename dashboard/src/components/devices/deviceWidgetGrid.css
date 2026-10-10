@@ -34,7 +34,7 @@
 .device-metric-navigation nav button { display:flex; align-items:center; gap:8px; border-radius:7px; padding:8px 10px; font-size:12px; text-align:left; }
 .device-metric-navigation nav button[aria-pressed=true] { background:rgb(var(--primary)/.1); color:rgb(var(--primary)); font-weight:600; }
 @media (min-width: 1280px) {
- .device-metric-browser { grid-template-columns:220px minmax(0,1fr); }
+ .device-metric-browser:has(> .device-metric-navigation) { grid-template-columns:220px minmax(0,1fr); }
  .device-metric-navigation { position:sticky; top:16px; }
  .device-metric-navigation nav { display:flex; flex-direction:column; flex-wrap:nowrap; max-height:60vh; }
 }

@@ -276,7 +276,7 @@ export function TemplateInsightsSection({ deviceId, rangeHours, summary = false,
               visibleWidgetIds={activeGroup === 'all' ? undefined : [activeGroup]}
               onStartEdit={() => { setSelectedGroup('all'); setGroupSearch('') }}
               widgets={groups.map(g => ({
-                id: g.key, title: g.name, width: g.kind === 'table' && (g.rows?.length || 0) > 1 ? 12 : 6,
+                id: g.key, title: g.name, width: (g.kind === 'table' ? (g.rows?.length || 0) > 1 : (g.metrics || []).filter(m => m.has_data).length > 2) ? 12 : 6,
                 height: g.kind === 'table' ? 12 : 7, minWidth: g.kind === 'table' ? 3 : 2, minHeight: 4,
                 content: g.kind === 'table'
                   ? <TableGroupCard group={g} onChart={(cell, row, col) => setChart({ seriesKey: cell.series_key, title: `${col.name} — ${row.label}`, unit: col.unit })} />
