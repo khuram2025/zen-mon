@@ -18,3 +18,6 @@ Python and protected CI checks. Release acceptance uses the signed package on th
 owner-designated development appliance before promotion and production update.
 Actual disk erasure/removal and deliberately filling production disks are not
 part of release acceptance.
+
+Legacy live smoke tests now require an explicit disposable target through
+`ZENPLUS_API`; collecting the default suite does not contact the installed app.

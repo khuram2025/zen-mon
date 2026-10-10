@@ -30,7 +30,7 @@ from app.api.v1.link_utilization import (  # noqa: E402
     _util_pct,
 )
 
-API = os.environ.get("ZENPLUS_API", "http://localhost:8000")
+API = os.environ.get("ZENPLUS_API", "")
 ADMIN_USER = os.environ.get("ZENPLUS_ADMIN", "admin")
 ADMIN_PASS = os.environ.get("ZENPLUS_ADMIN_PASS", "admin123")
 
@@ -170,13 +170,16 @@ def test_pairs_sql_emits_typed_tuples():
 # ── Live smoke tests ─────────────────────────────────────────────────────────
 
 def _api_up() -> bool:
+    # Live smoke tests must explicitly target a disposable appliance.
+    if not API:
+        return False
     try:
         return requests.get(f"{API}/api/v1/system/health", timeout=2).status_code == 200
     except Exception:
         return False
 
 
-live = pytest.mark.skipif(not _api_up(), reason="ZenPlus API not running")
+live = pytest.mark.skipif(not _api_up(), reason="Set ZENPLUS_API to a disposable test appliance to run live smoke tests")
 
 
 @pytest.fixture(scope="module")
