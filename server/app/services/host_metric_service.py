@@ -1378,9 +1378,7 @@ def _insert_metric_groups(
             # the whole batch.  Every kind therefore needs a deterministic
             # block token; migrate-094 enables the corresponding deduplication
             # window on these non-replicated MergeTree tables.
-            token = hashlib.sha256(
-                f"zenplus-host-v1\0{agent_id}\0{batch_id}\0{kind}".encode("utf-8")
-            ).hexdigest()
+            token = _kind_token(agent_id, batch_id, kind)
             accepted += inserter(
                 _DeduplicatingInsertClient(client, token),
                 agent_id,
@@ -1390,6 +1388,57 @@ def _insert_metric_groups(
         except Exception as exc:
             logger.exception("ClickHouse insert failed for kind=%s", kind)
             raise HostMetricStorageError(kind) from exc
+    return accepted
+
+
+class _CollectingClient:
+    """Captures the inserts a per-kind inserter would make (no I/O)."""
+
+    def __init__(self):
+        self.inserts: list[tuple[str, list[list], list[str]]] = []
+
+    def insert(self, table, data, column_names=None, **_kwargs):
+        self.inserts.append((table, data, list(column_names or [])))
+
+
+def _kind_token(agent_id: str, batch_id: str, kind: str) -> str:
+    # Deterministic per upload and kind: a replay of the same batch carries the
+    # same token, and migrate-094 enables deduplication windows on these tables.
+    return hashlib.sha256(
+        f"zenplus-host-v1\0{agent_id}\0{batch_id}\0{kind}".encode("utf-8")
+    ).hexdigest()
+
+
+async def _persist_metric_groups(
+    agent_id: str,
+    server_id: str,
+    batch_id: str,
+    by_kind: dict[str, list[dict]],
+) -> int:
+    """Store one upload's samples through the per-table group commit.
+
+    Returns once every kind is durably written (see host_insert_batcher);
+    raises HostMetricStorageError naming the first kind that could not be.
+    """
+    from app.services import host_insert_batcher
+
+    batcher = host_insert_batcher.batcher_for_loop(get_clickhouse_client)
+    accepted = 0
+    jobs: list[tuple[str, Any]] = []
+    for kind, inserter in KIND_INSERTERS.items():
+        rows = by_kind.get(kind) or []
+        if not rows:
+            continue
+        collector = _CollectingClient()
+        accepted += inserter(collector, agent_id, server_id, rows)
+        token = _kind_token(agent_id, batch_id, kind)
+        for table, data, columns in collector.inserts:
+            jobs.append((kind, batcher.insert(table, columns, data, token)))
+    results = await asyncio.gather(*(job for _kind, job in jobs), return_exceptions=True)
+    for (kind, _job), result in zip(jobs, results):
+        if isinstance(result, BaseException):
+            logger.error("ClickHouse insert failed for kind=%s: %s", kind, result)
+            raise HostMetricStorageError(kind) from result
     return accepted
 
 
@@ -1436,9 +1485,7 @@ async def ingest_host_metric_batch(
     # failure is retryable and must not be reported as a final per-sample
     # rejection: the Windows agent deliberately acknowledges and removes every
     # batch that receives a successful HTTP response with rejected samples.
-    accepted = await asyncio.to_thread(
-        _insert_metric_groups, agent_id, server_id, batch.batch_id, by_kind,
-    )
+    accepted = await _persist_metric_groups(agent_id, server_id, batch.batch_id, by_kind)
 
     if by_kind.get("process"):
         try:

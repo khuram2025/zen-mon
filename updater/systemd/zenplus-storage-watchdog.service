@@ -1,0 +1,46 @@
+[Unit]
+Description=ZenPlus storage watchdog (free-space protection)
+Documentation=file:///opt/zenplus/docs/storage-management.md
+# Deliberately independent of PostgreSQL and the API: it must keep freeing
+# space when a full disk has already stopped them.
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=zenplus
+Group=zenplus
+WorkingDirectory=/opt/zenplus/server
+EnvironmentFile=/opt/zenplus/.env
+ExecStart=/opt/zenplus/venv/bin/python -m app.services.storage_watchdog
+Restart=always
+RestartSec=10
+UMask=0027
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=zenplus-storage
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/zenplus-storage
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+TasksMax=16
+MemoryMax=256M
+CPUQuota=25%
+# Keep running when everything else is starved.
+OOMScoreAdjust=-500
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zenplus-storage-watchdog
+
+[Install]
+WantedBy=multi-user.target

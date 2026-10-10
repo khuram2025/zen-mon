@@ -17,6 +17,8 @@ services:
       - /data/clickhouse:/var/lib/clickhouse
       - /data/backups/clickhouse:/backups
       - ./docker/clickhouse/backup_disk.xml:/etc/clickhouse-server/config.d/backup_disk.xml:ro
+      - ./docker/clickhouse/zenplus_logging.xml:/etc/clickhouse-server/config.d/zenplus_logging.xml:ro
+      - ./docker/clickhouse/zenplus_profile.xml:/etc/clickhouse-server/users.d/zenplus_profile.xml:ro
       - ./scripts/init-clickhouse.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--password", "${CLICKHOUSE_PASSWORD:-clickhouse_dev}", "--query", "SELECT 1"]

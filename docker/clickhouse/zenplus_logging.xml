@@ -1,0 +1,81 @@
+<!--
+  ZenPlus: bounded ClickHouse diagnostics (mounted into config.d).
+
+  The image defaults log at trace level into text_log and keep every system
+  log table forever in monthly partitions; on appliances these diagnostics
+  grew to many times the size of the monitoring data. Here:
+    - server log files and text_log keep warnings and errors only;
+    - every system log enabled by default gets daily partitions and a TTL,
+      so expired days are removed as whole partitions.
+  Only logs the default config already enables are listed: declaring a
+  section enables that log. ClickHouse renames a system log table whose
+  definition changed to <name>_<n> on start; the storage sweeper and watchdog
+  drop those legacy copies once they are older than the same retention.
+  Keep the retention table in server/app/services/storage_policy.py
+  in sync with this file (a test enforces it).
+-->
+<clickhouse>
+    <logger>
+        <level>warning</level>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+
+    <text_log>
+        <level>warning</level>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </text_log>
+    <trace_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </trace_log>
+    <processors_profile_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </processors_profile_log>
+    <query_views_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_views_log>
+    <query_thread_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_thread_log>
+    <query_metric_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_metric_log>
+    <s3queue_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </s3queue_log>
+    <query_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_log>
+    <part_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </part_log>
+    <metric_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </metric_log>
+    <asynchronous_metric_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+    <blob_storage_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </blob_storage_log>
+    <error_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </error_log>
+    <backup_log>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </backup_log>
+</clickhouse>
