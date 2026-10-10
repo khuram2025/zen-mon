@@ -78,17 +78,26 @@ def test_policy_is_clamped_and_garbage_falls_back():
     assert P.normalize_policy({"threshold_pct": "x"}) == P.DEFAULT_POLICY
 
 
-@pytest.mark.parametrize("table,expected", [
-    ("text_log", ("text_log", False)),
-    ("text_log_0", ("text_log", True)),
-    ("query_log_pre_recovery_20261007", ("query_log", True)),
-    ("part_log_pre_recovery_20261007_1", ("part_log", True)),
-    ("error_log", ("error_log", False)),
-    ("parts", None),
-    ("tables", None),
+@pytest.mark.parametrize("table,expected,kind", [
+    ("text_log", ("text_log", False), "current"),
+    ("text_log_0", ("text_log", True), "legacy"),
+    ("trace_log_12", ("trace_log", True), "legacy"),
+    ("processors_profile_log", ("processors_profile_log", True), "legacy"),     # disabled writer
+    ("query_views_log_0", ("query_views_log", True), "legacy"),
+    ("query_log_pre_recovery_20261007", ("query_log", True), "evidence"),
+    ("part_log_pre_recovery_20261007_1", ("part_log", True), "evidence"),
+    ("error_log", ("error_log", False), "current"),
+    ("parts", None, None),
+    ("tables", None, None),
+    # Unknown or custom tables are never diagnostic, so never purged.
+    ("my_custom_log", None, None),
+    ("my_custom_log_0", None, None),
+    ("audit_log_pre_recovery_20261007", None, None),
+    ("opentelemetry_span_log", None, None),
 ])
-def test_diagnostic_log_classification(table, expected):
+def test_diagnostic_log_classification(table, expected, kind):
     assert P.diagnostic_log(table) == expected
+    assert P.diagnostic_kind(table) == kind
 
 
 def part(db, table, pid, gib, newest):
@@ -114,7 +123,9 @@ PARTITIONS = [
 def test_candidates_are_ordered_cheapest_to_lose_first():
     cands = P.build_candidates(PARTITIONS, TODAY, P.DEFAULT_POLICY)
     order = [(c.tier, c.table, c.partition_id) for c in cands]
-    assert order[0][0] == "legacy" and order[1][0] == "legacy"
+    assert order[0] == ("legacy", "text_log_0", None)
+    # Recovery evidence is never a candidate.
+    assert not any("pre_recovery" in o[1] for o in order)
     diag = [o for o in order if o[0] == "diagnostic"]
     assert diag == [("diagnostic", "text_log", "20261008"), ("diagnostic", "text_log", "20261009")]
     assert ("diagnostic_truncate", "text_log", None) in order
@@ -138,8 +149,8 @@ def test_plan_stops_once_the_need_is_covered():
     cands = P.build_candidates(PARTITIONS, TODAY, P.DEFAULT_POLICY)
     pressure = P.Pressure("pressure", 10 * GIB, ("legacy", "diagnostic", "diagnostic_truncate", "application"))
     plan = P.plan_pass(cands, pressure)
-    # Legacy copies oldest first, then the oldest diagnostic day.
-    assert [c.table for c in plan] == ["query_log_pre_recovery_20261007", "text_log_0", "text_log"]
+    # The legacy copy first, then the oldest diagnostic day; evidence is kept.
+    assert [c.table for c in plan] == ["text_log_0", "text_log"]
     growth = P.Pressure("growth", 100 * GIB, ("legacy", "diagnostic"))
     assert all(c.tier in ("legacy", "diagnostic") for c in P.plan_pass(cands, growth))
 
@@ -158,11 +169,10 @@ def test_candidate_sql_is_identifier_safe():
 def test_legacy_copies_expire_with_their_log_retention():
     cands = P.build_candidates(PARTITIONS, TODAY, P.DEFAULT_POLICY)
     expired = [c.table for c in P.legacy_expired(cands, TODAY)]
-    # text_log_0 still has today's data; the query_log copy is 3 days old (< 7).
+    # text_log_0 still has today's data; the query_log copy is recovery evidence.
     assert expired == []
     later = TODAY + timedelta(days=8)
-    assert {c.table for c in P.legacy_expired(cands, later)} == {
-        "text_log_0", "query_log_pre_recovery_20261007"}
+    assert {c.table for c in P.legacy_expired(cands, later)} == {"text_log_0"}
 
 
 def test_growth_rate_needs_a_real_window():
@@ -223,6 +233,7 @@ class FakeClickHouse:
         self.disk = disk
         self.clock = clock
         self.commands: list[str] = []
+        self.queries = 0
         self.down = False
 
     class _R:
@@ -230,8 +241,11 @@ class FakeClickHouse:
             self.result_rows = rows
 
     def query(self, sql, parameters=None):
+        self.queries += 1
         if self.down:
             raise ConnectionError("Connection refused")
+        if sql.strip() == "SELECT 1":
+            return self._R([[1]])
         if "detached_parts" in sql:
             return self._R([[0]])
         if "GROUP BY database, table, active" in sql:
@@ -281,11 +295,11 @@ def test_pressure_pass_is_bounded_and_does_not_repeat_while_reclaim_is_pending(e
     state = dog.tick()
     # Needs 15 GiB: legacy text_log_0 (9, immediate) + query copy (0.7, immediate)
     # + oldest text_log days (2 + 2, delayed) + truncate text_log (rest).
-    assert set(ch.commands[:2]) == {"DROP TABLE IF EXISTS system.text_log_0 SYNC",
-                                    "DROP TABLE IF EXISTS system.query_log_pre_recovery_20261007 SYNC"}
+    assert ch.commands[0] == "DROP TABLE IF EXISTS system.text_log_0 SYNC"
+    assert not any("pre_recovery" in c for c in ch.commands), "recovery evidence is kept"
     assert len([a for a in audit(tmp) if a["type"] == "watchdog_purge"]) == 1
-    # Diagnostics (14.7 GiB) fall just short of the 15 GiB need: only then is the
-    # least valuable, oldest monitoring data (raw flows) used.
+    # Diagnostics (14 GiB; recovery evidence excluded) fall short of the 15 GiB
+    # need: only then is the least valuable, oldest monitoring data used.
     app = [c for c in ch.commands if "zenplus." in c]
     assert app == ["ALTER TABLE zenplus.flow_records DROP PARTITION ID '20260901'"]
     assert not any("error_log" in c for c in ch.commands)
@@ -467,3 +481,136 @@ def test_growth_need_accounts_for_pending_reclamation():
     assert p.state == "ok"
     p = P.evaluate_pressure(fs(60, 30), P.DEFAULT_POLICY, 5 * GIB, rate)
     assert p.state == "growth" and p.need_bytes == int(rate * 6 * 3600) - 5 * GIB
+
+
+def test_unknown_custom_and_evidence_tables_survive_even_critical_pressure(env):
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = [part("system", "my_custom_log", "20261001", 3, TODAY - timedelta(days=9)),
+                     part("system", "my_custom_log_0", "202609", 3, date(2026, 9, 30)),
+                     part("system", "query_log_pre_recovery_20261007", "202610", 3, TODAY - timedelta(days=3)),
+                     part("system", "text_log_0", "202609", 1, date(2026, 9, 30))]
+    disk.used, disk.avail = int(99 * GIB), int(1 * GIB)
+    for _ in range(3):
+        make().tick()
+        clock["t"] += 20 * 60
+    assert ch.commands == ["DROP TABLE IF EXISTS system.text_log_0 SYNC"]
+
+
+def test_disabled_writer_logs_expire_after_retention_without_pressure(env):
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = [part("system", "processors_profile_log", "202610", 1.2, TODAY),
+                     part("system", "query_views_log", "202610", 0.1, TODAY)]
+    disk.used, disk.avail = int(20 * GIB), int(80 * GIB)
+    make().tick()
+    assert ch.commands == []                                   # still within 3 days
+    clock["t"] += 4 * 86400
+    make().tick()
+    assert set(ch.commands) == {"DROP TABLE IF EXISTS system.processors_profile_log SYNC",
+                                "DROP TABLE IF EXISTS system.query_views_log SYNC"}
+    # Idempotent: a later sweep finds nothing and issues nothing new.
+    n = len(ch.commands)
+    clock["t"] += 2 * 3600
+    make().tick()
+    assert len(ch.commands) == n
+
+
+def test_error_is_cleared_only_after_a_successful_clickhouse_check(env):
+    W, make, clock, disk, ch, tmp = env
+    disk.used, disk.avail = int(20 * GIB), int(80 * GIB)       # no pressure
+    dog = make()
+    dog.tick()                                                  # breakdown + legacy sweep run
+    ch.down = True
+    clock["t"] += 400                                           # breakdown due again: fails
+    state = dog.tick()
+    assert state["last_error"]
+    # Still down; nothing scheduled this tick: the probe fails, the error stays.
+    clock["t"] += 30
+    state = dog.tick()
+    assert state["last_error"], "an idle tick must not count as recovery"
+    # Back up; still nothing scheduled except the probe: proven recovery.
+    ch.down = False
+    clock["t"] += 30
+    probes_before = ch.queries
+    state = dog.tick()
+    assert state["last_error"] is None and state["last_recovered"]
+    assert ch.queries > probes_before
+
+
+def test_failed_scheduled_read_is_retried_next_tick(env):
+    W, make, clock, disk, ch, tmp = env
+    disk.used, disk.avail = int(20 * GIB), int(80 * GIB)
+    ch.down = True
+    dog = make()
+    dog.tick()
+    ch.down = False
+    clock["t"] += 30                                            # far less than the 5-minute interval
+    state = dog.tick()
+    assert state["breakdown"] is not None, "a failed read must not wait for the next interval"
+
+
+def test_top_tables_keep_qualified_names():
+    bd = {"tables": {"system.text_log": {"database": "system", "table": "text_log",
+                                          "active_bytes": 5, "inactive_bytes": 0, "parts": 1}},
+          "detached_bytes": 0}
+    top = W_top(bd)
+    assert top[0]["table"] == "system.text_log" and top[0]["name"] == "text_log"
+
+
+def W_top(bd):
+    from app.services import storage_watchdog as W
+    return W.top_tables(bd)
+
+
+# ─── Critical floor: pause until real free space returns ─────────────────────
+
+def _tiny_diagnostics(n, size_mib=0.05):
+    return [part("system", "metric_log", f"2026{10:02d}{d:02d}", size_mib / 1024, TODAY - timedelta(days=1 + d))
+            for d in range(n)]
+
+
+def test_tiny_plan_at_the_critical_floor_pauses_ingestion(env):
+    """Codex real-fixture failure: 0.17 GiB free, ~1 MB of eligible logs, >500 MB deficit."""
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = _tiny_diagnostics(3)
+    disk.used, disk.avail = int(9.83 * GIB), int(0.17 * GIB)
+    state = make().tick()
+    fs = state["filesystems"][0]
+    assert fs["state"] == "critical"
+    assert fs["planned_actions"] > 0 and fs["exhausted"] is False
+    assert fs["insufficient"] is True
+    assert state["ingest_paused"] is True and (tmp / "ingest-paused").exists()
+    assert "watchdog_insufficient" in [a["type"] for a in audit(tmp)]
+
+
+def test_pass_bounded_by_max_actions_is_insufficient_and_pauses(env):
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = _tiny_diagnostics(30, size_mib=10)          # 30 x 10 MiB, plan capped at 12
+    disk.used, disk.avail = int(98.5 * GIB), int(1.5 * GIB)
+    fs = make().tick()["filesystems"][0]
+    assert fs["planned_actions"] == P.MAX_ACTIONS_PER_PASS and fs["insufficient"] is True
+    assert (tmp / "ingest-paused").exists()
+
+
+def test_critical_pause_holds_until_real_free_space_returns(env):
+    W, make, clock, disk, ch, tmp = env
+    # Enough eligible data (need: 98.5% -> 75% = 23.5 GiB), but dropped
+    # partitions only return their space after ~10 minutes.
+    ch.partitions = [part("system", "text_log", "20261001", 30, TODAY - timedelta(days=9))]
+    disk.used, disk.avail = int(98.5 * GIB), int(1.5 * GIB)
+    dog = make()
+    state = dog.tick()
+    fs = state["filesystems"][0]
+    assert fs["insufficient"] is False and state["ingest_paused"] is True
+    clock["t"] += 30
+    assert dog.tick()["ingest_paused"] is True, "pending reclamation is not free space"
+    clock["t"] += 15 * 60                                       # partition removal lands
+    state = dog.tick()
+    assert state["filesystems"][0]["avail_bytes"] >= 5 * GIB
+    assert state["ingest_paused"] is False
+
+
+def test_non_critical_pressure_does_not_pause(env):
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = [part("system", "text_log", "20261001", 1, TODAY - timedelta(days=9))]
+    disk.used, disk.avail = int(88 * GIB), int(12 * GIB)
+    assert make().tick()["ingest_paused"] is False

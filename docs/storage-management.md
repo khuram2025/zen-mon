@@ -63,8 +63,10 @@ Field assessment of a 498 GiB appliance (10 Oct 2026) and cross-check on `.221`:
 
 ## Bounded ClickHouse diagnostics
 
-`docker/clickhouse/zenplus_logging.xml` (config.d) and `zenplus_profile.xml` (users.d),
-mounted by `docker-compose.yml`, persist across upgrades:
+`docker/clickhouse/zenplus_logging.xml` (config.d) and `zenplus_profile.xml` (users.d)
+are installed by `scripts/install-clickhouse-config.sh` into `/etc/zenplus/clickhouse`
+(staged, validated, renamed atomically; outside the code tree so a rollback can never
+remove a bind-mount source) and mounted from there by `docker-compose.yml`:
 
 - server log files and `text_log` keep warnings and errors (100 MiB × 3 files);
 - every system log enabled by default gets daily partitions and a TTL (3 days for
@@ -72,9 +74,14 @@ mounted by `docker-compose.yml`, persist across upgrades:
   `storage_policy.DIAGNOSTIC_LOG_RETENTION_DAYS`, kept in sync by a test);
 - processor profiles, materialized-view logs and sampling-profiler stacks are off.
 
-ClickHouse renames a system log table whose definition changed to `<name>_<n>` on start;
-those legacy copies (and `*_pre_recovery_*`) are dropped once older than their log's
-retention, or first under pressure. `setup-storage.sh` recreates the container when the
+ClickHouse renames a system log table whose definition changed to `<name>_<n>` on its next
+write; those legacy copies, and the logs switched off by the profile
+(`processors_profile_log`, `query_views_log`), are dropped once older than their log's
+retention, or first under pressure. Only known diagnostic logs are ever touched:
+`*_pre_recovery_*` copies are recovery evidence and are never deleted automatically, and
+unknown or custom `system` tables are left alone. A failed upgrade's rollback runs
+`ota-reconcile-storage-rollback.sh` from the payload (see
+`docs/storage-1.24.2-migration-acceptance.md`). `setup-storage.sh` recreates the container when the
 mounts are missing.
 
 ## Free-space watchdog

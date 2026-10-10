@@ -349,7 +349,7 @@ async def storage_overview(
     try:
         inventory = await svc.ch_inventory()
         breakdown = await svc.clickhouse_breakdown()
-        diag = await svc.diagnostic_logs(breakdown)
+        diag = await svc.diagnostic_logs()
     except Exception as exc:  # the page must render while ClickHouse is down
         inventory, breakdown, diag = [], None, []
         ch_error = f"ClickHouse is unreachable: {exc}"

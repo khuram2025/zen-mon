@@ -565,6 +565,11 @@ def watchdog_issues(wd: dict) -> list[dict]:
             "Host agent and APM uploads are held in the agents' spools until space returns. "
             "Free space or expand storage.", "expand")
     for fs in wd.get("filesystems") or []:
+        if fs.get("insufficient") and not fs.get("exhausted"):
+            add("critical" if fs.get("state") == "critical" else "warning", "purge_insufficient",
+                f"Purging cannot free enough space on {fs.get('mount')}",
+                "What is still eligible for deletion falls short of what is needed. "
+                "Expand storage or shorten retention.", "expand")
         if fs.get("exhausted"):
             add("critical" if fs.get("state") == "critical" else "warning", "purge_exhausted",
                 f"No more data can be purged on {fs.get('mount')} within policy",

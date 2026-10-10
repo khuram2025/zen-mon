@@ -139,20 +139,52 @@ DIAGNOSTIC_LOG_RETENTION_DAYS: dict[str, int] = {
 # Small and useful after an incident: kept even under pressure.
 PROTECTED_DIAGNOSTIC_LOGS = {"error_log", "crash_log", "session_log", "backup_log"}
 
-_LEGACY_RE = re.compile(r"^(?P<base>[a-z_]+?_log)(?:_\d+|_pre_recovery_\d{8}(?:_\d+)?)$")
+# Logs that docker/clickhouse/zenplus_profile.xml switches off. ClickHouse never
+# writes them again, so it never re-creates them with the new TTL: the existing
+# table is a frozen legacy copy, removed once its newest day passes retention.
+DISABLED_DIAGNOSTIC_LOGS = {"processors_profile_log", "query_views_log"}
+
+_LEGACY_RE = re.compile(r"^(?P<base>[a-z_]+?_log)_\d+$")
+# Copies taken by a storage recovery are evidence about that incident: never
+# deleted automatically (not even under pressure); an operator decides.
+_EVIDENCE_RE = re.compile(r"^(?P<base>[a-z_]+?_log)_pre_recovery_\d{8}(?:_\d+)?$")
+
+
+# Every diagnostic log name this policy knows. Anything else in ``system``,
+# including custom or future ``*_log`` tables and copies of them, is never
+# classified as diagnostic and therefore never touched.
+KNOWN_DIAGNOSTIC_LOGS = (set(DIAGNOSTIC_LOG_RETENTION_DAYS) | PROTECTED_DIAGNOSTIC_LOGS
+                         | DISABLED_DIAGNOSTIC_LOGS)
+
+
+def diagnostic_kind(table: str) -> Optional[str]:
+    """current | legacy | evidence for a known ``system`` log table, else None."""
+    m = _EVIDENCE_RE.match(table)
+    if m:
+        return "evidence" if m.group("base") in KNOWN_DIAGNOSTIC_LOGS else None
+    if table in DISABLED_DIAGNOSTIC_LOGS:
+        return "legacy"
+    if table in KNOWN_DIAGNOSTIC_LOGS:
+        return "current"
+    m = _LEGACY_RE.match(table)
+    if m and m.group("base") in KNOWN_DIAGNOSTIC_LOGS:
+        return "legacy"
+    return None
 
 
 def diagnostic_log(table: str) -> Optional[tuple[str, bool]]:
-    """(base log name, is_legacy_copy) for a ``system`` log table, else None."""
-    if table in DIAGNOSTIC_LOG_RETENTION_DAYS or table in PROTECTED_DIAGNOSTIC_LOGS:
+    """(base log name, is_not_current) for a ``system`` log table, else None.
+
+    Legacy copies, disabled logs and recovery evidence all report True; use
+    ``diagnostic_kind`` to tell evidence (never deleted) from legacy.
+    """
+    kind = diagnostic_kind(table)
+    if kind is None:
+        return None
+    if kind == "current":
         return table, False
-    m = _LEGACY_RE.match(table)
-    if m and (m.group("base") in DIAGNOSTIC_LOG_RETENTION_DAYS
-              or m.group("base") in PROTECTED_DIAGNOSTIC_LOGS):
-        return m.group("base"), True
-    if table.endswith("_log"):
-        return table, False
-    return None
+    m = _EVIDENCE_RE.match(table) or _LEGACY_RE.match(table)
+    return (m.group("base") if m else table), True
 
 
 def diagnostic_retention_days(base: str) -> int:
@@ -357,6 +389,8 @@ def build_candidates(partitions: list[dict], today: date, policy: dict) -> list[
             if not kind:
                 continue
             base, legacy = kind
+            if diagnostic_kind(table) == "evidence":
+                continue
             if legacy:
                 legacy_bytes[table] = legacy_bytes.get(table, 0) + size
                 legacy_newest[table] = max(filter(None, [legacy_newest.get(table), newest]), default=None)

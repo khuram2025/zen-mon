@@ -121,6 +121,7 @@ export const EVENT_LABELS: Record<string, string> = {
   watchdog_purge: 'Low-space purge',
   watchdog_reclaim: 'Space reclaimed',
   watchdog_exhausted: 'Nothing left to purge',
+  watchdog_insufficient: 'Purge cannot free enough',
   watchdog_application_spared: 'Monitoring data spared',
   watchdog_ingest_paused: 'Ingestion paused',
   watchdog_ingest_resumed: 'Ingestion resumed',
@@ -186,6 +187,10 @@ export function eventSummary(e: StorageEvent): string {
       if (typeof d.measured_free_change_bytes === 'number') {
         parts.push(`free space ${d.measured_free_change_bytes >= 0 ? '+' : '−'}${bytes(Math.abs(d.measured_free_change_bytes))} measured`)
       }
+      break
+    case 'watchdog_insufficient':
+      parts.push(`${bytes(d.planned_bytes)} eligible this pass vs ${bytes(d.need_bytes)} needed`)
+      if (d.usage_pct != null) parts.push(`at ${Number(d.usage_pct).toFixed(1)}%`)
       break
     case 'watchdog_exhausted':
     case 'watchdog_application_spared':

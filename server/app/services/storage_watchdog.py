@@ -184,11 +184,19 @@ def ch_breakdown(client) -> dict:
     return {"tables": tables, "detached_bytes": detached}
 
 
+def top_tables(bd: dict, limit: int = 25) -> list[dict]:
+    """Largest tables; ``table`` is always the qualified ``db.name``."""
+    rows = [{**v, "name": v["table"], "table": key} for key, v in bd["tables"].items()]
+    return sorted(rows, key=lambda t: -(t["active_bytes"] + t["inactive_bytes"]))[:limit]
+
+
 def summarize_breakdown(bd: dict) -> dict:
     app_active = diag_active = inactive = 0
     for t in bd["tables"].values():
         inactive += t["inactive_bytes"]
-        if t["database"] == "system" and P.diagnostic_log(t["table"]):
+        # Everything in ``system`` is ClickHouse's own data, never monitoring
+        # data; which of it may be purged is decided by storage_policy.
+        if t["database"] == "system":
             diag_active += t["active_bytes"]
         else:
             app_active += t["active_bytes"]
@@ -221,7 +229,9 @@ class Watchdog:
         self.last_event_at: dict[str, float] = prior.get("last_event_at") or {}
         self.last_pass: Optional[dict] = prior.get("last_pass")
         self.last_error: Optional[dict] = prior.get("last_error")
+        self.last_recovered: Optional[dict] = prior.get("last_recovered")
         self.paused: bool = os.path.exists(_path("ingest-paused"))
+        self._ch_ok = False
 
     # ClickHouse access tolerates outages: every tick reconnects as needed.
     def client(self):
@@ -231,10 +241,12 @@ class Watchdog:
 
     def _ch(self, fn, *args):
         try:
-            return fn(self.client(), *args)
+            result = fn(self.client(), *args)
         except Exception:
             self._client = None
             raise
+        self._ch_ok = True
+        return result
 
     def _event_once(self, key: str, record_type: str, details: dict, now: float) -> None:
         if now - self.last_event_at.get(key, 0) >= REPEAT_EVENT_EVERY_S:
@@ -274,8 +286,8 @@ class Watchdog:
     def _maybe_breakdown(self, now: float) -> None:
         if now - self.last_breakdown_at < BREAKDOWN_EVERY_S:
             return
-        self.last_breakdown_at = now
         bd = self._ch(ch_breakdown)
+        self.last_breakdown_at = now        # only after a successful read
         sizes = {k: v["active_bytes"] + v["inactive_bytes"] for k, v in bd["tables"].items()}
         self.snapshots = [s for s in self.snapshots if now - s["t"] <= 26 * 3600]
         if not self.snapshots or now - self.snapshots[-1]["t"] >= 3600:
@@ -289,16 +301,15 @@ class Watchdog:
                 if delta > 0:
                     growth.append({"table": k, "bytes_per_hour": int(delta / span_h), "bytes": size})
             growth.sort(key=lambda g: -g["bytes_per_hour"])
-        top = sorted(({"table": k, **v} for k, v in bd["tables"].items()),
-                     key=lambda t: -(t["active_bytes"] + t["inactive_bytes"]))[:25]
+        top = top_tables(bd)
         self.breakdown = {"at": now, **summarize_breakdown(bd), "top_tables": top,
                           "growth": growth[:10]}
 
     def _sweep_legacy(self, today: date, now: float) -> None:
         if now - self.last_legacy_sweep_at < LEGACY_SWEEP_EVERY_S:
             return
-        self.last_legacy_sweep_at = now
         candidates = P.build_candidates(self._ch(ch_partitions), today, P.DEFAULT_POLICY)
+        self.last_legacy_sweep_at = now     # only after a successful read
         expired = P.legacy_expired(candidates, today)
         if expired:
             self._execute(expired, None, "legacy_cleanup", now)
@@ -376,6 +387,7 @@ class Watchdog:
         policy = self.policy()
         # Deduplicate here, not only in the default sampler: evaluating a shared
         # / and /data twice would run two purge passes for one filesystem.
+        self._ch_ok = False
         fss = P.dedupe_filesystems(self.sampler())
         self._record_samples(fss, now)
         self._settle_passes(fss, now)
@@ -399,6 +411,7 @@ class Watchdog:
             pressure = P.evaluate_pressure(fs, policy, pending, rate)
             plan: list[P.Candidate] = []
             exhausted = False
+            insufficient = False
             holds_clickhouse = ch_dev is None or fs.device == ch_dev
             if pressure.need_bytes > 0 and not holds_clickhouse:
                 # Nothing ZenPlus can delete lives here (e.g. a separate root
@@ -423,6 +436,7 @@ class Watchdog:
                                     "target; the space is used by other files. Monitoring data "
                                     f"is only deleted from {P.APPLICATION_LAST_RESORT_PCT:.0f}% usage.",
                         }, now)
+                    planned_bytes = sum(c.bytes for c in plan)
                     if plan:
                         self._execute(plan, fs, pressure.reasons, now)
                     else:
@@ -433,11 +447,26 @@ class Watchdog:
                             "note": "no eligible data left to delete within policy "
                                     f"(minimum keep {policy['min_keep_days']} days)",
                         }, now)
+                    # need_bytes is already net of pending reclamation; a pass is
+                    # bounded by MAX_ACTIONS_PER_PASS. Either way, what this pass
+                    # can free may fall short of what is needed.
+                    if plan and planned_bytes < pressure.need_bytes:
+                        insufficient = True
+                        self._event_once(f"insufficient:{fs.device}", "watchdog_insufficient", {
+                            "mount": fs.mount, "usage_pct": fs.usage_pct,
+                            "need_bytes": pressure.need_bytes, "planned_bytes": planned_bytes,
+                            "actions": len(plan), "reasons": pressure.reasons,
+                            "note": "this pass cannot free enough space; more passes follow "
+                                    "while eligible data remains",
+                        }, now)
                 except Exception as exc:
                     error = f"ClickHouse: {str(exc)[:300]}"
-            # Pausing telemetry only helps the filesystem it is written to.
-            if holds_clickhouse and pressure.state == "critical" and (
-                    exhausted or error or not policy["enabled"]):
+            # Critical free space on the filesystem telemetry is written to:
+            # pause bulk ingestion now, whatever is scheduled. Dropped
+            # partitions only return their space minutes later and a plan of
+            # tiny, continuously regenerated logs cannot relieve the floor.
+            # Ingestion resumes only once real free space is back (below).
+            if holds_clickhouse and pressure.state == "critical":
                 self._set_paused(True, f"{fs.mount}: {', '.join(pressure.reasons)}", now)
             evaluations.append({
                 "mount": fs.mount, "device": fs.device, "total_bytes": fs.total_bytes,
@@ -447,7 +476,8 @@ class Watchdog:
                 "need_bytes": pressure.need_bytes,
                 "runway_hours": pressure.runway_hours,
                 "growth_bytes_per_hour": pressure.rate_bytes_per_hour,
-                "exhausted": exhausted, "planned_actions": len(plan),
+                "exhausted": exhausted, "insufficient": insufficient,
+                "planned_actions": len(plan),
                 "holds_clickhouse": holds_clickhouse,
             })
             if STATE_RANK[pressure.state] > STATE_RANK[worst]:
@@ -463,6 +493,19 @@ class Watchdog:
         if error:
             self.last_error = {"at": now, "message": error}
             self._event_once("error", "watchdog_error", {"message": error}, now)
+        elif self.last_error:
+            # Recovery needs proof: a ClickHouse call that succeeded in this
+            # tick. A tick that made no call (nothing scheduled, no pressure)
+            # proves nothing, so probe.
+            if not self._ch_ok:
+                try:
+                    self._ch(lambda cl: cl.query("SELECT 1"))
+                except Exception as exc:
+                    self.last_error = {"at": now, "message": f"ClickHouse: {str(exc)[:300]}"}
+            if self._ch_ok:
+                # The error is history (kept in the audit trail), not a finding.
+                self.last_recovered = {"at": now, "error": self.last_error}
+                self.last_error = None
 
         state = {
             "version": 1,
@@ -478,6 +521,7 @@ class Watchdog:
             "open_passes": self.passes,
             "last_pass": self.last_pass,
             "last_error": self.last_error,
+            "last_recovered": self.last_recovered,
             "ingest_paused": self.paused,
             "breakdown": self.breakdown,
             "samples": self.samples,

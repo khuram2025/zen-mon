@@ -185,41 +185,54 @@ XMLEOF
     log "Restored missing ClickHouse backup-disk config"
 fi
 
-# The logging limits are bind-mounted files too: a missing source would make
-# Docker create a directory there, so refuse to recreate without them.
-for f in zenplus_logging.xml zenplus_profile.xml; do
-    if [ ! -f "${ZENPLUS_DIR}/docker/clickhouse/$f" ]; then
-        warn "docker/clickhouse/$f is missing — not recreating ClickHouse"
-        exit 1
-    fi
-done
+# The logging limits live in /etc/zenplus/clickhouse (outside the code tree, so
+# an OTA rollback can never delete a bind-mount source). Install them before
+# any container recreation; refuse to touch ClickHouse if that fails.
+CH_CONF_DIR=/etc/zenplus/clickhouse
+CONF_RESULT="$(ZENPLUS_DIR="$ZENPLUS_DIR" bash "${ZENPLUS_DIR}/scripts/install-clickhouse-config.sh")" || {
+    warn "Could not install the ClickHouse logging configuration — not recreating ClickHouse"
+    exit 1
+}
+CONF_CHANGED=0
+[[ "$CONF_RESULT" == *"changed=1"* ]] && CONF_CHANGED=1
 
-# Recreate the container when it is missing the backups mount or the logging
-# limits, or still uses the legacy default bridge. Giving the replacement network a stable name lets
-# Compose create it before detaching ClickHouse from the old network.
+# ClickHouse with many large system-log parts can take a while to start.
+wait_clickhouse_healthy() {
+    local health=""
+    for _ in $(seq 1 60); do
+        health="$(docker inspect -f '{{.State.Health.Status}}' "$CH_CONTAINER" 2>/dev/null || true)"
+        [ "$health" = "healthy" ] && return 0
+        sleep 5
+    done
+    warn "ClickHouse did not become healthy (status: ${health:-unknown})"
+    return 1
+}
+
+# Recreate the container when it is missing the backups mount, does not mount
+# the logging limits from /etc/zenplus/clickhouse (a 1.24.1 container mounted
+# them from the code tree), still uses the legacy default bridge, or the
+# configuration content changed: install-clickhouse-config.sh renames new
+# files into place (new inodes) and a single-file bind mount keeps the old
+# inode, so only a re-created container reads the new content. Giving the
+# replacement network a stable name lets Compose create it before detaching
+# ClickHouse from the old network.
 if command -v docker >/dev/null 2>&1 && docker inspect "$CH_CONTAINER" >/dev/null 2>&1; then
     CH_NETWORKS="$(docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}} {{end}}' "$CH_CONTAINER" 2>/dev/null || true)"
-    CH_MOUNTS="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$CH_CONTAINER" 2>/dev/null || true)"
-    if [[ " $CH_NETWORKS " == *" $CH_NETWORK "* && " $CH_MOUNTS " == *" /backups "* \
-          && " $CH_MOUNTS " == *"/config.d/zenplus_logging.xml "* \
-          && " $CH_MOUNTS " == *"/users.d/zenplus_profile.xml "* ]]; then
+    CH_MOUNTS="$(docker inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$CH_CONTAINER" 2>/dev/null || true)"
+    if [[ "$CONF_CHANGED" = 0 && " $CH_NETWORKS " == *" $CH_NETWORK "* && " $CH_MOUNTS " == *":/backups "* \
+          && " $CH_MOUNTS " == *" ${CH_CONF_DIR}/config.d/zenplus_logging.xml:/etc/clickhouse-server/config.d/zenplus_logging.xml "* \
+          && " $CH_MOUNTS " == *" ${CH_CONF_DIR}/users.d/zenplus_profile.xml:/etc/clickhouse-server/users.d/zenplus_profile.xml "* ]]; then
         log "ClickHouse network, backups disk and logging limits are current"
     else
         log "Recreating ClickHouse with the current storage and network configuration ..."
         if (cd "$ZENPLUS_DIR" && docker compose up -d --force-recreate clickhouse >/dev/null 2>&1); then
-            for _ in $(seq 1 24); do
-                [ "$(docker inspect -f '{{.State.Health.Status}}' "$CH_CONTAINER" 2>/dev/null)" = "healthy" ] && break
-                sleep 5
-            done
-            CH_HEALTH="$(docker inspect -f '{{.State.Health.Status}}' "$CH_CONTAINER" 2>/dev/null || true)"
-            if [ "$CH_HEALTH" = "healthy" ]; then
+            if wait_clickhouse_healthy; then
                 if [ "$LEGACY_CH_NETWORK" != "$CH_NETWORK" ] && docker network inspect "$LEGACY_CH_NETWORK" >/dev/null 2>&1; then
                     docker network rm "$LEGACY_CH_NETWORK" >/dev/null 2>&1 || \
                         warn "Legacy Docker network $LEGACY_CH_NETWORK is still in use"
                 fi
                 log "ClickHouse recreated (healthy)"
             else
-                warn "ClickHouse did not become healthy after recreation (status: ${CH_HEALTH:-unknown})"
                 exit 1
             fi
         else

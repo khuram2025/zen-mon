@@ -6,6 +6,7 @@ import { useStorageEvents } from './useStorage'
 
 function tone(type: string) {
   if (type.includes('failed') || type === 'watchdog_ingest_paused' || type === 'watchdog_exhausted'
+    || type === 'watchdog_insufficient'
     || type === 'watchdog_error') return 'text-danger'
   if (type === 'watchdog_purge' || type === 'watchdog_application_spared') return 'text-warning'
   if (type === 'watchdog_reclaim' || type === 'watchdog_ingest_resumed') return 'text-success'

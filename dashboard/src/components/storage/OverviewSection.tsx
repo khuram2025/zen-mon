@@ -290,12 +290,22 @@ function Stat({ label, value, sub, warn }: { label: string; value: string; sub: 
   )
 }
 
+function diagnosticStatus(l: DiagnosticLog): { label: string; variant: 'success' | 'warning' | 'default' | 'info'; title: string } {
+  if (l.evidence) return { label: 'recovery evidence', variant: 'info', title: 'Copied during a storage recovery. Never deleted automatically; remove it manually once no longer needed.' }
+  if (l.disabled) return { label: `disabled · expires`, variant: 'warning', title: `This log is switched off. Its remaining data is removed ${l.retention_days} days after its last entry.` }
+  if (l.legacy) return { label: 'legacy copy · expires', variant: 'warning', title: `Left behind when ClickHouse re-created the table. Removed ${l.retention_days} days after its last entry.` }
+  if (l.protected) return { label: 'kept', variant: 'default', title: 'Small and useful after an incident: never removed under pressure.' }
+  if (l.ttl_active) return { label: 'bounded', variant: 'success', title: `Daily partitions, removed after ${l.retention_days} days.` }
+  return { label: 'no TTL yet', variant: 'warning', title: 'ClickHouse re-creates this table with retention on its next write.' }
+}
+
 function DiagnosticLogsCard({ overview }: { overview: Overview }) {
   const logs = overview.diagnostic_logs || []
   if (logs.length === 0) return null
   const total = logs.reduce((a, l) => a + l.bytes, 0)
-  const unbounded = logs.filter((l) => !l.legacy && !l.ttl_active)
-  const legacy = logs.filter((l) => l.legacy)
+  const pending = logs.filter((l) => l.kind === 'current' && !l.protected && !l.ttl_active)
+  const expiring = logs.filter((l) => l.legacy)
+  const evidence = logs.filter((l) => l.evidence)
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -305,17 +315,17 @@ function DiagnosticLogsCard({ overview }: { overview: Overview }) {
         </CardTitle>
         <p className="text-xs text-muted">
           ClickHouse's own query, trace and server logs. They are not monitoring data and are bounded by
-          retention: warnings and errors only, daily partitions, removed after the period shown. They are
-          the first data removed under disk pressure (error and crash logs are kept).
+          retention: warnings and errors only, daily partitions, removed after the period shown. Older copies
+          and switched-off logs expire on their own; under disk pressure they are removed first (error and crash
+          logs and recovery evidence are kept).
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
-        {unbounded.length > 0 && (
-          <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            {unbounded.length} log table(s) have no retention yet ({bytes(unbounded.reduce((a, l) => a + l.bytes, 0))}).
-            Retention applies when ClickHouse restarts with the bounded logging configuration (done on upgrade);
-            the previous tables are then kept as legacy copies and removed once expired.
+        {pending.length > 0 && (
+          <div className="flex items-start gap-2 rounded-md border border-border/60 bg-surface2/30 px-3 py-2 text-xs text-text2">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
+            {pending.length} current table(s) have no retention yet ({bytes(pending.reduce((a, l) => a + l.bytes, 0))}).
+            ClickHouse re-creates each with retention on its next write; the old content is then kept as a legacy copy that expires.
           </div>
         )}
         <div className="max-h-72 overflow-y-auto">
@@ -329,27 +339,29 @@ function DiagnosticLogsCard({ overview }: { overview: Overview }) {
               </tr>
             </thead>
             <tbody>
-              {logs.map((l: DiagnosticLog) => (
-                <tr key={l.table} className="border-t border-border/40">
-                  <td className="py-1 font-mono">{l.table}</td>
-                  <td className="py-1 text-right tabular-nums">{bytes(l.bytes)}</td>
-                  <td className="py-1 text-right tabular-nums text-text2">{l.retention_days} days</td>
-                  <td className="py-1 text-right">
-                    {l.legacy ? <Badge variant="warning">legacy copy</Badge>
-                      : l.protected ? <Badge variant="default">kept</Badge>
-                      : l.ttl_active ? <Badge variant="success">bounded</Badge>
-                      : <Badge variant="warning">no TTL</Badge>}
-                  </td>
-                </tr>
-              ))}
+              {logs.map((l: DiagnosticLog) => {
+                const st = diagnosticStatus(l)
+                return (
+                  <tr key={l.table} className="border-t border-border/40">
+                    <td className="py-1 font-mono">{l.table}</td>
+                    <td className="py-1 text-right tabular-nums">{bytes(l.bytes)}</td>
+                    <td className="py-1 text-right tabular-nums text-text2">{l.evidence ? 'until removed' : `${l.retention_days} days`}</td>
+                    <td className="py-1 text-right" title={st.title}><Badge variant={st.variant}>{st.label}</Badge></td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
-        {legacy.length > 0 && (
+        {expiring.length > 0 && (
           <p className="text-[11px] text-muted">
-            Legacy copies ({bytes(legacy.reduce((a, l) => a + l.bytes, 0))}) are left behind by ClickHouse upgrades,
-            configuration changes or recoveries. The watchdog removes them once older than their log's retention, or
-            first under disk pressure.
+            {bytes(expiring.reduce((a, l) => a + l.bytes, 0))} in legacy copies and switched-off logs is removed automatically
+            once older than its log's retention.
+          </p>
+        )}
+        {evidence.length > 0 && (
+          <p className="text-[11px] text-muted">
+            {bytes(evidence.reduce((a, l) => a + l.bytes, 0))} of recovery evidence is kept until removed manually.
           </p>
         )}
       </CardContent>

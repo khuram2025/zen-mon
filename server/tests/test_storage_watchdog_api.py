@@ -101,3 +101,49 @@ def test_paused_ingest_rejects_host_results_before_claiming_the_batch(monkeypatc
     src = open(agents.__file__).read()
     pause_at = src.index('storage_backpressure.raise_if_paused("Host telemetry")')
     assert pause_at < src.index("payload_sha256 = _host_results_batch_digest(data)")
+
+
+def test_diagnostic_log_sizes_cover_every_table_with_bare_names(monkeypatch):
+    """Sizes come from system.parts for all tables, not the top-25 breakdown."""
+    many = [(f"zz_filler_{i}", 10 ** 9) for i in range(40)]      # pushes logs out of any top 25
+
+    class Client:
+        def query(self, sql, parameters=None):
+            class R:
+                pass
+            r = R()
+            if "FROM system.parts" in sql:
+                r.result_rows = many + [("text_log", 1234), ("text_log_0", 5678),
+                                        ("processors_profile_log", 99),
+                                        ("query_log_pre_recovery_20261007", 7),
+                                        ("my_custom_log", 11)]
+            else:
+                r.result_rows = [("text_log", "MergeTree PARTITION BY event_date TTL event_date + toIntervalDay(3)"),
+                                 ("text_log_0", "MergeTree PARTITION BY toYYYYMM(event_date)"),
+                                 ("processors_profile_log", "MergeTree PARTITION BY toYYYYMM(event_date)"),
+                                 ("query_log_pre_recovery_20261007", "MergeTree"),
+                                 ("my_custom_log", "MergeTree")]
+            return r
+    monkeypatch.setattr(svc, "get_ch_client", lambda: Client())
+    rows = {r["table"]: r for r in svc._diagnostic_logs_sync()}
+    assert rows["text_log"]["bytes"] == 1234 and rows["text_log"]["ttl_active"]
+    assert rows["text_log_0"]["bytes"] == 5678 and rows["text_log_0"]["kind"] == "legacy"
+    assert rows["processors_profile_log"]["disabled"] and rows["processors_profile_log"]["kind"] == "legacy"
+    assert rows["query_log_pre_recovery_20261007"]["evidence"]
+    assert "my_custom_log" not in rows                          # unknown tables are not diagnostics
+
+
+def test_watchdog_issues_ignore_a_recovered_error():
+    hb = time.time()
+    assert L.watchdog_issues({"installed": True, "alive": True, "heartbeat": hb, "filesystems": [],
+                              "last_error": None,
+                              "last_recovered": {"at": hb, "error": {"message": "x"}}}) == []
+
+
+def test_insufficient_purge_is_a_critical_finding_at_the_floor():
+    hb = time.time()
+    issues = L.watchdog_issues({"installed": True, "alive": True, "heartbeat": hb, "ingest_paused": True,
+                                "filesystems": [{"mount": "/ /data", "state": "critical",
+                                                 "exhausted": False, "insufficient": True}]})
+    codes = {i["code"]: i["severity"] for i in issues}
+    assert codes == {"ingest_paused": "critical", "purge_insufficient": "critical"}

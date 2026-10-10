@@ -4,6 +4,9 @@ Documentation=file:///opt/zenplus/docs/storage-management.md
 # Deliberately independent of PostgreSQL and the API: it must keep freeing
 # space when a full disk has already stopped them.
 After=network.target docker.service
+# After an OTA rollback to a version without the watchdog, do not restart a
+# missing module forever (the rollback hook also removes this unit).
+ConditionPathExists=/opt/zenplus/server/app/services/storage_watchdog.py
 
 [Service]
 Type=simple
