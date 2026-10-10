@@ -58,7 +58,9 @@ Load
     two uvicorn workers never double-insert an hour — the loser of the race
     yields the pass. A newly created rollup converges over a month of raw in
     well under an hour; in steady state the views keep every count exact and a
-    sweep only reads.
+    sweep only reads. Unchanged raw partitions reuse an exact census; a
+    separate session advisory lock and shared next-due setting coordinate the
+    expensive census across API workers without a long database transaction.
 
 Deduplication
     migrate-144 gives every rollup table a block log so a collector retry
@@ -80,7 +82,8 @@ from typing import Any, Callable
 
 from sqlalchemy import text
 
-from app.core.database import AsyncSessionLocal, get_ch_client
+from app.core.database import AsyncSessionLocal, engine, get_ch_client
+from app.services.netflow_census import RawCensusCache, FORMAT as CENSUS_FORMAT
 
 logger = logging.getLogger("zenplus.netflow")
 
@@ -118,6 +121,8 @@ BACKFILL_PAUSE_S = 0.5
 HEALER_MAX_THREADS = 4
 
 NETFLOW_ROLLUP_ADVISORY_LOCK = 1515074392
+NETFLOW_SWEEP_ADVISORY_LOCK = 1515074393
+CENSUS_SETTINGS_KEY = "netflow_rollup_census"
 REPAIR_SETTINGS_KEY = "netflow_rollup_repair"
 
 
@@ -556,6 +561,25 @@ async def rollup_census(t: ChTarget, spec: RollupSpec, lo_s: int, hi_s: int) -> 
     return {int(r[0]): RolledHour(int(r[1]), int(r[2] or 0), int(r[3] or 0)) for r in rows}
 
 
+def _partition_census_sql(database: str, clock: str) -> str:
+    """Exact per-partition results for a bounded batch of raw partitions."""
+    if clock == "flow":
+        sql = _flow_census_sql(database)
+        extras = f", count(), toUnixTimestamp64Milli(min(timestamp)), countIf({X02_PREDICATE})\n"
+        window = "timestamp >= %(lo)s AND timestamp < %(hi)s"
+    else:
+        sql = _received_census_sql(database)
+        extras = f", countIf({X02_PREDICATE})\n"
+        window = "received_at >= %(lo)s AND received_at < %(hi)s"
+    return sql.replace(f"FROM {database}.flow_records", extras + f"FROM {database}.flow_records").replace(
+        "SELECT toUInt32", "SELECT _partition_id AS census_partition, toUInt32", 1).replace(
+        window, "_partition_id IN %(partitions)s").replace("GROUP BY h", "GROUP BY census_partition, h")
+
+
+def _raw_cache(t: ChTarget, stored: dict | None = None) -> RawCensusCache:
+    return RawCensusCache(lambda sql, params: _query(t, sql, params), t.database, stored)
+
+
 # ─── Retention floor ─────────────────────────────────────────────────────────
 
 
@@ -938,23 +962,32 @@ async def pending_raw_mutations(t: ChTarget) -> list[tuple[str, str, str]]:
     return [(str(r[0]), str(r[1]), str(r[2] or "")) for r in rows]
 
 
-async def _queue_unmasked_rows(t: ChTarget) -> bool:
+async def _queue_unmasked_rows(t: ChTarget, cache: RawCensusCache | None = None) -> bool:
     """Queue every hour holding unmasked v5 rows and correct them. True when
     such rows were found (the caller then waits for the mutation)."""
-    found = await _query(t, f"SELECT count() FROM {t.database}.flow_records WHERE {X02_PREDICATE}")
-    count = int(found[0][0] or 0)
-    if not count:
-        return False
-    flow_hours = [int(r[0]) for r in await _query(
-        t,
-        f"SELECT DISTINCT toUInt32(toUnixTimestamp(toStartOfHour(timestamp))) "
-        f"FROM {t.database}.flow_records WHERE {X02_PREDICATE}",
-    )]
-    received_hours = [int(r[0]) for r in await _query(
-        t,
-        f"SELECT DISTINCT toUInt32(toUnixTimestamp(toStartOfHour(toDateTime(received_at, 'UTC')))) "
-        f"FROM {t.database}.flow_records WHERE {X02_PREDICATE}",
-    )]
+    if cache is not None:
+        flow = cache.census("flow", 0, 2**32)
+        received = cache.census("received", 0, 2**32)
+        count = sum(row["unmasked"] for row in flow.values())
+        if not count:
+            return False
+        flow_hours = [hour for hour, row in flow.items() if row["unmasked"]]
+        received_hours = [hour for hour, row in received.items() if row["unmasked"]]
+    else:
+        found = await _query(t, f"SELECT count() FROM {t.database}.flow_records WHERE {X02_PREDICATE}")
+        count = int(found[0][0] or 0)
+        if not count:
+            return False
+        flow_hours = [int(r[0]) for r in await _query(
+            t,
+            f"SELECT DISTINCT toUInt32(toUnixTimestamp(toStartOfHour(timestamp))) "
+            f"FROM {t.database}.flow_records WHERE {X02_PREDICATE}",
+        )]
+        received_hours = [int(r[0]) for r in await _query(
+            t,
+            f"SELECT DISTINCT toUInt32(toUnixTimestamp(toStartOfHour(toDateTime(received_at, 'UTC')))) "
+            f"FROM {t.database}.flow_records WHERE {X02_PREDICATE}",
+        )]
     async with _Locked() as lock:
         if not lock.acquired:
             return True
@@ -1091,7 +1124,7 @@ def _now_s() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
 
-async def sweep_once(t: ChTarget = DEFAULT_TARGET) -> float:
+async def sweep_once(t: ChTarget = DEFAULT_TARGET, cache: RawCensusCache | None = None) -> float:
     """One convergence pass over every rollup. Returns seconds until the next."""
     ready = await _schema_ready(t)
     if not any(ready.values()):
@@ -1111,21 +1144,23 @@ async def sweep_once(t: ChTarget = DEFAULT_TARGET) -> float:
         else:
             logger.info("netflow rollup: waiting on %d flow_records mutation(s)", len(pending))
         return MUTATION_RECHECK_S
-    if await _queue_unmasked_rows(t):
+    cache = cache if cache is not None else _raw_cache(t)
+    await cache.prepare({clock: _partition_census_sql(t.database, clock) for clock in ("flow", "received")})
+    if await _queue_unmasked_rows(t, cache):
         return MUTATION_RECHECK_S
 
     now_s = _now_s()
     current_hour = now_s - now_s % HOUR_S
-    oldest = await _query(t, f"SELECT toUnixTimestamp(min(timestamp)), count() > 0 FROM {t.database}.flow_records")
-    oldest_raw_s = int(oldest[0][0]) if oldest and oldest[0][1] else None
+    all_flow = cache.census("flow", 0, 2**32)
+    oldest_raw_s = min((row["ts_min_ms"] // 1000 for row in all_flow.values()), default=None)
     retention = await raw_retention_days(t)
     base_floor = retention_floor(now_s, oldest_raw_s=oldest_raw_s,
                                  raw_retention_days=retention, rollup_ttl_days=None)
     if base_floor is None or base_floor >= current_hour:
         return SWEEP_INTERVAL_S
 
-    flow_raw = await raw_census(t, "flow", base_floor, current_hour)
-    received_raw = await raw_census(t, "received", base_floor, current_hour)
+    flow_raw = cache.census("flow", base_floor, current_hour)
+    received_raw = cache.census("received", base_floor, current_hour)
 
     censuses: dict[str, dict[int, RolledHour]] = {}
     for spec in ROLLUPS:
@@ -1188,14 +1223,89 @@ async def _drop_unrecoverable(spec: RollupSpec, hours: list[int]) -> None:
     )
 
 
+class _SweepLease:
+    """One session lock for census/scheduling, separate from per-hour locks.
+
+    AUTOCOMMIT avoids holding a database transaction across history scans.
+    An unlock failure invalidates the physical connection before pool return.
+    """
+    def __init__(self):
+        self.connection = None
+        self.acquired = False
+
+    async def __aenter__(self):
+        self.connection = await engine.connect()
+        try:
+            await self.connection.execution_options(isolation_level="AUTOCOMMIT")
+            self.acquired = bool((await self.connection.execute(
+                text("SELECT pg_try_advisory_lock(:k)"), {"k": NETFLOW_SWEEP_ADVISORY_LOCK}
+            )).scalar())
+        except BaseException:
+            await self.connection.invalidate()
+            await self.connection.close()
+            raise
+        return self
+
+    async def _release(self):
+        try:
+            if self.acquired:
+                unlocked = (await self.connection.execute(
+                    text("SELECT pg_advisory_unlock(:k)"), {"k": NETFLOW_SWEEP_ADVISORY_LOCK}
+                )).scalar()
+                if not unlocked:
+                    await self.connection.invalidate()
+        except BaseException:
+            await self.connection.invalidate()
+            raise
+        finally:
+            await self.connection.close()
+
+    async def __aexit__(self, *exc):
+        await asyncio.shield(self._release())
+
+
+async def coordinated_sweep(t: ChTarget = DEFAULT_TARGET) -> float:
+    """Single appliance-wide pass with durable cache and next-due scheduling.
+
+    A worker losing the lock retries shortly. Once the winner finishes, the
+    shared next-due time prevents the loser repeating the same scans. Failed
+    passes publish neither a completion time nor a new cache.
+    """
+    async with _SweepLease() as lease:
+        if not lease.acquired:
+            return float(MUTATION_RECHECK_S)
+        key = CENSUS_SETTINGS_KEY + ":" + t.database
+        saved = (await lease.connection.execute(
+            text("SELECT value FROM system_settings WHERE key = :k"), {"k": key}
+        )).scalar()
+        saved = saved if isinstance(saved, dict) else {}
+        stored = saved.get("census")
+        now = _now_s()
+        due = saved.get("next_due", 0)
+        valid = isinstance(stored, dict) and stored.get("format") == CENSUS_FORMAT
+        if valid and type(due) in (int, float) and now < due <= now + SWEEP_INTERVAL_S:
+            return max(float(MUTATION_RECHECK_S), due - now)
+        cache = _raw_cache(t, stored)
+        delay = await sweep_once(t, cache)
+        state = {"next_due": _now_s() + delay, "census": cache.export()}
+        await lease.connection.execute(
+            text("INSERT INTO system_settings (key, value) VALUES (:k, CAST(:v AS jsonb)) "
+                 "ON CONFLICT (key) DO UPDATE SET value = CAST(EXCLUDED.value AS jsonb), updated_at = NOW()"),
+            {"k": key, "v": json.dumps(state, separators=(",", ":"))},
+        )
+        logger.info("netflow rollup: census reused %d unchanged partition(s), scanned %d", cache.hits, cache.scanned)
+        return delay
+
+
 async def netflow_rollup_loop() -> None:
     await asyncio.sleep(STARTUP_DELAY_S)
     while True:
         delay: float = SWEEP_INTERVAL_S
         try:
-            delay = await sweep_once()
+            delay = await coordinated_sweep()
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("netflow rollup sweep failed")
+            delay = MUTATION_RECHECK_S
         await asyncio.sleep(delay)
