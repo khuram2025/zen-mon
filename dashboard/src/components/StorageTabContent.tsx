@@ -20,7 +20,7 @@ import { useStorageStatus } from '@/components/storage/useStorage'
 
 const SECTIONS: { id: StorageSection; label: string; icon: typeof HardDrive }[] = [
   { id: 'overview', label: 'Overview', icon: HardDrive },
-  { id: 'disks', label: 'Disks & volumes', icon: Layers },
+  { id: 'disks', label: 'Disks & capacity', icon: Layers },
   { id: 'retention', label: 'Retention & cleanup', icon: Clock },
   { id: 'backups', label: 'Backups', icon: Archive },
   { id: 'activity', label: 'Activity', icon: Activity },
@@ -30,7 +30,7 @@ export function StorageTabContent() {
   const [params, setParams] = useSearchParams()
   const requested = params.get('section') as StorageSection | null
   const active: StorageSection = SECTIONS.some((s) => s.id === requested) ? requested! : 'overview'
-  const { data: status } = useStorageStatus()
+  const { data: status } = useStorageStatus(active === 'overview' || active === 'disks')
 
   // Count findings that need the operator, shown on the Disks tab.
   const diskAttention = (status?.issues || []).filter((i) =>

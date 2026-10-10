@@ -287,6 +287,18 @@ class Pressure:
     rate_bytes_per_hour: Optional[float] = None
 
 
+def effective_free_limits(policy: dict, capacity_bytes: int) -> tuple[int, int]:
+    """Scale floors to writable capacity; preserve configured ceilings on large disks.
+
+    Recomputed from each fresh filesystem sample, so expansion needs no policy
+    rewrite. Percentage pressure remains authoritative above these floors.
+    """
+    capacity = max(0, capacity_bytes)
+    minimum = min(int(policy["min_free_gib"] * GIB), int(capacity * 0.10))
+    critical = min(int(policy["critical_free_gib"] * GIB), int(capacity * 0.04), minimum)
+    return minimum, critical
+
+
 def evaluate_pressure(fs: FsSample, policy: dict, pending_bytes: int,
                       rate_bps: Optional[float]) -> Pressure:
     """Decide what, if anything, the watchdog must free on one filesystem."""
@@ -294,8 +306,7 @@ def evaluate_pressure(fs: FsSample, policy: dict, pending_bytes: int,
     used = max(0, fs.used_bytes - pending_bytes)
     avail = fs.avail_bytes + pending_bytes
     pct = used / cap * 100 if cap else 0.0
-    min_free = int(policy["min_free_gib"] * GIB)
-    critical_free = int(policy["critical_free_gib"] * GIB)
+    min_free, critical_free = effective_free_limits(policy, cap)
     reasons: list[str] = []
     runway = None
     if rate_bps and rate_bps > 0:
@@ -309,7 +320,7 @@ def evaluate_pressure(fs: FsSample, policy: dict, pending_bytes: int,
     if avail < min_free:
         # Recover with margin so the trigger does not flap at the boundary.
         need = max(need, int(min_free * 1.5) - avail)
-        reasons.append(f"free {avail / GIB:.1f} GiB < {policy['min_free_gib']:.1f} GiB")
+        reasons.append(f"free {avail / GIB:.1f} GiB < {min_free / GIB:.1f} GiB")
 
     critical = (fs.avail_bytes < critical_free or fs.usage_pct >= policy["critical_pct"])
     if need > 0:

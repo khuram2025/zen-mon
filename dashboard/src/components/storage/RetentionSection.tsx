@@ -1,10 +1,10 @@
-import { Fragment, useState } from 'react'
+import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, ChevronDown, ChevronRight, Clock, Eraser, Loader2, RefreshCw, Save, Trash2,
+  AlertTriangle, Clock, Eraser, Loader2, RefreshCw, Save, Trash2,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -15,12 +15,13 @@ import {
 import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
-import { bytes } from './storageMath'
+import { bytes, storageError } from './storageMath'
 import type { AutoPurge, Overview } from './types'
 import { STORAGE_KEY, useOverview } from './useStorage'
 
 export function RetentionSection() {
-  const { data: overview } = useOverview()
+  const { data: overview, isError, refetch } = useOverview()
+  if (isError) return <Card><CardContent className="py-5 text-sm">Retention settings are unavailable. <Button variant="ghost" onClick={() => refetch()}>Retry</Button></CardContent></Card>
   if (!overview) {
     return (
       <Card><CardContent className="flex items-center gap-2 py-6 text-sm text-muted">
@@ -60,7 +61,6 @@ function RetentionCard({ overview }: { overview: Overview }) {
   const qc = useQueryClient()
   const [days, setDays] = useState<Record<string, string>>({})
   const [auto, setAuto] = useState<AutoPurge | null>(null)
-  const [expanded, setExpanded] = useState<string | null>(null)
   const effectiveAuto = auto ?? overview.auto_purge
   const value = (id: string, configured: number | null) => days[id] ?? (configured != null ? String(configured) : '')
   const errors = overview.categories
@@ -83,15 +83,14 @@ function RetentionCard({ overview }: { overview: Overview }) {
       })).data
     },
     onSuccess: (data: any) => {
-      const changed = (data.ttl_changes || []).filter((c: any) => !c.error).length
       const failed = (data.errors || []).length
-      if (failed) toast.error(`Saved with ${failed} TTL error(s)`, 'See the Activity log')
-      else toast.success('Retention policy saved', changed ? `${changed} table TTL(s) updated` : undefined)
+      if (failed) toast.error('Some retention changes could not be applied', 'See the Activity log')
+      else toast.success('Retention policy saved', 'Old history will expire automatically')
       setDays({})
       setAuto(null)
       qc.invalidateQueries({ queryKey: STORAGE_KEY })
     },
-    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
+    onError: (e: any) => toast.error('Save failed', storageError(e)),
   })
 
   const setAutoField = (field: keyof AutoPurge, raw: string) =>
@@ -104,9 +103,8 @@ function RetentionCard({ overview }: { overview: Overview }) {
           <Clock className="h-4 w-4 text-primary" /> Data retention
         </CardTitle>
         <p className="text-xs text-muted">
-          How long each category is kept, applied as ClickHouse table TTLs (expired data is removed in
-          the background). Leave a field blank to keep each table's built-in retention. The projection
-          shows where each category levels off at the current ingest rate.
+          Choose how long to keep monitoring history. Expired records are removed in the background.
+          Blank fields use the built-in retention. Projections estimate capacity from stored history.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -124,22 +122,20 @@ function RetentionCard({ overview }: { overview: Overview }) {
             {overview.categories.map((c) => {
               const raw = value(c.id, c.configured_days)
               const err = retentionError(raw, c.min_days)
-              const open = expanded === c.id
               return (
-                <Fragment key={c.id}>
-                  <Tr className="cursor-pointer" onClick={() => setExpanded(open ? null : c.id)}>
+                <Tr key={c.id}>
+
                     <Td>
                       <div className="flex items-center gap-1.5 font-medium">
-                        {open ? <ChevronDown className="h-3.5 w-3.5 text-muted" /> : <ChevronRight className="h-3.5 w-3.5 text-muted" />}
                         {c.label}
                       </div>
-                      <div className="pl-5 text-[11px] text-muted">{c.description} · {c.tables.length} table{c.tables.length === 1 ? '' : 's'}</div>
+                      <div className="text-[11px] text-muted">{c.description}</div>
                     </Td>
                     <Td className="text-right tabular-nums">{bytes(c.size_bytes)}</Td>
                     <Td className="text-right tabular-nums text-text2">{c.daily_bytes ? bytes(c.daily_bytes) : '—'}</Td>
                     <Td className="text-right tabular-nums text-text2">
                       {c.unbounded
-                        ? <span className="text-warning" title="At least one table has no retention limit">unbounded</span>
+                        ? <span className="text-warning" title="Some history has no retention limit">unbounded</span>
                         : c.projected_bytes ? bytes(c.projected_bytes) : '—'}
                     </Td>
                     <Td className="text-right" onClick={(e) => e.stopPropagation()}>
@@ -158,23 +154,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
                       {err && <div className="mt-0.5 text-[11px] text-danger">{err}</div>}
                     </Td>
                   </Tr>
-                  {open && c.tables.map((t) => (
-                    <Tr key={`${c.id}-${t.table}`} className="bg-surface2/20">
-                      <Td className="pl-9">
-                        <span className="font-mono text-xs">{t.table}</span>
-                        <span className="ml-2 text-[10px] uppercase text-muted">{t.partition_granularity} partitions</span>
-                      </Td>
-                      <Td className="text-right font-mono text-xs tabular-nums">{bytes(t.size_bytes)}</Td>
-                      <Td className="text-right font-mono text-xs tabular-nums text-text2">{t.rows.toLocaleString()} rows</Td>
-                      <Td className="text-right text-xs text-muted">
-                        {t.oldest ? `since ${new Date(t.oldest).toLocaleDateString()}` : ''}
-                      </Td>
-                      <Td className="text-right text-xs text-muted">
-                        {t.current_ttl_days != null ? `TTL ${t.current_ttl_days}d` : 'no TTL'}
-                      </Td>
-                    </Tr>
-                  ))}
-                </Fragment>
+
               )
             })}
           </TBody>
@@ -187,12 +167,10 @@ function RetentionCard({ overview }: { overview: Overview }) {
                 <Eraser className="h-4 w-4 text-warning" /> Low-space protection
               </div>
               <p className="mt-0.5 max-w-2xl text-[11px] text-muted">
-                Applied by the free-space watchdog, which keeps running when the API or database is down.
-                Above the threshold, or below the minimum free space, it frees space down to the target:
-                ClickHouse diagnostic logs first, then the least valuable monitoring data older than the
-                minimum keep window. Monitoring data is only deleted when that can reach the target, or
-                from 95% usage. When nothing more is eligible, host-agent and APM uploads pause (agents
-                keep them) instead of filling the disk.
+                Automatic cleanup starts before storage fills. It removes eligible old appliance logs first,
+                then monitoring history older than your minimum keep window. Protected records are retained.
+                Free-space reserves scale down on small disks and are recalculated after expansion.
+                If cleanup is insufficient, expand storage; agent and application uploads pause at critical capacity.
               </p>
             </div>
             <Switch
@@ -207,7 +185,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
                 ['threshold_pct', 'Purge when usage above', '%', 50, 98],
                 ['target_pct', 'Purge down to', '%', 40, 95],
                 ['min_keep_days', 'Always keep at least', 'days', 1, 365],
-                ['min_free_gib', 'Also act below', 'GiB free', 0.5, 1024],
+                ['min_free_gib', 'Free-space reserve ceiling', 'GiB free', 0.5, 1024],
               ] as const).map(([field, label, unit, min, max]) => (
                 <label key={field} className="text-xs text-text2">
                   {label}
@@ -256,7 +234,7 @@ function PurgeCard({ overview }: { overview: Overview }) {
   const preview = useMutation({
     mutationFn: async () => (await request(true)).data,
     onSuccess: (data) => setPlan(data),
-    onError: (e: any) => toast.error('Preview failed', apiErrorMessage(e)),
+    onError: (e: any) => toast.error('Preview failed', storageError(e)),
   })
 
   const purge = useMutation({
@@ -265,10 +243,10 @@ function PurgeCard({ overview }: { overview: Overview }) {
       setConfirmOpen(false)
       setPlan(null)
       toast.success('Purge scheduled',
-        `${bytes(data.scheduled_bytes ?? data.freed_bytes)} in ${data.dropped_partitions.length} partitions; ClickHouse returns the space within about 10 minutes`)
+        `${bytes(data.scheduled_bytes ?? data.freed_bytes)} scheduled; capacity may take about 10 minutes to return`)
       qc.invalidateQueries({ queryKey: STORAGE_KEY })
     },
-    onError: (e: any) => { setConfirmOpen(false); toast.error('Purge failed', apiErrorMessage(e)) },
+    onError: (e: any) => { setConfirmOpen(false); toast.error('Purge failed', storageError(e)) },
   })
 
   const selected = overview.categories.find((c) => c.id === category)
@@ -280,7 +258,7 @@ function PurgeCard({ overview }: { overview: Overview }) {
           <Trash2 className="h-4 w-4 text-primary" /> Free up space now
         </CardTitle>
         <p className="text-xs text-muted">
-          Delete old metrics immediately. Preview first — whole partitions are dropped and this cannot be undone.
+          Preview the eligible old history before permanently removing it. Recent and incomplete periods are kept.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -316,33 +294,20 @@ function PurgeCard({ overview }: { overview: Overview }) {
           <div className="rounded-lg border border-border/50 bg-surface2/20 p-3">
             {plan.partitions.length === 0 ? (
               <p className="text-sm text-muted">
-                Nothing to purge — no complete partitions of {selected?.label.toLowerCase()} are older than {olderThan} days.
+                Nothing to purge — no complete periods of {selected?.label.toLowerCase()} are older than {olderThan} days.
               </p>
             ) : (
               <>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm">
-                    <span className="font-semibold text-warning">{bytes(plan.total_bytes)}</span> can be reclaimed by dropping{' '}
-                    <span className="font-semibold">{plan.partitions.length}</span> partition{plan.partitions.length === 1 ? '' : 's'}.
+                    <span className="font-semibold text-warning">{bytes(plan.total_bytes)}</span> can be reclaimed from{' '}
+                    <span className="font-semibold">{plan.partitions.length}</span> complete period{plan.partitions.length === 1 ? '' : 's'}.
                   </p>
                   <Button variant="destructive" size="sm" onClick={() => setConfirmOpen(true)}>
                     <Trash2 /> Purge now
                   </Button>
                 </div>
-                <div className="mt-2 max-h-40 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <tbody>
-                      {plan.partitions.map((p: any) => (
-                        <tr key={`${p.table}-${p.partition_id}`} className="border-t border-border/40">
-                          <td className="py-1 font-mono">{p.table}</td>
-                          <td className="py-1 font-mono text-muted">{p.partition_id}</td>
-                          <td className="py-1 text-right tabular-nums">{bytes(p.size_bytes)}</td>
-                          <td className="py-1 text-right tabular-nums text-muted">{p.rows.toLocaleString()} rows</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <p className="mt-2 text-xs text-muted">Only eligible history in the selected category and age range will be removed. Capacity is reclaimed in the background.</p>
               </>
             )}
           </div>
@@ -372,11 +337,11 @@ function OsCleanupCard({ overview }: { overview: Overview }) {
     mutationFn: async (actions: string[]) =>
       (await api.post('/system/storage/os-cleanup', { actions, journal_max_mb: Number(journalMb) })).data,
     onSuccess: (data: any) => {
-      if (data.errors?.length) toast.error('Cleanup finished with errors', data.errors.join('; '))
-      else toast.success('OS cleanup complete', `Freed ${bytes(data.freed_bytes)} on the system disk`)
+      if (data.errors?.length) toast.error('Cleanup finished with errors', 'Some items could not be cleared. Refresh and contact support if this continues.')
+      else toast.success('Appliance cleanup complete', `Freed ${bytes(data.freed_bytes)} on the system disk`)
       qc.invalidateQueries({ queryKey: STORAGE_KEY })
     },
-    onError: (e: any) => toast.error('Cleanup failed', apiErrorMessage(e)),
+    onError: (e: any) => toast.error('Cleanup failed', storageError(e)),
   })
 
   return (
@@ -386,16 +351,16 @@ function OsCleanupCard({ overview }: { overview: Overview }) {
           <Eraser className="h-4 w-4 text-primary" /> System disk cleanup
         </CardTitle>
         <p className="text-xs text-muted">
-          Shrink the systemd journal and clear the package cache. Safe to run at any time.
+          Reduce older service logs or clear downloaded update files. Monitoring history is kept.
         </p>
       </CardHeader>
       <CardContent>
         {overview.os_usage_error && (
-          <p role="status" className="mb-3 text-xs text-warning">{overview.os_usage_error}</p>
+          <p role="status" className="mb-3 text-xs text-warning">Some category sizes are unavailable. Refresh to retry.</p>
         )}
         <div className="flex flex-wrap items-end gap-3">
           <label className="text-xs text-text2">
-            Shrink journal ({overview.journal_bytes == null ? 'unavailable' : bytes(overview.journal_bytes)}) to
+            Reduce service logs ({overview.journal_bytes == null ? 'unavailable' : bytes(overview.journal_bytes)}) to
             <div className="mt-1 flex items-center gap-2">
               <Input type="number" min={50} max={5000} className="h-9 w-24 text-right tabular-nums"
                 value={journalMb} onChange={(e) => setJournalMb(e.target.value)} />
@@ -404,16 +369,16 @@ function OsCleanupCard({ overview }: { overview: Overview }) {
           </label>
           <Button variant="outline" disabled={cleanup.isPending || !journalValid} onClick={() => cleanup.mutate(['vacuum_journal'])}>
             {cleanup.isPending ? <Loader2 className="animate-spin" /> : <Eraser />}
-            Vacuum journal
+            Clear older service logs
           </Button>
           <Button variant="outline" disabled={cleanup.isPending || overview.apt_cache_bytes == null || overview.apt_cache_bytes <= 0} onClick={() => cleanup.mutate(['apt_clean'])}>
             {cleanup.isPending ? <Loader2 className="animate-spin" /> : <Trash2 />}
-            Clear package cache ({overview.apt_cache_bytes == null ? 'unavailable' : bytes(overview.apt_cache_bytes)})
+            Clear update cache ({overview.apt_cache_bytes == null ? 'unavailable' : bytes(overview.apt_cache_bytes)})
           </Button>
         </div>
         {!journalValid && (
           <div className="mt-2 flex items-center gap-1.5 text-xs text-danger">
-            <AlertTriangle className="h-3.5 w-3.5" /> Journal size must be 50–5000 MB
+            <AlertTriangle className="h-3.5 w-3.5" /> Log size must be 50–5000 MB
           </div>
         )}
       </CardContent>

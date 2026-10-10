@@ -4,7 +4,7 @@ import {
   AlertTriangle, Archive, CheckCircle2, Clock, Download, Loader2, RefreshCw, RotateCcw, Save, Trash2, Upload,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
+import { cn, relativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -20,7 +20,7 @@ import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import type { Backup, BackupSchedule } from './types'
-import { bytes } from './storageMath'
+import { bytes, storageError } from './storageMath'
 import { STORAGE_KEY, useOverview } from './useStorage'
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -59,7 +59,7 @@ export function BackupsSection() {
     Number.isInteger(effectiveSchedule.keep_last) && effectiveSchedule.keep_last >= 1 && effectiveSchedule.keep_last <= 30
   )
 
-  const { data: backups } = useQuery<Backup[]>({
+  const { data: backups, isError: backupsError, isLoading: backupsLoading } = useQuery<Backup[]>({
     queryKey: [...STORAGE_KEY, 'backups'],
     queryFn: async () => (await api.get('/system/storage/backups')).data,
     refetchInterval: (q) => {
@@ -76,8 +76,8 @@ export function BackupsSection() {
       (await api.post('/system/storage/backups', {
         include_clickhouse: includeCh, note: note || null,
       })).data,
-    onSuccess: (data: any) => { setNote(''); toast.success('Backup started', data.message); invalidate() },
-    onError: (e: any) => toast.error('Backup failed to start', apiErrorMessage(e)),
+    onSuccess: () => { setNote(''); toast.success('Backup started', 'Track progress below'); invalidate() },
+    onError: (e: any) => toast.error('Backup failed to start', storageError(e)),
   })
 
   const restore = useMutation({
@@ -90,13 +90,13 @@ export function BackupsSection() {
       toast.success('Restore started', 'Track progress in the table — restart services once it completes')
       invalidate()
     },
-    onError: (e: any) => toast.error('Restore failed to start', apiErrorMessage(e)),
+    onError: (e: any) => toast.error('Restore failed to start', storageError(e)),
   })
 
   const remove = useMutation({
     mutationFn: async () => (await api.delete(`/system/storage/backups/${deleteTarget!.id}`)).data,
     onSuccess: () => { setDeleteTarget(null); toast.success('Backup deleted'); invalidate() },
-    onError: (e: any) => { setDeleteTarget(null); toast.error('Delete failed', apiErrorMessage(e)) },
+    onError: (e: any) => { setDeleteTarget(null); toast.error('Delete failed', storageError(e)) },
   })
 
   const saveSchedule = useMutation({
@@ -105,13 +105,13 @@ export function BackupsSection() {
       toast.success('Backup schedule saved')
       qc.invalidateQueries({ queryKey: [...STORAGE_KEY, 'overview'] })
     },
-    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
+    onError: (e: any) => toast.error('Save failed', storageError(e)),
   })
 
   const restart = useMutation({
     mutationFn: async () => (await api.post('/system/storage/restart-services')).data,
     onSuccess: () => { setRestartOpen(false); toast.success('Services restarting', 'The dashboard may briefly disconnect') },
-    onError: (e: any) => { setRestartOpen(false); toast.error('Restart failed', apiErrorMessage(e)) },
+    onError: (e: any) => { setRestartOpen(false); toast.error('Restart failed', storageError(e)) },
   })
 
   async function download(b: Backup) {
@@ -125,7 +125,7 @@ export function BackupsSection() {
       a.click()
       URL.revokeObjectURL(url)
     } catch (e) {
-      toast.error('Download failed', apiErrorMessage(e))
+      toast.error('Download failed', storageError(e))
     }
   }
 
@@ -133,13 +133,13 @@ export function BackupsSection() {
     const fd = new FormData()
     fd.append('file', file)
     try {
-      const res = await api.post('/system/storage/backups/upload', fd, {
+      await api.post('/system/storage/backups/upload', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
-      toast.success('Backup imported', res.data.message)
+      toast.success('Backup imported')
       invalidate()
     } catch (e) {
-      toast.error('Import failed', apiErrorMessage(e))
+      toast.error('Import failed', storageError(e))
     }
   }
 
@@ -152,9 +152,8 @@ export function BackupsSection() {
           <Archive className="h-4 w-4 text-primary" /> Backup &amp; Restore
         </CardTitle>
         <p className="text-xs text-muted">
-          Configuration backups capture the PostgreSQL database (devices, users, settings,
-          alert rules), the ClickHouse schema and appliance config files. Full backups also
-          snapshot all metrics data in ClickHouse.
+          Configuration backups include devices, users, settings and alert rules.
+          Full backups also include monitoring history. Download backups to separate storage for recovery.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -252,7 +251,7 @@ export function BackupsSection() {
         )}
 
         {/* Backup list */}
-        {(backups || []).length === 0 ? (
+        {backupsError ? <p role="alert" className="text-sm text-warning">Backup inventory is unavailable. Refresh before starting another backup.</p> : backupsLoading ? <p className="text-sm text-muted">Loading backups…</p> : (backups || []).length === 0 ? (
           <div className="rounded-lg border border-dashed border-border/60 p-6 text-center text-xs text-muted">
             No backups yet. Create one above — it takes a few seconds for a configuration
             backup.
@@ -278,7 +277,7 @@ export function BackupsSection() {
                       {relativeTime(b.created_at)} · by {b.created_by}
                       {b.note && <> · {b.note}</>}
                     </div>
-                    {b.error && <div className="mt-0.5 max-w-md truncate text-[11px] text-danger" title={b.error}>{b.error}</div>}
+                    {b.error && <div className="mt-0.5 max-w-md truncate text-[11px] text-danger" >Backup could not complete. Check capacity and contact support if this continues.</div>}
                   </Td>
                   <Td>
                     <Badge variant={b.kind === 'full' ? 'info' : 'default'}>
@@ -292,8 +291,8 @@ export function BackupsSection() {
                       <div>
                         <StatusBadge status={b.last_restore_status} />
                         {b.last_restore_error && (
-                          <div className="mt-0.5 max-w-[16rem] truncate text-[11px] text-danger" title={b.last_restore_error}>
-                            {b.last_restore_error}
+                          <div className="mt-0.5 max-w-[16rem] truncate text-[11px] text-danger" >
+                            Restore could not complete. Contact support before retrying.
                           </div>
                         )}
                       </div>
@@ -351,10 +350,10 @@ export function BackupsSection() {
             </DialogDescription>
             <div className="space-y-2">
               {[
-                { id: 'postgres', label: 'Database (devices, users, settings, alert rules)', always: true },
-                { id: 'config', label: 'Appliance configuration (.env, poller config)', always: true },
-                { id: 'clickhouse_schema', label: 'ClickHouse schema (recreate missing tables)', always: true },
-                { id: 'clickhouse_data', label: 'Metrics data (replaces all ClickHouse tables)', always: false },
+                { id: 'postgres', label: 'Devices, users, settings & alert rules', always: true },
+                { id: 'config', label: 'Appliance configuration', always: true },
+                { id: 'clickhouse_schema', label: 'Monitoring history structure', always: true },
+                { id: 'clickhouse_data', label: 'Monitoring history (replaces existing records)', always: false },
               ].filter((c) => c.always || restoreTarget?.include_clickhouse).map((c) => (
                 <label key={c.id} className="flex items-center gap-2 text-sm">
                   <input
@@ -397,7 +396,7 @@ export function BackupsSection() {
           open={restartOpen}
           onOpenChange={setRestartOpen}
           title="Restart application services?"
-          description="The API, poller and NetFlow collector restart. Monitoring pauses for a few seconds and the dashboard may briefly disconnect."
+          description="Monitoring services restart. Monitoring briefly pauses and the dashboard may disconnect."
           confirmText="Restart"
           loading={restart.isPending}
           onConfirm={() => restart.mutate()}
