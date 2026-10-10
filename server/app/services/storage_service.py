@@ -537,40 +537,50 @@ async def clickhouse_breakdown() -> dict:
     if bd and datetime.now(timezone.utc).timestamp() - float(bd.get("at") or 0) < 600:
         return {**bd, "source": "watchdog"}
     raw = await asyncio.to_thread(_clickhouse_breakdown_sync)
-    top = sorted(({"table": k, **v} for k, v in raw["tables"].items()),
-                 key=lambda t: -(t["active_bytes"] + t["inactive_bytes"]))[:25]
+    top = storage_watchdog.top_tables(raw)
     return {"at": datetime.now(timezone.utc).timestamp(),
             **storage_watchdog.summarize_breakdown(raw), "top_tables": top, "growth": [],
             "source": "live"}
 
 
-def _diagnostic_logs_sync(sizes: dict[str, int]) -> list[dict]:
-    rows = get_ch_client().query(
+def _diagnostic_logs_sync() -> list[dict]:
+    """Every ``system`` log table with its kind, retention, TTL and size.
+
+    Sizes come from system.parts for all tables (active and inactive parts),
+    not from the top-25 breakdown, keyed by the table's own name.
+    """
+    client = get_ch_client()
+    sizes = {r[0]: int(r[1] or 0) for r in client.query(
+        "SELECT table, sum(bytes_on_disk) FROM system.parts "
+        "WHERE database = 'system' GROUP BY table"
+    ).result_rows}
+    rows = client.query(
         "SELECT name, engine_full FROM system.tables WHERE database = 'system' "
         "AND engine LIKE '%MergeTree%'"
     ).result_rows
     out = []
     for name, engine_full in rows:
-        kind = storage_policy.diagnostic_log(name)
+        kind = storage_policy.diagnostic_kind(name)
         if not kind:
             continue
-        base, legacy = kind
+        base = storage_policy.diagnostic_log(name)[0]
         out.append({
             "table": name,
             "log": base,
-            "legacy": legacy,
-            "protected": base in storage_policy.PROTECTED_DIAGNOSTIC_LOGS,
+            "kind": kind,                      # current | legacy | evidence
+            "legacy": kind == "legacy",
+            "evidence": kind == "evidence",
+            "disabled": name in storage_policy.DISABLED_DIAGNOSTIC_LOGS,
+            "protected": kind == "current" and base in storage_policy.PROTECTED_DIAGNOSTIC_LOGS,
             "retention_days": storage_policy.diagnostic_retention_days(base),
             "ttl_active": " TTL " in f" {engine_full or ''} ",
-            "bytes": sizes.get(f"system.{name}", 0),
+            "bytes": sizes.get(name, 0),
         })
     return sorted(out, key=lambda r: -r["bytes"])
 
 
-async def diagnostic_logs(breakdown: dict) -> list[dict]:
-    sizes = {t["table"]: t["active_bytes"] + t["inactive_bytes"]
-             for t in breakdown.get("top_tables") or []}
-    return await asyncio.to_thread(_diagnostic_logs_sync, sizes)
+async def diagnostic_logs() -> list[dict]:
+    return await asyncio.to_thread(_diagnostic_logs_sync)
 
 
 async def space_consumers(db: AsyncSession, ch: Optional[dict], extras: dict) -> list[dict]:

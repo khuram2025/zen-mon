@@ -99,6 +99,9 @@ export interface ClickHouseBreakdown {
 export interface DiagnosticLog {
   table: string
   log: string
+  kind: 'current' | 'legacy' | 'evidence'
+  evidence: boolean
+  disabled: boolean
   legacy: boolean
   protected: boolean
   retention_days: number

@@ -595,6 +595,10 @@ print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('admin123'))
     # --- ClickHouse (Docker) ---
     info "Starting ClickHouse..."
     cd "$ZENPLUS_HOME"
+    # docker-compose.yml bind-mounts the bounded logging configuration from
+    # /etc/zenplus/clickhouse: install it before the first container start.
+    ZENPLUS_DIR="$ZENPLUS_HOME" bash "$ZENPLUS_HOME/scripts/install-clickhouse-config.sh" >/dev/null \
+        || err "Could not install the ClickHouse configuration"
     docker compose up -d clickhouse 2>&1 | grep -v "^$\|level=warning" || true
 
     # Wait for ClickHouse

@@ -1012,7 +1012,9 @@ def build_package(version: str, changelog: str, severity: str,
         steps.append({
             "type": "run_hook",
             "script": "code/scripts/setup-storage.sh",
-            "timeout": 300,
+            # Allows a ClickHouse recreate with large system-log tables (the
+            # hook waits up to 300 s for health).
+            "timeout": 600,
         })
 
     # Security tab (Settings -> General -> Security): install the root-owned
@@ -1180,6 +1182,12 @@ def build_package(version: str, changelog: str, severity: str,
             {"type": "run_hook",
              "script": "code/scripts/enforce-support-security-floor.sh",
              "timeout": 120},
+            # Storage: reconcile what setup-storage.sh changed on the host
+            # (watchdog unit, ClickHouse bind mounts) with the restored code.
+            # Runs from the signed payload, so old updaters execute it too.
+            {"type": "run_hook",
+             "script": "code/scripts/ota-reconcile-storage-rollback.sh",
+             "timeout": 300},
             {"type": "start_services",
              "enabled_services": ["zenplus-syslog"],
              "services": ["zenplus-api", "zenplus-poller",
