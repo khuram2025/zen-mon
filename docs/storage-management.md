@@ -137,3 +137,18 @@ the TTL'd tables (legacy copies appear as `<name>_0`), replay a backlog plus liv
 traffic and compare parts/merges per minute and sample counts, and fill a test filesystem
 through the thresholds with an API/PostgreSQL outage to verify purging, reclamation and
 the ingest pause.
+
+
+### Storage measurement and protected copies (1.24.3)
+
+OS measurements tolerate absent optional cache files while preserving actual
+read failures. Unknown sizes are displayed as unavailable; they remain part of
+the filesystem usage and Other segment. Rsyslog's size rule is validated with
+the complete global logrotate configuration. Its hourly check and archives mean
+the ceiling is not a hard upper bound on the whole log directory.
+
+Error, crash, session and backup log copies keep their incident history under
+pressure. A legacy copy may still expire normally after its newest day exceeds
+retention, but unknown age cannot establish expiry for a protected copy. The
+capacity forecast describes a historical footprint estimate; the watchdog's
+15-minute filesystem samples are the source for observed growth.

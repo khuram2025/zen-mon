@@ -390,9 +390,12 @@ function OsCleanupCard({ overview }: { overview: Overview }) {
         </p>
       </CardHeader>
       <CardContent>
+        {overview.os_usage_error && (
+          <p role="status" className="mb-3 text-xs text-warning">{overview.os_usage_error}</p>
+        )}
         <div className="flex flex-wrap items-end gap-3">
           <label className="text-xs text-text2">
-            Shrink journal ({bytes(overview.journal_bytes)}) to
+            Shrink journal ({overview.journal_bytes == null ? 'unavailable' : bytes(overview.journal_bytes)}) to
             <div className="mt-1 flex items-center gap-2">
               <Input type="number" min={50} max={5000} className="h-9 w-24 text-right tabular-nums"
                 value={journalMb} onChange={(e) => setJournalMb(e.target.value)} />
@@ -403,9 +406,9 @@ function OsCleanupCard({ overview }: { overview: Overview }) {
             {cleanup.isPending ? <Loader2 className="animate-spin" /> : <Eraser />}
             Vacuum journal
           </Button>
-          <Button variant="outline" disabled={cleanup.isPending || overview.apt_cache_bytes <= 0} onClick={() => cleanup.mutate(['apt_clean'])}>
+          <Button variant="outline" disabled={cleanup.isPending || overview.apt_cache_bytes == null || overview.apt_cache_bytes <= 0} onClick={() => cleanup.mutate(['apt_clean'])}>
             {cleanup.isPending ? <Loader2 className="animate-spin" /> : <Trash2 />}
-            Clear package cache ({bytes(overview.apt_cache_bytes)})
+            Clear package cache ({overview.apt_cache_bytes == null ? 'unavailable' : bytes(overview.apt_cache_bytes)})
           </Button>
         </div>
         {!journalValid && (

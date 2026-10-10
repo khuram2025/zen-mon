@@ -82,20 +82,20 @@ export function forecastSummary(f: Forecast | undefined | null): { tone: 'ok' | 
     const days = f.days_until_full
     return {
       tone: days != null && days < 30 ? 'critical' : 'warning',
-      text: `Metrics grow ${perDay} and ${f.unbounded_categories.length} categor${f.unbounded_categories.length === 1 ? 'y has' : 'ies have'} no retention limit` +
-        (days != null ? ` — free space lasts about ${days} days.` : '.'),
+      text: `Historical metrics footprint averages ${perDay} and ${f.unbounded_categories.length} categor${f.unbounded_categories.length === 1 ? 'y has' : 'ies have'} no retention limit` +
+        (days != null ? ` — estimated free space lasts about ${days} days.` : '.'),
     }
   }
   if (f.fits) {
     return {
       tone: 'ok',
-      text: `Metrics grow ${perDay} and level off around ${bytes(f.steady_state_bytes)} with current retention — this fits in the free space.`,
+      text: `Historical metrics footprint averages ${perDay} and level off around ${bytes(f.steady_state_bytes)} with current retention — this fits in the free space.`,
     }
   }
   return {
     tone: f.days_until_full != null && f.days_until_full < 30 ? 'critical' : 'warning',
-    text: `Metrics grow ${perDay} and need about ${bytes(f.growth_remaining_bytes)} more before retention levels them off` +
-      (f.days_until_full != null ? ` — free space runs out in about ${f.days_until_full} days.` : '.'),
+    text: `Historical metrics footprint averages ${perDay} and need about ${bytes(f.growth_remaining_bytes)} more before retention levels them off` +
+      (f.days_until_full != null ? ` — estimated free space runs out in about ${f.days_until_full} days.` : '.'),
   }
 }
 

@@ -614,3 +614,29 @@ def test_non_critical_pressure_does_not_pause(env):
     ch.partitions = [part("system", "text_log", "20261001", 1, TODAY - timedelta(days=9))]
     disk.used, disk.avail = int(88 * GIB), int(12 * GIB)
     assert make().tick()["ingest_paused"] is False
+
+
+@pytest.mark.parametrize("base", sorted(P.PROTECTED_DIAGNOSTIC_LOGS))
+def test_protected_legacy_logs_keep_retention_under_all_pressure_tiers(base):
+    old = TODAY - timedelta(days=20)
+    rows = [part("system", base + "_0", "202609", 30, old),
+            part("system", "text_log_0", "202609", 1, old)]
+    cands = P.build_candidates(rows, TODAY, P.DEFAULT_POLICY)
+    for state in ("growth", "pressure", "critical"):
+        pressure = P.Pressure(state, 100 * GIB, tuple(P.TIER_ORDER))
+        assert [c.table for c in P.plan_pass(cands, pressure)] == ["text_log_0"]
+    assert base + "_0" not in {c.table for c in P.legacy_expired(cands, TODAY)}
+    assert base + "_0" in {c.table for c in P.legacy_expired(cands, TODAY + timedelta(days=11))}
+
+
+def test_protected_legacy_unknown_age_does_not_expire():
+    cands = P.build_candidates([part("system", "error_log_0", "all", 1, None)], TODAY, P.DEFAULT_POLICY)
+    assert P.legacy_expired(cands, TODAY) == []
+
+
+def test_protected_bytes_cannot_make_futile_application_purge_look_effective():
+    rows = [part("system", "error_log_0", "202609", 50, TODAY),
+            part("zenplus", "flow_records", "202609", 1, TODAY - timedelta(days=20))]
+    cands = P.build_candidates(rows, TODAY, P.DEFAULT_POLICY)
+    pressure = P.Pressure("pressure", 20 * GIB, tuple(P.TIER_ORDER))
+    assert not P.application_allowed(cands, pressure, 90)

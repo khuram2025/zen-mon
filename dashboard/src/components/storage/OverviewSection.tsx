@@ -123,6 +123,12 @@ function CapacityCard({ overview, onNavigate }: { overview: Overview; onNavigate
           <MountUsage key={m.mount} mount={m} overview={overview} />
         ))}
 
+        {overview.os_usage_error && (
+          <div role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+            {overview.os_usage_error} Unmeasured space is included in Other.
+          </div>
+        )}
+
         {overview.clickhouse_error && (
           <div className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {overview.clickhouse_error}
@@ -137,7 +143,7 @@ function CapacityCard({ overview, onNavigate }: { overview: Overview; onNavigate
           )}>
             <TrendingUp className={cn('h-4 w-4 shrink-0',
               forecast.tone === 'ok' ? 'text-primary' : forecast.tone === 'warning' ? 'text-warning' : 'text-danger')} />
-            <span className="min-w-0 flex-1 text-text2">{forecast.text}</span>
+            <span className="min-w-0 flex-1 text-text2">{forecast.text}<span className="mt-1 block text-xs text-muted">This retention estimate uses stored history, not the current write rate. Allow space for logs, backups and merges; the watchdog shows measured filesystem growth.</span></span>
             <Button size="sm" variant="ghost" onClick={() => onNavigate('retention')}>Retention</Button>
           </div>
         )}
@@ -293,6 +299,7 @@ function Stat({ label, value, sub, warn }: { label: string; value: string; sub: 
 function diagnosticStatus(l: DiagnosticLog): { label: string; variant: 'success' | 'warning' | 'default' | 'info'; title: string } {
   if (l.evidence) return { label: 'recovery evidence', variant: 'info', title: 'Copied during a storage recovery. Never deleted automatically; remove it manually once no longer needed.' }
   if (l.disabled) return { label: `disabled · expires`, variant: 'warning', title: `This log is switched off. Its remaining data is removed ${l.retention_days} days after its last entry.` }
+  if (l.legacy && l.protected) return { label: 'retained copy · expires', variant: 'default', title: `Protected under pressure; removed only ${l.retention_days} days after its last entry.` }
   if (l.legacy) return { label: 'legacy copy · expires', variant: 'warning', title: `Left behind when ClickHouse re-created the table. Removed ${l.retention_days} days after its last entry.` }
   if (l.protected) return { label: 'kept', variant: 'default', title: 'Small and useful after an incident: never removed under pressure.' }
   if (l.ttl_active) return { label: 'bounded', variant: 'success', title: `Daily partitions, removed after ${l.retention_days} days.` }

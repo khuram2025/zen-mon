@@ -100,12 +100,28 @@ case "${1:-}" in
     os-usage)
         # Allocated bytes (what the filesystem gives back), not apparent sizes:
         # journal files are sparse/preallocated, so `du -b` misreports them.
-        journal=$(du -s --block-size=1 /var/log/journal 2>/dev/null | cut -f1)
-        varlog=$(du -s --block-size=1 /var/log 2>/dev/null | cut -f1)
+        # Missing optional paths and empty globs mean zero; an actual du
+        # failure must still fail the measurement instead of reporting zero.
+        allocated_bytes() {
+            if [ "$#" -eq 0 ]; then echo 0; return; fi
+            du -sc --block-size=1 -- "$@" | tail -1 | cut -f1
+        }
+        journal=0
+        varlog=0
+        if [ -e /var/log/journal ] || [ -L /var/log/journal ]; then
+            journal=$(allocated_bytes /var/log/journal)
+        fi
+        if [ -e /var/log ] || [ -L /var/log ]; then
+            varlog=$(allocated_bytes /var/log)
+        fi
         # Only what `apt-get clean` removes: downloaded packages and the
         # package cache binaries, not the rest of /var/cache/apt.
-        aptc=$(du -c --block-size=1 /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial \
-               /var/cache/apt/*.bin 2>/dev/null | tail -1 | cut -f1)
+        shopt -s nullglob
+        cache_paths=(/var/cache/apt/archives/*.deb /var/cache/apt/*.bin)
+        if [ -e /var/cache/apt/archives/partial ] || [ -L /var/cache/apt/archives/partial ]; then
+            cache_paths+=(/var/cache/apt/archives/partial)
+        fi
+        aptc=$(allocated_bytes "${cache_paths[@]}")
         echo "{\"journal_bytes\":${journal:-0},\"var_log_bytes\":${varlog:-0},\"apt_cache_bytes\":${aptc:-0}}"
         ;;
 
