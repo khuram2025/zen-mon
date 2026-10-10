@@ -1,4 +1,6 @@
 from app.services.notification_transport import NotificationHTTPClient
+from app.services.sms_transport import send_sms_request
+from app.services.alert_delivery_log import DeliveryRejected
 from app.core.crypto import encrypt_config, decrypt_config
 import ssl
 import base64
@@ -503,6 +505,8 @@ def _row_to_channel(row) -> dict:
     }
     if hasattr(row, 'gateway_id'):
         d["gateway_id"] = str(row.gateway_id) if row.gateway_id else None
+        if row.gateway_id:
+            d["config"]["gateway_id"] = str(row.gateway_id)
     if hasattr(row, 'gateway_name'):
         d["gateway_name"] = row.gateway_name if row.gateway_name else None
     return d
@@ -599,68 +603,23 @@ def _do_smtp_test(raw_config: dict, recipient: str) -> dict:
 
 async def _do_sms_test(raw_config: dict, recipient: str) -> dict:
     """Send a test SMS using the given SMS config dict. Raises HTTPException on failure."""
-    import httpx
-
     config = SmsConfig(**(raw_config or {}))
-    if not recipient or not recipient.strip():
-        raise HTTPException(status_code=400, detail="A recipient phone number is required")
-
-    if config.provider == "custom_http":
-        if not config.api_url:
-            raise HTTPException(status_code=400, detail="API URL is required for Custom HTTP")
-
-        test_message = "ZenPlus Test Alert: This is a test SMS from your monitoring system."
-        template = config.request_template or ""
-        template = template.replace("{recipients}", recipient)
-        template = template.replace("{message}", test_message)
-        template = template.replace("{sender}", config.sender_name or "ZenPlus")
-        template = template.replace("{hostname}", "test-device")
-        template = template.replace("{ip_address}", "0.0.0.0")
-        template = template.replace("{status}", "TEST")
-
-        headers = dict(config.custom_headers) if config.custom_headers else {}
-        auth = None
-        if config.auth_type == "basic" and config.auth_username:
-            auth = (config.auth_username, config.auth_password)
-        elif config.auth_type == "bearer" and config.auth_token_value:
-            headers["Authorization"] = f"Bearer {config.auth_token_value}"
-
-        try:
-            async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
-                if config.http_method.upper() == "POST":
-                    if config.content_type == "application/json":
-                        try:
-                            import json as json_mod
-                            body = json_mod.loads(template)
-                            resp = await client.post(config.api_url, json=body, headers=headers, auth=auth)
-                        except (ValueError, Exception):
-                            headers["Content-Type"] = config.content_type or "text/plain"
-                            resp = await client.post(config.api_url, content=template, headers=headers, auth=auth)
-                    elif config.content_type == "application/x-www-form-urlencoded":
-                        resp = await client.post(config.api_url, content=template, headers={**headers, "Content-Type": config.content_type}, auth=auth)
-                    else:
-                        resp = await client.post(config.api_url, content=template, headers=headers, auth=auth)
-                else:
-                    url = config.api_url
-                    if template:
-                        sep = "&" if "?" in url else "?"
-                        url = f"{url}{sep}{template}"
-                    resp = await client.get(url, headers=headers, auth=auth)
-
-                return {
-                    "message": f"SMS test sent. API responded with status {resp.status_code}",
-                    "status_code": resp.status_code,
-                    "response": resp.text[:200],
-                    "recipient": recipient,
-                }
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"SMS send failed — {type(e).__name__}: {e}")
-    else:
-        if not config.account_sid or not config.auth_token:
-            raise HTTPException(status_code=400, detail="Account SID and Auth Token are required")
-        return {"message": "SMS configuration is valid (Twilio/Vonage send not implemented yet)", "recipient": recipient}
+    try:
+        response = await send_sms_request(config.model_dump(), {
+            'recipients': recipient,
+            'message': 'ZenPlus Test Alert: This is a test SMS from your monitoring system.',
+            'sender': config.sender_name or 'ZenPlus',
+            'hostname': 'test-device', 'ip_address': '0.0.0.0', 'status': 'TEST',
+        }, client_factory=NotificationHTTPClient)
+    except DeliveryRejected as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    except ValueError as exc:
+        # Only locally generated validation messages are exposed.
+        detail = str(exc) if str(exc).startswith(('SMS gateway', 'A recipient', 'This SMS provider', 'Notification gateways')) else 'SMS gateway configuration is invalid'
+        raise HTTPException(status_code=400, detail=detail) from None
+    except Exception:
+        raise HTTPException(status_code=502, detail='SMS gateway connection failed') from None
+    return {'message': 'SMS test accepted by the provider', 'status_code': response.status_code}
 
 
 async def _clear_default_gateways(db: AsyncSession, gateway_type: str, keep_id=None) -> None:
@@ -1110,8 +1069,8 @@ async def test_channel(
         gw_id = row.gateway_id or config.get("gateway_id")
         if gw_id:
             gw_result = await db.execute(
-                text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
-                {"id": gw_id})
+                text("SELECT config, enabled FROM notification_gateways WHERE id = :id AND type = :type"),
+                {"id": gw_id, "type": "sms" if channel_type == "sms" else "smtp"})
         else:
             gw_result = await db.execute(text(
                 "SELECT config, enabled FROM notification_gateways "
@@ -1119,6 +1078,8 @@ async def test_channel(
         gw_row = gw_result.first()
 
         if not gw_row:
+            if gw_id:
+                raise HTTPException(status_code=400, detail="Selected SMS gateway is unavailable")
             # Fallback to system_settings
             gw_config = await _get_system_setting(db, "sms")
             if not gw_config:
@@ -1132,53 +1093,7 @@ async def test_channel(
         if not gw_enabled:
             raise HTTPException(status_code=400, detail="SMS gateway is disabled")
 
-        if sms_cfg.provider == "custom_http":
-            if not sms_cfg.api_url:
-                raise HTTPException(status_code=400, detail="SMS gateway API URL not configured")
-
-            template = sms_cfg.request_template or ""
-            template = template.replace("{recipients}", phone_numbers)
-            template = template.replace("{message}", test_message)
-            template = template.replace("{sender}", sms_cfg.sender_name or "ZenPlus")
-            template = template.replace("{hostname}", "test-device")
-            template = template.replace("{ip_address}", "0.0.0.0")
-            template = template.replace("{status}", "TEST")
-
-            headers = dict(sms_cfg.custom_headers) if sms_cfg.custom_headers else {}
-            auth = None
-            if sms_cfg.auth_type == "basic" and sms_cfg.auth_username:
-                auth = (sms_cfg.auth_username, sms_cfg.auth_password)
-            elif sms_cfg.auth_type == "bearer" and sms_cfg.auth_token_value:
-                headers["Authorization"] = f"Bearer {sms_cfg.auth_token_value}"
-
-            try:
-                async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
-                    if sms_cfg.http_method.upper() == "POST":
-                        if sms_cfg.content_type == "application/json":
-                            try:
-                                import json as json_mod
-                                body = json_mod.loads(template)
-                                resp = await client.post(sms_cfg.api_url, json=body, headers=headers, auth=auth)
-                            except (ValueError,):
-                                resp = await client.post(sms_cfg.api_url, content=template, headers=headers, auth=auth)
-                        else:
-                            resp = await client.post(sms_cfg.api_url, content=template, headers=headers, auth=auth)
-                    else:
-                        url = sms_cfg.api_url
-                        if template:
-                            sep = "&" if "?" in url else "?"
-                            url = f"{url}{sep}{template}"
-                        resp = await client.get(url, headers=headers, auth=auth)
-
-                return {
-                    "message": f"Test SMS sent to {phone_numbers}. API status: {resp.status_code}",
-                    "status_code": resp.status_code,
-                    "response": resp.text[:300],
-                }
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"SMS send failed: {str(e)}")
-        else:
-            return {"message": f"SMS test via {sms_cfg.provider} not implemented yet. Numbers: {phone_numbers}"}
+        return await _do_sms_test(sms_cfg.model_dump(), phone_numbers)
 
     # ─── Email Channel ───
     elif channel_type == "email":
@@ -1193,8 +1108,8 @@ async def test_channel(
         gw_id = row.gateway_id or config.get("gateway_id")
         if gw_id:
             gw_result = await db.execute(
-                text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
-                {"id": gw_id})
+                text("SELECT config, enabled FROM notification_gateways WHERE id = :id AND type = :type"),
+                {"id": gw_id, "type": "sms" if channel_type == "sms" else "smtp"})
         else:
             gw_result = await db.execute(text(
                 "SELECT config, enabled FROM notification_gateways "

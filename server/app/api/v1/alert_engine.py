@@ -1,4 +1,5 @@
 from app.services.notification_transport import NotificationHTTPClient
+from app.services.sms_transport import fill_template, send_sms_request
 from app.services import alert_delivery_log as dl
 from app.services.alert_delivery_log import DeliveryRejected, ensure_accepted
 from app.core.crypto import encrypt_config, decrypt_config
@@ -190,43 +191,16 @@ def _sms_fill(template: str, values: dict, *, is_get: bool) -> str:
     conventions most gateways expect). POST bodies are provider-defined
     (JSON/XML/form), so they are substituted verbatim as before.
     """
-    from urllib.parse import quote
-    for key, value in values.items():
-        v = str(value)
-        if is_get:
-            v = quote(v, safe=",+") if key == "recipients" else quote(v, safe="")
-        template = template.replace(f"{{{key}}}", v)
-    return template
+    return fill_template(template, values, is_get=is_get)
 
 
 async def _send_sms(gw_config: dict, phones: str, message: str) -> bool:
-    """Send SMS via custom HTTP gateway. False when the gateway is not usable
-    (nothing sent); raises when the gateway rejects the request."""
-    if gw_config.get("provider") != "custom_http" or not gw_config.get("api_url"):
+    if gw_config.get('provider') != 'custom_http' or not gw_config.get('api_url'):
         return False
-
-    is_get = gw_config.get("http_method", "GET").upper() != "POST"
-    template = _sms_fill(gw_config.get("request_template", ""), {
-        "recipients": phones,
-        "message": message,
-        "sender": gw_config.get("sender_name", "ZenPlus"),
-    }, is_get=is_get)
-
-    headers = dict(gw_config.get("custom_headers", {}))
-    auth = None
-    if gw_config.get("auth_type") == "basic":
-        auth = (gw_config.get("auth_username", ""), gw_config.get("auth_password", ""))
-
-    async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
-        if not is_get:
-            resp = await client.post(gw_config["api_url"], content=template, headers=headers, auth=auth)
-        else:
-            url = gw_config["api_url"]
-            if template:
-                sep = "&" if "?" in url else "?"
-                url = f"{url}{sep}{template}"
-            resp = await client.get(url, headers=headers, auth=auth)
-    ensure_accepted(resp)
+    await send_sms_request(gw_config, {
+        'recipients': phones, 'message': message,
+        'sender': gw_config.get('sender_name') or 'ZenPlus',
+    }, client_factory=NotificationHTTPClient)
     return True
 
 
@@ -1123,12 +1097,13 @@ async def evaluate_status_change(
                     # Pre-fill device placeholders in the gateway template
                     # (encoded per HTTP method); {message}/{recipients}/
                     # {sender} are filled by _send_sms itself.
-                    gw_cfg["request_template"] = _sms_fill(
+                    gw_cfg["request_template"] = fill_template(
                         gw_cfg.get("request_template", ""),
                         {"hostname": event.hostname,
                          "ip_address": event.ip_address,
                          "status": event.new_status.upper()},
                         is_get=gw_cfg.get("http_method", "GET").upper() != "POST",
+                        content_type=gw_cfg.get("content_type", ""),
                     )
                     if await _send_sms(gw_cfg, phones, sms_body):
                         notifications_sent += 1
