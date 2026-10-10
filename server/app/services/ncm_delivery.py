@@ -10,6 +10,7 @@ from email.message import EmailMessage
 from sqlalchemy import text
 from app.core.crypto import decrypt_config
 from app.services.notification_transport import NotificationHTTPClient
+from app.services.sms_transport import send_sms_request
 
 SUPPORTED_CHANNELS = ('email', 'webhook', 'slack', 'teams', 'discord', 'pagerduty', 'sms')
 
@@ -41,26 +42,14 @@ _SAFE_MESSAGES = {'Incomplete SMTP configuration', 'One or more SMTP recipients 
 
 
 async def sms_send(gw, phones, payload):
-    from app.api.v1.alert_engine import _sms_fill
     if not phones or not str(phones).strip():
         raise ValueError('Missing SMS recipients')
     if gw.get('provider') != 'custom_http' or not gw.get('api_url'):
         raise ValueError('Unsupported SMS gateway provider')
-    text_body = (payload['subject'])[:300]
-    is_get = gw.get('http_method', 'GET').upper() != 'POST'
-    template = _sms_fill(gw.get('request_template', ''), {'recipients': phones, 'message': text_body,
-                         'sender': gw.get('sender_name', 'ZenPlus')}, is_get=is_get)
-    headers = dict(gw.get('custom_headers', {}))
-    auth = (gw.get('auth_username', ''), gw.get('auth_password', '')) if gw.get('auth_type') == 'basic' else None
-    async with NotificationHTTPClient(timeout=15, verify=True) as client:
-        if is_get:
-            url = gw['api_url']
-            if template:
-                url = f"{url}{'&' if '?' in url else '?'}{template}"
-            response = await client.get(url, headers=headers, auth=auth)
-        else:
-            response = await client.post(gw['api_url'], content=template, headers=headers, auth=auth)
-        response.raise_for_status()
+    await send_sms_request(gw, {
+        'recipients': phones, 'message': payload['subject'][:300],
+        'sender': gw.get('sender_name') or 'ZenPlus',
+    }, client_factory=NotificationHTTPClient)
 
 
 def smtp_send(config, recipients, payload):

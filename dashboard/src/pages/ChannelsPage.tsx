@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -444,12 +444,13 @@ export function ChannelsPage() {
         </TabsContent>
       </Tabs>
 
-      <ChannelFormDialog
+      {formOpen && <ChannelFormDialog
+        key={editing?.id || `new:${editing?.type}`}
         open={formOpen}
         onOpenChange={setFormOpen}
         channel={editing}
         gateways={gateways}
-      />
+      />}
 
       <ConfirmDialog
         open={!!deleting}
@@ -477,31 +478,22 @@ function ChannelFormDialog({
   gateways: Gateway[]
 }) {
   const qc = useQueryClient()
-  const [form, setForm] = useState<ChannelForm>(DEFAULT_FORM)
-  const isEdit = !!channel?.id
-
-  useEffect(() => {
-    if (!open) return
-    if (!channel) {
-      setForm(DEFAULT_FORM)
-      return
-    }
+  const [form, setForm] = useState<ChannelForm>(() => {
+    if (!channel) return DEFAULT_FORM
     const config = { ...(channel.config || {}) }
-    if (channel.gateway_id && !config.gateway_id) config.gateway_id = channel.gateway_id
+    if (channel.gateway_id) config.gateway_id = channel.gateway_id
     if (channel.type === 'sms' && config.numbers && !config.phone_numbers) config.phone_numbers = config.numbers
-    setForm({
-      name: channel.name || '',
-      type: channel.type || 'email',
-      enabled: channel.enabled ?? true,
-      config,
-    })
-  }, [channel, open])
+    return { name: channel.name || '', type: channel.type || 'email',
+             enabled: channel.enabled ?? true, config }
+  })
+  const isEdit = !!channel?.id
 
   const availableGateways = gateways.filter((gateway) => {
     if (form.type === 'email') return gateway.type === 'smtp'
     if (form.type === 'sms') return gateway.type === 'sms'
     return false
   })
+  const defaultGateway = availableGateways.find((gateway) => gateway.is_default)
 
   const save = useMutation({
     mutationFn: async () => {
@@ -523,7 +515,7 @@ function ChannelFormDialog({
   }
 
   function changeType(type: ChannelType) {
-    setForm((prev) => ({
+    setForm((prev) => prev.type === type ? prev : ({
       name: prev.name || defaultName(type),
       enabled: prev.enabled,
       type,
@@ -585,13 +577,19 @@ function ChannelFormDialog({
             <FormField label={`${channelMeta[form.type].gatewayLabel} gateway`}>
               <Select
                 value={form.config.gateway_id || '__default'}
-                onValueChange={(value) => updateConfig('gateway_id', value === '__default' ? '' : value)}
+                onValueChange={(value) => {
+                  // Radix's hidden form select may emit an empty initialization event.
+                  if (value) updateConfig('gateway_id', value === '__default' ? '' : value)
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__default">Default gateway</SelectItem>
+                  <SelectItem value="__default">Default gateway{defaultGateway?.name ? ` — ${defaultGateway.name}` : ''}</SelectItem>
+                  {form.config.gateway_id && !availableGateways.some((gateway) => gateway.id === form.config.gateway_id) && (
+                    <SelectItem value={form.config.gateway_id} disabled>Selected gateway unavailable</SelectItem>
+                  )}
                   {availableGateways.map((gateway) => (
                     <SelectItem key={gateway.id} value={gateway.id}>
                       {gateway.name || `${gateway.type.toUpperCase()} gateway`}{gateway.is_default ? ' (default)' : ''}

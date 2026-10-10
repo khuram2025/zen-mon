@@ -1,4 +1,5 @@
 from app.services.notification_transport import NotificationHTTPClient
+from app.services.sms_transport import send_sms_request
 from app.core.crypto import encrypt_config, decrypt_config
 import ssl
 import json
@@ -1292,27 +1293,12 @@ async def simulate_alert_rule(
                     continue
 
                 if gw_cfg.get("provider") == "custom_http" and gw_cfg.get("api_url"):
-                    template = gw_cfg.get("request_template", "")
-                    template = template.replace("{recipients}", phones)
-                    template = template.replace("{message}", alert_msg["sms_body"])
-                    template = template.replace("{sender}", gw_cfg.get("sender_name", "ZenPlus"))
-                    template = template.replace("{hostname}", alert_msg["sim_hostname"])
-                    template = template.replace("{ip_address}", alert_msg["sim_ip"])
-                    template = template.replace("{status}", alert_msg["device_status"])
-
-                    headers = dict(gw_cfg.get("custom_headers", {}))
-                    auth = None
-                    if gw_cfg.get("auth_type") == "basic":
-                        auth = (gw_cfg.get("auth_username", ""), gw_cfg.get("auth_password", ""))
-
-                    async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
-                        if gw_cfg.get("http_method", "GET").upper() == "POST":
-                            resp = await client.post(gw_cfg["api_url"], content=template, headers=headers, auth=auth)
-                        else:
-                            url = gw_cfg["api_url"]
-                            sep = "&" if "?" in url else "?"
-                            url = f"{url}{sep}{template}" if template else url
-                            resp = await client.get(url, headers=headers, auth=auth)
+                    resp = await send_sms_request(gw_cfg, {
+                        'recipients': phones, 'message': alert_msg['sms_body'],
+                        'sender': gw_cfg.get('sender_name') or 'ZenPlus',
+                        'hostname': alert_msg['sim_hostname'], 'ip_address': alert_msg['sim_ip'],
+                        'status': alert_msg['device_status'],
+                    }, client_factory=NotificationHTTPClient)
 
                     results.append({"channel": ch_row.name, "type": "sms", "status": "sent", "detail": f"Status {resp.status_code}", "recipients": phones})
                 else:
