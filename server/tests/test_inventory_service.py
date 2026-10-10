@@ -48,7 +48,7 @@ def test_settings_defaults_match_the_design():
         "stale_days": 7,
         "change_retention_days": 400,
         "snapshot_hour": 0,
-        "hide_categories_by_default": ["update", "driver", "os-component"],
+        "hide_categories_by_default": ["update", "driver", "os-component", "runtime"],
         "trends_enabled": True,
     }
 
@@ -102,9 +102,9 @@ def test_settings_hidden_categories_are_validated():
     merge = lambda v: svc.merge_inventory_settings({"hide_categories_by_default": v})["hide_categories_by_default"]  # noqa: E731
     assert merge(["driver", "bogus", "driver", 7, "update"]) == ["driver", "update"]
     assert merge([]) == []                                  # hide nothing is a valid choice
-    assert merge(["bogus", "also-bogus"]) == ["update", "driver", "os-component"]   # a mistake, not a choice
-    assert merge("update") == ["update", "driver", "os-component"]
-    assert merge(None) == ["update", "driver", "os-component"]
+    assert merge(["bogus", "also-bogus"]) == ["update", "driver", "os-component", "runtime"]   # a mistake, not a choice
+    assert merge("update") == ["update", "driver", "os-component", "runtime"]
+    assert merge(None) == ["update", "driver", "os-component", "runtime"]
 
 
 def test_settings_trends_enabled_must_be_a_bool():
@@ -118,7 +118,7 @@ def test_settings_result_is_independent_of_the_defaults():
     out["fresh_hours"]["server"] = 1
     out["hide_categories_by_default"].append("x")
     assert svc.DEFAULT_SETTINGS["fresh_hours"]["server"] == 24
-    assert svc.DEFAULT_SETTINGS["hide_categories_by_default"] == ["update", "driver", "os-component"]
+    assert svc.DEFAULT_SETTINGS["hide_categories_by_default"] == ["update", "driver", "os-component", "runtime"]
     assert "x" not in svc.merge_inventory_settings(None)["hide_categories_by_default"]
 
 
@@ -814,12 +814,14 @@ async def test_C1_every_write_stamps_values_rev_together_with_norm_rev(inv_db, m
 
 
 def _pack_that_drops_the_last_version_component(monkeypatch):
-    """A rule-pack release (revision 2 and later) that renders '10.0.20348.587' as '10.0.20348'."""
+    """A rule-pack release (the revision after the current one, and later) that renders '10.0.20348.587' as
+    '10.0.20348'."""
     real = inventory_normalize.normalize_server
+    first_new = inventory_normalize.RULEPACK_REV + 1
 
     def short(*a, **k):
         identity = real(*a, **k)
-        if inventory_normalize.RULEPACK_REV >= 2 and identity.os_version:
+        if inventory_normalize.RULEPACK_REV >= first_new and identity.os_version:
             return dataclasses.replace(identity, os_version=identity.os_version.rsplit(".", 1)[0])
         return identity
 
@@ -834,7 +836,8 @@ async def test_C1_a_dirty_row_that_a_new_rule_pack_renders_differently_writes_no
     await tick(inv_db)
     assert ident(inv_db, "server", f.s_win)["os_version"] == "10.0.20348.587"
     _pack_that_drops_the_last_version_component(monkeypatch)
-    monkeypatch.setattr(inventory_normalize, "RULEPACK_REV", 2)
+    old_rev = inventory_normalize.RULEPACK_REV
+    monkeypatch.setattr(inventory_normalize, "RULEPACK_REV", old_rev + 1)
     inv_db.execute("UPDATE servers SET cpu_model = 'Xeon Gold 6338' WHERE id = $1", f.s_win)    # not an OS column
     assert is_dirty(inv_db, "server", f.s_win)
 
@@ -845,7 +848,7 @@ async def test_C1_a_dirty_row_that_a_new_rule_pack_renders_differently_writes_no
     assert events(inv_db) == []
 
     # And the other way: a rollback to the old pack, again through a dirty row.
-    monkeypatch.setattr(inventory_normalize, "RULEPACK_REV", 1)
+    monkeypatch.setattr(inventory_normalize, "RULEPACK_REV", old_rev)
     inv_db.execute("UPDATE servers SET cpu_model = 'Xeon Gold 6348' WHERE id = $1", f.s_win)
     await tick(inv_db)
     assert ident(inv_db, "server", f.s_win)["os_version"] == "10.0.20348.587"
@@ -2315,21 +2318,26 @@ async def test_snapshot_day_computes_every_family_from_a_seeded_fleet(inv_db):
     assert {m for m, _ in rows} == set(svc.SNAPSHOT_METRICS)
     assert snapshot_rows(inv_db, DAY) == rows
     assert {d: v for (m, d), v in rows.items() if m == "assets"} == {"server": 4, "device": 3}
-    assert {d: v for (m, d), v in rows.items() if m == "coverage"} == {"fresh": 2, "aging": 2, "stale": 1, "never": 2}
+    # D4 is a bare device: SNMP off, so it cannot report an inventory and is counted on its own line (X3).
+    assert {d: v for (m, d), v in rows.items() if m == "coverage"} == {
+        "fresh": 2, "aging": 2, "stale": 1, "never": 1, "not_applicable": 1}
     assert {d: v for (m, d), v in rows.items() if m == "os_release"} == {
         "windows/Windows Server/2022": 1, "windows/Windows Server/2019": 2, "linux/Ubuntu/22.04": 1,
         "fortios/FortiOS/7.2": 1, "ios-xe/IOS XE/17.9": 1, "unknown//": 1}
-    assert {d: v for (m, d), v in rows.items() if m == "software_products"} == {"products": 4, "installs": 5}
+    # openssl (a runtime) is hidden by default since UI-03, so the default hides four of the seven installs.
+    assert {d: v for (m, d), v in rows.items() if m == "software_products"} == {"products": 3, "installs": 4}
+    # The live Overview's predicates (UP-07): model, serial and vendor describe network devices only, and an asset
+    # that cannot report by design has no missing values. D1 and D2 have a model and a vendor; only D2 lacks a serial.
     assert {d: v for (m, d), v in rows.items() if m == "health"} == {
-        "missing_os_version": 1, "missing_model": 5, "missing_serial": 6, "unknown_vendor": 5,
-        "software_truncated": 1, "stale": 1, "never": 2}
+        "missing_os_version": 0, "missing_model": 0, "missing_serial": 1, "unknown_vendor": 0,
+        "software_truncated": 1, "stale": 1, "never": 1, "missing_security_agent": 0}
     assert {d: v for (m, d), v in rows.items() if m == "changes"} == {
         "software/added": 2, "software/removed": 0, "software/changed": 0,
         "os/changed": 0, "firmware/changed": 1, "hardware/changed": 0}
     # The linked device is not an asset of its own: no junos row, and the totals add up.
     assert not any("junos" in d for (m, d) in rows if m == "os_release")
     assert sum(v for (m, d), v in rows.items() if m == "os_release") == 7
-    assert sum(v for (m, d), v in rows.items() if m == "coverage") == 7
+    assert sum(v for (m, d), v in rows.items() if m == "coverage") == 7        # the five buckets partition the assets
 
 
 @pytest.mark.asyncio
@@ -2348,7 +2356,8 @@ async def test_snapshot_day_coverage_follows_the_settings_thresholds(inv_db):
     await tick(inv_db)
     rows = await snapshot(inv_db, settings={"fresh_hours": {"server": 2, "device": 6}, "stale_days": 2})
     # S1 (1 h) and D1 (30 min) and D2 (5 h) are fresh; S2 (3 days) and S4 (10 days) are past two days.
-    assert {d: v for (m, d), v in rows.items() if m == "coverage"} == {"fresh": 3, "aging": 0, "stale": 2, "never": 2}
+    assert {d: v for (m, d), v in rows.items() if m == "coverage"} == {
+        "fresh": 3, "aging": 0, "stale": 2, "never": 1, "not_applicable": 1}
     assert rows[("health", "stale")] == 2
 
 
@@ -2410,9 +2419,10 @@ async def test_snapshot_day_on_an_empty_database_writes_zeroes_not_nothing(inv_d
     rows = await snapshot(inv_db)
     assert rows[("assets", "server")] == 0 and rows[("assets", "device")] == 0
     assert rows[("software_products", "products")] == 0
-    assert {d for (m, d) in rows if m == "coverage"} == {"fresh", "aging", "stale", "never"}
-    assert {d for (m, d) in rows if m == "health"} == {
-        "missing_os_version", "missing_model", "missing_serial", "unknown_vendor", "software_truncated", "stale", "never"}
+    assert {d for (m, d) in rows if m == "coverage"} == set(svc.SNAPSHOT_COVERAGE_KEYS)
+    assert {d for (m, d) in rows if m == "health"} == set(svc.SNAPSHOT_HEALTH_KEYS) == {
+        "missing_os_version", "missing_model", "missing_serial", "unknown_vendor", "software_truncated", "stale", "never",
+        "missing_security_agent"}
     assert not [k for k in rows if k[0] == "os_release"]
 
 

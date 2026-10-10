@@ -1,0 +1,811 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "scope": {
+    "restricted": false,
+    "tags": []
+  },
+  "network": {
+    "devices": 85,
+    "models_known": 19,
+    "unknown_model_devices": 17,
+    "vendors": [
+      {
+        "vendor": "Cisco",
+        "count": 28,
+        "models": 5,
+        "models_known": 5,
+        "unknown_model_devices": 3,
+        "firmware_versions": 10,
+        "serial_missing": 5,
+        "not_collected": 0,
+        "serial_coverage_pct": 82.1,
+        "modules": 8
+      },
+      {
+        "vendor": "Fortinet",
+        "count": 14,
+        "models": 4,
+        "models_known": 4,
+        "unknown_model_devices": 2,
+        "firmware_versions": 4,
+        "serial_missing": 2,
+        "not_collected": 2,
+        "serial_coverage_pct": 83.3,
+        "modules": 0
+      },
+      {
+        "vendor": "HPE Aruba Networking",
+        "count": 10,
+        "models": 2,
+        "models_known": 2,
+        "unknown_model_devices": 1,
+        "firmware_versions": 4,
+        "serial_missing": 2,
+        "not_collected": 0,
+        "serial_coverage_pct": 80.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Juniper Networks",
+        "count": 8,
+        "models": 3,
+        "models_known": 3,
+        "unknown_model_devices": 1,
+        "firmware_versions": 4,
+        "serial_missing": 1,
+        "not_collected": 0,
+        "serial_coverage_pct": 87.5,
+        "modules": 8
+      },
+      {
+        "vendor": "Palo Alto Networks",
+        "count": 8,
+        "models": 3,
+        "models_known": 3,
+        "unknown_model_devices": 0,
+        "firmware_versions": 4,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "F5",
+        "count": 4,
+        "models": 1,
+        "models_known": 1,
+        "unknown_model_devices": 0,
+        "firmware_versions": 3,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Ubiquiti",
+        "count": 4,
+        "models": 1,
+        "models_known": 1,
+        "unknown_model_devices": 1,
+        "firmware_versions": 1,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": null,
+        "count": 9,
+        "models": 0,
+        "models_known": 0,
+        "unknown_model_devices": 9,
+        "firmware_versions": 0,
+        "serial_missing": 5,
+        "not_collected": 4,
+        "serial_coverage_pct": 0.0,
+        "modules": 0
+      }
+    ],
+    "models": [
+      {
+        "vendor": "Cisco",
+        "model": "C9200L-24P-4G",
+        "unknown": false,
+        "count": 6,
+        "firmware_versions": 2,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Cisco",
+        "model": "WS-C2960X-48TS-L",
+        "unknown": false,
+        "count": 6,
+        "firmware_versions": 3,
+        "serial_missing": 1,
+        "not_collected": 0,
+        "serial_coverage_pct": 83.3,
+        "modules": 0
+      },
+      {
+        "vendor": "Cisco",
+        "model": "C9300-24T",
+        "unknown": false,
+        "count": 5,
+        "firmware_versions": 2,
+        "serial_missing": 1,
+        "not_collected": 0,
+        "serial_coverage_pct": 80.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Cisco",
+        "model": "C9300-48P",
+        "unknown": false,
+        "count": 4,
+        "firmware_versions": 2,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 4
+      },
+      {
+        "vendor": "Cisco",
+        "model": "N9K-C93180YC-FX",
+        "unknown": false,
+        "count": 4,
+        "firmware_versions": 3,
+        "serial_missing": 1,
+        "not_collected": 0,
+        "serial_coverage_pct": 75.0,
+        "modules": 4
+      },
+      {
+        "vendor": "Cisco",
+        "model": null,
+        "unknown": true,
+        "count": 3,
+        "firmware_versions": 2,
+        "serial_missing": 2,
+        "not_collected": 0,
+        "serial_coverage_pct": 33.3,
+        "modules": 0
+      },
+      {
+        "vendor": "F5",
+        "model": "BIG-IP i2800",
+        "unknown": false,
+        "count": 4,
+        "firmware_versions": 3,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Fortinet",
+        "model": "FortiGate-100F",
+        "unknown": false,
+        "count": 4,
+        "firmware_versions": 3,
+        "serial_missing": 1,
+        "not_collected": 1,
+        "serial_coverage_pct": 66.7,
+        "modules": 0
+      },
+      {
+        "vendor": "Fortinet",
+        "model": "FortiGate-200F",
+        "unknown": false,
+        "count": 3,
+        "firmware_versions": 2,
+        "serial_missing": 0,
+        "not_collected": 1,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Fortinet",
+        "model": "FortiGate-600E",
+        "unknown": false,
+        "count": 3,
+        "firmware_versions": 3,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Fortinet",
+        "model": "FortiGate-60F",
+        "unknown": false,
+        "count": 2,
+        "firmware_versions": 2,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Fortinet",
+        "model": null,
+        "unknown": true,
+        "count": 2,
+        "firmware_versions": 1,
+        "serial_missing": 1,
+        "not_collected": 0,
+        "serial_coverage_pct": 50.0,
+        "modules": 0
+      },
+      {
+        "vendor": "HPE Aruba Networking",
+        "model": "6300M",
+        "unknown": false,
+        "count": 5,
+        "firmware_versions": 4,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "HPE Aruba Networking",
+        "model": "6200F",
+        "unknown": false,
+        "count": 4,
+        "firmware_versions": 3,
+        "serial_missing": 1,
+        "not_collected": 0,
+        "serial_coverage_pct": 75.0,
+        "modules": 0
+      },
+      {
+        "vendor": "HPE Aruba Networking",
+        "model": null,
+        "unknown": true,
+        "count": 1,
+        "firmware_versions": 0,
+        "serial_missing": 1,
+        "not_collected": 0,
+        "serial_coverage_pct": 0.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Juniper Networks",
+        "model": "EX4300-48T",
+        "unknown": false,
+        "count": 4,
+        "firmware_versions": 4,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 4
+      },
+      {
+        "vendor": "Juniper Networks",
+        "model": "EX2300-24T",
+        "unknown": false,
+        "count": 2,
+        "firmware_versions": 2,
+        "serial_missing": 1,
+        "not_collected": 0,
+        "serial_coverage_pct": 50.0,
+        "modules": 2
+      },
+      {
+        "vendor": "Juniper Networks",
+        "model": "QFX5120-48Y",
+        "unknown": false,
+        "count": 1,
+        "firmware_versions": 1,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 1
+      },
+      {
+        "vendor": "Juniper Networks",
+        "model": null,
+        "unknown": true,
+        "count": 1,
+        "firmware_versions": 1,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 1
+      },
+      {
+        "vendor": "Palo Alto Networks",
+        "model": "PA-3220",
+        "unknown": false,
+        "count": 4,
+        "firmware_versions": 3,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Palo Alto Networks",
+        "model": "PA-440",
+        "unknown": false,
+        "count": 2,
+        "firmware_versions": 2,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Palo Alto Networks",
+        "model": "PA-5220",
+        "unknown": false,
+        "count": 2,
+        "firmware_versions": 2,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Ubiquiti",
+        "model": "USW-24-PoE",
+        "unknown": false,
+        "count": 3,
+        "firmware_versions": 1,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      },
+      {
+        "vendor": "Ubiquiti",
+        "model": null,
+        "unknown": true,
+        "count": 1,
+        "firmware_versions": 1,
+        "serial_missing": 0,
+        "not_collected": 0,
+        "serial_coverage_pct": 100.0,
+        "modules": 0
+      }
+    ]
+  },
+  "matrix": {
+    "vendor": "Cisco",
+    "releases": [
+      "17.12",
+      "17.9",
+      "17.6",
+      "17.3",
+      "15.2",
+      "10.2",
+      "9.3",
+      "unknown"
+    ],
+    "models": [
+      {
+        "model": "C9200L-24P-4G",
+        "unknown": false,
+        "count": 6,
+        "cells": [
+          {
+            "release": "17.9",
+            "count": 3
+          },
+          {
+            "release": "17.3",
+            "count": 3
+          }
+        ]
+      },
+      {
+        "model": "WS-C2960X-48TS-L",
+        "unknown": false,
+        "count": 6,
+        "cells": [
+          {
+            "release": "15.2",
+            "count": 6
+          }
+        ]
+      },
+      {
+        "model": "C9300-24T",
+        "unknown": false,
+        "count": 5,
+        "cells": [
+          {
+            "release": "17.12",
+            "count": 3
+          },
+          {
+            "release": "17.9",
+            "count": 2
+          }
+        ]
+      },
+      {
+        "model": "C9300-48P",
+        "unknown": false,
+        "count": 4,
+        "cells": [
+          {
+            "release": "17.9",
+            "count": 2
+          },
+          {
+            "release": "17.6",
+            "count": 2
+          }
+        ]
+      },
+      {
+        "model": "N9K-C93180YC-FX",
+        "unknown": false,
+        "count": 4,
+        "cells": [
+          {
+            "release": "10.2",
+            "count": 1
+          },
+          {
+            "release": "9.3",
+            "count": 3
+          }
+        ]
+      },
+      {
+        "model": null,
+        "unknown": true,
+        "count": 3,
+        "cells": [
+          {
+            "release": "17.9",
+            "count": 1
+          },
+          {
+            "release": "17.6",
+            "count": 1
+          },
+          {
+            "release": "unknown",
+            "count": 1
+          }
+        ]
+      }
+    ]
+  },
+  "modules": [
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "C9200L-24P-4G",
+      "count": 6,
+      "devices": 6,
+      "with_serial": 6
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "WS-C2960X-48TS-L",
+      "count": 6,
+      "devices": 6,
+      "with_serial": 5
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "6300M",
+      "count": 5,
+      "devices": 5,
+      "with_serial": 5
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "C9300-24T",
+      "count": 5,
+      "devices": 5,
+      "with_serial": 4
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "6200F",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 3
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "BIG-IP i2800",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 4
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "C9300-48P",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 4
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "EX4300-48T",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 4
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "FortiGate-100F",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 3
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "N9K-C93180YC-FX",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 3
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "PA-3220",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 4
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "FortiGate-200F",
+      "count": 3,
+      "devices": 3,
+      "with_serial": 2
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "FortiGate-600E",
+      "count": 3,
+      "devices": 3,
+      "with_serial": 3
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "USW-24-PoE",
+      "count": 3,
+      "devices": 3,
+      "with_serial": 3
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "EX2300-24T",
+      "count": 2,
+      "devices": 2,
+      "with_serial": 1
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "FortiGate-60F",
+      "count": 2,
+      "devices": 2,
+      "with_serial": 2
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "PA-440",
+      "count": 2,
+      "devices": 2,
+      "with_serial": 2
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "PA-5220",
+      "count": 2,
+      "devices": 2,
+      "with_serial": 2
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": "QFX5120-48Y",
+      "count": 1,
+      "devices": 1,
+      "with_serial": 1
+    },
+    {
+      "class": "chassis",
+      "class_label": "Chassis",
+      "model": null,
+      "count": 5,
+      "devices": 5,
+      "with_serial": 4
+    },
+    {
+      "class": "module",
+      "class_label": "Module",
+      "model": "EX4300-48T",
+      "count": 8,
+      "devices": 8,
+      "with_serial": 8
+    },
+    {
+      "class": "module",
+      "class_label": "Module",
+      "model": "C3850-NM-4-10G",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 4
+    },
+    {
+      "class": "module",
+      "class_label": "Module",
+      "model": "N9K-C93180YC-FX",
+      "count": 4,
+      "devices": 4,
+      "with_serial": 4
+    },
+    {
+      "class": "powerSupply",
+      "class_label": "Power supply",
+      "model": "PWR-C1-715WAC-P",
+      "count": 34,
+      "devices": 17,
+      "with_serial": 30
+    },
+    {
+      "class": "powerSupply",
+      "class_label": "Power supply",
+      "model": "JPSU-350-AC-AFO",
+      "count": 8,
+      "devices": 8,
+      "with_serial": 8
+    },
+    {
+      "class": "fan",
+      "class_label": "Fan",
+      "model": "PA-3200-FAN",
+      "count": 8,
+      "devices": 8,
+      "with_serial": 0
+    }
+  ],
+  "servers": {
+    "total": 60,
+    "cpu_models": [
+      {
+        "value": "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz",
+        "label": "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz",
+        "count": 18
+      },
+      {
+        "value": "AMD EPYC 7543 32-Core Processor",
+        "label": "AMD EPYC 7543 32-Core Processor",
+        "count": 17
+      },
+      {
+        "value": "Intel(R) Xeon(R) Silver 4314 CPU @ 2.40GHz",
+        "label": "Intel(R) Xeon(R) Silver 4314 CPU @ 2.40GHz",
+        "count": 17
+      },
+      {
+        "value": "unknown",
+        "label": "Unknown",
+        "count": 8
+      }
+    ],
+    "cpu_models_more": {
+      "models": 0,
+      "servers": 0
+    },
+    "memory": [
+      {
+        "value": "le8",
+        "label": "Up to 8 GB",
+        "count": 6
+      },
+      {
+        "value": "le16",
+        "label": "9 to 16 GB",
+        "count": 11
+      },
+      {
+        "value": "le32",
+        "label": "17 to 32 GB",
+        "count": 15
+      },
+      {
+        "value": "le64",
+        "label": "33 to 64 GB",
+        "count": 10
+      },
+      {
+        "value": "le128",
+        "label": "65 to 128 GB",
+        "count": 5
+      },
+      {
+        "value": "gt128",
+        "label": "Over 128 GB",
+        "count": 5
+      },
+      {
+        "value": "unknown",
+        "label": "Unknown",
+        "count": 8
+      }
+    ],
+    "disks": [
+      {
+        "value": "1",
+        "label": "1 disk",
+        "count": 9
+      },
+      {
+        "value": "2",
+        "label": "2 disks",
+        "count": 9
+      },
+      {
+        "value": "3-4",
+        "label": "3 to 4 disks",
+        "count": 18
+      },
+      {
+        "value": "5-8",
+        "label": "5 to 8 disks",
+        "count": 16
+      },
+      {
+        "value": "ge9",
+        "label": "9 or more disks",
+        "count": 0
+      },
+      {
+        "value": "unknown",
+        "label": "Unknown",
+        "count": 8
+      }
+    ],
+    "virtualization": [
+      {
+        "value": "vmware",
+        "label": "vmware",
+        "count": 18
+      },
+      {
+        "value": "hyper-v",
+        "label": "hyper-v",
+        "count": 6
+      },
+      {
+        "value": "physical",
+        "label": "physical",
+        "count": 5
+      },
+      {
+        "value": "unknown",
+        "label": "Unknown",
+        "count": 31
+      }
+    ]
+  }
+}

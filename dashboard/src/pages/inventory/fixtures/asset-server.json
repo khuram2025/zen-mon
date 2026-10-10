@@ -1,0 +1,361 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "asset": {
+    "key": "server:faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+    "kind": "server",
+    "id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+    "name": "srv-w19-03",
+    "ip": "10.10.0.30",
+    "asset_type": "windows",
+    "status": "healthy",
+    "vendor": "Dell",
+    "model": "PowerEdge R650",
+    "serial": "DELL00003",
+    "os_family": "windows",
+    "os_product": "Windows Server",
+    "os_release": "2019",
+    "os_version": "10.0.17763.5696",
+    "os_build": "17763.5696",
+    "os_edition": "Standard",
+    "os_source": "agent",
+    "hw_source": "device",
+    "site": "Branch-1",
+    "tags": [
+      "dev",
+      "pci",
+      "team-edge"
+    ],
+    "sources": [
+      "agent",
+      "snmp"
+    ],
+    "last_seen": "2026-10-08T10:40:00Z",
+    "inventory_at": "2026-10-08T10:40:00Z",
+    "inventory_age_s": 4800,
+    "freshness": "fresh",
+    "software_truncated": false
+  },
+  "identity": [
+    {
+      "field": "vendor",
+      "label": "Vendor",
+      "value": "Dell",
+      "source": "snmp",
+      "source_detail": "device",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    },
+    {
+      "field": "model",
+      "label": "Model",
+      "value": "PowerEdge R650",
+      "source": "snmp",
+      "source_detail": "device",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    },
+    {
+      "field": "serial",
+      "label": "Serial number",
+      "value": "DELL00003",
+      "source": "snmp",
+      "source_detail": "device",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    },
+    {
+      "field": "os_family",
+      "label": "OS family",
+      "value": "windows",
+      "source": "agent",
+      "source_detail": "agent",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    },
+    {
+      "field": "os_product",
+      "label": "Operating system",
+      "value": "Windows Server",
+      "source": "agent",
+      "source_detail": "agent",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    },
+    {
+      "field": "os_release",
+      "label": "Release",
+      "value": "2019",
+      "source": "agent",
+      "source_detail": "agent",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    },
+    {
+      "field": "os_version",
+      "label": "Version",
+      "value": "10.0.17763.5696",
+      "source": "agent",
+      "source_detail": "agent",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    },
+    {
+      "field": "os_build",
+      "label": "Build",
+      "value": "17763.5696",
+      "source": "agent",
+      "source_detail": "agent",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    },
+    {
+      "field": "os_edition",
+      "label": "Edition",
+      "value": "Standard",
+      "source": "agent",
+      "source_detail": "agent",
+      "observed_at": "2026-10-08T10:40:00Z",
+      "age_s": 4800
+    }
+  ],
+  "raw": {
+    "os_name": "Microsoft Windows Server 2019 Standard",
+    "os_version": "1809",
+    "kernel_or_build": "10.0.17763.5696 Build 17763.5696",
+    "hw_manufacturer": null,
+    "hw_model": null,
+    "hw_serial": null
+  },
+  "server": {
+    "os_name": "Microsoft Windows Server 2019 Standard",
+    "architecture": "x86_64",
+    "hostname": "srv-w19-03",
+    "fqdn": null,
+    "cpu_model": "AMD EPYC 7543 32-Core Processor",
+    "cpu_cores": 8,
+    "cpu_physical_cores": 4,
+    "memory_total_bytes": 8589934592,
+    "disks": [
+      {
+        "model": "Disk 0",
+        "size_bytes": 480103981056
+      },
+      {
+        "model": "Disk 1",
+        "size_bytes": 960207962112
+      },
+      {
+        "model": "Disk 2",
+        "size_bytes": 1440311943168
+      }
+    ],
+    "virtualization": "physical",
+    "bios_version": null,
+    "bios_date": null,
+    "boot_time": "2026-09-15T12:00:00Z",
+    "baselined": true,
+    "software": {
+      "total": 14,
+      "shown": 8,
+      "hidden": 6,
+      "truncated": false,
+      "top": [
+        {
+          "package_name": "CrowdStrike Falcon Sensor",
+          "product_key": "crowdstrike-falcon-sensor",
+          "product": "CrowdStrike Falcon Sensor",
+          "version": "7.15.18513",
+          "publisher": "CrowdStrike, Inc.",
+          "category": "endpoint-protection",
+          "architecture": "x64",
+          "source": "hklm",
+          "install_date": "2026-09-03T12:00:00Z",
+          "first_seen_at": "2026-05-12T12:00:00Z"
+        },
+        {
+          "package_name": "Git",
+          "product_key": "git",
+          "product": "Git",
+          "version": "2.46.2",
+          "publisher": "The Git Development Community",
+          "category": "development",
+          "architecture": "x64",
+          "source": "hklm",
+          "install_date": "2026-01-11T12:00:00Z",
+          "first_seen_at": "2026-08-13T12:00:00Z"
+        },
+        {
+          "package_name": "Google Chrome",
+          "product_key": "google-chrome",
+          "product": "Google Chrome",
+          "version": "151.0.7922.110",
+          "publisher": "Google LLC",
+          "category": "browser",
+          "architecture": "x64",
+          "source": "hklm",
+          "install_date": "2026-02-10T12:00:00Z",
+          "first_seen_at": "2026-08-19T12:00:00Z"
+        },
+        {
+          "package_name": "Microsoft Edge",
+          "product_key": "microsoft-edge",
+          "product": "Microsoft Edge",
+          "version": "151.0.3200.62",
+          "publisher": "Microsoft Corporation",
+          "category": "browser",
+          "architecture": "x64",
+          "source": "hklm",
+          "install_date": "2026-02-05T12:00:00Z",
+          "first_seen_at": "2026-08-18T12:00:00Z"
+        },
+        {
+          "package_name": "PuTTY release 0.81 (64-bit)",
+          "product_key": "putty",
+          "product": "PuTTY",
+          "version": "0.81",
+          "publisher": "Simon Tatham",
+          "category": "remote-access",
+          "architecture": "x64",
+          "source": "hklm",
+          "install_date": "2026-01-06T12:00:00Z",
+          "first_seen_at": "2026-08-12T12:00:00Z"
+        },
+        {
+          "package_name": "TeamViewer",
+          "product_key": "teamviewer",
+          "product": "TeamViewer",
+          "version": "15.51.5",
+          "publisher": "TeamViewer",
+          "category": "remote-access",
+          "architecture": "x64",
+          "source": "hklm",
+          "install_date": "2025-11-02T12:00:00Z",
+          "first_seen_at": "2026-07-30T12:00:00Z"
+        },
+        {
+          "package_name": "Visual Studio Code",
+          "product_key": "visual-studio-code",
+          "product": "Visual Studio Code",
+          "version": "1.94.2",
+          "publisher": "Microsoft Corporation",
+          "category": "development",
+          "architecture": "x64",
+          "source": "hklm",
+          "install_date": "2026-01-16T12:00:00Z",
+          "first_seen_at": "2026-08-14T12:00:00Z"
+        },
+        {
+          "package_name": "Wireshark 4.4.0 x64",
+          "product_key": "wireshark",
+          "product": "Wireshark",
+          "version": "4.4.0",
+          "publisher": "The Wireshark developer community",
+          "category": "networking",
+          "architecture": "x64",
+          "source": "hklm",
+          "install_date": "2025-12-07T12:00:00Z",
+          "first_seen_at": "2026-08-06T12:00:00Z"
+        }
+      ],
+      "security_agent": {
+        "present": true,
+        "state": "present",
+        "reason": null,
+        "products": [
+          "CrowdStrike Falcon Sensor"
+        ],
+        "services": []
+      }
+    }
+  },
+  "device": null,
+  "changes": {
+    "items": [
+      {
+        "id": 49,
+        "observed_at": "2026-10-07T21:50:00Z",
+        "asset_key": "device:a8d490b8-97c2-5a52-bc70-e1181b21f217",
+        "asset_kind": "device",
+        "asset_id": "a8d490b8-97c2-5a52-bc70-e1181b21f217",
+        "asset_name": "twin-srv-w19-03",
+        "asset_present": true,
+        "server_id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+        "category": "firmware",
+        "action": "changed",
+        "subject": "os_version",
+        "subject_key": null,
+        "old_value": "1.0.0",
+        "new_value": "1.1.0",
+        "label": null,
+        "pair": null,
+        "marker": false,
+        "snapshot_truncated": false,
+        "detail": {
+          "os_source": "profile"
+        }
+      },
+      {
+        "id": 24,
+        "observed_at": "2026-10-06T13:38:48Z",
+        "asset_key": "server:faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+        "asset_kind": "server",
+        "asset_id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+        "asset_name": "srv-w19-03",
+        "asset_present": true,
+        "server_id": null,
+        "category": "software",
+        "action": "removed",
+        "subject": "Java 8 Update 391",
+        "subject_key": "java-se-runtime",
+        "old_value": "8.0.3910.11",
+        "new_value": null,
+        "label": null,
+        "pair": {
+          "event_id": 23,
+          "label": "upgrade"
+        },
+        "marker": false,
+        "snapshot_truncated": false,
+        "detail": {
+          "source": "hklm",
+          "vendor": "Oracle Corporation",
+          "architecture": "x64"
+        }
+      },
+      {
+        "id": 23,
+        "observed_at": "2026-10-06T13:38:48Z",
+        "asset_key": "server:faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+        "asset_kind": "server",
+        "asset_id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+        "asset_name": "srv-w19-03",
+        "asset_present": true,
+        "server_id": null,
+        "category": "software",
+        "action": "added",
+        "subject": "Java 8 Update 401",
+        "subject_key": "java-se-runtime",
+        "old_value": null,
+        "new_value": "8.0.4010.10",
+        "label": null,
+        "pair": {
+          "event_id": 24,
+          "label": "upgrade"
+        },
+        "marker": false,
+        "snapshot_truncated": false,
+        "detail": {
+          "source": "hklm",
+          "vendor": "Oracle Corporation",
+          "architecture": "x64"
+        }
+      }
+    ],
+    "total": 3,
+    "first_change_at": "2026-10-06T13:38:48Z"
+  },
+  "links": {
+    "server_id": "faa42e3e-82ca-544d-bc72-34a51c3fdf6b",
+    "device_id": "a8d490b8-97c2-5a52-bc70-e1181b21f217"
+  }
+}

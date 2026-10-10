@@ -82,13 +82,13 @@ __all__ = [
     "PACK_FILES", "PACK_OS", "PACK_VENDORS", "PACK_SOFTWARE",
 ]
 
-RULEPACK_REV = 1
+RULEPACK_REV = 3
 
 MAX_INPUT_LEN = 512
 _MAX_PATTERN_LEN = 600
 
 CATEGORIES = (
-    "browser", "security", "remote-access", "database", "web-server", "runtime",
+    "browser", "security", "endpoint-protection", "remote-access", "database", "web-server", "runtime",
     "development", "productivity", "monitoring", "backup", "virtualization",
     "networking", "driver", "os-component", "update", "other",
 )
@@ -448,7 +448,7 @@ _TEMPLATE_REF_RE = re.compile(r"\\(?:(\\)|([1-9][0-9]?)|g<([^>]{1,64})>)", re.AS
 def _check_template(rx: "re.Pattern[str]", template: str) -> None:
     """Reject a ``match.expand`` template that refers to a group the pattern does not have."""
     for _escaped_backslash, num, name in _TEMPLATE_REF_RE.findall(template):
-        if num or name.isdigit():
+        if num or (name.isascii() and name.isdigit()):          # ASCII only: '²'.isdigit() is True and int() refuses it
             if int(num or name) > rx.groups:
                 raise ValueError(f"template {template!r} refers to group {num or name} of {rx.groups}")
         elif name and name not in rx.groupindex:
@@ -726,6 +726,58 @@ def _load_vendors(pack: dict) -> None:
             _VENDOR_DEFAULT_FAMILY[vendor] = family
         else:
             _pack_error(PACK_VENDORS, f"vendor_default_family {vendor}: unknown vendor or family {family!r}")
+    for i, r in enumerate(_section(PACK_VENDORS, pack, "vendor_refinements", list, required=False)):
+        try:
+            rid, target = _text(r, "id"), _text(r, "to")
+            sources = frozenset(_strings(r, "from", True))
+            if not sources or not sources <= _VENDOR_BY_KEY.keys() or target not in _VENDOR_BY_KEY:
+                raise ValueError("unknown vendor key")
+            oid_prefix, text_re = _text(r, "sys_object_id_prefix", False), _text(r, "text_re", False)
+            if (oid_prefix is None) == (text_re is None):
+                raise ValueError("exactly one of sys_object_id_prefix and text_re is required")
+            if oid_prefix is not None and not _OID_RE.match(oid_prefix):
+                raise ValueError("invalid sys_object_id_prefix")
+            _REFINEMENTS.append(_Refinement(
+                id=rid, sources=sources, target=target, oid_prefix=oid_prefix,
+                text_rx=_rx(text_re, f"vendor-refinement-{rid}") if text_re else None,
+            ))
+        except Exception as exc:
+            _pack_error(PACK_VENDORS, f"vendor_refinements {_ident(r, i)}: {exc}")
+
+
+@dataclass(frozen=True)
+class _Refinement:
+    id: str
+    sources: frozenset[str]
+    target: str
+    oid_prefix: Optional[str]
+    text_rx: Optional["re.Pattern[str]"]
+
+
+_REFINEMENTS: list[_Refinement] = []
+
+
+def _refine_vendor(key: Optional[str], label: Optional[str], *, oid: Optional[str] = None,
+                   texts: tuple = ()) -> tuple[Optional[str], Optional[str]]:
+    """The vendor an asset really belongs to when its raw vendor name is ambiguous.
+
+    'HP' and 'Hewlett-Packard' name both Hewlett Packard Enterprise (ProLiant, Aruba) and HP Inc.
+    (printers, PCs); the name alone cannot tell them apart, so a ``vendor_refinements`` entry of the
+    vendor pack moves such an asset by its sysObjectID subtree or by words in its model and sysDescr.
+    The first matching entry wins; with no match the vendor is returned unchanged."""
+    if key is None or not _REFINEMENTS:
+        return key, label
+    blob = " ".join(t for t in texts if t)
+    for r in _REFINEMENTS:
+        if key not in r.sources:
+            continue
+        if r.oid_prefix is not None:
+            if not oid or not (oid == r.oid_prefix or oid.startswith(r.oid_prefix + ".")):
+                continue
+        elif r.text_rx is None or not blob or r.text_rx.search(blob) is None:
+            continue
+        return r.target, _VENDOR_BY_KEY[r.target]
+    return key, label
 
 
 @functools.lru_cache(maxsize=4096)
@@ -800,7 +852,18 @@ class _Windows:
     edition_prefix_rx: "re.Pattern[str]"
     version_rx: "re.Pattern[str]"
     build_rx: "re.Pattern[str]"
+    # Products that run on a Windows kernel without saying Windows in their name.
+    platforms: list["_WinPlatform"] = []
     ok = False
+
+
+@dataclass(frozen=True)
+class _WinPlatform:
+    id: str
+    rx: "re.Pattern[str]"
+    server: bool
+    product: Optional[str]
+    edition: Optional[str]
 
 
 _SERVER_WORD_RE = _rx(r"\bserver\b", "win-server-word")
@@ -833,6 +896,14 @@ def _load_windows(pack: dict) -> None:
         edition_prefix = _rx(_text(w, "edition_prefix_re"), "win-edition-prefix")
         version = _rx(_text(w, "version_re"), "win-version", groups=1)
         build = _rx(_text(w, "build_re"), "win-build", groups=1)
+        platforms = []
+        for i, p in enumerate(_typed(w, "platforms", list, False)):
+            pid = _text(p, "id")
+            platforms.append(_WinPlatform(
+                id=pid, rx=_rx(_text(p, "match"), f"win-platform-{pid}"), server=bool(p.get("server")),
+                product=_text(p, "product", False), edition=_text(p, "edition", False),
+            ))
+        _Windows.platforms = platforms
         _Windows.builds = builds
         _Windows.client_floor = sorted(floor, reverse=True)
         _Windows.server_year_rx, _Windows.client_name_rx = server_year, client_name
@@ -843,9 +914,17 @@ def _load_windows(pack: dict) -> None:
         _pack_error(PACK_OS, f"windows: {exc}")
 
 
+def _windows_platform(name: str) -> Optional[_WinPlatform]:
+    for plat in _Windows.platforms:
+        if plat.rx.search(name):
+            return plat
+    return None
+
+
 def _windows_identity(name: str, os_version: Optional[str], kernel: Optional[str]) -> dict:
     W = _Windows
-    is_server = bool(_SERVER_WORD_RE.search(name))
+    plat = _windows_platform(name)
+    is_server = bool(_SERVER_WORD_RE.search(name)) or bool(plat and plat.server)
     version = build = None
     for cand in (kernel, os_version):
         if not cand:
@@ -892,12 +971,17 @@ def _windows_identity(name: str, os_version: Optional[str], kernel: Optional[str
             release = os_version.upper()
         elif sp:
             release = f"SP{sp.group(1)}"
+    if release is None and plat is not None and os_version and W.client_release_rx.match(os_version):
+        release = os_version.upper()  # Azure Stack HCI names its release (23H2) in the version field
 
     em = W.edition_prefix_rx.match(name)
     edition = name[em.end():].strip() if em else None
     if edition:
         edition = _SERVICE_PACK_RE.sub("", edition).strip()
         edition = _EDITION_WORD_RE.sub("", edition).strip(" -,") or None
+    if plat is not None:
+        product = plat.product or product
+        edition = edition or plat.edition
     return {
         "os_family": "windows", "os_product": product, "os_release": release,
         "os_version": version, "os_build": build, "os_edition": edition,
@@ -917,6 +1001,7 @@ class _Distro:
     edition_rx: Optional["re.Pattern[str]"]
     release: str
     os_version_rx: Optional["re.Pattern[str]"] = None  # the entry applies only to os_versions that match
+    kernel_rx: Optional["re.Pattern[str]"] = None      # ... and only to kernel strings that match
 
 
 _DISTROS: list[_Distro] = []
@@ -943,9 +1028,10 @@ def _load_distros(pack: dict) -> None:
             release = d.get("release", "none")
             if release not in _DISTRO_RELEASE_MODES:
                 raise ValueError(f"unknown release mode {release!r}")
-            version_re, sp_re, edition_re, os_version_re = (
+            version_re, sp_re, edition_re, os_version_re, kernel_re = (
                 _text(d, "version_re", required=False), _text(d, "sp_re", required=False),
                 _text(d, "edition_re", required=False), _text(d, "os_version_re", required=False),
+                _text(d, "kernel_re", required=False),
             )
             _DISTROS.append(_Distro(
                 id=did, product=_text(d, "product"), family=family,
@@ -955,6 +1041,7 @@ def _load_distros(pack: dict) -> None:
                 edition_rx=_rx(edition_re, f"distro-{did}-edition", groups=1) if edition_re else None,
                 release=release,
                 os_version_rx=_rx(os_version_re, f"distro-{did}-os-version") if os_version_re else None,
+                kernel_rx=_rx(kernel_re, f"distro-{did}-kernel") if kernel_re else None,
             ))
             seen.add(did)
         except Exception as exc:
@@ -979,11 +1066,13 @@ def _release_of(version: Optional[str], mode: str) -> Optional[str]:
     return None
 
 
-def _distro_identity(name: str, os_version: Optional[str]) -> Optional[dict]:
+def _distro_identity(name: str, os_version: Optional[str], kernel: Optional[str] = None) -> Optional[dict]:
     for d in _DISTROS:
         if not d.match_rx.search(name):
             continue
         if d.os_version_rx is not None and not (os_version and d.os_version_rx.search(os_version)):
+            continue
+        if d.kernel_rx is not None and not (kernel and d.kernel_rx.search(kernel)):
             continue
         version: Optional[str] = None
         if d.version_rx is not None:
@@ -1013,6 +1102,28 @@ def _distro_identity(name: str, os_version: Optional[str]) -> Optional[dict]:
             "os_version": version, "os_build": None, "os_edition": None,
         }
     return None
+
+
+# A discovered or hand-entered OS name outside the tables ("Solaris 11.4", "AIX 7.2"). The product is the
+# name without its version, so one OS is one product however many releases the estate runs; the version
+# goes to os_version. Never let a string that contains a version become an os_product.
+_VERSIONED_NAME_RE = _rx(
+    r"^(?P<p>\S.{0,100}?)[\s,/_-]{1,3}v?(?P<v>\d{1,4}(?:\.\d{1,4}){1,3})\b.{0,60}$", "os-versioned-name")
+
+
+def _unrecognised_os(name: str, os_version: Optional[str]) -> dict:
+    product, version = name, None
+    m = _VERSIONED_NAME_RE.match(name)
+    if m:
+        stripped = m.group("p").strip(" ,/_-")
+        if stripped:
+            product, version = stripped, m.group("v")
+    if os_version and _DOTTED_RE.match(os_version):
+        version = os_version
+    return {
+        "os_family": "other", "os_product": product[:_CAPS["os_product"]], "os_release": None,
+        "os_version": version, "os_build": None, "os_edition": None,
+    }
 
 
 # ── Hardware ─────────────────────────────────────────────────────────
@@ -1085,6 +1196,8 @@ class _NetFamily:
     descr_rx: Optional["re.Pattern[str]"]
     release_rx: Optional["re.Pattern[str]"]
     template_keys: tuple[str, ...]
+    strict_version: bool = False                       # a string that is not shaped like a version is never kept
+    descr_model_rx: Optional["re.Pattern[str]"] = None  # hardware model read from sysDescr when none is reported
 
 
 class _Net:
@@ -1122,12 +1235,15 @@ def _load_network(pack: dict) -> None:
             if vendor is not None and vendor not in _VENDOR_BY_KEY:
                 raise ValueError(f"unknown vendor {vendor}")
             descr_re, release_re = _text(f, "descr_version_re", False), _text(f, "release_re", False)
+            model_re = _text(f, "descr_model_re", False)
             _Net.families[key] = _NetFamily(
                 key=key, vendor=vendor, product=product, scheme=scheme,
                 version_rx=_rx(_text(f, "version_re"), f"net-{key}-version"),
                 descr_rx=_rx(descr_re, f"net-{key}-descr", groups=1) if descr_re else None,
                 release_rx=_rx(release_re, f"net-{key}-release", groups=1) if release_re else None,
                 template_keys=tuple(_strings(f, "template_keys")),
+                strict_version=f.get("strict_version") is True,
+                descr_model_rx=_rx(model_re, f"net-{key}-descr-model", groups=1) if model_re else None,
             )
         except Exception as exc:
             _pack_error(PACK_OS, f"network family {key}: {exc}")
@@ -1335,14 +1451,12 @@ def _normalize_server(os_name: Any, os_version: Any, kernel_or_build: Any, archi
     kernel = _clean(kernel_or_build, 128)
     os_fields: dict = {}
     if name:
-        if _WINDOWS_WORD_RE.search(name) and _Windows.ok:
+        if _Windows.ok and (_WINDOWS_WORD_RE.search(name) or _windows_platform(name) is not None):
             os_fields = _windows_identity(name, osv, kernel)
         else:
-            os_fields = _distro_identity(name, osv) or {
-                "os_family": "other", "os_product": name[:_CAPS["os_product"]], "os_release": None,
-                "os_version": osv if osv and _DOTTED_RE.match(osv) else None, "os_build": None, "os_edition": None,
-            }
+            os_fields = _distro_identity(name, osv, kernel) or _unrecognised_os(name, osv)
     vendor_key, vendor_label = canonical_vendor(hw_manufacturer, strict=strict)
+    vendor_key, vendor_label = _refine_vendor(vendor_key, vendor_label, texts=(_clean(hw_model, _CAPS["hw_model"]),))
     model = _clean_model(vendor_key, hw_model)
     serial = _clean_serial(hw_serial)
     hw_present = bool(vendor_key or model or serial)
@@ -1420,6 +1534,7 @@ def _normalize_device(vendor: Any, model: Any, os_version: Any, firmware_version
         if ent:
             vendor_key, vendor_label = ent, _VENDOR_BY_KEY[ent]
     model_raw = _clean(model, _CAPS["hw_model"])
+    vendor_key, vendor_label = _refine_vendor(vendor_key, vendor_label, oid=oid, texts=(model_raw, descr))
 
     descr_version = None
     if descr and _Net.cisco_descr_rx is not None:
@@ -1457,7 +1572,7 @@ def _normalize_device(vendor: Any, model: Any, os_version: Any, firmware_version
             if parsed:
                 os_source = source
                 break
-            if fallback is None and _HAS_DIGIT_RE.search(raw):
+            if fallback is None and not fam_def.strict_version and _HAS_DIGIT_RE.search(raw):
                 fallback = (source, raw)
         os_fields = {"os_family": fam_def.key, "os_product": fam_def.product}
         if parsed:
@@ -1474,6 +1589,9 @@ def _normalize_device(vendor: Any, model: Any, os_version: Any, firmware_version
                 break
 
     model_clean = _clean_model(vendor_key, model_raw)
+    if model_clean is None and fam_def is not None and fam_def.descr_model_rx is not None and descr:
+        dm = fam_def.descr_model_rx.search(descr)
+        model_clean = _clean_model(vendor_key, dm.group(1)) if dm else None
     serial = _clean_serial(serial_number)
     serial_from_template = False
     if serial is None:

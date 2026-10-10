@@ -1582,6 +1582,10 @@ async def test_a_version_that_first_appears_later_is_discovery_not_a_change(pg_d
 
 # ---- rule-pack revision bumps never read as changes (contract C1)
 
+CURRENT_REV = inventory_normalize.RULEPACK_REV      # the pack the tests start from (read before any test patches it)
+BUMPED_REV = CURRENT_REV + 1                         # a later rule-pack release
+
+
 def rerender_with(monkeypatch, revision, rerender):
     """A rule-pack release: RULEPACK_REV moves and the normaliser renders some value differently."""
     real = inventory_normalize.normalize_server
@@ -1594,7 +1598,7 @@ def rerender_with(monkeypatch, revision, rerender):
 
 
 def without_revision_number(identity):
-    """Revision 2 renders a Windows version without its update revision: 10.0.20348.587 -> 10.0.20348."""
+    """The later revision renders a Windows version without its update revision: 10.0.20348.587 -> 10.0.20348."""
     version = identity.os_version
     if version and version.count(".") >= 3:
         identity = dataclasses.replace(identity, os_version=version.rsplit(".", 1)[0])
@@ -1617,11 +1621,11 @@ async def test_a_revision_bump_re_rendering_a_clean_row_writes_no_event(pg_db_mo
     await upload(db, sid, {"os": WIN_2022})
     assert identity(db, sid)["os_version"] == "10.0.20348.587"
 
-    rerender_with(monkeypatch, 2, without_revision_number)
+    rerender_with(monkeypatch, BUMPED_REV, without_revision_number)
     await upload(db, sid, {"os": WIN_2022})  # the same data, a new rule pack
 
     row = identity(db, sid)
-    assert (row["os_version"], row["norm_rev"], row["values_rev"]) == ("10.0.20348", 2, 2)
+    assert (row["os_version"], row["norm_rev"], row["values_rev"]) == ("10.0.20348", BUMPED_REV, BUMPED_REV)
     assert events(db, sid) == []
     await upload(db, sid, {"os": WIN_2022})
     assert events(db, sid) == []
@@ -1632,16 +1636,16 @@ async def test_a_revision_bump_re_rendering_a_dirty_row_writes_no_event(pg_db_mo
     db = pg_db_module
     sid = add_server(db)
     await upload(db, sid, {"os": WIN_2022})
-    rerender_with(monkeypatch, 2, without_revision_number)
+    rerender_with(monkeypatch, BUMPED_REV, without_revision_number)
     # An unrelated source column changed before the loop reached the row: it is dirty (norm_rev NULL)
     # and no longer says which revision rendered its values, but values_rev still does.
     db.execute("UPDATE servers SET cpu_model = 'Other CPU' WHERE id = $1", sid)
-    assert identity(db, sid)["norm_rev"] is None and identity(db, sid)["values_rev"] == 1
+    assert identity(db, sid)["norm_rev"] is None and identity(db, sid)["values_rev"] == CURRENT_REV
 
     await upload(db, sid, {"os": WIN_2022})
 
     row = identity(db, sid)
-    assert (row["os_version"], row["norm_rev"], row["values_rev"]) == ("10.0.20348", 2, 2)
+    assert (row["os_version"], row["norm_rev"], row["values_rev"]) == ("10.0.20348", BUMPED_REV, BUMPED_REV)
     assert events(db, sid) == []
 
 
@@ -1653,12 +1657,12 @@ async def test_a_revision_bump_re_rendering_a_never_normalised_row_writes_no_eve
     db.execute("UPDATE inventory_identity SET os_family = 'windows', os_product = 'Windows Server', "
                "os_version = '10.0.20348.587', norm_rev = NULL, values_rev = NULL "
                "WHERE asset_kind = 'server' AND asset_id = $1", sid)
-    rerender_with(monkeypatch, 2, without_revision_number)
+    rerender_with(monkeypatch, BUMPED_REV, without_revision_number)
 
     await upload(db, sid, {"os": WIN_2022})
 
     row = identity(db, sid)
-    assert (row["os_version"], row["norm_rev"], row["values_rev"]) == ("10.0.20348", 2, 2)
+    assert (row["os_version"], row["norm_rev"], row["values_rev"]) == ("10.0.20348", BUMPED_REV, BUMPED_REV)
     assert events(db, sid) == []
 
 
@@ -1668,14 +1672,14 @@ async def test_rolling_back_to_an_older_revision_writes_no_event(pg_db_module, m
     sid = add_server(db)
     await upload(db, sid, {"os": WIN_2022})
     with monkeypatch.context() as newer:
-        rerender_with(newer, 2, without_revision_number)
+        rerender_with(newer, BUMPED_REV, without_revision_number)
         await upload(db, sid, {"os": WIN_2022})
         assert identity(db, sid)["os_version"] == "10.0.20348"
 
     await upload(db, sid, {"os": WIN_2022})  # the older release is back; nothing selects the row for the loop
 
     row = identity(db, sid)
-    assert (row["os_version"], row["norm_rev"], row["values_rev"]) == ("10.0.20348.587", 1, 1)
+    assert (row["os_version"], row["norm_rev"], row["values_rev"]) == ("10.0.20348.587", CURRENT_REV, CURRENT_REV)
     assert events(db, sid) == []
 
 
@@ -1686,7 +1690,7 @@ async def test_hardware_renderings_are_covered_too(pg_db_module, monkeypatch):
     await upload(db, sid, {"os": WIN_2022})
     assert identity(db, sid)["hw_model"] == "PowerEdge R740"
 
-    rerender_with(monkeypatch, 2, lambda i: dataclasses.replace(
+    rerender_with(monkeypatch, BUMPED_REV, lambda i: dataclasses.replace(
         i, hw_model=i.hw_model.replace("PowerEdge ", ""), hw_serial=i.hw_serial.lower()))
     await upload(db, sid, {"os": WIN_2022})
 
@@ -1700,7 +1704,7 @@ async def test_a_genuine_change_after_the_bump_is_recorded_by_the_next_upload(pg
     db = pg_db_module
     sid = add_server(db)
     await upload(db, sid, {"os": WIN_2022})
-    rerender_with(monkeypatch, 2, without_revision_number)
+    rerender_with(monkeypatch, BUMPED_REV, without_revision_number)
     await upload(db, sid, {"os": WIN_2022})
     assert events(db, sid) == []
 

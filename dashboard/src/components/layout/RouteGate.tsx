@@ -3,6 +3,7 @@ import { Link, Navigate, useLocation } from 'react-router-dom'
 import { ShieldOff } from 'lucide-react'
 import { hasPermission, useAuth } from '@/stores/auth'
 import { NAV_GROUPS, trailForLocation } from './navigation'
+import { deniedPageName } from './deniedWording'
 import { firstAllowedPath, gatePermissions, trailAllows } from './navAccess'
 
 /**
@@ -30,7 +31,7 @@ export function RouteGate({ children }: { children: ReactNode }) {
 
   const leaf = trail ? (trail.child ?? trail.item) : null
   const needed = leaf ? [...new Set([...gatePermissions(trail!.item), ...(trail!.child ? gatePermissions(trail!.child) : [])])] : []
-  return <NoAccess page={leaf?.label} needed={needed} landing={landing} />
+  return <NoAccess page={deniedPageName(trail)} needed={needed} landing={landing} />
 }
 
 function NoAccess({ page, needed, landing }: { page?: string; needed: string[]; landing: string | null }) {

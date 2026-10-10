@@ -238,7 +238,7 @@ export function ServerTeamDashboard() {
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
         <Card className="xl:col-span-8">
           <SectionHeader icon={<LayoutList className="h-3.5 w-3.5" />} title="Fleet Status" hint="worst first · live"
-            right={<Link to="/servers/inventory" className="text-xs text-primary hover:underline">Inventory →</Link>} />
+            right={<Link to="/servers/inventory" className="text-xs text-primary hover:underline">All servers →</Link>} />
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
@@ -254,7 +254,7 @@ export function ServerTeamDashboard() {
               </thead>
               <tbody>
                 {!fleet.rows.length && (
-                  <tr><td colSpan={7}><Empty text="No servers enrolled yet — add one from Servers → Inventory" /></td></tr>
+                  <tr><td colSpan={7}><Empty text="No servers enrolled yet — add one from Servers → All Servers" /></td></tr>
                 )}
                 {fleet.rows.map(({ s, m }) => (
                   <tr key={s.id} className="border-b border-border/50 transition hover:bg-surface2/40">

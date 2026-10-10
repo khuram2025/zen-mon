@@ -167,7 +167,7 @@ Sources: cas.docs.cisecurity.org/en/latest/source/Controls1/ and /Controls2/ · 
   - servers have `site_id`, `environment`, `owner` and `tags`;
   - `servers.device_id` links a server to its SNMP device row, which **must be used to avoid double-counting**.
 - **Scoping is tag-based only** (`users.scope_tags`, `core/scoping.py`: `visible_tags`, `jsonb_tags_visible`, `entity_visible`, `scoped_device_filter`). Out-of-scope detail endpoints return 404.
-  - **Gap found:** `/servers/{id}/software`, `/services`, `/filesystems`, `/network`, `/compliance` and `/server-baselines/*` don't check scope. This is filed as a separate fix task.
+  - **Gap found (at research time, 2026-10-07):** `/servers/{id}/software`, `/services`, `/filesystems`, `/network`, `/compliance` and `/server-baselines/*` don't check scope. This is filed as a separate fix task. Since then `/servers/{id}/software` has been closed (it answers `404` outside the caller's scope); the other routes, `GET /server-baselines/{id}/results` and `GET /agent-fleet` are still open and are tracked as a separate task outside the module (`06-RELEASE-NOTES-DRAFT.md` section 8, `02-ARCHITECTURE-DATA-MODEL-API.md` section 14).
   - Inventory endpoints must not inherit this gap.
 
 ### B.4 Compliance engines already shipped

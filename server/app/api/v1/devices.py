@@ -2,6 +2,7 @@ from uuid import UUID
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,23 +133,53 @@ async def list_devices(
     tags: str | None = Query(default=None, description="Comma-separated tag names"),
     tags_match: str = Query(default="any", pattern="^(any|all)$"),
     managed_by: UUID | None = Query(default=None, description="Only children of this controller"),
+    vendor: str | None = Query(default=None, max_length=200, description="Exact vendor, case-insensitive; 'unknown' for none"),
+    model: str | None = Query(default=None, max_length=200, description="Exact model, case-insensitive; 'unknown' for none"),
+    os_version: str | None = Query(default=None, max_length=200,
+                                   description="Exact displayed OS version (os_version_display), case-insensitive; 'unknown' for none"),
+    facets: bool = Query(default=False, description="Also return vendor, model and os_version menus with counts over ALL devices"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """The devices the caller may see, 50 per page (at most 200), ordered by hostname.
+
+    Identity filters ``vendor``, ``model`` and ``os_version`` (Inventory & Compliance). They are exact, case-insensitive,
+    trimmed (``%`` and ``_`` are literal), narrow what the tag scope already allows and are ignored when blank.
+    ``unknown`` (any case) means the device has NO value (NULL, blank or the text "unknown"), the meaning the Inventory API
+    gives ``vendor=unknown``, ``model=unknown`` and ``os_version=unknown``; a bare blank value is "not set" and filters
+    nothing. ``vendor`` and ``model`` are the device's own columns (``vendor``/``model`` of each item). ``os_version``
+    matches ``os_version_display`` of each item: the normalised version of the Inventory identity where it has one ("7.2.5"),
+    else the device's own ``os_version``; the item's legacy ``os_version`` is unchanged.
+
+    ``facets=true`` adds ``facets``: ``{vendor, model, os_version}``, each ``{items: [{value, label, count}], distinct}`` over
+    ALL the devices the caller may see, not the page. Each facet counts over every active filter except its own, so a
+    ``count`` is the ``meta.total`` this list gives when its ``value`` is passed as that filter (``unknown`` for "Unknown").
+    Without the flag nothing is computed.
+    """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    visible = await scoping.visible_tags(db, user)
     devices, total = await device_service.get_devices(
         db, status, group_id, device_type, location, search, skip, limit,
         tags=tag_list, tags_match=tags_match, managed_by=managed_by,
-        visible_tags=await scoping.visible_tags(db, user),
+        visible_tags=visible,
+        vendor=vendor, model=model, os_version=os_version,
     )
     profile_names = await _profile_name_map(db)
     parent_names, child_counts = await _managed_maps(db, devices)
-    return {
-        "data": [_device_to_response(d, profile_names, parent_names, child_counts) for d in devices],
-        "meta": {"total": total, "skip": skip, "limit": limit},
-    }
+    os_display = await device_service.get_os_version_display(db, devices)
+    data = []
+    for d in devices:
+        item = jsonable_encoder(_device_to_response(d, profile_names, parent_names, child_counts))
+        item["os_version_display"] = os_display.get(d.id)
+        data.append(item)
+    out: dict = {"data": data, "meta": {"total": total, "skip": skip, "limit": limit}}
+    if facets:
+        out["facets"] = await device_service.get_device_facets(
+            db, status, group_id, device_type, location, search, tag_list, tags_match, managed_by, visible,
+            vendor, model, os_version)
+    return out
 
 
 @router.get("/summary", response_model=DeviceSummary)

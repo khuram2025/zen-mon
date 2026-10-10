@@ -1,0 +1,218 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-os-tree.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-os-tree.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Operating systems and firmware", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_operating_systems' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Operating systems and firmware",
+  "description": "How the ZenPlus Inventory Operating Systems page lists server operating systems and network firmware as a family, release and version tree, how versions are compared, and what build currency means.",
+  "datePublished": "2026-10-09",
+  "dateModified": "2026-10-09",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_inventory_operating_systems' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus Inventory", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Operating systems and firmware</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Operating systems and firmware</h1>
+        <p class="lede">Which operating systems and firmware releases run on your servers and network devices, how many of
+        each, and how many are on the newest version you have. This article explains the tree, how a version is worked
+        out, and what <em>build currency</em> does and does not tell you.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~6 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#the-page">What the page shows</a></li>
+            <li><a href="#where-from">Where the version comes from</a></li>
+            <li><a href="#comparing">How versions are compared</a></li>
+            <li><a href="#currency">Build currency</a></li>
+            <li><a href="#unknown">Unknown operating systems</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="the-page">
+            <h2><span class="num">01</span> What the page shows <a class="kb-anchor" href="#the-page">#</a></h2>
+
+            <p><strong>Inventory &amp; Compliance &rarr; Operating Systems</strong> has a switch at the top: <strong>All</strong>,
+            <strong>Servers</strong> or <strong>Network</strong>. The choice is kept in the address (<code>?kind=server</code>
+            or <code>?kind=device</code>).</p>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-os-tree.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus Inventory Operating Systems page with a tree of operating system families, releases and versions with asset counts and share bars, a donut of families and a build currency panel per release">
+                <figcaption><strong>Operating systems and firmware.</strong> The tree on the left, a family donut and build
+                currency per release on the right. The data shown is example data.</figcaption>
+            </figure>
+
+            <div class="kb-deflist">
+                <div><dt>The tree</dt><dd>Family, then product, then release, then version. Windows Server 2022 is a
+                    release of the product <em>Windows Server</em> in the family <em>Windows</em>; FortiOS 7.2 is a release
+                    of <em>FortiOS</em>. Each row has a count, a share bar and the number of distinct versions below it,
+                    and the newest version seen. Use <em>Expand all</em> and <em>Collapse all</em>, and click the column
+                    headings to sort. Where a firmware version was normalised from a longer string, a <em>Reported as</em>
+                    column shows the original text, for example
+                    <code>v7.2.8,build1639,240614 (GA.M)</code>.</dd></div>
+                <div><dt>Every count is a link</dt><dd>Click a family, release or version count and the Assets list opens
+                    with those filters. Its total equals the number you clicked, including the <em>Unknown</em> rows.</dd></div>
+                <div><dt>Family donut</dt><dd>Shares by family, with the five largest families coloured, the remaining families folded
+                    into one grey slice, <em>Other (N families)</em>, and a hatched <em>Unknown</em> slice. The grey slice
+                    covers several families, so it has no single filter and stays on this page; the legend beside the donut
+                    still lists every family as a link of its own. A <em>View as table</em> toggle shows the same
+                    numbers as text.</dd></div>
+                <div><dt>Build currency</dt><dd>One entry per release, described below.</dd></div>
+            </div>
+
+            <p>The <em>Export</em> button (with the <code>inventory.export</code> permission) downloads the tree as a CSV,
+            one row per version. See <a href="{% url 'core:kb_zenplus_inventory_export' %}">CSV export</a>.</p>
+        </section>
+
+        <section id="where-from">
+            <h2><span class="num">02</span> Where the version comes from <a class="kb-anchor" href="#where-from">#</a></h2>
+
+            <p>ZenPlus stores the raw text every collector reports and never overwrites it. Inventory then <em>normalises</em>
+            that text into a family, product, release, version, build and edition, using rule packs that ship with
+            ZenPlus. Because the raw evidence is kept, an improved rule re-reads old data without losing anything, and
+            changing the rules never creates change history.</p>
+
+            <h3>Servers</h3>
+            <p>The Windows agent reports the operating-system name, version and build. A name such as
+            <em>Microsoft Windows Server 2022 Datacenter</em> with version <code>10.0.20348.2700</code> becomes family
+            <em>Windows</em>, product <em>Windows Server</em>, release <em>2022</em>, version
+            <code>10.0.20348.2700</code>, edition <em>Datacenter</em>.</p>
+
+            <h3>Network devices</h3>
+            <p>Network firmware is harder, because every vendor writes it differently. For each device the best available
+            source wins, most exact first:</p>
+            <ol>
+                <li>a fresh <strong>vendor template</strong> value (FortiGate, Palo Alto and F5 report the exact version
+                    this way);</li>
+                <li>the <strong>device profile</strong>: the version extracted from the device&rsquo;s description text by
+                    its matching profile;</li>
+                <li>the <strong>chassis firmware</strong> published through ENTITY-MIB;</li>
+                <li>a version found in the device&rsquo;s own description text;</li>
+                <li>last, an <strong>old template value</strong> (older than 24 hours), used only so that a device that was
+                    unreachable for a day does not lose its firmware.</li>
+            </ol>
+            <p>The asset flyout shows which source won, as a badge beside the version.</p>
+        </section>
+
+        <section id="comparing">
+            <h2><span class="num">03</span> How versions are compared <a class="kb-anchor" href="#comparing">#</a></h2>
+
+            <p>Two spellings of the same version are one version: <code>7.2</code> and <code>7.2.0</code> are counted
+            together (trailing <code>.0</code> parts are ignored), product and release names are matched without regard
+            to case, and the label shown is the longer or most common spelling. A click on a version count therefore
+            opens a list of exactly that many machines.</p>
+
+            <p>&ldquo;Newer&rdquo; is decided with the version rules of each product family, not by comparing text:
+            <code>10.0.20348.587</code> is older than <code>10.0.20348.2700</code>, <code>17.9.4</code> is older than
+            <code>17.9.4a</code>, and <code>11.1.2-h3</code> is older than <code>11.1.2-h10</code>. Windows builds,
+            FortiOS, PAN-OS (with hotfixes), Junos, IOS and IOS XE each have their own rules.</p>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    ZenPlus refuses to guess
+                </div>
+                <p>Two versions from different release trains of classic Cisco IOS cannot be ordered reliably. When a
+                release contains versions that cannot be compared, Inventory shows them in natural order without a
+                &ldquo;newest&rdquo; verdict, and the build currency of that release reads <em>No usable version</em>,
+                rather than showing a wrong ranking.</p>
+            </div>
+        </section>
+
+        <section id="currency">
+            <h2><span class="num">04</span> Build currency <a class="kb-anchor" href="#currency">#</a></h2>
+
+            <p>For each release, the <em>Build currency</em> panel splits its machines into four groups:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Group</th><th>Meaning</th><th>A link?</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Latest observed</strong></td><td>On the newest version found on your own machines of that release</td><td>Yes, to those machines</td></tr>
+                        <tr><td><strong>N-1</strong></td><td>On the version just before it</td><td>Yes</td></tr>
+                        <tr><td><strong>Older</strong></td><td>On a version two or more places behind the newest observed (the third newest version or any earlier one)</td><td>Text; several versions have no single filter</td></tr>
+                        <tr><td><strong>No usable version</strong></td><td>No version reported, or one that cannot be ordered</td><td>Text</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The four groups add up to the number of machines on that release. Their bars use different shades and are
+            labelled with words and counts, so they do not depend on colour.</p>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    &ldquo;Latest observed&rdquo; is not the vendor&rsquo;s latest release
+                </div>
+                <p>It is the newest version found on <em>your</em> machines. If every server is on an old build, they are
+                all &ldquo;latest observed&rdquo;. This release does not compare against the vendor&rsquo;s own lifecycle
+                data, so treat build currency as a measure of how far your estate has drifted <em>from itself</em>; the
+                page says so beside the panel.</p>
+            </div>
+        </section>
+
+        <section id="unknown">
+            <h2><span class="num">05</span> Unknown operating systems <a class="kb-anchor" href="#unknown">#</a></h2>
+
+            <p>A machine whose operating system could not be identified is in the family <em>Unknown</em>, always listed
+            last and always counted, with a hatched slice in the donut. Click it to see which machines they are. Typical
+            reasons are a server that has not reported yet, a server registered without the agent, or a device whose
+            description text is not recognised by any profile. The
+            <a href="{% url 'core:kb_zenplus_inventory_troubleshooting' %}#unknown-device">Troubleshooting</a> article walks
+            through each.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_assets' %}">&larr; Assets and the asset flyout</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_software' %}">Software and versions &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import { ToastViewport } from './components/ui/Toast'
+import { resetQueryCacheOnSessionChange, useAuth } from './stores/auth'
 import './styles/globals.css'
 
 const queryClient = new QueryClient({
@@ -15,6 +16,10 @@ const queryClient = new QueryClient({
     },
   },
 })
+
+// Responses depend on who asked (Inventory is tag-scoped per caller) and query keys carry no identity: when the
+// signed-in user changes or the token goes away, nothing fetched for the previous session may be shown to the next.
+resetQueryCacheOnSessionChange(useAuth, queryClient)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

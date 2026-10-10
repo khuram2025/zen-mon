@@ -1,6 +1,6 @@
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete, text, cast, String, or_, and_
+from sqlalchemy import select, func, delete, text, cast, String, or_, and_, table, column
 from sqlalchemy.orm import selectinload
 
 from app.core import crypto, scoping
@@ -80,6 +80,90 @@ _SNMP_PLAIN_FIELDS = (
 )
 
 
+# The normalised identity of a device (Inventory & Compliance). The Devices list reads two things from it that its own
+# columns cannot give: the OS version of devices whose version only a monitoring template reports (PAN-OS, F5), and a
+# version without the vendor's decoration ("7.2.5", not "FortiOS v7.2.5,build1517").
+_IDENTITY = table("inventory_identity", column("asset_kind"), column("asset_id"), column("os_version"))
+
+UNKNOWN = "unknown"
+FACET_LIMIT = 200
+
+
+def _clean(expr):
+    """A text column as the filters and the facets read it: trimmed, and NULL when nothing is left."""
+    return func.nullif(func.btrim(expr), "")
+
+
+def os_version_display_expr():
+    """The OS version of a device as the list shows it: the normalised version where the identity table has one, else the
+    device's own ``os_version``; NULL when neither has a value. Also what the ``os_version`` filter and its facet match."""
+    normalised = (select(_IDENTITY.c.os_version)
+                  .where(_IDENTITY.c.asset_kind == "device", _IDENTITY.c.asset_id == Device.id)
+                  .scalar_subquery())
+    return func.coalesce(_clean(normalised), _clean(Device.os_version))
+
+
+def _identity_columns():
+    """``(name, expression)`` of the three identity filters: the device's own vendor and model, and the displayed OS version."""
+    return (("vendor", _clean(Device.vendor)), ("model", _clean(Device.model)), ("os_version", os_version_display_expr()))
+
+
+def _identity_condition(expr, wanted: str):
+    """One identity filter. ``unknown`` (any case) means the device has no value (NULL, blank, or the text "unknown"): the
+    same meaning the Inventory API gives ``vendor=unknown``, ``model=unknown`` and ``os_version=unknown``. Anything else is
+    an exact, case-insensitive, whitespace-trimmed match; ``%`` and ``_`` are literal characters."""
+    if wanted.lower() == UNKNOWN:
+        return or_(expr.is_(None), func.lower(expr) == UNKNOWN)
+    return func.lower(expr) == wanted.lower()
+
+
+def _device_conditions(
+    status, group_id, device_type, location, search, tags, tags_match, managed_by, visible_tags, vendor, model, os_version,
+    *, omit: str | None = None,
+) -> list:
+    """The WHERE conditions of the Devices list, as a list; ``omit`` names one identity filter to leave out (a facet counts
+    over every active filter except its own)."""
+    conds: list = []
+    if visible_tags is not None:
+        conds.append(text(scoping.jsonb_tags_visible("devices.tags")).bindparams(**{scoping.SCOPE_PARAM: visible_tags}))
+    if status:
+        conds.append(Device.status == status)
+    if managed_by:
+        conds.append(Device.managed_by_device_id == managed_by)
+    if group_id:
+        conds.append(Device.group_id == group_id)
+    if device_type:
+        conds.append(Device.device_type == device_type)
+    if location:
+        conds.append(Device.location.ilike(f"%{location}%"))
+    # Identity filters (vendor, model, os_version): see _identity_condition. An empty value means "not set", never
+    # "devices whose field is empty". The tag scope above stays in force.
+    asked = {"vendor": vendor, "model": model, "os_version": os_version}
+    for name, expr in _identity_columns():
+        wanted = (asked[name] or "").strip()
+        if wanted and name != omit:
+            conds.append(_identity_condition(expr, wanted))
+    if search:
+        conds.append(
+            Device.hostname.ilike(f"%{search}%")
+            | cast(Device.ip_address, String).ilike(f"%{search}%")
+            | cast(Device.tags, String).ilike(f"%{search}%")
+        )
+    if tags:
+        # Case-insensitive element match; jsonb_exists()/@> would miss rows
+        # written before spellings were canonicalized against the registry.
+        tag_conds = [
+            text(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements_text("
+                "COALESCE(devices.tags, '[]'::jsonb)) el "
+                f"WHERE LOWER(el) = LOWER(:tag_{i}))"
+            ).bindparams(**{f"tag_{i}": t})
+            for i, t in enumerate(tags)
+        ]
+        conds.append(and_(*tag_conds) if tags_match == "all" else or_(*tag_conds))
+    return conds
+
+
 async def get_devices(
     db: AsyncSession,
     status: str | None = None,
@@ -93,42 +177,14 @@ async def get_devices(
     tags_match: str = "any",
     managed_by: UUID | None = None,
     visible_tags: list[str] | None = None,
+    vendor: str | None = None,
+    model: str | None = None,
+    os_version: str | None = None,
 ) -> tuple[list[Device], int]:
     query = select(Device).options(selectinload(Device.group))
-
-    if visible_tags is not None:
-        query = query.where(
-            text(scoping.jsonb_tags_visible("devices.tags"))
-            .bindparams(**{scoping.SCOPE_PARAM: visible_tags})
-        )
-    if status:
-        query = query.where(Device.status == status)
-    if managed_by:
-        query = query.where(Device.managed_by_device_id == managed_by)
-    if group_id:
-        query = query.where(Device.group_id == group_id)
-    if device_type:
-        query = query.where(Device.device_type == device_type)
-    if location:
-        query = query.where(Device.location.ilike(f"%{location}%"))
-    if search:
-        query = query.where(
-            Device.hostname.ilike(f"%{search}%")
-            | cast(Device.ip_address, String).ilike(f"%{search}%")
-            | cast(Device.tags, String).ilike(f"%{search}%")
-        )
-    if tags:
-        # Case-insensitive element match; jsonb_exists()/@> would miss rows
-        # written before spellings were canonicalized against the registry.
-        conds = [
-            text(
-                "EXISTS (SELECT 1 FROM jsonb_array_elements_text("
-                "COALESCE(devices.tags, '[]'::jsonb)) el "
-                f"WHERE LOWER(el) = LOWER(:tag_{i}))"
-            ).bindparams(**{f"tag_{i}": t})
-            for i, t in enumerate(tags)
-        ]
-        query = query.where(and_(*conds) if tags_match == "all" else or_(*conds))
+    for cond in _device_conditions(status, group_id, device_type, location, search, tags, tags_match, managed_by,
+                                   visible_tags, vendor, model, os_version):
+        query = query.where(cond)
 
     # Count
     count_query = select(func.count()).select_from(query.subquery())
@@ -140,6 +196,56 @@ async def get_devices(
     devices = result.scalars().all()
 
     return devices, total
+
+
+async def get_os_version_display(db: AsyncSession, devices: list[Device]) -> dict[UUID, str | None]:
+    """``os_version_display`` of the given devices (one primary-key lookup each, for one page)."""
+    if not devices:
+        return {}
+    rows = (await db.execute(
+        select(Device.id, os_version_display_expr()).where(Device.id.in_([d.id for d in devices])))).all()
+    return {r[0]: r[1] for r in rows}
+
+
+async def get_device_facets(
+    db: AsyncSession,
+    status: str | None = None,
+    group_id: UUID | None = None,
+    device_type: str | None = None,
+    location: str | None = None,
+    search: str | None = None,
+    tags: list[str] | None = None,
+    tags_match: str = "any",
+    managed_by: UUID | None = None,
+    visible_tags: list[str] | None = None,
+    vendor: str | None = None,
+    model: str | None = None,
+    os_version: str | None = None,
+) -> dict[str, dict]:
+    """Vendor, model and OS version menus with counts over ALL the devices the caller may see, not the page: each facet
+    counts over every active filter except its own, so ``count`` is the ``meta.total`` the list gives when the value is
+    chosen. Values are grouped case-insensitively and labelled with their most common spelling (ties: byte order); devices
+    with no value are the ``unknown`` value, labelled "Unknown". ``{"items": [{value, label, count}], "distinct": n}``,
+    at most ``FACET_LIMIT`` items, most devices first (``unknown`` last among equals)."""
+    out: dict[str, dict] = {}
+    for name, expr in _identity_columns():
+        conds = _device_conditions(status, group_id, device_type, location, search, tags, tags_match, managed_by,
+                                   visible_tags, vendor, model, os_version, omit=name)
+        rows = (await db.execute(select(expr.label("v"), func.count()).where(*conds).group_by("v"))).all()
+        groups: dict[str, dict] = {}
+        for spelling, n in rows:
+            key = UNKNOWN if spelling is None or spelling.lower() == UNKNOWN else spelling.lower()
+            g = groups.setdefault(key, {"spellings": {}, "count": 0})
+            g["count"] += int(n)
+            if key != UNKNOWN:
+                g["spellings"][spelling] = g["spellings"].get(spelling, 0) + int(n)
+        items = []
+        for key, g in groups.items():
+            label = "Unknown" if key == UNKNOWN else min(g["spellings"], key=lambda sp: (-g["spellings"][sp], sp))
+            items.append({"value": UNKNOWN if key == UNKNOWN else label, "label": label, "count": g["count"]})
+        items.sort(key=lambda it: (-it["count"], it["value"] == UNKNOWN, it["label"].lower(), it["label"]))
+        out[name] = {"items": items[:FACET_LIMIT], "distinct": len(items)}
+    return out
 
 
 async def get_distinct_locations(db: AsyncSession) -> list[str]:

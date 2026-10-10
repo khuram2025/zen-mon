@@ -1,0 +1,172 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "asset": {
+    "key": "device:c8c15245-72b8-5a06-9210-3f47094d22f4",
+    "kind": "device",
+    "id": "c8c15245-72b8-5a06-9210-3f47094d22f4",
+    "name": "fg-04",
+    "ip": "10.20.0.13",
+    "asset_type": "firewall",
+    "status": "down",
+    "vendor": "Fortinet",
+    "model": "FortiGate-60F",
+    "serial": "FG60FTK20000004",
+    "os_family": "fortios",
+    "os_product": "FortiOS",
+    "os_release": "7.4",
+    "os_version": "7.4.4",
+    "os_build": "2662",
+    "os_edition": null,
+    "os_source": "template",
+    "hw_source": "device",
+    "site": "HQ / rack 4",
+    "tags": [
+      "prod",
+      "dc-east",
+      "pci",
+      "team-edge"
+    ],
+    "sources": [
+      "snmp"
+    ],
+    "last_seen": "2026-09-27T12:00:00Z",
+    "inventory_at": "2026-09-27T12:00:00Z",
+    "inventory_age_s": 950400,
+    "freshness": "stale",
+    "software_truncated": false
+  },
+  "identity": [
+    {
+      "field": "vendor",
+      "label": "Vendor",
+      "value": "Fortinet",
+      "source": "snmp",
+      "source_detail": "device",
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    },
+    {
+      "field": "model",
+      "label": "Model",
+      "value": "FortiGate-60F",
+      "source": "snmp",
+      "source_detail": "device",
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    },
+    {
+      "field": "serial",
+      "label": "Serial number",
+      "value": "FG60FTK20000004",
+      "source": "snmp",
+      "source_detail": "device",
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    },
+    {
+      "field": "os_family",
+      "label": "OS family",
+      "value": "fortios",
+      "source": "template",
+      "source_detail": "template",
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    },
+    {
+      "field": "os_product",
+      "label": "Operating system",
+      "value": "FortiOS",
+      "source": "template",
+      "source_detail": "template",
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    },
+    {
+      "field": "os_release",
+      "label": "Release",
+      "value": "7.4",
+      "source": "template",
+      "source_detail": "template",
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    },
+    {
+      "field": "os_version",
+      "label": "Version",
+      "value": "7.4.4",
+      "source": "template",
+      "source_detail": "template",
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    },
+    {
+      "field": "os_build",
+      "label": "Build",
+      "value": "2662",
+      "source": "template",
+      "source_detail": "template",
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    },
+    {
+      "field": "os_edition",
+      "label": "Edition",
+      "value": null,
+      "source": null,
+      "source_detail": null,
+      "observed_at": null,
+      "age_s": null
+    }
+  ],
+  "raw": {
+    "vendor": "Fortinet",
+    "model": "FortiGate-60F",
+    "os_version": null,
+    "firmware_version": null,
+    "serial_number": "FG60FTK20000004",
+    "sys_descr": "FortiGate-60F v7.4.4,build2662,240614 (GA.M)"
+  },
+  "server": null,
+  "device": {
+    "profile": "FortiGate",
+    "group": "Firewalls",
+    "device_type": "firewall",
+    "sys_object_id": "1.3.6.1.4.1.12356.101.1.1000",
+    "controller_managed": false,
+    "modules": [
+      {
+        "class": "chassis",
+        "class_label": "Chassis",
+        "model": "FortiGate-60F",
+        "items": [
+          {
+            "ent_index": 1,
+            "name": "Chassis",
+            "serial": "FG60FTK20000004",
+            "hw_revision": null,
+            "fw_revision": null
+          }
+        ],
+        "count": 1
+      }
+    ],
+    "modules_truncated": false,
+    "ha": {
+      "mode": "Active-Passive",
+      "role": "Primary",
+      "peer": null,
+      "sync": null,
+      "observed_at": "2026-09-27T12:00:00Z",
+      "age_s": 950400
+    }
+  },
+  "changes": {
+    "items": [],
+    "total": 0,
+    "first_change_at": null
+  },
+  "links": {
+    "server_id": null,
+    "device_id": "c8c15245-72b8-5a06-9210-3f47094d22f4"
+  }
+}

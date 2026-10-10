@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "restricted": true,
+  "enabled": true,
+  "metric": "assets",
+  "dimension": null,
+  "days": 30,
+  "window": {
+    "since": "2026-09-09",
+    "until": "2026-10-08"
+  },
+  "first_day": null,
+  "days_with_data": 0,
+  "dimensions_total": 0,
+  "truncated": false,
+  "series": []
+}

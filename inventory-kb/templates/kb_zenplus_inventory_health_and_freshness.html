@@ -1,0 +1,308 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/inventory/inventory-overview.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "Inventory", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Health and freshness", "item": "https://zentryc.com{% url 'core:kb_zenplus_inventory_health_and_freshness' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "What do the Fresh, Aging, Stale and Never badges mean in ZenPlus Inventory?",
+     "acceptedAnswer": {"@type": "Answer", "text": "They compare the time of an asset's last inventory report with a target. By default a server is Fresh if it reported within 24 hours and a network device within 2 hours; Aging means older than that but within 7 days; Stale means older than 7 days; Never means an asset that can report an inventory has not done so. An asset that cannot report an inventory by design, such as a ping-only device or a server monitored without the ZenPlus agent, shows Not reported by design and is not counted as Never. The targets can be changed in Inventory Settings."}},
+    {"@type": "Question", "name": "What is the difference between last inventory and last seen?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Last seen says the machine answered a ping or heartbeat, which is reachability. Last inventory says its data was refreshed by the agent or the SNMP poller. A server can be up while its agent has stopped sending inventory, so Inventory shows both in the badge tooltip."}},
+    {"@type": "Question", "name": "What does the endpoint-protection line on the Inventory overview count?",
+     "acceptedAnswer": {"@type": "Answer", "text": "It counts servers with a complete, processed software list. A server is covered when the list contains an antivirus, endpoint-protection or EDR product from the Endpoint protection category of the software catalog, or when the Microsoft Defender Antivirus or Defender for Endpoint service (WinDefend or Sense) is running. A server whose list is missing, cut at the agent's cap or not yet processed, or that has reported no service list (so a running built-in Defender cannot be seen), is shown as unknown, not as without protection. The line shows that such a product is installed; it does not prove that it is current or that it is working."}},
+    {"@type": "Question", "name": "Why does a click on a health item open a list with the same number?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Every count of machines in Inventory is a link to the Assets list filtered by the same rule, and the total of that list equals the number you clicked."}}
+  ]
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_inventory' %}">Inventory</a>
+        <span class="sep">/</span>
+        <span class="current">Health and freshness</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus Inventory</p>
+        <h1>Reading the health panel and freshness badges</h1>
+        <p class="lede">Two things tell you whether to trust a number in Inventory: how recently each machine reported, and
+        what is still missing. This article explains the freshness badges, the line under the tabs and the checks
+        of the <em>Inventory health</em> panel, and what to do about each.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.24.0+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-10-09</span>
+            <span class="kb-pill"><strong>Audience</strong> Operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~8 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#freshness">Freshness badges</a></li>
+            <li><a href="#meta-line">The line under the tabs</a></li>
+            <li><a href="#health-panel">The Inventory health panel</a></li>
+            <li><a href="#security-software">The endpoint-protection line</a></li>
+            <li><a href="#worklists">Using the checks as worklists</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="freshness">
+            <h2><span class="num">01</span> Freshness badges <a class="kb-anchor" href="#freshness">#</a></h2>
+
+            <p>Every asset has a freshness badge: a small pill with a word and, except for <em>Never</em> and <em>Not
+            reported by design</em>, the age of its last inventory, for example <em>Aging &middot; 6h ago</em>. The word is always written out, so the badge never
+            depends on colour alone. Badges appear in the <em>Last inventory</em> column of the Assets list and in the
+            header of the asset flyout.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Badge</th><th>Meaning</th><th>Server, by default</th><th>Network device, by default</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Fresh</strong></td><td>Inventory reported within its freshness target</td><td>Within 24 hours</td><td>Within 2 hours</td></tr>
+                        <tr><td><strong>Aging</strong></td><td>Older than the target, but not for long</td><td>24 hours to 7 days</td><td>2 hours to 7 days</td></tr>
+                        <tr><td><strong>Stale</strong></td><td>Not refreshed for a long time; treat its values as possibly out of date</td><td>Older than 7 days</td><td>Older than 7 days</td></tr>
+                        <tr><td><strong>Never</strong></td><td>The asset can report an inventory and none has been recorded</td><td>An agent server with no inventory report</td><td>A device polled over SNMP with no successful poll</td></tr>
+                        <tr><td><strong>Not reported by design</strong></td><td>The asset cannot send an inventory and never has, so it is not a gap</td><td>A server monitored over SSH, WMI, WinRM or SNMP only, or with collection off</td><td>A ping-only device, or a child device managed through a controller</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p><strong>Not reported by design</strong> assets stay in the Assets list and are counted (filter
+            <code>freshness=not_applicable</code>), but they are left out of <em>Never</em>, out of the <em>fresh</em>
+            percentage, out of the missing-OS-version, -model, -serial and -vendor checks and out of the all-clear. The
+            only way a server becomes <em>Fresh</em> in this release is the ZenPlus agent; a server monitored another
+            way keeps this badge unless it reported before, in which case it carries a normal badge.</p>
+
+            <p>An age exactly at a boundary belongs to the fresher bucket. The targets are the defaults; an administrator
+            can change them in <a href="{% url 'core:kb_zenplus_inventory_settings' %}">Inventory settings</a>, and every
+            badge, filter and count follows at once.</p>
+
+            <h3>Last inventory is not last seen</h3>
+
+            <p>Hover over a badge. The tooltip separates two times:</p>
+
+            <div class="kb-deflist">
+                <div><dt>Last inventory (data)</dt><dd>When the agent or the SNMP poller last refreshed this
+                    machine&rsquo;s identity: operating system, hardware, software list. This is what the badge is
+                    computed from.</dd></div>
+                <div><dt>Last seen (reachability)</dt><dd>When ZenPlus last heard from the machine at all, by ping,
+                    heartbeat or poll. A server whose agent still sends heartbeats but no longer sends inventory has a
+                    recent last seen and an old last inventory.</dd></div>
+            </div>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Aging servers right after an upgrade are normal
+                </div>
+                <p>The freshness time of a network device is set by its first successful SNMP poll after Inventory is
+                installed, so devices read <em>Never</em> for a few minutes. A server that already held a software list is
+                given the time of that list, so it shows its true age (<em>Stale</em> if it stopped reporting long ago).
+                An agent server that never sent a list reads <em>Never</em> until its next inventory report, up to 6 hours
+                with the default interval.</p>
+            </div>
+        </section>
+
+        <section id="meta-line">
+            <h2><span class="num">02</span> The line under the tabs <a class="kb-anchor" href="#meta-line">#</a></h2>
+
+            <p>Every Inventory screen shows one line directly under the tab strip, for example:</p>
+
+<pre><code>Inventory as of 14:05 · 94.4% fresh · 15 aging · 6 stale · 2 never reported · 8 not reported by design</code></pre>
+
+            <ul>
+                <li><strong>Inventory as of</strong> is the time the figures were computed. The summary is recomputed at
+                    most once a minute.</li>
+                <li><strong>% fresh</strong> is the share of the assets <em>that can report</em> that reported within their
+                    target. Assets that cannot report by design are not in the denominator. The percentage never rounds up
+                    to 100.0% unless every one of them is fresh. Click it for the list of fresh assets.</li>
+                <li><strong>aging, stale, never reported, not reported by design</strong> appear only when they are above
+                    zero. Each one is a link to the Assets list with that freshness filter, and the list total equals the
+                    number shown.</li>
+                <li>When nothing is aging, stale or missing the line says <em>every asset that can report did so within its
+                    target</em>.</li>
+                <li><strong>may be out of date</strong> with a <em>Retry</em> link appears if the last refresh failed; the
+                    figures are the last ones that loaded.</li>
+                <li>A <strong>Showing assets tagged &hellip;</strong> badge means your role or account limits you to
+                    those tags and every figure covers only the assets with them. See
+                    <a href="{% url 'core:kb_zenplus_inventory_permissions' %}">Permissions</a>.</li>
+            </ul>
+        </section>
+
+        <section id="health-panel">
+            <h2><span class="num">03</span> The Inventory health panel <a class="kb-anchor" href="#health-panel">#</a></h2>
+
+            <p>At the bottom of the Overview, <em>Inventory health</em> lists eight checks as a worklist, followed by one
+            information line for the assets that are <em>not reported by design</em>. A check with a count above zero is
+            a link: it opens the Assets list filtered to exactly the machines that fail it, and the list total is the
+            number you clicked. A check at zero is shown with a tick and is not a link. When every check is at zero the
+            panel reads <em>Inventory is complete: every asset that can report did so within its targets and nothing is
+            missing.</em> That sentence never appears while the page says it is still normalising existing software lists.</p>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/inventory/inventory-health-panel.webp' %}" width="1307" height="107" loading="lazy"
+                     alt="Inventory health panel listing counts of assets missing an OS version, network devices missing a model or serial number, network devices with an unknown vendor, stale and never-reported assets, servers with a truncated software list and servers without endpoint protection">
+                <figcaption><strong>Inventory health.</strong> Each line is a link to the machines behind the number. The
+                data shown is example data.</figcaption>
+            </figure>
+
+            <div class="kb-table-wrap scroll">
+                <table class="kb-table">
+                    <thead><tr><th>Check</th><th>Counts</th><th>Usual cause</th><th>What to do</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Assets missing an OS version</strong></td><td>Servers and network devices</td>
+                            <td>A server has not yet sent its operating system, or a device&rsquo;s version could not be read or recognised</td>
+                            <td>For a server, check its agent is installed and reporting. For a device, check the SNMP credential and that the device is polled</td></tr>
+                        <tr><td><strong>Network devices missing a model</strong></td><td>Network devices only</td>
+                            <td>The device did not answer ENTITY-MIB, or its description text does not name a model</td>
+                            <td>Make sure the SNMP view includes ENTITY-MIB (<code>1.3.6.1.2.1.47</code>)</td></tr>
+                        <tr><td><strong>Network devices missing a serial number</strong></td><td>Network devices only</td>
+                            <td>The device does not expose a serial number over SNMP, or ENTITY-MIB is not answered</td>
+                            <td>As above; some platforms never publish one</td></tr>
+                        <tr><td><strong>Network devices with an unknown vendor</strong></td><td>Network devices only</td>
+                            <td>The device&rsquo;s vendor identifier (sysObjectID) is not one ZenPlus recognises yet</td>
+                            <td>No device profile matches it yet. Note the sysObjectID shown in the asset flyout and send it to Zentryc support so a profile can be added</td></tr>
+                        <tr><td><strong>Assets with stale inventory</strong></td><td>Servers and network devices</td>
+                            <td>Nothing has refreshed the asset for more than the stale limit (7 days by default)</td>
+                            <td>The agent is stopped or the device no longer answers SNMP; the asset flyout shows both times</td></tr>
+                        <tr><td><strong>Assets that can report but never have</strong></td><td>Servers and network devices</td>
+                            <td>An agent server that never delivered an inventory report, or a device polled over SNMP that never answered</td>
+                            <td>Install or repair the agent, or fix SNMP reachability. Assets that cannot report by design are not in this check</td></tr>
+                        <tr><td><strong>Servers with a truncated software list</strong></td><td>Servers only</td>
+                            <td>The agent sends at most 1,000 titles, sorted by name, and dropped the rest</td>
+                            <td>Nothing to fix; the titles beyond the cap are not counted anywhere in Inventory</td></tr>
+                        <tr><td><strong>Servers without endpoint protection</strong></td><td>Servers with a complete, processed software list and a service list</td>
+                            <td>No antivirus, endpoint-protection or EDR product is in the list and no Defender service is running. See the next section</td>
+                            <td>Check the server really has protection, then look at its software in the flyout</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    Why the model, serial and vendor checks ignore servers
+                </div>
+                <p>The Windows agent in this release does not report a manufacturer, model or serial number for a server.
+                Counting every server as &ldquo;missing a model&rdquo; would only be noise, so these three checks cover
+                network devices only. Servers show their CPU, memory and disks instead.</p>
+            </div>
+        </section>
+
+        <section id="security-software">
+            <h2><span class="num">04</span> The endpoint-protection line <a class="kb-anchor" href="#security-software">#</a></h2>
+
+            <p>Under the <em>Software titles</em> figure on the Overview, and on the Assets page as the filter
+            <em>Endpoint protection</em>, Inventory shows how many servers have endpoint protection, for example
+            <em>Endpoint protection on 39 of 52 servers with a complete software list (75.0%) &middot; 13 without</em>,
+            and on its own line <em>3 servers unknown: no complete software or service list to judge</em>. The covered
+            number, the gap and the unknown line each open their own list of servers, and the three add up to every
+            server.</p>
+
+            <ul>
+                <li>A server counts as <strong>covered</strong> when its software list contains an antivirus,
+                    endpoint-protection-platform or EDR engine or sensor (the catalog category
+                    <strong>Endpoint protection</strong>: for example CrowdStrike Falcon, SentinelOne, Sophos, ESET,
+                    Trend Micro, Symantec, McAfee, Bitdefender, Kaspersky, Cortex XDR, Carbon Black, Malwarebytes,
+                    Cylance, Webroot, Avast and AVG), <em>or</em> when the Microsoft Defender Antivirus
+                    (<code>WinDefend</code>) or Defender for Endpoint (<code>Sense</code>) service is running on it.
+                    Built-in Defender has no entry in the list of installed programs, which is why the running service
+                    counts.</li>
+                <li>A server counts as <strong>without</strong> only when its software list is complete (not cut at the
+                    1,000-title cap) and processed, <em>and</em> the server has reported a service list, and the two show no
+                    such product and no running Defender service. A server that already shows such a product counts as
+                    covered even when its list was cut: the cap only prevents the verdict <em>without</em>.</li>
+                <li>Every other server is <strong>unknown</strong>. It is in neither number and has its own line; the
+                    Assets list filters it with the chip <em>Endpoint protection</em> set to <em>Unknown (no complete software or
+                    service list)</em>, and the asset flyout names the reason, one of four:
+                    <ul>
+                        <li><em>No software list has been reported for this server</em>: a new agent, a server monitored without
+                            the agent, a server whose agent does not send software (Linux servers today), or software rows that
+                            Inventory never processes (rows with no source on a server that is not a Windows machine).</li>
+                        <li><em>The software list was cut off, so protection cannot be judged</em>: the agent stopped at its
+                            1,000-title cap, and the product could be among the titles beyond it.</li>
+                        <li><em>The software list is still being processed</em>: right after an upgrade this lasts the minutes the
+                            existing lists need (see
+                            <a href="{% url 'core:kb_zenplus_inventory_getting_started' %}#first-days">the first days</a>).</li>
+                        <li><em>Built-in Windows Defender can only be seen through the service list, and this server has not
+                            reported one</em>: the list is complete and shows no protection product, but no service list exists at
+                            all (for example an agent set up for application monitoring only), so a running built-in Defender
+                            cannot be ruled out. It resolves when the agent reports its services.</li>
+                    </ul>
+                    Only the third reason passes by itself. The others stay until the agent reports what is missing, and the
+                    screen does not promise that it will.</li>
+                <li>The number after <em>of</em> is covered plus without: the servers the question can be answered for.</li>
+            </ul>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    It shows that protection is installed, not that it works
+                </div>
+                <p>The line cannot tell whether a product is current, licensed, healthy or switched to a passive mode, and a
+                protection product that the software catalog does not know is not counted until it is added to the catalog.
+                Other security tooling is deliberately <strong>not</strong> counted: VPN and zero-trust clients,
+                vulnerability-scanner agents, password managers, Sysmon, Wazuh and management agents are listed under
+                <em>Security</em>, VPN clients such as FortiClient and Cisco Secure Client under <em>Remote access</em>, and
+                the ZenPlus Agent under <em>Monitoring</em>; none of them counts. Open a server in the flyout to see which
+                products and services made it count.</p>
+            </div>
+        </section>
+
+        <section id="worklists">
+            <h2><span class="num">05</span> Using the checks as worklists <a class="kb-anchor" href="#worklists">#</a></h2>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Start with Never and Stale</h4>
+                    <p>Machines that are not reporting make every other figure less trustworthy. Open
+                    <em>assets that can report but never have</em> and <em>assets with stale inventory</em> first.</p></div></div>
+                <div class="step"><div><h4>Then close the identity gaps</h4>
+                    <p>Missing OS version, model, serial number and vendor are usually one SNMP or agent problem per
+                    device. The flyout shows the source and age of each value and, under <em>Raw evidence</em>, the raw
+                    text the device reported.</p></div></div>
+                <div class="step"><div><h4>Export the list</h4>
+                    <p>With the <code>inventory.export</code> permission, the Export button on the Assets page downloads
+                    exactly the filtered list. See <a href="{% url 'core:kb_zenplus_inventory_export' %}">CSV export</a>.</p></div></div>
+            </div>
+
+            <p>Still unsure why a value is blank? See
+            <a href="{% url 'core:kb_zenplus_inventory_troubleshooting' %}">Troubleshooting</a>.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_inventory_changes' %}">&larr; Changes</a></span>
+        <span><a href="{% url 'core:kb_zenplus_inventory_settings' %}">Inventory settings &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

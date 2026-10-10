@@ -1,0 +1,566 @@
+{
+  "generated_at": "2026-10-08T12:00:00Z",
+  "scope": {
+    "restricted": true,
+    "tags": [
+      "team-edge"
+    ]
+  },
+  "items": [
+    {
+      "product_key": "crowdstrike-falcon-sensor",
+      "name": "CrowdStrike Falcon Sensor",
+      "publisher": "CrowdStrike",
+      "publisher_key": "crowdstrike",
+      "category": "endpoint-protection",
+      "norm_status": "normalized",
+      "hosts": 5,
+      "installs": 5,
+      "version_count": 2,
+      "latest_version": "7.15.18513",
+      "distribution": {
+        "top": [
+          {
+            "version": "7.15.18513",
+            "hosts": 4,
+            "scheme": "semverish",
+            "rank": 1
+          },
+          {
+            "version": "7.04.17605",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 2
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-04-21T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "microsoft-edge",
+      "name": "Microsoft Edge",
+      "publisher": "Microsoft",
+      "publisher_key": "microsoft",
+      "category": "browser",
+      "norm_status": "normalized",
+      "hosts": 5,
+      "installs": 5,
+      "version_count": 2,
+      "latest_version": "152.0.3250.20",
+      "distribution": {
+        "top": [
+          {
+            "version": "152.0.3250.20",
+            "hosts": 3,
+            "scheme": "semverish",
+            "rank": 1
+          },
+          {
+            "version": "151.0.3200.62",
+            "hosts": 2,
+            "scheme": "semverish",
+            "rank": 2
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-28T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "git",
+      "name": "Git",
+      "publisher": "Git",
+      "publisher_key": "git",
+      "category": "development",
+      "norm_status": "normalized",
+      "hosts": 4,
+      "installs": 4,
+      "version_count": 2,
+      "latest_version": "2.46.2",
+      "distribution": {
+        "top": [
+          {
+            "version": "2.46.2",
+            "hosts": 3,
+            "scheme": "semverish",
+            "rank": 1
+          },
+          {
+            "version": "1:2.34.1-1ubuntu1.11",
+            "hosts": 1,
+            "scheme": "dpkg",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-23T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "google-chrome",
+      "name": "Google Chrome",
+      "publisher": "Google",
+      "publisher_key": "google",
+      "category": "browser",
+      "norm_status": "normalized",
+      "hosts": 4,
+      "installs": 4,
+      "version_count": 3,
+      "latest_version": "152.0.8001.12",
+      "distribution": {
+        "top": [
+          {
+            "version": "152.0.8001.12",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          },
+          {
+            "version": "151.0.7922.110",
+            "hosts": 2,
+            "scheme": "semverish",
+            "rank": 2
+          },
+          {
+            "version": "150.0.7871.50",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 3
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-08-06T12:00:00Z",
+      "last_change": "2026-10-07T11:50:57Z"
+    },
+    {
+      "product_key": "7-zip",
+      "name": "7-Zip",
+      "publisher": "Igor Pavlov",
+      "publisher_key": "igor-pavlov",
+      "category": "productivity",
+      "norm_status": "normalized",
+      "hosts": 3,
+      "installs": 3,
+      "version_count": 3,
+      "latest_version": "24.05",
+      "distribution": {
+        "top": [
+          {
+            "version": "24.05",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          },
+          {
+            "version": "23.01",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 2
+          },
+          {
+            "version": "22.01",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 3
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-26T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "putty",
+      "name": "PuTTY",
+      "publisher": "Simon Tatham",
+      "publisher_key": "simon-tatham",
+      "category": "remote-access",
+      "norm_status": "normalized",
+      "hosts": 3,
+      "installs": 3,
+      "version_count": 2,
+      "latest_version": "0.81",
+      "distribution": {
+        "top": [
+          {
+            "version": "0.81",
+            "hosts": 2,
+            "scheme": "semverish",
+            "rank": 1
+          },
+          {
+            "version": "0.80",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 2
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-30T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "adobe-acrobat-reader",
+      "name": "Adobe Acrobat Reader",
+      "publisher": "Adobe",
+      "publisher_key": "adobe",
+      "category": "productivity",
+      "norm_status": "normalized",
+      "hosts": 2,
+      "installs": 2,
+      "version_count": 2,
+      "latest_version": "24.004.20220",
+      "distribution": {
+        "top": [
+          {
+            "version": "24.004.20220",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          },
+          {
+            "version": "24.002.20933",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 2
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-19T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "wireshark",
+      "name": "Wireshark",
+      "publisher": "Wireshark Foundation",
+      "publisher_key": "wireshark",
+      "category": "networking",
+      "norm_status": "normalized",
+      "hosts": 2,
+      "installs": 2,
+      "version_count": 2,
+      "latest_version": "4.4.0",
+      "distribution": {
+        "top": [
+          {
+            "version": "4.4.0",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          },
+          {
+            "version": "4.2.0",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 2
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-24T12:00:00Z",
+      "last_change": "2026-10-08T02:30:00Z"
+    },
+    {
+      "product_key": "microsoft-sql-server",
+      "name": "Microsoft SQL Server",
+      "publisher": "Microsoft",
+      "publisher_key": "microsoft",
+      "category": "database",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "15.0.4375.4",
+      "distribution": {
+        "top": [
+          {
+            "version": "15.0.4375.4",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-08-11T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "mozilla-firefox-esr",
+      "name": "Mozilla Firefox ESR",
+      "publisher": "Mozilla",
+      "publisher_key": "mozilla",
+      "category": "browser",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "140.1.0",
+      "distribution": {
+        "top": [
+          {
+            "version": "140.1.0",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-27T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "notepad-plus-plus",
+      "name": "Notepad++",
+      "publisher": "Notepad++ Team",
+      "publisher_key": "notepad-team",
+      "category": "development",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "8.7.1",
+      "distribution": {
+        "top": [
+          {
+            "version": "8.7.1",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-08-25T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "openssh-server",
+      "name": "OpenSSH Server",
+      "publisher": "Ubuntu Developers",
+      "publisher_key": "ubuntu-developers",
+      "category": "networking",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "1:8.9p1-3ubuntu0.7",
+      "distribution": {
+        "top": [
+          {
+            "version": "1:8.9p1-3ubuntu0.7",
+            "hosts": 1,
+            "scheme": "dpkg",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-23T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "splunk-universal-forwarder",
+      "name": "Splunk Universal Forwarder",
+      "publisher": "Splunk",
+      "publisher_key": "splunk",
+      "category": "monitoring",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "9.2.1",
+      "distribution": {
+        "top": [
+          {
+            "version": "9.2.1",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-08-14T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "teamviewer",
+      "name": "TeamViewer",
+      "publisher": "TeamViewer",
+      "publisher_key": "teamviewer",
+      "category": "remote-access",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "15.51.5",
+      "distribution": {
+        "top": [
+          {
+            "version": "15.51.5",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-30T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "visual-studio-code",
+      "name": "Visual Studio Code",
+      "publisher": "Microsoft",
+      "publisher_key": "microsoft",
+      "category": "development",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "1.94.2",
+      "distribution": {
+        "top": [
+          {
+            "version": "1.94.2",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-08-14T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "vlc-media-player",
+      "name": "VLC media player",
+      "publisher": "VideoLAN",
+      "publisher_key": "videolan",
+      "category": "other",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "3.0.21",
+      "distribution": {
+        "top": [
+          {
+            "version": "3.0.21",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-07-20T12:00:00Z",
+      "last_change": null
+    },
+    {
+      "product_key": "vmware-tools",
+      "name": "VMware Tools",
+      "publisher": "VMware",
+      "publisher_key": "vmware",
+      "category": "virtualization",
+      "norm_status": "normalized",
+      "hosts": 1,
+      "installs": 1,
+      "version_count": 1,
+      "latest_version": "12.3.5.22544099",
+      "distribution": {
+        "top": [
+          {
+            "version": "12.3.5.22544099",
+            "hosts": 1,
+            "scheme": "semverish",
+            "rank": 1
+          }
+        ],
+        "other": {
+          "versions": 0,
+          "hosts": 0
+        }
+      },
+      "first_seen": "2026-08-10T12:00:00Z",
+      "last_change": null
+    }
+  ],
+  "total": 17,
+  "page": 1,
+  "page_size": 50,
+  "sort": "hosts",
+  "order": "desc",
+  "hidden_products": 9,
+  "hidden_installs": 29,
+  "unmatched_titles": 0,
+  "hidden_categories": [
+    "driver",
+    "os-component",
+    "runtime",
+    "update"
+  ],
+  "data_status": {
+    "normalising": false,
+    "pending_software_rows": 0,
+    "pending_identity_rows": 0
+  }
+}

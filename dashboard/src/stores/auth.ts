@@ -62,6 +62,50 @@ export function useCanAny() {
   return (permissions: readonly string[]) => hasAnyPermission(user, permissions)
 }
 
+/** What `shouldResetQueryCache` looks at: the part of the session a cached response can depend on. */
+export type SessionIdentity = {
+  token: string | null
+  user: Pick<User, 'id' | 'permissions_revision' | 'scope_tags' | 'role_scope_tags'> | null
+}
+
+/** Two scope lists differ; a list one side has not loaded yet (the login response carries fewer fields than /auth/me) is not a difference. */
+const tagsDiffer = (a?: readonly string[], b?: readonly string[]) =>
+  a !== undefined && b !== undefined && [...a].sort().join('\u0000') !== [...b].sort().join('\u0000')
+
+/**
+ * Whether the data fetched for `prev` must not be shown to `next`. Server responses (above all the tag-scoped
+ * Inventory ones) depend on WHO asked, but a query key carries no identity, so the cache is thrown away
+ * whenever the answer to "who is signed in, and what may they see" changes (review finding FE-01):
+ * the token goes away (sign-out, an expired or rejected session), another account signs in, or the same
+ * account's access changes (a role edit that moves its permissions or tag scope).
+ */
+export function shouldResetQueryCache(prev: SessionIdentity, next: SessionIdentity): boolean {
+  if (prev.token && !next.token) return true
+  if ((prev.user?.id ?? null) !== (next.user?.id ?? null)) return true
+  if (!prev.user || !next.user) return false
+  const a = prev.user
+  const b = next.user
+  return (
+    (a.permissions_revision !== undefined && b.permissions_revision !== undefined && a.permissions_revision !== b.permissions_revision)
+    || tagsDiffer(a.scope_tags, b.scope_tags)
+    || tagsDiffer(a.role_scope_tags, b.role_scope_tags)
+  )
+}
+
+/**
+ * Empties `client` (a React Query `QueryClient`) whenever {@link shouldResetQueryCache} says the session
+ * changed. Called once from main.tsx; returns the unsubscribe function. Covers login, logout and the
+ * `zp-auth-expired` event (which logs out).
+ */
+export function resetQueryCacheOnSessionChange(
+  store: { subscribe(listener: (state: SessionIdentity, prev: SessionIdentity) => void): () => void },
+  client: { clear(): void },
+): () => void {
+  return store.subscribe((state, prev) => {
+    if (shouldResetQueryCache(prev, state)) client.clear()
+  })
+}
+
 export const useAuth = create<AuthState>()(
   persist(
     (set, get) => ({

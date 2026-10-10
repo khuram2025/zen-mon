@@ -1,4 +1,4 @@
-/** Server Inventory — searchable, filterable fleet list with live resource metrics. */
+/** All Servers — searchable, filterable fleet list with live resource metrics. */
 
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
@@ -268,11 +268,11 @@ export function ServerInventoryPage() {
               <Gauge className="h-3 w-3" /> Fleet dashboard
             </Link>
             <span>/</span>
-            <span className="text-text2">Inventory</span>
+            <span className="text-text2">All Servers</span>
           </div>
           <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
             <Server className="h-5 w-5 text-primary" />
-            Server Inventory
+            All Servers
           </h1>
           <p className="text-sm text-muted">
             {total} server{total === 1 ? '' : 's'} · search, filter, and manage your fleet

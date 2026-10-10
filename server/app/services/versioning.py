@@ -176,6 +176,10 @@ __all__ = [
     "compare",
     "highest",
     "canonicalize",
+    "equivalence_key",
+    "natural_key",
+    "EQUIVALENCE_KEY_SQL",
+    "BLANK_VERSION_SQL",
     "release_cycle",
     "scheme_for",
     "parse",
@@ -1062,6 +1066,67 @@ def canonicalize(scheme: Scheme, raw: object) -> Optional[tuple[str, Optional[st
     """
     p = _impl(scheme).parse(raw)
     return None if p is None else (p.text, p.build)
+
+
+# The one definition of "the same version, spelled differently" that counts and filters share. Two spellings are
+# one version when they differ only by case, surrounding blanks and trailing ``.0`` parts (``7.2`` and ``7.2.0``,
+# ``14.38.33135`` and ``14.38.33135.0``, ``V1`` and ``v1``). It is deliberately text-only and scheme-free, so
+# PostgreSQL can evaluate exactly the same function (``EQUIVALENCE_KEY_SQL``) in a filter or a GROUP BY: a number on
+# a page and the list behind it can then never disagree about which spellings are one version. The comparators
+# above are finer (``1.0.0-rc1`` equals ``1.0-rc1`` there) and order the groups; they never decide the grouping.
+#
+# The trailing zero parts are only dropped from behind at least one character (``(?<=.)``): the key of a version is never
+# empty, which is what a blank (or whitespace) version has. Without it ``.0`` and ``..0`` reduced to ``''`` and a filter
+# for that spelling also matched every row that reports no version (NB-07).
+_TRAILING_ZERO_PARTS = re.compile(r"(?<=.)(?:\.0+)+$", re.DOTALL)
+_KEY_BLANKS = " \t\n\r\x0c\x0b"           # the characters the SQL key trims too (btrim with the same set)
+EQUIVALENCE_KEY_SQL = "regexp_replace(lower(btrim({c}, E' \\t\\n\\r\\f\\x0b')), '(?<=.)(\\.0+)+$', '')"
+BLANK_VERSION_SQL = "btrim({c}, E' \\t\\n\\r\\f\\x0b') = ''"
+
+
+def equivalence_key(raw: object) -> Optional[str]:
+    """The grouping key of a version spelling (see ``EQUIVALENCE_KEY_SQL``), or None for a blank or non-text value.
+
+    ``equivalence_key('7.2.0') == equivalence_key('7.2') == '7.2'``; ``'10.0'`` -> ``'10'``; ``'1.10'`` and
+    ``'1.100'`` keep their last part (only parts made of zeros are dropped, and never the first character: ``'.0'`` stays
+    ``'.0'``, so a non-blank version never has the empty key of a blank one). The SQL twin applies
+    ``lower(btrim(x))`` first, exactly as this function does (``BLANK_VERSION_SQL`` is its test for no version).
+    """
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip(_KEY_BLANKS).lower()
+    if not s:
+        return None
+    return _TRAILING_ZERO_PARTS.sub("", s)
+
+
+_NATURAL_DIGIT_RUN = re.compile(r"[0-9]+")        # ASCII only: str.isdigit() / \d accept '²' or '٣' that int() may refuse
+
+
+def natural_key(value: object) -> tuple:
+    """A total sort key for version text: digit runs by value, other text lower-cased (NB-01, NQ-04).
+
+    ``natural_key('7.2') < natural_key('7.10') < natural_key('17.9')``. It is the fallback order where a scheme
+    refuses to order two versions (``9.6p1``, ``1.2.3-1``) and the order of the Inventory lists; it is not a claim
+    about which release is newer. Unlike an ``int()`` based key it can never raise: digits are the ASCII ``0-9``
+    only (a superscript two, a fullwidth or an Arabic-Indic digit is ordinary text), and a digit run is compared by
+    its length once leading zeros are gone and then by its text, so a run of any length costs no integer conversion
+    (``int()`` refuses runs of more than 4,300 digits). Anything that is not text, and blank text, gives ``()``.
+    Every element is a 3-tuple whose first item tells a number (0) from text (1), so keys of any two values compare.
+    """
+    if not isinstance(value, str) or not value:
+        return ()
+    parts: list[tuple[int, int, str]] = []
+    position = 0
+    for match in _NATURAL_DIGIT_RUN.finditer(value):
+        if match.start() > position:
+            parts.append((1, 0, value[position:match.start()].lower()))
+        digits = match.group().lstrip("0")
+        parts.append((0, len(digits), digits))
+        position = match.end()
+    if position < len(value):
+        parts.append((1, 0, value[position:].lower()))
+    return tuple(parts)
 
 
 def release_cycle(scheme: Scheme, version: object) -> Optional[str]:

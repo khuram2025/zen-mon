@@ -240,7 +240,8 @@ def test_identity_matches_the_migration_columns():
 
 
 def test_every_software_category_is_in_the_documented_set():
-    documented = {"browser", "security", "remote-access", "database", "web-server", "runtime", "development",
+    documented = {"browser", "security", "endpoint-protection", "remote-access", "database", "web-server", "runtime",
+                  "development",
                   "productivity", "monitoring", "backup", "virtualization", "networking", "driver", "os-component",
                   "update", "other"}
     assert set(inv.CATEGORIES) == documented
@@ -492,11 +493,27 @@ def test_kb_updates_key_by_kb_number():
 # A change to _clean, _slug, the Windows or Linux code or versioning.py moves the engine digest and fails the test
 # even when no pack changed. When either fails, bump RULEPACK_REV in inventory_normalize.py and register the new
 # values (the failing assertion prints them). Never edit the entry of a revision that has shipped; a revision that
-# has not shipped yet may have its entry updated in place instead of bumping again. Revision 1 has not shipped.
+# has not shipped yet may have its entry updated in place instead of bumping again. Neither revision has shipped.
+# Revision 2 (Phase 1 fix round) adds the endpoint-protection category and moves the AV, EPP and EDR titles into
+# it, moves the ZenPlus Agent out of 'security', splits the Visual C++ redistributable per family, gives the
+# database client drivers product rules, adds the operating systems of UP-15, the HP Inc. / HPE refinement and
+# the vendor spellings of UP-16. Appliances that stored revision 1 (development databases) re-key silently.
+# Revision 3 (Phase 1 re-check) narrows two endpoint-protection rules that filed utilities as protection (Malwarebytes Support
+# Tool and Firewall Control, Check Point's VPN-only client, which gets a rule of its own in 'remote-access') and accepts three
+# spellings that read as 'no protection' (Cylance PROTECT with a space, Comodo Client - Security, F-Secure Client). Appliances that
+# stored revision 2 re-key silently.
 PACK_FINGERPRINTS = {
     1: {
         "packs": "b6561f880c5eb2f30e10c8271ffafa56c371f74abfca102f21c23b99c3e9d023",
         "engine": "d483aab25e4c39d7f293a9546764a830e82163333886b5ae837e3853d2528c42",
+    },
+    2: {
+        "packs": "2a378db5e9b896f1134b345a76e0c7177cbf92a079cd0edc28a5bdf1947551d2",
+        "engine": "749f113bf68905ba4bff8878b714334b2c1b21086d7504f17abd2715a012c92d",
+    },
+    3: {
+        "packs": "dddc1f8dfc2d398ed142ae2fb701516f31323f87282bc38aa88c4534d02bf812",
+        "engine": "03f14dd024785a00679e2b1bb2e06165d3100c39ad6f40ae77d3a32a75c04918",
     },
 }
 
@@ -1307,7 +1324,7 @@ def test_values_that_differ_only_by_invisible_characters_are_equal():
 
 def test_hp_and_hpe_are_mapped_consistently():
     by_name = {canonical_vendor(n)[0] for n in ("HP", "Hewlett-Packard", "Hewlett-Packard Company", "Hewlett Packard", "HPE")}
-    by_oid = normalize_device(sys_object_id="1.3.6.1.4.1.11.2.3.7.11.147").vendor_key  # enterprise 11: ProCurve / Aruba-Switch
+    by_oid = normalize_device(sys_object_id="1.3.6.1.4.1.11.2.3.1.11").vendor_key  # enterprise 11 outside the ProCurve and printer subtrees
     assert by_name == {by_oid} == {"hpe"}
     assert canonical_vendor("HP Inc.") == ("hp", "HP Inc.")  # only the explicit HP Inc. is HP Inc.
     assert normalize_device(sys_object_id="1.3.6.1.4.1.232.9.2").vendor_key == "hpe"

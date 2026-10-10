@@ -82,6 +82,19 @@ import { NetflowSetupPage } from '@/pages/netflow/SetupPage'
 import { NetflowSettingsPage } from '@/pages/netflow/SettingsPage'
 import { NetflowHostProfilePage } from '@/pages/netflow/HostProfilePage'
 import { NetflowAccessGate } from '@/components/netflow/NetflowAccess'
+import { InventoryAccessGate } from '@/components/inventory/InventoryAccess'
+import { InventoryLayout } from '@/pages/inventory/InventoryLayout'
+
+// The shell (layout, access gate) stays in the main bundle; the eight pages load on first visit, so a role that
+// cannot open Inventory never downloads it (review finding RG-09). InventoryLayout owns the Suspense boundary.
+const InventoryOverviewPage = lazy(() => import('@/pages/inventory/InventoryOverviewPage').then((m) => ({ default: m.InventoryOverviewPage })))
+const InventoryAssetsPage = lazy(() => import('@/pages/inventory/InventoryAssetsPage').then((m) => ({ default: m.InventoryAssetsPage })))
+const InventoryOsPage = lazy(() => import('@/pages/inventory/InventoryOsPage').then((m) => ({ default: m.InventoryOsPage })))
+const InventorySoftwarePage = lazy(() => import('@/pages/inventory/InventorySoftwarePage').then((m) => ({ default: m.InventorySoftwarePage })))
+const InventoryProductPage = lazy(() => import('@/pages/inventory/InventoryProductPage').then((m) => ({ default: m.InventoryProductPage })))
+const InventoryHardwarePage = lazy(() => import('@/pages/inventory/InventoryHardwarePage').then((m) => ({ default: m.InventoryHardwarePage })))
+const InventoryChangesPage = lazy(() => import('@/pages/inventory/InventoryChangesPage').then((m) => ({ default: m.InventoryChangesPage })))
+const InventorySettingsPage = lazy(() => import('@/pages/inventory/InventorySettingsPage').then((m) => ({ default: m.InventorySettingsPage })))
 
 const ReportLibrary = lazy(() => import('@/pages/reports/ReportLibrary'))
 const SectionReportViewer = lazy(() => import('@/pages/reports/SectionReportViewer'))
@@ -157,6 +170,19 @@ export default function App() {
         <Route path="server-agents" element={<AgentFleetPage />} />
         <Route path="agent-policies" element={<AgentPoliciesPage />} />
         <Route path="server-baselines" element={<BaselinesPage />} />
+        {/* Inventory & Compliance: one denied state without inventory.view (InventoryAccess.tsx). */}
+        <Route element={<InventoryAccessGate />}>
+          <Route path="inventory" element={<InventoryLayout />}>
+            <Route index element={<InventoryOverviewPage />} />
+            <Route path="assets" element={<InventoryAssetsPage />} />
+            <Route path="os" element={<InventoryOsPage />} />
+            <Route path="software" element={<InventorySoftwarePage />} />
+            <Route path="software/:productKey" element={<InventoryProductPage />} />
+            <Route path="hardware" element={<InventoryHardwarePage />} />
+            <Route path="changes" element={<InventoryChangesPage />} />
+            <Route path="settings" element={<InventorySettingsPage />} />
+          </Route>
+        </Route>
         <Route path="services" element={<ServicesPage />} />
         <Route path="services/groups" element={<ServiceCheckGroupsPage />} />
         <Route path="services/maintenance" element={<ServiceMaintenancePage />} />
