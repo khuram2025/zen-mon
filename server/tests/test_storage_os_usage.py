@@ -3,6 +3,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
+import pwd
+import grp
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -135,7 +139,7 @@ def test_logrotate_size_cap_uses_global_configuration_and_rolls_back_errors(tmp_
     fake.write_text(f'#!/bin/bash\n[ "$*" = "-d {global_conf}" ] || exit 99\nexit "${{TEST_ROTATE_RC:-0}}"\n')
     fake.chmod(0o755)
     env = dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}")
-    script = 'set -e\nlog() { :; }\nwarn() { :; }\n' + block.replace("/etc/", str(etc) + "/")
+    script = 'set -e\nlog() { :; }\nwarn() { :; }\n' + block.replace("/etc/", str(etc) + "/").replace("/var/tmp/", str(tmp_path) + "/")
     conf.write_text(original)
     assert subprocess.run(["bash", "-c", script], env=env).returncode == 0
     assert "maxsize 500M" in conf.read_text()
@@ -146,3 +150,37 @@ def test_logrotate_size_cap_uses_global_configuration_and_rolls_back_errors(tmp_
     assert subprocess.run(["bash", "-c", script], env=dict(env, TEST_ROTATE_RC="1")).returncode == 0
     assert conf.read_text() == original
     assert not (d / ".rsyslog.zenplus-bak").exists()
+    assert not list(tmp_path.glob("zenplus-rsyslog.*"))
+
+
+@pytest.mark.skipif(not shutil.which("logrotate"), reason="real logrotate parser unavailable")
+def test_full_logrotate_include_directory_accepts_installer_backup(tmp_path):
+    """Parse the actual edited stanza and include directory, including backups."""
+    setup = (ROOT / "scripts/setup-storage.sh").read_text()
+    start = setup.index('if [ -f /etc/logrotate.d/rsyslog ]')
+    block = setup[start:setup.index('# maxsize is only checked', start)]
+    etc = tmp_path / "etc"
+    confdir = etc / "logrotate.d"
+    confdir.mkdir(parents=True)
+    conf = confdir / "rsyslog"
+    log = tmp_path / "missing-syslog"
+    original = f"{log} {{\n    rotate 4\n    weekly\n    missingok\n}}\n"
+    conf.write_text(original)
+    user, group = pwd.getpwuid(os.getuid()).pw_name, grp.getgrgid(os.getgid()).gr_name
+    (etc / "logrotate.conf").write_text(f"su {user} {group}\ninclude {confdir}\n")
+    # Isolate state and use the current uid/gid: the test does not need sudo.
+    # A separate root fixture proves Ubuntu's real `su root adm` context.
+    real_rotate = shlex.quote(shutil.which("logrotate"))
+    state = shlex.quote(str(tmp_path / "state"))
+    script = ('set -e\nlog() { :; }\nwarn() { :; }\n'
+              + f'logrotate() {{ {real_rotate} -s {state} "$@"; }}\n'
+              + block.replace("/etc/", str(etc) + "/").replace("/var/tmp/", str(tmp_path) + "/"))
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "maxsize 500M" in conf.read_text(), "validation rejected the edit and restored the original"
+    assert not list(tmp_path.glob("zenplus-rsyslog.*"))
+    assert sorted(p.name for p in confdir.iterdir()) == ["rsyslog"]
+    # Negative control: the previously used dot-prefixed backup is included.
+    (confdir / ".rsyslog.zenplus-bak").write_text(original)
+    rejected = subprocess.run(["logrotate", "-d", "-s", str(tmp_path / "state"), str(etc / "logrotate.conf")], capture_output=True, text=True)
+    assert rejected.returncode != 0 and "duplicate log entry" in rejected.stderr
