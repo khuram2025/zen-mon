@@ -515,17 +515,18 @@ print, so their absence proves nothing. Use the on-screen message of check 3 ins
   the normalised vendor (aliases and spellings merged, so *Cisco* and *Cisco Systems* are one). The
   same estate can therefore show different counts for a vendor on the two pages; neither is wrong,
   and the list behind each number has that many rows.
-- **Tag scope on server pages outside the module (pre-existing, not changed by this release).**
-  Only `GET /servers/{id}/software` was given the tag-scope check in this release. A user who is
-  limited to tags and holds `servers.view` can still read, for servers outside their scope, the
-  other `GET /servers/{id}/…` sub-routes (network, filesystems, services, compliance, agent,
-  commands, network captures) **and two lists that hand out the ids**: `GET
-  /server-baselines/{id}/results` (server id, name, hostname and rule result for every server the
-  baseline covers; needs an enabled baseline) and `GET /agent-fleet` (server id, name, hostname,
-  agent address and version of every agent). The Inventory pages and exports are scoped and
-  reveal none of this. These routes were like this before Inventory; they are filed as a
-  separate task and are not part of this release. Until it is done, treat `servers.view` as
-  showing every server's name and address, also for a role limited to tags.
+- **Tag scope on server pages outside the module (pre-existing; the reads are now scoped).** The
+  `GET /servers/{id}/…` read routes (metrics, processes, services, filesystems, network, events,
+  software, compliance, commands, agent, network captures), `GET /agent-fleet` (list, counts,
+  search and `/{id}`) and `GET /server-baselines/{id}/results` apply the user's tag scope: a user
+  limited to tags who holds `servers.view` sees only the servers, agents and baseline results
+  within the scope, and an id outside it answers `404` exactly as an unknown id does. An agent
+  that is not linked to a server has no tags, so a user limited to tags does not see it in the
+  fleet. Not covered: the baseline list and detail still show fleet-wide counts (servers
+  evaluated, compliant, violations; no names), the capture detail routes
+  (`/servers/network-captures/{id}/flows`, `/traffic`, `/summary`) answer for a known capture id,
+  and the actions that need `servers.manage` do not check the scope. Until those are scoped,
+  treat `servers.manage` as acting on every server, also for a role limited to tags.
 - **Accessibility.** Support for forced-colors (Windows High Contrast) mode is incomplete: the
   data bars and the selected tab can lose their contrast there.
 - **Exports.** One per user and two in all **per API process**; the appliance runs two processes,
