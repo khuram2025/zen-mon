@@ -208,6 +208,25 @@ def _host_telemetry_readiness(
     return output
 
 
+async def _server_in_scope(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    """Route dependency for the read routes under ``/servers/{server_id}/``: the server must exist and be
+    inside the caller's tag scope. An unknown id and a server outside the scope (or untagged, for a scoped
+    caller) answer the same 404 as GET /servers/{id}, so an id cannot be probed for existence and its
+    inventory, agent or commands cannot be read by a user who may not see the server. Runs before the
+    handler, so a refused id never reaches the metric store.
+
+    Deliberately not a ``_zp_guard``: the module's ``servers.view`` default must still apply to the route."""
+    row = (await db.execute(
+        text("SELECT tags FROM servers WHERE id = :id"), {"id": server_id},
+    )).first()
+    if row is None or not scoping.entity_visible(row[0], await scoping.visible_tags(db, user)):
+        raise HTTPException(404, "Server not found")
+
+
 async def _server_agent_freshness_seconds(
     server_id: UUID,
     db: AsyncSession,
@@ -752,7 +771,7 @@ async def decommission_server(
 
 # ── Server detail companions ────────────────────────────────────────
 
-@router.get("/{server_id}/metrics", response_model=ServerMetricsResponse)
+@router.get("/{server_id}/metrics", response_model=ServerMetricsResponse, dependencies=[Depends(_server_in_scope)])
 async def server_metrics(
     server_id: UUID,
     metrics: str = Query("cpu_total_pct,memory_used_pct,network_rx_bps,network_tx_bps"),
@@ -808,7 +827,7 @@ async def server_metric_detail(
         raise HTTPException(503, "Metric store unavailable")
 
 
-@router.get("/{server_id}/processes")
+@router.get("/{server_id}/processes", dependencies=[Depends(_server_in_scope)])
 async def server_processes(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -871,7 +890,7 @@ async def server_processes(
     }
 
 
-@router.get("/{server_id}/processes/history", response_model=ServerMetricsResponse)
+@router.get("/{server_id}/processes/history", response_model=ServerMetricsResponse, dependencies=[Depends(_server_in_scope)])
 async def server_process_history(
     server_id: UUID,
     name: str = Query(..., min_length=1, max_length=255),
@@ -897,7 +916,7 @@ async def server_process_history(
     )
 
 
-@router.get("/{server_id}/services")
+@router.get("/{server_id}/services", dependencies=[Depends(_server_in_scope)])
 async def server_services(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -918,7 +937,7 @@ async def server_services(
     return {"items": [dict(r) for r in rows]}
 
 
-@router.get("/{server_id}/filesystems")
+@router.get("/{server_id}/filesystems", dependencies=[Depends(_server_in_scope)])
 async def server_filesystems(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -940,7 +959,7 @@ async def server_filesystems(
     return {"items": [dict(r) for r in rows]}
 
 
-@router.get("/{server_id}/network")
+@router.get("/{server_id}/network", dependencies=[Depends(_server_in_scope)])
 async def server_network(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -956,7 +975,7 @@ async def server_network(
     return {"items": [dict(r) for r in rows]}
 
 
-@router.get("/{server_id}/events")
+@router.get("/{server_id}/events", dependencies=[Depends(_server_in_scope)])
 async def server_events(
     server_id: UUID,
     limit: int = Query(200, ge=1, le=1000),
@@ -1040,7 +1059,7 @@ async def server_software(
             "truncated": int(total) > len(rows), "agent_truncated": bool(head["software_truncated"])}
 
 
-@router.get("/{server_id}/compliance")
+@router.get("/{server_id}/compliance", dependencies=[Depends(_server_in_scope)])
 async def server_compliance(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -1095,7 +1114,7 @@ async def server_evaluate_baselines(
     return {"ok": True, **summary}
 
 
-@router.get("/{server_id}/commands")
+@router.get("/{server_id}/commands", dependencies=[Depends(_server_in_scope)])
 async def server_commands(
     server_id: UUID,
     limit: int = Query(50, ge=1, le=200),
@@ -1120,7 +1139,7 @@ async def server_commands(
     return {"items": [dict(r) for r in rows]}
 
 
-@router.get("/{server_id}/agent")
+@router.get("/{server_id}/agent", dependencies=[Depends(_server_in_scope)])
 async def server_agent(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -1146,6 +1165,17 @@ async def server_agent(
     if not row:
         return None
     return _agent_response(dict(row))
+
+
+def _mask_foreign_clone_source(row: dict, scope: list[str] | None) -> dict:
+    """An agent registered as a clone names the agent it was cloned from. That source may belong to a server
+    outside the caller's tag scope: drop its id and hostname rather than hand them to a scoped caller.
+    ``clone_src_tags`` (the source's server tags, selected for this check) never leaves the handler."""
+    source_tags = row.pop("clone_src_tags", None)
+    if scope is not None and row.get("clone_of_agent_id") and not scoping.entity_visible(source_tags, scope):
+        row["clone_of_agent_id"] = None
+        row["clone_of_hostname"] = None
+    return row
 
 
 def _agent_response(row: dict) -> AgentResponse:
@@ -1393,7 +1423,7 @@ async def start_network_capture(
             "detail": "The agent starts the capture on its next command poll (within ~30s)."}
 
 
-@router.get("/{server_id}/network-captures")
+@router.get("/{server_id}/network-captures", dependencies=[Depends(_server_in_scope)])
 async def list_network_captures(
     server_id: UUID,
     limit: int = Query(20, ge=1, le=100),
@@ -2474,6 +2504,12 @@ async def list_fleet(
 
     where = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    # An agent belongs to the slice of the server it reports for. One not yet linked to a server has no tags,
+    # so (as for any untagged entity) a scoped caller never sees it; the summary below follows the same rule.
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        where.append(scoping.jsonb_tags_visible("s.tags"))
+        params[scoping.SCOPE_PARAM] = scope
     if status:
         where.append("a.status = :st"); params["st"] = status
     if platform:
@@ -2497,13 +2533,17 @@ async def list_fleet(
         params["q"] = f"%{q}%"
 
     where_sql = " AND ".join(where)
-    total = (await db.execute(text(f"SELECT COUNT(*) FROM agents a WHERE {where_sql}"), params)).first()[0]
+    total = (await db.execute(
+        text(f"SELECT COUNT(*) FROM agents a LEFT JOIN servers s ON s.id = a.server_id WHERE {where_sql}"),
+        params,
+    )).first()[0]
 
     rows = (await db.execute(
         text(f"""SELECT a.*, p.name AS policy_name, st.name AS site_name,
                         s.display_name AS server_name,
                         clone_src.id AS clone_of_agent_id,
                         clone_src.hostname AS clone_of_hostname,
+                        clone_src.server_tags AS clone_src_tags,
                         EXISTS (
                             SELECT 1 FROM agent_apm_credentials credential
                             JOIN apm_ingest_keys ingest_key
@@ -2517,9 +2557,10 @@ async def list_fleet(
                  LEFT JOIN sites st ON st.id = a.site_id
                  LEFT JOIN servers s ON s.id = a.server_id
                  LEFT JOIN LATERAL (
-                     SELECT src.id, src.hostname
+                     SELECT src.id, src.hostname, src_s.tags AS server_tags
                        FROM agent_registration_resolutions r
                        JOIN agents src ON src.id = r.source_agent_id
+                       LEFT JOIN servers src_s ON src_s.id = src.server_id
                       WHERE r.assigned_agent_id = a.id
                       ORDER BY r.approved_at DESC LIMIT 1
                  ) clone_src ON TRUE
@@ -2529,22 +2570,25 @@ async def list_fleet(
         params,
     )).mappings().all()
     summary_row = (await db.execute(text(
-        """SELECT COUNT(*) FILTER (WHERE status = 'online')   AS online,
-                  COUNT(*) FILTER (WHERE status = 'stale')    AS stale,
-                  COUNT(*) FILTER (WHERE status = 'offline')  AS offline,
-                  COUNT(*) FILTER (WHERE status = 'disabled') AS disabled,
-                  COUNT(*) FILTER (WHERE authorized_at IS NULL
-                                     AND revoked_at IS NULL)   AS pending_authorization,
-                  COUNT(*) FILTER (WHERE pending_conflict_secret_hash IS NOT NULL)
-                                                               AS registration_conflicts,
-                  COUNT(*)                                    AS total,
-                  COALESCE(SUM(queue_depth), 0)               AS queue_depth,
-                  COALESCE(SUM(spool_bytes), 0)               AS spool_bytes
-           FROM agents"""
-    ))).mappings().first()
+        f"""SELECT COUNT(*) FILTER (WHERE a.status = 'online')   AS online,
+                   COUNT(*) FILTER (WHERE a.status = 'stale')    AS stale,
+                   COUNT(*) FILTER (WHERE a.status = 'offline')  AS offline,
+                   COUNT(*) FILTER (WHERE a.status = 'disabled') AS disabled,
+                   COUNT(*) FILTER (WHERE a.authorized_at IS NULL
+                                      AND a.revoked_at IS NULL)   AS pending_authorization,
+                   COUNT(*) FILTER (WHERE a.pending_conflict_secret_hash IS NOT NULL)
+                                                                  AS registration_conflicts,
+                   COUNT(*)                                      AS total,
+                   COALESCE(SUM(a.queue_depth), 0)               AS queue_depth,
+                   COALESCE(SUM(a.spool_bytes), 0)               AS spool_bytes
+            FROM agents a
+            LEFT JOIN servers s ON s.id = a.server_id
+            WHERE {scoping.jsonb_tags_visible('s.tags') if scope is not None else 'TRUE'}"""),
+        {scoping.SCOPE_PARAM: scope} if scope is not None else {},
+    )).mappings().first()
 
     return {
-        "items": [_agent_response(dict(r)) for r in rows],
+        "items": [_agent_response(_mask_foreign_clone_source(dict(r), scope)) for r in rows],
         "total": total, "page": page, "page_size": page_size,
         "summary": dict(summary_row) if summary_row else {},
     }
@@ -2833,11 +2877,16 @@ async def get_agent(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # Scoped callers reach an agent only through a server in their scope (see list_fleet); any other id,
+    # including an agent not linked to a server, answers the same 404 as an unknown one.
+    scope = await scoping.visible_tags(db, user)
+    scope_sql = f" AND {scoping.jsonb_tags_visible('s.tags')}" if scope is not None else ""
     row = (await db.execute(
-        text("""SELECT a.*, p.name AS policy_name, st.name AS site_name,
+        text(f"""SELECT a.*, p.name AS policy_name, st.name AS site_name,
                        s.display_name AS server_name,
                         clone_src.id AS clone_of_agent_id,
                         clone_src.hostname AS clone_of_hostname,
+                        clone_src.server_tags AS clone_src_tags,
                        EXISTS (
                            SELECT 1 FROM agent_apm_credentials credential
                            JOIN apm_ingest_keys ingest_key
@@ -2851,18 +2900,19 @@ async def get_agent(
                 LEFT JOIN sites st ON st.id = a.site_id
                 LEFT JOIN servers s ON s.id = a.server_id
                  LEFT JOIN LATERAL (
-                     SELECT src.id, src.hostname
+                     SELECT src.id, src.hostname, src_s.tags AS server_tags
                        FROM agent_registration_resolutions r
                        JOIN agents src ON src.id = r.source_agent_id
+                       LEFT JOIN servers src_s ON src_s.id = src.server_id
                       WHERE r.assigned_agent_id = a.id
                       ORDER BY r.approved_at DESC LIMIT 1
                  ) clone_src ON TRUE
-                WHERE a.id = :id"""),
-        {"id": agent_id},
+                WHERE a.id = :id{scope_sql}"""),
+        {"id": agent_id} | ({scoping.SCOPE_PARAM: scope} if scope is not None else {}),
     )).mappings().first()
     if not row:
         raise HTTPException(404, "Agent not found")
-    return _agent_response(dict(row))
+    return _agent_response(_mask_foreign_clone_source(dict(row), scope))
 
 
 @fleet_router.post("/{agent_id}/authorize")
@@ -3845,6 +3895,12 @@ async def baseline_results(
     """Per-server outcomes for one baseline, violations first."""
     where = "res.baseline_id = :bid"
     params: dict[str, Any] = {"bid": baseline_id}
+    # The baseline is shared policy, but its per-server outcomes name servers: a scoped caller gets the rows
+    # of the servers they may see (none, for a baseline that only covers other teams), never the whole fleet.
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        where += " AND " + scoping.jsonb_tags_visible("s.tags")
+        params[scoping.SCOPE_PARAM] = scope
     if status:
         where += " AND res.status = :st"
         params["st"] = status
