@@ -559,3 +559,58 @@ def test_top_tables_keep_qualified_names():
 def W_top(bd):
     from app.services import storage_watchdog as W
     return W.top_tables(bd)
+
+
+# ─── Critical floor: pause until real free space returns ─────────────────────
+
+def _tiny_diagnostics(n, size_mib=0.05):
+    return [part("system", "metric_log", f"2026{10:02d}{d:02d}", size_mib / 1024, TODAY - timedelta(days=1 + d))
+            for d in range(n)]
+
+
+def test_tiny_plan_at_the_critical_floor_pauses_ingestion(env):
+    """Codex real-fixture failure: 0.17 GiB free, ~1 MB of eligible logs, >500 MB deficit."""
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = _tiny_diagnostics(3)
+    disk.used, disk.avail = int(9.83 * GIB), int(0.17 * GIB)
+    state = make().tick()
+    fs = state["filesystems"][0]
+    assert fs["state"] == "critical"
+    assert fs["planned_actions"] > 0 and fs["exhausted"] is False
+    assert fs["insufficient"] is True
+    assert state["ingest_paused"] is True and (tmp / "ingest-paused").exists()
+    assert "watchdog_insufficient" in [a["type"] for a in audit(tmp)]
+
+
+def test_pass_bounded_by_max_actions_is_insufficient_and_pauses(env):
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = _tiny_diagnostics(30, size_mib=10)          # 30 x 10 MiB, plan capped at 12
+    disk.used, disk.avail = int(98.5 * GIB), int(1.5 * GIB)
+    fs = make().tick()["filesystems"][0]
+    assert fs["planned_actions"] == P.MAX_ACTIONS_PER_PASS and fs["insufficient"] is True
+    assert (tmp / "ingest-paused").exists()
+
+
+def test_critical_pause_holds_until_real_free_space_returns(env):
+    W, make, clock, disk, ch, tmp = env
+    # Enough eligible data (need: 98.5% -> 75% = 23.5 GiB), but dropped
+    # partitions only return their space after ~10 minutes.
+    ch.partitions = [part("system", "text_log", "20261001", 30, TODAY - timedelta(days=9))]
+    disk.used, disk.avail = int(98.5 * GIB), int(1.5 * GIB)
+    dog = make()
+    state = dog.tick()
+    fs = state["filesystems"][0]
+    assert fs["insufficient"] is False and state["ingest_paused"] is True
+    clock["t"] += 30
+    assert dog.tick()["ingest_paused"] is True, "pending reclamation is not free space"
+    clock["t"] += 15 * 60                                       # partition removal lands
+    state = dog.tick()
+    assert state["filesystems"][0]["avail_bytes"] >= 5 * GIB
+    assert state["ingest_paused"] is False
+
+
+def test_non_critical_pressure_does_not_pause(env):
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = [part("system", "text_log", "20261001", 1, TODAY - timedelta(days=9))]
+    disk.used, disk.avail = int(88 * GIB), int(12 * GIB)
+    assert make().tick()["ingest_paused"] is False

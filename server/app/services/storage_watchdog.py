@@ -411,6 +411,7 @@ class Watchdog:
             pressure = P.evaluate_pressure(fs, policy, pending, rate)
             plan: list[P.Candidate] = []
             exhausted = False
+            insufficient = False
             holds_clickhouse = ch_dev is None or fs.device == ch_dev
             if pressure.need_bytes > 0 and not holds_clickhouse:
                 # Nothing ZenPlus can delete lives here (e.g. a separate root
@@ -435,6 +436,7 @@ class Watchdog:
                                     "target; the space is used by other files. Monitoring data "
                                     f"is only deleted from {P.APPLICATION_LAST_RESORT_PCT:.0f}% usage.",
                         }, now)
+                    planned_bytes = sum(c.bytes for c in plan)
                     if plan:
                         self._execute(plan, fs, pressure.reasons, now)
                     else:
@@ -445,11 +447,26 @@ class Watchdog:
                             "note": "no eligible data left to delete within policy "
                                     f"(minimum keep {policy['min_keep_days']} days)",
                         }, now)
+                    # need_bytes is already net of pending reclamation; a pass is
+                    # bounded by MAX_ACTIONS_PER_PASS. Either way, what this pass
+                    # can free may fall short of what is needed.
+                    if plan and planned_bytes < pressure.need_bytes:
+                        insufficient = True
+                        self._event_once(f"insufficient:{fs.device}", "watchdog_insufficient", {
+                            "mount": fs.mount, "usage_pct": fs.usage_pct,
+                            "need_bytes": pressure.need_bytes, "planned_bytes": planned_bytes,
+                            "actions": len(plan), "reasons": pressure.reasons,
+                            "note": "this pass cannot free enough space; more passes follow "
+                                    "while eligible data remains",
+                        }, now)
                 except Exception as exc:
                     error = f"ClickHouse: {str(exc)[:300]}"
-            # Pausing telemetry only helps the filesystem it is written to.
-            if holds_clickhouse and pressure.state == "critical" and (
-                    exhausted or error or not policy["enabled"]):
+            # Critical free space on the filesystem telemetry is written to:
+            # pause bulk ingestion now, whatever is scheduled. Dropped
+            # partitions only return their space minutes later and a plan of
+            # tiny, continuously regenerated logs cannot relieve the floor.
+            # Ingestion resumes only once real free space is back (below).
+            if holds_clickhouse and pressure.state == "critical":
                 self._set_paused(True, f"{fs.mount}: {', '.join(pressure.reasons)}", now)
             evaluations.append({
                 "mount": fs.mount, "device": fs.device, "total_bytes": fs.total_bytes,
@@ -459,7 +476,8 @@ class Watchdog:
                 "need_bytes": pressure.need_bytes,
                 "runway_hours": pressure.runway_hours,
                 "growth_bytes_per_hour": pressure.rate_bytes_per_hour,
-                "exhausted": exhausted, "planned_actions": len(plan),
+                "exhausted": exhausted, "insufficient": insufficient,
+                "planned_actions": len(plan),
                 "holds_clickhouse": holds_clickhouse,
             })
             if STATE_RANK[pressure.state] > STATE_RANK[worst]:

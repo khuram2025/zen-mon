@@ -122,6 +122,7 @@ export interface WatchdogFs {
   runway_hours: number | null
   growth_bytes_per_hour: number | null
   exhausted: boolean
+  insufficient?: boolean
 }
 
 export interface WatchdogStatus {

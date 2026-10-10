@@ -138,3 +138,12 @@ def test_watchdog_issues_ignore_a_recovered_error():
     assert L.watchdog_issues({"installed": True, "alive": True, "heartbeat": hb, "filesystems": [],
                               "last_error": None,
                               "last_recovered": {"at": hb, "error": {"message": "x"}}}) == []
+
+
+def test_insufficient_purge_is_a_critical_finding_at_the_floor():
+    hb = time.time()
+    issues = L.watchdog_issues({"installed": True, "alive": True, "heartbeat": hb, "ingest_paused": True,
+                                "filesystems": [{"mount": "/ /data", "state": "critical",
+                                                 "exhausted": False, "insufficient": True}]})
+    codes = {i["code"]: i["severity"] for i in issues}
+    assert codes == {"ingest_paused": "critical", "purge_insufficient": "critical"}
