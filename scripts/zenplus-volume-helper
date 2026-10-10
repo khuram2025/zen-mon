@@ -223,9 +223,16 @@ def volume_for_mount(mount):
     mount_row = findmnt(mount)
     if not mount_row or not mount_row.get("source", "").startswith("/dev/"):
         raise Rejected(f"{mount} is not mounted from a block device", "not_lvm")
-    source = _real(mount_row["source"])
-    lv = next((row for row in lvs()
-               if row.get("lv_path") and _real(row["lv_path"]) == source), None)
+    # findmnt reports /dev/mapper/<vg>-<lv>; LVM reports that as lv_dm_path
+    # and /dev/<vg>/<lv> as lv_path. Match either, literally or resolved.
+    source = mount_row["source"]
+    resolved = _real(source)
+
+    def backs_mount(row):
+        paths = [row.get(k) for k in ("lv_path", "lv_dm_path") if row.get(k)]
+        return source in paths or resolved in {_real(p) for p in paths}
+
+    lv = next((row for row in lvs() if backs_mount(row)), None)
     if lv is None:
         raise Rejected(f"{mount} is not on an LVM logical volume", "not_lvm")
     vg = next((row for row in vgs() if row.get("vg_name") == lv.get("vg_name")), None)

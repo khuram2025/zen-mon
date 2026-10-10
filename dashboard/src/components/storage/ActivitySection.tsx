@@ -1,11 +1,14 @@
 import { Activity, Loader2 } from 'lucide-react'
 import { cn, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import { EVENT_LABELS, eventSummary, groupEvents } from './storageMath'
+import { EVENT_LABELS, bytes, eventSummary, groupEvents } from './storageMath'
 import { useStorageEvents } from './useStorage'
 
 function tone(type: string) {
-  if (type.includes('failed')) return 'text-danger'
+  if (type.includes('failed') || type === 'watchdog_ingest_paused' || type === 'watchdog_exhausted'
+    || type === 'watchdog_error') return 'text-danger'
+  if (type === 'watchdog_purge' || type === 'watchdog_application_spared') return 'text-warning'
+  if (type === 'watchdog_reclaim' || type === 'watchdog_ingest_resumed') return 'text-success'
   if (type === 'auto_purge' || type === 'auto_purge_skipped' || type.startsWith('disk_evacuation')) return 'text-warning'
   if (type === 'disk_added' || type === 'volume_extended' || type === 'space_claimed') return 'text-success'
   return 'text-text'
@@ -46,7 +49,7 @@ export function ActivitySection() {
                       <span className="ml-1.5 rounded bg-surface2 px-1.5 py-0.5 text-[10px] tabular-nums text-text2">×{count}</span>
                     )}
                     <span className="ml-2 text-muted">
-                      {e.freed_bytes > 0 && <>freed {e.freed_human} · </>}
+                      {e.freed_bytes > 0 && e.event_type !== 'watchdog_reclaim' && <>freed {bytes(e.freed_bytes)} · </>}
                       {summary && <>{summary} · </>}
                       by {e.actor}
                     </span>

@@ -4,9 +4,10 @@ import type { Consumer, Forecast, MountInfo, Severity, StorageEvent } from './ty
 
 export const GIB = 1024 ** 3
 
+/** Binary units, labelled as such (GiB), everywhere on the Storage page. */
 export function bytes(n: number, decimals = 1): string {
   if (!n || !Number.isFinite(n) || n <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
   const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
   return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : decimals)} ${units[i]}`
 }
@@ -58,13 +59,17 @@ export function spaceSegments(mount: MountInfo, consumers: Consumer[], allMounts
   const segments: SpaceSegment[] = mine
     .filter((c) => c.bytes > 0)
     .map((c) => ({ id: c.id, label: c.label, bytes: c.bytes, hint: c.hint }))
+  // The remainder is shown, not hidden: the reconciliation gap between what
+  // the filesystem reports and what ZenPlus can attribute.
   const other = mount.used_bytes - known
   if (other > 0) {
     segments.push({
       id: 'other',
-      label: mount.roles.includes('system') ? 'Operating system, applications & other files' : 'Other files',
+      label: mount.roles.includes('system')
+        ? 'Unclassified (operating system, applications, other files)'
+        : 'Unclassified files',
       bytes: other,
-      hint: null,
+      hint: 'Used space not attributed to a known consumer (includes metadata and sampling skew)',
     })
   }
   return segments.sort((a, b) => b.bytes - a.bytes)
@@ -113,6 +118,13 @@ export const EVENT_LABELS: Record<string, string> = {
   disk_evacuation_aborted: 'Data move aborted',
   disk_removed: 'Disk removed',
   missing_disk_removed: 'Missing disk forgotten',
+  watchdog_purge: 'Low-space purge',
+  watchdog_reclaim: 'Space reclaimed',
+  watchdog_exhausted: 'Nothing left to purge',
+  watchdog_application_spared: 'Monitoring data spared',
+  watchdog_ingest_paused: 'Ingestion paused',
+  watchdog_ingest_resumed: 'Ingestion resumed',
+  watchdog_error: 'Watchdog error',
 }
 
 export function eventSummary(e: StorageEvent): string {
@@ -159,6 +171,32 @@ export function eventSummary(e: StorageEvent): string {
     case 'backup_created':
       if (d.kind) parts.push(d.kind === 'full' ? 'full' : 'configuration')
       if (d.size_bytes) parts.push(bytes(d.size_bytes))
+      break
+    case 'watchdog_purge': {
+      const actions = Array.isArray(d.actions) ? d.actions : []
+      const tables = [...new Set(actions.map((a: any) => String(a.table).replace(/^(system|zenplus)\./, '')))]
+      parts.push(`${bytes(d.scheduled_bytes)} scheduled for deletion`)
+      if (tables.length) parts.push(tables.slice(0, 3).join(', ') + (tables.length > 3 ? ` +${tables.length - 3}` : ''))
+      if (Array.isArray(d.reason) && d.reason.length) parts.push(d.reason.join('; '))
+      else if (d.reason === 'legacy_cleanup') parts.push('expired legacy diagnostic tables')
+      break
+    }
+    case 'watchdog_reclaim':
+      parts.push(`${bytes(d.scheduled_bytes)} scheduled`)
+      if (typeof d.measured_free_change_bytes === 'number') {
+        parts.push(`free space ${d.measured_free_change_bytes >= 0 ? '+' : '−'}${bytes(Math.abs(d.measured_free_change_bytes))} measured`)
+      }
+      break
+    case 'watchdog_exhausted':
+    case 'watchdog_application_spared':
+      if (d.usage_pct != null) parts.push(`at ${Number(d.usage_pct).toFixed(1)}%`)
+      if (d.note) parts.push(String(d.note))
+      break
+    case 'watchdog_ingest_paused':
+    case 'watchdog_ingest_resumed':
+    case 'watchdog_error':
+      if (d.reason) parts.push(String(d.reason))
+      if (d.message) parts.push(String(d.message))
       break
     case 'backup_failed':
     case 'restore_failed':

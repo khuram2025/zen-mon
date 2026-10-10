@@ -44,7 +44,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_ch_client
+from app.services import storage_policy, storage_watchdog
 from app.services.storage_layout import fs_usage, shares_filesystem
+from app.services.storage_policy import (  # noqa: F401  (re-exported)
+    CATEGORIES, EXCLUDED_PREFIXES, EXCLUDED_TABLES, STATE_TABLES, TABLE_CATEGORIES,
+    classify_table,
+)
 
 logger = logging.getLogger("zenplus.storage")
 
@@ -64,79 +69,12 @@ STORAGE_SWEEP_ADVISORY_LOCK = 1515074390
 SWEEP_INTERVAL_S = 300
 BACKUP_STALE_AFTER_H = 3
 
-# Above this usage the auto-purge acts even when the purgeable metrics alone
-# cannot reach the target: a full disk stops ingest, so any space helps.
-# Below it, deleting history that cannot fix the problem is pure data loss
-# (typical on single-volume appliances where other files fill the disk).
-AUTO_PURGE_CRITICAL_PCT = 95
-# A skipped auto-purge is recorded at most this often per reason.
-AUTO_PURGE_SKIP_EVENT_EVERY_H = 6
-
-# Tables that must never be touched by retention/purge: ClickHouse's own
-# bookkeeping and datasets with their own first-class retention subsystem
-# (network captures manage purge_after themselves).
-EXCLUDED_TABLES = {"schema_migrations"}
-EXCLUDED_PREFIXES = ("capture_", "network_capture")
-
-# NetFlow tables that hold state rather than a time series: flow templates and
-# NBAR application names stay valid however old their first_seen/updated_at is
-# (a template advertised once at boot is used for months), so they must never
-# get a TTL or lose partitions to a purge.
-STATE_TABLES = {"flow_templates", "flow_app_names"}
-
-# NetFlow tables kept longer by design (90-400 days) than the category their
-# name would give them (raw metrics, or 5-minute rollups): per-interface
-# capacity history for trends and forecasts, exporter delivery coverage and
-# sFlow interface counters.
-TABLE_CATEGORIES = {
-    "flow_interface_5m": "flow_history",
-    "flow_exporter_minutes": "flow_history",
-    "flow_if_counters": "flow_history",
-}
-
-CATEGORIES: dict[str, dict[str, Any]] = {
-    "raw_metrics": {
-        "label": "Raw metrics",
-        "description": "Per-poll SNMP, ping, service and host agent samples",
-        "default_days": 30, "min_days": 3,
-    },
-    "rollups_5m": {
-        "label": "5-minute rollups",
-        "description": "Aggregated 5-minute series used by most charts",
-        "default_days": 90, "min_days": 14,
-    },
-    "rollups_1h": {
-        "label": "Hourly rollups",
-        "description": "Long-range hourly series for capacity trends",
-        "default_days": 400, "min_days": 30,
-    },
-    "flows": {
-        "label": "NetFlow records",
-        "description": "Raw flow records from the NetFlow collector",
-        "default_days": 30, "min_days": 3,
-    },
-    "flow_history": {
-        "label": "NetFlow history",
-        "description": "Per-interface capacity, exporter delivery coverage and sFlow interface counters",
-        "default_days": 400, "min_days": 30,
-    },
-    "apm": {
-        "label": "APM traces",
-        "description": "Spans, exceptions and service-graph data",
-        "default_days": 30, "min_days": 3,
-    },
-    "events": {
-        "label": "Events & logs",
-        "description": "Status change history, SNMP traps and event summaries",
-        "default_days": 180, "min_days": 30,
-    },
-}
-
 DEFAULT_AUTO_PURGE = {
     "enabled": True,
     "threshold_pct": 85,
     "target_pct": 75,
     "min_keep_days": 7,
+    "min_free_gib": 5.0,
 }
 
 DEFAULT_BACKUP_SCHEDULE = {
@@ -147,27 +85,6 @@ DEFAULT_BACKUP_SCHEDULE = {
     "include_clickhouse": False,
     "keep_last": 5,
 }
-
-
-def classify_table(name: str) -> Optional[str]:
-    """Map a ClickHouse table to a retention category (None = unmanaged)."""
-    if name in EXCLUDED_TABLES or name in STATE_TABLES or name.endswith("_mv"):
-        return None
-    if any(name.startswith(p) for p in EXCLUDED_PREFIXES):
-        return None
-    if name in TABLE_CATEGORIES:
-        return TABLE_CATEGORIES[name]
-    if name.endswith("_5m"):
-        return "rollups_5m"
-    if name.endswith("_1h"):
-        return "rollups_1h"
-    if name == "flow_records" or name.startswith("host_network_flows"):
-        return "flows"
-    if name.startswith("apm_"):
-        return "apm"
-    if name.endswith(("_status_log", "_traps", "_event_log_summary", "_service_state")):
-        return "events"
-    return "raw_metrics"
 
 
 # ─── Small helpers ───────────────────────────────────────────────────────────
@@ -464,6 +381,9 @@ async def execute_purge(
                 errors.append(f"{table}: {e}")
     result = {
         "dropped_partitions": dropped,
+        # Partition bytes scheduled for deletion. ClickHouse removes dropped
+        # parts in the background (about 10 minutes); this is not yet free space.
+        "scheduled_bytes": freed,
         "freed_bytes": freed,
         "freed_human": human_size(freed),
         "delete_mutations": mutations,
@@ -476,111 +396,92 @@ async def execute_purge(
     return result
 
 
-def auto_purge_decision(usage: dict, auto: dict, reclaimable_bytes: int) -> dict:
-    """Decide whether the emergency purge should drop partitions.
+# ─── Free-space watchdog integration ─────────────────────────────────────────
+# Pressure-based purging lives in the independent watchdog service
+# (storage_watchdog), which keeps working when the API or PostgreSQL is down.
+# The API gives it the last valid policy, imports its audit trail into
+# storage_events, and runs the same tick itself (under the same lock) on
+# appliances where the service is not installed yet.
 
-    Returns {"action": "idle"|"purge"|"skip", "reason", "need_bytes"}.
-    ``need_bytes`` is how much must be freed to get back under the target.
-    """
-    pct = float(usage["usage_percent"])
-    capacity = usage["used_bytes"] + usage["free_bytes"]
-    need = max(0, int(usage["used_bytes"] - capacity * float(auto["target_pct"]) / 100))
-    if pct < float(auto["threshold_pct"]):
-        return {"action": "idle", "reason": None, "need_bytes": need}
-    if reclaimable_bytes <= 0:
-        return {"action": "skip", "reason": "nothing_purgeable", "need_bytes": need}
-    if reclaimable_bytes < need and pct < AUTO_PURGE_CRITICAL_PCT:
-        return {"action": "skip", "reason": "insufficient", "need_bytes": need}
-    return {"action": "purge", "reason": None, "need_bytes": need}
+WATCHDOG_STALE_S = 180
 
 
-async def _recent_skip_event(db: AsyncSession, reason: str) -> bool:
-    row = (
-        await db.execute(
-            text(
-                "SELECT 1 FROM storage_events WHERE event_type = 'auto_purge_skipped' "
-                "AND details->>'reason' = :r AND created_at > :since LIMIT 1"
-            ),
-            {"r": reason,
-             "since": datetime.now(timezone.utc) - timedelta(hours=AUTO_PURGE_SKIP_EVENT_EVERY_H)},
-        )
-    ).first()
-    return row is not None
+def watchdog_policy(retention: dict) -> dict:
+    auto = retention.get("auto_purge") or {}
+    return storage_policy.normalize_policy({
+        "enabled": auto.get("enabled"),
+        "threshold_pct": auto.get("threshold_pct"),
+        "target_pct": auto.get("target_pct"),
+        "min_keep_days": auto.get("min_keep_days"),
+        "min_free_gib": auto.get("min_free_gib"),
+    })
 
 
-async def emergency_auto_purge(db: AsyncSession, auto: dict) -> Optional[dict]:
-    """Drop oldest purgeable partitions until /data is back under target."""
-    usage = _mount_usage(DATA_MOUNT)
-    if usage["usage_percent"] < auto["threshold_pct"]:
-        return None
+def write_watchdog_policy(retention: dict) -> bool:
+    try:
+        os.makedirs(storage_watchdog.STATE_DIR, exist_ok=True)
+        storage_watchdog._atomic_write("policy.json", {
+            "policy": watchdog_policy(retention),
+            "written_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return True
+    except OSError:
+        logger.warning("cannot write the storage watchdog policy to %s", storage_watchdog.STATE_DIR)
+        return False
 
-    inventory = await ch_inventory()
-    tables_meta = {t["table"]: t for t in inventory}
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-        days=int(auto["min_keep_days"])
-    )
-    candidates = await asyncio.to_thread(
-        _list_purgeable_partitions_sync, list(tables_meta), cutoff
-    )
-    reclaimable = sum(p["size_bytes"] for p in candidates)
-    decision = auto_purge_decision(usage, auto, reclaimable)
-    if decision["action"] == "skip":
-        # Recorded once per window, not every sweep: a persistent condition
-        # must not flood the activity log.
-        if not await _recent_skip_event(db, decision["reason"]):
-            note = (
-                f"no metrics data is older than the {auto['min_keep_days']}-day minimum keep window"
-                if decision["reason"] == "nothing_purgeable" else
-                f"purging all {human_size(reclaimable)} of eligible metrics data cannot free the "
-                f"{human_size(decision['need_bytes'])} needed; the space is used by other files"
-            )
-            await write_storage_event(
-                db, "auto_purge_skipped", details={
-                    "reason": decision["reason"],
-                    "usage_percent": usage["usage_percent"],
-                    "reclaimable_bytes": reclaimable,
-                    "need_bytes": decision["need_bytes"],
-                    "note": note,
-                },
-            )
-        return {"freed_bytes": 0, "dropped_partitions": [], "exhausted": True,
-                "skipped": decision["reason"]}
 
-    target = float(auto["target_pct"])
-    dropped, freed = [], 0
-    for p in candidates:
-        try:
-            await asyncio.to_thread(_drop_partition_sync, p["table"], p["partition_id"])
-            dropped.append({"table": p["table"], "partition_id": p["partition_id"],
-                            "size_bytes": p["size_bytes"]})
-            freed += p["size_bytes"]
-        except Exception:
-            logger.exception("auto-purge drop failed: %s %s", p["table"], p["partition_id"])
-            continue
-        if _mount_usage(DATA_MOUNT)["usage_percent"] <= target:
-            break
+def watchdog_status() -> dict:
+    """Watchdog state for the Storage page (bulky sample series trimmed)."""
+    state = storage_watchdog._read_json("state.json")
+    if not state:
+        return {"installed": False, "alive": False}
+    age = datetime.now(timezone.utc).timestamp() - float(state.get("heartbeat") or 0)
+    trimmed = {k: v for k, v in state.items()
+               if k not in ("samples", "table_snapshots", "pending", "open_passes", "last_event_at")}
+    return {**trimmed, "installed": True, "alive": age < WATCHDOG_STALE_S,
+            "heartbeat_age_s": int(age)}
 
-    after = _mount_usage(DATA_MOUNT)
-    result = {
-        "dropped_partitions": dropped,
-        "freed_bytes": freed,
-        "usage_before_pct": usage["usage_percent"],
-        "usage_after_pct": after["usage_percent"],
-        "exhausted": after["usage_percent"] > target,
+
+def _fallback_watchdog_tick() -> Optional[dict]:
+    return storage_watchdog.run_tick_once(get_ch_client)
+
+
+async def import_watchdog_audit(db: AsyncSession, limit: int = 200) -> int:
+    """Copy new watchdog audit records into storage_events (idempotent)."""
+    records = [r for r in storage_watchdog.read_audit(limit) if r.get("id") and r.get("type")]
+    if not records:
+        return 0
+    ids = [r["id"] for r in records]
+    existing = {
+        row[0] for row in (await db.execute(
+            text("SELECT details->>'watchdog_id' FROM storage_events "
+                 "WHERE details->>'watchdog_id' = ANY(:ids)"), {"ids": ids})).all()
     }
-    await write_storage_event(db, "auto_purge", freed_bytes=freed, details=result)
-    logger.warning(
-        "auto-purge: freed %s (%d partitions), /data %s%% -> %s%%",
-        human_size(freed), len(dropped),
-        usage["usage_percent"], after["usage_percent"],
-    )
-    return result
+    added = 0
+    for r in records:
+        if r["id"] in existing:
+            continue
+        details = dict(r.get("details") or {})
+        measured = details.get("measured_free_change_bytes")
+        freed = int(measured) if r["type"] == "watchdog_reclaim" and measured and measured > 0 else 0
+        try:
+            created = datetime.fromisoformat(r["at"])
+        except (KeyError, ValueError):
+            created = datetime.now(timezone.utc)
+        await db.execute(
+            text("INSERT INTO storage_events (created_at, event_type, actor, freed_bytes, details) "
+                 "VALUES (:c, :t, 'watchdog', :f, CAST(:d AS jsonb))"),
+            {"c": created, "t": r["type"], "f": freed,
+             "d": json.dumps({**details, "watchdog_id": r["id"]}, default=str)},
+        )
+        added += 1
+    return added
 
 
 # ─── OS disk overview & cleanup ──────────────────────────────────────────────
 
 def _os_usage_extras() -> dict:
-    out = {"journal_bytes": 0, "apt_cache_bytes": 0}
+    out = {"journal_bytes": 0, "apt_cache_bytes": 0, "var_log_bytes": 0}
     try:
         r = _run_helper("os-usage", timeout=60)
         if r.returncode == 0:
@@ -599,11 +500,17 @@ async def os_overview() -> dict:
         targets = [("/", "System volume", ["system"]), (DATA_MOUNT, "Data volume", ["data"])]
     for path, label, roles in targets:
         try:
-            mounts.append({**_mount_usage(path), "label": label, "roles": roles})
+            u = _mount_usage(path)
         except OSError:
             continue
+        mounts.append({
+            **u, "label": label, "roles": roles,
+            # Blocks reserved for root: neither used nor available to the app.
+            "reserved_bytes": max(0, u["total_bytes"] - u["used_bytes"] - u["free_bytes"]),
+        })
     extras = await asyncio.to_thread(_os_usage_extras)
-    return {"mounts": mounts, "data_shares_os": shared, **extras}
+    return {"mounts": mounts, "data_shares_os": shared,
+            "sampled_at": datetime.now(timezone.utc).isoformat(), **extras}
 
 
 def _pg_data_path() -> str:
@@ -615,8 +522,59 @@ def _mount_of(path: str) -> str:
     return DATA_MOUNT if shares_filesystem(path, DATA_MOUNT) else "/"
 
 
-async def space_consumers(db: AsyncSession, ch_bytes: int, extras: dict) -> list[dict]:
-    """Known consumers per mount; the dashboard derives "other" from mount usage."""
+def _clickhouse_breakdown_sync() -> dict:
+    return storage_watchdog.ch_breakdown(get_ch_client())
+
+
+async def clickhouse_breakdown() -> dict:
+    """Application vs diagnostic, active vs inactive, detached — plus top tables.
+
+    Uses the watchdog's recent sample when fresh (it also tracks growth), and
+    queries ClickHouse directly otherwise.
+    """
+    state = storage_watchdog._read_json("state.json") or {}
+    bd = state.get("breakdown")
+    if bd and datetime.now(timezone.utc).timestamp() - float(bd.get("at") or 0) < 600:
+        return {**bd, "source": "watchdog"}
+    raw = await asyncio.to_thread(_clickhouse_breakdown_sync)
+    top = sorted(({"table": k, **v} for k, v in raw["tables"].items()),
+                 key=lambda t: -(t["active_bytes"] + t["inactive_bytes"]))[:25]
+    return {"at": datetime.now(timezone.utc).timestamp(),
+            **storage_watchdog.summarize_breakdown(raw), "top_tables": top, "growth": [],
+            "source": "live"}
+
+
+def _diagnostic_logs_sync(sizes: dict[str, int]) -> list[dict]:
+    rows = get_ch_client().query(
+        "SELECT name, engine_full FROM system.tables WHERE database = 'system' "
+        "AND engine LIKE '%MergeTree%'"
+    ).result_rows
+    out = []
+    for name, engine_full in rows:
+        kind = storage_policy.diagnostic_log(name)
+        if not kind:
+            continue
+        base, legacy = kind
+        out.append({
+            "table": name,
+            "log": base,
+            "legacy": legacy,
+            "protected": base in storage_policy.PROTECTED_DIAGNOSTIC_LOGS,
+            "retention_days": storage_policy.diagnostic_retention_days(base),
+            "ttl_active": " TTL " in f" {engine_full or ''} ",
+            "bytes": sizes.get(f"system.{name}", 0),
+        })
+    return sorted(out, key=lambda r: -r["bytes"])
+
+
+async def diagnostic_logs(breakdown: dict) -> list[dict]:
+    sizes = {t["table"]: t["active_bytes"] + t["inactive_bytes"]
+             for t in breakdown.get("top_tables") or []}
+    return await asyncio.to_thread(_diagnostic_logs_sync, sizes)
+
+
+async def space_consumers(db: AsyncSession, ch: Optional[dict], extras: dict) -> list[dict]:
+    """Known consumers per mount; the dashboard shows the rest as unclassified."""
     try:
         pg_bytes = int((await db.execute(
             text("SELECT pg_database_size(current_database())"))).scalar() or 0)
@@ -630,18 +588,29 @@ async def space_consumers(db: AsyncSession, ch_bytes: int, extras: dict) -> list
             "WHERE status = 'completed'"))).scalar() or 0)
     except Exception:
         backup_bytes = 0
+    ch = ch or {}
+    journal = int(extras.get("journal_bytes") or 0)
+    var_log = int(extras.get("var_log_bytes") or 0)
+    ch_path = f"{DATA_MOUNT}/clickhouse"
     rows = [
-        ("clickhouse", "Metrics database (ClickHouse)", ch_bytes, f"{DATA_MOUNT}/clickhouse",
+        ("clickhouse", "Monitoring data (ClickHouse)", ch.get("application_bytes", 0), ch_path,
          "Shorten retention or purge old data"),
+        ("clickhouse_diagnostic", "ClickHouse diagnostic logs", ch.get("diagnostic_bytes", 0),
+         ch_path, "Bounded by the diagnostic-log retention below"),
+        ("clickhouse_inactive", "Merged parts awaiting removal", ch.get("inactive_bytes", 0),
+         ch_path, "Removed automatically about 8 minutes after each merge"),
+        ("clickhouse_detached", "Detached parts", ch.get("detached_bytes", 0), ch_path,
+         "Left by recoveries; never removed automatically"),
         ("postgres", "Configuration database (PostgreSQL)", pg_bytes, _pg_data_path(), None),
         ("backups", "Backups", backup_bytes, f"{DATA_MOUNT}/backups", "Delete old backups"),
-        ("journal", "System journal", int(extras.get("journal_bytes") or 0), "/var/log/journal",
-         "Vacuum the journal"),
+        ("journal", "System journal", journal, "/var/log/journal", "Vacuum the journal"),
+        ("os_logs", "Other system logs (/var/log)", max(0, var_log - journal), "/var/log",
+         "Rotated by size"),
         ("apt_cache", "Package cache", int(extras.get("apt_cache_bytes") or 0), "/var/cache/apt",
          "Clear the package cache"),
     ]
     return [
-        {"id": cid, "label": label, "bytes": size, "human": human_size(size),
+        {"id": cid, "label": label, "bytes": int(size or 0), "human": human_size(int(size or 0)),
          "mount": _mount_of(path), "hint": hint}
         for cid, label, size, path, hint in rows
     ]
@@ -1163,11 +1132,16 @@ async def storage_sweep_tick(db: AsyncSession) -> None:
     )
 
     settings = await get_retention_settings(db)
-    if settings["auto_purge"].get("enabled"):
+    write_watchdog_policy(settings)
+    if not watchdog_status().get("alive"):
         try:
-            await emergency_auto_purge(db, settings["auto_purge"])
+            await asyncio.to_thread(_fallback_watchdog_tick)
         except Exception:
-            logger.exception("auto-purge failed")
+            logger.exception("in-process storage watchdog tick failed")
+    try:
+        await import_watchdog_audit(db)
+    except Exception:
+        logger.exception("importing the storage watchdog audit trail failed")
 
     try:
         schedule = await get_backup_schedule(db)

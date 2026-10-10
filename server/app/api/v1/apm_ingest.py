@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.apm import authenticate_ingest_key
 from app.core.database import get_ch_client, get_db
+from app.services import storage_backpressure
 from app.core.security import require_permission
 
 logger = logging.getLogger("zenplus.apm.ingest")
@@ -563,6 +564,7 @@ async def otlp_traces(
 ):
     global _last_received_at
     key = await authenticate_ingest_key(authorization or "", db, kind="sdk")
+    storage_backpressure.raise_if_paused("APM trace")
 
     ct = (content_type or "application/json").split(";", 1)[0].strip().lower()
     is_protobuf = ct in {"application/x-protobuf", "application/protobuf"}

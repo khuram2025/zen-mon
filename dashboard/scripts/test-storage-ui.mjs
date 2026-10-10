@@ -50,8 +50,16 @@ const grouped = m.groupEvents([noop(3, '2026-10-08T09:10:00Z'), noop(2, '2026-10
 assert.equal(grouped.length, 2)
 assert.equal(grouped[0].count, 3)
 assert.equal(grouped[0].oldest, '2026-10-08T09:00:00Z')
-assert.match(m.eventSummary(grouped[1].event), /\/dev\/sdb \(50\.0 GB\) · 50\.0 GB allocated/)
-for (const type of ['disk_added', 'volume_extended', 'space_claimed', 'disk_removed', 'auto_purge_skipped']) {
+assert.match(m.eventSummary(grouped[1].event), /\/dev\/sdb \(50\.0 GiB\) · 50\.0 GiB allocated/)
+// Watchdog passes report scheduled bytes, measured reclamation separately.
+const purge = { id: 9, created_at: '2026-10-10T10:00:00Z', event_type: 'watchdog_purge', actor: 'watchdog',
+  freed_bytes: 0, freed_human: '0 B', details: { scheduled_bytes: 3 * GIB, reason: ['usage 90.0% ≥ 85%'],
+    actions: [{ table: 'system.text_log' }, { table: 'system.text_log' }, { table: 'zenplus.flow_records' }] } }
+assert.equal(m.eventSummary(purge), '3.0 GiB scheduled for deletion · text_log, flow_records · usage 90.0% ≥ 85%')
+const reclaim = { ...purge, event_type: 'watchdog_reclaim', details: { scheduled_bytes: 3 * GIB, measured_free_change_bytes: -GIB } }
+assert.match(m.eventSummary(reclaim), /free space −1\.0 GiB measured/)
+for (const type of ['disk_added', 'volume_extended', 'space_claimed', 'disk_removed', 'auto_purge_skipped',
+  'watchdog_purge', 'watchdog_reclaim', 'watchdog_exhausted', 'watchdog_ingest_paused']) {
   assert(m.EVENT_LABELS[type], `label for ${type}`)
 }
 

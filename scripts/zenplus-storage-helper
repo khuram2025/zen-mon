@@ -98,9 +98,15 @@ case "${1:-}" in
         ;;
 
     os-usage)
-        journal=$(du -sb /var/log/journal 2>/dev/null | cut -f1)
-        aptc=$(du -sb /var/cache/apt 2>/dev/null | cut -f1)
-        echo "{\"journal_bytes\":${journal:-0},\"apt_cache_bytes\":${aptc:-0}}"
+        # Allocated bytes (what the filesystem gives back), not apparent sizes:
+        # journal files are sparse/preallocated, so `du -b` misreports them.
+        journal=$(du -s --block-size=1 /var/log/journal 2>/dev/null | cut -f1)
+        varlog=$(du -s --block-size=1 /var/log 2>/dev/null | cut -f1)
+        # Only what `apt-get clean` removes: downloaded packages and the
+        # package cache binaries, not the rest of /var/cache/apt.
+        aptc=$(du -c --block-size=1 /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial \
+               /var/cache/apt/*.bin 2>/dev/null | tail -1 | cut -f1)
+        echo "{\"journal_bytes\":${journal:-0},\"var_log_bytes\":${varlog:-0},\"apt_cache_bytes\":${aptc:-0}}"
         ;;
 
     vacuum-journal)

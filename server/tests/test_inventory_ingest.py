@@ -2310,7 +2310,9 @@ async def _ingest(db: PgDatabase, server_id, batch: AgentResultsBatch, monkeypat
         evaluated.append(str(sid))
         return await real(session, sid, commit=commit)
 
-    monkeypatch.setattr(metrics, "_insert_metric_groups", lambda *args, **kwargs: 0)
+    async def _no_clickhouse(*args, **kwargs):
+        return 0
+    monkeypatch.setattr(metrics, "_persist_metric_groups", _no_clickhouse)
     monkeypatch.setattr(baseline_service, "evaluate_server", spy)
     engine = create_async_engine(db.url, poolclass=NullPool)
     try:
@@ -2358,7 +2360,9 @@ async def test_ingest_gives_the_inventory_writer_the_agents_own_snapshot_time(mo
         seen.append((inv, collected_at))
 
     monkeypatch.setattr(metrics, "_upsert_inventory", spy)
-    monkeypatch.setattr(metrics, "_insert_metric_groups", lambda *args, **kwargs: 0)
+    async def _no_clickhouse(*args, **kwargs):
+        return 0
+    monkeypatch.setattr(metrics, "_persist_metric_groups", _no_clickhouse)
     collected, sampled = hours(2), hours(1)
     batch = _batch({"os": WIN_2022}, collected_at=collected,
                    samples=[MetricSample(kind="inventory", timestamp=sampled, data={"os": WIN_2022})])

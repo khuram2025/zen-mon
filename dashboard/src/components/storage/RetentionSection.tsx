@@ -52,6 +52,7 @@ function autoPurgeError(a: AutoPurge): string | null {
   if (!(a.target_pct >= 40 && a.target_pct <= 95)) return 'Target must be 40–95%'
   if (a.target_pct >= a.threshold_pct) return 'Target must be below the threshold'
   if (!(a.min_keep_days >= 1 && a.min_keep_days <= 365)) return 'Minimum keep must be 1–365 days'
+  if (!(a.min_free_gib >= 0.5 && a.min_free_gib <= 1024)) return 'Minimum free space must be 0.5–1024 GiB'
   return null
 }
 
@@ -134,7 +135,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
                       </div>
                       <div className="pl-5 text-[11px] text-muted">{c.description} · {c.tables.length} table{c.tables.length === 1 ? '' : 's'}</div>
                     </Td>
-                    <Td className="text-right tabular-nums">{c.size_human}</Td>
+                    <Td className="text-right tabular-nums">{bytes(c.size_bytes)}</Td>
                     <Td className="text-right tabular-nums text-text2">{c.daily_bytes ? bytes(c.daily_bytes) : '—'}</Td>
                     <Td className="text-right tabular-nums text-text2">
                       {c.unbounded
@@ -163,7 +164,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
                         <span className="font-mono text-xs">{t.table}</span>
                         <span className="ml-2 text-[10px] uppercase text-muted">{t.partition_granularity} partitions</span>
                       </Td>
-                      <Td className="text-right font-mono text-xs tabular-nums">{t.size_human}</Td>
+                      <Td className="text-right font-mono text-xs tabular-nums">{bytes(t.size_bytes)}</Td>
                       <Td className="text-right font-mono text-xs tabular-nums text-text2">{t.rows.toLocaleString()} rows</Td>
                       <Td className="text-right text-xs text-muted">
                         {t.oldest ? `since ${new Date(t.oldest).toLocaleDateString()}` : ''}
@@ -183,13 +184,15 @@ function RetentionCard({ overview }: { overview: Overview }) {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="flex items-center gap-2 text-sm font-medium">
-                <Eraser className="h-4 w-4 text-warning" /> Emergency auto-purge
+                <Eraser className="h-4 w-4 text-warning" /> Low-space protection
               </div>
               <p className="mt-0.5 max-w-2xl text-[11px] text-muted">
-                When the data volume passes the threshold, the oldest metrics are dropped (oldest partitions
-                first, never inside the minimum keep window) until usage is back under the target. If the
-                purgeable metrics cannot reach the target — space is used by other files — nothing is deleted
-                until usage reaches 95%.
+                Applied by the free-space watchdog, which keeps running when the API or database is down.
+                Above the threshold, or below the minimum free space, it frees space down to the target:
+                ClickHouse diagnostic logs first, then the least valuable monitoring data older than the
+                minimum keep window. Monitoring data is only deleted when that can reach the target, or
+                from 95% usage. When nothing more is eligible, host-agent and APM uploads pause (agents
+                keep them) instead of filling the disk.
               </p>
             </div>
             <Switch
@@ -199,11 +202,12 @@ function RetentionCard({ overview }: { overview: Overview }) {
             />
           </div>
           {effectiveAuto.enabled && (
-            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <div className="mt-3 grid gap-3 sm:grid-cols-4">
               {([
                 ['threshold_pct', 'Purge when usage above', '%', 50, 98],
                 ['target_pct', 'Purge down to', '%', 40, 95],
                 ['min_keep_days', 'Always keep at least', 'days', 1, 365],
+                ['min_free_gib', 'Also act below', 'GiB free', 0.5, 1024],
               ] as const).map(([field, label, unit, min, max]) => (
                 <label key={field} className="text-xs text-text2">
                   {label}
@@ -260,7 +264,8 @@ function PurgeCard({ overview }: { overview: Overview }) {
     onSuccess: (data: any) => {
       setConfirmOpen(false)
       setPlan(null)
-      toast.success('Purge complete', `Freed ${data.freed_human} (${data.dropped_partitions.length} partitions)`)
+      toast.success('Purge scheduled',
+        `${bytes(data.scheduled_bytes ?? data.freed_bytes)} in ${data.dropped_partitions.length} partitions; ClickHouse returns the space within about 10 minutes`)
       qc.invalidateQueries({ queryKey: STORAGE_KEY })
     },
     onError: (e: any) => { setConfirmOpen(false); toast.error('Purge failed', apiErrorMessage(e)) },
@@ -287,7 +292,7 @@ function PurgeCard({ overview }: { overview: Overview }) {
                 <SelectTrigger className="h-9"><SelectValue placeholder="Select category…" /></SelectTrigger>
                 <SelectContent>
                   {overview.categories.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>{c.label} ({c.size_human})</SelectItem>
+                    <SelectItem key={c.id} value={c.id}>{c.label} ({bytes(c.size_bytes)})</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -317,7 +322,7 @@ function PurgeCard({ overview }: { overview: Overview }) {
               <>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm">
-                    <span className="font-semibold text-warning">{plan.total_human}</span> can be reclaimed by dropping{' '}
+                    <span className="font-semibold text-warning">{bytes(plan.total_bytes)}</span> can be reclaimed by dropping{' '}
                     <span className="font-semibold">{plan.partitions.length}</span> partition{plan.partitions.length === 1 ? '' : 's'}.
                   </p>
                   <Button variant="destructive" size="sm" onClick={() => setConfirmOpen(true)}>
@@ -331,7 +336,7 @@ function PurgeCard({ overview }: { overview: Overview }) {
                         <tr key={`${p.table}-${p.partition_id}`} className="border-t border-border/40">
                           <td className="py-1 font-mono">{p.table}</td>
                           <td className="py-1 font-mono text-muted">{p.partition_id}</td>
-                          <td className="py-1 text-right tabular-nums">{p.size_human}</td>
+                          <td className="py-1 text-right tabular-nums">{bytes(p.size_bytes)}</td>
                           <td className="py-1 text-right tabular-nums text-muted">{p.rows.toLocaleString()} rows</td>
                         </tr>
                       ))}
@@ -347,7 +352,7 @@ function PurgeCard({ overview }: { overview: Overview }) {
           open={confirmOpen}
           onOpenChange={setConfirmOpen}
           title="Purge old data?"
-          description={`This permanently deletes ${plan?.total_human || ''} of ${selected?.label || ''} older than ${olderThan} days. This cannot be undone.`}
+          description={`This permanently deletes ${plan ? bytes(plan.total_bytes) : ''} of ${selected?.label || ''} older than ${olderThan} days. This cannot be undone.`}
           confirmText="Purge data"
           destructive
           loading={purge.isPending}
@@ -368,7 +373,7 @@ function OsCleanupCard({ overview }: { overview: Overview }) {
       (await api.post('/system/storage/os-cleanup', { actions, journal_max_mb: Number(journalMb) })).data,
     onSuccess: (data: any) => {
       if (data.errors?.length) toast.error('Cleanup finished with errors', data.errors.join('; '))
-      else toast.success('OS cleanup complete', `Freed ${data.freed_human} on the system disk`)
+      else toast.success('OS cleanup complete', `Freed ${bytes(data.freed_bytes)} on the system disk`)
       qc.invalidateQueries({ queryKey: STORAGE_KEY })
     },
     onError: (e: any) => toast.error('Cleanup failed', apiErrorMessage(e)),

@@ -1,0 +1,17 @@
+<!--
+  ZenPlus: default-profile settings that bound diagnostic volume (mounted
+  into users.d). Per-query processor profiles, materialized-view logs and
+  sampling-profiler stacks were written for every query, including the
+  tens of thousands of small telemetry INSERTs per hour; none are used by
+  the application. Re-enable per session for an investigation instead.
+-->
+<clickhouse>
+    <profiles>
+        <default>
+            <log_processors_profiles>0</log_processors_profiles>
+            <log_query_views>0</log_query_views>
+            <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
+            <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
+        </default>
+    </profiles>
+</clickhouse>

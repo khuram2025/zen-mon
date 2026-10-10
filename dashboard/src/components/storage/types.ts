@@ -8,6 +8,7 @@ export interface MountInfo {
   used_bytes: number
   free_bytes: number
   usage_percent: number
+  reserved_bytes: number
 }
 
 export interface Consumer {
@@ -53,6 +54,7 @@ export interface AutoPurge {
   threshold_pct: number
   target_pct: number
   min_keep_days: number
+  min_free_gib: number
 }
 
 export interface BackupSchedule {
@@ -75,12 +77,75 @@ export interface Forecast {
   unbounded_categories: string[]
 }
 
+export interface ClickHouseTable {
+  table: string
+  database: string
+  active_bytes: number
+  inactive_bytes: number
+  parts: number
+}
+
+export interface ClickHouseBreakdown {
+  at: number
+  application_bytes: number
+  diagnostic_bytes: number
+  inactive_bytes: number
+  detached_bytes: number
+  top_tables: ClickHouseTable[]
+  growth: { table: string; bytes_per_hour: number; bytes: number }[]
+  source: 'watchdog' | 'live'
+}
+
+export interface DiagnosticLog {
+  table: string
+  log: string
+  legacy: boolean
+  protected: boolean
+  retention_days: number
+  ttl_active: boolean
+  bytes: number
+}
+
+export interface WatchdogFs {
+  mount: string
+  total_bytes: number
+  used_bytes: number
+  avail_bytes: number
+  reserved_bytes: number
+  usage_pct: number
+  state: 'ok' | 'growth' | 'pressure' | 'critical'
+  reasons: string[]
+  need_bytes: number
+  runway_hours: number | null
+  growth_bytes_per_hour: number | null
+  exhausted: boolean
+}
+
+export interface WatchdogStatus {
+  installed: boolean
+  alive: boolean
+  heartbeat?: number
+  heartbeat_age_s?: number
+  state?: WatchdogFs['state']
+  filesystems?: WatchdogFs[]
+  pending_bytes?: number
+  ingest_paused?: boolean
+  last_pass?: { at: number; scheduled_bytes: number; action_count: number; errors: string[]; reason: any } | null
+  last_error?: { at: number; message: string } | null
+  history?: { t: number; fs: Record<string, [number, number]> }[]
+}
+
 export interface Overview {
   mounts: MountInfo[]
   data_shares_os: boolean
+  sampled_at: string
   journal_bytes: number
+  var_log_bytes: number
   apt_cache_bytes: number
   consumers: Consumer[]
+  clickhouse: ClickHouseBreakdown | null
+  diagnostic_logs: DiagnosticLog[]
+  watchdog: WatchdogStatus
   clickhouse_error: string | null
   forecast: Forecast
   categories: RetentionCategory[]

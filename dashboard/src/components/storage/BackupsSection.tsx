@@ -20,6 +20,7 @@ import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import type { Backup, BackupSchedule } from './types'
+import { bytes } from './storageMath'
 import { STORAGE_KEY, useOverview } from './useStorage'
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -285,7 +286,7 @@ export function BackupsSection() {
                     </Badge>
                   </Td>
                   <Td><StatusBadge status={b.status} /></Td>
-                  <Td className="text-right tabular-nums">{b.status === 'completed' ? b.size_human : '—'}</Td>
+                  <Td className="text-right tabular-nums">{b.status === 'completed' ? bytes(b.size_bytes) : '—'}</Td>
                   <Td>
                     {b.last_restore_status ? (
                       <div>
@@ -385,7 +386,7 @@ export function BackupsSection() {
           open={deleteTarget !== null}
           onOpenChange={(o) => !o && setDeleteTarget(null)}
           title="Delete backup?"
-          description={`The backup from ${deleteTarget ? new Date(deleteTarget.created_at).toLocaleString() : ''} (${deleteTarget?.size_human || ''}) will be permanently removed.`}
+          description={`The backup from ${deleteTarget ? new Date(deleteTarget.created_at).toLocaleString() : ''} (${deleteTarget ? bytes(deleteTarget.size_bytes) : ''}) will be permanently removed.`}
           confirmText="Delete"
           destructive
           loading={remove.isPending}

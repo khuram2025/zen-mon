@@ -32,11 +32,12 @@ SECTOR = 512
 
 
 def human_size(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
+    """Binary units labelled as such, matching the Storage page."""
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if abs(n) < 1024:
             return f"{n:.1f} {unit}"
         n /= 1024
-    return f"{n:.1f} PB"
+    return f"{n:.1f} PiB"
 
 
 # ─── Helper invocation ───────────────────────────────────────────────────────
@@ -175,13 +176,21 @@ def build_layout(inv: dict, usage: dict[str, Optional[dict]],
     mounts = inv.get("mounts") or {}
 
     # LV behind each managed mount.
-    lv_by_path = {_real(lv.get("lv_path", ""), resolve): lv for lv in lvs if lv.get("lv_path")}
+    # findmnt reports /dev/mapper/<vg>-<lv>; LVM reports both that (lv_dm_path)
+    # and /dev/<vg>/<lv>. Match either literally, then via the resolved node.
+    lv_by_path: dict[str, dict] = {}
+    for lv in lvs:
+        for key in ("lv_path", "lv_dm_path"):
+            if lv.get(key):
+                lv_by_path.setdefault(lv[key], lv)
+                lv_by_path.setdefault(_real(lv[key], resolve), lv)
     volumes: dict[str, dict] = {}
     for mount in ("/", DATA_MOUNT):
         row = mounts.get(mount)
         if not row:
             continue
-        lv = lv_by_path.get(_real(row.get("source", ""), resolve))
+        source = row.get("source", "")
+        lv = lv_by_path.get(source) or lv_by_path.get(_real(source, resolve))
         key = (lv or {}).get("lv_path") or row.get("source") or mount
         vol = volumes.setdefault(key, {
             "vg": (lv or {}).get("vg_name"),
@@ -530,3 +539,44 @@ def clickhouse_storage_check() -> dict[str, Any]:
                           f"(expected '{CLICKHOUSE_CONTAINER_PATH}/')")
         result["message"] = "ClickHouse storage configuration has drifted: " + "; ".join(issues)
     return result
+
+
+# ─── Watchdog findings ───────────────────────────────────────────────────────
+
+def watchdog_issues(wd: dict) -> list[dict]:
+    """Findings from the free-space watchdog state (see storage_watchdog)."""
+    issues: list[dict] = []
+
+    def add(severity, code, title, detail=None, action=None):
+        issues.append({"severity": severity, "code": code, "title": title,
+                       "detail": detail, "action": action})
+
+    if not wd.get("installed"):
+        add("warning", "watchdog_missing", "Free-space watchdog is not installed",
+            "Low-space protection only runs inside the API every 5 minutes and stops when "
+            "the API or PostgreSQL is down. Re-run the storage setup (applied on upgrade).")
+        return issues
+    if not wd.get("alive"):
+        add("warning", "watchdog_stale",
+            f"Free-space watchdog has not reported for {wd.get('heartbeat_age_s', 0) // 60} min",
+            "Check: systemctl status zenplus-storage-watchdog")
+    if wd.get("ingest_paused"):
+        add("critical", "ingest_paused", "Telemetry ingestion is paused: disk critically low",
+            "Host agent and APM uploads are held in the agents' spools until space returns. "
+            "Free space or expand storage.", "expand")
+    for fs in wd.get("filesystems") or []:
+        if fs.get("exhausted"):
+            add("critical" if fs.get("state") == "critical" else "warning", "purge_exhausted",
+                f"No more data can be purged on {fs.get('mount')} within policy",
+                "Everything eligible was already removed; the remaining space is protected "
+                "data or other files. Expand storage or shorten retention.", "expand")
+        if fs.get("state") == "growth" and fs.get("runway_hours") is not None:
+            rate = fs.get("growth_bytes_per_hour") or 0
+            add("warning", "fast_growth",
+                f"Disk filling fast: full in about {fs['runway_hours']:.1f} h at {human_size(rate)}/h",
+                "Diagnostic logs are being shed. Check the fastest-growing tables on the Overview.")
+    err = wd.get("last_error")
+    if err and wd.get("heartbeat") and float(wd["heartbeat"]) - float(err.get("at") or 0) < 900:
+        add("warning", "watchdog_error", "Free-space watchdog reported an error", err.get("message"))
+    issues.sort(key=lambda i: SEVERITY_ORDER[i["severity"]])
+    return issues

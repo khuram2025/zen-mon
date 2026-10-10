@@ -46,7 +46,7 @@ SINGLE = {
              "vg_extent_size": str(4 * 1024 ** 2), "pv_count": "1", "lv_count": "1",
              "vg_missing_pv_count": "0"}],
     "lvs": [{"lv_name": "ubuntu-lv", "vg_name": "ubuntu-vg", "lv_path": ROOT_LV,
-             "lv_size": str(98 * GIB), "lv_attr": "-wi-ao----", "copy_percent": "",
+             "lv_dm_path": ROOT_DM, "lv_size": str(98 * GIB), "lv_attr": "-wi-ao----", "copy_percent": "",
              "move_pv": ""}],
     "geometry": {"sda": {"size_sectors": 100 * GIB // 512, "partitions": {
         "sda1": {"number": 1, "start": 2048, "size": 2048},
@@ -66,6 +66,12 @@ USAGE["/data"] = USAGE["/"]
 
 def layout(inv=None, usage=USAGE):
     return L.build_layout(copy.deepcopy(inv or SINGLE), usage, resolve=resolve)
+
+
+def test_mount_source_matches_lv_dm_path_without_device_nodes():
+    # CI has no /dev/mapper nodes: matching must not rely on realpath.
+    lay = L.build_layout(copy.deepcopy(SINGLE), USAGE, resolve=lambda p: p)
+    assert lay["data_vg"] == "ubuntu-vg" and lay["volumes"][0]["lv"] == "ubuntu-lv"
 
 
 def test_single_disk_appliance_resolves_data_to_the_root_lv():
@@ -145,7 +151,7 @@ def test_removal_plan_depends_on_room_on_the_other_disks():
 
     pv = {d["name"]: d for d in layout(_pool(20 * GIB, sda_free=5 * GIB))["disks"]}["sdb"]["pvs"][0]
     assert pv["removal"]["action"] is None
-    assert "15.0 GB" in pv["removal"]["reason"]
+    assert "15.0 GiB" in pv["removal"]["reason"]
 
 
 def test_missing_disk_with_data_is_critical_and_empty_one_can_be_forgotten():
@@ -181,34 +187,6 @@ def test_unavailable_helper_still_yields_a_renderable_model():
     lay = L.unavailable_layout("not installed")
     issues = L.storage_issues(lay, USAGE)
     assert issues[0]["code"] == "helper_unavailable"
-
-
-# ─── Auto-purge ──────────────────────────────────────────────────────────────
-
-AUTO = {"enabled": True, "threshold_pct": 85, "target_pct": 75, "min_keep_days": 7}
-
-
-def usage(pct, total=100 * GIB):
-    used = int(total * pct / 100)
-    return {"usage_percent": pct, "used_bytes": used, "free_bytes": total - used}
-
-
-def test_auto_purge_idle_below_threshold():
-    assert svc.auto_purge_decision(usage(80), AUTO, 50 * GIB)["action"] == "idle"
-
-
-def test_auto_purge_skips_when_metrics_cannot_fix_shared_disk():
-    # 88% full, needs ~13 GB freed, only 15 MB of purgeable metrics: deleting
-    # history would not help, so nothing is deleted.
-    d = svc.auto_purge_decision(usage(88), AUTO, 15 * 1024 ** 2)
-    assert d["action"] == "skip" and d["reason"] == "insufficient"
-    assert 12 * GIB < d["need_bytes"] < 14 * GIB
-
-
-def test_auto_purge_acts_when_it_can_reach_target_or_disk_is_critical():
-    assert svc.auto_purge_decision(usage(88), AUTO, 20 * GIB)["action"] == "purge"
-    assert svc.auto_purge_decision(usage(96), AUTO, GIB)["action"] == "purge"
-    assert svc.auto_purge_decision(usage(96), AUTO, 0)["reason"] == "nothing_purgeable"
 
 
 # ─── Forecast ────────────────────────────────────────────────────────────────
@@ -321,7 +299,9 @@ def test_status_endpoint_reports_real_lv_and_issues(storage_client):
     assert body["vg_name"] == "ubuntu-vg" and body["lv_name"] == "ubuntu-lv"
     assert body["layout"]["data_shares_os"] is True
     assert body["health"] == "warning"
-    assert body["issues"][0]["code"] == "usage_elevated"
+    codes = [i["code"] for i in body["issues"]]
+    # No watchdog state in the isolated test directory: that is reported too.
+    assert codes[:2] == ["watchdog_missing", "usage_elevated"]
 
 
 def test_add_disk_allocates_and_wipe_needs_typed_confirmation(storage_client):

@@ -76,6 +76,8 @@ async def storage_status(user: User = Depends(require_admin_user)):
     layout, usage = await _current_layout()
     ch_check = await asyncio.to_thread(layout_svc.clickhouse_storage_check)
     issues = layout_svc.storage_issues(layout, usage, ch_check)
+    issues = sorted(layout_svc.watchdog_issues(svc.watchdog_status()) + issues,
+                    key=lambda i: layout_svc.SEVERITY_ORDER[i["severity"]])
     health, message = layout_svc.overall_health(issues)
     data = usage.get(svc.DATA_MOUNT) or {"total_bytes": 0, "used_bytes": 0,
                                         "free_bytes": 0, "usage_percent": 0}
@@ -343,14 +345,16 @@ async def storage_overview(
 ):
     """Mounts, space consumers, managed-table inventory, forecast, settings."""
     os_info = await svc.os_overview()
+    ch_error = None
     try:
         inventory = await svc.ch_inventory()
-        ch_error = None
+        breakdown = await svc.clickhouse_breakdown()
+        diag = await svc.diagnostic_logs(breakdown)
     except Exception as exc:  # the page must render while ClickHouse is down
-        inventory, ch_error = [], f"ClickHouse is unreachable: {exc}"
+        inventory, breakdown, diag = [], None, []
+        ch_error = f"ClickHouse is unreachable: {exc}"
     retention = await svc.get_retention_settings(db)
     schedule = await svc.get_backup_schedule(db)
-    ch_bytes = sum(t["size_bytes"] for t in inventory)
     data_mount = next((m for m in os_info["mounts"] if "data" in m["roles"]), None)
     forecast = svc.capacity_forecast(
         inventory, retention, (data_mount or {}).get("free_bytes", 0)
@@ -375,7 +379,10 @@ async def storage_overview(
 
     return {
         **os_info,
-        "consumers": await svc.space_consumers(db, ch_bytes, os_info),
+        "consumers": await svc.space_consumers(db, breakdown, os_info),
+        "clickhouse": breakdown,
+        "diagnostic_logs": diag,
+        "watchdog": svc.watchdog_status(),
         "clickhouse_error": ch_error,
         "forecast": {k: v for k, v in forecast.items() if k != "categories"},
         "categories": categories,
@@ -390,6 +397,8 @@ class AutoPurgeSettings(BaseModel):
     threshold_pct: int = Field(85, ge=50, le=98)
     target_pct: int = Field(75, ge=40, le=95)
     min_keep_days: int = Field(7, ge=1, le=365)
+    # Also purge when free space falls below this, whatever the percentage.
+    min_free_gib: float = Field(5.0, ge=0.5, le=1024)
 
 
 class RetentionUpdate(BaseModel):
@@ -419,6 +428,8 @@ async def update_retention(
 
     value = body.model_dump()
     await svc._upsert_setting(db, svc.RETENTION_SETTINGS_KEY, value)
+    # The watchdog keeps this last valid policy for when the API is down.
+    svc.write_watchdog_policy(value)
     changes = await svc.apply_retention(db, value, actor=user.username)
     await write_audit_log(
         db, actor=user, action="settings.storage.retention.update",

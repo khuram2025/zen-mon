@@ -204,6 +204,16 @@ def as_operator():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_storage_watchdog_state(monkeypatch, tmp_path_factory):
+    """Never read or write the appliance's real watchdog state in tests."""
+    from app.services import storage_backpressure, storage_watchdog
+
+    monkeypatch.setattr(storage_watchdog, "STATE_DIR",
+                        str(tmp_path_factory.mktemp("zenplus-storage")))
+    storage_backpressure._cache.update({"at": 0.0, "value": None})
+
+
+@pytest.fixture(autouse=True)
 def _builtin_roles_for_minimal_fake_dbs(monkeypatch):
     """Authorization now fails closed when the roles lookup yields nothing.
     Many tests drive routes with a minimal fake DB that cannot answer

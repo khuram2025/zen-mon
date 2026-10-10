@@ -61,6 +61,7 @@ from app.schemas.agent import (
     NetworkCaptureUpload,
 )
 from app.services import package_digest
+from app.services import storage_backpressure
 from app.services.agent_package_names import (
     FLAVOR_FULL,
     FLAVOR_PATTERN,
@@ -1118,6 +1119,8 @@ async def post_results(
     batch_id = data.batch_id.strip()
     if not batch_id or batch_id != data.batch_id or len(batch_id) > 255:
         raise HTTPException(400, "batch_id must be 1-255 non-whitespace characters")
+    # Before claiming the batch: a paused upload stays in the agent's spool.
+    storage_backpressure.raise_if_paused("Host telemetry")
 
     # Claim the batch inside this transaction. PostgreSQL's unique constraint
     # makes concurrent retries wait for the first transaction to finish. Once
