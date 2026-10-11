@@ -1,0 +1,13 @@
+[Unit]
+Description=Zentryc VMware host UTC initialization
+DefaultDependencies=no
+After=local-fs.target
+Before=time-set.target sysinit.target
+RequiresMountsFor=/usr/local/libexec
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/zentryc-clock
+RemainAfterExit=yes
+TimeoutStartSec=120
+[Install]
+WantedBy=sysinit.target

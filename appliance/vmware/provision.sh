@@ -59,6 +59,18 @@ done
 chmod -R a+rX /opt/zenplus/server /opt/zenplus/venv /opt/zentryc/python /opt/zenplus/dashboard/dist
 mkdir -p /usr/local/libexec
 install -m 0755 /home/zimage/first-boot.py /usr/local/libexec/zentryc-first-boot
+install -m 0755 /home/zimage/clock.py /usr/local/libexec/zentryc-clock
+install -m 0644 /home/zimage/zentryc-clock.service /etc/systemd/system/
+for u in postgresql postgresql@18-main docker redis-server zentryc-first-boot nginx ssh; do
+mkdir -p "/etc/systemd/system/$u.service.d"
+cat > "/etc/systemd/system/$u.service.d/zentryc-clock.conf" <<'EOF'
+[Unit]
+Requires=zentryc-clock.service
+After=zentryc-clock.service
+EOF
+done
+systemctl enable zentryc-clock.service
+
 # Reuse the release's service and helper recipes, without source fetch/build.
 sed '$d' /home/zimage/install.sh > /root/zentryc-install-functions.sh
 source /root/zentryc-install-functions.sh
