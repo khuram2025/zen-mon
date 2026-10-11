@@ -1,6 +1,10 @@
 #!/bin/bash
 set -Eeuo pipefail
 mkdir -p /etc/systemd/system/zenplus-updater.service.d
+mkdir -p /etc/systemd/system/zenplus-api.service.d /etc/systemd/system/zenplus-poller.service.d
+printf '[Service]\nEnvironment=PYTHONPATH=/opt/zenplus\n' > /etc/systemd/system/zenplus-api.service.d/zentryc.conf
+install -o zenplus -g zenplus -m 0640 /dev/null /opt/zenplus/support/.enqueue.lock
+printf '[Service]\nAmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE\nProtectSystem=strict\nProtectHome=true\nReadWritePaths=/opt/zenplus/logs /opt/zenplus/data /var/lib/zenplus\n' > /etc/systemd/system/zenplus-poller.service.d/zentryc.conf
 printf '[Service]\nExecStopPost=/usr/local/libexec/zentryc-policy\n' > /etc/systemd/system/zenplus-updater.service.d/zentryc-policy.conf
 for unit in zenplus-ncm-worker zenplus-ncm-backup zenplus-ncm-delivery; do
  mkdir -p /etc/systemd/system/$unit.service.d
@@ -41,7 +45,6 @@ apt-get purge -y snapd apport apport-core-dump-handler whoopsie popularity-conte
 apt-get clean
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\t${Status}\n' > /etc/zentryc/packages.tsv
 /opt/zenplus/venv/bin/pip freeze > /etc/zentryc/python-runtime.lock
-cp -a /usr/share/doc /etc/zentryc/package-notices
-printf 'Canonical Ubuntu 26.04.1 base; ZenPlus v1.24.13 commit 11087ff373877c75cf89d6b9594edfe7eb029d57\n' > /etc/zentryc/provenance.txt
+printf 'Third-party copyright notices: /usr/share/doc/*/copyright\n' > /etc/zentryc/NOTICE
 systemctl daemon-reload
 echo BASELINE_COMPLETE

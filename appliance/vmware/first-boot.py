@@ -6,6 +6,7 @@ from passlib.context import CryptContext
 
 state=Path('/var/lib/zentryc')
 state.mkdir(mode=0o700,parents=True,exist_ok=True)
+state.chmod(0o700)
 sentinel=state/'initialized.json'
 if sentinel.exists(): raise SystemExit(0)
 os.umask(0o077)
@@ -35,6 +36,7 @@ else:
     write(envpath,'# Unique appliance secrets\n'+''.join(f'{k}={v}\n' for k,v in env.items()),0o640)
     run(['chown','root:zenplus',str(envpath)])
 os.environ.update(env)
+run(['make-ssl-cert','generate-default-snakeoil','--force-overwrite'])
 pg=env['POSTGRES_PASSWORD']
 run(['runuser','-u','postgres','--','psql','-X','-q','-v','ON_ERROR_STOP=1'],input=f"DO $$ BEGIN IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='zenplus') THEN CREATE ROLE zenplus LOGIN; END IF; END $$; ALTER ROLE zenplus PASSWORD '{pg}';")
 if '1' not in run(['runuser','-u','postgres','--','psql','-X','-tAc',"SELECT 1 FROM pg_database WHERE datname='zenplus'"]):
@@ -72,11 +74,12 @@ write('/opt/zenplus/updater/config/subscription.json','{}\n');run(['chown','zenp
 run(['ssh-keygen','-A'])
 serial='ZT-VM-'+secrets.token_hex(8).upper()
 run(['hostnamectl','set-hostname','zentryc-'+serial[-8:].lower()])
-write('/etc/zentryc/identity.json',json.dumps({'serial':serial,'product':'ZenPlus','version':'1.24.14'}),0o644)
+version=Path('/opt/zenplus/.version').read_text().splitlines()[0].strip()
+write('/etc/zentryc/identity.json',json.dumps({'serial':serial,'product':'ZenPlus','version':version}),0o644)
 tls=Path('/etc/zenplus/tls');tls.mkdir(parents=True,exist_ok=True)
-run(['openssl','req','-x509','-nodes','-newkey','rsa:3072','-days','365','-keyout',str(tls/'server.key'),'-out',str(tls/'server.crt'),'-subj','/CN='+serial+'.local'])
+run(['openssl','req','-x509','-nodes','-newkey','rsa:3072','-days','365','-keyout',str(tls/'server.key'),'-out',str(tls/'server.crt'),'-subj','/CN='+serial+'.local','-addext','subjectAltName=DNS:'+serial+'.local,DNS:'+socket.gethostname()])
 (tls/'server.key').chmod(0o600);(tls/'server.crt').chmod(0o644)
 write(tls/'fullchain.pem',(tls/'server.crt').read_text(),0o644)
 write('/var/lib/zenplus/.initialized','initialized\n',0o644)
-write(sentinel,json.dumps({'serial':serial,'initialized_at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'version':'1.24.14'}))
+write(sentinel,json.dumps({'serial':serial,'initialized_at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'version':version}))
 print('Zentryc ZenPlus initialization completed; trial active for 30 days.')

@@ -6,7 +6,7 @@ from passlib.context import CryptContext
 def run(args,**kw): return subprocess.run(args,text=True,**kw)
 def ips():
     data=json.loads(subprocess.check_output(['ip','-j','-4','addr','show','scope','global']))
-    return [(i['ifname'],a['local']) for i in data for a in i.get('addr_info',[]) if a['family']=='inet']
+    return [(i['ifname'],a['local']) for i in data if not i['ifname'].startswith(('docker','veth','br-')) for a in i.get('addr_info',[]) if a['family']=='inet']
 def sql(text):
     p=run(['runuser','-u','postgres','--','psql','-X','-q','-v','ON_ERROR_STOP=1','-d','zenplus'],input=text,capture_output=True)
     if p.returncode: raise RuntimeError('Database unavailable; inspect service status')
@@ -30,7 +30,7 @@ def network():
         addr=str(ipaddress.IPv4Interface(input('IPv4 address/prefix: ').strip()))
         gw=str(ipaddress.IPv4Address(input('Gateway: ').strip()))
         dns=[str(ipaddress.ip_address(v)) for v in input('DNS servers, separated by commas: ').split(',')]
-        config['network']['ethernets'][nic]={'addresses':[addr],'routes':[{'to':'default','via':gw}],'nameservers':{'addresses':dns},'optional':True}
+        config['network']['ethernets'][nic]={'dhcp4':False,'addresses':[addr],'routes':[{'to':'default','via':gw}],'nameservers':{'addresses':dns},'optional':True}
     import yaml
     path=Path('/etc/netplan/90-zentryc-management.yaml')
     previous=path.read_bytes() if path.exists() else None
@@ -44,10 +44,15 @@ def network():
         print('Previous configuration restored.')
 def show():
     os.system('clear')
-    print('  ZENTRYC  |  ZenPlus Appliance 1.24.14\n')
+    version=Path('/opt/zenplus/.version').read_text().splitlines()[0].strip()
+    print('  ZENTRYC  |  ZenPlus Appliance '+version+'\n')
     identity=Path('/etc/zentryc/identity.json')
     if identity.exists(): print('Serial: '+json.loads(identity.read_text())['serial'])
     for nic,addr in ips(): print(f'Management: https://{addr}/  ({nic})')
+    cert=Path('/etc/zenplus/tls/server.crt')
+    if cert.exists():
+        fingerprint=subprocess.check_output(['openssl','x509','-in',str(cert),'-noout','-fingerprint','-sha256'],text=True).strip()
+        print('TLS '+fingerprint)
     claim=Path('/var/lib/zentryc/initial-login.json')
     if claim.exists():
         try:

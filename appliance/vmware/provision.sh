@@ -8,7 +8,7 @@ apt-get update -qq
 apt-get install -y --no-install-recommends ca-certificates curl jq openssl python3 sudo \
   postgresql postgresql-client redis-server nginx docker.io docker-compose-v2 \
   snmp iputils-ping dnsutils iproute2 libcap2-bin cloud-image-utils lvm2 \
-  openssh-server open-vm-tools nftables logrotate unattended-upgrades auditd apparmor \
+  openssh-server open-vm-tools nftables logrotate unattended-upgrades auditd apparmor ssl-cert \
   libexpat1 libsqlite3-0 libbz2-1.0 libffi8 liblzma5 zlib1g libgomp1
 systemctl enable --now docker postgresql redis-server
 test -b /dev/sdb
