@@ -240,6 +240,23 @@ def test_managed_ports_gateway_evidence_and_history():
                     and e["if_name"] == "port4"
                     and e["gateway_hostname"] == "Controller"
                 )
+                # Port drill-down cannot include another switch's same-number
+                # port, and displayed location must match the selected scope.
+                first_switch = ids[switches[0]["serial"]]
+                second_switch = ids[switches[1]["serial"]]
+                scoped = await list_endpoints(**(kwargs | {"device_id": first_switch, "if_index": 4}))
+                assert scoped["meta"]["total"] == 1
+                assert scoped["data"][0]["id"] == e["id"]
+                assert scoped["data"][0]["loc_device_id"] == first_switch
+                assert scoped["data"][0]["if_name"] == "port4"
+                assert (await list_endpoints(**(kwargs | {"device_id": first_switch, "if_index": 3})))["meta"]["total"] == 0
+                other_port = await list_endpoints(**(kwargs | {"device_id": second_switch, "if_index": 4}))
+                assert other_port["meta"]["total"] == 1 and other_port["data"][0]["id"] != e["id"]
+                await db.execute(text("INSERT INTO udt_managed_locations(endpoint_id,switch_id,port_number,vlan_id,is_direct) VALUES(:eid,:sid,1,24,TRUE)"), {"eid": e["id"], "sid": second_switch})
+                scoped_again = await list_endpoints(**(kwargs | {"device_id": first_switch, "if_index": 4}))
+                assert scoped_again["data"][0]["loc_device_id"] == first_switch
+                assert scoped_again["data"][0]["if_name"] == "port4"
+                await db.execute(text("DELETE FROM udt_managed_locations WHERE endpoint_id=:eid AND switch_id=:sid"), {"eid": e["id"], "sid": second_switch})
                 assert (
                     await db.execute(text("SELECT count(*) FROM devices"))
                 ).scalar() == 2

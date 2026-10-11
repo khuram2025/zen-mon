@@ -105,7 +105,7 @@ export function SwitchPortsPage() {
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
       {/* Device list / capacity rail */}
-      <div className="space-y-2">
+      <div className="max-h-64 space-y-2 overflow-y-auto pr-1 xl:sticky xl:top-4 xl:max-h-[calc(100vh-11rem)] xl:self-start">
         <div className="text-xs font-semibold uppercase tracking-wide text-muted">Switches</div>
         {capacity.isLoading ? (
           <Skeleton className="h-40 w-full" />
@@ -135,7 +135,7 @@ export function SwitchPortsPage() {
       </div>
 
       {/* Port table */}
-      <Card>
+      <Card className="self-start">
         <CardContent className="p-0">
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <h3 className="text-sm font-semibold">
@@ -200,7 +200,7 @@ export function SwitchPortsPage() {
                         <Td className="text-right tabular-nums">
                           {p.active_endpoints > 0
                             ? <button className="text-primary hover:underline"
-                                onClick={() => navigate(`/udt?device=${activeDevice}`)}>{p.active_endpoints}</button>
+                                onClick={() => navigate(`/udt?device=${activeDevice}&port=${p.if_index}`)}>{p.active_endpoints}</button>
                             : <span className="text-muted">0</span>}
                         </Td>
                         <Td>

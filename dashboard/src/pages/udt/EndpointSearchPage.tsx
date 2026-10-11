@@ -52,11 +52,14 @@ export function EndpointSearchPage() {
   const flag = params.get('flag') || ''
   const status = params.get('status') || ''
   const type = params.get('type') || ''
+  const device = params.get('device') || ''
+  const port = params.get('port') || ''
   const [qInput, setQInput] = useState(q)
   const [page, setPage] = useState(0)
   const limit = 50
 
-  useEffect(() => { setQInput(q); setPage(0) }, [q])
+  useEffect(() => { setQInput(q) }, [q])
+  useEffect(() => { setPage(0) }, [q, flag, status, type, device, port])
 
   useEffect(() => {
     const term = qInput.trim()
@@ -92,7 +95,15 @@ export function EndpointSearchPage() {
   const typeInfo = useQuery({ queryKey: ['udt', 'types'], queryFn: () => udtApi.types() })
   const typeChips = (typeInfo.data?.data || []).filter((t) => t.count > 0 || t.type === type)
 
+  const location = useQuery({
+    queryKey: ['udt', 'device-ports', device],
+    queryFn: () => udtApi.devicePorts(device),
+    enabled: !!device,
+  })
+  const selectedPort = location.data?.ports.find((p) => String(p.if_index) === port)
   const queryParams: Record<string, any> = { skip: page * limit, limit }
+  if (device) queryParams.device_id = device
+  if (port) queryParams.if_index = port
   if (q) queryParams.q = q
   if (type) queryParams.endpoint_type = type
   if (flag === 'active') queryParams.status = 'active'
@@ -164,6 +175,17 @@ export function EndpointSearchPage() {
           </div>
         </CardContent>
       </Card>
+
+      {device && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface px-4 py-3 text-sm">
+        <div>
+          <span className="text-muted">Active observations on </span>
+          <button className="font-medium text-primary hover:underline" onClick={() => navigate(`/udt/ports?device=${device}`)}>
+            {location.data?.device.hostname || 'selected switch'}
+          </button>
+          {port && <span> · {selectedPort?.if_name || `port ${port}`}</span>}
+        </div>
+        <Button size="sm" variant="outline" onClick={() => patch({ device: null, port: null })}>Clear location filter</Button>
+      </div>}
 
       {/* Type filter chips */}
       <div className="flex flex-wrap items-center gap-1.5">

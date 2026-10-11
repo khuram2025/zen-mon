@@ -57,6 +57,8 @@ def test_search_database_results_and_permissions():
                    vlan_id int, is_direct boolean, active boolean, last_seen timestamptz) ON COMMIT DROP''',
                 'CREATE TEMP TABLE devices(id uuid, hostname text) ON COMMIT DROP',
                 'CREATE TEMP TABLE device_interfaces(device_id uuid, if_index int, if_name text) ON COMMIT DROP',
+                "INSERT INTO devices VALUES ('00000000-0000-0000-0000-000000000010','Direct switch'),('00000000-0000-0000-0000-000000000020','Other switch')",
+                "INSERT INTO device_interfaces VALUES ('00000000-0000-0000-0000-000000000010',10001,'Gi1/0/1'),('00000000-0000-0000-0000-000000000010',10002,'Gi1/0/2'),('00000000-0000-0000-0000-000000000020',10001,'Other port')",
                 'CREATE TEMP VIEW udt_observed_locations AS SELECT * FROM udt_endpoint_locations',
                 'CREATE TEMP VIEW udt_switch_inventory AS SELECT id,hostname FROM devices',
                 'CREATE TEMP VIEW udt_switch_ports AS SELECT device_id,if_index,if_name FROM device_interfaces',
@@ -73,7 +75,7 @@ def test_search_database_results_and_permissions():
                     async def permitted(*args): return see_users
                     with patch('app.api.v1.udt._can_see_users', permitted):
                         return await list_endpoints(q=q, status=filters.get('status'), endpoint_type=None,
-                            vlan=None, device_id=None, flag=None, include_ignored=False,
+                            vlan=None, device_id=filters.get('device_id'), if_index=filters.get('if_index'), flag=None, include_ignored=False,
                             sort='last_seen', order='desc', skip=0, limit=50, db=db, user=None)
                 for query in ['192.168.100.101','192.0.2.99','2001:0db8:0:0:0:0:0:1',
                               '8C:16:45:2F:0A:A1','8c-16-45-2f-0a-a1','8c16.452f.0aa1',
@@ -92,5 +94,28 @@ def test_search_database_results_and_permissions():
                     assert (await search(query))['meta']['total'] == 0, query
                 assert (await search('   '))['meta']['total'] == 2
                 assert (await search('LCFC', status='inactive'))['meta']['total'] == 0
+                await db.execute(text("""INSERT INTO udt_endpoint_locations VALUES
+                    ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000010',10001,10,FALSE,TRUE,NOW()),
+                    ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000020',10001,10,TRUE,TRUE,NOW()),
+                    ('00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000010',10002,10,TRUE,TRUE,NOW())"""))
+                switch = '00000000-0000-0000-0000-000000000010'
+                scoped = await search('', device_id=switch, if_index=10001)
+                assert scoped['meta']['total'] == 1 and scoped['data'][0]['id'].endswith('0001')
+                assert scoped['data'][0]['if_name'] == 'Gi1/0/1'
+                assert scoped['data'][0]['loc_device_id'] == switch
+                assert (await search('', device_id=switch))['meta']['total'] == 2
+                assert (await search('other-client', device_id=switch, if_index=10001))['meta']['total'] == 0
+                assert (await search('', device_id=switch, if_index=10003))['meta']['total'] == 0
+                await db.execute(text("UPDATE udt_endpoint_locations SET last_seen=NOW()-INTERVAL '20 minutes' WHERE if_index=10001 AND device_id=:id"), {'id': switch})
+                assert (await search('', device_id=switch, if_index=10001))['meta']['total'] == 0
         await engine.dispose()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('device,port', [(None,1), ('sample',0), ('sample',-1)])
+def test_port_filter_requires_switch_and_positive_index(device, port):
+    from fastapi import HTTPException
+    from app.api.v1.udt import list_endpoints
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(list_endpoints(device_id=device, if_index=port))
+    assert error.value.status_code == 422
