@@ -55,6 +55,12 @@ enter the export. Use a separate builder for source builds and disk conversion.
    free disk blocks, and powers off. Do not reboot the sealed golden VM.
 6. Copy both powered-off VMDKs to the builder. Use `export-ova.py` to convert them
    to streamOptimized VMDKs and create the OVF, SHA256 manifest, and OVA.
+   If sealing stopped during bootstrap-account removal, power off first and
+   verify both copied disk hashes. Mount only those copies on the isolated
+   builder (`nbd0p1` root, `zentryc-data/data` data) and use `offline-seal.sh` to
+   finish cleanup and zeroing. Its guards require that identity/credentials were
+   already cleared. Inspect the final sealed disks before exporting; never boot
+   the partially sealed original.
 7. Import that exact OVA into VMware Workstation. Test an unmodified first boot,
    DHCP, unique identity/TLS/SSH keys/secrets, password claim, mandatory password
    change, fresh 30-day trial, functionality, and another cold boot. Repeat with
