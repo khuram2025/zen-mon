@@ -197,6 +197,8 @@ class UdtGlobalSettingsUpdate(BaseModel):
 
 class UdtDeviceSettingsUpdate(BaseModel):
     """Full-state upsert for one device (PUT semantics)."""
+
+    ncm_credential_id: Optional[str] = None
     enabled: bool = True
     snmp_credential_id: Optional[str] = None
     poll_interval_s: Optional[int] = Field(default=None, ge=60, le=86400)
@@ -222,50 +224,75 @@ class PortBulkMonitor(BaseModel):
 
 @router.get("/summary")
 async def udt_summary(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
-    row = (await db.execute(text(
-        """SELECT
+    row = (
+        (
+            await db.execute(
+                text(
+                    """SELECT
              (SELECT COUNT(*) FROM udt_endpoints WHERE NOT ignored) AS total_endpoints,
              (SELECT COUNT(*) FROM udt_endpoints WHERE NOT ignored AND last_seen > NOW() - INTERVAL '15 minutes') AS active_endpoints,
              (SELECT COUNT(*) FROM udt_endpoints WHERE NOT ignored AND first_seen > NOW() - INTERVAL '24 hours') AS new_24h,
              (SELECT COUNT(*) FROM udt_endpoints WHERE authorized = FALSE AND NOT ignored) AS rogue,
              (SELECT COUNT(*) FROM udt_endpoints WHERE is_watched AND NOT ignored) AS watched,
              (SELECT COUNT(*) FROM udt_endpoints WHERE is_randomized AND NOT ignored) AS randomized,
-             (SELECT COUNT(DISTINCT device_id) FROM udt_port_state) AS switches,
+             (SELECT COUNT(DISTINCT device_id) FROM udt_switch_ports) AS switches,
              (SELECT COUNT(*) FROM udt_user_logins WHERE event_time > NOW() - INTERVAL '24 hours') AS logins_24h"""
-    ))).mappings().first()
+                )
+            )
+        )
+        .mappings()
+        .first()
+    )
 
-    cap = (await db.execute(text(
-        """SELECT COALESCE(SUM(total),0) AS total_ports, COALESCE(SUM(used),0) AS used_ports
-           FROM (
-             SELECT di.device_id,
-                    COUNT(*) FILTER (WHERE di.if_type IS NULL OR di.if_type IN (6,117)) AS total,
-                    COUNT(*) FILTER (WHERE di.oper_status='up' AND (di.if_type IS NULL OR di.if_type IN (6,117))) AS used
-             FROM device_interfaces di
-             WHERE EXISTS (SELECT 1 FROM udt_port_state p WHERE p.device_id = di.device_id)
-             GROUP BY di.device_id
-           ) t"""
-    ))).mappings().first()
-
-    top = (await db.execute(text(
-        """SELECT id, hostname, total, used FROM (
-             SELECT d.id, d.hostname,
-                    COUNT(*) FILTER (WHERE di.if_type IS NULL OR di.if_type IN (6,117)) AS total,
-                    COUNT(*) FILTER (WHERE di.oper_status='up' AND (di.if_type IS NULL OR di.if_type IN (6,117))) AS used
-             FROM devices d JOIN device_interfaces di ON di.device_id = d.id
-             WHERE EXISTS (SELECT 1 FROM udt_port_state p WHERE p.device_id = d.id)
-             GROUP BY d.id, d.hostname
-           ) t ORDER BY used::float / NULLIF(total,0) DESC NULLS LAST LIMIT 5"""
-    ))).mappings().all()
+    cap = (
+        (
+            await db.execute(
+                text(
+                    """SELECT COUNT(*) AS total_ports,
+      COUNT(*) FILTER(WHERE oper_status='up') AS used_ports FROM udt_switch_ports
+      WHERE if_type IS NULL OR if_type IN (6,117)"""
+                )
+            )
+        )
+        .mappings()
+        .first()
+    )
+    top = (
+        (
+            await db.execute(
+                text(
+                    """SELECT d.id,d.hostname,COUNT(*) AS total,
+      COUNT(*) FILTER(WHERE p.oper_status='up') AS used
+      FROM udt_switch_inventory d JOIN udt_switch_ports p ON p.device_id=d.id
+      WHERE p.if_type IS NULL OR p.if_type IN (6,117)
+      GROUP BY d.id,d.hostname ORDER BY COUNT(*) FILTER(WHERE p.oper_status='up')::float/NULLIF(COUNT(*),0) DESC LIMIT 5"""
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
 
     total_ports = cap["total_ports"] or 0
     return {
         **{k: row[k] for k in row.keys()},
         "total_ports": total_ports,
         "used_ports": cap["used_ports"] or 0,
-        "port_utilization_pct": round((cap["used_ports"] or 0) / total_ports * 100, 1) if total_ports else 0.0,
+        "port_utilization_pct": (
+            round((cap["used_ports"] or 0) / total_ports * 100, 1)
+            if total_ports
+            else 0.0
+        ),
         "top_switches": [
-            {"id": str(t["id"]), "hostname": t["hostname"], "total": t["total"], "used": t["used"],
-             "pct": round((t["used"] or 0) / t["total"] * 100, 1) if t["total"] else 0.0}
+            {
+                "id": str(t["id"]),
+                "hostname": t["hostname"],
+                "total": t["total"],
+                "used": t["used"],
+                "pct": (
+                    round((t["used"] or 0) / t["total"] * 100, 1) if t["total"] else 0.0
+                ),
+            }
             for t in top
         ],
     }
@@ -306,10 +333,10 @@ async def list_endpoints(
         where.append("e.endpoint_type = :etype")
         params["etype"] = endpoint_type
     if device_id:
-        where.append("EXISTS (SELECT 1 FROM udt_endpoint_locations l WHERE l.endpoint_id=e.id AND l.active AND l.device_id = :dev)")
+        where.append("EXISTS (SELECT 1 FROM udt_observed_locations l WHERE l.endpoint_id=e.id AND l.active AND l.last_seen>NOW()-INTERVAL '15 minutes' AND l.device_id = :dev)")
         params["dev"] = device_id
     if vlan is not None:
-        where.append("EXISTS (SELECT 1 FROM udt_endpoint_locations l WHERE l.endpoint_id=e.id AND l.active AND l.vlan_id = :vlan)")
+        where.append("EXISTS (SELECT 1 FROM udt_observed_locations l WHERE l.endpoint_id=e.id AND l.active AND l.last_seen>NOW()-INTERVAL '15 minutes' AND l.vlan_id = :vlan)")
         params["vlan"] = vlan
     if flag == "rogue":
         where.append("e.authorized = FALSE")
@@ -335,14 +362,23 @@ async def list_endpoints(
                    e.first_seen, e.last_seen,
                    loc.device_id AS loc_device_id, dv.hostname AS switch_hostname,
                    loc.if_index, di.if_name, loc.vlan_id, loc.is_direct,
+                   gateway.hostname AS gateway_hostname, gateway.interface_name AS gateway_interface_name,
                    (e.last_seen > NOW() - INTERVAL '15 minutes') AS online
             FROM udt_endpoints e
             LEFT JOIN LATERAL (
-                SELECT device_id, if_index, vlan_id, is_direct FROM udt_endpoint_locations
-                WHERE endpoint_id = e.id AND active ORDER BY is_direct DESC, last_seen DESC LIMIT 1
+                SELECT device_id, if_index, vlan_id, is_direct FROM udt_observed_locations
+                WHERE endpoint_id = e.id AND active AND last_seen > NOW() - INTERVAL '15 minutes' ORDER BY is_direct DESC, last_seen DESC, device_id, if_index LIMIT 1
             ) loc ON TRUE
-            LEFT JOIN devices dv ON dv.id = loc.device_id
-            LEFT JOIN device_interfaces di ON di.device_id = loc.device_id AND di.if_index = loc.if_index
+            LEFT JOIN udt_switch_inventory dv ON dv.id = loc.device_id
+            LEFT JOIN udt_switch_ports di ON di.device_id = loc.device_id AND di.if_index = loc.if_index
+            LEFT JOIN LATERAL (
+                SELECT d.hostname, i.if_name AS interface_name
+                FROM udt_ip_evidence evidence JOIN devices d ON d.id=evidence.reporting_device_id
+                LEFT JOIN device_interfaces i ON i.device_id=d.id AND i.if_index=evidence.if_index
+                WHERE evidence.endpoint_id=e.id AND evidence.ip=e.ip_address
+                  AND evidence.last_seen>NOW()-INTERVAL '24 hours'
+                ORDER BY evidence.last_seen DESC, evidence.reporting_device_id, evidence.if_index LIMIT 1
+            ) gateway ON TRUE
             {where_sql}
             ORDER BY {sort_col} {order.upper()} NULLS LAST, e.id
             OFFSET :skip LIMIT :limit"""
@@ -375,10 +411,10 @@ async def endpoint_detail(endpoint_id: str, db: AsyncSession = Depends(get_db), 
 
     locations = (await db.execute(text(
         """SELECT l.id, l.device_id, dv.hostname AS switch, l.if_index, di.if_name, di.if_alias,
-                  l.vlan_id, l.is_direct, l.active, l.first_seen, l.last_seen, l.closed_at
-           FROM udt_endpoint_locations l
-           JOIN devices dv ON dv.id = l.device_id
-           LEFT JOIN device_interfaces di ON di.device_id = l.device_id AND di.if_index = l.if_index
+                  l.vlan_id, l.is_direct, l.managed, (l.active AND l.last_seen>NOW()-INTERVAL '15 minutes') AS active, l.first_seen, l.last_seen, l.closed_at
+           FROM udt_observed_locations l
+           JOIN udt_switch_inventory dv ON dv.id = l.device_id
+           LEFT JOIN udt_switch_ports di ON di.device_id = l.device_id AND di.if_index = l.if_index
            WHERE l.endpoint_id = :id ORDER BY l.active DESC, l.is_direct DESC, l.last_seen DESC LIMIT 200"""
     ), {"id": endpoint_id})).mappings().all()
 
@@ -506,96 +542,180 @@ async def update_endpoint(
 
 # ── Switch-port map ──────────────────────────────────────────────────
 
+
 @router.get("/devices/{device_id}/ports")
 async def device_ports(
-    device_id: str, include_empty: bool = True,
-    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
+    device_id: str,
+    include_empty: bool = True,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(udt_reader),
 ):
-    dev = (await db.execute(text("SELECT id, hostname FROM devices WHERE id = :id"), {"id": device_id})).mappings().first()
+    dev = (
+        (
+            await db.execute(
+                text(
+                    "SELECT id,hostname,managed,controller_id FROM udt_switch_inventory WHERE id=:id"
+                ),
+                {"id": device_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
     if not dev:
-        raise HTTPException(status_code=404, detail="Device not found")
-    rows = (await db.execute(text(
-        """SELECT di.if_index, di.if_name, di.if_descr, di.if_alias, di.if_type,
-                  di.admin_status, di.oper_status, di.if_speed,
-                  ps.is_uplink, ps.uplink_reason, ps.uplink_override, ps.monitored,
-                  ps.mac_count, ps.vlan_ids, ps.pvid, ps.last_endpoint_seen,
-                  (SELECT COUNT(*) FROM udt_endpoint_locations l
-                   WHERE l.device_id = di.device_id AND l.if_index = di.if_index AND l.active) AS active_endpoints
-           FROM device_interfaces di
-           LEFT JOIN udt_port_state ps ON ps.device_id = di.device_id AND ps.if_index = di.if_index
-           WHERE di.device_id = :id
-             AND (di.if_type IS NULL OR di.if_type IN (6,117,161))
-           ORDER BY di.if_index"""
-    ), {"id": device_id})).mappings().all()
-    ports = []
-    for r in rows:
-        if not include_empty and (r["active_endpoints"] or 0) == 0 and not r["is_uplink"]:
-            continue
-        d = dict(r)
-        d["vlan_ids"] = r["vlan_ids"] or []
-        ports.append(d)
-    return {"device": {"id": str(dev["id"]), "hostname": dev["hostname"]}, "ports": ports}
+        raise HTTPException(status_code=404, detail="Switch not found")
+    rows = (
+        (
+            await db.execute(
+                text(
+                    """SELECT p.*,
+        (SELECT COUNT(DISTINCT l.endpoint_id) FROM udt_observed_locations l
+         WHERE l.device_id=p.device_id AND l.if_index=p.if_index AND l.active
+         AND l.last_seen>NOW()-INTERVAL '15 minutes') AS active_endpoints
+        FROM udt_switch_ports p WHERE p.device_id=:id
+        AND (p.if_type IS NULL OR p.if_type IN(6,117,161)) ORDER BY p.if_index"""
+                ),
+                {"id": device_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    collection = None
+    if dev["managed"]:
+        row = (
+            (
+                await db.execute(
+                    text(
+                        "SELECT status,message,last_poll_at,last_success_at FROM udt_gateway_collection WHERE device_id=:id"
+                    ),
+                    {"id": str(dev["controller_id"])},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        collection = (
+            dict(row)
+            if row
+            else {"status": "unknown", "message": "Awaiting controller collection"}
+        )
+    return {
+        "device": dict(dev)
+        | {"id": str(dev["id"]), "controller_id": str(dev["controller_id"])},
+        "collection": collection,
+        "ports": [
+            dict(r)
+            | {"device_id": str(r["device_id"]), "vlan_ids": r["vlan_ids"] or []}
+            for r in rows
+            if include_empty or r["active_endpoints"] or r["is_uplink"]
+        ],
+    }
 
 
 @router.get("/devices/{device_id}/ports/{if_index}/endpoints")
 async def port_endpoints(
-    device_id: str, if_index: int, active_only: bool = True,
-    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
+    device_id: str,
+    if_index: int,
+    active_only: bool = True,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(udt_reader),
 ):
-    cond = "AND l.active" if active_only else ""
-    rows = (await db.execute(text(
-        f"""SELECT e.id, e.mac::text AS mac, e.vendor, e.hostname, host(e.ip_address) AS ip,
-                   e.endpoint_type, e.is_watched, e.authorized, l.vlan_id, l.is_direct,
-                   l.active, l.first_seen, l.last_seen
-            FROM udt_endpoint_locations l JOIN udt_endpoints e ON e.id = l.endpoint_id
-            WHERE l.device_id = :dev AND l.if_index = :ifx {cond}
-            ORDER BY l.last_seen DESC LIMIT 500"""
-    ), {"dev": device_id, "ifx": if_index})).mappings().all()
+    cond = (
+        "AND l.active AND l.last_seen>NOW()-INTERVAL '15 minutes'"
+        if active_only
+        else ""
+    )
+    rows = (
+        (
+            await db.execute(
+                text(
+                    f"""SELECT e.id,e.mac::text AS mac,e.vendor,e.hostname,host(e.ip_address) AS ip,
+        e.endpoint_type,e.is_watched,e.authorized,l.vlan_id,l.is_direct,l.active,l.first_seen,l.last_seen
+        FROM udt_observed_locations l JOIN udt_endpoints e ON e.id=l.endpoint_id
+        WHERE l.device_id=:dev AND l.if_index=:ifx {cond} ORDER BY l.last_seen DESC LIMIT 500"""
+                ),
+                {"dev": device_id, "ifx": if_index},
+            )
+        )
+        .mappings()
+        .all()
+    )
     return {"data": [dict(r) | {"id": str(r["id"])} for r in rows]}
 
 
 @router.get("/ports")
 async def list_ports(
-    q: Optional[str] = None, only_uplinks: bool = False, only_used: bool = False,
-    skip: int = 0, limit: int = Query(default=100, ge=1, le=1000),
-    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
+    q: Optional[str] = None,
+    only_uplinks: bool = False,
+    only_used: bool = False,
+    skip: int = 0,
+    limit: int = Query(default=100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(udt_reader),
 ):
-    where = ["EXISTS (SELECT 1 FROM udt_port_state p WHERE p.device_id = di.device_id)"]
-    params: dict = {"skip": skip, "limit": limit}
+    where = ["TRUE"]
+    params = {"skip": skip, "limit": limit}
     if q:
-        where.append("(d.hostname ILIKE :q OR di.if_name ILIKE :q OR di.if_alias ILIKE :q)")
+        where.append(
+            "(d.hostname ILIKE :q OR p.if_name ILIKE :q OR p.if_alias ILIKE :q)"
+        )
         params["q"] = f"%{q.strip()}%"
     if only_uplinks:
-        where.append("ps.is_uplink")
+        where.append("p.is_uplink")
     if only_used:
-        where.append("di.oper_status = 'up'")
-    where_sql = " AND ".join(where)
-    total = (await db.execute(text(
-        f"SELECT COUNT(*) FROM device_interfaces di JOIN devices d ON d.id=di.device_id "
-        f"LEFT JOIN udt_port_state ps ON ps.device_id=di.device_id AND ps.if_index=di.if_index WHERE {where_sql}"
-    ), params)).scalar()
-    rows = (await db.execute(text(
-        f"""SELECT d.id AS device_id, d.hostname, di.if_index, di.if_name, di.if_alias,
-                   di.oper_status, di.admin_status, di.if_speed,
-                   ps.is_uplink, ps.uplink_reason, ps.mac_count, ps.last_endpoint_seen
-            FROM device_interfaces di JOIN devices d ON d.id = di.device_id
-            LEFT JOIN udt_port_state ps ON ps.device_id=di.device_id AND ps.if_index=di.if_index
-            WHERE {where_sql}
-            ORDER BY d.hostname, di.if_index OFFSET :skip LIMIT :limit"""
-    ), params)).mappings().all()
-    return {"data": [dict(r) | {"device_id": str(r["device_id"])} for r in rows],
-            "meta": {"total": total, "skip": skip, "limit": limit}}
+        where.append("p.oper_status='up'")
+    condition = " AND ".join(where)
+    base = f"FROM udt_switch_ports p JOIN udt_switch_inventory d ON d.id=p.device_id WHERE {condition}"
+    total = (await db.execute(text(f"SELECT COUNT(*) {base}"), params)).scalar()
+    rows = (
+        (
+            await db.execute(
+                text(
+                    f"SELECT p.*,d.hostname {base} ORDER BY d.hostname,p.if_index OFFSET :skip LIMIT :limit"
+                ),
+                params,
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return {
+        "data": [dict(r) | {"device_id": str(r["device_id"])} for r in rows],
+        "meta": {"total": total, "skip": skip, "limit": limit},
+    }
+
+
+async def _require_direct_switch(db, device_id):
+    managed = (
+        await db.execute(
+            text("SELECT EXISTS(SELECT 1 FROM udt_managed_switches WHERE id=:id)"),
+            {"id": device_id},
+        )
+    ).scalar()
+    if managed:
+        raise HTTPException(
+            status_code=409,
+            detail="Controller-managed ports are read-only; use the controller to change port settings",
+        )
 
 
 @router.patch("/ports/{device_id}/{if_index}")
 async def update_port(
-    device_id: str, if_index: int, payload: PortUpdate,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
+    device_id: str,
+    if_index: int,
+    payload: PortUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("udt.manage")),
 ):
+    await _require_direct_switch(db, device_id)
     # Ensure the port-state row exists.
-    await db.execute(text(
-        "INSERT INTO udt_port_state (device_id, if_index) VALUES (:d, :i) ON CONFLICT DO NOTHING"
-    ), {"d": device_id, "i": if_index})
+    await db.execute(
+        text(
+            "INSERT INTO udt_port_state (device_id, if_index) VALUES (:d, :i) ON CONFLICT DO NOTHING"
+        ),
+        {"d": device_id, "i": if_index},
+    )
     sets, params = [], {"d": device_id, "i": if_index}
     if payload.uplink_override is not None:
         if payload.uplink_override == "auto":
@@ -606,16 +726,27 @@ async def update_port(
             params["ov"] = payload.uplink_override
             params["isup"] = payload.uplink_override == "uplink"
     if payload.monitored is not None:
-        sets.append("monitored = :m"); params["m"] = payload.monitored
+        sets.append("monitored = :m")
+        params["m"] = payload.monitored
     if not sets:
         raise HTTPException(status_code=400, detail="no fields to update")
     sets.append("updated_at = NOW()")
-    await db.execute(text(f"UPDATE udt_port_state SET {', '.join(sets)} WHERE device_id=:d AND if_index=:i"), params)
+    await db.execute(
+        text(
+            f"UPDATE udt_port_state SET {', '.join(sets)} WHERE device_id=:d AND if_index=:i"
+        ),
+        params,
+    )
     if payload.monitored is False:
         await _close_port_sessions(db, device_id, [if_index])
-    await write_audit_log(db, actor=user, action="udt.port.update",
-                          resource_type="udt_port", resource_id=f"{device_id}/{if_index}",
-                          metadata=payload.model_dump(exclude_none=True))
+    await write_audit_log(
+        db,
+        actor=user,
+        action="udt.port.update",
+        resource_type="udt_port",
+        resource_id=f"{device_id}/{if_index}",
+        metadata=payload.model_dump(exclude_none=True),
+    )
     await db.commit()
     return {"status": "ok"}
 
@@ -625,6 +756,7 @@ async def port_action(
     device_id: str, if_index: int, payload: PortAction,
     db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
+    await _require_direct_switch(db,device_id)
     if payload.action in ("monitor", "unmonitor"):
         await db.execute(text(
             "INSERT INTO udt_port_state (device_id, if_index, monitored) VALUES (:d,:i,:m) "
@@ -759,9 +891,11 @@ async def udt_device_settings(db: AsyncSession = Depends(get_db), user: User = D
                   d.vendor, d.model, d.device_type,
                   (d.device_type = 'switch'
                    OR EXISTS (SELECT 1 FROM udt_port_state ps
-                              WHERE ps.device_id = d.id AND ps.mac_count > 0)) AS is_l2,
+                              WHERE ps.device_id = d.id AND ps.mac_count > 0)
+                   OR EXISTS (SELECT 1 FROM udt_managed_switches ms WHERE ms.controller_id=d.id)) AS is_l2,
                   COALESCE(us.enabled, TRUE) AS enabled,
                   us.snmp_credential_id, sc.name AS credential_name,
+                  us.ncm_credential_id, nc.name AS ncm_credential_name,
                   us.poll_interval_s,
                   (SELECT COUNT(*) FROM udt_port_state ps WHERE ps.device_id = d.id) AS ports_total,
                   (SELECT COUNT(*) FROM udt_port_state ps WHERE ps.device_id = d.id AND ps.monitored) AS ports_monitored,
@@ -770,48 +904,112 @@ async def udt_device_settings(db: AsyncSession = Depends(get_db), user: User = D
            FROM devices d
            LEFT JOIN udt_device_settings us ON us.device_id = d.id
            LEFT JOIN snmp_credentials sc ON sc.id = us.snmp_credential_id
+           LEFT JOIN ncm_credentials nc ON nc.id = us.ncm_credential_id
            WHERE d.snmp_enabled = TRUE
            ORDER BY is_l2 DESC, d.hostname"""
     ))).mappings().all()
     # id+name only, so operators get a working picker without the
     # admin-only /snmp-credentials routes (which expose secrets).
-    creds = (await db.execute(text(
-        "SELECT id, name, snmp_version FROM snmp_credentials ORDER BY name"
-    ))).mappings().all()
+    creds = (
+        (
+            await db.execute(
+                text(
+                    "SELECT id, name, snmp_version FROM snmp_credentials ORDER BY name"
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
+    cli_creds = (
+        (
+            await db.execute(
+                text(
+                    "SELECT id,name FROM ncm_credentials WHERE protocol='ssh' ORDER BY name"
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
     return {
-        "data": [dict(r) | {"device_id": str(r["device_id"]),
-                            "snmp_credential_id": str(r["snmp_credential_id"]) if r["snmp_credential_id"] else None}
-                 for r in rows],
+        "data": [
+            dict(r)
+            | {
+                "device_id": str(r["device_id"]),
+                "ncm_credential_id": (
+                    str(r["ncm_credential_id"]) if r["ncm_credential_id"] else None
+                ),
+                "snmp_credential_id": (
+                    str(r["snmp_credential_id"]) if r["snmp_credential_id"] else None
+                ),
+            }
+            for r in rows
+        ],
         "credentials": [dict(c) | {"id": str(c["id"])} for c in creds],
+        "cli_credentials": [{"id": str(c["id"]), "name": c["name"]} for c in cli_creds],
     }
 
 
 @router.put("/settings/devices/{device_id}")
 async def update_udt_device_settings(
-    device_id: str, payload: UdtDeviceSettingsUpdate,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
+    device_id: str,
+    payload: UdtDeviceSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("udt.manage")),
 ):
-    dev = (await db.execute(text(
-        "SELECT id FROM devices WHERE id = :id AND snmp_enabled = TRUE"
-    ), {"id": device_id})).first()
+    dev = (
+        await db.execute(
+            text("SELECT id FROM devices WHERE id = :id AND snmp_enabled = TRUE"),
+            {"id": device_id},
+        )
+    ).first()
     if not dev:
         raise HTTPException(status_code=404, detail="SNMP device not found")
     if payload.snmp_credential_id:
-        cred = (await db.execute(text(
-            "SELECT id FROM snmp_credentials WHERE id = :id"
-        ), {"id": payload.snmp_credential_id})).first()
+        cred = (
+            await db.execute(
+                text("SELECT id FROM snmp_credentials WHERE id = :id"),
+                {"id": payload.snmp_credential_id},
+            )
+        ).first()
         if not cred:
             raise HTTPException(status_code=404, detail="SNMP credential not found")
-    await db.execute(text(
-        """INSERT INTO udt_device_settings (device_id, enabled, snmp_credential_id, poll_interval_s, updated_at)
-           VALUES (:d, :e, :c, :p, NOW())
+    if payload.ncm_credential_id:
+        cred = (
+            await db.execute(
+                text("SELECT id FROM ncm_credentials WHERE id=:id AND protocol='ssh'"),
+                {"id": payload.ncm_credential_id},
+            )
+        ).first()
+        if not cred:
+            raise HTTPException(status_code=404, detail="SSH credential not found")
+    await db.execute(
+        text(
+            """INSERT INTO udt_device_settings (device_id, enabled, snmp_credential_id, ncm_credential_id, poll_interval_s, updated_at)
+           VALUES (:d, :e, :c, :cli, :p, NOW())
            ON CONFLICT (device_id) DO UPDATE SET
-               enabled = :e, snmp_credential_id = :c, poll_interval_s = :p, updated_at = NOW()"""
-    ), {"d": device_id, "e": payload.enabled,
-        "c": payload.snmp_credential_id, "p": payload.poll_interval_s})
-    await write_audit_log(db, actor=user, action="udt.device_settings.update",
-                          resource_type="udt_device_settings", resource_id=device_id,
-                          metadata=payload.model_dump())
+               enabled = :e, snmp_credential_id = :c,
+               ncm_credential_id = CASE WHEN :has_cli THEN CAST(:cli AS uuid) ELSE udt_device_settings.ncm_credential_id END,
+               poll_interval_s = :p, updated_at = NOW()"""
+        ),
+        {
+            "d": device_id,
+            "e": payload.enabled,
+            "c": payload.snmp_credential_id,
+            "cli": payload.ncm_credential_id,
+            "has_cli": "ncm_credential_id" in payload.model_fields_set,
+            "p": payload.poll_interval_s,
+        },
+    )
+    await write_audit_log(
+        db,
+        actor=user,
+        action="udt.device_settings.update",
+        resource_type="udt_device_settings",
+        resource_id=device_id,
+        metadata=payload.model_dump(),
+    )
     await db.commit()
     return {"status": "ok"}
 
@@ -819,7 +1017,8 @@ async def update_udt_device_settings(
 @router.post("/settings/devices/bulk")
 async def bulk_udt_device_settings(
     payload: UdtBulkDeviceSettings,
-    db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("udt.manage")),
 ):
     if payload.set_enabled is None and not payload.set_credential and not payload.set_interval:
         raise HTTPException(status_code=400, detail="no fields to update")
@@ -863,6 +1062,7 @@ async def bulk_port_monitor(
     device_id: str, payload: PortBulkMonitor,
     db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("udt.manage")),
 ):
+    await _require_direct_switch(db,device_id)
     dev = (await db.execute(text("SELECT id FROM devices WHERE id = :id"), {"id": device_id})).first()
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -1152,34 +1352,62 @@ async def list_events(
 
 @router.get("/capacity")
 async def capacity(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
-    devices = (await db.execute(text(
-        """SELECT d.id, d.hostname, d.location,
-                  COUNT(*) FILTER (WHERE di.if_type IS NULL OR di.if_type IN (6,117)) AS total,
-                  COUNT(*) FILTER (WHERE di.oper_status='up' AND (di.if_type IS NULL OR di.if_type IN (6,117))) AS used,
-                  COUNT(*) FILTER (WHERE ps.is_uplink) AS uplinks,
-                  COUNT(*) FILTER (WHERE ps.last_endpoint_seen > NOW() - INTERVAL '1 day') AS active
-           FROM devices d JOIN device_interfaces di ON di.device_id = d.id
-           LEFT JOIN udt_port_state ps ON ps.device_id=di.device_id AND ps.if_index=di.if_index
-           WHERE EXISTS (SELECT 1 FROM udt_port_state p WHERE p.device_id=d.id)
-           GROUP BY d.id ORDER BY d.hostname"""
-    ))).mappings().all()
-    return {"data": [
-        dict(r) | {"id": str(r["id"]),
-                   "free": (r["total"] or 0) - (r["used"] or 0),
-                   "pct": round((r["used"] or 0) / r["total"] * 100, 1) if r["total"] else 0.0}
-        for r in devices
-    ]}
+    devices = (
+        (
+            await db.execute(
+                text(
+                    """SELECT d.id,d.hostname,d.location,d.managed,d.controller_id,
+        COUNT(*) FILTER(WHERE p.if_type IS NULL OR p.if_type IN(6,117)) AS total,
+        COUNT(*) FILTER(WHERE p.oper_status='up' AND (p.if_type IS NULL OR p.if_type IN(6,117))) AS used,
+        COUNT(*) FILTER(WHERE p.is_uplink) AS uplinks,
+        COUNT(*) FILTER(WHERE p.oper_status='down' AND (p.if_type IS NULL OR p.if_type IN(6,117))) AS free,
+        COUNT(*) FILTER(WHERE COALESCE(p.oper_status,'unknown') NOT IN('up','down') AND (p.if_type IS NULL OR p.if_type IN(6,117))) AS unknown,
+        COUNT(*) FILTER(WHERE EXISTS(SELECT 1 FROM udt_observed_locations l WHERE l.device_id=p.device_id AND l.if_index=p.if_index AND l.active AND l.last_seen>NOW()-INTERVAL '15 minutes')) AS active
+        FROM udt_switch_inventory d JOIN udt_switch_ports p ON p.device_id=d.id
+        GROUP BY d.id,d.hostname,d.location,d.managed,d.controller_id ORDER BY d.hostname"""
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return {
+        "data": [
+            dict(r)
+            | {
+                "id": str(r["id"]),
+                "controller_id": str(r["controller_id"]),
+                "pct": (
+                    round((r["used"] or 0) / r["total"] * 100, 1) if r["total"] else 0.0
+                ),
+            }
+            for r in devices
+        ]
+    }
 
 
 @router.get("/capacity/{device_id}/trend")
-async def capacity_trend(device_id: str, days: int = Query(default=30, ge=1, le=365),
-                         db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
-    rows = (await db.execute(text(
-        """SELECT day, total_ports, used_ports, active_ports, uplink_ports
+async def capacity_trend(
+    device_id: str,
+    days: int = Query(default=30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(udt_reader),
+):
+    rows = (
+        (
+            await db.execute(
+                text(
+                    """SELECT day, total_ports, used_ports, active_ports, uplink_ports
            FROM udt_port_capacity_daily
            WHERE device_id = :id AND day > CURRENT_DATE - make_interval(days => :d)
            ORDER BY day"""
-    ), {"id": device_id, "d": days})).mappings().all()
+                ),
+                {"id": device_id, "d": days},
+            )
+        )
+        .mappings()
+        .all()
+    )
     return {"data": [dict(r) for r in rows]}
 
 

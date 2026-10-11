@@ -92,6 +92,7 @@ export function SwitchPortsPage() {
     onError: (e: any) => toast.error('Bulk update failed', apiErrorMessage(e)),
   })
 
+  const managed = ports.data?.device.managed === true
   const portRows = ports.data?.ports || []
   const allChecked = portRows.length > 0 && checked.size === portRows.length
   const toggleAll = () => setChecked(allChecked ? new Set() : new Set(portRows.map((p) => p.if_index)))
@@ -109,7 +110,7 @@ export function SwitchPortsPage() {
         {capacity.isLoading ? (
           <Skeleton className="h-40 w-full" />
         ) : devices.length === 0 ? (
-          <Card><CardContent className="p-4 text-xs text-muted">No SNMP switches with UDT data yet.</CardContent></Card>
+          <Card><CardContent className="p-4 text-xs text-muted">No switches with UDT observations yet.</CardContent></Card>
         ) : (
           devices.map((d: CapacityRow) => (
             <button
@@ -123,9 +124,10 @@ export function SwitchPortsPage() {
                 <Server className="h-4 w-4 text-muted" />
                 <span className="truncate text-sm font-medium">{d.hostname}</span>
               </div>
+              {d.managed && <div className="mt-1 text-[11px] text-muted">Controller-managed</div>}
               <div className="mt-2"><CapacityBar used={d.used} total={d.total} /></div>
               <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted">
-                <span>{d.free} free</span>·<span>{d.uplinks} uplinks</span>·<span>{d.active} active</span>
+                <span>{d.free} down</span>{!!d.unknown && <><span>·</span><span>{d.unknown} unknown</span></>}·<span>{d.uplinks} uplinks</span>·<span>{d.active} with endpoints</span>
               </div>
             </button>
           ))
@@ -141,7 +143,7 @@ export function SwitchPortsPage() {
               {ports.data && <span className="ml-2 text-xs font-normal text-muted">{ports.data.ports.length} ports</span>}
             </h3>
             <div className="flex items-center gap-2">
-              {checked.size > 0 && (
+              {!managed && checked.size > 0 && (
                 <>
                   <span className="text-xs font-medium">{checked.size} selected</span>
                   <Button size="sm" variant="outline" disabled={bulkMonitorMut.isPending}
@@ -151,10 +153,14 @@ export function SwitchPortsPage() {
                 </>
               )}
               {activeDevice && (
-                <Button size="sm" variant="ghost" onClick={() => navigate(`/devices/${activeDevice}`)}>Device page</Button>
+                <Button size="sm" variant="ghost" onClick={() => navigate(`/devices/${ports.data?.device.controller_id || activeDevice}`)}>{managed ? 'Controller page' : 'Device page'}</Button>
               )}
             </div>
           </div>
+          {managed && <div className="border-b border-border bg-surface2/40 px-4 py-3 text-xs text-muted">
+            <span className="font-medium text-text">Controller observations · read-only ports</span>
+            <p className="mt-1">{ports.data?.collection?.message || 'Awaiting controller collection'}. Last poll {relTime(ports.data?.collection?.last_poll_at || null)}.</p>
+          </div>}
           {ports.isLoading ? (
             <div className="space-y-2 p-4">{Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-9 w-full" />)}</div>
           ) : !ports.data || ports.data.ports.length === 0 ? (
@@ -164,7 +170,7 @@ export function SwitchPortsPage() {
               <Table>
                 <THead className="bg-surface2/40">
                   <Tr>
-                    <Th className="w-8"><input type="checkbox" className="accent-primary" checked={allChecked} onChange={toggleAll} /></Th>
+                    <Th className="w-8"><input type="checkbox" className="accent-primary" disabled={managed} checked={allChecked} onChange={toggleAll} /></Th>
                     <Th>Port</Th><Th>Description</Th><Th>Status</Th><Th>Speed</Th>
                     <Th>VLAN</Th><Th className="text-right">Endpoints</Th><Th>Role</Th>
                     <Th>UDT</Th>
@@ -177,7 +183,7 @@ export function SwitchPortsPage() {
                     const adminDown = p.admin_status === 'down'
                     return (
                       <Tr key={p.if_index} className={p.monitored === false ? 'opacity-60' : ''}>
-                        <Td><input type="checkbox" className="accent-primary" checked={checked.has(p.if_index)} onChange={() => toggleOne(p.if_index)} /></Td>
+                        <Td><input type="checkbox" className="accent-primary" disabled={managed} checked={checked.has(p.if_index)} onChange={() => toggleOne(p.if_index)} /></Td>
                         <Td className="font-medium">{p.if_name || `if ${p.if_index}`}</Td>
                         <Td className="max-w-[220px] truncate text-xs text-muted" title={p.if_alias || p.if_descr || ''}>
                           {p.if_alias || p.if_descr || '—'}
@@ -185,7 +191,7 @@ export function SwitchPortsPage() {
                         <Td>
                           {adminDown ? <Badge variant="outline">admin down</Badge>
                             : up ? <Badge variant="success">up</Badge>
-                            : <Badge variant="danger">down</Badge>}
+                            : p.oper_status === 'down' ? <Badge variant="danger">down</Badge> : <Badge variant="outline">unknown</Badge>}
                         </Td>
                         <Td className="text-xs tabular-nums text-muted">{speedLabel(p.if_speed)}</Td>
                         <Td className="text-xs tabular-nums">
@@ -203,10 +209,11 @@ export function SwitchPortsPage() {
                               <Badge variant="info"><ArrowUpFromLine className="mr-0.5 inline h-3 w-3" />uplink</Badge>
                               {p.uplink_reason && <span className="text-[10px] text-muted">{p.uplink_reason}</span>}
                             </span>
-                          ) : <span className="text-xs text-muted">access</span>}
+                          ) : <span className="text-xs text-muted">{managed ? 'unconfirmed' : 'access'}</span>}
                         </Td>
                         <Td>
                           <Switch
+                            disabled={managed}
                             checked={p.monitored !== false}
                             onCheckedChange={(v) => monitorMut.mutate({ port: p, monitored: v })}
                           />
@@ -214,6 +221,7 @@ export function SwitchPortsPage() {
                         <Td className="text-right text-xs text-muted">{relTime(p.last_endpoint_seen)}</Td>
                         <Td className="text-right">
                           <div className="flex items-center justify-end gap-1">
+                            {managed ? <span className="text-xs text-muted">Read-only</span> : <>
                             <button
                               title={p.is_uplink ? 'Mark as access port' : 'Mark as uplink'}
                               onClick={() => overrideMut.mutate({ port: p, value: p.is_uplink ? 'access' : 'uplink' })}
@@ -232,6 +240,7 @@ export function SwitchPortsPage() {
                                 <Power className="h-4 w-4" />
                               </button>
                             )}
+                            </>}
                           </div>
                         </Td>
                       </Tr>

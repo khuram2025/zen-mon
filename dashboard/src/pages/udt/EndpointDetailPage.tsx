@@ -61,12 +61,12 @@ function TimelineEntry({ loc }: { loc: EndpointLocation }) {
         loc.active ? 'bg-success ring-success/25' : 'bg-muted/50 ring-transparent'
       }`} aria-hidden />
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <Link to={`/devices/${loc.device_id}`} className="text-sm font-medium text-primary hover:underline">
+        <Link to={`/udt/ports?device=${loc.device_id}`} className="text-sm font-medium text-primary hover:underline">
           {loc.switch}
         </Link>
         <span className="rounded bg-surface2 px-1.5 py-0.5 font-mono text-[11px]">{portLabel(loc.if_name, loc.if_index)}</span>
         {loc.vlan_id != null && <span className="text-[11px] text-muted">VLAN {loc.vlan_id}</span>}
-        {loc.is_direct
+        {loc.managed ? <Badge variant="outline" title="Controller observed this MAC on the port; direct attachment is unconfirmed">observed port</Badge> : loc.is_direct
           ? <Badge variant="success">direct</Badge>
           : <Badge variant="outline" title="MAC learned through another switch's uplink">via uplink</Badge>}
         {loc.active && <Badge variant="info">connected</Badge>}
@@ -210,7 +210,7 @@ export function EndpointDetailPage() {
           <Field label="Vendor">{e.vendor || '—'}</Field>
           <Field label="Current location">
             {activeLoc ? (
-              <Link to={`/devices/${activeLoc.device_id}`} className="text-primary hover:underline">
+              <Link to={`/udt/ports?device=${activeLoc.device_id}`} className="text-primary hover:underline">
                 {activeLoc.switch} · {portLabel(activeLoc.if_name, activeLoc.if_index)}
               </Link>
             ) : <span className="text-muted">Not currently connected</span>}

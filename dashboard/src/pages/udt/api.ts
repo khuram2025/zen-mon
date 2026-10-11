@@ -26,7 +26,7 @@ export const udtApi = {
   async updateEndpoint(id: string, body: Record<string, any>) {
     return (await api.patch(`${base}/endpoints/${id}`, body)).data
   },
-  async devicePorts(deviceId: string, includeEmpty = true): Promise<{ device: { id: string; hostname: string }; ports: UdtPort[] }> {
+  async devicePorts(deviceId: string, includeEmpty = true): Promise<{ device: { id: string; hostname: string; managed?: boolean; controller_id?: string }; collection?: { status: string; message: string; last_poll_at?: string }; ports: UdtPort[] }> {
     return (await api.get(`${base}/devices/${deviceId}/ports`, { params: { include_empty: includeEmpty } })).data
   },
   async portEndpoints(deviceId: string, ifIndex: number): Promise<{ data: Endpoint[] }> {
@@ -95,10 +95,10 @@ export const udtApi = {
   async updateSettings(body: { poll_interval_s: number }) {
     return (await api.put(`${base}/settings`, body)).data
   },
-  async deviceSettings(): Promise<{ data: UdtDeviceSettings[]; credentials: UdtCredentialOption[] }> {
+  async deviceSettings(): Promise<{ data: UdtDeviceSettings[]; credentials: UdtCredentialOption[]; cli_credentials: { id: string; name: string }[] }> {
     return (await api.get(`${base}/settings/devices`)).data
   },
-  async updateDeviceSettings(deviceId: string, body: { enabled: boolean; snmp_credential_id: string | null; poll_interval_s: number | null }) {
+  async updateDeviceSettings(deviceId: string, body: { enabled: boolean; snmp_credential_id: string | null; ncm_credential_id?: string | null; poll_interval_s: number | null }) {
     return (await api.put(`${base}/settings/devices/${deviceId}`, body)).data
   },
   async bulkDeviceSettings(body: Record<string, any>) {
