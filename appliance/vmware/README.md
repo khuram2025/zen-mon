@@ -53,8 +53,19 @@ enter the export. Use a separate builder for source builds and disk conversion.
    `seal.sh` only after validation. It destroys all test data and lab accounts,
    regenerates a blank PostgreSQL cluster, clears identities and secrets, zeros
    free disk blocks, and powers off. Do not reboot the sealed golden VM.
-6. Copy both powered-off VMDKs to the builder. Use `export-ova.py` to convert them
-   to streamOptimized VMDKs and create the OVF, SHA256 manifest, and OVA.
+6. Copy both powered-off VMDKs to the builder.
+   If sealing stopped during bootstrap-account removal, power off first and
+   verify both copied disk hashes. Mount only those copies on the isolated
+   builder (`nbd0p1` root, `zentryc-data/data` data) and use `offline-seal.sh` to
+   finish cleanup and zeroing. Its guards require that identity/credentials were
+   already cleared. Inspect the final sealed disks before exporting; never boot
+   the partially sealed original.
+   Copy the final sealed disks back to the VMware export workstation, verify
+   their transfer hashes, and create a clean VMX with the hardware above, one
+   generated-MAC management NIC, and no seed media, UUID, NVRAM or lab devices.
+   Do not boot it. Use `export-native.ps1` with VMware OVF Tool to create the OVA
+   and SHA256 manifest. QEMU streamOptimized exports failed native VMware digest
+   verification during qualification; do not use them for customer packages.
 7. Import that exact OVA into VMware Workstation. Test an unmodified first boot,
    DHCP, unique identity/TLS/SSH keys/secrets, password claim, mandatory password
    change, fresh 30-day trial, functionality, and another cold boot. Repeat with

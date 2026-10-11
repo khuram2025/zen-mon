@@ -46,7 +46,9 @@ chown zenplus:zenplus /opt/zenplus/updater/config/*
 chmod 600 /opt/zenplus/updater/config/*
 rm -f /etc/systemd/system/zenplus-updater.timer.d/override.conf
 rm -f /etc/sudoers.d/90-zimage /etc/sudoers.d/90-cloud-init-users /etc/sudoers.d/zimage /etc/sudoers.d/zenplus-security.tmp
-userdel zimage
+# The disposable bootstrap account may still own the SSH session that launched
+# this root systemd job. Its account and authorized keys must be removed anyway.
+userdel --force zimage
 find /home -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 rm -rf /root/zentryc-payload /root/.cache /root/.ssh /var/lib/cloud /var/lib/postgresql.base /var/lib/redis.base /etc/zentryc/package-notices
 rm -f /root/zentryc-install-functions.sh /root/.bash_history /root/.python_history
@@ -73,7 +75,7 @@ rm -f /var/lib/dhcp/* /run/systemd/netif/leases/*
 apt-get clean
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\t${Status}\n' > /etc/zentryc/packages.tsv
 find /opt/zenplus /opt/zentryc/python -type d -name __pycache__ -prune -exec rm -rf -- {} +
-find /var/log -type f ! -path '/var/log/journal/*' -exec truncate -s 0 {} +
+find /var/log -type f ! -path '/var/log/journal/*' -exec truncate -c -s 0 {} +
 journalctl --rotate
 journalctl --vacuum-time=1s
 systemctl daemon-reload
