@@ -1,6 +1,6 @@
 #!/opt/zenplus/venv/bin/python
 """Physical-console setup and recovery, independent of the API."""
-import subprocess,os,json,ipaddress,getpass,time,secrets
+import subprocess,os,json,ipaddress,getpass,time,secrets,sys,signal
 from pathlib import Path
 from passlib.context import CryptContext
 def run(args,**kw): return subprocess.run(args,text=True,**kw)
@@ -19,6 +19,33 @@ def password():
     sql(f"UPDATE users SET password_hash='{h}',must_change_password=FALSE,password_changed_at=now(),token_version=COALESCE(token_version,0)+1 WHERE username='admin'; UPDATE auth_sessions SET revoked_at=now() WHERE user_id=(SELECT id FROM users WHERE username='admin');")
     Path('/var/lib/zentryc/initial-login.json').unlink(missing_ok=True)
     print('Administrator password changed; sign in through HTTPS.')
+def try_netplan(path, previous):
+    # Recent Netplan also returns zero after a successful timeout rollback.
+    # Keep the YAML only when its explicit acceptance marker was emitted.
+    accepted=False
+    process=None
+    try:
+        process=subprocess.Popen(['netplan','try','--timeout','120'],
+            stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+            env=dict(os.environ,LC_ALL='C',PYTHONUNBUFFERED='1'))
+        output=b''
+        with process.stdout:
+            while chunk:=process.stdout.read1(4096):
+                output=(output+chunk)[-8192:]
+                sys.stdout.write(chunk.decode(errors='replace'));sys.stdout.flush()
+        accepted=process.wait()==0 and b'\nConfiguration accepted.' in output
+    finally:
+        if process is not None and process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try: process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill();process.wait()
+        if not accepted:
+            if previous is None: path.unlink(missing_ok=True)
+            else: path.write_bytes(previous)
+            run(['netplan','apply'])
+            print('Previous configuration restored.')
+
 def network():
     links=json.loads(subprocess.check_output(['ip','-j','link','show']))
     links=[x['ifname'] for x in links if x.get('link_type')=='ether' and not x['ifname'].startswith(('docker','veth','br-'))]
@@ -35,13 +62,7 @@ def network():
     path=Path('/etc/netplan/90-zentryc-management.yaml')
     previous=path.read_bytes() if path.exists() else None
     path.write_text(yaml.safe_dump(config));path.chmod(0o600)
-    # netplan try owns the timed rollback and console confirmation.
-    p=run(['netplan','try','--timeout','120'])
-    if p.returncode:
-        if previous is None: path.unlink(missing_ok=True)
-        else: path.write_bytes(previous)
-        run(['netplan','apply'])
-        print('Previous configuration restored.')
+    try_netplan(path, previous)
 def show():
     os.system('clear')
     version=Path('/opt/zenplus/.version').read_text().splitlines()[0].strip()
