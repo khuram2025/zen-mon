@@ -27,6 +27,7 @@ id zenplus || useradd --system --home-dir /opt/zenplus --shell /usr/sbin/nologin
 mkdir -p /opt/zenplus /root/zentryc-payload
 tar -xzf /home/zimage/signed-runtime.tar.gz -C /root/zentryc-payload
 cp -a /root/zentryc-payload/code/. /opt/zenplus/
+install -m 0644 /home/zimage/init-postgres.sql /home/zimage/init-clickhouse.sql /opt/zenplus/scripts/
 tar -xzf /home/zimage/python-runtime.tar.gz -C /
 mkdir -p /opt/zenplus/bin /opt/zenplus/dashboard/dist /opt/zenplus/data/sensor-artifacts /opt/zenplus/updater/keys
 cp /root/zentryc-payload/go-binaries/* /opt/zenplus/bin/
@@ -178,12 +179,12 @@ MaxAuthTries 3
 LoginGraceTime 30
 Banner /etc/issue.net
 EOF
-printf '\nZentryc ZenPlus Appliance 1.24.13\nAuthorized access only. https://zentryc.com/\n' > /etc/issue.net
+printf '\nZentryc ZenPlus Appliance 1.24.14\nAuthorized access only. https://zentryc.com/\n' > /etc/issue.net
 cp /etc/issue.net /etc/issue
 printf 'Zentryc ZenPlus Appliance\nUse the local setup console or HTTPS management interface.\n' > /etc/motd
 cat >> /etc/os-release <<'EOF'
 ZENTRYC_PRODUCT=ZenPlus
-ZENTRYC_APPLIANCE_VERSION=1.24.13
+ZENTRYC_APPLIANCE_VERSION=1.24.14
 ZENTRYC_SUPPORT_URL=https://zentryc.com/support/
 EOF
 mkdir -p /etc/default/grub.d

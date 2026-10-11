@@ -42,6 +42,10 @@ for path,ops in spec['paths'].items():
         check('GET '+path,r.status_code<400 or r.status_code==expected.get(path),{'status':r.status_code,'expected_status':expected.get(path)})
     except requests.RequestException as e: check('GET '+path,False,{'error':type(e).__name__})
 # Real poller exercise: disposable loopback device, then inspect stored metrics.
+if not fresh and Path('/var/lib/zentryc/test-device.json').exists():
+    old=json.loads(Path('/var/lib/zentryc/test-device.json').read_text())
+    old=old.get('data',old)
+    if old.get('id'): s.delete(base+'/api/v1/devices/'+old['id'],timeout=30)
 r=s.post(base+'/api/v1/devices',json={'hostname':'release-test-loopback','ip_address':'127.0.0.1','device_type':'server','ping_enabled':True,'ping_interval':10},timeout=30)
 check('create monitored device',r.status_code in (200,201),{'status':r.status_code})
 if r.status_code in (200,201):

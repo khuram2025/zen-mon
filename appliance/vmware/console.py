@@ -44,7 +44,7 @@ def network():
         print('Previous configuration restored.')
 def show():
     os.system('clear')
-    print('  ZENTRYC  |  ZenPlus Appliance 1.24.13\n')
+    print('  ZENTRYC  |  ZenPlus Appliance 1.24.14\n')
     identity=Path('/etc/zentryc/identity.json')
     if identity.exists(): print('Serial: '+json.loads(identity.read_text())['serial'])
     for nic,addr in ips(): print(f'Management: https://{addr}/  ({nic})')
