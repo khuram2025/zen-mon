@@ -2,6 +2,7 @@
 # Finish sealing a powered-off lab image. Run only on the isolated builder.
 set -Eeuo pipefail
 test "$EUID" = 0
+command -v zerofree >/dev/null
 root=/mnt/zentryc-offline-root
 data=/mnt/zentryc-offline-data
 test "$(findmnt -no SOURCE "$root")" = /dev/nbd0p1
@@ -61,10 +62,10 @@ chown -R root:root "$root/opt/zenplus/data/sensor-artifacts"
 chmod -R a+rX "$root/opt/zenplus/data/sensor-artifacts"
 systemctl --root="$root" enable zentryc-first-boot zenplus-api zenplus-poller zenplus-netflow-collector zenplus-ncm-worker zenplus-ncm-backup.timer zenplus-ncm-delivery.timer zenplus-support-queue.path zenplus-updater.timer nginx zentryc-console
 sync
-# The mount-source assertions above keep these writes on the copied image disks.
-for mount in "$root" "$data"; do
- dd if=/dev/zero of="$mount/zentryc-zero-free" bs=16M status=none || test "$?" = 1
- rm -f "$mount/zentryc-zero-free"
-done
+# Scrub free blocks while unmounted, without expanding unallocated thin grains.
+umount "$data"
+umount "$root"
+zerofree /dev/nbd0p1
+zerofree /dev/mapper/zentryc--data-data
 sync
 echo OFFLINE_SEAL_COMPLETED
