@@ -29,7 +29,7 @@ ovf.write_text(f'''<?xml version="1.0" encoding="UTF-8"?>
  <Item><rasd:AddressOnParent>0</rasd:AddressOnParent><rasd:ElementName>System disk</rasd:ElementName><rasd:HostResource>ovf:/disk/system</rasd:HostResource><rasd:InstanceID>4</rasd:InstanceID><rasd:Parent>3</rasd:Parent><rasd:ResourceType>17</rasd:ResourceType></Item>
  <Item><rasd:AddressOnParent>1</rasd:AddressOnParent><rasd:ElementName>Data disk</rasd:ElementName><rasd:HostResource>ovf:/disk/data</rasd:HostResource><rasd:InstanceID>5</rasd:InstanceID><rasd:Parent>3</rasd:Parent><rasd:ResourceType>17</rasd:ResourceType></Item>
  <Item><rasd:AddressOnParent>7</rasd:AddressOnParent><rasd:AutomaticAllocation>true</rasd:AutomaticAllocation><rasd:Connection>Management</rasd:Connection><rasd:Description>VMXNET3 management adapter</rasd:Description><rasd:ElementName>Management</rasd:ElementName><rasd:InstanceID>6</rasd:InstanceID><rasd:ResourceSubType>VmxNet3</rasd:ResourceSubType><rasd:ResourceType>10</rasd:ResourceType></Item>
- <vmw:Config ovf:required="false" vmw:key="firmware" vmw:value="efi"/><vmw:Config ovf:required="false" vmw:key="uefi.secureBoot.enabled" vmw:value="true"/><vmw:Config ovf:required="false" vmw:key="tools.syncTime" vmw:value="false"/>
+ <vmw:Config ovf:required="false" vmw:key="firmware" vmw:value="efi"/><vmw:Config ovf:required="false" vmw:key="bootOptions.efiSecureBootEnabled" vmw:value="true"/>
  </VirtualHardwareSection></VirtualSystem></Envelope>
 ''',encoding='utf-8')
 def sha(path):
