@@ -448,11 +448,11 @@ export function assessDevices(input: DeviceInput): Assessment {
     risks.push({
       key: `issue-${issue.device_id}-${issue.issue}`,
       tone: issue.category === 'degraded' ? 'risk' : 'breach',
-      status: issue.category === 'degraded' ? 'Degraded' : 'Outage in period',
+      status: issue.category === 'degraded' ? 'Failed checks' : 'Outage in period',
       title: issue.hostname,
       to: `/devices/${issue.device_id}`,
-      reason: `${issue.outages != null ? `${plural(issue.outages, 'outage')} · ` : ''}${fmtDuration(issue.downtime_minutes ?? issue.duration_minutes)} downtime`,
-      context: issue.issue,
+      reason: issue.category === 'degraded' ? `${fmtAvail(issue.availability_pct)} ping success in period` : `${issue.outages != null ? `${plural(issue.outages, 'outage')} · ` : ''}${fmtDuration(issue.downtime_minutes ?? issue.duration_minutes)} downtime`,
+      context: issue.category === 'degraded' ? 'No confirmed outage recorded' : issue.issue,
     })
   }
 
