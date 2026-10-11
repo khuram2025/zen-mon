@@ -13,6 +13,7 @@ docker compose down
 systemctl stop docker.service docker.socket redis-server postgresql
 pg_dropcluster --stop 18 main
 pg_createcluster 18 main --start-conf auto -- --auth-local peer --auth-host scram-sha-256
+sed -i 's/^ssl = on/ssl = off/' /etc/postgresql/18/main/postgresql.conf
 sed -i '/^requirepass /d;/^user default /d' /etc/redis/redis.conf
 # All customer data and disposable lab state are removed while services are stopped.
 for d in /data/clickhouse /data/redis /data/backups /data/tmp /data/zenplus-data /data/zenplus-logs /opt/zenplus/backups /opt/zenplus/logs; do
@@ -66,6 +67,7 @@ chmod 600 /etc/netplan/50-zentryc.yaml
 hostnamectl set-hostname zentryc-appliance
 truncate -s 0 /etc/machine-id
 rm -f /var/lib/dbus/machine-id /var/lib/systemd/random-seed
+rm -f /var/lib/docker/engine-id
 ln -s /etc/machine-id /var/lib/dbus/machine-id
 rm -f /var/lib/dhcp/* /run/systemd/netif/leases/*
 apt-get clean

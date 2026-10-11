@@ -18,6 +18,10 @@ def sql(query):
     return run(['runuser','-u','postgres','--','psql','-X','-q','-v','ON_ERROR_STOP=1','-d','zenplus'],input=query)
 def write(path,text,mode=0o600):
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text);p.chmod(mode)
+run(['make-ssl-cert','generate-default-snakeoil','--force-overwrite'])
+pgconfig=Path('/etc/postgresql/18/main/postgresql.conf')
+pgconfig.write_text(re.sub(r'^ssl\s*=\s*off\s*$', 'ssl = on', pgconfig.read_text(),flags=re.M))
+run(['systemctl','restart','postgresql@18-main.service'])
 for _ in range(120):
     if subprocess.run(['pg_isready','-q'],stdout=subprocess.DEVNULL).returncode==0: break
     time.sleep(1)
@@ -36,7 +40,6 @@ else:
     write(envpath,'# Unique appliance secrets\n'+''.join(f'{k}={v}\n' for k,v in env.items()),0o640)
     run(['chown','root:zenplus',str(envpath)])
 os.environ.update(env)
-run(['make-ssl-cert','generate-default-snakeoil','--force-overwrite'])
 pg=env['POSTGRES_PASSWORD']
 run(['runuser','-u','postgres','--','psql','-X','-q','-v','ON_ERROR_STOP=1'],input=f"DO $$ BEGIN IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='zenplus') THEN CREATE ROLE zenplus LOGIN; END IF; END $$; ALTER ROLE zenplus PASSWORD '{pg}';")
 if '1' not in run(['runuser','-u','postgres','--','psql','-X','-tAc',"SELECT 1 FROM pg_database WHERE datname='zenplus'"]):

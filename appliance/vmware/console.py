@@ -25,12 +25,12 @@ def network():
     print('Interfaces: '+', '.join(links));nic=input('Management interface: ').strip()
     if nic not in links: raise ValueError('Select a listed physical interface')
     mode=input('Use DHCP? [Y/n]: ').strip().lower()
-    config={'network':{'version':2,'ethernets':{nic:{'dhcp4':True,'optional':True}}}}
+    config={'network':{'version':2,'ethernets':{'management':{'match':{'name':nic},'dhcp4':True,'optional':True}}}}
     if mode=='n':
         addr=str(ipaddress.IPv4Interface(input('IPv4 address/prefix: ').strip()))
         gw=str(ipaddress.IPv4Address(input('Gateway: ').strip()))
         dns=[str(ipaddress.ip_address(v)) for v in input('DNS servers, separated by commas: ').split(',')]
-        config['network']['ethernets'][nic]={'dhcp4':False,'addresses':[addr],'routes':[{'to':'default','via':gw}],'nameservers':{'addresses':dns},'optional':True}
+        config['network']['ethernets']['management']={'match':{'name':nic},'dhcp4':False,'addresses':[addr],'routes':[{'to':'default','via':gw}],'nameservers':{'addresses':dns},'optional':True}
     import yaml
     path=Path('/etc/netplan/90-zentryc-management.yaml')
     previous=path.read_bytes() if path.exists() else None
