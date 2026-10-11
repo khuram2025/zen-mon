@@ -364,3 +364,33 @@ func TestServiceMaintenanceSuppressesStatusChangeEvents(t *testing.T) {
 		t.Fatalf("expected maintenance to suppress status-change publishes, got %d", publishes)
 	}
 }
+
+func TestDeviceDefaultPolicyKeepsIsolatedFailuresDiagnostic(t *testing.T) {
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Poller.DownThreshold != 3 || cfg.Poller.PingCount != 3 {
+		t.Fatal("default confirmation policy changed")
+	}
+	e := testEngine()
+	e.cfg.Poller.DownThreshold = cfg.Poller.DownThreshold
+	id := uuid.New()
+	e.devices[id] = &Device{ID: id, Hostname: "fixture", IPAddress: net.ParseIP("192.0.2.10"), Status: "up"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sequence := []struct {
+		up       bool
+		status   string
+		failures int
+	}{
+		{false, "up", 1}, {true, "up", 0}, {false, "up", 1}, {false, "up", 2}, {true, "up", 0},
+		{false, "up", 1}, {false, "up", 2}, {false, "down", 3}, {true, "up", 0},
+	}
+	for i, step := range sequence {
+		e.processStatusChange(ctx, &PingResult{DeviceID: id, IsUp: step.up, Timestamp: time.Now()})
+		if e.devices[id].Status != step.status || e.devices[id].DownCount != step.failures {
+			t.Fatalf("step %d: status=%s failures=%d", i, e.devices[id].Status, e.devices[id].DownCount)
+		}
+	}
+}

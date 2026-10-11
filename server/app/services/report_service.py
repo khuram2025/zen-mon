@@ -2136,13 +2136,15 @@ def _to_naive_utc(dt: datetime) -> datetime:
 
 async def _fetch_device_maintenance_windows(
     db: AsyncSession, start: datetime, end: datetime,
+    *, device_ids: list[str] | None = None, strict: bool = False,
 ) -> dict[str, list[tuple[datetime, datetime]]]:
     """device_id -> [(start, end), ...] maintenance intervals overlapping the
     report range, clamped to it. Naive-UTC datetimes to match ClickHouse rows.
     Tolerates the table not existing yet (pre-migrate-053 appliances)."""
+    device_filter = "AND d.id = ANY(CAST(:device_ids AS uuid[]))" if device_ids is not None else ""
     try:
         rows = (await db.execute(
-            text("""
+            text(f"""
                 SELECT d.id AS device_id,
                        GREATEST(m.starts_at, :start_ts) AS s,
                        LEAST(m.ends_at, :end_ts) AS e
@@ -2154,13 +2156,17 @@ async def _fetch_device_maintenance_windows(
                     OR (m.scope_type = 'all')
                 )
                 WHERE m.starts_at < :end_ts AND m.ends_at > :start_ts
+                {device_filter}
             """),
             {
+                **({"device_ids": device_ids} if device_ids is not None else {}),
                 "start_ts": start if start.tzinfo else start.replace(tzinfo=timezone.utc),
                 "end_ts": end if end.tzinfo else end.replace(tzinfo=timezone.utc),
             },
         )).all()
     except Exception:
+        if strict:
+            raise
         return {}
     out: dict[str, list[tuple[datetime, datetime]]] = {}
     for r in rows:

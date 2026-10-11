@@ -745,3 +745,22 @@ def test_outage_activity_subtracts_maintenance():
     maint = {D1: [(s + timedelta(hours=1, minutes=30), s + timedelta(hours=3))]}
     rows = rds._outage_activity(eps, s, s + timedelta(hours=24), maint)
     assert sum(r["downtime_minutes"] for r in rows) == pytest.approx(30)
+
+
+def test_failed_pings_and_alerts_do_not_populate_downtime_leaderboard(monkeypatch):
+    db = ReportDB([device(D1), device(D2)], alerts=[alert(D2, START + timedelta(hours=1))])
+    ch = FakeCH(samples={(START, END): {D1: (994, 1000), D2: (1000, 1000)}})
+    result = run_executive(monkeypatch, db, ch)
+    assert result["kpis"]["outage_episodes"] == 0
+    assert result["downtime_by_device"] == []
+    assert result["kpis"]["availability_pct"] == 99.7
+
+
+def test_downtime_leaderboard_contains_only_confirmed_episodes(monkeypatch):
+    db = ReportDB([device(D1), device(D2)])
+    ch = FakeCH(samples={(START, END): {D1: (990, 1000), D2: (994, 1000)}},
+                transitions=[(D1, START + timedelta(hours=1), "up", "down"),
+                             (D1, START + timedelta(hours=1, minutes=5), "down", "up")])
+    result = run_executive(monkeypatch, db, ch)
+    assert [r["device_id"] for r in result["downtime_by_device"]] == [D1]
+    assert result["downtime_by_device"][0]["downtime_minutes"] == 5

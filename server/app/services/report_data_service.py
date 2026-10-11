@@ -861,7 +861,7 @@ async def build_executive(
 
     # Every device with confirmed downtime in the window, worst first.
     downtime_by_device = []
-    for did in sorted((d for d in outages_by_dev if d in device_map),
+    for did in sorted((d for d, count in outages_by_dev.items() if d in device_map and count > 0),
                       key=lambda d: (-downtime_by_dev[d], -outages_by_dev[d]))[:25]:
         d = device_map[did]
         downtime_by_device.append({
