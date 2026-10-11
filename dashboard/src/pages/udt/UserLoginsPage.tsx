@@ -26,6 +26,13 @@ export function UserLoginsPage() {
   })
 
   return (
+    <div className="space-y-4">
+      <Card><CardContent className="p-4 text-sm">
+        <h2 className="font-semibold">Login collection requirements</h2>
+        <p className="mt-2 text-xs text-muted">Use a dedicated account with Security event-log read access (Event Log Readers), WinRM access (Remote Management Users), and WinRM shell access to run PowerShell/Get-WinEvent. No Domain Admin membership is required. Allow only the appliance to connect, preferably with HTTPS and a trusted certificate.</p>
+        <p className="mt-2 text-xs text-muted">Enable successful Logon, Kerberos Authentication Service and Kerberos Service Ticket Operations auditing on the selected controllers. Events 4624, 4768 and 4769 show authentication activity, not a guaranteed interactive desktop session. An unambiguous address observation links the activity to a device.</p>
+        <Link to="/udt/settings" className="mt-2 inline-block text-xs text-primary hover:underline">Configure domain controllers</Link>
+      </CardContent></Card>
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
       <Card>
         <CardContent className="p-0">
@@ -106,6 +113,7 @@ export function UserLoginsPage() {
           )}
         </CardContent>
       </Card>
+    </div>
     </div>
   )
 }

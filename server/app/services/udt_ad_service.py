@@ -30,7 +30,7 @@ logger = logging.getLogger("zenplus.udt_ad")
 POLL_TICK_S = 30            # scheduler granularity; per-DC interval respected
 DEFAULT_LOOKBACK_MIN = 30   # first poll window when no checkpoint exists
 MAX_EVENTS = 500
-UDT_AD_ADVISORY_LOCK = 1515074392
+UDT_AD_ADVISORY_LOCK = 1515074393
 
 # PowerShell: emit recent logon events as a compact JSON array. We ask
 # for 4624 (logon) + 4768/4769 (Kerberos). TargetUserName/IpAddress are
@@ -40,7 +40,7 @@ _PS_TEMPLATE = r"""
 $since = [DateTime]::Parse('{since_iso}', $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
 $ids = @(4624,4768,4769)
 try {{
-  $events = Get-WinEvent -FilterHashtable @{{ LogName='Security'; Id=$ids; StartTime=$since }} -MaxEvents {max_events} -ErrorAction Stop
+  $events = Get-WinEvent -FilterHashtable @{{ LogName='Security'; Id=$ids; StartTime=$since }} -Oldest -MaxEvents {max_events} -ErrorAction Stop
 }} catch {{
   if ($_.Exception.Message -match 'No events were found') {{ '[]'; exit 0 }} else {{ throw }}
 }}
@@ -48,6 +48,7 @@ $out = foreach ($e in $events) {{
   $x = [xml]$e.ToXml()
   $d = @{{}}
   foreach ($n in $x.Event.EventData.Data) {{ $d[$n.Name] = $n.'#text' }}
+  if ($e.Id -in @(4768,4769) -and $d['Status'] -and $d['Status'] -notin @('0','0x0','0x00000000')) {{ continue }}
   $user = $d['TargetUserName']
   if (-not $user) {{ continue }}
   if ($user.EndsWith('$')) {{ continue }}
@@ -64,6 +65,11 @@ $out = foreach ($e in $events) {{
     Workstation = $d['WorkstationName']
     LogonType = $d['LogonType']
   }}
+}}
+# Advance across excluded machine accounts and failed authentication too.
+if ($events) {{
+  $last = $events | Select-Object -Last 1
+  $out = @($out) + @([pscustomobject]@{{ Time=$last.TimeCreated.ToUniversalTime().ToString('o'); Cursor=$true }})
 }}
 if ($out) {{ $out | ConvertTo-Json -Compress -Depth 3 }} else {{ '[]' }}
 """
@@ -123,7 +129,7 @@ async def _record_events(db: AsyncSession, dc, events: list[dict]) -> tuple[int,
         if newest is None or ts > newest:
             newest = ts
         user = (ev.get("User") or "").strip()
-        if not user:
+        if not user or user.endswith('$') or user.upper() in ('ANONYMOUS LOGON','SYSTEM','LOCAL SERVICE','NETWORK SERVICE'):
             continue
         ip = ev.get("Ip")
         # A DC may report a non-IP value (or a hostname) in IpAddress; drop
@@ -144,24 +150,31 @@ async def _record_events(db: AsyncSession, dc, events: list[dict]) -> tuple[int,
         except (TypeError, ValueError):
             logon_type = None
 
-        # Correlate to an endpoint by active IP binding, then hostname.
+        # Authentication is attributable only when the observed address is
+        # unambiguous at the event time. Shared/proxy/overlapping IPs must not
+        # select an arbitrary "last seen" MAC and disclose the wrong user.
         endpoint_id = None
         if ip:
-            row = (await db.execute(text(
-                """SELECT e.id FROM udt_endpoints e
-                   WHERE e.ip_address = CAST(:ip AS inet)
-                      OR EXISTS (SELECT 1 FROM udt_ip_history h
-                                 WHERE h.endpoint_id = e.id AND h.active AND h.ip = CAST(:ip AS inet))
-                   ORDER BY e.last_seen DESC LIMIT 1"""
-            ), {"ip": ip})).first()
-            if row:
-                endpoint_id = row[0]
-        if endpoint_id is None and hostname:
-            row = (await db.execute(text(
-                "SELECT id FROM udt_endpoints WHERE LOWER(hostname) = LOWER(:h) ORDER BY last_seen DESC LIMIT 1"
-            ), {"h": hostname})).first()
-            if row:
-                endpoint_id = row[0]
+            address = ipaddress.ip_address(ip)
+            if address.version == 6 and address.ipv4_mapped:
+                ip = str(address.ipv4_mapped)
+            if address.is_loopback or address.is_unspecified or address.is_multicast:
+                ip = None
+        if ip:
+            candidates = (await db.execute(text(
+                """SELECT DISTINCT e.id FROM udt_endpoints e
+                   JOIN udt_ip_history h ON h.endpoint_id=e.id
+                   WHERE h.ip=CAST(:ip AS inet) AND h.first_seen<=:ts
+                     AND h.last_seen>=:ts-INTERVAL '15 minutes' LIMIT 2"""
+            ), {"ip": ip, "ts": ts})).all()
+            if len(candidates) == 1:
+                endpoint_id = candidates[0][0]
+        elif hostname:
+            candidates = (await db.execute(text(
+                "SELECT id FROM udt_endpoints WHERE LOWER(hostname)=LOWER(:h) LIMIT 2"
+            ), {"h":hostname})).all()
+            if len(candidates) == 1:
+                endpoint_id = candidates[0][0]
 
         res = await db.execute(text(
             """INSERT INTO udt_user_logins

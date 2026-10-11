@@ -127,10 +127,11 @@ function DevicePolling() {
     onError: (e: any) => toast.error('Could not save', apiErrorMessage(e)),
   })
   const saveDevice = useMutation({
-    mutationFn: ({ row, patch }: { row: UdtDeviceSettings; patch: Partial<{ enabled: boolean; snmp_credential_id: string | null; poll_interval_s: number | null }> }) =>
+    mutationFn: ({ row, patch }: { row: UdtDeviceSettings; patch: Partial<{ enabled: boolean; snmp_credential_id: string | null; ncm_credential_id: string | null; poll_interval_s: number | null }> }) =>
       udtApi.updateDeviceSettings(row.device_id, {
         enabled: row.enabled,
         snmp_credential_id: row.snmp_credential_id,
+        ncm_credential_id: row.ncm_credential_id,
         poll_interval_s: row.poll_interval_s,
         ...patch,
       }),
@@ -160,11 +161,11 @@ function DevicePolling() {
       <CardContent className="p-0">
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border p-4">
           <div>
-            <h3 className="flex items-center gap-2 text-sm font-semibold"><Network className="h-4 w-4 text-primary" /> Layer-2 polling</h3>
+            <h3 className="flex items-center gap-2 text-sm font-semibold"><Network className="h-4 w-4 text-primary" /> Switch and gateway polling</h3>
             <p className="mt-0.5 text-xs text-muted">
-              Layer-2 devices (switches and anything returning bridge-table data) that UDT polls for MAC/ARP/LLDP tables.
+              Switches and gateways that supply MAC, address, neighbor and controller-managed port observations.
               Devices are enabled by default and use their own SNMP settings unless overridden here.
-              Per-port exclusions live on the <Link to="/udt/ports" className="text-primary hover:underline">Switch Ports</Link> tab.
+              Supplemental read-only CLI uses the enabled NCCM connection; an optional UDT-only credential override leaves configuration backups unchanged. Per-port exclusions live on the <Link to="/udt/ports" className="text-primary hover:underline">Switch Ports</Link> tab.
             </p>
             <KbLink article="getting-started" variant="inline" label="Switch SNMP permissions guide" className="mt-1.5" />
           </div>
@@ -222,7 +223,7 @@ function DevicePolling() {
               <THead className="bg-surface2/40">
                 <Tr>
                   <Th className="w-8"><input type="checkbox" className="accent-primary" checked={allSelected} onChange={toggleAll} /></Th>
-                  <Th>Device</Th><Th>UDT credential</Th><Th>Interval</Th>
+                  <Th>Device</Th><Th>SNMP credential</Th><Th>Read-only CLI credential</Th><Th>Interval</Th>
                   <Th className="text-right">Ports monitored</Th><Th className="text-right">Endpoints</Th>
                   <Th>Last poll</Th><Th>UDT</Th>
                 </Tr>
@@ -247,6 +248,16 @@ function DevicePolling() {
                         <SelectContent>
                           <SelectItem value={DEVICE_CRED}>Device SNMP settings</SelectItem>
                           {creds.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} (v{c.snmp_version})</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </Td>
+                    <Td>
+                      <Select value={r.ncm_credential_id || DEVICE_CRED}
+                        onValueChange={(v) => saveDevice.mutate({ row: r, patch: { ncm_credential_id: v === DEVICE_CRED ? null : v } })}>
+                        <SelectTrigger className="h-7 w-48 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={DEVICE_CRED}>Device NCCM connection</SelectItem>
+                          {(deviceSettings.data?.cli_credentials || []).map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
                         </SelectContent>
                       </Select>
                     </Td>

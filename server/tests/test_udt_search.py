@@ -51,17 +51,20 @@ def test_search_database_results_and_permissions():
                    user_name text, user_domain text, device_id uuid, first_seen timestamptz DEFAULT now(),
                    last_seen timestamptz DEFAULT now()) ON COMMIT DROP''',
                 'CREATE TEMP TABLE udt_ip_history(endpoint_id uuid, ip inet) ON COMMIT DROP',
-                'CREATE TEMP TABLE udt_ip_evidence(endpoint_id uuid, ip inet) ON COMMIT DROP',
+                'CREATE TEMP TABLE udt_ip_evidence(endpoint_id uuid, ip inet, reporting_device_id uuid, if_index int, last_seen timestamptz) ON COMMIT DROP',
                 'CREATE TEMP TABLE udt_user_logins(endpoint_id uuid, user_name text, user_domain text) ON COMMIT DROP',
                 '''CREATE TEMP TABLE udt_endpoint_locations(endpoint_id uuid, device_id uuid, if_index int,
                    vlan_id int, is_direct boolean, active boolean, last_seen timestamptz) ON COMMIT DROP''',
                 'CREATE TEMP TABLE devices(id uuid, hostname text) ON COMMIT DROP',
                 'CREATE TEMP TABLE device_interfaces(device_id uuid, if_index int, if_name text) ON COMMIT DROP',
+                'CREATE TEMP VIEW udt_observed_locations AS SELECT * FROM udt_endpoint_locations',
+                'CREATE TEMP VIEW udt_switch_inventory AS SELECT id,hostname FROM devices',
+                'CREATE TEMP VIEW udt_switch_ports AS SELECT device_id,if_index,if_name FROM device_interfaces',
                 '''INSERT INTO udt_endpoints(id,mac,vendor,hostname,ip_address,endpoint_type,type_source,user_name,user_domain) VALUES
                    ('00000000-0000-0000-0000-000000000001','8c:16:45:2f:0a:a1','LCFC(Hefei)','test-client','192.168.100.101','unknown','auto','Alice','EXAMPLE'),
                    ('00000000-0000-0000-0000-000000000002','00:11:22:33:44:55','Dell Inc.','other-client','192.168.100.10','unknown','auto',NULL,NULL)''',
                 "INSERT INTO udt_ip_history VALUES ('00000000-0000-0000-0000-000000000001','192.0.2.99')",
-                "INSERT INTO udt_ip_evidence VALUES ('00000000-0000-0000-0000-000000000001','2001:db8::1')",
+                "INSERT INTO udt_ip_evidence(endpoint_id,ip) VALUES ('00000000-0000-0000-0000-000000000001','2001:db8::1')",
                 "INSERT INTO udt_user_logins VALUES ('00000000-0000-0000-0000-000000000002','HistoricalBob','OLD')",
             ]:
                 await conn.execute(text(ddl))

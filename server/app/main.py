@@ -279,6 +279,8 @@ def create_app() -> FastAPI:
         # UDT: agentless AD user-login correlation over WinRM (advisory-locked).
         from app.services.udt_ad_service import udt_ad_poller_loop
         app.state.udt_ad_poller = asyncio.create_task(udt_ad_poller_loop())
+        from app.services.udt_gateway_service import udt_gateway_loop
+        app.state.udt_gateway_poller = asyncio.create_task(udt_gateway_loop())
         # NetPath: per-hop enrichment (rDNS, ASN, device match) sweeper (advisory-locked).
         from app.services.netpath_enrichment import netpath_enrichment_loop
         app.state.netpath_enrichment = asyncio.create_task(netpath_enrichment_loop())
@@ -314,7 +316,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
+        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

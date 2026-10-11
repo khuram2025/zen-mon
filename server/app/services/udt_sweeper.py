@@ -82,6 +82,7 @@ async def _resolve_dns_name(ip: str, resolver=None) -> str | None:
 
 
 async def _close_stale(db: AsyncSession) -> None:
+    await db.execute(text("UPDATE udt_managed_locations SET active=FALSE,closed_at=NOW() WHERE active AND last_seen<NOW()-INTERVAL '15 minutes'"))
     await db.execute(text(
         f"UPDATE udt_endpoint_locations SET active = FALSE, closed_at = NOW() "
         f"WHERE active AND last_seen < NOW() - INTERVAL '{SESSION_GRACE}'"

@@ -241,7 +241,10 @@ export function EndpointSearchPage() {
                           <span className="text-muted"> · {portLabel(e.if_name, e.if_index)}</span>
                           {e.is_direct === false && <Badge variant="outline" className="ml-1">indirect</Badge>}
                         </span>
-                      ) : '—'}
+                      ) : e.gateway_hostname ? <span className="text-muted" title="Gateway ARP/neighbor evidence; switch port has not been confirmed">
+                        {e.gateway_hostname}{e.gateway_interface_name ? ` · ${e.gateway_interface_name}` : ''}
+                        <Badge variant="outline" className="ml-1">gateway evidence</Badge>
+                      </span> : '—'}
                     </Td>
                     <Td className="text-xs tabular-nums">{e.vlan_id ?? '—'}</Td>
                     <Td className="text-xs">{e.user_name || '—'}</Td>

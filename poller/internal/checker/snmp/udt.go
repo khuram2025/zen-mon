@@ -3,6 +3,7 @@ package snmp
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -167,8 +168,8 @@ func (c *Collector) collectVlans(s *g.GoSNMP, isCisco bool) []VlanInfo {
 }
 
 // collectQBridgeFdb walks dot1qTpFdbTable. The OID suffix is
-// <fdbId>.<6 MAC bytes>; fdbId equals the VLAN ID on practically all
-// implementations.
+// <fdbId>.<6 MAC bytes>; RFC 4363 supplies the FDB-to-VLAN mapping.
+// Shared and unavailable mappings remain unknown.
 func (c *Collector) collectQBridgeFdb(s *g.GoSNMP, portToIf map[int]int) []FdbEntry {
 	ports, err := s.BulkWalkAll(OIDDot1qTpFdbPort)
 	if err != nil || len(ports) == 0 {
@@ -181,6 +182,8 @@ func (c *Collector) collectQBridgeFdb(s *g.GoSNMP, portToIf map[int]int) []FdbEn
 		}
 	}
 
+	vlanRows, _ := s.BulkWalkAll("1.3.6.1.2.1.17.7.1.4.2.1.3")
+	vlanByFDB := fdbVLANs(vlanRows)
 	out := make([]FdbEntry, 0, len(ports))
 	for _, p := range ports {
 		suffix := oidSuffix(p.Name, OIDDot1qTpFdbPort)
@@ -188,7 +191,11 @@ func (c *Collector) collectQBridgeFdb(s *g.GoSNMP, portToIf map[int]int) []FdbEn
 		if len(parts) != 7 {
 			continue
 		}
-		vlan, _ := strconv.Atoi(parts[0])
+		fdbID, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		vlan := vlanByFDB[fdbID]
 		mac := macFromOIDParts(parts[1:])
 		if mac == "" {
 			continue
@@ -211,6 +218,32 @@ func (c *Collector) collectQBridgeFdb(s *g.GoSNMP, portToIf map[int]int) []FdbEn
 		out = append(out, FdbEntry{VlanID: vlan, MAC: mac, IfIndex: ifIdx, Status: st})
 	}
 	return out
+}
+
+// RFC 4363 permits one FDB to be shared by multiple VLANs. Unknown
+// mappings stay unknown rather than treating a vendor's FDB ID as a VLAN.
+func fdbVLANs(rows []g.SnmpPDU) map[int]int {
+	result := make(map[int]int)
+	for _, p := range rows {
+		parts := strings.Split(oidSuffix(p.Name, "1.3.6.1.2.1.17.7.1.4.2.1.3"), ".")
+		if len(parts) != 2 {
+			continue
+		}
+		vlan, err := strconv.Atoi(parts[1])
+		if err != nil || vlan < 1 || vlan > 4094 {
+			continue
+		}
+		id := int(asInt(p))
+		if id <= 0 {
+			continue
+		}
+		if old, ok := result[id]; ok && old != vlan {
+			result[id] = 0
+		} else if !ok {
+			result[id] = vlan
+		}
+	}
+	return result
 }
 
 // collectDot1dFdb walks the classic dot1dTpFdbTable on session s,
@@ -349,83 +382,80 @@ func isAuthzError(err error) bool {
 // collectArp walks ipNetToMediaTable (IPv4) and ipNetToPhysicalTable
 // (IPv4 + IPv6 neighbor discovery).
 func (c *Collector) collectArp(s *g.GoSNMP) []ArpEntry {
+	walk := func(oid string) []g.SnmpPDU { rows, _ := s.BulkWalkAll(oid); return rows }
+	return parseARPTables(walk(OIDIpNetToMediaPhysAddress), walk(OIDIpNetToMediaType),
+		walk(OIDIpNetToPhysicalPhysAddr), walk("1.3.6.1.2.1.4.35.1.6"),
+		walk("1.3.6.1.2.1.4.35.1.7"), walk("1.3.6.1.2.1.4.35.1.8"))
+}
+
+// Preserve each reporter-local interface/source. An invalid or incomplete
+// neighbor is not address ownership, even if an agent leaves MAC bytes set.
+func parseARPTables(legacy, legacyTypes, physical, states, physicalTypes, rowStatuses []g.SnmpPDU) []ArpEntry {
+	values := func(rows []g.SnmpPDU, oid string) map[string]int {
+		result := make(map[string]int)
+		for _, p := range rows {
+			result[oidSuffix(p.Name, oid)] = int(asInt(p))
+		}
+		return result
+	}
+	lt := values(legacyTypes, OIDIpNetToMediaType)
+	st := values(states, "1.3.6.1.2.1.4.35.1.6")
+	pt := values(physicalTypes, "1.3.6.1.2.1.4.35.1.7")
+	rs := values(rowStatuses, "1.3.6.1.2.1.4.35.1.8")
 	var out []ArpEntry
 	seen := make(map[string]bool)
-
-	// Classic IPv4 ARP: suffix = ifIndex.a.b.c.d
-	types := make(map[string]int)
-	if pdus, err := s.BulkWalkAll(OIDIpNetToMediaType); err == nil {
-		for _, p := range pdus {
-			types[oidSuffix(p.Name, OIDIpNetToMediaType)] = int(asInt(p))
+	add := func(p g.SnmpPDU, index int, ip string, v6 bool, source string) {
+		mac := macString(p)
+		parsed, err := net.ParseMAC(mac)
+		addr := net.ParseIP(ip)
+		if index <= 0 || err != nil || len(parsed) != 6 || parsed[0]&1 != 0 || mac == "00:00:00:00:00:00" || addr == nil || addr.IsUnspecified() || addr.IsMulticast() || addr.IsLoopback() {
+			return
 		}
-	}
-	if pdus, err := s.BulkWalkAll(OIDIpNetToMediaPhysAddress); err == nil {
-		for _, p := range pdus {
-			suffix := oidSuffix(p.Name, OIDIpNetToMediaPhysAddress)
-			parts := strings.Split(suffix, ".")
-			if len(parts) != 5 {
-				continue
-			}
-			if t, ok := types[suffix]; ok && t == 2 { // invalid
-				continue
-			}
-			mac := macString(p)
-			if mac == "" {
-				continue
-			}
-			ifIdx, _ := strconv.Atoi(parts[0])
-			ip := ipv4FromOIDParts(parts[1:])
-			if ip == "" {
-				continue
-			}
-			key := ip + "|" + mac
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, ArpEntry{IfIndex: ifIdx, IP: ip, MAC: mac, Source: "arp"})
+		key := fmt.Sprintf("%s|%s|%d|%s", addr.String(), mac, index, source)
+		if seen[key] {
+			return
 		}
+		seen[key] = true
+		out = append(out, ArpEntry{IfIndex: index, IP: addr.String(), MAC: mac, IsIPv6: v6, Source: source})
 	}
-
-	// RFC 4293 ipNetToPhysicalTable: suffix = ifIndex.addrType.addrLen.addr...
-	if pdus, err := s.BulkWalkAll(OIDIpNetToPhysicalPhysAddr); err == nil {
-		for _, p := range pdus {
-			suffix := oidSuffix(p.Name, OIDIpNetToPhysicalPhysAddr)
-			parts := strings.Split(suffix, ".")
-			if len(parts) < 4 {
-				continue
-			}
-			ifIdx, _ := strconv.Atoi(parts[0])
-			addrType, _ := strconv.Atoi(parts[1])
-			addrLen, _ := strconv.Atoi(parts[2])
-			addrParts := parts[3:]
-			if len(addrParts) != addrLen {
-				continue
-			}
-			mac := macString(p)
-			if mac == "" {
-				continue
-			}
-			var ip string
-			var isV6 bool
-			switch {
-			case addrType == 1 && addrLen == 4:
-				ip = ipv4FromOIDParts(addrParts)
-			case addrType == 2 && addrLen == 16:
-				ip = ipv6FromOIDParts(addrParts)
-				isV6 = true
-			default:
-				continue
-			}
-			if ip == "" {
-				continue
-			}
-			key := ip + "|" + mac
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, ArpEntry{IfIndex: ifIdx, IP: ip, MAC: mac, IsIPv6: isV6, Source: "nd"})
+	for _, p := range legacy {
+		suffix := oidSuffix(p.Name, OIDIpNetToMediaPhysAddress)
+		parts := strings.Split(suffix, ".")
+		if len(parts) != 5 || lt[suffix] == 2 {
+			continue
+		}
+		index, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		add(p, index, ipv4FromOIDParts(parts[1:]), false, "arp")
+	}
+	for _, p := range physical {
+		suffix := oidSuffix(p.Name, OIDIpNetToPhysicalPhysAddr)
+		parts := strings.Split(suffix, ".")
+		if len(parts) < 4 || st[suffix] == 5 || st[suffix] == 7 || pt[suffix] == 2 {
+			continue
+		}
+		if status, ok := rs[suffix]; ok && status != 1 {
+			continue
+		}
+		index, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		kind, err := strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		size, err := strconv.Atoi(parts[2])
+		if err != nil || size != len(parts)-3 {
+			continue
+		}
+		if kind == 1 && size == 4 {
+			add(p, index, ipv4FromOIDParts(parts[3:]), false, "arp")
+		}
+		if kind == 2 && size == 16 {
+			add(p, index, ipv6FromOIDParts(parts[3:]), true, "nd")
 		}
 	}
 	return out

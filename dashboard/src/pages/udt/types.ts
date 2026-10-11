@@ -58,6 +58,8 @@ export interface Endpoint {
   first_seen: string
   last_seen: string
   loc_device_id?: string | null
+  gateway_hostname?: string | null
+  gateway_interface_name?: string | null
   switch_hostname?: string | null
   if_index?: number | null
   if_name?: string | null
@@ -72,6 +74,7 @@ export interface EndpointList {
 }
 
 export interface EndpointLocation {
+  managed?: boolean
   id: number
   device_id: string
   switch: string
@@ -116,6 +119,7 @@ export interface EndpointDetail {
 }
 
 export interface UdtPort {
+  managed?: boolean
   if_index: number
   if_name: string | null
   if_descr: string | null
@@ -147,11 +151,14 @@ export interface UdtRule {
 }
 
 export interface CapacityRow {
+  managed?: boolean
+  controller_id?: string
   id: string
   hostname: string
   location: string | null
   total: number
   used: number
+  unknown?: number
   free: number
   uplinks: number
   active: number
@@ -194,6 +201,8 @@ export interface UdtDeviceSettings {
   enabled: boolean
   snmp_credential_id: string | null
   credential_name: string | null
+  ncm_credential_id: string | null
+  ncm_credential_name: string | null
   poll_interval_s: number | null
   ports_total: number
   ports_monitored: number
