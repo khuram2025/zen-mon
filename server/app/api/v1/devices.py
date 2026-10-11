@@ -571,7 +571,7 @@ async def export_devices(
     return JSONResponse(content={"devices": devices})
 
 
-@router.get("/{device_id}/availability-events")
+@router.get("/{device_id}/availability-events", dependencies=[Depends(_device_in_scope)])
 async def get_device_availability_events(
     device_id: UUID,
     from_time: datetime = Query(..., alias="from"),
