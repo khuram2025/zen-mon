@@ -119,3 +119,5 @@ Canonical redistribution approval is an open public-release gate for a modified
 Ubuntu image; the build itself is for internal qualification until that gate is
 resolved. See https://canonical.com/legal/intellectual-property-policy . Retain
 component license notices and provide required corresponding source material.
+
+The VMware host must have an accurate clock. At every boot, `zentryc-clock.service` reads host UTC through open-vm-tools before databases and initialization start. Native NTP remains enabled for ongoing synchronization. This prevents a local-time RTC offset on fresh UEFI imports from affecting TLS validity or the 30-day trial, including on an offline network. Initialization fails if host UTC cannot be read.
