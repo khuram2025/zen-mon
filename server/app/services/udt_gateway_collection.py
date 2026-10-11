@@ -105,7 +105,7 @@ def fortinet_ports(
                 "serial": by_instance[instance],
                 "port_number": int(port),
                 "if_name": name,
-                "oper_status": {"1": "up", "2": "down"}.get(
+                "oper_status": {"0": "down", "1": "up"}.get(
                     columns.get("status", {}).get(index), "unknown"
                 ),
                 "pvid": (

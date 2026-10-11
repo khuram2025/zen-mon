@@ -356,7 +356,12 @@ async def list_endpoints(
     total = (await db.execute(text(f"SELECT COUNT(*) FROM udt_endpoints e{where_sql}"), params)).scalar()
     params.update({"skip": skip, "limit": limit})
     rows = (await db.execute(text(
-        f"""SELECT e.id, e.mac::text AS mac, e.vendor, e.hostname, host(e.ip_address) AS ip,
+        f"""WITH endpoint_page AS MATERIALIZED (
+                SELECT e.* FROM udt_endpoints e {where_sql}
+                ORDER BY {sort_col} {order.upper()} NULLS LAST, e.id
+                OFFSET :skip LIMIT :limit
+            )
+            SELECT e.id, e.mac::text AS mac, e.vendor, e.hostname, host(e.ip_address) AS ip,
                    e.endpoint_type, e.type_source, e.is_randomized, e.is_watched, e.authorized, e.ignored,
                    e.user_name, e.user_domain, e.device_id,
                    e.first_seen, e.last_seen,
@@ -364,7 +369,7 @@ async def list_endpoints(
                    loc.if_index, di.if_name, loc.vlan_id, loc.is_direct,
                    gateway.hostname AS gateway_hostname, gateway.interface_name AS gateway_interface_name,
                    (e.last_seen > NOW() - INTERVAL '15 minutes') AS online
-            FROM udt_endpoints e
+            FROM endpoint_page e
             LEFT JOIN LATERAL (
                 SELECT device_id, if_index, vlan_id, is_direct FROM udt_observed_locations
                 WHERE endpoint_id = e.id AND active AND last_seen > NOW() - INTERVAL '15 minutes' ORDER BY is_direct DESC, last_seen DESC, device_id, if_index LIMIT 1
@@ -379,9 +384,7 @@ async def list_endpoints(
                   AND evidence.last_seen>NOW()-INTERVAL '24 hours'
                 ORDER BY evidence.last_seen DESC, evidence.reporting_device_id, evidence.if_index LIMIT 1
             ) gateway ON TRUE
-            {where_sql}
-            ORDER BY {sort_col} {order.upper()} NULLS LAST, e.id
-            OFFSET :skip LIMIT :limit"""
+            ORDER BY {sort_col} {order.upper()} NULLS LAST, e.id"""
     ), params)).mappings().all()
 
     redact = {} if see_users else {"user_name": None, "user_domain": None}

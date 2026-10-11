@@ -342,7 +342,41 @@ def test_managed_ports_gateway_evidence_and_history():
                 assert loaded_endpoints["meta"]["total"] == 16656
                 assert len(loaded_cap["data"]) == 33
                 # Catch accidental full cross-products while allowing slow CI hosts.
-                assert capacity_s < 10 and endpoints_s < 10
+                assert capacity_s < 10 and endpoints_s < 3
+                first_page = await list_endpoints(
+                    **(kwargs | {"sort": "mac", "order": "asc"})
+                )
+                second_page = await list_endpoints(
+                    **(kwargs | {"sort": "mac", "order": "asc", "skip": 50})
+                )
+                expected = (
+                    (
+                        await db.execute(
+                            text(
+                                "SELECT id FROM udt_endpoints WHERE NOT ignored ORDER BY mac ASC NULLS LAST,id LIMIT 100"
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert [e["id"] for e in first_page["data"] + second_page["data"]] == [
+                    str(eid) for eid in expected
+                ]
+                assert all(
+                    e["switch_hostname"] == "Switch 00" and e["if_name"]
+                    for e in first_page["data"]
+                )
+                filtered = await list_endpoints(
+                    **(kwargs | {"device_id": ids[switches[0]["serial"]], "vlan": 24})
+                )
+                assert filtered["meta"]["total"] == 16654
+                assert len(filtered["data"]) == 50
+                assert all(
+                    e["vlan_id"] == 24
+                    and e["loc_device_id"] == ids[switches[0]["serial"]]
+                    for e in filtered["data"]
+                )
                 print(
                     json.dumps(
                         {
