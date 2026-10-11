@@ -2980,7 +2980,7 @@ async def rum_journeys(
     def query():
         ch = _ch()
         totals = ch.query(f"""
-            SELECT count(), avg(length(path)), countIf(length(path) = 1)
+            SELECT count(), avgOrNull(length(path)), countIf(length(path) = 1)
             FROM ({paths_sql})
         """, parameters=params).result_rows[0]
         entries = ch.query(f"""

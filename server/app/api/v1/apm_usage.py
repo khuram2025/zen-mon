@@ -76,8 +76,8 @@ async def usage_summary(
                    uniqIf(http_route, http_route != '')      AS pages,
                    uniq(service_name)                        AS services,
                    countIf(has_error = 1)                    AS errors,
-                   avg(duration_nano) / 1e6                  AS avg_ms,
-                   quantile(0.95)(duration_nano) / 1e6       AS p95_ms
+                   avgOrNull(duration_nano) / 1e6            AS avg_ms,
+                   quantileOrNull(0.95)(duration_nano) / 1e6 AS p95_ms
             FROM zenplus.apm_spans
             WHERE timestamp >= %(since)s AND span_kind_str IN {ENTRY_KINDS}{scope}
         """, parameters=params).result_rows[0]
