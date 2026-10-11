@@ -1725,7 +1725,11 @@ function AvailabilityTimelineCard({
         </div>
         <div className="mt-2 flex justify-between gap-2 text-[10px] text-muted"><span>{timeTooltipLabelFormatter(fromTs)}</span><span>{timeTooltipLabelFormatter(toTs)}</span></div>
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted"><span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-success" />All checks responded</span><span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-warning" />Failed checks</span><span><span className="mr-1 inline-block h-2 w-2 rounded-sm border border-border bg-surface2" />No measurements</span></div>
-        <div className="mt-3 rounded-lg border border-border bg-surface2/40 p-3 text-xs" aria-live="polite">{label(active)}</div>
+        <div className="mt-3 flex items-center gap-2 rounded-lg border border-border bg-surface2/40 p-2 text-xs">
+          <button type="button" aria-label="Previous interval" disabled={activeIndex === 0} onClick={() => setSelected(activeIndex - 1)} className="h-11 w-11 shrink-0 rounded-md border border-border text-lg disabled:opacity-30">‹</button>
+          <span className="min-w-0 flex-1" aria-live="polite">{label(active)}</span>
+          <button type="button" aria-label="Next interval" disabled={activeIndex === buckets.length - 1} onClick={() => setSelected(activeIndex + 1)} className="h-11 w-11 shrink-0 rounded-md border border-border text-lg disabled:opacity-30">›</button>
+        </div>
       </div>
       <p className="text-xs leading-relaxed text-muted">A failed check lowers ping success; it does not by itself confirm an outage. Down incidents follow the assigned monitor’s confirmation policy. Missing measurements are unknown, not healthy time. The strip includes raw checks during maintenance; the headline and confirmed downtime exclude planned maintenance.</p>
       <div className="border-t border-border pt-3">

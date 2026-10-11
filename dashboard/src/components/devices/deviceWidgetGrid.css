@@ -45,3 +45,7 @@
 .is-standard .device-summary-grid .device-widget-content > * { height:100%; min-height:132px; }
 .is-standard .device-performance-chart { height:240px; flex:none; }
 .is-standard .device-widget:has(> .device-widget-content:empty) { display:none; }
+
+/* A hidden chart tooltip can retain its desktop x-coordinate after resizing.
+   Remove its box while hidden so it cannot widen a narrow device page. */
+.device-performance-chart .recharts-tooltip-wrapper[style*="visibility: hidden"] { display:none; }
