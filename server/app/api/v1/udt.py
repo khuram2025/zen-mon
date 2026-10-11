@@ -315,7 +315,10 @@ async def list_endpoints(
     limit: int = Query(default=50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(udt_reader),
+    if_index: Optional[int] = None,
 ):
+    if if_index is not None and (not device_id or if_index < 1):
+        raise HTTPException(status_code=422, detail="A positive port index requires a switch")
     see_users = await _can_see_users(db, user)
     where = []
     params: dict = {}
@@ -332,9 +335,17 @@ async def list_endpoints(
     if endpoint_type:
         where.append("e.endpoint_type = :etype")
         params["etype"] = endpoint_type
+    # Keep the switch and port in the same observation, including managed
+    # ports. A filtered row must also display that observation rather than
+    # another switch's newer/direct sighting of the same endpoint.
+    location_scope = ""
     if device_id:
-        where.append("EXISTS (SELECT 1 FROM udt_observed_locations l WHERE l.endpoint_id=e.id AND l.active AND l.last_seen>NOW()-INTERVAL '15 minutes' AND l.device_id = :dev)")
+        location_scope = " AND device_id = :dev"
         params["dev"] = device_id
+        if if_index is not None:
+            location_scope += " AND if_index = :if_index"
+            params["if_index"] = if_index
+        where.append(f"EXISTS (SELECT 1 FROM udt_observed_locations WHERE endpoint_id=e.id AND active AND last_seen>NOW()-INTERVAL '15 minutes'{location_scope})")
     if vlan is not None:
         where.append("EXISTS (SELECT 1 FROM udt_observed_locations l WHERE l.endpoint_id=e.id AND l.active AND l.last_seen>NOW()-INTERVAL '15 minutes' AND l.vlan_id = :vlan)")
         params["vlan"] = vlan
@@ -372,7 +383,7 @@ async def list_endpoints(
             FROM endpoint_page e
             LEFT JOIN LATERAL (
                 SELECT device_id, if_index, vlan_id, is_direct FROM udt_observed_locations
-                WHERE endpoint_id = e.id AND active AND last_seen > NOW() - INTERVAL '15 minutes' ORDER BY is_direct DESC, last_seen DESC, device_id, if_index LIMIT 1
+                WHERE endpoint_id = e.id AND active AND last_seen > NOW() - INTERVAL '15 minutes'{location_scope} ORDER BY is_direct DESC, last_seen DESC, device_id, if_index LIMIT 1
             ) loc ON TRUE
             LEFT JOIN udt_switch_inventory dv ON dv.id = loc.device_id
             LEFT JOIN udt_switch_ports di ON di.device_id = loc.device_id AND di.if_index = loc.if_index
