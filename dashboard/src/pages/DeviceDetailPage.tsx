@@ -1695,7 +1695,11 @@ function AvailabilityTimelineCard({
   const firstFailure = buckets.findIndex(b => b.down > 0)
   const activeIndex = Math.min(buckets.length - 1, selected ?? (firstFailure >= 0 ? firstFailure : buckets.length - 1))
   const active = buckets[activeIndex]
-  const label = (b: typeof active) => `${timeTooltipLabelFormatter(b.start)} – ${timeTooltipLabelFormatter(b.end)}: ${b.state === 'gap' ? 'No measurements' : `${formatDeviceAvailability(b.pct)} ping success, ${Math.round(b.down)} failed of ${Math.round(b.up + b.down)} checks`}`
+  const intervalTime = (ts: number) => new Date(ts).toLocaleString([], {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    ...((toTs - fromTs) / buckets.length < 60_000 ? { second: '2-digit' as const } : {}),
+  })
+  const label = (b: typeof active) => `${intervalTime(b.start)} – ${intervalTime(b.end)}: ${b.state === 'gap' ? 'No measurements' : `${formatDeviceAvailability(b.pct)} ping success, ${Math.round(b.down)} failed of ${Math.round(b.up + b.down)} checks`}`
   const duration = (seconds: number) => seconds < 60 ? `${Math.round(seconds)} sec` : seconds < 3600 ? `${(seconds / 60).toFixed(1)} min` : `${(seconds / 3600).toFixed(1)} hr`
   return <Card>
     <CardContent className="space-y-4 p-4">
