@@ -4,7 +4,7 @@ import { transformWithEsbuild } from 'vite'
 
 const src = fs.readFileSync('src/components/devices/availability.ts', 'utf8')
 const compiled = await transformWithEsbuild(src, 'availability.ts', { loader: 'ts', format: 'esm' })
-const { formatDeviceAvailability: format, deviceAvailabilityBuckets: buckets } = await import(`data:text/javascript;base64,${Buffer.from(compiled.code).toString('base64')}`)
+const { formatDeviceAvailability: format, deviceAvailabilityBuckets: buckets, packetLossPercent, averageDevicePacketLoss } = await import(`data:text/javascript;base64,${Buffer.from(compiled.code).toString('base64')}`)
 assert.equal(format(99.96), '99.96%')
 assert.equal(format(100), '100.00%')
 assert.equal(format(0), '0.00%')
@@ -36,3 +36,14 @@ assert(page.includes("queryKey: ['uptime-stats', range.fromISO, range.toISO]"), 
 assert(page.includes('/devices/dashboard/uptime-stats?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}'), 'headline and timeline must request identical dates')
 assert(section.includes('aria-pressed={i === activeIndex}'), 'selected interval is accessible')
 assert(section.includes('Outage history could not be loaded'), 'failed incident query must remain unknown')
+
+assert.equal(packetLossPercent(1), 100, 'complete loss must display 100%, not 1%')
+assert.equal(packetLossPercent(.01), 1)
+assert.equal(packetLossPercent(0), 0)
+for (const ratio of [null, undefined, NaN, Infinity, -1, 2]) assert.equal(packetLossPercent(ratio), null)
+assert.equal(averageDevicePacketLoss([{packet_loss:1,sample_count:3}]),100)
+assert.equal(averageDevicePacketLoss([{packet_loss:1,sample_count:1},{packet_loss:0,sample_count:99}]),1, 'rollup averages must be sample weighted')
+assert.equal(averageDevicePacketLoss([{packet_loss:null,sample_count:100},{packet_loss:1,sample_count:0}]),null)
+assert.equal(averageDevicePacketLoss([{packet_loss:0},{packet_loss:1}]),50, 'legacy raw points default to one check each')
+assert.equal(averageDevicePacketLoss([]),null)
+console.log('Packet-loss units, weighted rollups, complete loss and missing data passed.')

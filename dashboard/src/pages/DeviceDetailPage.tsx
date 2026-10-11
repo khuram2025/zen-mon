@@ -2,7 +2,7 @@ import { DeviceWidgetGrid, type DeviceWidget } from '@/components/devices/Device
 import { alignDeviceRange, autoDetectState } from '@/components/devices/templatePresentation'
 import { deviceOsLink } from '@/components/devices/deviceInventory'
 import { inventoryApi } from '@/pages/inventory/api'
-import { deviceAvailabilityBuckets, formatDeviceAvailability, type DeviceAvailabilityPoint } from '@/components/devices/availability'
+import { averageDevicePacketLoss, packetLossPercent, deviceAvailabilityBuckets, formatDeviceAvailability, type DeviceAvailabilityPoint } from '@/components/devices/availability'
 import { DeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
 import { MonitoringSites } from '@/components/MonitoringSites'
 import { useEffect, useMemo, useState } from 'react'
@@ -545,7 +545,7 @@ function DashboardSection({
   const [inventoryOpen, setInventoryOpen] = useState(false)
 
   const { data: pingData } = useQuery<{
-    points: (DeviceAvailabilityPoint & { rtt_ms: number; packet_loss: number; jitter_ms: number })[]
+    points: (DeviceAvailabilityPoint & { rtt_ms: number; packet_loss: number | null; jitter_ms: number })[]
   }>({
     queryKey: ['device', deviceId, 'ping-metrics', range.fromISO, range.toISO],
     queryFn: async () =>
@@ -669,9 +669,9 @@ function DashboardSection({
   const memVal = mem?.points?.length ? mem.points[mem.points.length - 1].value : null
 
   const pts = pingData?.points || []
-  const rttPts = pts.map((p) => ({ ts: new Date(p.timestamp).getTime(), rtt: p.rtt_ms, loss: p.packet_loss, jitter: p.jitter_ms }))
+  const rttPts = pts.map((p) => ({ ts: new Date(p.timestamp).getTime(), rtt: p.rtt_ms, loss: packetLossPercent(p.packet_loss), jitter: p.jitter_ms }))
   const lastRtt = rttPts.length ? rttPts[rttPts.length - 1].rtt : null
-  const avgLoss = rttPts.length ? rttPts.reduce((s, p) => s + p.loss, 0) / rttPts.length : null
+  const avgLoss = averageDevicePacketLoss(pts)
 
   /* Total bandwidth across interfaces (sum of last in+out bps) */
   const bwSeries = useMemo(() => bandwidthSeries(ifMetrics || {}), [ifMetrics])
@@ -719,7 +719,7 @@ function DashboardSection({
   const memTrend = percentTrend(mem?.points?.map((p) => p.value) || [])
   const ifTrend = percentTrend(bwSeries.map((p) => p.value))
   const latTrend = percentTrend(rttPts.map((p) => p.rtt))
-  const lossTrend = percentTrend(rttPts.map((p) => p.loss))
+  const lossTrend = percentTrend(rttPts.flatMap((p) => p.loss == null ? [] : [p.loss]))
 
   /* Merged performance chart — CPU + Memory only. Bandwidth has its own
      "Throughput" tile in the Environmental / System Stats card. */
@@ -733,7 +733,7 @@ function DashboardSection({
   const cpuSeries = cpu?.points?.map((p) => p.value) || []
   const memSeries = mem?.points?.map((p) => p.value) || []
   const latSeries = rttPts.map((p) => p.rtt)
-  const lossSeries = rttPts.map((p) => p.loss)
+  const lossSeries = rttPts.flatMap((p) => p.loss == null ? [] : [p.loss])
   const bwMbpsSeries = bwSeries.map((p) => p.value / 1_000_000)
   // Real availability sparkline: 100 when the check was up, 0 when it was down.
   const uptimeSpark = pts.filter(p => p.is_up != null).map(p => p.uptime_pct ?? (isUpPoint(p.is_up) ? 100 : 0))

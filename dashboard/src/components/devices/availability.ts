@@ -35,3 +35,20 @@ export function deviceAvailabilityBuckets(points: DeviceAvailabilityPoint[], fro
     pct: s.up + s.down > 0 ? s.up * 100 / (s.up + s.down) : null,
   }))
 }
+
+/** The metrics API stores packet loss as a fraction, including rollup averages. */
+export function packetLossPercent(ratio: number | null | undefined): number | null {
+  return typeof ratio === 'number' && Number.isFinite(ratio) && ratio >= 0 && ratio <= 1 ? ratio * 100 : null
+}
+
+export function averageDevicePacketLoss(points: { packet_loss?: number | null; sample_count?: number | null }[]): number | null {
+  let weighted = 0, samples = 0
+  for (const point of points) {
+    const pct = packetLossPercent(point.packet_loss)
+    const weight = point.sample_count ?? 1
+    if (pct == null || !Number.isFinite(weight) || weight <= 0) continue
+    weighted += pct * weight
+    samples += weight
+  }
+  return samples > 0 ? weighted / samples : null
+}
