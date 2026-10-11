@@ -187,7 +187,7 @@ export function DevicesDashboard({
     const rows = exec?.downtime_by_device ?? (exec?.top_issues || [])
       .filter((i) => (i.category ?? 'outage') !== 'alert_noise')
       .map((i) => ({ device_id: i.device_id, hostname: i.hostname, downtime_minutes: i.downtime_minutes ?? i.duration_minutes, outages: i.outages ?? 0, ongoing: i.severity === 'critical', availability_pct: i.availability_pct ?? null, location: null as string | null | undefined }))
-    return rows.slice(0, 8).map((r) => ({
+    return rows.filter(r => r.outages > 0 || (r.downtime_minutes ?? 0) > 0).slice(0, 8).map((r) => ({
       key: r.device_id,
       label: r.hostname,
       sub: [r.location && !isUnassigned(r.location) ? r.location : null, `${plural(r.outages, 'outage')}`, r.availability_pct != null ? `${fmtAvail(r.availability_pct)} available` : null].filter(Boolean).join(' · '),
@@ -214,8 +214,9 @@ export function DevicesDashboard({
 
   return (
     <div className="flex flex-col gap-4">
+      <p className="rounded-xl border border-border bg-surface p-3 text-sm text-muted">Ping success measures responding checks. Confirmed outages count Down incidents after the monitor’s confirmation policy. Isolated failed checks can lower the percentage with zero outages. Group and site percentages combine different sets of devices; alerts may describe performance or other conditions.</p>
       <Hero>
-        <HeroCard title="Device availability" subtitle={`${periodLabel} · ping reachability, maintenance excluded`} className={dim}>
+        <HeroCard title="Device ping success" subtitle={`${periodLabel} · ping reachability, maintenance excluded`} className={dim}>
           {loading ? <Loading h="h-64" /> : (
             <>
               <div className="mt-2"><RingGauge value={avail} target={target} caption="of ping samples succeeded" size={large ? 250 : 216} /></div>
@@ -228,9 +229,9 @@ export function DevicesDashboard({
               <div className="mt-4"><BudgetMeter avail={avail} target={target} /></div>
               <p className="mt-2 text-xs text-muted">
                 {used != null && used > 1
-                  ? `Unavailability is ${used >= 10 ? Math.round(used).toLocaleString() : used.toFixed(1)}× what the ${fmtTarget(target)} target allows.`
+                  ? `Failed-check rate is ${used >= 10 ? Math.round(used).toLocaleString() : used.toFixed(1)}× what the ${fmtTarget(target)} target allows.`
                   : used != null
-                    ? `${((1 - used) * 100).toFixed(0)}% of the downtime allowed by the ${fmtTarget(target)} target remains.`
+                    ? `${((1 - used) * 100).toFixed(0)}% of the failed-check allowance for the ${fmtTarget(target)} target remains.`
                     : 'No availability evidence in this period.'}
               </p>
             </>
@@ -329,7 +330,7 @@ export function DevicesDashboard({
         <Panel
           className={cn('xl:col-span-8', dim)}
           title="Availability & outage activity"
-          subtitle={`Fleet availability per interval with devices down beneath · ${periodLabel}`}
+          subtitle={`Ping success per interval with confirmed devices down beneath · ${periodLabel}`}
         >
           {loading ? <Loading h="h-[340px]" /> : trend.some((p) => p.availability_pct != null) || activity?.some((a) => a.entities_down) ? (
             <>
@@ -362,7 +363,7 @@ export function DevicesDashboard({
         <Panel
           className={cn('xl:col-span-8', dim)}
           title="Availability heatmap"
-          subtitle={`When availability was lost · ${trend.length && Date.parse(trend[trend.length - 1].ts) - Date.parse(trend[0].ts) > 20 * 3_600_000 ? 'rows are days, columns are time of day (browser time)' : 'one cell per interval'}`}
+          subtitle={`Intervals with failed checks · ${trend.length && Date.parse(trend[trend.length - 1].ts) - Date.parse(trend[0].ts) > 20 * 3_600_000 ? 'rows are days, columns are time of day (browser time)' : 'one cell per interval'}`}
         >
           {loading ? <Loading h="h-52" /> : trend.length ? (
             <>
@@ -377,8 +378,8 @@ export function DevicesDashboard({
       <Row className={dim}>
         <Panel
           className="xl:col-span-6"
-          title="Availability by segment"
-          subtitle={`Same period and denominator as the headline · worst first`}
+          title="Ping success by segment"
+          subtitle={`Successful checks ÷ all checks in each segment · weighted by recorded checks`}
           actions={<Segmented label="Segment" value={segment} onChange={setSegment} options={[{ key: 'group', label: 'Group' }, { key: 'type', label: 'Type' }, { key: 'site', label: 'Site' }]} />}
         >
           {loading ? <Loading /> : (
@@ -401,7 +402,7 @@ export function DevicesDashboard({
             </div>
           )}
         </Panel>
-        <Panel className="xl:col-span-6" title="Site health map" subtitle={`Availability for ${c.period} · badge = devices down now`}>
+        <Panel className="xl:col-span-6" title="Site health map" subtitle={`Ping success for ${c.period} · each site combines its own devices · badge = down now`}>
           {loading ? <Loading /> : (
             <div className="max-h-[440px] overflow-y-auto pr-1">
               <HealthTiles

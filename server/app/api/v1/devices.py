@@ -571,6 +571,41 @@ async def export_devices(
     return JSONResponse(content={"devices": devices})
 
 
+@router.get("/{device_id}/availability-events")
+async def get_device_availability_events(
+    device_id: UUID,
+    from_time: datetime = Query(..., alias="from"),
+    to_time: datetime = Query(..., alias="to"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Confirmed episodes, using exactly the Availability report's semantics.
+
+    Probe failures must never be inferred as incidents from chart buckets.
+    Historical windows include incidents already open when the window starts.
+    """
+    device = await device_service.get_device(db, device_id)
+    if not device or not scoping.entity_visible(device.tags, await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail="Device not found")
+    from app.services.report_data_service import _device_transitions, window_episodes
+    from app.services.report_service import _fetch_device_maintenance_windows
+    start = from_time.replace(tzinfo=timezone.utc) if from_time.tzinfo is None else from_time.astimezone(timezone.utc)
+    end = to_time.replace(tzinfo=timezone.utc) if to_time.tzinfo is None else to_time.astimezone(timezone.utc)
+    if end <= start or end - start > timedelta(days=366):
+        raise HTTPException(status_code=422, detail="Select a period between zero and 366 days")
+    try:
+        maintenance = await _fetch_device_maintenance_windows(db, start, end, device_ids=[str(device_id)], strict=True)
+        transitions = await asyncio.to_thread(_device_transitions, start, end, [str(device_id)])
+        episodes = window_episodes(transitions, start, end, start, maintenance)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Confirmed outage history is temporarily unavailable") from exc
+    return {"from": start.isoformat(), "to": end.isoformat(), "basis": "confirmed",
+            "outages": len(episodes),
+            "downtime_seconds": sum(e["in_window_s"] for e in episodes),
+            "events": sorted(episodes, key=lambda e: e["clipped_start"], reverse=True)[:100],
+            "events_truncated": len(episodes) > 100}
+
+
 @router.get("/{device_id}/status-explanation")
 async def get_device_status_explanation(
     device_id: UUID,
@@ -598,6 +633,8 @@ async def get_device_status_explanation(
     import os
     from app.services.device_status_explanation import evidence
     poller_id = os.getenv("POLLER_ID", "poller-01") if owner["owner_kind"] == "central" else str(owner["sensor_id"])
+    if owner["owner_kind"] == "central":
+        output["confirmation"] = {"failed_checks": 3, "packets_per_check": 3, "interval_seconds": device.ping_interval or 60, "recovery_checks": 1}
     output["source"] = "Controller" if owner["owner_kind"] == "central" else (owner["name"] or "Assigned sensor")
     try:
         output.update(await asyncio.to_thread(evidence, device_id, poller_id, thresholds,

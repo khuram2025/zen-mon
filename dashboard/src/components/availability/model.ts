@@ -290,7 +290,7 @@ export function assessDevices(input: DeviceInput): Assessment {
   const metrics: DecisionMetric[] = [
     {
       key: 'availability',
-      label: 'Device availability',
+      label: 'Device ping success',
       value: fmtAvail(avail),
       valueTone: verdict == null ? 'unknown' : 'neutral',
       verdict: statusWord(verdict),
@@ -396,7 +396,7 @@ export function assessDevices(input: DeviceInput): Assessment {
     if (!measured) {
       sentences.push(`Availability for ${period} is not measured: no ping evidence was recorded, so no target verdict is given.`)
     } else {
-      sentences.push(`During ${period}, device availability was ${fmtAvail(avail)} against a configured target of ${fmtTarget(target)} (${verdict ? 'met' : 'below target'}).`)
+      sentences.push(`During ${period}, device ping success was ${fmtAvail(avail)} against a configured target of ${fmtTarget(target)} (${verdict ? 'met' : 'below target'}).`)
       if (!legacy && episodes != null) {
         sentences.push(episodes === 0
           ? 'No confirmed outages were recorded in the period.'
@@ -470,7 +470,7 @@ export function assessDevices(input: DeviceInput): Assessment {
         : { label: 'Open device estate', to: '/devices' },
     },
     risks,
-    basis: 'Device ping availability over the selected period; planned maintenance excluded; current inventory only.',
+    basis: 'Successful ping checks ÷ recorded checks; planned maintenance excluded; current inventory only. Confirmed outages use Down incidents, not isolated failed checks.',
     target,
     targetLabel: `${fmtTarget(target)} (${targetSource})`,
     coverageText,

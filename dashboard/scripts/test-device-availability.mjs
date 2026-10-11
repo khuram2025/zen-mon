@@ -31,3 +31,8 @@ assert(!section.includes('upCount / total'))
 assert(page.includes('availabilityPct={availabilityPct}'))
 assert(page.includes('const availabilityLabel = formatDeviceAvailability(availabilityPct)'))
 console.log('Device availability regressions passed: 99.96% precision, partial failures, sample weighting, missing data, range bounds, and shared headline source.')
+
+assert(page.includes("queryKey: ['uptime-stats', range.fromISO, range.toISO]"), 'same-duration historical windows must not share current-window cache')
+assert(page.includes('/devices/dashboard/uptime-stats?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}'), 'headline and timeline must request identical dates')
+assert(section.includes('aria-pressed={i === activeIndex}'), 'selected interval is accessible')
+assert(section.includes('Outage history could not be loaded'), 'failed incident query must remain unknown')

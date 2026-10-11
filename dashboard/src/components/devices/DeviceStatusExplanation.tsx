@@ -9,6 +9,7 @@ type Sample = { timestamp: string; rtt_ms: number; packet_loss_pct: number; is_u
 type Explanation = {
   status: string; mode: string; source: string
   thresholds: { degraded_rtt_ms: number; degraded_loss_pct: number }
+  confirmation?: { failed_checks: number; packets_per_check: number; interval_seconds: number; recovery_checks: number }
   latest?: Sample | null
   recent_degraded?: { timestamp: string; reason: string; sample?: Sample | null; thresholds_unchanged: boolean; recovered_at?: string | null } | null
 }
@@ -45,6 +46,7 @@ export function DeviceStatusExplanation({ deviceId, compact = false }: { deviceI
       <Link className="text-xs text-primary hover:underline" to="/settings/general?tab=monitoring">Monitoring thresholds</Link>
     </div>
     <p className="mt-2 text-xs text-muted">Degraded when a responding ping check has latency above <b>{number(data.thresholds.degraded_rtt_ms)} ms</b> OR packet loss above <b>{number(data.thresholds.degraded_loss_pct)}%</b>. Equality does not trigger degradation.</p>
+    {data.confirmation && <p className="mt-2 text-xs text-muted">Down requires <b>{data.confirmation.failed_checks} consecutive failed checks</b>, with {data.confirmation.packets_per_check} packets per check and a configured {data.confirmation.interval_seconds}s polling interval. A responding check resets the failure sequence and clears Down; latency or packet loss can still mark the device Degraded. Isolated failures remain diagnostic evidence.</p>}
     {latest ? <div className="mt-3 rounded-lg border border-border bg-surface2/30 p-3">
       <div className="mb-2 text-xs text-muted">Latest check · {data.source} · {relativeTime(latest.timestamp)} · {new Date(latest.timestamp).toLocaleString()}</div>
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm"><span>Latency <b>{latest.is_up ? `${number(latest.rtt_ms)} ms` : 'No response'}</b> / {number(data.thresholds.degraded_rtt_ms)} ms limit</span><span>Packet loss <b>{number(latest.packet_loss_pct)}%</b> / {number(data.thresholds.degraded_loss_pct)}% limit</span></div>

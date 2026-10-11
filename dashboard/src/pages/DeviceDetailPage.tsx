@@ -699,11 +699,17 @@ function DashboardSection({
   const uptimeDaysCompact = uptimeSec != null ? formatDaysCompact(uptimeSec) : '—'
 
   // Availability % over the active time-filter window — pulled from ClickHouse
-  // ping aggregation. Re-fetches whenever range.hours changes.
+  // ping aggregation. Bind the headline to the same exact window as the chart.
   const { data: uptimeStats } = useQuery<{ devices: Record<string, number> }>({
-    queryKey: ['uptime-stats', range.hours],
+    queryKey: ['uptime-stats', range.fromISO, range.toISO],
     queryFn: async () =>
-      (await api.get(`/devices/dashboard/uptime-stats?hours=${Math.max(1, Math.round(range.hours))}`)).data,
+      (await api.get(`/devices/dashboard/uptime-stats?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}`)).data,
+    staleTime: 30_000,
+  })
+  const { data: availabilityEvents, isError: availabilityEventsError } = useQuery<DeviceOutageEvidence>({
+    queryKey: ['device', deviceId, 'availability-events', range.fromISO, range.toISO],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/availability-events?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}`)).data,
+    enabled: !!device.ping_enabled,
     staleTime: 30_000,
   })
   const availabilityPct = deviceId && uptimeStats?.devices ? uptimeStats.devices[deviceId] : undefined
@@ -806,7 +812,7 @@ function DashboardSection({
   )
 
   const overviewWidgets: DeviceWidget[] = [
-    ...(device.ping_enabled ? [{ id: 'availability', title: 'Availability', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<Clock className="h-4 w-4" />} label="Availability" value={availabilityLabel} trend={null}
+    ...(device.ping_enabled ? [{ id: 'availability', title: 'Availability', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<Clock className="h-4 w-4" />} label="Ping success" value={availabilityLabel} trend={null}
             color={availabilityPct == null ? 'info' : availabilityPct >= 99.9 ? 'success' : availabilityPct >= 95 ? 'warning' : 'danger'} series={uptimeSpark} subtitle={range.label} />) }] : []),
     ...(device.ping_enabled ? [{ id: 'latency', title: 'Latency', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<Activity className="h-4 w-4" />} label="Latency" value={lastRtt != null ? `${Number(lastRtt).toFixed(1)} ms` : '—'} trend={latTrend} color="info" invertTrend series={latSeries.slice(-22)} subtitle={lastRtt == null ? 'No samples in this range' : 'Latest sample in range'} />) }] : []),
     ...(device.ping_enabled ? [{ id: 'packet-loss', title: 'Packet loss', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<ZapOff className="h-4 w-4" />} label="Packet loss" value={avgLoss != null ? `${avgLoss.toFixed(1)}%` : '—'} trend={lossTrend} color={avgLoss == null ? 'info' : avgLoss === 0 ? 'success' : avgLoss < 2 ? 'warning' : 'danger'} invertTrend series={lossSeries.slice(-22)} subtitle={`Average · ${range.label}`} />) }] : []),
@@ -825,7 +831,7 @@ function DashboardSection({
     }) : []),
     ...(snmp && !!device.profile_name ? [{ id: 'device-health', title: 'Device health & metrics', width: 8, height: 10, minWidth: 2, minHeight: 5, compact: false, content: (<TemplateInsightsSection deviceId={deviceId} rangeHours={range.hours} summary onExplore={exploreMetrics} />) }] : []),
     ...(true ? [{ id: 'alerts', title: 'Alerts', width: 4, height: 10, minWidth: 2, minHeight: 5, compact: false, content: (<DeviceAlertsCard alerts={alertPreview} activeCount={activeAlertsResp?.meta?.total} loading={alertsLoading} error={alertsError} deviceId={deviceId} />) }] : []),
-    ...(device.ping_enabled ? [{ id: 'availability-timeline', title: 'Availability timeline', width: 8, height: 5, minWidth: 2, minHeight: 4, compact: false, content: (<AvailabilityTimelineCard points={pts} rangeLabel={range.label} fromTs={fromTs} toTs={toTs} availabilityPct={availabilityPct} />) }] : []),
+    ...(device.ping_enabled ? [{ id: 'availability-timeline', title: 'Availability timeline', width: 8, height: 5, minWidth: 2, minHeight: 4, compact: false, content: (<AvailabilityTimelineCard points={pts} rangeLabel={range.label} fromTs={fromTs} toTs={toTs} availabilityPct={availabilityPct} evidence={availabilityEvents} evidenceError={availabilityEventsError} />) }] : []),
     ...(true ? [{ id: 'reachability', title: 'Reachability details', width: 4, height: 5, minWidth: 2, minHeight: 3, compact: false, content: (<DeviceStatusExplanation deviceId={deviceId} compact />) }] : []),
     ...(perfSeries.length > 0 ? [{ id: 'performance', title: 'Performance overview', width: 12, height: 10, minWidth: 3, minHeight: 8, compact: false, content: (<PerformanceOverviewCard series={perfSeries} stats={perfStats} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} />) }] : []),
     ...(uptimeSec != null ? [{ id: 'boot-time', title: 'Time since reboot', width: 2, height: 2, minWidth: 1, minHeight: 2, compact: true, content: (<div className="device-boot-time rounded-lg border border-border bg-surface text-sm"><div className="device-boot-label text-muted"><Clock className="h-3.5 w-3.5 shrink-0" /><span>Time since reboot</span></div><span className="device-boot-value font-medium">{uptimeDaysCompact}</span></div>) }] : []),
@@ -1658,109 +1664,77 @@ export function InventoryConfigCard({
 }
 
 /* ════════════════════════════════════════════════════════════
-   Availability Timeline — horizontal green/red up/down strip
+   Availability evidence — probe quality and confirmed incidents
    ════════════════════════════════════════════════════════════ */
 
 const UP_COLOR = '#22C55E'
-const DOWN_COLOR = '#EF4444'
+
+type DeviceOutageEvidence = {
+  outages: number
+  downtime_seconds: number
+  events_truncated: boolean
+  events: { started_at: string | null; clipped_start: string; ended_at: string | null; ongoing: boolean; in_window_s: number }[]
+}
 
 function AvailabilityTimelineCard({
-  points, rangeLabel, fromTs, toTs, availabilityPct,
+  points, rangeLabel, fromTs, toTs, availabilityPct, evidence, evidenceError,
 }: {
   points: DeviceAvailabilityPoint[]
   availabilityPct?: number
   rangeLabel: string
   fromTs: number
   toTs: number
+  evidence?: DeviceOutageEvidence
+  evidenceError?: boolean
 }) {
-  // Headline shares the device-list calculation, including maintenance exclusions.
   const pct = availabilityPct ?? null
-  const pctColor = pct == null ? 'text-muted' : pct > 99 ? 'text-success' : pct > 95 ? 'text-warning' : 'text-danger'
   const buckets = useMemo(() => deviceAvailabilityBuckets(points, fromTs, toTs), [points, fromTs, toTs])
-  const total = Math.round(buckets.reduce((sum, bucket) => sum + bucket.up + bucket.down, 0))
-
-  const coveredBuckets = buckets.filter((b) => b.state !== 'gap').length
-  const coveragePct = buckets.length ? (coveredBuckets / buckets.length) * 100 : 0
-
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 items-baseline gap-2">
-            <h3 className="text-sm font-semibold">Availability Timeline</h3>
-            <span className="truncate text-[11px] font-medium text-muted">
-              {rangeLabel}{total ? ` · ${total} check${total === 1 ? '' : 's'}` : ''}
-            </span>
-          </div>
-          {pct != null && (
-            <div className="flex flex-wrap items-baseline gap-2">
-              {coveragePct < 95 && (
-                <span
-                  className="text-[10px] text-muted"
-                  title="Share of the selected window that has ping data. The timeline shows raw probe results; the headline uses the same maintenance-adjusted calculation as the device list."
-                >
-                  {coveragePct < 1 ? '<1' : coveragePct.toFixed(0)}% of range covered
-                </span>
-              )}
-              <span className={cn('text-xs font-mono font-medium', pctColor)}>{formatDeviceAvailability(pct)} uptime</span>
-            </div>
-          )}
+  const [selected, setSelected] = useState<number | null>(null)
+  const total = Math.round(buckets.reduce((sum, b) => sum + b.up + b.down, 0))
+  const failed = Math.round(buckets.reduce((sum, b) => sum + b.down, 0))
+  const firstFailure = buckets.findIndex(b => b.down > 0)
+  const activeIndex = Math.min(buckets.length - 1, selected ?? (firstFailure >= 0 ? firstFailure : buckets.length - 1))
+  const active = buckets[activeIndex]
+  const label = (b: typeof active) => `${timeTooltipLabelFormatter(b.start)} – ${timeTooltipLabelFormatter(b.end)}: ${b.state === 'gap' ? 'No measurements' : `${formatDeviceAvailability(b.pct)} ping success, ${Math.round(b.down)} failed of ${Math.round(b.up + b.down)} checks`}`
+  const duration = (seconds: number) => seconds < 60 ? `${Math.round(seconds)} sec` : seconds < 3600 ? `${(seconds / 60).toFixed(1)} min` : `${(seconds / 3600).toFixed(1)} hr`
+  return <Card>
+    <CardContent className="space-y-4 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div><h3 className="text-sm font-semibold">Availability & reachability</h3><p className="mt-1 text-xs text-muted">{rangeLabel} · times shown in your browser’s timezone</p></div>
+        <span className="rounded-full border border-border px-2 py-1 text-xs text-muted">{total.toLocaleString()} recorded checks</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div><div className="text-xs text-muted">Ping success</div><div className="mt-1 text-lg font-semibold tabular-nums">{formatDeviceAvailability(pct)}</div><div className="text-[11px] text-muted">Maintenance excluded</div></div>
+        <div><div className="text-xs text-muted">Failed checks</div><div className={cn('mt-1 text-lg font-semibold tabular-nums', failed > 0 && 'text-warning')}>{total ? failed : '—'}</div><div className="text-[11px] text-muted">Raw diagnostic evidence</div></div>
+        <div><div className="text-xs text-muted">Confirmed outages</div><div className="mt-1 text-lg font-semibold tabular-nums">{evidenceError ? '—' : evidence?.outages ?? '…'}</div><div className="text-[11px] text-muted">Recorded Down incidents</div></div>
+        <div><div className="text-xs text-muted">Confirmed downtime</div><div className="mt-1 text-lg font-semibold tabular-nums">{evidenceError ? '—' : evidence ? duration(evidence.downtime_seconds) : '…'}</div><div className="text-[11px] text-muted">Within selected period</div></div>
+      </div>
+      <div>
+        <div className="mb-2 text-xs font-medium">Ping checks · select an interval for details</div>
+        <div className="flex h-8 gap-px rounded-lg border border-border bg-surface2 p-0.5" role="group" aria-label="Ping check intervals">
+          {buckets.map((b, i) => <button key={i} type="button" aria-label={label(b)} aria-pressed={i === activeIndex} title={label(b)} tabIndex={i === activeIndex ? 0 : -1}
+            onClick={() => setSelected(i)} onFocus={() => setSelected(i)}
+            onKeyDown={event => {
+              if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+              event.preventDefault()
+              const next = event.key === 'ArrowRight' ? event.currentTarget.nextElementSibling : event.currentTarget.previousElementSibling
+              if (next instanceof HTMLElement) next.focus()
+            }}
+            className={cn('min-w-0 flex-1 rounded-sm focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2', i === activeIndex && 'ring-2 ring-text/60')}
+            style={{ backgroundColor: b.state === 'up' ? UP_COLOR : b.state === 'gap' ? 'transparent' : '#F59E0B', opacity: b.state === 'partial' ? 0.7 : 1 }} />)}
         </div>
-
-        {total === 0 ? (
-          <div className="flex flex-col items-center gap-1 py-6 text-center">
-            <Activity className="h-5 w-5 text-muted/60" />
-            <div className="text-[11px] font-medium text-text">No availability data in {rangePhrase(rangeLabel)}</div>
-            <div className="text-[10px] text-muted">Ping checks for this device will appear here</div>
-          </div>
-        ) : (
-          <>
-            <div className="flex h-7 gap-[1px] overflow-hidden rounded-lg bg-surface2">
-              {buckets.map((b, i) => (
-                <div
-                  key={i}
-                  className="flex-1 transition-opacity hover:opacity-70"
-                  style={{
-                    backgroundColor:
-                      b.state === 'up' ? UP_COLOR : b.state === 'down' ? DOWN_COLOR : b.state === 'partial' ? '#F59E0B' : 'transparent',
-                  }}
-                  title={
-                    b.state === 'gap'
-                      ? `${timeTooltipLabelFormatter(b.start)} — no data`
-                      : `${timeTooltipLabelFormatter(b.start)} — ${formatDeviceAvailability(b.pct)} up · ${Math.round(b.down)} failed of ${Math.round(b.up + b.down)} checks`
-                  }
-                />
-              ))}
-            </div>
-            <p className="mt-1 text-[10px] text-muted">Timeline shows raw checks, including partial failures. The headline excludes scheduled maintenance, matching the device list.</p>
-            <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
-              <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(fromTs)}</span>
-              <div className="flex items-center gap-3">
-                <span className="flex items-center gap-1 text-[10px] text-muted">
-                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: UP_COLOR }} />Up
-                </span>
-                <span className="flex items-center gap-1 text-[10px] text-muted">
-                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: DOWN_COLOR }} />Down
-                </span>
-                <span className="flex items-center gap-1 text-[10px] text-muted">
-                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: '#F59E0B' }} />Partial failure
-                </span>
-                <span className="flex items-center gap-1 text-[10px] text-muted">
-                  <span className="h-2 w-2 rounded-sm bg-surface2 ring-1 ring-inset ring-border" />No data
-                </span>
-              </div>
-              <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(toTs)}</span>
-            </div>
-          </>
-        )}
-      </CardContent>
-    </Card>
-  )
+        <div className="mt-2 flex justify-between gap-2 text-[10px] text-muted"><span>{timeTooltipLabelFormatter(fromTs)}</span><span>{timeTooltipLabelFormatter(toTs)}</span></div>
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted"><span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-success" />All checks responded</span><span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-warning" />Failed checks</span><span><span className="mr-1 inline-block h-2 w-2 rounded-sm border border-border bg-surface2" />No measurements</span></div>
+        <div className="mt-3 rounded-lg border border-border bg-surface2/40 p-3 text-xs" aria-live="polite">{label(active)}</div>
+      </div>
+      <p className="text-xs leading-relaxed text-muted">A failed check lowers ping success; it does not by itself confirm an outage. Down incidents follow the assigned monitor’s confirmation policy. Missing measurements are unknown, not healthy time. The strip includes raw checks during maintenance; the headline and confirmed downtime exclude planned maintenance.</p>
+      <div className="border-t border-border pt-3">
+        <h4 className="text-xs font-semibold">Confirmed outage history</h4>
+        {evidenceError ? <p className="mt-2 text-xs text-warning">Outage history could not be loaded. Outage count and downtime are unknown.</p> : !evidence ? <p className="mt-2 text-xs text-muted">Loading confirmed history…</p> : evidence.outages === 0 ? <p className="mt-2 text-xs text-muted">No confirmed outages were recorded in this period.{failed > 0 ? ' Failed checks remain visible above as diagnostic evidence.' : ''}</p> : <details className="mt-2" open><summary className="cursor-pointer text-xs text-muted">{evidence.outages} confirmed outage{evidence.outages === 1 ? '' : 's'}{evidence.events_truncated ? ' · latest 100 shown' : ''}</summary><ol className="mt-2 max-h-48 space-y-2 overflow-y-auto">{evidence.events.map((e, i) => <li key={i} className="border-l-2 border-danger/60 pl-3 text-xs"><span className="font-medium">{timeTooltipLabelFormatter(Date.parse(e.started_at ?? e.clipped_start))}{!e.started_at ? ' (start unknown)' : ''}</span><span className="block text-muted">{e.ended_at ? `Recovered ${timeTooltipLabelFormatter(Date.parse(e.ended_at))}` : 'No recovery recorded'} · {duration(e.in_window_s)} in this period</span></li>)}</ol></details>}
+      </div>
+    </CardContent>
+  </Card>
 }
-
-/* ════════════════════════════════════════════════════════════
-   Recent Events / Activity Log — vertical timeline
-   ════════════════════════════════════════════════════════════ */
 
 function ActivityLogCard({
   events: activityEvents, rangeLabel, showingFallback, onViewAll,
