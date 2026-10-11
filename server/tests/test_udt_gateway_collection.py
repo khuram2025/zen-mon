@@ -128,7 +128,11 @@ MAC: aa:bb:cc:dd:ee:06 VLAN: 24 Port: port4(port-id 4)""",
         ("cisco_asa", "inside 192.0.2.10 aabb.ccdd.ee02 5", "inside"),
         ("arista_eos", "192.0.2.10 0 aabb.ccdd.ee02 Vlan24", "Vlan24"),
         ("juniper_junos", "aa:bb:cc:dd:ee:02 192.0.2.10 ge-0/0/1.0 none", "ge-0/0/1.0"),
-        ("aruba_aoscx", "192.0.2.10 aa:bb:cc:dd:ee:02 vlan24 1/1/4 reachable", "vlan24"),
+        (
+            "aruba_aoscx",
+            "192.0.2.10 aa:bb:cc:dd:ee:02 vlan24 1/1/4 reachable",
+            "vlan24",
+        ),
         ("aruba_osswitch", "192.0.2.10 aa:bb:cc:dd:ee:02 dynamic 24", "24"),
         ("huawei", "192.0.2.10 aabb-ccdd-ee02 20 D-0 GE1/0/1", "GE1/0/1"),
         ("hp_comware", "192.0.2.10 aabb-ccdd-ee02 24 GE1/0/1 20 D", "GE1/0/1"),
@@ -260,3 +264,21 @@ def test_huawei_vpn_and_spaced_interface_not_guessed_from_last_token():
     assert rows == [
         {"ip": "192.0.2.10", "mac": "aa:bb:cc:dd:ee:02", "interface": "GE1/0/1"}
     ]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("0", "down"),
+        ("1", "up"),
+        ("2", "unknown"),
+        (None, "unknown"),
+        ("99", "unknown"),
+    ],
+)
+def test_fortinet_port_status_is_zero_down_one_up(raw, expected):
+    ports = fortinet_ports(
+        {"name": {"1.9.123.7": "port7"}, "status": {"1.9.123.7": raw}},
+        [{"instance": "1.9.123", "serial": "SAMPLE001"}],
+    )
+    assert ports[0]["oper_status"] == expected
