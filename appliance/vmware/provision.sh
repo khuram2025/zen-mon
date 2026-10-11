@@ -203,5 +203,6 @@ systemctl start postgresql redis-server
 while read -r version cluster rest; do pg_ctlcluster "$version" "$cluster" start || true; done < <(pg_lsclusters --no-header)
 systemctl start zentryc-first-boot.service
 systemctl restart zenplus-wait-deps zenplus-api zenplus-poller zenplus-netflow-collector nginx zenplus-ncm-worker zenplus-storage-watchdog
+/usr/local/sbin/zenplus-security-helper apply https=on redirect=on hsts=off min_tls=1.2
 systemctl restart nftables
 echo 'PROVISION COMPLETE'

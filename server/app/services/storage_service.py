@@ -1034,7 +1034,10 @@ async def run_restore(backup_id: str, components: list[str], actor: str) -> None
         async with AsyncSessionLocal() as db:
             await db.execute(
                 text(
-                    "UPDATE storage_backups SET last_restore_status='completed', "
+                    # A PostgreSQL dump includes its own backup row while that
+                    # backup is still running. Restoring it must not strand the
+                    # row in 'running' and block every subsequent backup.
+                    "UPDATE storage_backups SET status='completed', last_restore_status='completed', "
                     "last_restore_error=NULL WHERE id=:id"
                 ),
                 {"id": backup_id},
@@ -1052,7 +1055,7 @@ async def run_restore(backup_id: str, components: list[str], actor: str) -> None
         async with AsyncSessionLocal() as db:
             await db.execute(
                 text(
-                    "UPDATE storage_backups SET last_restore_status='failed', "
+                    "UPDATE storage_backups SET status='completed', last_restore_status='failed', "
                     "last_restore_error=:e WHERE id=:id"
                 ),
                 {"e": str(e)[:2000], "id": backup_id},

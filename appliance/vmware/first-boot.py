@@ -48,6 +48,7 @@ if 't' not in sql("SELECT to_regclass('public.users') IS NOT NULL;"):
     sql(base)
 run(['runuser','-u','postgres','--','python3','/opt/zenplus/scripts/run-migrations.py','--scripts-dir','/opt/zenplus/scripts'])
 sql('GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO zenplus; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO zenplus; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO zenplus; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO zenplus;')
+sql('''INSERT INTO system_settings(key,value) VALUES('security.tls','{"https_enabled":true,"redirect_http":true,"hsts_enabled":false,"min_tls_version":"1.2"}'::jsonb) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value;''')
 redis=Path('/etc/redis/redis.conf')
 text=re.sub(r'^user default .*\n','',redis.read_text(),flags=re.M)
 text=re.sub(r'^requirepass .*\n','',text,flags=re.M)
