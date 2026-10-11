@@ -979,8 +979,18 @@ def _extract_config_files(tar_path: str) -> list[str]:
             if src is None:
                 continue
             dest = "/" + name
+            # A hardened appliance keeps configuration root-owned. A restore
+            # of its own backup need not rewrite files that are already equal.
+            # Changed protected files still require an administrator to apply
+            # them; the API must not gain arbitrary configuration write access.
+            content = src.read()
+            if os.path.isfile(dest):
+                with open(dest, "rb") as current:
+                    if current.read() == content:
+                        restored.append(dest)
+                        continue
             with open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
+                out.write(content)
             restored.append(dest)
     return restored
 
@@ -1034,7 +1044,10 @@ async def run_restore(backup_id: str, components: list[str], actor: str) -> None
         async with AsyncSessionLocal() as db:
             await db.execute(
                 text(
-                    "UPDATE storage_backups SET last_restore_status='completed', "
+                    # A PostgreSQL dump includes its own backup row while that
+                    # backup is still running. Restoring it must not strand the
+                    # row in 'running' and block every subsequent backup.
+                    "UPDATE storage_backups SET status='completed', last_restore_status='completed', "
                     "last_restore_error=NULL WHERE id=:id"
                 ),
                 {"id": backup_id},
@@ -1052,7 +1065,7 @@ async def run_restore(backup_id: str, components: list[str], actor: str) -> None
         async with AsyncSessionLocal() as db:
             await db.execute(
                 text(
-                    "UPDATE storage_backups SET last_restore_status='failed', "
+                    "UPDATE storage_backups SET status='completed', last_restore_status='failed', "
                     "last_restore_error=:e WHERE id=:id"
                 ),
                 {"e": str(e)[:2000], "id": backup_id},
