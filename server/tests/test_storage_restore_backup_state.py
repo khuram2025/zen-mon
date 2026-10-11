@@ -1,5 +1,7 @@
 """A restored dump must not permanently block new backups."""
 import json
+import io
+import tarfile
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -49,3 +51,26 @@ async def test_restore_recovers_its_backup_row(tmp_path, monkeypatch, fail_after
     assert restore == ('failed' if fail_after_postgres else 'completed')
     assert bool(error) == fail_after_postgres
     conn.close()
+
+
+@pytest.mark.parametrize('same_contents', [True, False])
+def test_config_restore_respects_protected_files(tmp_path, monkeypatch, same_contents):
+    archive = tmp_path / 'config.tar.gz'
+    with tarfile.open(archive, 'w:gz') as tar:
+        member = tarfile.TarInfo('opt/zenplus/.env')
+        member.size = len(b'existing-config')
+        tar.addfile(member, io.BytesIO(b'existing-config'))
+
+    def protected_open(path, mode):
+        assert path == '/opt/zenplus/.env'
+        if mode == 'wb':
+            raise PermissionError('Root-owned configuration')
+        return io.BytesIO(b'existing-config' if same_contents else b'changed-config')
+
+    monkeypatch.setattr(svc, 'open', protected_open, raising=False)
+    monkeypatch.setattr(svc.os.path, 'isfile', lambda path: path == '/opt/zenplus/.env')
+    if same_contents:
+        assert svc._extract_config_files(str(archive)) == ['/opt/zenplus/.env']
+    else:
+        with pytest.raises(PermissionError):
+            svc._extract_config_files(str(archive))

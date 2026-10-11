@@ -979,8 +979,18 @@ def _extract_config_files(tar_path: str) -> list[str]:
             if src is None:
                 continue
             dest = "/" + name
+            # A hardened appliance keeps configuration root-owned. A restore
+            # of its own backup need not rewrite files that are already equal.
+            # Changed protected files still require an administrator to apply
+            # them; the API must not gain arbitrary configuration write access.
+            content = src.read()
+            if os.path.isfile(dest):
+                with open(dest, "rb") as current:
+                    if current.read() == content:
+                        restored.append(dest)
+                        continue
             with open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
+                out.write(content)
             restored.append(dest)
     return restored
 
