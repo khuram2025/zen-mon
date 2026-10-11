@@ -40,9 +40,9 @@ def test_managed_ports_gateway_evidence_and_history():
         await setup.execute(f"CREATE SCHEMA {schema}; SET search_path TO {schema};")
         try:
             await setup.execute(
-                """CREATE TABLE devices(id uuid PRIMARY KEY,hostname varchar(255),location varchar(255),device_type text,ip_address inet);
+                """CREATE TABLE devices(id uuid PRIMARY KEY,hostname varchar(255),location varchar(255),device_type text,ip_address inet,snmp_enabled boolean DEFAULT TRUE,vendor text,model text);
     CREATE TABLE device_interfaces(device_id uuid,if_index int,if_name varchar(255),if_descr varchar(255),if_alias varchar(255),if_type integer,admin_status varchar(20),oper_status varchar(20),if_speed bigint,mac_address macaddr,PRIMARY KEY(device_id,if_index));
-    CREATE TABLE snmp_credentials(id uuid PRIMARY KEY); CREATE TABLE ncm_credentials(id uuid PRIMARY KEY); CREATE TABLE users(id uuid PRIMARY KEY); CREATE TABLE windows_credentials(id uuid PRIMARY KEY);
+    CREATE TABLE snmp_credentials(id uuid PRIMARY KEY,name text,snmp_version text); CREATE TABLE ncm_credentials(id uuid PRIMARY KEY,name text,protocol text); CREATE TABLE users(id uuid PRIMARY KEY); CREATE TABLE windows_credentials(id uuid PRIMARY KEY);
     CREATE TABLE alert_rules(metric text); CREATE TABLE roles(name text,permissions jsonb);
     INSERT INTO roles VALUES('admin','["*"]');"""
             )
@@ -72,7 +72,7 @@ def test_managed_ports_gateway_evidence_and_history():
                 other = str(uuid4())
                 await db.execute(
                     text(
-                        "INSERT INTO devices VALUES(:id,'Controller','Lab','firewall','192.0.2.254'),(:other,'Router','Lab','router','192.0.2.253')"
+                        "INSERT INTO devices(id,hostname,location,device_type,ip_address) VALUES(:id,'Controller','Lab','firewall','192.0.2.254'),(:other,'Router','Lab','router','192.0.2.253')"
                     ),
                     {"id": cid, "other": other},
                 )
@@ -81,6 +81,58 @@ def test_managed_ports_gateway_evidence_and_history():
                         "INSERT INTO device_interfaces VALUES(:id,700,'internal','internal',NULL,6,'up','up',1000000000,NULL),(:other,900,'internal','internal',NULL,6,'up','up',1000000000,NULL)"
                     ),
                     {"id": cid, "other": other},
+                )
+                # UDT's diagnostic override is independent and old clients
+                # cannot erase it while changing ordinary polling settings.
+                from app.api.v1.udt import (
+                    update_udt_device_settings,
+                    UdtDeviceSettingsUpdate,
+                    udt_device_settings,
+                )
+                from unittest.mock import patch
+
+                credential = str(uuid4())
+                await db.execute(
+                    text(
+                        "INSERT INTO ncm_credentials VALUES(:id,'Diagnostic fixture','ssh')"
+                    ),
+                    {"id": credential},
+                )
+
+                async def audit(*args, **kwargs):
+                    return True
+
+                with patch("app.api.v1.udt.write_audit_log", audit):
+                    await update_udt_device_settings(
+                        cid,
+                        UdtDeviceSettingsUpdate(ncm_credential_id=credential),
+                        db,
+                        None,
+                    )
+                    await update_udt_device_settings(
+                        cid, UdtDeviceSettingsUpdate(poll_interval_s=600), db, None
+                    )
+                assert (
+                    str(
+                        (
+                            await db.execute(
+                                text(
+                                    "SELECT ncm_credential_id FROM udt_device_settings WHERE device_id=:id"
+                                ),
+                                {"id": cid},
+                            )
+                        ).scalar()
+                    )
+                    == credential
+                )
+                settings_result = await udt_device_settings(db, None)
+                assert settings_result["cli_credentials"] == [
+                    {"id": credential, "name": "Diagnostic fixture"}
+                ]
+                assert not any(
+                    "password" in key or "username" in key
+                    for item in settings_result["cli_credentials"]
+                    for key in item
                 )
                 switches = [
                     {
