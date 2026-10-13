@@ -42,6 +42,7 @@ jobs:
       - run: python appliance/vmware/test-clock.py
       - run: python appliance/vmware/test-platform-clock.py
       - run: python appliance/vmware/test-network-rollback.py
+      - run: python appliance/vmware/cli/test_cli.py
       - run: python -m pytest server/tests -q --disable-warnings
 
   dashboard:

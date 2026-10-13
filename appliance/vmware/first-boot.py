@@ -70,7 +70,14 @@ run(['/opt/zenplus/venv/bin/python','/opt/zenplus/scripts/sync-schema.py','--jso
 claim=state/'initial-login.json'
 if claim.exists(): login=json.loads(claim.read_text())
 else:
-    login={'username':'admin','password':secrets.token_urlsafe(18)}
+    if Path('/etc/zentryc/cli-required').exists():
+        # Public setup credential is safe only behind the console-controlled
+        # loopback web gate. Existing initialized appliances never reach here.
+        sys.path.insert(0,'/usr/local/libexec/zentryc-cli')
+        from cli import SETUP_PASSWORD
+        login={'username':'admin','password':SETUP_PASSWORD}
+    else:
+        login={'username':'admin','password':secrets.token_urlsafe(18)}
     write(claim,json.dumps(login))
 hashed=CryptContext(schemes=['bcrypt'],deprecated='auto').hash(login['password'])
 sql(f"UPDATE users SET password_hash='{hashed}', must_change_password=TRUE, password_changed_at=NULL, last_login=NULL WHERE username='admin'; DELETE FROM subscriptions; INSERT INTO subscriptions(plan,status,started_at,expires_at,max_devices,max_service_checks,max_users,license_key,activated_by) VALUES('trial','active',now(),now()+interval '30 days',50,20,5,NULL,NULL);")
