@@ -201,6 +201,18 @@ class NetworkTests(unittest.TestCase):
 
 
 class WebGateTests(unittest.TestCase):
+    def test_setup_restarts_nginx_after_listener_change(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings=Path(folder)/'tls-state.json'
+            settings.write_text(json.dumps({'https':'on','redirect':'on','hsts':'off','min_tls':'1.2'}))
+            real_path=Path
+            def mapped(name):
+                return settings if name=='/etc/zenplus/tls/state.json' else real_path(name)
+            with patch.object(cli,'STATE',Path(folder)),patch.object(cli,'Path',side_effect=mapped),patch.object(cli,'run') as run:
+                cli.web_gate(True)
+                self.assertEqual(run.call_args_list[-1].args[0],['/usr/bin/systemctl','restart','nginx'])
+                self.assertTrue((Path(folder)/'console-setup-complete.json').exists())
+
     def test_nginx_templates_closed_then_open(self):
         helper=Path(__file__).resolve().parents[3]/'scripts/zenplus-security-helper'
         if not helper.exists():
@@ -223,6 +235,17 @@ class WebGateTests(unittest.TestCase):
                     self.assertIn('listen 127.0.0.1:443 ssl',config)
                     self.assertIn('listen [::1]:443',config)
                     self.assertNotIn('listen 443 ssl',config)
+
+
+class SDKModelTests(unittest.TestCase):
+    def test_complete_model_graph_without_database_connection(self):
+        project=Path(__file__).resolve().parents[3]
+        sys.path[:0]=[str(project/'server'),str(project)]
+        with patch.dict(os.environ,{'DATABASE_URL':'postgresql+asyncpg://fixture@127.0.0.1:1/fixture'}):
+            from app_ops import register_models
+            register_models()
+            from sqlalchemy.orm import configure_mappers
+            configure_mappers()
 
 
 if __name__=='__main__':

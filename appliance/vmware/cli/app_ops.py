@@ -16,7 +16,18 @@ from types import SimpleNamespace
 from uuid import UUID
 
 
+def register_models():
+    import importlib
+    import pkgutil
+    import app.models
+    # The web app imports all routers before using ORM models. This smaller SDK
+    # process must register the complete model graph without starting the web app.
+    for module in pkgutil.iter_modules(app.models.__path__):
+        importlib.import_module('app.models.'+module.name)
+
+
 async def dispatch(request):
+    register_models()
     from sqlalchemy import select, text
     from app.core.database import AsyncSessionLocal, engine
     from app.models.user import User
@@ -75,6 +86,7 @@ def main():
     if len(raw) > 8192:
         raise SystemExit('Request too large')
     request = json.loads(raw)
+    os.chdir('/opt/zenplus')
     # dotenv handles quoting without displaying the installed environment.
     from dotenv import load_dotenv
     load_dotenv('/opt/zenplus/.env')

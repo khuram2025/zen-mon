@@ -13,6 +13,8 @@ class AuthError(Exception):
 
 
 def password_context():
+    import logging
+    logging.getLogger('passlib.handlers.bcrypt').setLevel(logging.ERROR)
     from passlib.context import CryptContext
     return CryptContext(schemes=['bcrypt_sha256', 'bcrypt'], deprecated='auto')
 
@@ -46,6 +48,9 @@ class ConsoleAuth:
     @contextmanager
     def locked(self):
         self.directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        info = self.directory.stat()
+        if self.directory.is_symlink() or info.st_uid != self.owner_uid or info.st_mode & 0o077:
+            raise AuthError('Console credential directory is unsafe')
         fd = os.open(self.directory / 'console-auth.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)

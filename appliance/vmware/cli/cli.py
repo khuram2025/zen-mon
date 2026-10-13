@@ -96,12 +96,20 @@ def web_gate(open_access):
         run(['/usr/local/sbin/zenplus-security-helper','apply',
              *[f'{k}={settings.get(k, default)}' for k,default in
                [('https','on'),('redirect','on'),('hsts','off'),('min_tls','1.2')]]])
+        # Nginx's graceful reload cannot replace a bound loopback socket with a
+        # wildcard socket on the same port. Restart once at the setup transition.
+        run(['/usr/bin/systemctl','restart','nginx'])
     except Exception:
         if previous is None:
             marker.unlink(missing_ok=True)
         else:
             marker.write_bytes(previous)
             marker.chmod(0o600)
+        # Re-render the gate after restoring its marker, then recover nginx.
+        run(['/usr/local/sbin/zenplus-security-helper','apply',
+             *[f'{k}={settings.get(k, default)}' for k,default in
+               [('https','on'),('redirect','on'),('hsts','off'),('min_tls','1.2')]]])
+        run(['/usr/bin/systemctl','restart','nginx'])
         raise
 
 
