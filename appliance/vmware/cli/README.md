@@ -22,6 +22,7 @@ configured dashboard stays available during this local console migration.
 help
 show version
 show interfaces
+show certificate
 show services
 show license
 show updates

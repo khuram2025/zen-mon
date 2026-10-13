@@ -22,7 +22,7 @@ SERVICES = {'api':'zenplus-api', 'poller':'zenplus-poller', 'netflow':'zenplus-n
             'redis':'redis-server', 'updater':'zenplus-updater', 'watchdog':'zenplus-storage-watchdog'}
 READ_COMMANDS = ['show version','show system','show interfaces','show routes','show dns','show services',
                  'show license','show updates','show storage','show backups','show running-config',
-                 'show candidate-config','show ssh','ping','enable','help','exit','logout']
+                 'show candidate-config','show certificate','show ssh','ping','enable','help','exit','logout']
 ADMIN_COMMANDS = ['configure terminal','password console','license activate','backup create config',
                   'backup create full','backup restore','updates check','updates apply','service restart',
                   'system reboot','system shutdown','system initialization retry','setup',
@@ -355,6 +355,8 @@ class CLI:
             display(app(what))
         elif what=='storage':
             display(run(['/usr/bin/df','-h','/','/data']))
+        elif what=='certificate':
+            display(run(['/usr/bin/openssl','x509','-in','/etc/zenplus/tls/server.crt','-noout','-fingerprint','-sha256']))
         elif what=='running-config':
             display(Path('/etc/netplan/50-zentryc.yaml').read_text())
         elif what=='candidate-config':
@@ -369,6 +371,7 @@ class CLI:
     def loop(self):
         print('\nWelcome to the Zentryc appliance CLI. Type help or ? for commands.')
         self.show('interfaces')
+        self.show('certificate')
         while True:
             suffix={'read':'>','admin':'#','config':'(config)#','config-if':'(config-if)#'}[self.mode]
             try:

@@ -122,6 +122,10 @@ class ParserTests(unittest.TestCase):
             run.assert_called_once_with(['/usr/bin/systemctl','restart','zenplus-api'])
     def test_no_command_history(self):
         self.assertEqual(cli.readline.get_current_history_length(),0)
+    def test_certificate_fingerprint_uses_public_fixed_certificate(self):
+        with patch.object(cli,'run',return_value='SHA256 Fingerprint=fixture') as run:
+            self.cli.execute('show certificate')
+            run.assert_called_once_with(['/usr/bin/openssl','x509','-in','/etc/zenplus/tls/server.crt','-noout','-fingerprint','-sha256'])
     def test_key_options_not_installed(self):
         self.cli.execute('enable')
         with patch.object(cli,'read',return_value='command="id" ssh-ed25519 AAAA'):
