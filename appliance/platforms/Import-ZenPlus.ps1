@@ -21,7 +21,19 @@ if (Test-Path -LiteralPath $VMDirectory) { throw 'Choose a new directory to pres
 $directory=[IO.Path]::GetFullPath($VMDirectory)
 $null=New-Item -ItemType Directory -Path $directory
 foreach ($disk in @('system.vhdx','data.vhdx')) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $disk) -Destination (Join-Path $directory $disk)
+    $destination=Join-Path $directory $disk
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $disk) -Destination $destination
+    # Hyper-V rejects NTFS-compressed/encrypted/sparse files. Archive compression
+    # is fine, but the imported virtual disk itself must be an ordinary file.
+    if ((Get-Item -LiteralPath $destination).Attributes -band [IO.FileAttributes]::Encrypted) {
+        throw 'Choose an unencrypted VM directory.'
+    }
+    & "$env:SystemRoot/System32/compact.exe" /U /I /F $destination
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot remove NTFS compression from the imported disk.' }
+    if ((Get-Item -LiteralPath $destination).Attributes -band [IO.FileAttributes]::SparseFile) {
+        & "$env:SystemRoot/System32/fsutil.exe" sparse setflag $destination 0
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot clear the imported disk sparse-file flag.' }
+    }
 }
 $vm=New-VM -Name $Name -Generation 2 -MemoryStartupBytes 8GB -Path $directory -NoVHD -SwitchName $SwitchName
 Set-VMProcessor -VM $vm -Count 4
