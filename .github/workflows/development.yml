@@ -39,6 +39,9 @@ jobs:
       - run: python scripts/build-release.py lint-migrations
       - run: python scripts/dev/inventory-contract/build_contract.py --check
       - run: python scripts/dev/inventory-contract/check_contract.py
+      - run: python appliance/vmware/test-clock.py
+      - run: python appliance/vmware/test-platform-clock.py
+      - run: python appliance/vmware/test-network-rollback.py
       - run: python -m pytest server/tests -q --disable-warnings
 
   dashboard:
