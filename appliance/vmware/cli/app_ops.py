@@ -75,8 +75,20 @@ async def dispatch(request):
             if selected and (selected['status'] != 'completed' or (operation == 'backup-restore' and selected['last_restore_status'] != 'completed')):
                 raise ValueError('Backup operation failed; inspect show backups')
             return selected or result
-    await engine.dispose()
     raise ValueError('Unsupported application operation')
+
+
+async def execute(request):
+    from app.core.database import engine
+    try:
+        result = await dispatch(request)
+        # Registration also schedules local subscription synchronization. Drain
+        # it before this short-lived SDK process exits, just like backup tasks.
+        while pending := asyncio.all_tasks() - {asyncio.current_task()}:
+            await asyncio.gather(*pending)
+        return result
+    finally:
+        await engine.dispose()
 
 
 def main():
@@ -93,7 +105,7 @@ def main():
     sys.path[:0] = ['/opt/zenplus/server', '/opt/zenplus']
     logging.disable(logging.CRITICAL)
     try:
-        result = asyncio.run(dispatch(request))
+        result = asyncio.run(execute(request))
         print(json.dumps({'ok': True, 'result': result}, default=str))
     except Exception as exc:
         # Framework HTTPException details are intended user-facing errors. Hide

@@ -30,6 +30,11 @@ def atomic_private(path, data):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if temp.exists():
             temp.unlink()
