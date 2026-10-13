@@ -7,6 +7,20 @@ import time
 from pathlib import Path
 
 
+def hyperv_host_epoch():
+    # Linux's Hyper-V Time Synchronization integration exposes host UTC as a PHC.
+    # Reading it avoids interpreting a host-local RTC as UTC on Windows hosts.
+    for device in Path('/sys/class/ptp').glob('ptp*'):
+        if (device/'clock_name').read_text().strip() != 'hyperv':
+            continue
+        fd = os.open('/dev/' + device.name, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            return int(time.clock_gettime(((~fd) << 3) | 3))
+        finally:
+            os.close(fd)
+    raise RuntimeError('Hyper-V host UTC is unavailable; enable Time Synchronization')
+
+
 def initialize_clock(platform='vmware'):
     env = dict(os.environ, LC_ALL='C', TZ='UTC')
     if platform not in ('vmware', 'kvm', 'hyperv'):
@@ -18,6 +32,9 @@ def initialize_clock(platform='vmware'):
         expected = {'kvm': ('kvm', 'qemu'), 'hyperv': ('microsoft',)}
         if detected not in expected[platform]:
             raise RuntimeError('Appliance profile does not match the running hypervisor')
+        if platform == 'hyperv':
+            subprocess.run(['/usr/sbin/modprobe', 'hv_utils'], env=env,
+                           check=True, capture_output=True, timeout=5)
     for attempt in range(10):
         try:
             if platform == 'vmware':
@@ -32,9 +49,8 @@ def initialize_clock(platform='vmware'):
                 subprocess.run(['/usr/bin/date', '--utc', '--set', '@' + str(int(host.timestamp()))],
                                check=True, capture_output=True, timeout=5)
                 source = 'VMware host UTC'
-            else:
-                # KVM templates explicitly use an UTC RTC. Hyper-V Generation 2
-                # supplies UTC RTC and its Linux time-sync integration remains enabled.
+            elif platform == 'kvm':
+                # The distributed KVM template explicitly sets an UTC RTC.
                 subprocess.run(['/usr/sbin/hwclock', '--hctosys', '--utc', '--noadjfile'],
                                env=env, check=True, capture_output=True, timeout=5)
                 epoch = subprocess.run(['/usr/bin/date', '--utc', '+%s'], env=env,
@@ -43,10 +59,18 @@ def initialize_clock(platform='vmware'):
                 current = datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc)
                 if not 2026 <= current.year < 2100:
                     raise ValueError('Hypervisor RTC is outside the supported date range')
-                source = ('QEMU/KVM' if platform == 'kvm' else 'Hyper-V') + ' UTC RTC'
+                source = 'QEMU/KVM UTC RTC'
+            else:
+                epoch = hyperv_host_epoch()
+                current = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)
+                if not 2026 <= current.year < 2100:
+                    raise ValueError('Hyper-V host clock is outside the supported date range')
+                subprocess.run(['/usr/bin/date', '--utc', '--set', '@' + str(epoch)],
+                               check=True, capture_output=True, timeout=5)
+                source = 'Hyper-V host UTC'
             print('Appliance clock initialized from ' + source)
             return
-        except (subprocess.SubprocessError, ValueError):
+        except (subprocess.SubprocessError, ValueError, OSError, RuntimeError):
             if attempt == 9:
                 raise RuntimeError('Cannot initialize UTC; check the hypervisor clock and profile') from None
             time.sleep(1)

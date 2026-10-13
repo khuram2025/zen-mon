@@ -16,9 +16,10 @@ customer or developer VM. Public OVA bytes and its qualification remain unchange
 `clock.py` remains in `appliance/vmware` for compatibility with the existing
 provisioner. An absent `/etc/zentryc/hypervisor` selects VMware host UTC, preserving
 existing image behavior. KVM/Hyper-V profiles explicitly select their provider,
-validate the detected hypervisor and initialize from its UTC RTC before any
-database, trial or certificate setup. KVM uses an UTC RTC in domain XML; Hyper-V
-host time synchronization must remain enabled. Incorrect host time still needs
+validate the detected hypervisor and initialize UTC before any database, trial
+or certificate setup. KVM uses an UTC RTC in domain XML; Hyper-V reads host UTC
+from the Linux Time Synchronization PHC, avoiding Windows local-RTC ambiguity.
+Hyper-V host time synchronization must remain enabled. Incorrect host time still needs
 operator correction. Network matching includes both `en*` and `eth*` names.
 
 Build with `build-platforms.sh` on the disposable Linux builder, placing the
