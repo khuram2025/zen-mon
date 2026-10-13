@@ -36,6 +36,7 @@ foreach ($disk in @('system.vhdx','data.vhdx')) {
     }
 }
 $vm=New-VM -Name $Name -Generation 2 -MemoryStartupBytes 8GB -Path $directory -NoVHD -SwitchName $SwitchName
+Set-VM -VM $vm -AutomaticCheckpointsEnabled $false
 Set-VMProcessor -VM $vm -Count 4
 Set-VMMemory -VM $vm -DynamicMemoryEnabled $false
 Add-VMHardDiskDrive -VM $vm -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 0 -Path (Join-Path $directory 'system.vhdx')
