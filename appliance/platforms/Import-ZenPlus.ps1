@@ -29,6 +29,6 @@ Set-VMMemory -VM $vm -DynamicMemoryEnabled $false
 Add-VMHardDiskDrive -VM $vm -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 0 -Path (Join-Path $directory 'system.vhdx')
 Add-VMHardDiskDrive -VM $vm -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 1 -Path (Join-Path $directory 'data.vhdx')
 $system=Get-VMHardDiskDrive -VM $vm | Where-Object ControllerLocation -eq 0
-Set-VMFirmware -VM $vm -EnableSecureBoot On -SecureBootTemplate MicrosoftUEFICertificateAuthority -FirstBootOrder $system
+Set-VMFirmware -VM $vm -EnableSecureBoot On -SecureBootTemplate MicrosoftUEFICertificateAuthority -FirstBootDevice $system
 if ($Start) { Start-VM -VM $vm }
 Write-Output 'Appliance created. Leave Time Synchronization enabled. Open its console for the unique admin login and HTTPS address.'
