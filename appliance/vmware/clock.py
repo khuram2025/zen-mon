@@ -7,6 +7,18 @@ import time
 from pathlib import Path
 
 
+def kvm_rtc_epoch():
+    # sysfs reads the same virtual UTC RTC without hwclock's one-Hz IRQ wait,
+    # which can stall under software emulation or interrupt-poor startup.
+    rtc = Path('/sys/class/rtc/rtc0')
+    day = (rtc/'date').read_text().strip()
+    stamp = (rtc/'time').read_text().strip()
+    if (rtc/'date').read_text().strip() != day:
+        raise ValueError('RTC date changed while reading; retry')
+    value = datetime.datetime.strptime(day + ' ' + stamp, '%Y-%m-%d %H:%M:%S')
+    return int(value.replace(tzinfo=datetime.timezone.utc).timestamp())
+
+
 def hyperv_host_epoch():
     # Linux's Hyper-V Time Synchronization integration exposes host UTC as a PHC.
     # Reading it avoids interpreting a host-local RTC as UTC on Windows hosts.
@@ -51,14 +63,12 @@ def initialize_clock(platform='vmware'):
                 source = 'VMware host UTC'
             elif platform == 'kvm':
                 # The distributed KVM template explicitly sets an UTC RTC.
-                subprocess.run(['/usr/sbin/hwclock', '--hctosys', '--utc', '--noadjfile'],
-                               env=env, check=True, capture_output=True, timeout=5)
-                epoch = subprocess.run(['/usr/bin/date', '--utc', '+%s'], env=env,
-                                       text=True, check=True, capture_output=True,
-                                       timeout=5).stdout.strip()
-                current = datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc)
+                epoch = kvm_rtc_epoch()
+                current = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)
                 if not 2026 <= current.year < 2100:
                     raise ValueError('Hypervisor RTC is outside the supported date range')
+                subprocess.run(['/usr/bin/date', '--utc', '--set', '@' + str(epoch)],
+                               env=env, check=True, capture_output=True, timeout=5)
                 source = 'QEMU/KVM UTC RTC'
             else:
                 epoch = hyperv_host_epoch()
@@ -70,9 +80,9 @@ def initialize_clock(platform='vmware'):
                 source = 'Hyper-V host UTC'
             print('Appliance clock initialized from ' + source)
             return
-        except (subprocess.SubprocessError, ValueError, OSError, RuntimeError):
+        except (subprocess.SubprocessError, ValueError, OSError, RuntimeError) as error:
             if attempt == 9:
-                raise RuntimeError('Cannot initialize UTC; check the hypervisor clock and profile') from None
+                raise RuntimeError('Cannot initialize UTC; check the hypervisor clock and profile (' + type(error).__name__ + ')') from None
             time.sleep(1)
 
 
