@@ -42,7 +42,7 @@ def install(root, source, factory=False):
     write('/etc/zentryc/cli-required','r2\n')
     write('/etc/issue','\nZENTRYC | ZenPlus Appliance\nUse the Zentryc console for setup and appliance commands.\n')
     write('/etc/issue.net','ZENTRYC | ZenPlus Appliance\nAuthorized access only. https://zentryc.com/\n')
-    write('/etc/motd','ZENTRYC | ZenPlus Appliance\nRemote CLI: ssh -t zencli@<management-ip> (enrolled SSH key required).\nConsole and dashboard use separate administrator passwords.\n')
+    write('/etc/motd','ZENTRYC | ZenPlus Appliance\nRemote CLI: ssh -t zencli@<management-ip> (enrolled SSH key required).\nConsole and dashboard passwords are managed independently; you may choose the same or different passwords.\n')
     for name in ('00-header','10-help-text'):
         p=target('/etc/update-motd.d/'+name)
         if p.exists():

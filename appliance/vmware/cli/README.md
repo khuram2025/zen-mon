@@ -4,8 +4,10 @@ The authenticated command console replaces the old numbered recovery menu.
 The web application remains the separately signed ZenPlus 1.24.14 payload.
 
 Fresh downloads use the public bootstrap login **admin / Zentryc@Setup123**.
-Console setup requires a new console password, then a different web administrator
-password. HTTP/HTTPS listeners remain loopback-only until both passwords are
+Console setup requires a new console password, then a web administrator password.
+Users may enter the same new password for both or choose different passwords.
+The two credentials remain independently managed; changing one later does not
+change the other. HTTP/HTTPS listeners remain loopback-only until both passwords are
 changed. No administrator session can use the unchanged console password.
 Passwords are hashed independently. Console credentials are root-owned mode 0600
 under `/var/lib/zentryc`; they never create a shared Linux password or change web
@@ -79,6 +81,9 @@ account. Existing owner-created support SSH accounts are unaffected.
 Run `test_cli.py` in a separate Python 3.12 test environment with the source-pinned
 server dependencies. It uses temporary credential files, mocked host operations
 and a disposable Nginx template fixture; no installed database is accessed.
+Run `check_terminal_input.py` with `CLI_INPUT_SOURCE` set to this directory and
+`CLI_DISABLE_INPUT=1` to check username echo, password masks and terminal recovery.
+Repeat with `CLI_NO_CONTROLLING_TTY=1` for the systemd console input environment.
 
 Derive a new writable system image from the unbooted r1 sealed master. Mount only
 that new image and run `install-cli.py --root <mount> --factory`. Supply the CLI

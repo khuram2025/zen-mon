@@ -151,9 +151,34 @@ class SetupTests(unittest.TestCase):
             def gate(_):
                 self.assertFalse(auth._read(auth.path)['must_change_password'])
                 self.assertEqual(events,['setup-status','setup-web-password'])
-            with patch.object(cli,'STATE',Path(folder)),patch.object(cli,'new_password',side_effect=[NEW,NEW,OTHER]),patch.object(cli,'app',side_effect=app),patch.object(cli,'web_gate',side_effect=gate):
+            with patch.object(cli,'STATE',Path(folder)),patch.object(cli,'new_password',side_effect=[NEW,OTHER]),patch.object(cli,'app',side_effect=app),patch.object(cli,'web_gate',side_effect=gate):
                 final=cli.setup(auth,session)
             self.assertFalse(final['must_change_password'])
+    def test_same_or_different_password_is_operator_choice(self):
+        for web_password in (NEW,OTHER):
+            with self.subTest(same_password=web_password==NEW),tempfile.TemporaryDirectory() as folder:
+                auth=ConsoleAuth(folder,owner_uid=os.getuid())
+                auth.initialize(cli.SETUP_PASSWORD)
+                session=auth.authenticate('admin',cli.SETUP_PASSWORD)
+                events=[]
+                def app(operation,**values):
+                    events.append(operation)
+                    if operation=='setup-status':
+                        return {'must_change_password':True}
+                    self.assertEqual(values['current_password'],cli.SETUP_PASSWORD)
+                    self.assertEqual(values['new_password'],web_password)
+                    return {}
+                def gate(open_access):
+                    self.assertTrue(open_access)
+                    self.assertEqual(events,['setup-status','setup-web-password'])
+                    auth.authenticate('admin',NEW)
+                    with self.assertRaises(AuthError):
+                        auth.authenticate('admin',cli.SETUP_PASSWORD)
+                with patch.object(cli,'STATE',Path(folder)),patch.object(cli,'new_password',side_effect=[NEW,web_password]) as prompts,patch.object(cli,'app',side_effect=app),patch.object(cli,'web_gate',side_effect=gate) as web_gate:
+                    final=cli.setup(auth,session)
+                self.assertFalse(final['must_change_password'])
+                self.assertEqual(prompts.call_count,2)
+                web_gate.assert_called_once_with(True)
     def test_existing_web_password_preserved(self):
         with tempfile.TemporaryDirectory() as folder:
             auth=unittest.mock.Mock()
