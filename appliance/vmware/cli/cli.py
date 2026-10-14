@@ -1,6 +1,6 @@
 #!/opt/zenplus/venv/bin/python
 """Zentryc operational CLI: authenticated local console, bounded commands."""
-import getpass
+import codecs
 import ipaddress
 import json
 import os
@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import syslog
+import termios
 import time
 from pathlib import Path
 from auth import AuthError, ConsoleAuth, atomic_private
@@ -68,10 +69,89 @@ def idle(_signal, _frame):
     raise IdleTimeout('Idle session expired; sign in again')
 
 
+def _read_visible(prompt):
+    if prompt == 'Username: ':
+        # A systemd-owned virtual console does not reliably get readline's
+        # interactive echo. Draw login characters ourselves, as with masks.
+        return _read_terminal(prompt, secret=False)
+    if not sys.stdin.isatty():
+        return input(prompt)
+    fd = sys.stdin.fileno()
+    previous = termios.tcgetattr(fd)
+    visible = termios.tcgetattr(fd)
+    visible[3] |= termios.ECHO | termios.ICANON
+    termios.tcsetattr(fd, termios.TCSANOW, visible)
+    try:
+        return input(prompt)
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, previous)
+
+
+def _read_terminal(prompt, secret=True):
+    # Never fall back to echoed input for credentials. The local console and
+    # SSH CLI both provide a terminal; redirected secret input fails closed.
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise ValueError('Login entry requires an interactive terminal')
+    fd = sys.stdin.fileno()
+    previous = termios.tcgetattr(fd)
+    masked = termios.tcgetattr(fd)
+    masked[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG)
+    masked[0] |= termios.ICRNL
+    masked[6][termios.VMIN] = 1
+    masked[6][termios.VTIME] = 0
+    value = []
+    decoder = codecs.getincrementaldecoder('utf-8')('replace')
+    escape = None
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    termios.tcsetattr(fd, termios.TCSANOW, masked)
+    try:
+        while True:
+            raw = os.read(fd, 1)
+            if not raw:
+                raise EOFError
+            char = decoder.decode(raw)
+            if not char:
+                continue
+            if escape is not None:
+                if escape == 'start' and char in ('[', 'O'):
+                    escape = 'sequence'
+                elif escape == 'start' or '@' <= char <= '~':
+                    escape = None
+                continue
+            if char == '\x1b':
+                escape = 'start'
+            elif char in ('\r', '\n'):
+                return ''.join(value)
+            elif char == '\x03':
+                raise KeyboardInterrupt
+            elif char == '\x04' and not value:
+                raise EOFError
+            elif char in ('\x08', '\x7f'):
+                if value:
+                    value.pop()
+                    sys.stdout.write('\b \b')
+            elif char == '\x15':
+                sys.stdout.write('\b \b' * len(value))
+                value.clear()
+            elif char.isprintable() and len(value) < 4096:
+                value.append(char)
+                sys.stdout.write('*' if secret else char)
+            sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, previous)
+        sys.stdout.write('\r\n')
+        sys.stdout.flush()
+
+
+def _read_masked(prompt):
+    return _read_terminal(prompt, secret=True)
+
+
 def read(prompt, secret=False):
     signal.alarm(300)
     try:
-        return getpass.getpass(prompt) if secret else input(prompt)
+        return _read_masked(prompt) if secret else _read_visible(prompt)
     finally:
         signal.alarm(0)
 
@@ -133,12 +213,11 @@ def setup(auth, session):
         return session
     if status['must_change_password']:
         print('\nNow replace the public web administrator setup password.')
-        print('Use a separate password of 12 through 128 characters; avoid common passwords and your username.')
+        print('You may use the same password as the console or choose a different password.')
+        print('Use 12 through 128 characters; avoid common passwords and your username.')
         while True:
             try:
                 password = new_password('web administrator')
-                if auth.crypto.verify(password, auth._read(auth.path)['password_hash']):
-                    raise ValueError('Use a different password for the web dashboard and console')
                 app('setup-web-password', current_password=SETUP_PASSWORD, new_password=password)
                 (STATE/'initial-login.json').unlink(missing_ok=True)
                 print('Web administrator password saved.')
