@@ -15,12 +15,18 @@ type Config struct {
 }
 
 type PollerConfig struct {
-	ID                 string
-	PingTimeout        time.Duration
-	PingCount          int
-	PingInterval       time.Duration
-	BatchSize          int
-	TickRate           time.Duration
+	ID           string
+	PingTimeout  time.Duration
+	PingCount    int
+	PingInterval time.Duration
+	BatchSize    int
+	TickRate     time.Duration
+	// DownThreshold, DegradedRTTMs and DegradedLossPct are the fallbacks of
+	// the device status policy (down_confirm_checks, degraded_rtt_ms,
+	// degraded_loss_pct) when the admin settings (system_settings key
+	// 'monitoring', reloaded every DeviceSyncInterval) do not set them. The
+	// other policy keys use the built-in defaults of devicestatus.
+	// DownThreshold is also the retry count of service checks that set none.
 	DownThreshold      int
 	DegradedRTTMs      float64
 	DegradedLossPct    float64
@@ -37,12 +43,12 @@ type PostgresConfig struct {
 }
 
 type ClickHouseConfig struct {
-	Host       string
-	Port       int
-	Database   string
-	User       string
-	Password   string
-	BatchSize  int
+	Host          string
+	Port          int
+	Database      string
+	User          string
+	Password      string
+	BatchSize     int
 	FlushInterval time.Duration
 }
 

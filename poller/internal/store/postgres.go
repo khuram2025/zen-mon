@@ -17,7 +17,6 @@ import (
 	"github.com/zenplus/poller/internal/checker"
 	"github.com/zenplus/poller/internal/checker/snmp"
 	"github.com/zenplus/poller/internal/config"
-	"github.com/zenplus/poller/internal/pinger"
 )
 
 // PostgresStore handles device data in PostgreSQL.
@@ -28,6 +27,12 @@ type PostgresStore struct {
 	// unix nanoseconds; the zero value means "columns assumed present".
 	sysInfoLegacyUntil atomic.Int64 // use the legacy statement until then
 	sysInfoWarnedAt    atomic.Int64 // last loud warning; 0 when not degraded
+
+	// Device status schema lag (migration 161), see
+	// postgres_device_status.go: statusLegacy selects the pre-161 statements
+	// until the next LoadDevices succeeds with the current one.
+	statusLegacy   atomic.Bool
+	statusWarnedAt atomic.Int64 // last loud warning (unix nanoseconds)
 }
 
 // NewPostgresStore connects to PostgreSQL.
@@ -53,61 +58,6 @@ func NewPostgresStore(ctx context.Context, cfg *config.Config) (*PostgresStore, 
 // Close closes the connection pool.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
-}
-
-// LoadDevices returns all ping-enabled devices.
-func (s *PostgresStore) LoadDevices(ctx context.Context) ([]*pinger.Device, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, hostname, host(ip_address)::text, ping_interval, ping_enabled, status,
-		       COALESCE(last_seen, '1970-01-01'::timestamptz),
-		       COALESCE(last_rtt_ms, 0)
-		FROM devices d
-		JOIN device_polling_owner owner
-		  ON owner.device_id = d.id AND owner.owner_kind = 'central'
-		WHERE d.ping_enabled = TRUE
-		  AND d.ip_address IS NOT NULL
-		ORDER BY hostname
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("query devices: %w", err)
-	}
-	defer rows.Close()
-
-	var devices []*pinger.Device
-	for rows.Next() {
-		var d pinger.Device
-		var ipStr string
-		var intervalSec int
-
-		err := rows.Scan(
-			&d.ID, &d.Hostname, &ipStr, &intervalSec,
-			&d.PingEnabled, &d.Status, &d.LastSeen, &d.LastRTT,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan device: %w", err)
-		}
-
-		d.IPAddress = net.ParseIP(ipStr)
-		d.PingInterval = time.Duration(intervalSec) * time.Second
-		devices = append(devices, &d)
-	}
-
-	return devices, rows.Err()
-}
-
-// UpdateDeviceStatus updates the device's current status in PostgreSQL.
-func (s *PostgresStore) UpdateDeviceStatus(ctx context.Context, deviceID uuid.UUID, status string, lastSeen time.Time, rttMs float64) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE devices
-		SET status = $1, last_seen = $2, last_rtt_ms = $3
-		WHERE id = $4
-		  AND EXISTS (
-		      SELECT 1 FROM device_polling_owner owner
-		       WHERE owner.device_id = devices.id
-		         AND owner.owner_kind = 'central'
-		  )
-	`, status, lastSeen, rttMs, deviceID)
-	return err
 }
 
 // LoadServiceChecks returns all enabled service checks.
@@ -393,26 +343,6 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		devices = append(devices, &d)
 	}
 	return devices, rows.Err()
-}
-
-// LoadDegradedThresholds returns the operator-configured degraded
-// thresholds from system_settings (key 'monitoring'): the RTT (ms) and
-// packet-loss (%) beyond which a responding device counts as DEGRADED.
-// Zeros mean unset — the engine then keeps its config defaults.
-func (s *PostgresStore) LoadDegradedThresholds(ctx context.Context) (float64, float64, error) {
-	var rttMs, lossPct float64
-	err := s.pool.QueryRow(ctx, `
-		SELECT COALESCE((value->>'degraded_rtt_ms')::float8, 0),
-		       COALESCE((value->>'degraded_loss_pct')::float8, 0)
-		FROM system_settings WHERE key = 'monitoring'
-	`).Scan(&rttMs, &lossPct)
-	if err == pgx.ErrNoRows {
-		return 0, 0, nil
-	}
-	if err != nil {
-		return 0, 0, err
-	}
-	return rttMs, lossPct, nil
 }
 
 // LoadUdtGlobalInterval returns the operator-configured global UDT

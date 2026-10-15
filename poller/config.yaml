@@ -1,5 +1,6 @@
 # ZenPlus Poller Configuration
-# Environment variables override these values
+# Reference only: the poller reads its built-in defaults
+# (internal/config/config.go) and the environment variables listed there.
 
 poller:
   id: poller-01
@@ -9,6 +10,12 @@ poller:
     interval: 500ms
     batch_size: 500
     privileged: true
+  # Device status policy fallbacks. The effective policy is the admin
+  # setting (Settings -> Monitoring, system_settings key 'monitoring'),
+  # reloaded every device sync; these values only apply to keys it does not
+  # set (down_confirm_checks, degraded_rtt_ms, degraded_loss_pct). The other
+  # keys (confirmation window, recovery limits, flap detection) default as
+  # documented in docs/device-status-policy.md.
   status:
     down_threshold: 3
     degraded_rtt_ms: 100
