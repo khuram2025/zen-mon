@@ -113,6 +113,14 @@ class DeviceResponse(BaseModel):
     status: str
     last_seen: Optional[datetime]
     last_rtt_ms: Optional[float]
+    # Confirmed status (migrate-161): flapping overlays the status, it never
+    # replaces it. flap_kind is reachability | performance | both while
+    # flapping; status_changed_at is the last hard change (None until the
+    # first one after the upgrade).
+    is_flapping: bool = False
+    flapping_since: Optional[datetime] = None
+    flap_kind: Optional[str] = None
+    status_changed_at: Optional[datetime] = None
     description: Optional[str]
     created_at: datetime
     updated_at: datetime
@@ -162,6 +170,9 @@ class DeviceSummary(BaseModel):
     degraded: int
     unknown: int
     maintenance: int
+    # Devices flagged as flapping, whatever their status (an overlay count:
+    # these devices are also counted in their status bucket).
+    flapping: int = 0
 
 
 class DeviceGroupResponse(BaseModel):

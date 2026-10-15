@@ -68,6 +68,9 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
+// Metrics a device rule reads from a confirmed status change; only those rules are held while a device flaps.
+const STATUS_EVENT_METRICS = new Set(['ping_status', 'rtt', 'packet_loss'])
+
 /* ── Snapshot diff (F08) ──────────────────────────────────────────────── */
 
 const DIFF_FIELDS: Array<{ key: keyof AlertRuleDetail; label: string; fmt?: (v: any) => string }> = [
@@ -139,6 +142,10 @@ export function PolicyCard({
   const compound = (rule.conditions?.length ?? 0) > 1
   const affected = rule.affected
   const trigger = triggerText(rule.trigger_on)
+  // Device status rules (evaluated on confirmed status changes) wait out a flapping device unless they opt out; an 'up'
+  // rule's trigger is a recovery, which is never held.
+  const flapHold = typeof rule.notify_while_flapping === 'boolean' && rule.trigger_on !== 'up'
+    && conditions.some((c) => STATUS_EVENT_METRICS.has(c.metric))
 
   return (
     <Card>
@@ -211,6 +218,11 @@ export function PolicyCard({
           </Row>
           {trigger && <Row label="Trigger">{trigger}</Row>}
           <Row label="Hold time">{rule.min_duration ? `${fmtDurExact(rule.min_duration)} (${rule.min_duration.toLocaleString()} s)` : 'Immediate'}</Row>
+          {flapHold && (
+            <Row label="While flapping">
+              {rule.notify_while_flapping ? 'Notifies immediately, even while the device is flapping' : 'Held until a status lasts the flap stability time'}
+            </Row>
+          )}
           <Row label="Cooldown">{rule.cooldown ? fmtDurExact(rule.cooldown) : 'None'}{rule.max_repeat ? ` · max ${rule.max_repeat} repeats` : ''}</Row>
           <Row label="Schedule">{scheduleText(rule.schedule)}</Row>
           <Row label="Recovery">{rule.recovery_alert ? 'Sends a recovery notice when the condition clears' : 'No recovery notice'}</Row>

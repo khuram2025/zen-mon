@@ -1,45 +1,220 @@
-"""Explain ping status using the owning poller's observations, not chart averages."""
+"""Explain ping status using the owning poller's observations, not chart averages.
+
+The rules themselves live in device_status_machine (shared with the Go poller
+through the contract vectors); this module only reads them back for the
+status-explanation API: per-sample measurements judged with the canonical
+predicates, the writer's persisted confirmation state and the flapping block.
+"""
 from datetime import datetime, timedelta, timezone
+from math import ceil
 
 from app.core.database import get_clickhouse_client
+from app.services import device_status_machine as dsm
+# Re-exported: the per-sample reason text is the machine's (one wording, one
+# set of predicates for both writers and the explanation).
+from app.services.device_status_machine import degraded_reason  # noqa: F401
+
+PACKETS_PER_CHECK = 3   # ICMP echo requests per check (the legacy confirmation key)
 
 
 def utc(value):
     return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
 
 
+def thresholds_for(policy: dsm.Policy) -> dict:
+    """The limits a sample is judged against: degraded limits plus the recovery (clear) limits."""
+    return {"degraded_rtt_ms": policy.degraded_rtt_ms, "degraded_loss_pct": policy.degraded_loss_pct,
+            "degraded_rtt_clear_ms": policy.degraded_rtt_clear_ms,
+            "degraded_loss_clear_pct": policy.degraded_loss_clear_pct}
+
+
+def _limits(thresholds: dict) -> dsm.Policy:
+    """The thresholds as the machine's policy for classify(). Thresholds without recovery limits
+    (older callers) get an empty hysteresis band: a check is then 'breach' or 'clear'."""
+    rtt, loss = float(thresholds["degraded_rtt_ms"]), float(thresholds["degraded_loss_pct"])
+    rtt_clear, loss_clear = thresholds.get("degraded_rtt_clear_ms"), thresholds.get("degraded_loss_clear_pct")
+    return dsm.Policy(degraded_rtt_ms=rtt, degraded_loss_pct=loss,
+                      degraded_rtt_clear_ms=rtt if rtt_clear is None else float(rtt_clear),
+                      degraded_loss_clear_pct=loss if loss_clear is None else float(loss_clear))
+
+
 def measurement(sample, thresholds):
+    """One ping sample against the limits, with the canonical predicates of the state machine.
+
+    ``classification`` is 'fail' for an unanswered check, else the machine's 'breach' / 'marginal'
+    (inside the hysteresis band: within the degraded limits, above a recovery limit) / 'clear'.
+    Float32 packet loss stored at exactly a limit (5% as 0.0500000007) is not a breach.
+    """
     if not sample:
         return None
     timestamp, rtt_ms, packet_loss, is_up = sample
-    loss_pct = float(packet_loss) * 100
+    rtt = float(rtt_ms or 0.0)
+    ratio = float(packet_loss or 0.0)
+    loss_pct = ratio * 100
     breaches = []
+    classification = "fail"
     if is_up:
-        for name, value, limit, unit in (
-            ("Packet loss", loss_pct, thresholds["degraded_loss_pct"], "percentage points"),
-            ("Latency", float(rtt_ms), thresholds["degraded_rtt_ms"], "ms"),
+        for name, value, limit, unit, over in (
+            ("Packet loss", loss_pct, thresholds["degraded_loss_pct"], "percentage points",
+             dsm.exceeds_pct(ratio, thresholds["degraded_loss_pct"])),
+            ("Latency", rtt, thresholds["degraded_rtt_ms"], "ms", dsm.exceeds_ms(rtt, thresholds["degraded_rtt_ms"])),
         ):
-            # Float32 packet loss is compared in its stored ratio domain by the
-            # controller. Round display arithmetic, never average samples here.
-            excess = round(value - limit, 6)
-            if excess > 0:
+            if over:
+                # Round display arithmetic, never average samples here.
                 breaches.append({"metric": name, "value": value, "threshold": limit,
-                                 "exceeded_by": excess, "excess_unit": unit})
-    return {"timestamp": utc(timestamp), "rtt_ms": float(rtt_ms), "packet_loss_pct": loss_pct,
-            "is_up": bool(is_up), "breaches": breaches}
+                                 "exceeded_by": round(value - limit, 6), "excess_unit": unit})
+        classification = dsm.classify(rtt, ratio, _limits(thresholds))
+    return {"timestamp": utc(timestamp), "rtt_ms": rtt, "packet_loss_pct": loss_pct,
+            "is_up": bool(is_up), "breaches": breaches, "classification": classification}
 
 
-def degraded_reason(rtt_ms, loss_ratio, rtt_limit, loss_limit_pct):
-    parts = []
-    loss = float(loss_ratio) * 100
-    if rtt_ms > rtt_limit:
-        parts.append(f"Latency {rtt_ms:.3f} ms exceeds {rtt_limit:g} ms by {rtt_ms-rtt_limit:.3f} ms")
-    if loss > loss_limit_pct:
-        parts.append(f"Packet loss {loss:.2f}% exceeds {loss_limit_pct:g}% by {loss-loss_limit_pct:.2f} percentage points")
-    return "; ".join(parts) or "High latency or packet loss"
+# --------------------------------------------------------------------------- confirmation state
 
+def newest(*times: datetime | None) -> datetime | None:
+    """The latest of the given times (naive ones are UTC), None when there is none."""
+    known = [utc(t) for t in times if t is not None]
+    return max(known) if known else None
+
+
+def stale_after_seconds(interval_s) -> float:
+    """Silence after which the writer's next check resets the streaks and the window (the machine's gap rule)."""
+    return max(3 * float(interval_s or 0), float(dsm.GAP_FLOOR_SECONDS))
+
+
+def current_state(row, owner: str, devices_status: str | None, status_changed_at) -> tuple[dsm.State, bool]:
+    """The writer's state for this device and whether it is a fresh seed.
+
+    A missing row, a row of another owner, or one that another writer has overtaken (the
+    devices status changed behind it) is what the writer reseeds silently at its next check,
+    so the explanation shows that seed (zero counters, no flapping) rather than the stale row.
+    """
+    if row is not None and not dsm.needs_reseed(row, owner, devices_status):
+        return dsm.state_from_row(row), False
+    return dsm.seed_state(devices_status, status_changed_at, owner), True
+
+
+def state_block(state: dsm.State, policy: dsm.Policy, source: str, interval_s, seeded: bool,
+                now: datetime | None = None, last_check_at: datetime | None = None) -> dict:
+    """``state`` of the status explanation.
+
+    Streaks linger after the change they caused, so each is reported only where it means
+    something: ``fail_streak`` while not down, ``ok_streak`` while down, ``clear_streak``
+    while degraded (None otherwise). ``pending`` is the unconfirmed progress towards the
+    next status (device_status_machine.pending), None when nothing is pending or when the
+    state is ``stale`` (silent longer than the gap rule, so the next check starts over).
+
+    ``last_sample_at`` is the owner's latest check: the row's own value or the newer
+    ``last_check_at`` the caller knows. The central poller rewrites a row whose counters
+    did not change only every 10 minutes (its heartbeat), so the row alone would make a
+    steady, regularly checked device look silent.
+    """
+    now = now or datetime.now(timezone.utc)
+    hard = state.hard_status if state.hard_status in dsm.HARD_STATUSES else "unknown"
+    bad, eff = dsm.window_counts(state, policy)
+    last = newest(state.last_sample_at, last_check_at)
+    stale = last is not None and (now - last).total_seconds() > stale_after_seconds(interval_s)
+    return {
+        "hard_status": hard,
+        "in_maintenance": bool(state.in_maintenance),
+        "pending": None if stale else dsm.pending(state, policy, source),
+        "fail_streak": state.fail_streak if hard != "down" else None,
+        "ok_streak": state.ok_streak if hard == "down" else None,
+        "clear_streak": state.clear_streak if hard == "degraded" else None,
+        "bad_in_window": bad,
+        "window_len": eff,
+        "window_size": policy.degraded_window_checks,
+        "status_since": utc(state.status_since),
+        "last_sample_at": last,
+        "stale": stale,
+        "seeded": seeded,
+    }
+
+
+def _span_checks(changes: int, into: int, out: int) -> int:
+    """Fewest consecutive checks that can hold ``changes`` alternating changes of one class
+    when entering the bad state needs ``into`` checks and leaving it ``out``."""
+    pairs, odd = divmod(changes - 1, 2)
+    return pairs * (into + out) + (min(into, out) if odd else 0)
+
+
+def max_detectable_interval_s(policy: dsm.Policy, source: str = "central") -> int:
+    """Longest ping interval (whole seconds) at which flapping can still start.
+
+    flap_start_changes confirmed changes of one class must fall inside flap_window_minutes
+    (the window excludes its lower bound). Each change needs its own confirmation checks:
+    into/out of down = down confirmation (for the source) / up_confirm_checks; up<->degraded =
+    degraded_confirm_checks / the faster of degraded_clear_checks and a clean window. The
+    faster class decides.
+    """
+    reach = _span_checks(policy.flap_start_changes, dsm.down_confirm_for(policy, source), policy.up_confirm_checks)
+    perf = _span_checks(policy.flap_start_changes, policy.degraded_confirm_checks,
+                        min(policy.degraded_clear_checks, policy.degraded_window_checks))
+    return ceil(policy.flap_window_minutes * 60 / min(reach, perf)) - 1
+
+
+def earliest_stop_at(state: dsm.State, policy: dsm.Policy) -> datetime | None:
+    """Earliest time flapping can end if no further change happens: per flapping class, the
+    stability stop (last change + flap_stable_minutes) or the count stop (enough changes aged
+    out of flap_window_minutes to leave at most flap_stop_changes), whichever comes first; the
+    device stops when its last flapping class does. The stop itself happens on the first check
+    at or after that time. None when not flapping or when detection is disabled (the next
+    check ends it)."""
+    if not policy.flap_detection_enabled:
+        return None
+    ends = []
+    for flapping, changes in ((state.reach_flapping, state.reach_changes), (state.perf_flapping, state.perf_changes)):
+        if not flapping or not changes:
+            continue
+        changes = sorted(utc(c) for c in changes)
+        stable_at = changes[-1] + timedelta(minutes=policy.flap_stable_minutes)
+        aged_out = len(changes) - policy.flap_stop_changes
+        count_at = changes[aged_out - 1] + timedelta(minutes=policy.flap_window_minutes) if aged_out >= 1 else stable_at
+        ends.append(min(stable_at, count_at))
+    return max(ends) if ends else None
+
+
+def flapping_block(device, state: dsm.State, policy: dsm.Policy, source: str, interval_s,
+                   now: datetime | None = None) -> dict:
+    """``flapping`` of the status explanation. ``active``/``kind``/``since`` are the device's
+    mirrored flags (what the Devices list shows); the change counts are the writer's recorded
+    confirmed changes still inside the flap window now."""
+    now = now or datetime.now(timezone.utc)
+    lo = now - timedelta(minutes=policy.flap_window_minutes)
+    active = bool(getattr(device, "is_flapping", False))
+    max_interval = max_detectable_interval_s(policy, source)
+    return {
+        "active": active,
+        "kind": getattr(device, "flap_kind", None) if active else None,
+        "since": utc(getattr(device, "flapping_since", None)) if active else None,
+        "reach_changes_in_window": sum(1 for c in state.reach_changes if utc(c) > lo),
+        "perf_changes_in_window": sum(1 for c in state.perf_changes if utc(c) > lo),
+        "window_minutes": policy.flap_window_minutes,
+        "start_changes": policy.flap_start_changes,
+        "stop_changes": policy.flap_stop_changes,
+        "stable_minutes": policy.flap_stable_minutes,
+        "enabled": policy.flap_detection_enabled,
+        "earliest_stop_at": earliest_stop_at(state, policy) if active else None,
+        "max_detectable_interval_s": max_interval,
+        # False: at this device's interval the window cannot hold enough confirmed changes.
+        "detectable": bool(policy.flap_detection_enabled and int(interval_s or 60) <= max_interval),
+    }
+
+
+def confirmation_block(policy: dsm.Policy, source: str, interval_s) -> dict:
+    """The legacy ``confirmation`` keys, now from the effective policy (central and sensor owners)."""
+    return {"failed_checks": dsm.down_confirm_for(policy, source), "packets_per_check": PACKETS_PER_CHECK,
+            "interval_seconds": int(interval_s or 60), "recovery_checks": policy.up_confirm_checks}
+
+
+# --------------------------------------------------------------------------- ClickHouse evidence
 
 def evidence(device_id, poller_id, thresholds, settings_updated_at, interval):
+    """The owning poller's latest sample and the most recent degraded transition with its sample.
+
+    Transitions are stamped with the timestamp of the check that confirmed them, so the
+    confirming sample is found at the transition time (the -5 s..+1 s tolerance also covers
+    rows written before confirmation existed, stamped at write time).
+    """
     client = get_clickhouse_client()
     params = {"id": str(device_id), "poller": poller_id}
     rows = client.query("""SELECT timestamp, rtt_ms, packet_loss, is_up
@@ -77,4 +252,6 @@ def evidence(device_id, poller_id, thresholds, settings_updated_at, interval):
         if recent["sample"] and not unchanged:
             # Current thresholds must not be represented as historical limits.
             recent["sample"]["breaches"] = []
+            if recent["sample"]["is_up"]:
+                recent["sample"]["classification"] = None
     return {"latest": latest, "recent_degraded": recent}

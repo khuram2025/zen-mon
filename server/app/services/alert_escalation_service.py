@@ -23,6 +23,11 @@ Rules of the game (the ones an on-call engineer expects):
 * A trigger that was never announced (quiet hours / flap cooldown recorded
   ``metadata.notified = false``) is not escalated: escalating an incident
   nobody was told about pages tier 2 before tier 1.
+* Deadlines run from the moment the trigger was announced: a held trigger
+  (min_duration, or a flapping device) stamps ``metadata.notified_at`` when the
+  hold sweeper confirms it, and that — not ``triggered_at`` — is the anchor.
+  Otherwise a trigger held for 10 minutes would page level 1 seconds after
+  its own base page. "Active for" still counts from ``triggered_at``.
 
 Escalation state is kept on the alert row as ``metadata->'escalation'``:
 ``{"level": n, "last_at": iso, "repeats": n, "channels": [...], "closed": bool}``.
@@ -52,7 +57,7 @@ MAX_LEVELS = 5
 # ── Pure planning logic (unit-tested) ────────────────────────────────────────
 
 def plan_escalation(levels: list[dict], state: dict | None, triggered_at,
-                    now: datetime, max_repeat: int = 0):
+                    now: datetime, max_repeat: int = 0, notified_at=None):
     """What, if anything, should happen for one active unacknowledged alert.
 
     Returns ``("escalate", level_no)`` when a new (higher) level is due,
@@ -60,12 +65,17 @@ def plan_escalation(levels: list[dict], state: dict | None, triggered_at,
     ``level_no`` is 1-based. When several levels became due at once (sweeper
     downtime, a long outage discovered late) only the highest fires — paging
     three tiers in the same minute tells nobody anything the top tier doesn't.
+
+    Level deadlines count from ``COALESCE(notified_at, triggered_at)``:
+    ``notified_at`` (datetime or ISO text) is when a held trigger was
+    confirmed and announced.
     """
-    if not levels or not triggered_at:
+    anchor = _parse_ts(notified_at) or triggered_at
+    if not levels or not anchor:
         return None
-    if triggered_at.tzinfo is None:
-        triggered_at = triggered_at.replace(tzinfo=timezone.utc)
-    elapsed_min = (now - triggered_at).total_seconds() / 60.0
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    elapsed_min = (now - anchor).total_seconds() / 60.0
     if elapsed_min < 0:
         return None
 
@@ -128,6 +138,7 @@ _SWEEP_SQL = """
     SELECT a.id, a.rule_id, a.device_id, a.server_id, a.service_check_id,
            a.status, a.severity AS alert_severity, a.message,
            a.triggered_at, a.resolved_at, a.acknowledged_at, a.metadata,
+           a.metadata->>'notified_at' AS notified_at,
            r.name AS rule_name, r.metric, r.operator, r.threshold,
            r.conditions, r.condition_logic, r.severity AS rule_severity,
            r.notify_channels, r.escalation_levels, r.max_repeat,
@@ -325,7 +336,8 @@ async def sweep_escalations(db: AsyncSession) -> dict[str, int]:
                 continue
 
             action = plan_escalation(levels, state, row.triggered_at, now,
-                                     int(row.max_repeat or 0))
+                                     int(row.max_repeat or 0),
+                                     notified_at=row.notified_at)
             if action is None:
                 continue
             kind, level_no = action
@@ -393,6 +405,16 @@ async def escalation_sweeper_loop() -> None:
             raise
         except Exception:
             logger.exception("alert hold sweep failed")
+        # Device flap start/stop notices: the status writers only record the
+        # episodes, delivery happens here so a notice survives an API restart.
+        try:
+            from app.services.device_flap_notice_service import deliver_pending
+            async with AsyncSessionLocal() as db:
+                await deliver_pending(db)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("device flap notice sweep failed")
         # Snoozes that ended while their condition is still open: clear the
         # suppression stamp and remind the rule's channels.
         try:

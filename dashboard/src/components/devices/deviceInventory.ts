@@ -281,9 +281,14 @@ export interface DeviceListFilters {
   managedBy?: string
   tags?: readonly string[]
   tagMode?: 'any' | 'all'
+  /** Only devices flagged as flapping (`flapping=1`): an overlay beside the status, never a status of its own. */
+  flapping?: boolean
 }
 
-/** The page's filters as its address bar spells them (`search` or the older `q`, `type`, `group`, `loc`, `tag`, `tagmode`, `managed_by`, `vendor`, `os_version`). */
+/**
+ * The page's filters as its address bar spells them (`search` or the older `q`, `type`, `group`, `loc`, `tag`, `tagmode`,
+ * `managed_by`, `vendor`, `os_version`, `flapping=1`). `flapping` is present only when on, so older bookmarks read as before.
+ */
 export function deviceListFiltersFromParams(params: URLSearchParams): DeviceListFilters {
   return {
     search: params.get('search') ?? params.get('q') ?? '',
@@ -295,6 +300,7 @@ export function deviceListFiltersFromParams(params: URLSearchParams): DeviceList
     managedBy: params.get('managed_by') ?? '',
     tags: (params.get('tag') ?? '').split(',').map((t) => t.trim()).filter(Boolean),
     tagMode: params.get('tagmode') === 'all' ? 'all' : 'any',
+    ...(params.get('flapping') === '1' ? { flapping: true } : {}),
   }
 }
 
@@ -323,6 +329,8 @@ export function deviceListParams(f: DeviceListFilters): Record<string, string> {
     out.tags = tags.join(',')
     if (f.tagMode === 'all') out.tags_match = 'all'
   }
+  // The flag is a column of the device row, so the API applies it exactly (and its facets honour it).
+  if (f.flapping) out.flapping = 'true'
   return out
 }
 

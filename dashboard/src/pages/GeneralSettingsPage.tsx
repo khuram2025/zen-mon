@@ -1,9 +1,14 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Building2, Download, HardDrive, KeyRound, LayoutTemplate, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
+import { Activity, Building2, Download, HardDrive, Info, KeyRound, LayoutTemplate, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, relativeTime } from '@/lib/utils'
+import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
+import {
+  TIMING_FLAP_LABEL, defaultsForm, effectivePolicy, flapDetectionLimitText, fmt3, fmtSeconds, formFromSettings, isLegacyPolicy,
+  legacyPresetForm, lossGranularityNote, policyFromForm, policySentences, settingsPayload, timingRows, validateMonitoringForm,
+  type MonitoringForm, type MonitoringFormField, type MonitoringSettingsDoc,
+} from '@/components/devices/deviceStatus'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -139,55 +144,253 @@ export function GeneralSettingsPage() {
   )
 }
 
-function MonitoringCard() {
+/**
+ * Device status policy (system_settings 'monitoring'; docs/device-status-policy.md). The primary rules read as
+ * sentences, the tuning values sit under Advanced, and a live preview states what the poller will do (the server's
+ * own loader, components/devices/deviceStatus.ts). Save sends the FULL document: every field the card shows.
+ */
+export function MonitoringCard() {
   const qc = useQueryClient()
-  const { data } = useQuery<any>({
+  const { data, isError, error, refetch } = useQuery<Record<string, unknown>>({
     queryKey: ['settings', 'monitoring'],
     queryFn: async () => (await api.get('/settings/monitoring')).data,
   })
-  const [form, setForm] = useState<any>({})
-  useEffect(() => { if (data) setForm(data) }, [data])
+  // The form follows the stored document: filled from it (also from the cache on the first render) and reset to it
+  // after every save; the user's edits stay until then.
+  const [form, setForm] = useState<MonitoringForm | null>(() => (data ? formFromSettings(data) : null))
+  useEffect(() => { if (data) setForm(formFromSettings(data)) }, [data])
 
   const save = useMutation({
-    mutationFn: async () => (await api.put('/settings/monitoring', {
-      degraded_rtt_ms: Number(form.degraded_rtt_ms),
-      degraded_loss_pct: Number(form.degraded_loss_pct),
-    })).data,
-    onSuccess: () => { toast.success('Monitoring thresholds saved', 'The poller applies them within about a minute.'); qc.invalidateQueries({ queryKey: ['settings', 'monitoring'] }) },
+    mutationFn: async (payload: MonitoringSettingsDoc) => (await api.put('/settings/monitoring', payload)).data,
+    onSuccess: (res: { message?: unknown } | undefined) => {
+      toast.success('Device status settings saved', typeof res?.message === 'string' ? res.message : 'The poller applies them within about a minute.')
+      qc.invalidateQueries({ queryKey: ['settings', 'monitoring'] })
+    },
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
   })
 
+  if (!form) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Device status</CardTitle></CardHeader>
+        <CardContent>
+          {isError
+            ? <div className="flex items-center gap-3 text-sm text-danger">Monitoring settings could not be loaded: {apiErrorMessage(error)} <Button size="sm" variant="outline" onClick={() => refetch()}>Retry</Button></div>
+            : <div className="flex items-center gap-2 text-sm text-muted"><Loader2 className="h-4 w-4 animate-spin" />Loading monitoring settings…</div>}
+        </CardContent>
+      </Card>
+    )
+  }
+
+  const f = form
+  const set = (patch: Partial<MonitoringForm>) => setForm({ ...f, ...patch })
+  const errors = validateMonitoringForm(f)
+  const invalid = Object.keys(errors).length > 0
+  const dirty = !!data && JSON.stringify(settingsPayload(f)) !== JSON.stringify(settingsPayload(formFromSettings(data)))
+  const policy = policyFromForm(f)
+  const auto = effectivePolicy({ degraded_rtt_ms: policy.degraded_rtt_ms, degraded_loss_pct: policy.degraded_loss_pct })
+  const rules = policySentences(policy)
+  const timing = timingRows(policy)
+  const field = (key: MonitoringFormField, label: string, opts: { disabled?: boolean; step?: string; width?: string } = {}) => (
+    <NumberInput label={label} value={f[key] as string} error={errors[key]} disabled={opts.disabled} step={opts.step} width={opts.width}
+      onChange={(value) => set({ [key]: value } as Partial<MonitoringForm>)} />
+  )
+
   return (
     <Card>
-      <CardHeader><CardTitle>Degraded thresholds</CardTitle></CardHeader>
-      <CardContent>
-        <p className="mb-4 text-sm text-muted">
-          A device that still answers ping is marked <span className="font-medium text-text">Degraded</span> when
-          either its round-trip time OR packet loss is strictly above the configured limit. Equality does not trigger degradation.
-          Each ping check is evaluated individually; chart averages do not determine this status. Changes apply after the controller configuration refresh (normally within a minute) and a subsequent check. Remote sensor results use these settings when received.
-          CPU, memory and hardware alerts use their own rules.
+      <CardHeader><CardTitle>Device status</CardTitle></CardHeader>
+      <CardContent className="space-y-5">
+        <p className="text-sm text-muted">
+          A device that answers ping is <span className="font-medium text-text">Degraded</span> when enough recent checks have latency
+          OR packet loss strictly above the limits below (equal values do not count), and <span className="font-medium text-text">Down</span> when
+          enough consecutive checks get no answer. Chart averages do not determine the status. Changes apply after the controller
+          configuration refresh (normally within a minute) and a subsequent check; remote sensor results use these settings when
+          received. CPU, memory and hardware alerts use their own rules.
         </p>
-        <form onSubmit={(e: FormEvent) => { e.preventDefault(); save.mutate() }} className="grid grid-cols-2 gap-3">
-          <FormField label="Round-trip time above" hint="Latency beyond which a responding device counts as degraded (default 100 ms)">
-            <div className="flex items-center gap-2">
-              <Input type="number" min={1} max={10000} value={form.degraded_rtt_ms ?? ''} onChange={(e) => setForm({ ...form, degraded_rtt_ms: e.target.value })} className="w-32" />
-              <span className="text-sm text-muted">ms</span>
+        <div role="note" className="flex gap-2 rounded-lg border border-info/30 bg-info/5 p-3 text-xs text-text2">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" aria-hidden />
+          <p>
+            <span className="font-medium text-text">What changed:</span> a status change is now confirmed over several checks. A single slow,
+            lossy or unanswered check stays in the ping history but no longer changes the status. Degraded alerts therefore arrive after
+            confirmation (plus any rule hold time), device latency and packet-loss alert rules are evaluated when the confirmed status
+            changes, status notifications of flapping devices are held, and status-change counts in reports drop from the upgrade onwards.
+            The Legacy single-check preset closely restores the previous behaviour.
+          </p>
+        </div>
+
+        <form onSubmit={(e: FormEvent) => { e.preventDefault(); if (!invalid) save.mutate(settingsPayload(f)) }} className="space-y-5" noValidate>
+          <section className="space-y-3">
+            <h3 className="text-sm font-semibold">Degraded limits</h3>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField label="Round-trip time above" hint="Latency beyond which a check counts as slow (default 100 ms)" error={errors.degraded_rtt_ms}>
+                <div className="flex items-center gap-2">
+                  <Input type="number" min={0} max={10000} step="any" aria-label="Round-trip time above (ms)" aria-invalid={!!errors.degraded_rtt_ms || undefined} value={f.degraded_rtt_ms} onChange={(e) => set({ degraded_rtt_ms: e.target.value })} className="w-32" />
+                  <span className="text-sm text-muted">ms</span>
+                </div>
+              </FormField>
+              <FormField label="Packet loss above" hint="Loss beyond which a check counts as lossy (default 10%)" error={errors.degraded_loss_pct}>
+                <div className="flex items-center gap-2">
+                  <Input type="number" min={1} max={100} step="any" aria-label="Packet loss above (%)" aria-invalid={!!errors.degraded_loss_pct || undefined} value={f.degraded_loss_pct} onChange={(e) => set({ degraded_loss_pct: e.target.value })} className="w-32" />
+                  <span className="text-sm text-muted">%</span>
+                </div>
+              </FormField>
             </div>
-          </FormField>
-          <FormField label="Packet loss above" hint="Loss beyond which a responding device counts as degraded (default 10%)">
-            <div className="flex items-center gap-2">
-              <Input type="number" min={1} max={100} value={form.degraded_loss_pct ?? ''} onChange={(e) => setForm({ ...form, degraded_loss_pct: e.target.value })} className="w-32" />
-              <span className="text-sm text-muted">%</span>
+            <p className="text-[11px] text-muted">{lossGranularityNote(policy)}</p>
+          </section>
+
+          <section className="space-y-2.5">
+            <h3 className="text-sm font-semibold">Confirmation</h3>
+            <Sentence errors={[errors.degraded_confirm_checks, errors.degraded_window_checks]}>
+              Degraded when {field('degraded_confirm_checks', 'Checks over the limits for Degraded')} of the last {field('degraded_window_checks', 'Checks in the Degraded window')} checks exceed them or get no answer.
+            </Sentence>
+            <Sentence errors={[errors.down_confirm_checks]}>
+              Down after {field('down_confirm_checks', 'Consecutive failed checks for Down')} consecutive failed checks.
+            </Sentence>
+            <Sentence errors={[errors.flap_start_changes, errors.flap_window_minutes]}>
+              <span className="inline-flex items-center gap-2">
+                Detect flapping
+                <Switch checked={f.flap_detection_enabled} onCheckedChange={(on) => set({ flap_detection_enabled: on })} aria-label="Detect flapping" />
+                <span className="text-muted">{f.flap_detection_enabled ? 'on' : 'off'}</span>
+              </span>
+              {f.flap_detection_enabled && <>: {field('flap_start_changes', 'Status changes that start flapping')} status changes within {field('flap_window_minutes', 'Flap window in minutes', { width: 'w-20' })} min.</>}
+            </Sentence>
+          </section>
+
+          <details className="group rounded-lg border border-border">
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Advanced: recovery and flapping</summary>
+            <div className="space-y-3 border-t border-border px-3 py-3">
+              <ClearLimit
+                label="Recovery latency" unit="ms" autoValue={auto.degraded_rtt_clear_ms} override={f.rtt_clear_override}
+                value={f.degraded_rtt_clear_ms} error={errors.degraded_rtt_clear_ms}
+                onOverride={(on) => set({ rtt_clear_override: on, degraded_rtt_clear_ms: on && !f.degraded_rtt_clear_ms ? String(auto.degraded_rtt_clear_ms) : f.degraded_rtt_clear_ms })}
+                onChange={(value) => set({ degraded_rtt_clear_ms: value })}
+              />
+              <ClearLimit
+                label="Recovery packet loss" unit="%" autoValue={auto.degraded_loss_clear_pct} override={f.loss_clear_override}
+                value={f.degraded_loss_clear_pct} error={errors.degraded_loss_clear_pct}
+                onOverride={(on) => set({ loss_clear_override: on, degraded_loss_clear_pct: on && !f.degraded_loss_clear_pct ? String(auto.degraded_loss_clear_pct) : f.degraded_loss_clear_pct })}
+                onChange={(value) => set({ degraded_loss_clear_pct: value })}
+              />
+              <Sentence errors={[errors.degraded_clear_checks]}>
+                Back to Up from Degraded after {field('degraded_clear_checks', 'Consecutive checks within the recovery limits')} consecutive checks within the recovery limits (or a full window without a slow, lossy or unanswered check).
+              </Sentence>
+              <Sentence errors={[errors.up_confirm_checks]}>
+                Back to Up from Down after {field('up_confirm_checks', 'Responding checks to confirm recovery')} responding check(s).
+              </Sentence>
+              <Sentence errors={[errors.sensor_down_confirm_checks]}>
+                Remote sensors: Down after {field('sensor_down_confirm_checks', 'Consecutive failed sensor checks for Down')} consecutive failed check(s). A sensor check already retries its ping within the cycle.
+              </Sentence>
+              <Sentence errors={[errors.flap_stop_changes, errors.flap_stable_minutes]}>
+                Flapping ends when at most {field('flap_stop_changes', 'Changes left in the window to stop flapping', { disabled: !f.flap_detection_enabled })} change(s) remain in the window, or after {field('flap_stable_minutes', 'Minutes without a change to stop flapping', { disabled: !f.flap_detection_enabled })} min without a change. While flapping, a status notifies only once it has lasted that long.
+              </Sentence>
             </div>
-          </FormField>
-          <div className="col-span-2 flex justify-end">
-            <Button type="submit" disabled={save.isPending}>
-              {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
-            </Button>
+          </details>
+
+          <section aria-label="What these settings do" className="space-y-2 rounded-lg border border-border bg-surface2/30 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold">With these settings</h3>
+              {isLegacyPolicy(policy) && <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">Legacy single-check behaviour</span>}
+            </div>
+            <ul className="list-disc space-y-1 pl-4 text-xs text-muted">
+              {[rules.degraded, rules.recovery, rules.down, rules.flapping].map((r) => <li key={r}>{r}</li>)}
+            </ul>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[520px] text-left text-xs">
+                <caption className="sr-only">Time to confirm a change at common ping intervals</caption>
+                <thead className="text-muted">
+                  <tr><th className="py-1 pr-3 font-medium">Ping interval</th><th className="py-1 pr-3 font-medium">Down confirmed</th><th className="py-1 pr-3 font-medium">Up confirmed</th><th className="py-1 pr-3 font-medium">Degraded confirmed</th><th className="py-1 pr-3 font-medium">Degraded cleared</th><th className="py-1 font-medium">Flapping can start</th></tr>
+                </thead>
+                <tbody>
+                  {timing.map((row) => (
+                    <tr key={row.intervalSeconds} className="border-t border-border/60">
+                      <td className="py-1 pr-3 font-medium">{fmtSeconds(row.intervalSeconds)}</td>
+                      <td className="py-1 pr-3">{row.down}</td>
+                      <td className="py-1 pr-3">{row.up}</td>
+                      <td className="py-1 pr-3">{row.degraded}</td>
+                      <td className="py-1 pr-3">{row.degradedClear}</td>
+                      <td className="py-1">{TIMING_FLAP_LABEL[row.flap]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-muted">Times run from the moment the condition begins on a sustained problem. {flapDetectionLimitText(policy)}</p>
+          </section>
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setForm(defaultsForm())}>Restore defaults</Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => setForm(legacyPresetForm(f))} title="One check confirms and clears Degraded, recovery limits equal the Degraded limits, flap detection off. Down and Up counts are kept.">Legacy single-check preset</Button>
+            </div>
+            <div className="flex items-center gap-3">
+              {invalid
+                ? <span role="alert" className="text-xs text-danger">Fix the highlighted values to save.</span>
+                : dirty && <span className="text-xs text-muted">Unsaved changes</span>}
+              <Button type="submit" disabled={save.isPending || invalid}>
+                {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
+              </Button>
+            </div>
           </div>
         </form>
       </CardContent>
     </Card>
+  )
+}
+
+/** A rule written as a sentence with inline number inputs; its fields' errors follow it. */
+function Sentence({ children, errors }: { children: React.ReactNode; errors: Array<string | undefined> }) {
+  const shown = errors.filter(Boolean)
+  return (
+    <div>
+      <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm">{children}</p>
+      {shown.map((e) => <p key={e} className="mt-0.5 text-[11px] text-danger">{e}</p>)}
+    </div>
+  )
+}
+
+function NumberInput({ label, value, error, onChange, disabled, step = '1', width = 'w-16' }: {
+  label: string
+  value: string
+  error?: string
+  onChange: (value: string) => void
+  disabled?: boolean
+  step?: string
+  width?: string
+}) {
+  return (
+    <Input
+      type="number" step={step} inputMode={step === '1' ? 'numeric' : 'decimal'} aria-label={label} title={label} aria-invalid={!!error || undefined}
+      value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}
+      className={cn('inline-block h-8 px-2 text-sm', width, error && 'border-danger')}
+    />
+  )
+}
+
+/** A recovery limit: derived (80% of the Degraded limit, as the server computes it) unless set manually. */
+function ClearLimit({ label, unit, autoValue, override, value, error, onOverride, onChange }: {
+  label: string
+  unit: string
+  autoValue: number
+  override: boolean
+  value: string
+  error?: string
+  onOverride: (on: boolean) => void
+  onChange: (value: string) => void
+}) {
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+        <span>{label} at or below</span>
+        {override
+          ? <><NumberInput label={`${label} (${unit})`} value={value} error={error} onChange={onChange} step="any" width="w-24" /><span className="text-muted">{unit}</span></>
+          : <span className="font-medium">{fmt3(autoValue)} {unit} <span className="font-normal text-muted">(auto: 80% of the Degraded limit)</span></span>}
+        <label className="ml-1 inline-flex items-center gap-1.5 text-xs text-muted">
+          <input type="checkbox" className="h-3.5 w-3.5 accent-primary" checked={override} onChange={(e) => onOverride(e.target.checked)} />
+          Set manually
+        </label>
+      </div>
+      {error && <p className="mt-0.5 text-[11px] text-danger">{error}</p>}
+    </div>
   )
 }
 

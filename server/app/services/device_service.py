@@ -119,15 +119,19 @@ def _identity_condition(expr, wanted: str):
 
 def _device_conditions(
     status, group_id, device_type, location, search, tags, tags_match, managed_by, visible_tags, vendor, model, os_version,
-    *, omit: str | None = None,
+    *, omit: str | None = None, flapping: bool | None = None,
 ) -> list:
     """The WHERE conditions of the Devices list, as a list; ``omit`` names one identity filter to leave out (a facet counts
-    over every active filter except its own)."""
+    over every active filter except its own). ``flapping`` is an overlay on the status, not a status: True keeps the
+    devices flagged as flapping, False the others, None does not filter; it combines with ``status``."""
     conds: list = []
     if visible_tags is not None:
         conds.append(text(scoping.jsonb_tags_visible("devices.tags")).bindparams(**{scoping.SCOPE_PARAM: visible_tags}))
     if status:
         conds.append(Device.status == status)
+    if flapping is not None:
+        # The bare column (NOT NULL) matches the partial index idx_devices_is_flapping.
+        conds.append(Device.is_flapping if flapping else ~Device.is_flapping)
     if managed_by:
         conds.append(Device.managed_by_device_id == managed_by)
     if group_id:
@@ -180,10 +184,11 @@ async def get_devices(
     vendor: str | None = None,
     model: str | None = None,
     os_version: str | None = None,
+    flapping: bool | None = None,
 ) -> tuple[list[Device], int]:
     query = select(Device).options(selectinload(Device.group))
     for cond in _device_conditions(status, group_id, device_type, location, search, tags, tags_match, managed_by,
-                                   visible_tags, vendor, model, os_version):
+                                   visible_tags, vendor, model, os_version, flapping=flapping):
         query = query.where(cond)
 
     # Count
@@ -221,6 +226,7 @@ async def get_device_facets(
     vendor: str | None = None,
     model: str | None = None,
     os_version: str | None = None,
+    flapping: bool | None = None,
 ) -> dict[str, dict]:
     """Vendor, model and OS version menus with counts over ALL the devices the caller may see, not the page: each facet
     counts over every active filter except its own, so ``count`` is the ``meta.total`` the list gives when the value is
@@ -230,7 +236,7 @@ async def get_device_facets(
     out: dict[str, dict] = {}
     for name, expr in _identity_columns():
         conds = _device_conditions(status, group_id, device_type, location, search, tags, tags_match, managed_by,
-                                   visible_tags, vendor, model, os_version, omit=name)
+                                   visible_tags, vendor, model, os_version, omit=name, flapping=flapping)
         rows = (await db.execute(select(expr.label("v"), func.count()).where(*conds).group_by("v"))).all()
         groups: dict[str, dict] = {}
         for spelling, n in rows:
@@ -365,9 +371,13 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
     # Pop credential_id so apply_credential is the authoritative writer
     # for credential-derived fields (version, port, community, v3 secrets).
     credential_id = update_data.pop("snmp_credential_id", "__missing__")
+    stops_polling = update_data.get("ping_enabled") is False and bool(device.ping_enabled)
 
     for key, value in update_data.items():
         setattr(device, key, value)
+
+    if stops_polling:
+        await release_device_status(db, device)
 
     if credential_id != "__missing__":
         device.snmp_credential_id = credential_id
@@ -379,6 +389,28 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
     return device
 
 
+async def release_device_status(db: AsyncSession, device: Device) -> None:
+    """Ping monitoring was switched off: no writer will check this device
+    again, so its confirmation state, flap flag and open flap episode would
+    otherwise stay frozen (a remote-sensor owner never releases it; the
+    central poller only releases rows it owns). Lock order as in every
+    status writer: devices -> device_status_state -> device_flap_episodes."""
+    await db.execute(
+        text("SELECT 1 FROM devices WHERE id = :id FOR NO KEY UPDATE"), {"id": device.id})
+    await db.execute(
+        text("DELETE FROM device_status_state WHERE device_id = :id"), {"id": device.id})
+    await db.execute(
+        text("""UPDATE device_flap_episodes
+                   SET ended_at = GREATEST(started_at, NOW()),
+                       end_reason = 'not_polled', status_at_end = :status
+                 WHERE device_id = :id AND ended_at IS NULL"""),
+        {"id": device.id, "status": device.status},
+    )
+    device.is_flapping = False
+    device.flapping_since = None
+    device.flap_kind = None
+
+
 async def delete_device(db: AsyncSession, device_id: UUID) -> bool:
     result = await db.execute(delete(Device).where(Device.id == device_id))
     await db.commit()
@@ -388,14 +420,20 @@ async def delete_device(db: AsyncSession, device_id: UUID) -> bool:
 async def get_device_summary(
     db: AsyncSession, visible_tags: list[str] | None = None,
 ) -> DeviceSummary:
-    query = select(Device.status, func.count(Device.id)).group_by(Device.status)
+    # Flapping is an overlay: a flapping device also counts in its status bucket.
+    query = select(
+        Device.status,
+        func.count(Device.id),
+        func.count(Device.id).filter(Device.is_flapping),
+    ).group_by(Device.status)
     if visible_tags is not None:
         query = query.where(
             text(scoping.jsonb_tags_visible("devices.tags"))
             .bindparams(**{scoping.SCOPE_PARAM: visible_tags})
         )
     result = await db.execute(query)
-    counts = {row[0]: row[1] for row in result.all()}
+    rows = result.all()
+    counts = {row[0]: row[1] for row in rows}
 
     return DeviceSummary(
         total=sum(counts.values()),
@@ -404,6 +442,7 @@ async def get_device_summary(
         degraded=counts.get("degraded", 0),
         unknown=counts.get("unknown", 0),
         maintenance=counts.get("maintenance", 0),
+        flapping=sum(int(row[2] or 0) for row in rows),
     )
 
 

@@ -589,13 +589,40 @@ _CHANGE_COND = ("n != 'maintenance' AND NOT (o = 'maintenance' AND n NOT IN ('do
                 "AND NOT (o IN ('', 'unknown') AND n = 'up')")
 
 
+async def _flap_episodes(ctx: SectionCtx) -> dict[str, dict[str, Any]]:
+    """device_id -> {episodes, flapping_s, ongoing} over the flap episodes (device_flap_episodes,
+    one row per time the status writer flagged the node as flapping) that overlap the window.
+    Time flapping is clipped to the window and, for an episode still open, to now."""
+    clause, params = ctx.pg_device_clause("e.device_id")
+    frm = ctx.frm if ctx.frm.tzinfo else ctx.frm.replace(tzinfo=timezone.utc)
+    to = ctx.to if ctx.to.tzinfo else ctx.to.replace(tzinfo=timezone.utc)
+    sql = text(
+        "SELECT e.device_id::text, count(*), "
+        "COALESCE(sum(GREATEST(EXTRACT(EPOCH FROM LEAST(COALESCE(e.ended_at, :now_ts), :to_ts) "
+        "- GREATEST(e.started_at, :from_ts)), 0)), 0), bool_or(e.ended_at IS NULL) "
+        "FROM device_flap_episodes e "
+        f"WHERE e.started_at < :to_ts AND (e.ended_at IS NULL OR e.ended_at > :from_ts){clause} "
+        "GROUP BY e.device_id")
+    args = {"from_ts": frm, "to_ts": to, "now_ts": datetime.now(timezone.utc), **params}
+    # A savepoint keeps a failure here from aborting the section's other reads.
+    nested = getattr(ctx.db, "begin_nested", None)
+    if nested is not None:
+        async with nested():
+            rows = (await ctx.db.execute(sql, args)).fetchall()
+    else:
+        rows = (await ctx.db.execute(sql, args)).fetchall()
+    return {str(r[0]): {"episodes": int(r[1] or 0), "flapping_s": float(r[2] or 0), "ongoing": bool(r[3])}
+            for r in rows}
+
+
 @register_section(
     "device_flapping", title="Unstable Devices (Flapping)", category="Availability",
-    description=("Nodes that changed state most often, with outage episodes, downtime, the "
-                 "longest outage and the median time to recover."),
+    description=("Nodes that changed state most often, their flapping episodes and time spent "
+                 "flapping, with outage episodes, downtime, the longest outage and the median "
+                 "time to recover."),
     scope="device", requires=("devices.view",),
     options=[top_n_option(15, 200),
-             {"key": "threshold", "label": "Flapping threshold (state changes in the period)",
+             {"key": "threshold", "label": "Unstable threshold (state changes in the period)",
               "type": "int", "default": 4, "min": 1, "max": 1000}],
 )
 async def device_flapping(ctx: SectionCtx) -> dict:
@@ -644,8 +671,16 @@ async def device_flapping(ctx: SectionCtx) -> dict:
         if e["entity_id"] in names:
             eps_by_dev[e["entity_id"]].append(e)
 
+    # Flap episodes: what the live Flapping badge showed (None = not measured).
+    flaps: Optional[dict[str, dict[str, Any]]] = None
+    try:
+        flaps = {did: f for did, f in (await _flap_episodes(ctx)).items() if did in names}
+    except Exception:
+        logger.exception("device_flapping: flap episodes unavailable")
+        notes.append("Flap episodes could not be read; the flap columns are not measured.")
+
     rows_data = []
-    for did in set(per_dev) | set(eps_by_dev):
+    for did in set(per_dev) | set(eps_by_dev) | set(flaps or ()):
         d = per_dev.get(did, {"changes": 0, "downs": 0, "degraded": 0, "last": None})
         eps = eps_by_dev.get(did, [])
         completed = [e["duration_s"] for e in eps if e["completed_in_window"] and e["duration_s"] is not None]
@@ -655,10 +690,13 @@ async def device_flapping(ctx: SectionCtx) -> dict:
             "id": did, "name": names[did], **d, "outages": len(eps),
             "downtime_s": sum(e["in_window_s"] for e in eps),
             "longest": longest, "median_s": statistics.median(completed) if completed else None,
+            "flap": None if flaps is None else flaps.get(did, {"episodes": 0, "flapping_s": 0.0, "ongoing": False}),
         })
-    rows_data.sort(key=lambda r: (-r["changes"], -r["outages"], -r["downtime_s"], r["name"].lower()))
+    rows_data.sort(key=lambda r: (-r["changes"], -(r["flap"] or {}).get("episodes", 0), -r["outages"],
+                                  -r["downtime_s"], r["name"].lower()))
     shown = rows_data[:top_n]
-    flapping = [r for r in rows_data if r["changes"] >= threshold]
+    unstable = [r for r in rows_data if r["changes"] >= threshold]
+    flapping_nodes = None if flaps is None else [r for r in rows_data if r["flap"]["episodes"]]
     all_completed = [e["duration_s"] for e in episodes
                      if e["entity_id"] in names and e["completed_in_window"] and e["duration_s"] is not None]
     longest_all = max((r for r in rows_data if r["longest"]),
@@ -671,11 +709,28 @@ async def device_flapping(ctx: SectionCtx) -> dict:
         out = _duration(e["duration_s"] if e["duration_s"] is not None else e["in_window_s"])
         return f"{out} (ongoing)" if e["ongoing"] else out
 
+    def _flap_cells(f: Optional[dict]) -> list[str]:
+        if f is None:
+            return ["—", "—"]
+        if not f["episodes"]:
+            return ["0", "—"]
+        spent = _duration(f["flapping_s"])
+        return [f"{f['episodes']:,}", f"{spent} (ongoing)" if f["ongoing"] else spent]
+
     total_changes = sum(r["changes"] for r in rows_data)
     total_outages = sum(r["outages"] for r in rows_data)
+    if flapping_nodes is None:
+        flapping_kpi = {"label": "Flapping nodes (episodes)", "value": "—", "accent": "neutral",
+                        "subtitle": "Not measured"}
+    else:
+        total_flaps = sum(r["flap"]["episodes"] for r in flapping_nodes)
+        flapping_kpi = {"label": "Flapping nodes (episodes)", "value": f"{len(flapping_nodes):,}",
+                        "accent": "warning" if flapping_nodes else "success",
+                        "subtitle": f"{total_flaps:,} flap episode(s)" if flapping_nodes else "No flap episode"}
     kpis = [
-        {"label": f"Flapping nodes (≥ {threshold} changes)", "value": f"{len(flapping):,}",
-         "accent": "warning" if flapping else "success", "subtitle": f"of {len(names):,} in scope"},
+        {"label": f"Unstable nodes (≥ {threshold} state changes)", "value": f"{len(unstable):,}",
+         "accent": "warning" if unstable else "success", "subtitle": f"of {len(names):,} in scope"},
+        flapping_kpi,
         {"label": "State changes", "value": f"{total_changes:,}", "accent": "info"},
         {"label": "Outage episodes", "value": f"{total_outages:,}",
          "accent": "danger" if total_outages else "success"},
@@ -701,21 +756,24 @@ async def device_flapping(ctx: SectionCtx) -> dict:
                                   "points": [{"label": h["label"], "value": h["count"]} for h in hist]}})
     notes += ["State changes exclude entering and leaving planned maintenance and a new node's "
               "first result. Outages pair each down transition with the next recovery; "
-              "maintenance time is excluded."]
+              "maintenance time is excluded.",
+              f"Unstable nodes changed state at least {threshold:,} times in the period. Flapping nodes "
+              "were flagged as flapping by status monitoring (confirmed changes within the flap "
+              "detection window) at least once; time flapping is clipped to the period."]
     notes += _coverage_note(ctx, STATUS_LOG_RETENTION_DAYS, "The device status log")
     if not rows_data:
         notes.insert(0, "No node changed state or had an outage in this period.")
     return _section(
         "device_flapping", title,
-        description="Nodes that changed state or went down in the period, most changes first.",
+        description="Nodes that changed state, flapped or went down in the period, most changes first.",
         kpis=kpis, charts=charts,
         tables=[{"title": _truncated("Nodes with state changes or outages", len(shown),
                                      len(rows_data), "nodes"),
-                 "headers": ["Node", "State changes", "Outages", "Degraded", "Downtime",
-                             "Longest outage", "Median recovery", "Last change"],
-                 "styles": ["text", "num", "num", "num", "num", "num", "num", "text"],
-                 "rows": [[r["name"], f"{r['changes']:,}", f"{r['outages']:,}", f"{r['degraded']:,}",
-                           _duration(r["downtime_s"]) if r["outages"] else "—",
+                 "headers": ["Node", "State changes", "Flap episodes", "Time flapping", "Outages",
+                             "Degraded", "Downtime", "Longest outage", "Median recovery", "Last change"],
+                 "styles": ["text", "num", "num", "num", "num", "num", "num", "num", "num", "text"],
+                 "rows": [[r["name"], f"{r['changes']:,}", *_flap_cells(r["flap"]), f"{r['outages']:,}",
+                           f"{r['degraded']:,}", _duration(r["downtime_s"]) if r["outages"] else "—",
                            _longest(r["longest"]), _duration(r["median_s"]),
                            ctx.fmt_short(r["last"])] for r in shown]}] if shown else [],
         notes=notes,
@@ -1211,8 +1269,8 @@ template(
 
 template(
     "unstable_devices_flapping", "Unstable Devices (Flapping)",
-    "Nodes that keep changing state, their outage episodes and recovery times, devices that "
-    "rebooted and the longest outages of the period.",
+    "Nodes that keep changing state, their flapping episodes, outage episodes and recovery times, "
+    "devices that rebooted and the longest outages of the period.",
     "availability",
     ["device_flapping", "device_reboots", "top_outages"],
     audience=("Network engineer", "NOC operator"), tags=("flapping", "stability", "outages"),

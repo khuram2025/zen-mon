@@ -181,21 +181,70 @@ func TestPersistOnlyWhenStateChangesRespondsOrHeartbeat(t *testing.T) {
 		t.Fatalf("saves = %+v", saves)
 	}
 
-	// Heartbeat: the state row is rewritten at least every 10 minutes.
+	// Heartbeat: an unchanged state row is rewritten within half the gap
+	// rule (90 s at this 30 s interval), so its last_sample_at never looks
+	// silent to readers.
+	heartbeat := stateHeartbeatFor(30 * time.Second)
+	if heartbeat != 90*time.Second {
+		t.Fatalf("heartbeat at 30 s = %s, want 90s", heartbeat)
+	}
 	lastStateWrite := saves[5].At
-	for f.at().Sub(lastStateWrite) <= stateHeartbeat {
+	for i := 0; i < 12; i++ {
 		f.clean()
 	}
 	f.flush()
 	saves = f.loader.savesCopy()
+	stateWrites := 0
 	for i, s := range saves[6:] {
-		heartbeat := s.At.Sub(lastStateWrite) >= stateHeartbeat
-		if s.WriteState != heartbeat {
+		due := s.At.Sub(lastStateWrite) >= heartbeat
+		if s.WriteState != due {
 			t.Fatalf("save %d at +%s: WriteState=%v", i+6, s.At.Sub(lastStateWrite), s.WriteState)
 		}
+		if s.WriteState {
+			stateWrites++
+			lastStateWrite = s.At
+		}
+		if age := s.At.Sub(lastStateWrite); age >= 3*time.Minute {
+			t.Fatalf("save %d: state row %s old, past the 180 s gap", i+6, age)
+		}
 	}
-	if !saves[len(saves)-1].WriteState {
-		t.Fatal("no heartbeat state write after 10 minutes")
+	if stateWrites != 4 {
+		t.Fatalf("%d heartbeat state writes in 12 steady checks, want 4 (every 3rd)", stateWrites)
+	}
+}
+
+// The heartbeat keeps last_sample_at inside the gap rule (max(3 x interval,
+// 180 s)) with at least 30 s to spare, and never exceeds 10 minutes.
+func TestStateHeartbeatStaysInsideTheGap(t *testing.T) {
+	for _, tc := range []struct {
+		interval, want time.Duration
+	}{
+		{0, 90 * time.Second}, // unset: the 60 s default
+		{10 * time.Second, 90 * time.Second},
+		{60 * time.Second, 90 * time.Second},
+		{300 * time.Second, 450 * time.Second},
+		{1800 * time.Second, stateHeartbeat},
+		{time.Hour, stateHeartbeat},
+	} {
+		got := stateHeartbeatFor(tc.interval)
+		if got != tc.want {
+			t.Fatalf("interval %s: heartbeat %s, want %s", tc.interval, got, tc.want)
+		}
+		interval := effectiveInterval(tc.interval, 60*time.Second)
+		gap := 3 * interval
+		if gap < stateGapFloor {
+			gap = stateGapFloor
+		}
+		// Worst case: the first check at or past the heartbeat writes, less
+		// than one interval after it (with a heartbeat below the interval
+		// every check writes, so the row is at most one interval old).
+		worst := got + interval
+		if got < interval {
+			worst = interval
+		}
+		if gap-worst < 30*time.Second {
+			t.Fatalf("interval %s: a state row can reach %s, within 30 s of the %s gap", tc.interval, worst, gap)
+		}
 	}
 }
 
@@ -586,7 +635,7 @@ func TestPlanPersist(t *testing.T) {
 	if write, state := planPersist(d, changed, false, now.Add(time.Minute)); !write || !state {
 		t.Fatal("a changed state must be written")
 	}
-	if write, state := planPersist(d, newer, false, now.Add(stateHeartbeat)); !write || !state {
+	if write, state := planPersist(d, newer, false, now.Add(stateHeartbeatFor(d.PingInterval))); !write || !state {
 		t.Fatal("heartbeat not written")
 	}
 }

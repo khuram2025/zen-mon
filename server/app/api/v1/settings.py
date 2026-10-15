@@ -10,14 +10,14 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, ValidationError, field_validator, model_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_admin_user, require_permission
 from app.models.user import User
-from app.services import branding
+from app.services import branding, device_status_machine
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
@@ -278,18 +278,143 @@ class GrafanaSettings(BaseModel):
     dashboard_template: str = ""  # e.g. "/d/abc123?var-host={hostname}&var-device_id={device_id}"
 
 
-class MonitoringSettings(BaseModel):
-    """Operator-tunable thresholds for what counts as a DEGRADED device.
+_MONITORING_KEYS = tuple(device_status_machine.DEFAULTS)
+# null means "derived": 80 % of the degraded limit (round3).
+_MONITORING_NULLABLE = ("degraded_rtt_clear_ms", "degraded_loss_clear_pct")
+_MONITORING_NUMBERS = tuple(k for k in _MONITORING_KEYS if k != "flap_detection_enabled")
 
-    The poller reads these from system_settings (key 'monitoring') on its
-    device-sync cadence (~60s); unset/zero falls back to its built-in defaults
-    (100 ms / 10 %). These are the values that decide the Up -> Degraded
-    transition, and with it every degraded-trigger alert.
+
+class MonitoringSettings(BaseModel):
+    """Device status policy (system_settings key 'monitoring'): degraded limits,
+    confirmation counts, recovery hysteresis and flap detection.
+
+    The central poller reloads it on its device-sync cadence (~60 s) and the
+    remote-sensor ingest reads it on every upload, both through the shared
+    loader (device_status_machine.policy_from_settings and its Go twin), which
+    clamps whatever is stored. Every key is optional: PUT merges into the
+    stored document, so a client that sends some keys (older UIs send only the
+    two limits) keeps the others. Ranges are per field here; the cross-field
+    rules are checked on the merged document by the PUT.
     """
-    # Loss floor is 1%: the poller reads 0 as "unset, keep defaults", and with
-    # a 3-packet sample the real granularity is ~33% anyway.
-    degraded_rtt_ms: float = Field(default=100.0, gt=0, le=10000)
-    degraded_loss_pct: float = Field(default=10.0, ge=1, le=100)
+    # Loss floor is 1%: with a 3-packet check the real granularity is ~33%.
+    degraded_rtt_ms: Optional[float] = Field(default=None, gt=0, le=10000, allow_inf_nan=False)
+    degraded_loss_pct: Optional[float] = Field(default=None, ge=1, le=100, allow_inf_nan=False)
+    degraded_rtt_clear_ms: Optional[float] = Field(default=None, gt=0, le=10000, allow_inf_nan=False)
+    degraded_loss_clear_pct: Optional[float] = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    degraded_confirm_checks: Optional[int] = Field(default=None, ge=1, le=20)
+    degraded_window_checks: Optional[int] = Field(default=None, ge=1, le=20)
+    degraded_clear_checks: Optional[int] = Field(default=None, ge=1, le=20)
+    down_confirm_checks: Optional[int] = Field(default=None, ge=1, le=10)
+    sensor_down_confirm_checks: Optional[int] = Field(default=None, ge=1, le=10)
+    up_confirm_checks: Optional[int] = Field(default=None, ge=1, le=10)
+    flap_detection_enabled: Optional[StrictBool] = None
+    flap_window_minutes: Optional[int] = Field(default=None, ge=5, le=1440)
+    flap_start_changes: Optional[int] = Field(default=None, ge=3, le=64)
+    flap_stop_changes: Optional[int] = Field(default=None, ge=0, le=63)
+    flap_stable_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+
+    @field_validator(*_MONITORING_NUMBERS, mode="before")
+    @classmethod
+    def _json_number(cls, value):
+        # The loaders read only JSON numbers; "5" or true would silently mean
+        # "default" there, so they are refused here.
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("must be a number")
+        return value
+
+    @model_validator(mode="after")
+    def _only_recovery_limits_may_be_null(self):
+        nulls = sorted(key for key in self.model_fields_set
+                       if getattr(self, key) is None and key not in _MONITORING_NULLABLE)
+        if nulls:
+            raise ValueError(f"{', '.join(nulls)} cannot be null")
+        return self
+
+
+def _monitoring_conflicts(doc: dict) -> list[str]:
+    """Cross-field rules of a (merged, per-field valid) monitoring document.
+    A missing key takes its default, as the loaders do."""
+    def value(key: str):
+        return doc[key] if doc.get(key) is not None else device_status_machine.DEFAULTS[key]
+
+    fmt = device_status_machine.fmt3
+    problems = []
+    rtt, loss = value("degraded_rtt_ms"), value("degraded_loss_pct")
+    rtt_clear, loss_clear = doc.get("degraded_rtt_clear_ms"), doc.get("degraded_loss_clear_pct")
+    if rtt_clear is not None and rtt_clear > rtt:
+        problems.append(f"degraded_rtt_clear_ms ({fmt(rtt_clear)} ms) cannot be above "
+                        f"degraded_rtt_ms ({fmt(rtt)} ms)")
+    if loss_clear is not None and loss_clear > loss:
+        problems.append(f"degraded_loss_clear_pct ({fmt(loss_clear)}%) cannot be above "
+                        f"degraded_loss_pct ({fmt(loss)}%)")
+    confirm, window = value("degraded_confirm_checks"), value("degraded_window_checks")
+    if window < confirm:
+        problems.append(f"degraded_window_checks ({window}) must be at least "
+                        f"degraded_confirm_checks ({confirm})")
+    start, stop = value("flap_start_changes"), value("flap_stop_changes")
+    if stop >= start:
+        problems.append(f"flap_stop_changes ({stop}) must be below flap_start_changes ({start})")
+    flap_window, stable = value("flap_window_minutes"), value("flap_stable_minutes")
+    if stable > flap_window:
+        problems.append(f"flap_stable_minutes ({stable}) cannot exceed flap_window_minutes ({flap_window})")
+    return problems
+
+
+def _monitoring_value_valid(key: str, value) -> bool:
+    try:
+        MonitoringSettings.model_validate({key: value})
+    except ValidationError:
+        return False
+    return True
+
+
+def _monitoring_document(stored: dict) -> dict:
+    """GET shape: every policy key (stored value when valid on its own, else the
+    default) plus ``effective``, the loader's output with the derived recovery
+    limits and the cross-field clamps applied (what the poller and the sensor
+    ingest actually use)."""
+    doc = {}
+    for key, default in device_status_machine.DEFAULTS.items():
+        value = stored.get(key, default)
+        doc[key] = value if _monitoring_value_valid(key, value) else default
+    doc["effective"] = device_status_machine.effective_policy_dict(
+        device_status_machine.policy_from_settings(stored)
+    )
+    return doc
+
+
+def _validation_message(exc: ValidationError, incoming: dict) -> str:
+    parts = []
+    for error in exc.errors():
+        key = ".".join(str(part) for part in error.get("loc", ()) if part != "__root__")
+        message = str(error.get("msg", "invalid")).removeprefix("Value error, ")
+        if not key:
+            parts.append(message)
+        else:
+            parts.append(f"{key}: {message}" if key in incoming else f"stored {key}: {message}")
+    return "; ".join(parts)
+
+
+async def _merge_system_setting(db: AsyncSession, key: str, patch: dict, user: User) -> None:
+    """jsonb-merge ``patch`` into a stored object (keys it lacks are kept) and
+    stamp updated_at/updated_by. No commit: the caller commits it together with
+    its audit entry."""
+    await db.execute(
+        text("""INSERT INTO system_settings (key, value, updated_at, updated_by)
+                VALUES (:key, CAST(:value AS jsonb), NOW(),
+                        (SELECT id FROM users WHERE id = CAST(:user_id AS uuid)))
+                ON CONFLICT (key) DO UPDATE
+                   SET value = CASE WHEN jsonb_typeof(system_settings.value) = 'object'
+                                    THEN system_settings.value ELSE '{}'::jsonb END
+                               || EXCLUDED.value,
+                       updated_at = EXCLUDED.updated_at,
+                       updated_by = EXCLUDED.updated_by"""),
+        {
+            "key": key,
+            "value": _json_dumps(patch),
+            "user_id": str(user.id) if getattr(user, "id", None) else None,
+        },
+    )
 
 
 @router.get("/monitoring")
@@ -298,7 +423,7 @@ async def get_monitoring_settings(
     user: User = Depends(require_permission("settings.view")),
 ):
     raw = await _get_system_setting(db, "monitoring")
-    return MonitoringSettings(**(raw or {})).model_dump()
+    return _monitoring_document(dict(raw) if isinstance(raw, dict) else {})
 
 
 @router.put("/monitoring")
@@ -307,17 +432,39 @@ async def update_monitoring_settings(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("settings.manage")),
 ):
-    await _upsert_system_setting(db, "monitoring", data.model_dump())
+    incoming = data.model_dump(exclude_unset=True)
+    stored = (await db.execute(
+        text("SELECT value FROM system_settings WHERE key = 'monitoring' FOR UPDATE")
+    )).scalar()
+    stored = dict(stored) if isinstance(stored, dict) else {}
+    merged = {**stored, **incoming}
+    try:
+        checked = MonitoringSettings.model_validate(
+            {key: merged[key] for key in _MONITORING_KEYS if key in merged}
+        )
+    except ValidationError as exc:
+        raise HTTPException(422, f"Invalid monitoring settings: {_validation_message(exc, incoming)}")
+    problems = _monitoring_conflicts(checked.model_dump(exclude_unset=True))
+    if problems:
+        raise HTTPException(422, "Invalid monitoring settings: " + "; ".join(problems))
+
+    await _merge_system_setting(db, "monitoring", incoming, user)
     await write_audit_log(
         db,
         actor=user,
         action="settings.monitoring.update",
         resource_type="system_setting",
         resource_id="monitoring",
-        metadata=data.model_dump(),
+        metadata=incoming,
     )
     await db.commit()
-    return {"message": "Monitoring thresholds updated. The poller applies them within about a minute."}
+    return {
+        "message": "Monitoring settings updated. The poller applies them within about a minute; "
+                   "remote sensor results use them from their next upload.",
+        "effective": device_status_machine.effective_policy_dict(
+            device_status_machine.policy_from_settings(merged)
+        ),
+    }
 
 
 @router.get("/integrations/grafana")

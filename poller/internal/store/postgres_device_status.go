@@ -218,8 +218,8 @@ func (s *PostgresStore) loadDevicesLegacy(ctx context.Context) ([]*pinger.Device
 // saveDeviceStatusSQL persists one check in one statement:
 //
 //   - dev: the devices row (displayed status, last_seen only for a reply,
-//     the check's RTT, the flap mirror, status_changed_at when the displayed
-//     status changes), only while the device is centrally owned;
+//     last_rtt_ms per lastRTT, the flap mirror, status_changed_at when the
+//     displayed status changes), only while the device is centrally owned;
 //   - state: the machine state upsert ($9), taking over a row of another
 //     owner (the central writer is single and ordered, so no age guard);
 //   - opened: while flapping, the open episode (one per device, partial
@@ -236,7 +236,7 @@ const saveDeviceStatusSQL = `
 	    UPDATE devices d
 	       SET status            = $2::varchar,
 	           last_seen         = CASE WHEN $3::boolean THEN $4::timestamptz ELSE d.last_seen END,
-	           last_rtt_ms       = $5::float8,
+	           last_rtt_ms       = COALESCE($5::float8, d.last_rtt_ms),
 	           is_flapping       = $6::boolean,
 	           flapping_since    = $7::timestamptz,
 	           flap_kind         = $8::varchar,
@@ -300,12 +300,13 @@ const saveDeviceStatusSQL = `
 `
 
 // saveDeviceStatusLegacySQL is the pre-161 devices write (schema-lag
-// fallback): displayed status, last_seen for a reply, the check's RTT.
+// fallback): displayed status, last_seen for a reply, last_rtt_ms per
+// lastRTT.
 const saveDeviceStatusLegacySQL = `
 	UPDATE devices d
 	   SET status      = $2::varchar,
 	       last_seen   = CASE WHEN $3::boolean THEN $4::timestamptz ELSE d.last_seen END,
-	       last_rtt_ms = $5::float8
+	       last_rtt_ms = COALESCE($5::float8, d.last_rtt_ms)
 	 WHERE d.id = $1::uuid
 	   AND EXISTS (SELECT 1 FROM device_polling_owner owner
 	                WHERE owner.device_id = d.id AND owner.owner_kind = 'central')
@@ -324,7 +325,7 @@ func saveDeviceStatusArgs(save *pinger.DeviceStatusSave) []any {
 		displayedStatus(st),       // $2 devices.status, status_at_start/end
 		save.Responded,            // $3
 		save.At.UTC(),             // $4 last_seen, status_changed_at, episode times
-		save.RTTMs,                // $5
+		lastRTT(save),             // $5
 		st.IsFlapping(),           // $6
 		optTime(st.FlappingSince), // $7
 		optString(st.FlapKind()),  // $8
@@ -350,7 +351,22 @@ func saveDeviceStatusArgs(save *pinger.DeviceStatusSave) []any {
 
 // saveDeviceStatusLegacyArgs binds a save to saveDeviceStatusLegacySQL.
 func saveDeviceStatusLegacyArgs(save *pinger.DeviceStatusSave) []any {
-	return []any{save.DeviceID, displayedStatus(save.State), save.Responded, save.At.UTC(), save.RTTMs}
+	return []any{save.DeviceID, displayedStatus(save.State), save.Responded, save.At.UTC(), lastRTT(save)}
+}
+
+// lastRTT is the devices.last_rtt_ms a check writes, as before confirmation
+// existed: the RTT of a reply; 0 once the device is confirmed down; NULL
+// (keep the last measured RTT) for an unanswered check that has not
+// confirmed Down, so a single lost check does not show an Up device at 0 ms.
+func lastRTT(save *pinger.DeviceStatusSave) any {
+	switch {
+	case save.Responded:
+		return save.RTTMs
+	case hardStatus(save.State.HardStatus) == devicestatus.StatusDown:
+		return 0.0
+	default:
+		return nil
+	}
 }
 
 // SaveDeviceStatus persists one central check (see saveDeviceStatusSQL).
@@ -385,6 +401,10 @@ func (s *PostgresStore) SaveDeviceStatus(ctx context.Context, save *pinger.Devic
 // every writer: gone locks the devices and state rows (in id order) before
 // any write. The un-referenced write CTEs run after it (episodes first), on
 // rows that are already locked, so no writer can deadlock with this one.
+// devices is locked FOR NO KEY UPDATE like the other status writers: the flap
+// notice sweep inserts an alerts row (a KEY SHARE foreign-key check on
+// devices) while holding its claimed episode, and FOR UPDATE here would
+// deadlock against that sweep waiting for the same episode.
 const releaseDevicesSQL = `
 	WITH gone AS (
 	    SELECT d.id AS device_id, d.status,
@@ -400,7 +420,7 @@ const releaseDevicesSQL = `
 	                AND EXISTS (SELECT 1 FROM device_polling_owner o
 	                             WHERE o.device_id = d.id AND o.owner_kind = 'central'))
 	     ORDER BY d.id
-	       FOR UPDATE OF d, s
+	       FOR NO KEY UPDATE OF d, s
 	),
 	flags AS (
 	    UPDATE devices d

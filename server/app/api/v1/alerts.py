@@ -177,7 +177,8 @@ def serialize(row, ctx: dict) -> dict:
     rid = str(row.rule_id) if row.rule_id else None
     sil = ctx["silences"].get(str(row.id))
     suppressed = bool(sil) and row.status in ("active", "acknowledged")
-    due, overdue = wf.ack_due(row.status, row.severity, row.triggered_at, ctx["targets"], suppressed)
+    due, overdue = wf.ack_due(row.status, row.severity, wf.ack_anchor(row.triggered_at, meta),
+                              ctx["targets"], suppressed)
     chans = [ctx["channels"][str(c)] for c in (row.notify_channels or [])
              if isinstance(row.notify_channels, list) and str(c) in ctx["channels"]]
     assigned = None
@@ -209,6 +210,12 @@ def serialize(row, ctx: dict) -> dict:
         "closure": _closure(row),
         "is_notice": wf.notice_kind(meta) is not None,
         "notice_kind": wf.notice_kind(meta),
+        # A pending row is parked until its hold expires; flap_held says the
+        # hold is there because the device is flapping ("Held: device
+        # flapping"), hold_until when the sweeper decides.
+        "flap_held": row.status == "pending" and str(meta.get("flap_held", "")).lower() == "true",
+        "flap_kind": meta.get("flap_kind") if row.status == "pending" else None,
+        "hold_until": meta.get("hold_until") if row.status == "pending" else None,
         "suppression": sil if suppressed else None,
         "snoozed": suppressed,
         "snoozed_until": sil["until"] if suppressed else None,
@@ -416,6 +423,9 @@ async def alert_device_counts(
 
     in_window = and_(Alert.triggered_at >= start, Alert.triggered_at <= end)
     scope = await scoping.visible_tags(db, user)
+    # Notices (recovery notices, cancelled holds, flapping start/stop) are
+    # records, not alerts: a flapping device must not show a badge of dozens.
+    # They are always resolved, so the "active" counts are unaffected.
     query = (
         select(
             Alert.device_id,
@@ -429,6 +439,7 @@ async def alert_device_counts(
         )
         .where(Alert.device_id.is_not(None))
         .where(or_(in_window, Alert.status == "active"))
+        .where(text(f"NOT {wf.notice_sql('alerts')}"))
         .group_by(Alert.device_id)
     )
     if scope is not None:
@@ -701,7 +712,9 @@ async def _events(db: AsyncSession, alert: dict, row) -> list[dict]:
 
     if meta.get("hold_until"):
         add(row.triggered_at, "held", new="pending",
-            detail={"hold_until": meta.get("hold_until")})
+            detail={"hold_until": meta.get("hold_until"),
+                    **({"flap_held": True, "flap_kind": meta.get("flap_kind")}
+                       if meta.get("flap_held") else {})})
         if meta.get("hold_confirmed_at"):
             add(_ts(meta.get("hold_confirmed_at")), "confirmed", old="pending", new="active")
     else:
@@ -746,6 +759,15 @@ _EVIDENCE_KEYS = [
     ("slo_name", "SLO"), ("tier", "Burn tier"), ("long_burn", "Long-window burn"),
     ("short_burn", "Short-window burn"), ("service", "Service"), ("source", "Source"),
     ("parent_hostname", "Upstream dependency"), ("parent_status", "Upstream status"),
+    ("flap_kind", "Held while flapping"),
+]
+
+# A device flapping notice (device_flap_notice_service) describes its episode;
+# these keys are generic enough to mean something else on other rows.
+_FLAP_NOTICE_EVIDENCE_KEYS = [
+    ("kind", "Flapping"), ("changes", "Status changes"),
+    ("window_minutes", "Flap window (minutes)"), ("end_reason", "Flapping ended"),
+    ("device_status", "Device status"),
 ]
 
 
@@ -754,7 +776,9 @@ def _evidence(meta: dict) -> list[dict]:
     if meta.get("old_status") or meta.get("new_status"):
         out.append({"label": "Status change",
                     "value": f"{meta.get('old_status') or '?'} → {meta.get('new_status') or '?'}"})
-    for key, label in _EVIDENCE_KEYS:
+    keys = _EVIDENCE_KEYS + (_FLAP_NOTICE_EVIDENCE_KEYS
+                             if wf.notice_kind(meta) == "flapping" else [])
+    for key, label in keys:
         v = meta.get(key)
         if v in (None, "", [], {}):
             continue
@@ -919,6 +943,7 @@ async def _rule_payload(db: AsyncSession, rule_id, user: User, perms: list[str],
         "conditions": conds, "condition_logic": rule.get("condition_logic") or "AND",
         "condition_label": label, "trigger_on": rule.get("trigger_on"),
         "recovery_alert": rule.get("recovery_alert"), "min_duration": rule.get("min_duration") or 0,
+        "notify_while_flapping": bool(rule.get("notify_while_flapping")),
         "duration": rule.get("duration") or 0, "cooldown": rule.get("cooldown"),
         "max_repeat": rule.get("max_repeat"), "schedule": sched,
         "escalation_levels": [{**lv, "channel_names": [names.get(str(c), "Deleted channel")

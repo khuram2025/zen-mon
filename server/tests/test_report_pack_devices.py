@@ -312,11 +312,18 @@ def test_flapping_counts_changes_pairs_outages_and_formats_in_org_timezone(monke
     db = FakeDB([("FROM device_maintenance m", []),
                  ("FROM devices d WHERE TRUE", inventory_rows(A, B, C))])
     sec = run(monkeypatch, db, _flap_ch(), "device_flapping")
+    assert sec["tables"][0]["headers"] == ["Node", "State changes", "Flap episodes", "Time flapping", "Outages",
+                                           "Degraded", "Downtime", "Longest outage", "Median recovery",
+                                           "Last change"]
     rows = sec["tables"][0]["rows"]
-    assert rows[0] == [NAMES[A], "6", "2", "1", "40 min", "30 min", "20 min", "Oct 07 01:00"]
-    assert rows[1][:3] == [NAMES[B], "1", "1"]
-    assert rows[1][5].endswith("(ongoing)") and rows[1][6] == "—"
-    assert kpi(sec, "Flapping nodes (≥ 4 changes)")["value"] == "1"
+    # No flap episode recorded: measured zero, not "not measured".
+    assert rows[0] == [NAMES[A], "6", "0", "—", "2", "1", "40 min", "30 min", "20 min", "Oct 07 01:00"]
+    assert rows[1][:5] == [NAMES[B], "1", "0", "—", "1"]
+    assert rows[1][7].endswith("(ongoing)") and rows[1][8] == "—"
+    # The change-count KPI keeps its threshold option under its new name.
+    assert kpi(sec, "Unstable nodes (≥ 4 state changes)")["value"] == "1"
+    assert not any(k["label"].startswith("Flapping nodes (≥") for k in sec["kpis"])
+    assert kpi(sec, "Flapping nodes (episodes)")["value"] == "0"
     assert kpi(sec, "State changes")["value"] == "7"
     assert kpi(sec, "Outage episodes")["value"] == "3"
     assert kpi(sec, "Median time to recover")["value"] == "20 min"
@@ -333,10 +340,65 @@ def test_flapping_threshold_option_and_device_filter(monkeypatch):
     ch = _flap_ch()
     sec = run(monkeypatch, db, ch, {"id": "device_flapping", "options": {"threshold": 7, "top_n": 1}},
               device_ids=[A, B])
-    assert kpi(sec, "Flapping nodes (≥ 7 changes)")["value"] == "0"
+    assert kpi(sec, "Unstable nodes (≥ 7 state changes)")["value"] == "0"
     assert sec["tables"][0]["title"] == "Nodes with state changes or outages — top 1 of 2 nodes"
     assert ch.sql_with("WITH lower(old_status)")[0][1]["dev_ids"] == [A, B]
     assert sorted(ch.sql_with("ORDER BY did, timestamp")[0][1]["ids"]) == [A, B]
+
+
+def _flap_episode_rows(sql, params):
+    # did, episodes, seconds flapping (clipped by the query), any still open
+    rows = [(A, 2, 2700.0, False), (B, 1, 600.0, True), (C, 1, 120.0, False)]
+    ids = (params or {}).get("dev_ids")
+    return [r for r in rows if not ids or r[0] in ids]
+
+
+def test_flapping_reports_flap_episodes_and_time_flapping(monkeypatch):
+    db = FakeDB([("FROM device_maintenance m", []),
+                 ("FROM device_flap_episodes e", _flap_episode_rows),
+                 ("FROM devices d WHERE TRUE", inventory_rows(A, B, C))])
+    sec = run(monkeypatch, db, _flap_ch(), "device_flapping")
+    rows = {r[0]: r for r in sec["tables"][0]["rows"]}
+    assert rows[NAMES[A]][2:4] == ["2", "45 min"]
+    assert rows[NAMES[B]][2:4] == ["1", "10 min (ongoing)"]
+    # A node that flapped without a logged change in the period still gets its row.
+    assert rows[NAMES[C]][:5] == [NAMES[C], "0", "1", "2 min", "0"]
+    flapping = kpi(sec, "Flapping nodes (episodes)")
+    assert flapping["value"] == "3" and flapping["subtitle"] == "4 flap episode(s)"
+    assert flapping["accent"] == "warning"
+    assert kpi(sec, "Unstable nodes (≥ 4 state changes)")["value"] == "1"
+    sql, params = next(c for c in db.calls if "FROM device_flap_episodes e" in c[0])
+    # Episodes overlapping the window, clipped to it (and to now while open).
+    assert "e.started_at < :to_ts" in sql and "e.ended_at IS NULL OR e.ended_at > :from_ts" in sql
+    assert params["from_ts"] == FRM.replace(tzinfo=timezone.utc)
+    assert params["to_ts"] == TO.replace(tzinfo=timezone.utc)
+
+
+def test_flapping_episodes_honour_the_device_filter(monkeypatch):
+    db = FakeDB([("FROM device_maintenance m", []),
+                 ("FROM device_flap_episodes e", _flap_episode_rows),
+                 ("FROM devices d WHERE TRUE", inventory_rows(A, B))])
+    sec = run(monkeypatch, db, _flap_ch(), "device_flapping", device_ids=[A, B])
+    sql, params = next(c for c in db.calls if "FROM device_flap_episodes e" in c[0])
+    assert "e.device_id::text = ANY(:dev_ids)" in sql and params["dev_ids"] == [A, B]
+    assert {r[0] for r in sec["tables"][0]["rows"]} == {NAMES[A], NAMES[B]}
+    assert kpi(sec, "Flapping nodes (episodes)")["value"] == "2"
+
+
+def test_flapping_episode_failure_is_not_measured_not_zero(monkeypatch):
+    def broken(sql, params):
+        raise RuntimeError("relation device_flap_episodes does not exist")
+    db = FakeDB([("FROM device_maintenance m", []),
+                 ("FROM device_flap_episodes e", broken),
+                 ("FROM devices d WHERE TRUE", inventory_rows(A, B, C))])
+    sec = run(monkeypatch, db, _flap_ch(), "device_flapping")
+    flapping = kpi(sec, "Flapping nodes (episodes)")
+    assert flapping["value"] == "—" and flapping["subtitle"] == "Not measured"
+    assert all(r[2:4] == ["—", "—"] for r in sec["tables"][0]["rows"])
+    assert any("Flap episodes could not be read" in n for n in sec["notes"])
+    # The rest of the section is unaffected.
+    assert kpi(sec, "State changes")["value"] == "7"
+    assert kpi(sec, "Outage episodes")["value"] == "3"
 
 
 def test_flapping_empty_period(monkeypatch):

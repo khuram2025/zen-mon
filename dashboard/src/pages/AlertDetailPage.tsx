@@ -35,6 +35,7 @@ import {
   ageOf, fmtAgo, fmtAlertDate, fmtClock, fmtDur, parseTs, spanSeconds, useApplianceNow,
 } from '@/components/alerts/format'
 import type { AlertDetail, AlertRow, RelatedAlert } from '@/components/alerts/types'
+import { alertFlapState } from '@/components/devices/deviceStatus'
 
 export function AlertDetailPage() {
   const { id = '' } = useParams<{ id: string }>()
@@ -100,6 +101,7 @@ export function AlertDetailPage() {
   const entity = entityOf(alert)
   const key = statusKey(alert)
   const staleSince = q.isError ? q.dataUpdatedAt : null
+  const flap = alertFlapState(alert, (ms) => fmtAlertDate(new Date(ms).toISOString()))
 
   return (
     <div className="space-y-4">
@@ -185,6 +187,29 @@ export function AlertDetailPage() {
         </div>
       )}
 
+      {flap?.kind === 'held' && (
+        <div role="status" className="flex flex-wrap items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-text2">
+          <Waves className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
+          <span>
+            <span className="font-medium text-text">Held: device flapping.</span>{' '}
+            {entity.href ? <Link className="text-primary hover:underline" to={entity.href}>{entity.name}</Link> : entity.name} keeps changing status, so this
+            notification waits{flap.until ? ` until ${fmtAlertDate(flap.until)}` : ' for the flap stability time'}. It is sent if the device is still in this status
+            then; otherwise it closes without a notification. A rule set to notify immediately even while the device is flapping skips this hold.
+          </span>
+        </div>
+      )}
+      {flap?.kind === 'notice' && (
+        <div role="note" className="flex flex-wrap items-start gap-2 rounded-md border border-border bg-surface2/40 px-3 py-2 text-sm text-text2">
+          <Waves className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
+          <span>
+            <span className="font-medium text-text">{flap.label}.</span>{' '}
+            {flap.event === 'start'
+              ? 'This notice opens no incident. Status notifications for the device are held while it flaps; a status that lasts the flap stability time still notifies.'
+              : 'This notice opens no incident. Status notifications for the device have resumed.'}
+          </span>
+        </div>
+      )}
+
       <SummaryTiles alert={alert} now={now} statusKeyValue={key} />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
@@ -253,7 +278,7 @@ function SummaryTiles({ alert, now, statusKeyValue }: { alert: AlertDetail; now:
   const sev = severityMeta(alert.severity)
 
   const condition = alert.status === 'pending'
-    ? { text: 'Breaching — within hold time', tone: 'warning' as const }
+    ? { text: alertFlapState(alert)?.kind === 'held' ? 'Held while the device is flapping' : 'Breaching — within hold time', tone: 'warning' as const }
     : statusKeyValue === 'suppressed'
       ? { text: 'Still active (suppressed)', tone: 'muted' as const }
       : open

@@ -331,11 +331,12 @@ async def alert_response_metrics(ctx: SectionCtx) -> dict:
     owner = "a.assigned_to IS NULL" if workflow else "NULL::boolean"
     snap = (await ctx.db.execute(text(f"""
         SELECT count(*) FILTER (WHERE x.status = 'active' AND NOT x.sup AND x.target_min IS NOT NULL
-                                AND x.triggered_at < NOW() - make_interval(mins => x.target_min))
+                                AND x.ack_at < NOW() - make_interval(mins => x.target_min))
                    AS ack_overdue,
                count(*) FILTER (WHERE NOT x.sup AND x.severity = 'critical' AND x.unowned)
                    AS unassigned_critical
         FROM (SELECT a.status, a.severity, a.triggered_at, {wf.suppressed_sql('a')} AS sup,
+                     {wf.ack_anchor_sql('a')} AS ack_at,
                      {owner} AS unowned, {TARGET_SQL} AS target_min
               FROM alerts a
               WHERE a.status IN ('active', 'acknowledged') AND NOT {wf.notice_sql('a')}{sev_sql}) x
@@ -460,9 +461,10 @@ async def alert_backlog_aging(ctx: SectionCtx) -> dict:
                count(*) FILTER (WHERE x.status IN ('active', 'acknowledged') AND NOT x.sup
                                 AND x.unowned) AS unassigned,
                count(*) FILTER (WHERE x.status = 'active' AND NOT x.sup AND x.target_min IS NOT NULL
-                                AND x.triggered_at < NOW() - make_interval(mins => x.target_min))
+                                AND x.ack_at < NOW() - make_interval(mins => x.target_min))
                    AS ack_overdue
         FROM (SELECT a.severity, a.status, a.triggered_at, {wf.suppressed_sql('a')} AS sup,
+                     {wf.ack_anchor_sql('a')} AS ack_at,
                      {owner} AS unowned, {TARGET_SQL} AS target_min,
                      CASE WHEN a.triggered_at >= NOW() - interval '1 hour' THEN 'lt_1h'
                           WHEN a.triggered_at >= NOW() - interval '24 hours' THEN 'h1_24'

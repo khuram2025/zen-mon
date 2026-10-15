@@ -98,6 +98,14 @@ class Device(Base):
     status: Mapped[str] = mapped_column(String(20), default="unknown")
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     last_rtt_ms: Mapped[float] = mapped_column(Float, nullable=True)
+    # Mirrors of the status writer's state (migrate-161, device_status_state):
+    # flapping is a flag beside the confirmed status, never a status value;
+    # status_changed_at is the time of the last hard change (NULL until the
+    # first one after the upgrade).
+    is_flapping: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    flapping_since: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    flap_kind: Mapped[str] = mapped_column(String(16), nullable=True)  # reachability|performance|both
+    status_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Metadata
     description: Mapped[str] = mapped_column(Text, nullable=True)

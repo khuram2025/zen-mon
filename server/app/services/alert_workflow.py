@@ -18,8 +18,9 @@ A06/A07/A23):
   kept out of time-to-recover metrics.
 
 Notice rows (recovery notices, dependency-suppressed downstream records, hold
-cancellations) are stored as resolved alerts by the evaluators; they are not
-incidents and are excluded from incident populations by ``notice_sql``.
+cancellations, device flapping start/stop notices) are stored as resolved
+alerts by the evaluators; they are not incidents and are excluded from
+incident populations by ``notice_sql``.
 
 Everything that needs migrate-135 (alert_events, assigned_to, delivery log)
 feature-detects it via ``supported()`` so a rolling upgrade keeps working
@@ -56,6 +57,7 @@ CLOSURE_LABELS = {
     "hold_cancelled": "Hold cancelled — condition cleared before confirmation",
     "dependency": "Suppressed by upstream dependency",
     "notice": "Recovery notice",
+    "flapping": "Flapping notice",
 }
 
 
@@ -89,10 +91,15 @@ def suppressed_sql(a: str = "a") -> str:
 
 
 def notice_sql(a: str = "a") -> str:
-    """Rows the evaluators record for information, not incidents."""
+    """Rows the evaluators record for information, not incidents.
+
+    ``flap_notice`` rows (device_flap_notice_service) carry no rule_id, so a
+    rule's cooldown can never match them and escalation never selects them.
+    """
     return (f"(COALESCE({a}.metadata->>'is_recovery', 'false') = 'true'"
             f" OR COALESCE({a}.metadata->>'suppressed_by_dependency', 'false') = 'true'"
-            f" OR COALESCE({a}.metadata->>'hold_cancelled', 'false') = 'true')")
+            f" OR COALESCE({a}.metadata->>'hold_cancelled', 'false') = 'true'"
+            f" OR COALESCE({a}.metadata->>'flap_notice', 'false') = 'true')")
 
 
 def closure_reason_sql(a: str = "a") -> str:
@@ -101,6 +108,7 @@ def closure_reason_sql(a: str = "a") -> str:
         f" WHEN COALESCE({a}.metadata->>'is_recovery', 'false') = 'true' THEN 'notice'"
         f" WHEN COALESCE({a}.metadata->>'suppressed_by_dependency', 'false') = 'true' THEN 'dependency'"
         f" WHEN COALESCE({a}.metadata->>'hold_cancelled', 'false') = 'true' THEN 'hold_cancelled'"
+        f" WHEN COALESCE({a}.metadata->>'flap_notice', 'false') = 'true' THEN 'flapping'"
         f" WHEN {a}.metadata->>'resolved_by' = 'manual' THEN 'manual'"
         f" WHEN {a}.metadata->>'resolved_by' = 'snooze' THEN 'suppressed'"
         f" WHEN {a}.metadata->>'resolved_by' = 'status_transition' THEN 'superseded'"
@@ -119,6 +127,8 @@ def notice_kind(meta: dict | None) -> str | None:
         return "dependency"
     if str(m.get("hold_cancelled", "")).lower() == "true":
         return "hold_cancelled"
+    if str(m.get("flap_notice", "")).lower() == "true":
+        return "flapping"
     return None
 
 
@@ -554,8 +564,31 @@ async def save_response_targets(db: AsyncSession, targets: dict) -> dict:
     return clean
 
 
+def ack_anchor_sql(a: str = "a") -> str:
+    """When the acknowledgement clock starts: ``metadata.notified_at`` for a
+    trigger whose page went out after a hold (min_duration, or a flapping
+    device), otherwise ``triggered_at``. Only an ISO timestamp is cast, so a
+    malformed value falls back instead of failing the query."""
+    return (f"(CASE WHEN {a}.metadata->>'notified_at' ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T'"
+            f" THEN ({a}.metadata->>'notified_at')::timestamptz ELSE {a}.triggered_at END)")
+
+
+def ack_anchor(triggered_at, meta: dict | None):
+    """Python twin of :func:`ack_anchor_sql` (same fallback rules)."""
+    raw = (meta or {}).get("notified_at")
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return triggered_at
+
+
 def ack_due(status: str, severity: str, triggered_at, targets: dict, suppressed: bool):
-    """(due_at, overdue) for an open, unacknowledged, unsuppressed alert."""
+    """(due_at, overdue) for an open, unacknowledged, unsuppressed alert.
+    ``triggered_at`` is the acknowledgement anchor (see :func:`ack_anchor`)."""
     if status != "active" or suppressed or not triggered_at:
         return None, False
     minutes = targets.get(severity)

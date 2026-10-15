@@ -21,7 +21,7 @@ export type AlertEntity = {
 }
 
 export type ClosureReason =
-  | 'recovered' | 'manual' | 'suppressed' | 'superseded' | 'hold_cancelled' | 'dependency' | 'notice'
+  | 'recovered' | 'manual' | 'suppressed' | 'superseded' | 'hold_cancelled' | 'dependency' | 'notice' | 'flapping'
 
 export type AlertClosure = {
   reason: ClosureReason
@@ -73,7 +73,12 @@ export interface AlertRow {
   assigned_at: string | null
   closure: AlertClosure | null
   is_notice: boolean
-  notice_kind: 'recovery' | 'dependency' | 'hold_cancelled' | null
+  /** 'flapping': a flapping started/stopped notice (metadata.flap_notice, flap_event 'start' | 'stop'). */
+  notice_kind: 'recovery' | 'dependency' | 'hold_cancelled' | 'flapping' | null
+  /** Pending rows only: held because the device is flapping ("Held: device flapping"), its class and the hold end. */
+  flap_held?: boolean
+  flap_kind?: 'reachability' | 'performance' | null
+  hold_until?: string | null
   suppression: AlertSuppression | null
   snoozed: boolean
   snoozed_until: string | null
@@ -120,6 +125,8 @@ export type AlertSummary = {
     acknowledged: number
     suppressed: number
     pending: number
+    /** Pending rows held because their device is flapping (part of `pending`; older servers omit it). */
+    flap_held?: number
     by_severity: { critical: number; warning: number; info: number }
     unassigned_critical: number
     ack_overdue: number
@@ -183,6 +190,8 @@ export type AlertRuleDetail = {
   trigger_on: 'any' | 'down' | 'degraded' | 'up' | null
   recovery_alert: boolean
   min_duration: number | null
+  /** Device status rules: notify at once even while the device is flapping (older servers omit it). */
+  notify_while_flapping?: boolean
   cooldown: number | null
   max_repeat: number | null
   schedule: { start: string | null; end: string | null; days: Array<string | number> } | null

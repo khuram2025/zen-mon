@@ -31,6 +31,7 @@ from app.services import alert_workflow as wf
     ({"is_recovery": True}, "notice"),
     ({"suppressed_by_dependency": True}, "dependency"),
     ({"hold_cancelled": True}, "hold_cancelled"),
+    ({"flap_notice": True, "flap_event": "stop"}, "flapping"),
 ])
 def test_closure_reason_separates_recovery_from_human_closure(meta, expected):
     assert wf.closure_reason("resolved", meta) == expected
@@ -45,13 +46,14 @@ def test_notice_kind():
     assert wf.notice_kind({"is_recovery": "true"}) == "recovery"
     assert wf.notice_kind({"suppressed_by_dependency": True}) == "dependency"
     assert wf.notice_kind({"hold_cancelled": True}) == "hold_cancelled"
+    assert wf.notice_kind({"flap_notice": True, "flap_event": "start"}) == "flapping"
     assert wf.notice_kind({"is_recovery": False}) is None
     assert wf.notice_kind(None) is None
 
 
 def test_closure_sql_mirrors_python_labels():
     sql = wf.closure_reason_sql("a")
-    for label in ("notice", "dependency", "hold_cancelled", "manual", "suppressed",
+    for label in ("notice", "dependency", "hold_cancelled", "flapping", "manual", "suppressed",
                   "superseded", "administrative", "recovered"):
         assert f"'{label}'" in sql
 

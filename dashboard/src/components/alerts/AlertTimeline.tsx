@@ -14,6 +14,7 @@ import { Card, CardContent } from '@/components/ui/Card'
 import { Textarea } from '@/components/ui/Textarea'
 import { StatusChip, focusRing, useAlertActions } from './AlertBits'
 import { fmtAgo, fmtAlertDate, parseTs } from './format'
+import { FLAP_KIND_LABEL, flapKindOf } from '@/components/devices/deviceStatus'
 import type { AlertDetail, AlertEvent, AlertStatus } from './types'
 
 const ICON: Record<string, { icon: typeof CircleDot; cls: string }> = {
@@ -74,6 +75,12 @@ function detailText(e: AlertEvent): string | null {
     if (d.forever) return 'Indefinitely'
     if (typeof d.until === 'string') return `Until ${fmtAlertDate(d.until)}`
     if (typeof d.minutes === 'number') return `For ${d.minutes} min`
+  }
+  if (e.kind === 'held' && d.flap_held === true) {
+    // A trigger parked because its device is flapping (alert_engine: hold = max(rule hold, flap stability time)).
+    const kind = flapKindOf(d.flap_kind)
+    const until = typeof d.hold_until === 'string' ? ` until ${fmtAlertDate(d.hold_until)}` : ''
+    return `Device flapping${kind ? ` (${FLAP_KIND_LABEL[kind]} changes)` : ''}: held${until}, sent only if the status lasts`
   }
   if (e.kind === 'assigned' && typeof d.assignee_name === 'string') return `To ${d.assignee_name}`
   if (e.kind === 'comment' && typeof d.text === 'string') return d.text

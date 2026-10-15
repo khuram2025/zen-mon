@@ -25,6 +25,7 @@ from app.core.database import get_db
 from app.services.email_render import build_alert_email_html
 from app.services.tag_service import tag_set as _tag_set
 from app.services import alert_notify_state as ns
+from app.services import device_status_machine as dsm
 from app.services.alert_schedule import notifications_allowed, get_configured_timezone
 from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
@@ -69,6 +70,15 @@ class StatusChangeEvent(BaseModel):
     location: Optional[str] = None
     rtt_ms: float = 0
     packet_loss: float = 0
+    # Flap state at the check that produced this transition (both optional, so
+    # producers from before flap detection still validate). ``flapping``: this
+    # transition's own class (reachability or performance) is flapping, which
+    # holds its triggers; ``is_flapping``: the device flag, for consumers that
+    # only want to label the event. The event carries it rather than the
+    # engine reading devices.is_flapping: a sensor outbox replay can lag the
+    # device row, which may already describe a later check.
+    flapping: bool = False
+    is_flapping: bool = False
 
 
 class TrapEvent(BaseModel):
@@ -547,6 +557,42 @@ async def _pending_supported(db: AsyncSession) -> bool:
     return _PENDING_STATUS_SUPPORTED
 
 
+_NOTIFY_WHILE_FLAPPING_SUPPORTED = False
+
+
+async def _notify_while_flapping_supported(db: AsyncSession) -> bool:
+    """Whether alert_rules.notify_while_flapping exists (migrate-161).
+
+    The rule query below names it, and a missing column would fail every
+    device evaluation in the window between a code update and its migration.
+    Until it exists every rule reads as False (the column default). A positive
+    answer is cached; a negative one is asked again, so the engine picks the
+    migration up without a restart.
+    """
+    global _NOTIFY_WHILE_FLAPPING_SUPPORTED
+    if not _NOTIFY_WHILE_FLAPPING_SUPPORTED:
+        _NOTIFY_WHILE_FLAPPING_SUPPORTED = bool((await db.execute(text("""
+            SELECT EXISTS (SELECT 1 FROM pg_attribute
+                           WHERE attrelid = 'alert_rules'::regclass
+                             AND attname = 'notify_while_flapping' AND NOT attisdropped)
+        """))).scalar())
+    return _NOTIFY_WHILE_FLAPPING_SUPPORTED
+
+
+async def _status_policy(db: AsyncSession) -> dsm.Policy:
+    """The effective device status policy (system_settings 'monitoring'),
+    through the same loader the poller and the sensor ingest use."""
+    row = (await db.execute(
+        text("SELECT value FROM system_settings WHERE key = 'monitoring'"))).first()
+    raw = row[0] if row else None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    return dsm.policy_from_settings(raw if isinstance(raw, dict) else None)
+
+
 async def _within_cooldown(db: AsyncSession, rule, *, device_id: str | None = None,
                            service_check_id: str | None = None,
                            exclude_alert_id=None) -> bool:
@@ -641,6 +687,86 @@ def _conditions_match(rule, values: dict) -> bool:
     return one(metric, getattr(rule, "operator", None), getattr(rule, "threshold", None))
 
 
+# The metric values a device status transition carries (see metric_values in
+# evaluate_status_change). A rule conditioned on anything else — CPU, an
+# interface, a trap — can never fire on a status transition.
+_STATUS_METRICS = frozenset({"ping_status", "rtt", "packet_loss"})
+
+
+def _status_path_rule(rule) -> bool:
+    """Is this one of the rules a device status transition can fire?
+
+    The status path loads every enabled non-service rule and lets the metric
+    gate drop the rest; flap notices have no metric values to gate on, so they
+    select the status rules by their conditions instead.
+    """
+    conds = getattr(rule, "conditions", None)
+    if conds:
+        return all(isinstance(c, dict) and c.get("metric") in _STATUS_METRICS for c in conds)
+    metric = getattr(rule, "metric", None)
+    return metric is None or metric in _STATUS_METRICS
+
+
+def _rule_in_device_scope(rule, *, device_id: str, group_id: str | None,
+                          device_type: str | None, location: str | None,
+                          device_tags: set[str]) -> bool:
+    """A device rule's device / group / type / location / tag scope.
+
+    Shared by the status path and the flap notices so the two can never
+    disagree about which rules cover a device.
+    """
+    if rule.device_id and str(rule.device_id) != device_id:
+        return False
+    if rule.group_id and str(rule.group_id) != group_id:
+        return False
+    if rule.device_type and rule.device_type != device_type:
+        return False
+    if rule.location and location and rule.location.lower() not in location.lower():
+        return False
+    # Tags are matched case-insensitively because the registry canonicalises
+    # spelling but older assignments in devices.tags may predate that.
+    if rule.scope_tag and rule.scope_tag.strip().lower() not in device_tags:
+        return False
+    return True
+
+
+def _transition_class(old_status: str, new_status: str) -> str:
+    """Flap class of a hard change: into or out of down is reachability,
+    up<->degraded is performance (docs/device-status-policy.md)."""
+    return "reachability" if "down" in (old_status, new_status) else "performance"
+
+
+_DEVICE_RULE_COLUMNS = """
+    id, name, trigger_on, recovery_alert, severity,
+    device_id, group_id, device_type, location, scope_tag,
+    notify_channels, cooldown, min_duration,
+    metric, operator, threshold, conditions, condition_logic,
+    email_subject, email_body, sms_template,
+    recovery_email_subject, recovery_email_body, recovery_sms_template,
+    schedule_start, schedule_end, schedule_days
+"""
+
+
+async def _load_device_rules(db: AsyncSession) -> list:
+    """Every enabled rule the device paths consider.
+
+    Service-check rules are excluded: their metric ('service_status') is
+    treated as always-matching by the condition gate, so a device ping
+    transition used to fire them — "HTTP health: SWITCH is DEGRADED" alerts
+    about a check nobody ran.
+    """
+    flap_col = ("notify_while_flapping" if await _notify_while_flapping_supported(db)
+                else "false AS notify_while_flapping")
+    return (await db.execute(text(f"""
+        SELECT {_DEVICE_RULE_COLUMNS}, {flap_col}
+        FROM alert_rules
+        WHERE enabled = true
+          AND service_check_id IS NULL
+          AND service_check_group_id IS NULL
+          AND COALESCE(metric, '') <> 'service_status'
+    """))).fetchall()
+
+
 async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
     """True for manual maintenance or an active device_maintenance window.
 
@@ -700,6 +826,14 @@ async def evaluate_status_change(
     Evaluates all matching alert rules and sends notifications.
     No auth required - internal endpoint.
     """
+    # One evaluation per device at a time, until this transaction ends. The
+    # poller posts a device's transitions in order, but a timed-out POST keeps
+    # running here while the next one arrives, and sensor-outbox workers run
+    # alongside: a down->up evaluated before the up->down that preceded it has
+    # committed cannot see that row, so it closes nothing and leaves an active
+    # DOWN alert on an UP device.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:device_id))"),
+                     {"device_id": event.device_id})
     now = datetime.now(timezone.utc)
     # Arriving at 'up' is never a problem. Only down/degraded -> up is a
     # recovery; unknown/maintenance -> up (a new device's first ping, the end
@@ -743,27 +877,7 @@ async def evaluate_status_change(
         gr_row = gr.first()
         group_name = gr_row.name if gr_row else ""
 
-    # Fetch all enabled alert rules. Service-check rules are excluded: their
-    # metric ('service_status') is treated as always-matching by the condition
-    # gate, so a device ping transition used to fire them — "HTTP health:
-    # SWITCH is DEGRADED" alerts about a check nobody ran.
-    rules_result = await db.execute(
-        text("""
-            SELECT id, name, trigger_on, recovery_alert, severity,
-                   device_id, group_id, device_type, location, scope_tag,
-                   notify_channels, cooldown, min_duration,
-                   metric, operator, threshold, conditions, condition_logic,
-                   email_subject, email_body, sms_template,
-                   recovery_email_subject, recovery_email_body, recovery_sms_template,
-                   schedule_start, schedule_end, schedule_days
-            FROM alert_rules
-            WHERE enabled = true
-              AND service_check_id IS NULL
-              AND service_check_group_id IS NULL
-              AND COALESCE(metric, '') <> 'service_status'
-        """)
-    )
-    rules = rules_result.fetchall()
+    rules = await _load_device_rules(db)
 
     # Template variables
     variables = {
@@ -801,6 +915,9 @@ async def evaluate_status_change(
     # "active" DEGRADED alerts, poisoning every alert counter in the UI.
     # Service-check alerts are deliberately NOT closed here: the device
     # answering ping again says nothing about its HTTP check passing.
+    # A row still in its hold (pending) never became an alert: it closes as a
+    # cancelled hold, a notice, not as a recovered incident — otherwise every
+    # cycle of a flapping device would count as an incident in the Alert Center.
     recovered: dict[str, dict] = {}
     outage_duration = ""
     if into_up:
@@ -810,13 +927,17 @@ async def evaluate_status_change(
                 SET status = 'resolved',
                     resolved_at = :resolved_at,
                     metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
+                               || CASE WHEN status = 'pending'
+                                       THEN jsonb_build_object('hold_cancelled', true)
+                                       ELSE '{}'::jsonb END
                 WHERE status IN ('pending', 'active', 'acknowledged')
                   AND device_id = :device_id
                   AND service_check_id IS NULL
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
                   AND metadata->>'new_status' IS NOT NULL
                 RETURNING id, rule_id, triggered_at, metadata->>'notified' AS notified,
-                          metadata->>'new_status' AS new_status
+                          metadata->>'new_status' AS new_status,
+                          metadata->>'hold_cancelled' AS hold_cancelled
             """),
             {
                 "resolved_at": now,
@@ -837,8 +958,12 @@ async def evaluate_status_change(
         return {"evaluated": 0, "matched": 0, "suppressed": "maintenance",
                 "resolved_alerts": resolved_alerts}
     if is_recovery:
-        # Only real outages drive the reset notices and "active for".
-        closed = [r for r in closed if r.new_status in ("down", "degraded")]
+        # Only real outages drive the reset notices and "active for". A hold
+        # this recovery cancelled never became an alert, so it has nothing to
+        # recover: no reset row, no all-clear (a flapping device would record
+        # one per cycle).
+        closed = [r for r in closed if r.new_status in ("down", "degraded")
+                  and str(getattr(r, "hold_cancelled", None) or "").lower() != "true"]
         recovered = _recovery_map(closed)
         # How long was it down? A recovery notice that cannot say "for how
         # long" makes the reader go and look it up in the dashboard.
@@ -853,6 +978,11 @@ async def evaluate_status_change(
         "rtt": float(event.rtt_ms or 0.0),
         "packet_loss": float(event.packet_loss or 0.0) * 100.0,
     }
+
+    # Flapping: hold, not drop. The flap hold is the policy's stable time,
+    # loaded once per evaluation and only when a held trigger needs it.
+    flap_hold_s: int | None = None
+    flap_held_alerts = 0
 
     for rule in rules:
         trigger = rule.trigger_on or "any"
@@ -878,26 +1008,9 @@ async def evaluate_status_change(
                     continue
                 variables["duration"] = outage_duration
 
-        # Check scope - device_id
-        if rule.device_id and str(rule.device_id) != event.device_id:
-            continue
-
-        # Check scope - group_id
-        if rule.group_id and str(rule.group_id) != group_id:
-            continue
-
-        # Check scope - device_type
-        if rule.device_type and rule.device_type != device_type:
-            continue
-
-        # Check scope - location
-        if rule.location and location and rule.location.lower() not in location.lower():
-            continue
-
-        # Check scope - device tag. Tags are matched case-insensitively
-        # because the registry canonicalises spelling but older assignments
-        # in devices.tags may predate that.
-        if rule.scope_tag and rule.scope_tag.strip().lower() not in device_tags:
+        if not _rule_in_device_scope(rule, device_id=event.device_id, group_id=group_id,
+                                     device_type=device_type, location=location,
+                                     device_tags=device_tags):
             continue
 
         # E1: metric-threshold gating. Recovery events are never gated (so they
@@ -979,13 +1092,17 @@ async def evaluate_status_change(
 
             # A new status supersedes this rule's previous open status alert
             # (down -> degraded and back used to stack a fresh active row per
-            # transition, none of which ever closed).
+            # transition, none of which ever closed). A row still in its hold
+            # is a cancelled hold, as on the way up.
             superseded = await db.execute(
                 text("""
                     UPDATE alerts
                     SET status = 'resolved', resolved_at = :now,
                         metadata = COALESCE(metadata, '{}'::jsonb) ||
                                    CAST(:m AS jsonb)
+                                   || CASE WHEN status = 'pending'
+                                           THEN jsonb_build_object('hold_cancelled', true)
+                                           ELSE '{}'::jsonb END
                     WHERE status IN ('pending', 'active', 'acknowledged')
                       AND device_id = :device_id AND rule_id = :rule_id
                       AND service_check_id IS NULL
@@ -1005,6 +1122,20 @@ async def evaluate_status_change(
         # the meantime resolves it silently: a 59-second blip under a
         # 100-second hold produces no alert and no pages.
         hold_s = 0 if is_recovery else int(rule.min_duration or 0)
+        # While this transition's class is flapping, a trigger must last the
+        # flap stable time before it notifies: dropping it would delay a real
+        # outage page until flapping ends, holding it pages a sustained state
+        # within that time and lets every blip cancel silently. Recoveries are
+        # untouched — they follow their trigger's notified fate, so a trigger
+        # paged before the flapping still gets its all-clear and a held one
+        # recovers silently. notify_while_flapping opts a rule out (core
+        # routers).
+        flap_held = (event.flapping and not is_recovery
+                     and not getattr(rule, "notify_while_flapping", False))
+        if flap_held:
+            if flap_hold_s is None:
+                flap_hold_s = (await _status_policy(db)).flap_stable_minutes * 60
+            hold_s = max(hold_s, flap_hold_s)
         held = hold_s > 0 and await _pending_supported(db)
 
         # Create alert record in DB. The stored message is a clean human
@@ -1015,6 +1146,10 @@ async def evaluate_status_change(
         if held:
             row_metadata["notified"] = False
             row_metadata["hold_until"] = (now + timedelta(seconds=hold_s)).isoformat()
+            if flap_held:
+                row_metadata["flap_held"] = True
+                row_metadata["flap_kind"] = _transition_class(event.old_status, event.new_status)
+                flap_held_alerts += 1
         inserted = await db.execute(
             text("""
                 INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
@@ -1221,6 +1356,9 @@ async def evaluate_status_change(
                     "old_status":  event.old_status,
                     "new_status":  event.new_status,
                     "is_recovery": is_recovery,
+                    # Still sent on every flip; the receiver decides what a
+                    # flip of a flapping device means to its canvas.
+                    "is_flapping": event.is_flapping,
                     "timestamp":   now.isoformat(),
                 }
                 try:
@@ -1239,6 +1377,7 @@ async def evaluate_status_change(
         "new_status": event.new_status,
         "resolved_alerts": resolved_alerts,
         "suppressed_alerts": suppressed_alerts,
+        "flap_held_alerts": flap_held_alerts,
     }
 
 

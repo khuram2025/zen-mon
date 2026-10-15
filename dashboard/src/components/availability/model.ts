@@ -38,6 +38,8 @@ export interface DeviceSummary {
   degraded: number
   unknown: number
   maintenance: number
+  /** Overlay: flapping devices are also counted under their confirmed status. */
+  flapping?: number
 }
 
 export interface ServiceSummary {
@@ -58,6 +60,9 @@ export interface DeviceLite {
   status: string
   last_seen?: string | null
   status_changed_at?: string | null
+  is_flapping?: boolean | null
+  flapping_since?: string | null
+  flap_kind?: string | null
 }
 
 export interface Verdict { tone: Tone; text: string }

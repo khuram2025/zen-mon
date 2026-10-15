@@ -36,7 +36,7 @@ type Device struct {
 	// persisted is the state handed to the status writer by the last write
 	// that included the state row; nil forces the next check to write it.
 	persisted *devicestatus.State
-	// stateWrittenAt is the check time of that write (heartbeat).
+	// stateWrittenAt is the check time of that write (stateHeartbeatFor).
 	stateWrittenAt time.Time
 }
 
@@ -80,7 +80,9 @@ type DeviceStatusSave struct {
 	// for status_changed_at and the episode open/close time.
 	At        time.Time
 	Responded bool
-	// RTTMs is the check's round-trip time (0 when it got no reply).
+	// RTTMs is the check's round-trip time (0 when it got no reply). An
+	// unanswered check keeps devices.last_rtt_ms unless the device is
+	// confirmed down (then 0).
 	RTTMs float64
 	// State is the machine state after the check. devices.status is
 	// State.Displayed(); the flap columns mirror it.

@@ -105,6 +105,39 @@ func TestSaveDeviceStatusArgsNullsAndOverlay(t *testing.T) {
 	}
 }
 
+// last_rtt_ms: a reply's RTT; 0 once confirmed down; an unconfirmed miss
+// keeps the last measured RTT (NULL leaves the column as it is).
+func TestLastRTTArg(t *testing.T) {
+	up := devicestatus.Seed("up", nil, "central")
+	down := devicestatus.Seed("down", nil, "central")
+	inMaint := down
+	inMaint.InMaintenance = true
+	for _, tc := range []struct {
+		name string
+		save pinger.DeviceStatusSave
+		want any
+	}{
+		{"reply", pinger.DeviceStatusSave{Responded: true, RTTMs: 1.5, State: up}, 1.5},
+		{"reply while down", pinger.DeviceStatusSave{Responded: true, RTTMs: 2, State: down}, 2.0},
+		{"unconfirmed miss", pinger.DeviceStatusSave{State: up}, nil},
+		{"confirmed down", pinger.DeviceStatusSave{State: down}, 0.0},
+		{"down behind maintenance", pinger.DeviceStatusSave{State: inMaint}, 0.0},
+	} {
+		save := tc.save
+		if got := saveDeviceStatusArgs(&save)[4]; got != tc.want {
+			t.Fatalf("%s: $5 = %#v, want %#v", tc.name, got, tc.want)
+		}
+		if got := saveDeviceStatusLegacyArgs(&save)[4]; got != tc.want {
+			t.Fatalf("%s: legacy $5 = %#v, want %#v", tc.name, got, tc.want)
+		}
+	}
+	for _, sql := range []string{saveDeviceStatusSQL, saveDeviceStatusLegacySQL} {
+		if !strings.Contains(sql, "COALESCE($5::float8, d.last_rtt_ms)") {
+			t.Fatal("last_rtt_ms must keep its value for a NULL $5")
+		}
+	}
+}
+
 func TestApplyDeviceStateReseedRule(t *testing.T) {
 	changed := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	stored := func(owner, hard string) *devicestatus.State {
@@ -360,6 +393,25 @@ func TestDeviceStatusMigratedSchema(t *testing.T) {
 		if status != "down" || changedAt == nil || !changedAt.Equal(base.Add(time.Minute)) ||
 			lastSeen == nil || !lastSeen.Equal(base.Add(90*time.Second)) || rtt != 2.5 {
 			t.Fatalf("devices row: %s changed=%v seen=%v rtt=%v", status, changedAt, lastSeen, rtt)
+		}
+		// last_rtt_ms: an unanswered check keeps the measured RTT until Down is
+		// confirmed, then reads 0.
+		up := st
+		up.HardStatus, up.FailStreak = "up", 1
+		for _, step := range []struct {
+			st   devicestatus.State
+			want float64
+		}{{up, 2.5}, {st, 0}} {
+			if _, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{
+				DeviceID: id, At: base.Add(2 * time.Minute), State: step.st, WriteState: true}); err != nil {
+				t.Fatal(err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT last_rtt_ms FROM devices WHERE id = $1`, id).Scan(&rtt); err != nil {
+				t.Fatal(err)
+			}
+			if rtt != step.want {
+				t.Fatalf("unanswered %s check: last_rtt_ms = %v, want %v", step.st.HardStatus, rtt, step.want)
+			}
 		}
 		var reach []time.Time
 		if err := pool.QueryRow(ctx, `SELECT reach_changes FROM device_status_state WHERE device_id = $1`, id).Scan(&reach); err != nil {

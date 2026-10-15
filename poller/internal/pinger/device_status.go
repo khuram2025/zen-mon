@@ -39,9 +39,12 @@ import (
 const ownerCentral = "central"
 
 const (
-	// stateHeartbeat rewrites an unchanged state row at least this often
-	// (last_sample_at freshness for readers).
+	// stateHeartbeat rewrites an unchanged state row at least this often;
+	// stateHeartbeatFor shortens it for the device's interval.
 	stateHeartbeat = 10 * time.Minute
+	// stateGapFloor is the floor of the machine's gap rule (a silence longer
+	// than max(3 x interval, 180 s) resets the streaks and the window).
+	stateGapFloor = 180 * time.Second
 	// statusQueueBatches bounds the writer queue (one batch per ping cycle).
 	statusQueueBatches = 256
 	// statusWriteTimeout bounds one SaveDeviceStatus / ReleaseDevices call.
@@ -254,11 +257,30 @@ func sameTimes(a, b []time.Time) bool {
 	return true
 }
 
+// stateHeartbeatFor is the longest an unchanged state row goes unwritten for
+// a device polled every interval: half the machine's gap, and at most
+// stateHeartbeat. Readers take a last_sample_at older than the gap as a
+// silent device (the status explanation reports its state as stale), so the
+// row must stay inside it: the write comes with the first check at or past
+// the heartbeat, so the row is never older than heartbeat + interval, which
+// is at least 30 s (and half an interval) short of the gap.
+func stateHeartbeatFor(interval time.Duration) time.Duration {
+	gap := 3 * effectiveInterval(interval, 60*time.Second)
+	if gap < stateGapFloor {
+		gap = stateGapFloor
+	}
+	if gap/2 < stateHeartbeat {
+		return gap / 2
+	}
+	return stateHeartbeat
+}
+
 // planPersist decides whether a check is written: the state row when the
 // state (apart from last_sample_at) changed, was never written or is due for
 // its heartbeat; the devices row alone when only last_seen moves.
 func planPersist(d *Device, next devicestatus.State, responded bool, at time.Time) (write, writeState bool) {
-	writeState = d.persisted == nil || !sameState(*d.persisted, next) || at.Sub(d.stateWrittenAt) >= stateHeartbeat
+	writeState = d.persisted == nil || !sameState(*d.persisted, next) ||
+		at.Sub(d.stateWrittenAt) >= stateHeartbeatFor(d.PingInterval)
 	return writeState || responded, writeState
 }
 

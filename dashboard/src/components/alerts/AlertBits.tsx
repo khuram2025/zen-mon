@@ -16,7 +16,7 @@ import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity, AlarmClockOff, AlertCircle, AlertTriangle, BellOff, CheckCircle2, Cpu, Gauge, Hash, Hourglass,
-  Info, Loader2, Mail, MessageSquare, Network, Radar, Search, Send, Server, UserCheck, UserX, Webhook, XCircle,
+  Info, Loader2, Mail, MessageSquare, Network, Radar, Search, Send, Server, UserCheck, UserX, Waves, Webhook, XCircle,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
@@ -28,6 +28,7 @@ import {
 import { Textarea } from '@/components/ui/Textarea'
 import { toast } from '@/components/ui/Toast'
 import { fmtAlertDate, fmtDur } from './format'
+import { alertFlapState } from '@/components/devices/deviceStatus'
 import type {
   AlertActionResult, AlertClosure, AlertDeliverySummary, AlertEntity, AlertRow, AlertSeverity, AlertStatus,
   AlertSuppression, Assignee, EntityKind, SnoozePreview,
@@ -101,14 +102,32 @@ export function cleanAlertMessage(message: string | null | undefined): string {
 /**
  * Notification column: configured routing icons plus the recorded delivery
  * outcome. Without `delivery` the outcome is stated as unknown — icons alone
- * never imply that anyone was notified (A24).
+ * never imply that anyone was notified (A24). A trigger held because its
+ * device is flapping says so (and until when) instead of "no attempts".
  */
-export function NotifyCell({ channels, delivery }: { channels?: AlertChannel[]; delivery?: AlertDeliverySummary | null }) {
+export function NotifyCell({ channels, delivery, alert }: {
+  channels?: AlertChannel[]
+  delivery?: AlertDeliverySummary | null
+  alert?: { status?: AlertStatus; metadata?: unknown; flap_held?: boolean; hold_until?: string | null }
+}) {
+  const flap = alert ? alertFlapState(alert, (ms) => fmtAlertDate(new Date(ms).toISOString())) : null
   return (
     <div className="flex flex-col items-start gap-1">
       <ChannelIcons channels={channels} />
-      <DeliveryBadge delivery={delivery} />
+      {flap?.kind === 'held'
+        ? <FlapHeldBadge label={flap.label} until={flap.until} title={flap.title} />
+        : <DeliveryBadge delivery={delivery} />}
     </div>
+  )
+}
+
+/** "Held: device flapping · until 14:52" — a status trigger waiting out its device's flapping. */
+export function FlapHeldBadge({ label, until, title, className }: { label: string; until: string | null; title: string; className?: string }) {
+  return (
+    <span className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded border border-dashed border-warning/50 bg-warning/10 px-1.5 py-px text-xs font-medium text-warning', className)} title={title}>
+      <Waves className="h-3 w-3" aria-hidden />
+      {label}{until ? ` · until ${fmtAlertDate(until)}` : ''}
+    </span>
   )
 }
 
@@ -187,6 +206,9 @@ type StatusInput = {
   closure?: AlertClosure | null
   is_notice?: boolean
   notice_kind?: string | null
+  metadata?: unknown
+  flap_held?: boolean
+  hold_until?: string | null
 }
 
 export function statusKey(a: StatusInput): StatusKey {
@@ -212,11 +234,16 @@ function suppressionTitle(a: StatusInput): string {
 
 export function StatusChip({ alert, className }: { alert: StatusInput; className?: string }) {
   const key = statusKey(alert)
+  const flap = alertFlapState(alert, (ms) => fmtAlertDate(new Date(ms).toISOString()))
   const base = 'inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-1.5 py-0.5 text-xs font-medium'
   let chip: ReactNode
   switch (key) {
     case 'pending':
-      chip = (
+      chip = flap?.kind === 'held' ? (
+        <span className={cn(base, 'border-dashed border-warning/50 bg-warning/10 text-warning')} title={flap.title}>
+          <Waves className="h-3.5 w-3.5" aria-hidden /> {flap.label}
+        </span>
+      ) : (
         <span className={cn(base, 'border-dashed border-border-strong bg-surface text-text2')} title="Held for the rule's hold time — not yet announced">
           <Hourglass className="h-3.5 w-3.5" aria-hidden /> Pending (held)
         </span>
@@ -265,7 +292,11 @@ export function StatusChip({ alert, className }: { alert: StatusInput; className
   return (
     <span className={cn('inline-flex flex-wrap items-center gap-1', className)}>
       {chip}
-      {alert.is_notice && (
+      {flap?.kind === 'notice' ? (
+        <span className={cn(base, 'border-dashed border-warning/50 text-warning')} title={flap.title}>
+          <Waves className="h-3.5 w-3.5" aria-hidden /> Notice · {flap.label}
+        </span>
+      ) : alert.is_notice && (
         <span className={cn(base, 'border-border text-muted')} title="Informational notice — excluded from incident metrics">
           Notice{alert.notice_kind ? ` · ${alert.notice_kind.replace('_', ' ')}` : ''}
         </span>
