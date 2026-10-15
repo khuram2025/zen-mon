@@ -357,7 +357,7 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
     try:
         maint_reset = await db.execute(
             text("""
-                UPDATE devices SET status = 'unknown', updated_at = NOW()
+                UPDATE devices SET status = 'unknown', status_changed_at = NOW(), updated_at = NOW()
                 WHERE status = 'maintenance' AND ping_enabled = false
                   AND NOT EXISTS (
                       SELECT 1 FROM device_maintenance m

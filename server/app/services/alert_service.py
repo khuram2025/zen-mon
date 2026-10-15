@@ -8,7 +8,8 @@ every refetch, whatever the browser clock says (A13).
 
 Populations:
 * incidents — alert rows that are not notices (see alert_workflow.notice_sql);
-* notices   — recovery notices, dependency-suppressed and hold-cancelled rows.
+* notices   — recovery notices, dependency-suppressed and hold-cancelled rows,
+  device flapping start/stop notices.
 The Alert Center defaults to incidents; legacy callers that pass ``status``
 without ``view`` keep the historic unfiltered behaviour.
 """
@@ -306,7 +307,7 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
     tgt_sql = []
     for sev in ("critical", "warning", "info"):
         if targets.get(sev):
-            tgt_sql.append(f"(x.severity = '{sev}' AND x.triggered_at < NOW() - make_interval(mins => :t_{sev}))")
+            tgt_sql.append(f"(x.severity = '{sev}' AND x.ack_at < NOW() - make_interval(mins => :t_{sev}))")
             params[f"t_{sev}"] = int(targets[sev])
     overdue = "(" + " OR ".join(tgt_sql) + ")" if tgt_sql else "FALSE"
     delivery_failed = ("EXISTS (SELECT 1 FROM alert_deliveries _dl WHERE _dl.alert_id = a.id"
@@ -318,6 +319,7 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
         " count(*) FILTER (WHERE x.status = 'acknowledged' AND NOT x.sup) AS acknowledged,"
         " count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND x.sup) AS suppressed,"
         " count(*) FILTER (WHERE x.status = 'pending') AS pending,"
+        " count(*) FILTER (WHERE x.status = 'pending' AND x.flap_held) AS flap_held,"
         " count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND NOT x.sup AND x.severity = 'critical') AS critical,"
         " count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND NOT x.sup AND x.severity = 'warning') AS warning,"
         " count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND NOT x.sup AND x.severity = 'info') AS info,"
@@ -333,6 +335,8 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
         " count(*) FILTER (WHERE x.triggered_at < NOW() - interval '7 days') AS older_7d,"
         " count(*) FILTER (WHERE x.delivery_failed) AS delivery_failed"
         f" FROM (SELECT a.status, a.severity, a.triggered_at, {wf.suppressed_sql('a')} AS sup,"
+        f" {wf.ack_anchor_sql('a')} AS ack_at,"
+        f" COALESCE(a.metadata->>'flap_held', 'false') = 'true' AS flap_held,"
         f" {delivery_failed} AS delivery_failed,"
         f" {owner} AS unowned, COALESCE(r.enabled = false, false) AS rule_disabled,"
         f" {RULE_MISSING_SQL} AS rule_missing"
@@ -410,6 +414,8 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
         "open": {
             "total": o.total, "active": o.active, "acknowledged": o.acknowledged,
             "suppressed": o.suppressed, "pending": o.pending,
+            # Pending because the device is flapping (part of ``pending``).
+            "flap_held": o.flap_held,
             "by_severity": {"critical": o.critical, "warning": o.warning, "info": o.info},
             "unassigned_critical": o.unassigned_critical if workflow else None,
             "ack_overdue": o.ack_overdue,

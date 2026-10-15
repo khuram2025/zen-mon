@@ -18,17 +18,27 @@ import (
 	"github.com/zenplus/poller/internal/checker"
 	"github.com/zenplus/poller/internal/checker/snmp"
 	"github.com/zenplus/poller/internal/config"
+	"github.com/zenplus/poller/internal/devicestatus"
 	"go.uber.org/zap"
 )
 
-// DeviceLoader loads devices from the database.
+// DeviceLoader loads centrally polled devices and persists their confirmed
+// status (devicestatus machine).
 type DeviceLoader interface {
+	// LoadDevices returns the centrally polled devices, each with its
+	// persisted machine State (or a silent seed, see Device.SeedEndReason).
 	LoadDevices(ctx context.Context) ([]*Device, error)
-	UpdateDeviceStatus(ctx context.Context, deviceID uuid.UUID, status string, lastSeen time.Time, rttMs float64) error
+	// SaveDeviceStatus persists one check: the devices row and, when
+	// requested, the state row and the flap episode derived from it. Only
+	// centrally owned devices are written.
+	SaveDeviceStatus(ctx context.Context, save *DeviceStatusSave) (DeviceStatusSaved, error)
+	// ReleaseDevices closes the open flap episode, clears the flapping flag
+	// and drops the central state row of devices that left central polling.
+	ReleaseDevices(ctx context.Context, ids []uuid.UUID) error
 	LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error)
-	// LoadDegradedThresholds returns the admin-set degraded RTT (ms) and
-	// packet-loss (%) thresholds; zeros mean unset (keep config defaults).
-	LoadDegradedThresholds(ctx context.Context) (float64, float64, error)
+	// LoadStatusPolicy returns the effective device status policy from the
+	// admin settings (system_settings key 'monitoring') over defaults.
+	LoadStatusPolicy(ctx context.Context, defaults devicestatus.Defaults) (devicestatus.Policy, error)
 }
 
 // MetricWriter writes ping results to the metrics store.
@@ -95,10 +105,16 @@ type SNMPDeviceLookup interface {
 	LookupDeviceByIP(ctx context.Context, ip net.IP) (uuid.UUID, bool)
 }
 
+// batchPinger runs the ICMP checks of one ping cycle (*Pinger; a stub in
+// tests).
+type batchPinger interface {
+	PingBatch(ctx context.Context, devices []*Device, pollerID string, maxWorkers int) []*PingResult
+}
+
 // Engine is the main monitoring engine.
 type Engine struct {
 	cfg       *config.Config
-	pinger    *Pinger
+	pinger    batchPinger
 	loader    DeviceLoader
 	writer    MetricWriter
 	publisher EventPublisher
@@ -135,16 +151,23 @@ type Engine struct {
 	serviceStopping bool
 	lastUdtAt       map[uuid.UUID]time.Time
 	udtInterval     time.Duration
-	// Effective degraded thresholds: config defaults, overridden by the
-	// admin-set values in system_settings (key 'monitoring'). Written under
-	// e.mu in syncDevices, read under e.mu in processStatusChange.
-	degradedRTTMs   float64
-	degradedLossPct float64
-	startTime       time.Time
-	lastCycleMs     int64
-	activePings     int
-	snmpActive      int
-	snmpRunning     bool
+	// Effective device status policy: config defaults, overridden by the
+	// admin settings in system_settings (key 'monitoring'). Written under
+	// e.mu in syncDevices, read under e.mu in stepDevice.
+	policy devicestatus.Policy
+	// alerts delivers confirmed device transitions to the alert engine.
+	alerts AlertEvaluator
+	// stateEpoch numbers device state lineages (Device.epoch), under e.mu.
+	stateEpoch uint64
+	// status is the ordered device status writer (see device_status.go),
+	// started on first use.
+	statusMu    sync.Mutex
+	status      *statusPipeline
+	startTime   time.Time
+	lastCycleMs int64
+	activePings int
+	snmpActive  int
+	snmpRunning bool
 
 	// Maintenance reconciliation (service checks): the check IDs that were in
 	// maintenance on the previous load, and the status the engine last wrote
@@ -205,8 +228,8 @@ func NewEngine(
 		serviceRunning:  make(map[uuid.UUID]bool),
 		lastUdtAt:       make(map[uuid.UUID]time.Time),
 		udtInterval:     udtIntervalFromEnv(),
-		degradedRTTMs:   cfg.Poller.DegradedRTTMs,
-		degradedLossPct: cfg.Poller.DegradedLossPct,
+		policy:          devicestatus.PolicyFromSettings(nil, policyDefaults(cfg)),
+		alerts:          newHTTPAlertEvaluator(logger),
 		startTime:       time.Now(),
 	}, nil
 }
@@ -333,6 +356,11 @@ func (e *Engine) Shutdown(ctx context.Context) {
 	case <-done:
 	case <-ctx.Done():
 	}
+	// Let queued device status writes and their events finish, so a restart
+	// resumes from the latest confirmed state.
+	if p := e.statusPipelineIfStarted(); p != nil {
+		p.flush(ctx)
+	}
 }
 
 // HealthStatus returns the current health status.
@@ -353,7 +381,7 @@ func (e *Engine) HealthStatus() *HealthStatus {
 	}
 }
 
-// --- Device Ping Logic (unchanged) ---
+// --- Device Ping Logic ---
 
 func (e *Engine) syncDevices(ctx context.Context) error {
 	devices, err := e.loader.LoadDevices(ctx)
@@ -361,47 +389,56 @@ func (e *Engine) syncDevices(ctx context.Context) error {
 		return err
 	}
 
-	// Admin-set degraded thresholds ride the same sync cadence. On error the
-	// previous values are kept — never clobbered with the defaults.
-	rttMs, lossPct, thrErr := e.loader.LoadDegradedThresholds(ctx)
+	// The status policy rides the same sync cadence. On error the previous
+	// policy is kept — never clobbered with the defaults.
+	policy, policyErr := e.loader.LoadStatusPolicy(ctx, policyDefaults(e.cfg))
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if thrErr != nil {
-		e.logger.Warnf("Failed to load degraded thresholds: %v", thrErr)
+	if policyErr != nil {
+		e.logger.Warnf("Failed to load device status policy, keeping the previous one: %v", policyErr)
 	} else {
-		newRTT, newLoss := e.cfg.Poller.DegradedRTTMs, e.cfg.Poller.DegradedLossPct
-		if rttMs > 0 {
-			newRTT = rttMs
+		if policy != e.policy {
+			e.logger.Infof("Device status policy: %s", describePolicy(policy))
 		}
-		if lossPct > 0 {
-			newLoss = lossPct
-		}
-		if newRTT != e.degradedRTTMs || newLoss != e.degradedLossPct {
-			e.logger.Infof("Degraded thresholds now rtt>%.0fms or loss>%.0f%%", newRTT, newLoss)
-		}
-		e.degradedRTTMs, e.degradedLossPct = newRTT, newLoss
+		e.policy = policy
 	}
 
+	// A device already known keeps its in-memory machine state (the poller
+	// is its only writer and the reloaded row may lag behind queued writes);
+	// a new one, or one a save found no longer centrally polled (its state
+	// stopped being the truth then), starts from its row or a silent seed,
+	// on a new lineage so jobs still queued from the old state are dropped.
 	seen := make(map[uuid.UUID]bool)
 	for _, d := range devices {
 		seen[d.ID] = true
-		if existing, ok := e.devices[d.ID]; ok {
-			d.DownCount = existing.DownCount
-			d.Status = existing.Status
+		if existing, ok := e.devices[d.ID]; ok && !existing.ownerLost {
+			adoptDeviceState(d, existing)
+		} else {
+			initDeviceState(d)
+			d.epoch = e.nextEpochLocked()
 		}
 		e.devices[d.ID] = d
 	}
 
+	var released []uuid.UUID
 	for id := range e.devices {
 		if !seen[id] {
 			delete(e.devices, id)
 			delete(e.lastPingAt, id)
+			released = append(released, id)
 		}
 	}
+	count := len(e.devices)
+	e.mu.Unlock()
 
-	e.logger.Infof("Device sync complete: %d devices loaded", len(e.devices))
+	// Devices that left central polling (ping disabled, deleted, moved to a
+	// sensor) lose their flapping flag and open episode. This goes through
+	// the status writer, behind any of their writes still queued.
+	if len(released) > 0 {
+		e.statusPipeline().submit(ctx, statusWork{release: sortedIDs(released)})
+	}
+
+	e.logger.Infof("Device sync complete: %d devices loaded", count)
 	return nil
 }
 
@@ -412,7 +449,7 @@ func (e *Engine) runPingCycle(ctx context.Context) {
 	for _, d := range e.devices {
 		last := e.lastPingAt[d.ID]
 		interval := effectiveInterval(d.PingInterval, 60*time.Second)
-		if d.PingEnabled && due(now, last, interval) {
+		if d.PingEnabled && !d.ownerLost && due(now, last, interval) {
 			deviceList = append(deviceList, d)
 		}
 	}
@@ -456,8 +493,19 @@ func (e *Engine) runPingCycle(ctx context.Context) {
 	e.lastCycleMs = time.Since(start).Milliseconds()
 	e.mu.Unlock()
 
+	// Shutdown: pings cut short by the cancelled context come back as
+	// unanswered. They are not checks, so none of this cycle's results may
+	// reach the metrics or the status machine (a persisted fake failure
+	// would count towards Down after the restart, or confirm it at once with
+	// down_confirm_checks=1).
+	if ctx.Err() != nil {
+		e.logger.Infof("Ping cycle cancelled: %d results discarded", len(results))
+		return
+	}
+
 	e.logger.Infof("Ping cycle complete: %d results in %dms", len(results), time.Since(start).Milliseconds())
 
+	jobs := make([]*statusJob, 0, len(results))
 	for _, result := range results {
 		e.writer.WriteResult(result)
 
@@ -465,201 +513,14 @@ func (e *Engine) runPingCycle(ctx context.Context) {
 			e.logger.Debugf("Failed to publish metric: %v", err)
 		}
 
-		e.processStatusChange(ctx, result)
-	}
-}
-
-func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	device, ok := e.devices[result.DeviceID]
-	if !ok {
-		return
-	}
-
-	_, inMaint := e.deviceMaint[result.DeviceID]
-
-	oldStatus := device.Status
-	var newStatus string
-
-	if !result.IsUp {
-		device.DownCount++
-		if device.DownCount >= e.cfg.Poller.DownThreshold {
-			newStatus = "down"
-		} else {
-			// Not confirmed down yet — but still flag a freshly opened
-			// maintenance window so the UI shows it immediately.
-			if inMaint && oldStatus != "maintenance" {
-				e.enterMaintenance(ctx, device, oldStatus, result)
-			}
-			return
+		if job := e.stepDevice(result); job != nil {
+			jobs = append(jobs, job)
 		}
-	} else {
-		device.DownCount = 0
-		rttMs := float64(result.RTT.Microseconds()) / 1000.0
-
-		if rttMs > e.degradedRTTMs || result.PacketLoss > float32(e.degradedLossPct)/100.0 {
-			newStatus = "degraded"
-		} else {
-			newStatus = "up"
-		}
-
-		device.LastSeen = result.Timestamp
-		device.LastRTT = rttMs
-
-		// While a maintenance window is active the stored status stays
-		// pinned to 'maintenance'; last_seen/rtt still refresh.
-		statusForPG := newStatus
-		if inMaint {
-			statusForPG = "maintenance"
-		}
-		go func() {
-			if err := e.loader.UpdateDeviceStatus(ctx, device.ID, statusForPG, result.Timestamp, rttMs); err != nil {
-				e.logger.Errorf("Failed to update device last_seen in PG: %v", err)
-			}
-		}()
 	}
-
-	if inMaint {
-		// Maintenance mute (mirrors the service-check behavior): metrics were
-		// already written above, DownCount keeps counting so the post-window
-		// state is confirmed immediately, but there are no transitions and no
-		// alert evaluation while the window is active.
-		if oldStatus != "maintenance" {
-			e.enterMaintenance(ctx, device, oldStatus, result)
-		}
-		return
+	// One hand-off per cycle, in check order, to the single status writer.
+	if len(jobs) > 0 {
+		e.statusPipeline().submit(ctx, statusWork{jobs: jobs})
 	}
-
-	// Note: when a window ends, oldStatus is 'maintenance' and the normal
-	// path below transitions to the real status — including alerting, so a
-	// device that is still down after maintenance pages right away.
-	if newStatus != oldStatus {
-		device.Status = newStatus
-
-		reason := ""
-		switch newStatus {
-		case "down":
-			reason = "No response for consecutive checks"
-		case "degraded":
-			reason = degradedReason(float64(result.RTT.Microseconds())/1000.0, float64(result.PacketLoss)*100, e.degradedRTTMs, e.degradedLossPct)
-		case "up":
-			reason = "Device responding normally"
-		}
-
-		sc := &StatusChange{
-			DeviceID:  device.ID,
-			OldStatus: oldStatus,
-			NewStatus: newStatus,
-			Reason:    reason,
-			Timestamp: time.Now().UTC(),
-		}
-
-		e.logger.Infof("Status change: %s (%s) %s → %s: %s",
-			device.Hostname, device.IPAddress, oldStatus, newStatus, reason)
-
-		rttMs := float64(result.RTT.Microseconds()) / 1000.0
-		go func() {
-			if err := e.loader.UpdateDeviceStatus(ctx, device.ID, newStatus, result.Timestamp, rttMs); err != nil {
-				e.logger.Errorf("Failed to update device status in PG: %v", err)
-			}
-		}()
-
-		go func() {
-			if err := e.writer.WriteStatusChange(ctx, sc, 0); err != nil {
-				e.logger.Errorf("Failed to write status change to CH: %v", err)
-			}
-		}()
-
-		go func() {
-			e.evaluateAlerts(ctx, device, oldStatus, newStatus, result)
-		}()
-
-		go func() {
-			if err := e.publisher.PublishStatusChange(ctx, sc); err != nil {
-				e.logger.Errorf("Failed to publish status change: %v", err)
-			}
-		}()
-	}
-}
-
-// enterMaintenance transitions a device into 'maintenance': one status-log
-// row, a PG status write and a realtime publish — and deliberately NO alert
-// evaluation. Caller must hold e.mu.
-func (e *Engine) enterMaintenance(ctx context.Context, device *Device, oldStatus string, result *PingResult) {
-	device.Status = "maintenance"
-
-	sc := &StatusChange{
-		DeviceID:  device.ID,
-		OldStatus: oldStatus,
-		NewStatus: "maintenance",
-		Reason:    "Maintenance window active",
-		Timestamp: time.Now().UTC(),
-	}
-
-	e.logger.Infof("Status change: %s (%s) %s → maintenance (alerting muted)",
-		device.Hostname, device.IPAddress, oldStatus)
-
-	rttMs := float64(result.RTT.Microseconds()) / 1000.0
-	go func() {
-		if err := e.loader.UpdateDeviceStatus(ctx, device.ID, "maintenance", result.Timestamp, rttMs); err != nil {
-			e.logger.Errorf("Failed to update device status in PG: %v", err)
-		}
-	}()
-
-	go func() {
-		if err := e.writer.WriteStatusChange(ctx, sc, 0); err != nil {
-			e.logger.Errorf("Failed to write status change to CH: %v", err)
-		}
-	}()
-
-	go func() {
-		if err := e.publisher.PublishStatusChange(ctx, sc); err != nil {
-			e.logger.Errorf("Failed to publish status change: %v", err)
-		}
-	}()
-}
-
-func (e *Engine) evaluateAlerts(ctx context.Context, device *Device, oldStatus, newStatus string, result *PingResult) {
-	apiURL := "http://localhost:8000/api/v1/alert-engine/evaluate"
-
-	payload := map[string]interface{}{
-		"device_id":   device.ID.String(),
-		"hostname":    device.Hostname,
-		"ip_address":  device.IPAddress.String(),
-		"old_status":  oldStatus,
-		"new_status":  newStatus,
-		"rtt_ms":      float64(result.RTT.Microseconds()) / 1000.0,
-		"packet_loss": result.PacketLoss,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		e.logger.Errorf("Failed to marshal alert payload: %v", err)
-		return
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
-	if err != nil {
-		e.logger.Errorf("Failed to create alert request: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		e.logger.Errorf("Failed to call alert engine: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	var result2 map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result2)
-
-	sent := result2["notifications_sent"]
-	e.logger.Infof("Alert evaluation: %s %s→%s, notifications sent: %v", device.Hostname, oldStatus, newStatus, sent)
 }
 
 // trapAlertSink wraps the metrics-store trap sink so that every received trap

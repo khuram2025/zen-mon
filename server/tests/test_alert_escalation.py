@@ -112,3 +112,30 @@ def test_escalated_channel_ids_dedupes_in_level_order():
     assert escalated_channel_ids(levels, 2) == ["a", "b", "c"]
     assert escalated_channel_ids(levels, 3) == ["a", "b", "c", "d"]
     assert escalated_channel_ids(levels, 0) == []
+
+
+# ── Anchor: COALESCE(notified_at, triggered_at) ──────────────────────────────
+
+LEVELS = [{"after_minutes": 15, "notify_channels": ["l1"]},
+          {"after_minutes": 30, "notify_channels": ["l2"]}]
+
+
+def test_escalation_counts_from_the_confirmed_announcement():
+    """A trigger held 28 minutes (min_duration or a flapping device) is
+    announced when the hold sweeper confirms it: level 1 is due 15 minutes
+    after that page, not seconds after it."""
+    triggered = _ago(28)
+    assert plan_escalation(LEVELS, None, triggered, NOW) == ("escalate", 1)
+    assert plan_escalation(LEVELS, None, triggered, NOW, notified_at=_ago(1).isoformat()) is None
+    assert plan_escalation(LEVELS, None, triggered, NOW, notified_at=_ago(16)) == ("escalate", 1)
+
+
+def test_escalation_without_a_usable_notified_at_counts_from_the_trigger():
+    assert plan_escalation(LEVELS, None, _ago(31), NOW, notified_at=None) == ("escalate", 2)
+    assert plan_escalation(LEVELS, None, _ago(31), NOW,
+                           notified_at="not a timestamp") == ("escalate", 2)
+
+
+def test_escalation_sweep_selects_the_anchor():
+    from app.services.alert_escalation_service import _SWEEP_SQL
+    assert "a.metadata->>'notified_at' AS notified_at" in _SWEEP_SQL

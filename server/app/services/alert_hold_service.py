@@ -13,6 +13,22 @@ each row once the hold expires:
   silently. The blip never becomes an alert and never pages, which is the
   entire point of the hold.
 
+The engine also parks a trigger while its device is flapping (``flap_held``:
+the hold is at least the policy's flap stable time). Such a row is settled
+exactly like any other hold — confirmed if the device still has that status
+when the hold expires, cancelled silently otherwise — so a sustained outage on
+a flapping device still pages within the stable time.
+
+A confirmed row is stamped ``metadata.notified_at``: escalation deadlines run
+from the moment the trigger could first have been announced, not from the
+transition, or a long hold would escalate the instant it confirms.
+
+A held trigger does not supersede the rule's earlier alert that was already
+sent (the engine only cancels an older hold); confirming the hold does. Until
+then that alert stays open, so a recovery during the hold still closes it with
+its all-clear. Confirmation takes the device's evaluation lock first, like the
+engine, so the two never interleave on one device.
+
 A recovery event arriving mid-hold already resolves the pending row in the
 engine itself; this sweeper is the confirm side plus a safety net for rows the
 event stream missed (poller restarts). Confirmation compares the object's
@@ -80,6 +96,29 @@ async def _settle(db: AsyncSession, alert_id, *, status: str, extra: dict) -> bo
     return bool(res.rowcount)
 
 
+async def _supersede_on_confirm(db: AsyncSession, row, now: datetime, new_status: str) -> int:
+    """Resolve the rule's other open status alerts on this device, as the
+    engine does when it inserts a trigger that is not held. Device rows
+    only: the service path has no supersede."""
+    res = await db.execute(
+        text("""
+            UPDATE alerts
+            SET status = 'resolved', resolved_at = :now,
+                metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:m AS jsonb)
+            WHERE status IN ('active', 'acknowledged')
+              AND device_id = :device_id AND rule_id = :rule_id
+              AND service_check_id IS NULL
+              AND id <> :id
+              AND COALESCE(metadata->>'is_recovery', 'false') <> 'true'
+              AND metadata->>'new_status' IS NOT NULL
+        """),
+        {"now": now, "device_id": row.device_id, "rule_id": row.rule_id, "id": row.id,
+         "m": json.dumps({"superseded_by_status": new_status,
+                          "resolved_by": "status_transition"})},
+    )
+    return res.rowcount or 0
+
+
 async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
     """Render the rule's trigger templates and send them to its channels."""
     from app.api.v1.alert_engine import _dashboard_url, _render
@@ -114,6 +153,19 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
     subject = _render(ap.effective_template(row.email_subject, ap.DEFAULT_EMAIL_SUBJECT), variables)
     body = _render(ap.effective_template(row.email_body, ap.DEFAULT_EMAIL_BODY), variables)
     sms = _render(ap.effective_template(row.sms_template, ap.DEFAULT_SMS), variables)
+    if meta.get("flap_held"):
+        # The hold came from flapping, not from the rule's own hold time.
+        notice = (
+            f"Flapping: this device kept changing status, so the alert waited "
+            f"for the status to settle, and it was still {status_txt} after "
+            f"{held_for}."
+        )
+    else:
+        notice = (
+            f"Hold time: this rule waits {int(row.min_duration or 0)} seconds "
+            f"before alerting, and the condition was still present after "
+            f"{held_for}."
+        )
 
     return await dispatch_to_channels(db, row.notify_channels or [], {
         "subject": subject,
@@ -125,11 +177,7 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         "severity": sev,
         "resolved": False,
         "rule_name": row.rule_name,
-        "notice": (
-            f"Hold time: this rule waits {int(row.min_duration or 0)} seconds "
-            f"before alerting, and the condition was still present after "
-            f"{held_for}."
-        ),
+        "notice": notice,
         "details": [
             ("Alert rule", row.rule_name),
             ("Condition", variables.get("condition_label")),
@@ -179,13 +227,25 @@ async def sweep_pending_holds(db: AsyncSession) -> dict[str, int]:
                 await db.commit()
                 continue
 
+            device_row = row.device_id is not None and row.service_check_id is None
+            if device_row:
+                # The engine's per-device lock, taken before any alert row of
+                # the device (see the module docstring).
+                await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:device_id))"),
+                                 {"device_id": str(row.device_id)})
+
             # Condition held: the alert becomes real. Settle the row first so
             # a crashed dispatch never re-pages on the next sweep.
             if not await _settle(db, row.id, status="active", extra={
                 "hold_confirmed_at": now.isoformat(),
+                # Escalation anchor (see the module docstring).
+                "notified_at": now.isoformat(),
             }):
                 await db.commit()
                 continue
+            if device_row:
+                # Whatever the dispatch gates below decide, as in the engine.
+                await _supersede_on_confirm(db, row, now, expected)
 
             # Quiet hours and flap cooldown apply at this moment — the moment
             # of dispatch — exactly as they would on a rule with no hold.

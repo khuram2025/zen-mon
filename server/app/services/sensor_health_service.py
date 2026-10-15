@@ -119,30 +119,69 @@ async def _suppress_owned_device_alerts(db: AsyncSession, sensor_id: str, sensor
     """Invalidate stale device state before closing its now-unverifiable alerts.
 
     Resetting the cached state to ``unknown`` is important: when the sensor
-    resumes and the target is still down, the first fresh result becomes an
-    unknown -> down transition and the alert engine can open a new alert.
+    resumes and the target is still down, its fresh results confirm an
+    unknown -> down transition again and the alert engine can open a new alert.
+    The confirmation state goes too (counters and flap history describe checks
+    nobody can vouch for any more): state rows are deleted, so the next writer
+    reseeds silently from 'unknown', flap flags are cleared and open flap
+    episodes close as an owner change (DESIGN: 'owner_change' covers a polling
+    owner that changed or went offline; the device stays assigned to this
+    sensor). Lock order, as in every writer:
+    devices -> device_status_state -> device_flap_episodes; devices FOR NO KEY
+    UPDATE, so the flap notice sweep's foreign-key check (it inserts a notice
+    row while holding its claimed episode) passes instead of deadlocking.
     """
+    owned = (await db.execute(
+        text("""SELECT d.id
+                  FROM devices d
+                 WHERE d.id IN (SELECT device_id FROM device_polling_owner
+                                 WHERE owner_kind = 'sensor' AND sensor_id = :sid)
+                 ORDER BY d.id
+                   FOR NO KEY UPDATE OF d"""),
+        {"sid": sensor_id},
+    )).scalars().all()
+    if not owned:
+        return 0
+    ids = list(owned)
+    await db.execute(
+        text("""UPDATE devices
+                   SET status = 'unknown',
+                       status_changed_at = CASE WHEN status <> 'unknown' THEN NOW()
+                                                ELSE status_changed_at END,
+                       is_flapping = false, flapping_since = NULL, flap_kind = NULL,
+                       updated_at = NOW()
+                 WHERE id = ANY(:ids)
+                   AND (status <> 'unknown' OR is_flapping
+                        OR flapping_since IS NOT NULL OR flap_kind IS NOT NULL)"""),
+        {"ids": ids},
+    )
+    await db.execute(
+        text("DELETE FROM device_status_state WHERE device_id = ANY(:ids)"),
+        {"ids": ids},
+    )
+    await db.execute(
+        text("""UPDATE device_flap_episodes
+                   SET ended_at = GREATEST(started_at, NOW()),
+                       end_reason = 'owner_change', status_at_end = 'unknown'
+                 WHERE device_id = ANY(:ids) AND ended_at IS NULL"""),
+        {"ids": ids},
+    )
+    # A held (pending) row never paged: closing it is a cancelled hold, so
+    # it stays a notice and never shows as a recovered incident.
     result = await db.execute(
-        text("""WITH owned AS MATERIALIZED (
-                    SELECT device_id FROM device_polling_owner
-                     WHERE owner_kind = 'sensor' AND sensor_id = :sid
-                ), invalidated AS (
-                    UPDATE devices
-                       SET status = 'unknown', updated_at = NOW()
-                     WHERE id IN (SELECT device_id FROM owned)
-                       AND status <> 'unknown'
-                    RETURNING id
-                )
-                UPDATE alerts
+        text("""UPDATE alerts
                    SET status = 'resolved', resolved_at = NOW(),
                        metadata = COALESCE(metadata, '{}'::jsonb)
                                   || CAST(:metadata AS jsonb)
+                                  || CASE WHEN status = 'pending'
+                                          THEN '{"hold_cancelled": true}'::jsonb
+                                          ELSE '{}'::jsonb END
                  WHERE status IN ('pending', 'active', 'acknowledged')
                    AND service_check_id IS NULL
                    AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
-                   AND device_id IN (SELECT device_id FROM owned)"""),
+                   AND device_id = ANY(:ids)"""),
         {
-            "sid": sensor_id,
+            "ids": ids,
             "metadata": json.dumps({
                 "suppressed_by": "sensor_offline",
                 "sensor_id": str(sensor_id),
@@ -331,8 +370,16 @@ async def dispatch_sensor_transition_outbox(
     ``processed_at`` is set before calling the alert engine; the alert
     engine's own commit then atomically persists its alert rows and the
     outbox acknowledgement. A failure rolls both back for a later retry.
+
+    A 'device' row may carry several transitions of one batch (``transitions``
+    plus a ``next_index`` cursor). Each claim delivers ONE of them: the cursor
+    advances in the same transaction as that transition's alert rows and
+    ``processed_at`` is set only with the last, so a failure retries from the
+    failed transition and never re-delivers an earlier one. The row stays the
+    oldest unprocessed one of its device, so the next claim continues it.
     """
     from app.api.v1.sensor_api import (
+        _device_outbox_events,
         _dispatch_device_transitions,
         _dispatch_service_transitions,
     )
@@ -362,16 +409,37 @@ async def dispatch_sensor_transition_outbox(
             break
 
         payload = dict(row["payload"] or {})
-        payload["timestamp"] = _outbox_timestamp(payload.get("timestamp"))
         try:
-            await db.execute(text("""UPDATE sensor_transition_outbox
-                                         SET processed_at = NOW(), last_error = NULL
-                                       WHERE id = :id"""), {"id": row["id"]})
             if row["transition_type"] == "device":
-                await _dispatch_device_transitions(
-                    [payload], db, raise_on_error=True
+                events, index = _device_outbox_events(payload)
+                await db.execute(
+                    text("""UPDATE sensor_transition_outbox
+                               SET processed_at = CASE WHEN CAST(:last AS boolean)
+                                                       THEN NOW() END,
+                                   payload = CASE WHEN CAST(:cursor AS boolean)
+                                                  THEN jsonb_set(payload, '{next_index}',
+                                                                 to_jsonb(CAST(:next AS integer)))
+                                                  ELSE payload END,
+                                   last_error = NULL
+                             WHERE id = :id"""),
+                    {
+                        "id": row["id"],
+                        "last": index >= len(events) - 1,
+                        "cursor": len(events) > 1,
+                        "next": index + 1,
+                    },
                 )
+                if index < len(events):
+                    event = events[index]
+                    event["timestamp"] = _outbox_timestamp(event.get("timestamp"))
+                    await _dispatch_device_transitions(
+                        [event], db, raise_on_error=True
+                    )
             else:
+                payload["timestamp"] = _outbox_timestamp(payload.get("timestamp"))
+                await db.execute(text("""UPDATE sensor_transition_outbox
+                                             SET processed_at = NOW(), last_error = NULL
+                                           WHERE id = :id"""), {"id": row["id"]})
                 await _dispatch_service_transitions(
                     [payload], db, raise_on_error=True
                 )

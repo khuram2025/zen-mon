@@ -147,14 +147,18 @@ export function AvailabilityPage() {
     refetchInterval: liveInterval,
     retry: 1,
   })
-  // Complete scoped lists per status (not a 200-row inventory sample).
-  const attentionQ = useQuery<{ down: DeviceLite[]; degraded: DeviceLite[]; maintenance: DeviceLite[] }>({
+  // Complete scoped lists per status (not a 200-row inventory sample), plus the flapping overlay. Flapping rows are
+  // kept only when the API marks them, so a server without the filter cannot list every device as flapping.
+  const attentionQ = useQuery<{ down: DeviceLite[]; degraded: DeviceLite[]; maintenance: DeviceLite[]; flapping: DeviceLite[] }>({
     queryKey: ['avail', 'attention'],
     queryFn: async () => {
-      const get = async (status: string) =>
-        ((await api.get('/devices', { params: { status, limit: 50 } })).data?.data || []) as DeviceLite[]
-      const [down, degraded, maintenance] = await Promise.all([get('down'), get('degraded'), get('maintenance')])
-      return { down, degraded, maintenance }
+      const get = async (params: Record<string, string | number | boolean>) =>
+        ((await api.get('/devices', { params: { ...params, limit: 50 } })).data?.data || []) as DeviceLite[]
+      const [down, degraded, maintenance, flapping] = await Promise.all([
+        get({ status: 'down' }), get({ status: 'degraded' }), get({ status: 'maintenance' }),
+        get({ flapping: true }).then((rows) => rows.filter((d) => d.is_flapping === true)),
+      ])
+      return { down, degraded, maintenance, flapping }
     },
     enabled: domain === 'devices',
     refetchInterval: liveInterval,
@@ -411,6 +415,7 @@ export function AvailabilityPage() {
                 technicalLoading={techQ.isLoading}
                 live={deviceSummaryQ.data}
                 attention={attention}
+                flapping={attentionQ.data?.flapping || []}
                 maintenance={attentionQ.data?.maintenance || []}
               />
             )}

@@ -21,6 +21,10 @@ def _device(**overrides):
         "status": "unknown",
         "last_seen": None,
         "last_rtt_ms": None,
+        "is_flapping": False,
+        "flapping_since": None,
+        "flap_kind": None,
+        "status_changed_at": None,
         "description": "test device",
         "created_at": now,
         "updated_at": now,
@@ -139,6 +143,27 @@ def test_operator_can_create_device_without_exposing_snmp_passphrases(client, as
     assert body["snmp_priv_configured"] is True
     assert "snmp_auth_passphrase" not in body
     assert "snmp_priv_passphrase" not in body
+
+
+def test_device_response_serializes_flapping_overlay_and_status_change_time():
+    from fastapi.encoders import jsonable_encoder
+    from app.api.v1.devices import _device_to_response
+
+    since = datetime(2026, 10, 14, 9, 30, tzinfo=timezone.utc)
+    changed = datetime(2026, 10, 14, 9, 41, 12, tzinfo=timezone.utc)
+    body = jsonable_encoder(_device_to_response(_device(
+        status="down", is_flapping=True, flapping_since=since, flap_kind="reachability",
+        status_changed_at=changed)))
+    # Flapping is a flag beside the status, never a status value.
+    assert body["status"] == "down"
+    assert body["is_flapping"] is True
+    assert body["flap_kind"] == "reachability"
+    assert body["flapping_since"] == "2026-10-14T09:30:00Z"
+    assert body["status_changed_at"] == "2026-10-14T09:41:12Z"
+
+    calm = jsonable_encoder(_device_to_response(_device(status="up")))
+    assert calm["is_flapping"] is False
+    assert calm["flapping_since"] is None and calm["flap_kind"] is None and calm["status_changed_at"] is None
 
 
 def test_service_check_create_validates_and_normalizes_status_patterns(client, as_operator, monkeypatch):

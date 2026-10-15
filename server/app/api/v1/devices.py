@@ -19,6 +19,8 @@ from app.schemas.device import (
 )
 from app.schemas.metric import MetricResponse, StatusChangeEvent
 from app.services import device_service, metric_service
+from app.services import device_status_explanation as explain
+from app.services import device_status_machine as dsm
 from app.services.audit_service import write_audit_log
 from app.api.v1.snmp import (
     _snmpget,
@@ -33,6 +35,7 @@ from app.services.ping_rollups import ping_table_for_hours, uptime_agg_sql
 from sqlalchemy import text
 import time
 import asyncio
+import json
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
 
@@ -138,6 +141,8 @@ async def list_devices(
     os_version: str | None = Query(default=None, max_length=200,
                                    description="Exact displayed OS version (os_version_display), case-insensitive; 'unknown' for none"),
     facets: bool = Query(default=False, description="Also return vendor, model and os_version menus with counts over ALL devices"),
+    flapping: bool | None = Query(default=None,
+                                  description="Only devices flagged as flapping (true) or not flapping (false); combines with status"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -157,6 +162,9 @@ async def list_devices(
     ALL the devices the caller may see, not the page. Each facet counts over every active filter except its own, so a
     ``count`` is the ``meta.total`` this list gives when its ``value`` is passed as that filter (``unknown`` for "Unknown").
     Without the flag nothing is computed.
+
+    ``flapping`` filters on the flapping flag, an overlay beside the status (``status=down&flapping=true`` is the down
+    devices that are also flapping); the facets honour it like every other filter.
     """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     visible = await scoping.visible_tags(db, user)
@@ -164,7 +172,7 @@ async def list_devices(
         db, status, group_id, device_type, location, search, skip, limit,
         tags=tag_list, tags_match=tags_match, managed_by=managed_by,
         visible_tags=visible,
-        vendor=vendor, model=model, os_version=os_version,
+        vendor=vendor, model=model, os_version=os_version, flapping=flapping,
     )
     profile_names = await _profile_name_map(db)
     parent_names, child_counts = await _managed_maps(db, devices)
@@ -178,7 +186,7 @@ async def list_devices(
     if facets:
         out["facets"] = await device_service.get_device_facets(
             db, status, group_id, device_type, location, search, tag_list, tags_match, managed_by, visible,
-            vendor, model, os_version)
+            vendor, model, os_version, flapping=flapping)
     return out
 
 
@@ -338,68 +346,73 @@ async def dashboard_uptime_stats(
     }
 
 
+# Statuses in which a device answers pings: continuous uptime runs through
+# them, so a degraded<->up change never resets it.
+_RESPONDING_SQL = "('up', 'degraded')"
+
+
+def _uptime_origins() -> dict[str, tuple]:
+    """device_id -> (last_back, n_back, last_lost, n_lost) from the status log: the last
+    transition INTO up/degraded from any other status (down, unknown, maintenance) and the
+    last transition into a non-responding status, with their counts."""
+    from app.core.database import get_clickhouse_client
+    back = f"new_status IN {_RESPONDING_SQL} AND old_status NOT IN {_RESPONDING_SQL}"
+    lost = f"new_status NOT IN {_RESPONDING_SQL}"
+    rows = get_clickhouse_client().query(f"""
+        SELECT device_id,
+               maxIf(timestamp, {back}) AS last_back, countIf({back}) AS n_back,
+               maxIf(timestamp, {lost}) AS last_lost, countIf({lost}) AS n_lost
+        FROM zenplus.device_status_log
+        GROUP BY device_id
+    """).result_rows
+    return {str(r[0]): (r[1], int(r[2] or 0), r[3], int(r[4] or 0)) for r in rows}
+
+
+def _aware(ts: datetime) -> datetime:
+    # ClickHouse (and query parameters without an offset) give naive datetimes: UTC.
+    return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
+
 @router.get("/current-uptime")
 async def current_uptime(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Return the current continuous uptime (seconds) for each up device.
+    """Current continuous uptime (seconds) of every responding (up or degraded) device the caller may see.
 
-    For each device whose most recent status log transition is to `up`, we
-    return `now - transition_timestamp`. Devices with no log fall back to
-    `created_at` (best guess for devices that have been up since creation).
+    The origin is the device's last status-log transition INTO up or degraded from a status in
+    which it did not respond (down, unknown, maintenance): an up<->degraded change does not reset
+    it. A responding device whose log holds no non-responding status at all has responded since it
+    was added (or since before the log's retention): its origin is ``created_at``. A device whose
+    log ends in a non-responding status although its current status is responding (a lost log
+    write) gets no value, and neither does any device while the log cannot be read: not measured,
+    never a guess.
     """
-    from app.core.database import get_clickhouse_client
-    client = get_clickhouse_client()
-
-    # Latest transition row per device.
-    try:
-        res = client.query(
-            """
-            SELECT
-              device_id,
-              argMax(timestamp, timestamp) AS last_ts,
-              argMax(new_status, timestamp) AS last_status
-            FROM zenplus.device_status_log
-            GROUP BY device_id
-            """
-        )
-    except Exception:
-        res = None
-
     now = datetime.now(timezone.utc)
-    uptime: dict[str, float] = {}
-    seen_ids: set[str] = set()
-    if res is not None:
-        for row in res.result_rows:
-            did = str(row[0])
-            seen_ids.add(did)
-            last_ts = row[1]
-            last_status = row[2]
-            if last_status != "up":
-                continue
-            # ClickHouse can return naive datetimes.
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=timezone.utc)
-            delta = (now - last_ts).total_seconds()
-            if delta > 0:
-                uptime[did] = delta
+    try:
+        log = await asyncio.to_thread(_uptime_origins)
+    except Exception:
+        return {"generated_at": now.isoformat(), "devices": {}}
 
-    # Fallback: devices that are currently up but have no status log entry —
-    # use created_at as the uptime origin. Only applies to `up` devices.
-    rows = (await db.execute(text(
-        "SELECT id, created_at FROM devices WHERE status = 'up'"
-    ))).all()
-    for row in rows:
-        did = str(row[0])
-        if did in uptime:
+    where, params = f"status IN {_RESPONDING_SQL}", {}
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        where += f" AND {scoping.jsonb_tags_visible('tags')}"
+        params[scoping.SCOPE_PARAM] = scope
+    rows = (await db.execute(text(f"SELECT id::text, created_at FROM devices WHERE {where}"), params)).all()
+
+    uptime: dict[str, float] = {}
+    for did, created_at in rows:
+        last_back, n_back, last_lost, n_lost = log.get(did, (None, 0, None, 0))
+        if n_lost == 0:
+            origin = last_back if n_back else created_at
+        elif n_back and _aware(last_back) >= _aware(last_lost):
+            origin = last_back
+        else:
             continue
-        created_at = row[1]
-        if created_at is None:
+        if origin is None:
             continue
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        delta = (now - created_at).total_seconds()
+        delta = (now - _aware(origin)).total_seconds()
         if delta > 0:
             uptime[did] = delta
 
@@ -606,21 +619,47 @@ async def get_device_availability_events(
             "events_truncated": len(episodes) > 100}
 
 
+_STATE_COLUMNS_SQL = ", ".join(dsm.STATE_COLUMNS)
+
+
+def _settings_document(value) -> dict:
+    """A system_settings JSONB value as a dict (the driver may hand back text); anything else is empty."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
 @router.get("/{device_id}/status-explanation")
 async def get_device_status_explanation(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Why the device has its status, from the real policy and the owning writer's state.
+
+    ``policy`` is the effective global 'monitoring' policy (derived recovery limits included);
+    ``thresholds`` its degraded and recovery limits. For ping-polled devices, central or sensor
+    owned: ``confirmation`` (the legacy keys, from the policy), ``state`` (confirmed status,
+    pending progress, streaks and the degraded window), ``flapping`` and the owner's latest
+    sample (``latest``) plus the most recent degraded transition (``recent_degraded``).
+    """
     device = await device_service.get_device(db, device_id)
     if not device or not scoping.entity_visible(device.tags, await scoping.visible_tags(db, user)):
         raise HTTPException(status_code=404, detail="Device not found")
     row = (await db.execute(text("SELECT value, updated_at FROM system_settings WHERE key = 'monitoring'"))).mappings().first()
-    raw = (row["value"] or {}) if row else {}
-    thresholds = {"degraded_rtt_ms": float(raw.get("degraded_rtt_ms") or 100),
-                  "degraded_loss_pct": float(raw.get("degraded_loss_pct") or 10)}
+    settings = _settings_document(row["value"] if row else None)
+    policy = dsm.policy_from_settings(settings)
+    thresholds = explain.thresholds_for(policy)
+    # Saving other settings (confirmation, flapping) moves updated_at but not the limits.
+    thresholds_changed_at = explain.thresholds_changed_at(settings, row["updated_at"] if row else None)
     output = {"status": device.status, "mode": "ping", "thresholds": thresholds,
-              "source": "Controller", "latest": None, "recent_degraded": None}
+              # v1 has one global policy; per-device overrides would change this scope.
+              "policy": {**dsm.effective_policy_dict(policy), "scope": "global"},
+              "source": "Controller", "latest": None, "recent_degraded": None,
+              "state": None, "flapping": None}
     if device.poll_mode == "via_controller":
         return dict(output, mode="managed")
     if not device.ping_enabled:
@@ -631,17 +670,86 @@ async def get_device_status_explanation(
     if not owner or (owner["owner_kind"] != "central" and not owner["sensor_id"]):
         return dict(output, mode="unassigned")
     import os
-    from app.services.device_status_explanation import evidence
-    poller_id = os.getenv("POLLER_ID", "poller-01") if owner["owner_kind"] == "central" else str(owner["sensor_id"])
-    if owner["owner_kind"] == "central":
-        output["confirmation"] = {"failed_checks": 3, "packets_per_check": 3, "interval_seconds": device.ping_interval or 60, "recovery_checks": 1}
-    output["source"] = "Controller" if owner["owner_kind"] == "central" else (owner["name"] or "Assigned sensor")
+    central = owner["owner_kind"] == "central"
+    source = "central" if central else "sensor"
+    owner_key = dsm.OWNER_CENTRAL if central else str(owner["sensor_id"])
+    poller_id = os.getenv("POLLER_ID", "poller-01") if central else str(owner["sensor_id"])
+    interval = device.ping_interval or 60
+    output["source"] = "Controller" if central else (owner["name"] or "Assigned sensor")
+    output["confirmation"] = explain.confirmation_block(policy, source, interval)
+
     try:
-        output.update(await asyncio.to_thread(evidence, device_id, poller_id, thresholds,
-                                             row["updated_at"] if row else None, device.ping_interval or 60))
+        measured = await asyncio.to_thread(explain.evidence, device_id, poller_id, thresholds,
+                                           thresholds_changed_at, interval)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Status measurements are temporarily unavailable") from exc
+    output.update(measured)
+
+    state_row = (await db.execute(text(f"SELECT {_STATE_COLUMNS_SQL} FROM device_status_state WHERE device_id = :id"),
+                                  {"id": device_id})).mappings().first()
+    state, seeded = explain.current_state(state_row, owner_key, device.status, device.status_changed_at)
+    last_check = None
+    if central and not seeded:
+        # The poller rewrites an unchanged state row only every 10 minutes; each of its checks
+        # is a ping sample and each answered one also moves devices.last_seen. (A sensor's row
+        # is rewritten with every accepted batch, and its last_seen can come from a sample the
+        # machine never took, so the row alone is the measure there.)
+        latest = measured.get("latest")
+        last_check = explain.newest(device.last_seen, latest["timestamp"] if latest else None)
+    now = datetime.now(timezone.utc)
+    output["state"] = explain.state_block(state, policy, source, interval, seeded, now, last_check_at=last_check)
+    output["flapping"] = explain.flapping_block(device, state, policy, source, interval, now)
     return output
+
+
+@router.get("/{device_id}/flap-episodes", dependencies=[Depends(_device_in_scope)])
+async def get_device_flap_episodes(
+    device_id: UUID,
+    from_time: datetime | None = Query(default=None, alias="from"),
+    to_time: datetime | None = Query(default=None, alias="to"),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Flapping episodes of one device that overlap ``[from, to]`` (default: the last 30 days), newest first,
+    as ``{from, to, items, truncated}`` (``truncated``: more than ``limit`` episodes overlap).
+
+    An episode with ``ended_at`` null is ongoing; ``duration_s`` runs to now for it. ``kind`` is the
+    union of the classes that flapped during the episode (reachability | performance | both);
+    ``end_reason`` is stable | disabled | maintenance | owner_change | reseed | not_polled.
+    """
+    row = (await db.execute(text("SELECT tags FROM devices WHERE id = :id"), {"id": device_id})).first()
+    if row is None or not scoping.entity_visible(row[0], await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail="Device not found")
+    now = datetime.now(timezone.utc)
+    end = _aware(to_time).astimezone(timezone.utc) if to_time else now
+    start = _aware(from_time).astimezone(timezone.utc) if from_time else end - timedelta(days=30)
+    if end <= start or end - start > timedelta(days=366):
+        raise HTTPException(status_code=422, detail="Select a period between zero and 366 days")
+    rows = (await db.execute(text("""
+        SELECT id, started_at, ended_at, kind, start_changes, window_minutes, status_at_start,
+               status_at_end, end_reason, start_notice, stop_notice
+        FROM device_flap_episodes
+        WHERE device_id = :id AND started_at <= :end AND (ended_at IS NULL OR ended_at >= :start)
+        ORDER BY started_at DESC
+        LIMIT :lim
+    """), {"id": device_id, "start": start, "end": end, "lim": limit + 1})).mappings().all()
+    items = [{
+        "id": str(r["id"]),
+        "started_at": r["started_at"],
+        "ended_at": r["ended_at"],
+        "ongoing": r["ended_at"] is None,
+        "duration_s": max(0.0, ((r["ended_at"] or now) - r["started_at"]).total_seconds()),
+        "kind": r["kind"],
+        "start_changes": r["start_changes"],
+        "window_minutes": r["window_minutes"],
+        "status_at_start": r["status_at_start"],
+        "status_at_end": r["status_at_end"],
+        "end_reason": r["end_reason"],
+        "start_notice": r["start_notice"],
+        "stop_notice": r["stop_notice"],
+    } for r in rows[:limit]]
+    return {"from": start.isoformat(), "to": end.isoformat(), "items": items, "truncated": len(rows) > limit}
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)
@@ -1948,6 +2056,10 @@ def _device_to_response(
         status=device.status,
         last_seen=device.last_seen,
         last_rtt_ms=device.last_rtt_ms,
+        is_flapping=bool(device.is_flapping),
+        flapping_since=device.flapping_since,
+        flap_kind=device.flap_kind,
+        status_changed_at=device.status_changed_at,
         description=device.description,
         created_at=device.created_at,
         updated_at=device.updated_at,
@@ -2118,7 +2230,9 @@ async def create_device_maintenance(
         if covered:
             await db.execute(
                 text("""
-                    UPDATE devices SET status = 'maintenance', updated_at = now()
+                    UPDATE devices SET status = 'maintenance', updated_at = now(),
+                        status_changed_at = CASE WHEN status IS DISTINCT FROM 'maintenance'
+                                                 THEN now() ELSE status_changed_at END
                     WHERE id = ANY(:ids)
                 """),
                 {"ids": covered},
@@ -2178,7 +2292,7 @@ async def delete_device_maintenance(
         # that are no longer covered by another active window.
         await db.execute(
             text(f"""
-                UPDATE devices SET status = 'unknown', updated_at = now()
+                UPDATE devices SET status = 'unknown', updated_at = now(), status_changed_at = now()
                 WHERE id = ANY(:ids) AND status = 'maintenance' AND ping_enabled = false
                   AND NOT EXISTS (
                       SELECT 1 FROM device_maintenance m

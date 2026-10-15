@@ -20,6 +20,8 @@ import type {
   Assessment, DeviceLite, DeviceSummary, ServiceRow, ServiceSummary, Tone,
 } from './model'
 import { rankServices } from './model'
+import { FlappingTag } from '@/components/devices/FlappingTag'
+import { FLAP_HOLD_FLEET_TEXT } from '@/components/devices/deviceStatus'
 import { AvailCell, complianceMeta, type TimelineItem } from './charts'
 import { AlertVolumeChart } from './viz'
 import {
@@ -130,14 +132,17 @@ function SegmentTable({ rows, target, empty }: { rows?: DeviceSegmentSummary[] |
 }
 
 export function DevicesOperations({
-  c, exec, technical, technicalLoading, live, attention, maintenance,
+  c, exec, technical, technicalLoading, live, attention, flapping = [], maintenance,
 }: {
   c: ViewCommon
   exec?: ExecutiveData
   technical?: TechnicalData
   technicalLoading: boolean
   live?: DeviceSummary
+  /** Down and degraded devices. */
   attention: DeviceLite[]
+  /** Flapping devices (any status); those already listed as down or degraded get a tag instead of a second row. */
+  flapping?: DeviceLite[]
   maintenance: DeviceLite[]
 }) {
   const { assessment, dimmed, loading } = c
@@ -156,25 +161,37 @@ export function DevicesOperations({
   const worst = (technical?.worst_devices || []).filter((d) => d.availability_pct < 100).slice(0, 15)
   const timeline = deviceTimelineItems(exec, 50)
   const techErrors = technical?.data_errors?.length ?? 0
+  const listed = new Set([...attention, ...maintenance].map((d) => d.id))
+  const flappingIds = new Set(flapping.map((d) => d.id))
+  const flappingOnly = flapping.filter((d) => !listed.has(d.id))
+  const liveFlapping = live?.flapping ?? 0
 
   return (
     <div className="flex flex-col gap-4">
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Current device state" subtitle="Now — independent of the selected period">
           {live ? <CountDistribution segments={liveSegments} total={live.total} /> : <Skeleton className="h-16 w-full" />}
+          {liveFlapping > 0 && (
+            <p className="mt-2 text-sm text-muted">
+              <Link to="/devices?flapping=1" className="font-medium text-warning hover:underline">{liveFlapping} flapping</Link>
+              {' '}— also counted under their confirmed status above; while they flap, {FLAP_HOLD_FLEET_TEXT}.
+            </p>
+          )}
         </Panel>
-        <Panel title="Needs attention now" subtitle="Down or degraded devices, plus planned maintenance">
-          {attention.length === 0 && maintenance.length === 0 ? (
-            live ? <EvidenceEmpty kind="no_findings">No devices are down or degraded now.</EvidenceEmpty> : <Skeleton className="h-16 w-full" />
+        <Panel title="Needs attention now" subtitle="Down, degraded or flapping devices, plus planned maintenance">
+          {attention.length === 0 && flappingOnly.length === 0 && maintenance.length === 0 ? (
+            live ? <EvidenceEmpty kind="no_findings">No devices are down, degraded or flapping now.</EvidenceEmpty> : <Skeleton className="h-16 w-full" />
           ) : (
             <ul className="max-h-72 space-y-1 overflow-y-auto">
-              {[...attention, ...maintenance].map((d) => {
+              {[...attention, ...flappingOnly, ...maintenance].map((d) => {
+                const flapOnly = !listed.has(d.id)
                 const tone: Tone = d.status === 'down' ? 'breach' : d.status === 'maintenance' ? 'maint' : 'risk'
                 return (
                   <li key={d.id}>
                     <Link to={`/devices/${d.id}`} className="flex min-h-[40px] items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-surface2/60">
-                      <StatusPill tone={tone}>{d.status === 'maintenance' ? 'Maintenance' : d.status === 'down' ? 'Down' : 'Degraded'}</StatusPill>
+                      <StatusPill tone={tone}>{flapOnly ? 'Flapping' : d.status === 'maintenance' ? 'Maintenance' : d.status === 'down' ? 'Down' : 'Degraded'}</StatusPill>
                       <span className="min-w-0 flex-1 truncate text-base text-text">{d.hostname}</span>
+                      {!flapOnly && flappingIds.has(d.id) && <FlappingTag device={flapping.find((f) => f.id === d.id) ?? d} />}
                       <span className="hidden text-sm text-muted sm:inline">{d.location || 'No location'}</span>
                     </Link>
                   </li>

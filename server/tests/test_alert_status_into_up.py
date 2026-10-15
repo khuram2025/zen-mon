@@ -13,6 +13,7 @@ alerts table.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -65,17 +66,26 @@ class _Result:
 
 class AlertsDB:
     """Just enough of Postgres for the status engine: an alerts table whose
-    UPDATEs honour the WHERE clauses the engine actually sends."""
+    UPDATEs honour the WHERE clauses the engine actually sends.
+
+    ``statements`` logs every (sql, params) sent; ``monitoring`` is the stored
+    system_settings 'monitoring' document; ``channels`` maps channel id ->
+    notification_channels row; ``map_hooks`` are manual_maps webhook rows.
+    """
 
     def __init__(self, rules):
         self.rules = rules
         self.alerts: list[dict] = []
+        self.statements: list[tuple[str, dict]] = []
+        self.monitoring: dict | None = None
+        self.channels: dict[str, NS] = {}
+        self.map_hooks: list[NS] = []
 
     def seed(self, rule, *, status="active", new_status="down", minutes_ago=5, **meta):
         self.alerts.append({
             "id": uuid4(), "device_id": DEVICE, "service_check_id": None,
-            "rule_id": rule.id, "status": status,
-            "message": f"{rule.name}: sw (10.0.0.1) is {new_status.upper()}",
+            "rule_id": rule.id if rule is not None else None, "status": status,
+            "message": f"{rule.name if rule is not None else 'Notice'}: sw (10.0.0.1) is {new_status.upper()}",
             "triggered_at": datetime.now(timezone.utc) - timedelta(minutes=minutes_ago),
             "resolved_at": None,
             "metadata": {"old_status": "up", "new_status": new_status,
@@ -83,12 +93,35 @@ class AlertsDB:
         })
         return self.alerts[-1]
 
+    def _cooldown_hits(self, sql, params):
+        """_within_cooldown: this rule's announced triggers on this object."""
+        since = datetime.now(timezone.utc) - timedelta(seconds=params["cd"])
+        col = "device_id" if "device_id = :oid" in sql else "service_check_id"
+        hits = []
+        for a in self.alerts:
+            meta = a["metadata"]
+            if str(a["rule_id"]) != params["rid"] or str(a[col]) != str(params["oid"]):
+                continue
+            if params.get("aid") and str(a["id"]) == params["aid"]:
+                continue
+            if str(meta.get("is_recovery", False)).lower() == "true":
+                continue
+            if str(meta.get("notified", True)).lower() != "true":
+                continue
+            if a["triggered_at"] > since:
+                hits.append((1,))
+        return hits
+
     def open_rows(self):
         return [a for a in self.alerts if a["status"] in OPEN]
 
     def _status_filter(self, sql, row):
         meta = row["metadata"]
-        if row["status"] not in OPEN or str(row["device_id"]) != DEVICE:
+        # The statuses the UPDATE names (WHERE status IN (...)).
+        listed = re.search(r"WHERE status IN \(([^)]*)\)", sql)
+        states = (tuple(s.strip().strip("'") for s in listed.group(1).split(","))
+                  if listed else OPEN)
+        if row["status"] not in states or str(row["device_id"]) != DEVICE:
             return False
         if "service_check_id IS NULL" in sql and row["service_check_id"] is not None:
             return False
@@ -103,22 +136,37 @@ class AlertsDB:
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
         params = params or {}
+        self.statements.append((sql, dict(params)))
         if "FROM devices WHERE id" in sql:
             return _Result([NS(device_type="switch", group_id=None, location="", tags=[])])
         if "FROM alert_rules" in sql:
             return _Result(self.rules)
+        if "FROM system_settings WHERE key = 'monitoring'" in sql:
+            return _Result([(self.monitoring,)] if self.monitoring is not None else [])
+        if sql.startswith("SELECT 1 FROM alerts WHERE rule_id = :rid"):
+            return _Result(self._cooldown_hits(sql, params))
+        if "FROM notification_channels WHERE id = :id" in sql:
+            ch = self.channels.get(str(params["id"]))
+            return _Result([ch] if ch else [])
+        if "FROM manual_maps" in sql:
+            return _Result(self.map_hooks)
         if sql.startswith("UPDATE alerts SET status = 'resolved'"):
             hits = [a for a in self.alerts if self._status_filter(sql, a)]
             if "rule_id = :rule_id" in sql:
                 hits = [a for a in hits if str(a["rule_id"]) == params["rule_id"]]
             extra = json.loads(params.get("resolution_metadata") or params.get("m") or "{}")
             for a in hits:
+                # CASE WHEN status = 'pending' THEN hold_cancelled (old status).
+                was_pending = a["status"] == "pending"
                 a["status"] = "resolved"
                 a["resolved_at"] = params.get("resolved_at") or params.get("now")
                 a["metadata"].update(extra)
-            return _Result([NS(rule_id=a["rule_id"], triggered_at=a["triggered_at"],
+                if was_pending and "jsonb_build_object('hold_cancelled', true)" in sql:
+                    a["metadata"]["hold_cancelled"] = True
+            return _Result([NS(id=a["id"], rule_id=a["rule_id"], triggered_at=a["triggered_at"],
                                notified=a["metadata"].get("notified"),
-                               new_status=a["metadata"].get("new_status")) for a in hits],
+                               new_status=a["metadata"].get("new_status"),
+                               hold_cancelled=a["metadata"].get("hold_cancelled")) for a in hits],
                            rowcount=len(hits))
         if sql.startswith("INSERT INTO alerts"):
             row = {"id": uuid4(), "device_id": params["device_id"], "service_check_id": None,

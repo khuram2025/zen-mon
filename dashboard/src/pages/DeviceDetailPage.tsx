@@ -3,7 +3,13 @@ import { alignDeviceRange, autoDetectState } from '@/components/devices/template
 import { deviceOsLink } from '@/components/devices/deviceInventory'
 import { inventoryApi } from '@/pages/inventory/api'
 import { averageDevicePacketLoss, packetLossPercent, deviceAvailabilityBuckets, formatDeviceAvailability, type DeviceAvailabilityPoint } from '@/components/devices/availability'
-import { DeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
+import { DeviceStatusExplanation, useDeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
+import {
+  FLAP_END_REASON_LABEL, FLAP_KIND_LABEL, episodeSummary, flapChangesInWindow, flapHeldNoun, flapKindOf, flapTooltip,
+  groupFlapTransitions, isFlapping, parseApiTime, pendingDownChip, statusForText, type FlapEpisode, type FlapPhase,
+} from '@/components/devices/deviceStatus'
+import { FlappingTag } from '@/components/devices/FlappingTag'
+import { serverNow } from '@/lib/serverClock'
 import { MonitoringSites } from '@/components/MonitoringSites'
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -26,6 +32,7 @@ import {
   FileText,
   GitBranch,
   HardDrive,
+  Hourglass,
   Info,
   Key,
   Layers,
@@ -55,6 +62,7 @@ import {
   Wrench,
   TrendingDown,
   TrendingUp,
+  Waves,
   Wifi,
   Zap,
   ZapOff,
@@ -294,6 +302,30 @@ function DeviceHeader({
     maintenance: { pill: 'bg-primary/15 text-primary border-primary/30', dot: 'bg-primary', label: 'Maintenance' },
   }[health]
 
+  // The confirmed status, its age, a pending Down and the flap episode. The explanation query is the one the
+  // Reachability widget uses (same key, one request).
+  const { data: explanation } = useDeviceStatusExplanation(device.id, !!device.ping_enabled)
+  const now = serverNow()
+  const statusFor = statusForText(device.status_changed_at, now)
+  const changedAt = parseApiTime(device.status_changed_at)
+  const pillTitle = [
+    `Confirmed status: ${kind.label}${statusFor ? ` ${statusFor}` : ''}${changedAt !== null ? ` (since ${new Date(changedAt).toLocaleString()})` : ''}.`,
+    'A change needs the confirmation checks set under Settings → Monitoring; component and alert states are shown separately.',
+  ].join(' ')
+  // During a maintenance window the machine keeps counting, but the shown status stays Maintenance until it ends.
+  const inMaintenance = device.status === 'maintenance' || explanation?.state?.in_maintenance === true
+  const pendingChip = pendingDownChip(explanation?.state?.pending, inMaintenance ? 'maintenance' : explanation?.state?.hard_status ?? device.status)
+  const flapping = isFlapping(device) || explanation?.flapping?.active === true
+  const flap = explanation?.flapping
+  const flapTitle = flapping ? flapTooltip({
+    kind: flap?.kind ?? device.flap_kind,
+    since: flap?.since ?? device.flapping_since,
+    changes: flap ? flapChangesInWindow(flap) : null,
+    windowMinutes: flap?.window_minutes ?? null,
+    stableMinutes: flap?.stable_minutes ?? null,
+    earliestStopAt: flap?.earliest_stop_at ?? null,
+  }, now) : ''
+
   const identity = [
     { label: 'Management IP', value: device.ip_address || device.managed_ip || 'Not reported' },
     { label: 'Device type', value: device.device_type === 'other' && device.profile_name ? device.profile_name : titleCase((device.device_type || 'other').replaceAll('_', ' ')) },
@@ -311,12 +343,21 @@ function DeviceHeader({
               <div className="mb-1 text-xs font-medium text-muted">{titleCase((device.device_type || 'network device').replaceAll('_', ' '))}</div>
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="break-words text-xl font-semibold tracking-tight md:text-2xl">{device.hostname}</h1>
-                <span title="Last reported reachability; component and alert states are shown separately" className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${kind.pill}`}>
+                <span title={pillTitle} className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${kind.pill}`}>
                   <span className={`h-1.5 w-1.5 rounded-full ${kind.dot}`} />{kind.label}
+                  {statusFor && <span className="font-normal opacity-80">{statusFor}</span>}
                 </span>
+                {flapping && (
+                  <FlappingTag device={{ ...device, flap_kind: flap?.kind ?? device.flap_kind }} title={flapTitle} withKind className="px-2 py-0.5 text-xs" />
+                )}
+                {pendingChip && (
+                  <span title="Not confirmed yet: the status changes to Down only after the configured number of consecutive failed checks" className="inline-flex items-center gap-1 rounded-full border border-dashed border-danger/40 bg-danger/5 px-2 py-0.5 text-xs font-medium text-danger">
+                    <Hourglass className="h-3 w-3" aria-hidden />{pendingChip}
+                  </span>
+                )}
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
-                <span title={device.last_seen ? new Date(device.last_seen).toLocaleString() : undefined}>Last device check: <span className="font-medium text-text">{device.last_seen ? new Date(device.last_seen).toLocaleString() : 'Not reported'}</span></span>
+                <span title={device.last_seen ? `The device last answered a ping check at ${new Date(device.last_seen).toLocaleString()}` : undefined}>Last response: <span className="font-medium text-text">{device.last_seen ? new Date(device.last_seen).toLocaleString() : 'Not reported'}</span></span>
                 <span>{device.ping_enabled ? 'ICMP enabled' : 'ICMP disabled'} · {device.snmp_enabled ? `SNMP v${device.snmp_version}` : 'SNMP disabled'}</span>
                 {device.managed_by_device_id && <Link to={`/devices/${device.managed_by_device_id}`} className="text-primary hover:underline">Managed by {device.managed_by_hostname || 'controller'}</Link>}
               </div>
@@ -781,9 +822,16 @@ function DashboardSection({
         resolved: a.status === 'resolved',
       }))
   }, [deviceAlerts])
+  // Flap episodes of the range: the widget gathers the status changes made during one into a single row.
+  const { data: flapEpisodes } = useQuery<FlapEpisode[]>({
+    queryKey: ['device', deviceId, 'flap-episodes', range.fromISO, range.toISO],
+    queryFn: async () => flapEpisodesOf((await api.get(flapEpisodesUrl(deviceId, range.fromISO, range.toISO))).data),
+    refetchInterval: 30_000,
+    enabled: !!device.ping_enabled,
+  })
   const activityEvents = useMemo(
-    () => buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO),
-    [traps, statusHistory, metrics, range.fromISO, range.toISO],
+    () => buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO, flapEpisodes || []),
+    [traps, statusHistory, metrics, range.fromISO, range.toISO, flapEpisodes],
   )
 
   // The activity card is range-bound; a quiet hour on a healthy device showed
@@ -806,9 +854,15 @@ function DashboardSection({
     enabled: wantsEventFallback,
     staleTime: 60_000,
   })
+  const { data: fbEpisodes } = useQuery<FlapEpisode[]>({
+    queryKey: ['device', deviceId, 'flap-episodes-fallback'],
+    queryFn: async () => flapEpisodesOf((await api.get(flapEpisodesUrl(deviceId, wideFrom, new Date().toISOString()))).data),
+    enabled: wantsEventFallback && !!device.ping_enabled,
+    staleTime: 60_000,
+  })
   const fallbackEvents = useMemo(
-    () => (wantsEventFallback ? buildActivityEvents(fbTraps || [], fbStatus || [], {}, wideFrom, range.toISO) : []),
-    [wantsEventFallback, fbTraps, fbStatus, wideFrom, range.toISO],
+    () => (wantsEventFallback ? buildActivityEvents(fbTraps || [], fbStatus || [], {}, wideFrom, range.toISO, fbEpisodes || []) : []),
+    [wantsEventFallback, fbTraps, fbStatus, wideFrom, range.toISO, fbEpisodes],
   )
 
   const overviewWidgets: DeviceWidget[] = [
@@ -1850,6 +1904,8 @@ function buildActivityEvents(
   metrics: MetricSeriesMap,
   fromISO: string,
   toISO: string,
+  episodes: FlapEpisode[] = [],
+  collapse = true,
 ): ActivityEvent[] {
   const trapEvents = traps.map((t, i): ActivityEvent => ({
     id: `trap-${t.timestamp || i}-${t.trap_oid || t.trap_name || i}`,
@@ -1860,7 +1916,11 @@ function buildActivityEvents(
     subtitle: t.message || t.trap_oid || '',
   }))
 
-  const statusEvents = statusHistory.map((e, i): ActivityEvent => {
+  // A change that led to an episode was notified as usual (its class was not flapping yet); one during it is marked
+  // only as such: whether it was held depends on its rule (notify_while_flapping) and recoveries follow their trigger,
+  // so the hold itself is stated once, per kind, on the episode's start row.
+  const flapLabel = (phase: FlapPhase | null) => phase === 'lead-in' ? 'Led to flapping' : phase === 'during' ? 'During flapping' : ''
+  const transitionEvent = (e: StatusHistoryEvent, i: number, phase: FlapPhase | null): ActivityEvent => {
     const next = (e.new_status || '').toLowerCase()
     const severity =
       next === 'down' ? 'critical'
@@ -1883,14 +1943,60 @@ function buildActivityEvents(
       severity,
       icon: next === 'up' ? CheckCircle2 : next === 'down' ? AlertTriangle : Activity,
       title,
-      subtitle: [previous, e.reason, duration].filter(Boolean).join(' · '),
+      subtitle: [flapLabel(phase), previous, e.reason, duration].filter(Boolean).join(' · '),
     }
+  }
+
+  // Transitions inside a flap episode become one row in the widget (`collapse`); the full log keeps each of them,
+  // marked: the lead-in changes before the episode's start row, the others between its start and stop rows.
+  const nowMs = Date.parse(toISO) || serverNow()
+  const statusEvents = groupFlapTransitions(statusHistory, episodes, nowMs, collapse).flatMap((g, i): ActivityEvent[] => {
+    if (g.kind === 'transition') return [transitionEvent(g.item, i, g.phase)]
+    const summary = episodeSummary(g.episode, g.items, nowMs, (ms) => formatEventTimestamp(new Date(ms).toISOString()))
+    return [{ id: `flap-${g.episode.id || g.episode.started_at}`, timestamp: summary.timestamp, severity: 'warning', icon: Waves, title: summary.title, subtitle: summary.subtitle }]
+  })
+  const boundaryEvents = collapse ? [] : episodes.flatMap((ep): ActivityEvent[] => {
+    const kind = flapKindOf(ep.kind)
+    const rows: ActivityEvent[] = [{
+      id: `flap-start-${ep.id || ep.started_at}`,
+      timestamp: ep.started_at,
+      severity: 'warning',
+      icon: Waves,
+      title: `Flapping started${kind ? ` (${FLAP_KIND_LABEL[kind]})` : ''}`,
+      subtitle: [
+        ep.start_changes != null && ep.window_minutes != null ? `${ep.start_changes} status changes within ${ep.window_minutes} min` : '',
+        `${flapHeldNoun(kind)} held while flapping`,
+      ].filter(Boolean).join(' · '),
+    }]
+    if (ep.ended_at) rows.push({
+      id: `flap-stop-${ep.id || ep.started_at}`,
+      timestamp: ep.ended_at,
+      severity: 'info',
+      icon: Waves,
+      title: 'Flapping stopped',
+      subtitle: [
+        ep.end_reason ? FLAP_END_REASON_LABEL[ep.end_reason] ?? ep.end_reason : '',
+        ep.status_at_end ? `status ${titleCase(ep.status_at_end)}` : '',
+        `${flapHeldNoun(kind)} resumed`,
+      ].filter(Boolean).join(' · '),
+    })
+    return rows
   })
 
   const reboot = inferRebootEvent(metrics, fromISO, toISO)
-  return [...trapEvents, ...statusEvents, ...(reboot ? [reboot] : [])]
+  return [...trapEvents, ...statusEvents, ...boundaryEvents, ...(reboot ? [reboot] : [])]
     .filter((e) => Number.isFinite(Date.parse(e.timestamp)))
     .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+}
+
+/** GET /devices/{id}/flap-episodes answers `{items}`; anything else (an older server) is no episodes. */
+function flapEpisodesOf(body: unknown): FlapEpisode[] {
+  const items = Array.isArray(body) ? body : (body as { items?: unknown } | null)?.items
+  return Array.isArray(items) ? items.filter((e): e is FlapEpisode => !!e && typeof (e as FlapEpisode).started_at === 'string') : []
+}
+
+function flapEpisodesUrl(deviceId: string, fromISO: string, toISO: string): string {
+  return `/devices/${deviceId}/flap-episodes?from=${encodeURIComponent(fromISO)}&to=${encodeURIComponent(toISO)}&limit=50`
 }
 
 function inferStatusDurationSec(event: StatusHistoryEvent, history: StatusHistoryEvent[]): number | null {
@@ -2528,10 +2634,17 @@ function EventsDialog({
     enabled: open,
     refetchInterval: open ? 15_000 : false,
   })
+  const { data: episodes } = useQuery<FlapEpisode[]>({
+    queryKey: ['device', deviceId, 'events-full', 'flap-episodes', fromISO, toISO],
+    queryFn: async () => flapEpisodesOf((await api.get(flapEpisodesUrl(deviceId, fromISO, toISO))).data),
+    enabled: open,
+    refetchInterval: open ? 15_000 : false,
+  })
   const isLoading = trapsLoading || statusLoading || metricsLoading
+  // The full log keeps every status change; those made while flapping are marked, between the start and stop rows.
   const events = useMemo(
-    () => buildActivityEvents(traps || [], statusHistory || [], metrics || {}, fromISO, toISO),
-    [traps, statusHistory, metrics, fromISO, toISO],
+    () => buildActivityEvents(traps || [], statusHistory || [], metrics || {}, fromISO, toISO, episodes || [], false),
+    [traps, statusHistory, metrics, fromISO, toISO, episodes],
   )
   // Build the range chips: include the standard set plus the active range
   // from the page (so a 1M / custom range is selectable here too).

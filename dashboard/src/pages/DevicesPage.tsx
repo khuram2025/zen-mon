@@ -1,4 +1,6 @@
 import { formatDeviceAvailability } from '@/components/devices/availability'
+import { FLAP_HOLD_FLEET_TEXT, isFlapping, type DeviceFlapFields } from '@/components/devices/deviceStatus'
+import { FlappingTag } from '@/components/devices/FlappingTag'
 import {
   ADDED_COLUMNS, buildDevicesCsv, cellText, deviceListFiltersFromParams, deviceListParams, facetMenu, identitySortValue, identityValue, isUnknownValue,
   listCoverage, matchesIdentity, resolveColumnVisibility, selectedValue, without,
@@ -40,6 +42,7 @@ import {
   Tags,
   Trash2,
   Upload,
+  Waves,
   Wifi,
   X,
   XCircle,
@@ -81,7 +84,7 @@ import { tagColor, tagColorMap, useTags } from '@/hooks/useTags'
 // Types
 // -------------------------------------------------------------------------
 
-type Device = {
+type Device = DeviceFlapFields & {
   id: string
   hostname: string
   ip_address: string
@@ -257,6 +260,9 @@ export function DevicesPage() {
   // Global search uses search; keep older q bookmarks working as well.
   const search = params.get('search') ?? params.get('q') ?? ''
   const statusFilter = params.get('status') || ''
+  // Flapping is an overlay, not a status: its own address parameter (flapping=1), combinable with the status chip. The
+  // API applies it exactly (deviceListParams), so it narrows the cards like the other scope filters.
+  const flappingFilter = params.get('flapping') === '1'
   const typeFilter = params.get('type') || ''
   const locationFilter = params.get('loc') || ''
   const groupFilter = params.get('group') || ''
@@ -404,7 +410,9 @@ export function DevicesPage() {
   // -----------------------------------------------------------------------
   // Per-row metrics — CPU/memory come from the live `current-metrics` map
   // (latest SNMP scalar values in the last 15 min). Uptime is seconds since
-  // the most recent `up` transition from `current-uptime`.
+  // the device last started responding (`current-uptime`: its last change
+  // into up or degraded from down, unknown or maintenance), so up <-> degraded
+  // changes do not reset it and degraded devices show it too.
   // -----------------------------------------------------------------------
 
   const enriched = useMemo(() => {
@@ -415,12 +423,14 @@ export function DevicesPage() {
       const snmpNoData =
         !!metricsData && d.snmp_enabled && d.status === 'up' && !m._ts
       const health: HealthKind = snmpNoData ? 'warning' : healthOf(d)
+      // Beside the health, never instead of it: the KPI partition still adds up to the total.
+      const flapping = isFlapping(d)
       const cpu = typeof m.cpu === 'number' ? Math.round(m.cpu) : null
       const mem = typeof m.memory === 'number' ? Math.round(m.memory) : null
       const uptimeSec = uptimeMap[d.id]
       const uptime = formatRealUptime(uptimeSec, health)
       const uptimePct = uptimePctMap[d.id]
-      return { device: d, health, snmpNoData, cpu, mem, uptime, uptimePct }
+      return { device: d, health, snmpNoData, flapping, cpu, mem, uptime, uptimePct }
     })
   }, [devices, uptimeMap, metricsData, metricsMap, uptimePctMap])
 
@@ -432,6 +442,8 @@ export function DevicesPage() {
       if (groupFilter && d.group_id !== groupFilter) return false
       if (locationFilter && (d.location || '') !== locationFilter) return false
       if (managedByFilter && d.managed_by_device_id !== managedByFilter) return false
+      // The API already answered only flapping devices; this keeps the list right against a server without the filter.
+      if (flappingFilter && !isFlapping(d)) return false
       if (tagFilter.length > 0) {
         const devTags = (d.tags || []).map((t) => t.toLowerCase())
         const wanted = tagFilter.map((t) => t.toLowerCase())
@@ -442,7 +454,7 @@ export function DevicesPage() {
       }
       return true
     })
-  }, [enriched, typeFilter, groupFilter, locationFilter, managedByFilter, tagFilter, tagMode])
+  }, [enriched, typeFilter, groupFilter, locationFilter, managedByFilter, flappingFilter, tagFilter, tagMode])
 
   // Vendor / OS version join the other scope filters: the KPIs and charts reflect them too.
   const identityFilters = useMemo<IdentityFilters>(
@@ -520,14 +532,17 @@ export function DevicesPage() {
     }
     const sevenDaysAgo = Date.now() - 7 * 86_400_000
     let newThisWeek = 0
-    scoped.forEach(({ device, health }) => {
+    // Flapping overlays the status partition (a flapping device is also Online, Warning, ...).
+    let flapping = 0
+    scoped.forEach(({ device, health, flapping: flaps }) => {
       counts[health]++
+      if (flaps) flapping++
       byCategory[categoryOf(device.device_type)]++
       const createdMs = device.created_at ? Date.parse(device.created_at) : NaN
       if (!Number.isNaN(createdMs) && createdMs >= sevenDaysAgo) newThisWeek++
     })
     const total = scoped.length
-    return { total, ...counts, byCategory, newThisWeek }
+    return { total, ...counts, byCategory, newThisWeek, flapping }
   }, [scoped])
 
   const availabilityByLocation = useMemo(
@@ -549,17 +564,18 @@ export function DevicesPage() {
   )
 
   const scopeFilterActive =
-    !!(typeFilter || groupFilter || locationFilter || managedByFilter || vendorFilter || osVersionFilter || tagFilter.length > 0)
+    !!(typeFilter || groupFilter || locationFilter || managedByFilter || flappingFilter || vendorFilter || osVersionFilter || tagFilter.length > 0)
 
   // The API applies most filters, so "no rows" no longer means "no devices": with a search or any filter on, the empty
   // state says to change them, and offers discovery only when nothing narrows the list (NF-EP-03).
-  const filtersNarrowTheList = !!search.trim() || !!(typeFilter || groupFilter || locationFilter || statusFilter || managedByFilter || vendorFilter || osVersionFilter || tagFilter.length > 0)
+  const filtersNarrowTheList = !!search.trim() || !!(typeFilter || groupFilter || locationFilter || statusFilter || flappingFilter || managedByFilter || vendorFilter || osVersionFilter || tagFilter.length > 0)
 
   const activeFilterCount =
     (typeFilter ? 1 : 0) +
     (groupFilter ? 1 : 0) +
     (locationFilter ? 1 : 0) +
     (statusFilter ? 1 : 0) +
+    (flappingFilter ? 1 : 0) +
     (managedByFilter ? 1 : 0) +
     (vendorFilter ? 1 : 0) +
     (osVersionFilter ? 1 : 0) +
@@ -673,7 +689,7 @@ export function DevicesPage() {
   }
 
   function clearFilters() {
-    patchParams({ type: null, group: null, loc: null, status: null, tag: null, tagmode: null, managed_by: null, vendor: null, os_version: null })
+    patchParams({ type: null, group: null, loc: null, status: null, flapping: null, tag: null, tagmode: null, managed_by: null, vendor: null, os_version: null })
   }
 
   function exportCsv() {
@@ -813,7 +829,7 @@ export function DevicesPage() {
           <span className="text-muted/70">· cards and charts reflect the filter</span>
         </div>
       )}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
         <KpiCard
           label="Total Devices"
           value={agg.total}
@@ -861,6 +877,15 @@ export function DevicesPage() {
           onClick={() =>
             patchParams({ status: statusFilter === 'critical' ? null : 'critical', page: '1' })
           }
+        />
+        <KpiCard
+          label="Flapping"
+          value={agg.flapping}
+          icon={<Waves className="h-4 w-4" />}
+          color="warning"
+          active={flappingFilter}
+          title={`Devices whose confirmed status keeps changing; while they flap, ${FLAP_HOLD_FLEET_TEXT}. Combines with the status cards.`}
+          onClick={() => patchParams({ flapping: flappingFilter ? null : '1', page: '1' })}
         />
         <KpiCard
           label="New This Week"
@@ -970,6 +995,22 @@ export function DevicesPage() {
                   className="ml-auto text-muted hover:text-text"
                   aria-label="Clear managed-by filter"
                   onClick={() => patchParams({ managed_by: null, page: '1' })}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
+            {flappingFilter && (
+              <div data-flapping-filter="" className="flex items-center gap-2 rounded-md border border-dashed border-warning/40 bg-warning/5 px-3 py-1.5 text-sm">
+                <Waves className="h-3.5 w-3.5 text-warning" aria-hidden />
+                <span className="text-muted">
+                  Showing flapping devices only{statusFilter ? ', with the status filter' : ''}. While they flap, {FLAP_HOLD_FLEET_TEXT}.
+                </span>
+                <button
+                  className="ml-auto text-muted hover:text-text"
+                  aria-label="Clear flapping filter"
+                  onClick={() => patchParams({ flapping: null, page: '1' })}
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -1099,7 +1140,7 @@ export function DevicesPage() {
                       </Td>
                     </Tr>
                   )}
-                  {pageRows.map(({ device: d, health, snmpNoData, cpu, mem, uptime, uptimePct }) => {
+                  {pageRows.map(({ device: d, health, snmpNoData, flapping, cpu, mem, uptime, uptimePct }) => {
                     const isSel = selected.has(d.id)
                     const typeInfo = TYPE_STYLE[normalizeType(d.device_type)] || TYPE_STYLE.other
                     const alertCount = alertCountMap[d.id]
@@ -1238,7 +1279,7 @@ export function DevicesPage() {
                           </Td>
                         )}
                         <Td>
-                          <HealthPill kind={health} snmpNoData={snmpNoData} />
+                          <HealthPill kind={health} snmpNoData={snmpNoData} flapping={flapping ? d : null} />
                         </Td>
                         {prefs.visible.cpu && (
                           <Td>
@@ -1421,7 +1462,7 @@ export function DevicesPage() {
 // =========================================================================
 
 function KpiCard({
-  label, value, trend, icon, color, active, onClick,
+  label, value, trend, icon, color, active, title, onClick,
 }: {
   label: string
   value: number
@@ -1429,6 +1470,7 @@ function KpiCard({
   icon: React.ReactNode
   color: 'primary' | 'success' | 'warning' | 'danger' | 'accent' | 'muted'
   active?: boolean
+  title?: string
   onClick?: () => void
 }) {
   const COLOR_MAP: Record<typeof color, { icon: string; ring: string }> = {
@@ -1448,6 +1490,8 @@ function KpiCard({
     <Wrapper
       type={onClick ? 'button' : undefined}
       onClick={onClick}
+      title={title}
+      aria-pressed={onClick ? !!active : undefined}
       className={`group relative flex flex-col gap-2 overflow-hidden rounded-xl border p-4 text-left transition-all ${
         active ? `${c.ring} ring-1 bg-surface` : 'border-border bg-surface hover:border-border-strong'
       }`}
@@ -1506,7 +1550,11 @@ function MetricCell({ value }: { value: number | null }) {
 // Health pill (Healthy / Warning / Critical / Offline)
 // =========================================================================
 
-function HealthPill({ kind, snmpNoData }: { kind: HealthKind; snmpNoData?: boolean }) {
+/**
+ * The status cell. Flapping is a second line under the confirmed status (never a status of its own), stacked with
+ * "SNMP: no data" so neither hides the other.
+ */
+function HealthPill({ kind, snmpNoData, flapping }: { kind: HealthKind; snmpNoData?: boolean; flapping?: DeviceFlapFields | null }) {
   const map: Record<HealthKind, { label: string; className: string; dot: string }> = {
     healthy:  { label: 'Healthy',  className: 'border-success/30 bg-success/10 text-success', dot: 'bg-success' },
     warning:  { label: 'Warning',  className: 'border-warning/30 bg-warning/10 text-warning', dot: 'bg-warning' },
@@ -1521,14 +1569,19 @@ function HealthPill({ kind, snmpNoData }: { kind: HealthKind; snmpNoData?: boole
       {v.label}
     </span>
   )
-  if (!snmpNoData) return pill
+  if (!snmpNoData && !flapping) return pill
   return (
-    <span
-      className="inline-flex flex-col items-start gap-0.5"
-      title="Reachable by ping, but no SNMP data collected in the last 15 minutes"
-    >
+    <span className="inline-flex flex-col items-start gap-0.5">
       {pill}
-      <span className="whitespace-nowrap text-[10px] text-muted">SNMP: no data</span>
+      {flapping && <FlappingTag device={flapping} />}
+      {snmpNoData && (
+        <span
+          className="whitespace-nowrap text-[10px] text-muted"
+          title="Reachable by ping, but no SNMP data collected in the last 15 minutes"
+        >
+          SNMP: no data
+        </span>
+      )}
     </span>
   )
 }

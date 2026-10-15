@@ -70,6 +70,8 @@ type WizardState = {
   trigger_on: 'any' | 'down' | 'up' | 'degraded'
   min_duration: number
   recovery_alert: boolean
+  /** Device status rules: skip the automatic hold while the device is flapping (e.g. core routers). */
+  notify_while_flapping: boolean
   reset_mode: 'auto' | 'none'
   device_id: string
   group_id: string
@@ -197,6 +199,7 @@ const DEFAULT_STATE: WizardState = {
   trigger_on: 'down',
   min_duration: 0,
   recovery_alert: true,
+  notify_while_flapping: false,
   reset_mode: 'auto',
   device_id: '',
   group_id: '',
@@ -225,6 +228,24 @@ const DEFAULT_STATE: WizardState = {
   recovery_email_body: '',
   recovery_sms_template: '',
   nf: defaultNetflowForm(),
+}
+
+// Metrics a device rule reads from a confirmed status change; only those rules are held while a device flaps.
+const STATUS_EVENT_METRICS = new Set(['ping_status', 'rtt', 'packet_loss'])
+
+/** A device rule evaluated on confirmed status changes (ping status, RTT, packet loss). */
+function isStatusRule(s: WizardState): boolean {
+  return s.source === 'device' && s.conditions.some((c) => STATUS_EVENT_METRICS.has(c.metric))
+}
+
+/**
+ * Whether the automatic flapping hold applies to the rule: a status rule whose trigger is not 'up'. The engine treats
+ * an up-transition as a recovery, and recoveries are never held (they follow their trigger's fate).
+ */
+function flapHoldApplies(s: WizardState): boolean {
+  if (!isStatusRule(s)) return false
+  const trigger = s.conditions[0]?.metric === 'ping_status' ? s.trigger_on : 'any'
+  return trigger !== 'up'
 }
 
 function ruleToState(rule: any): WizardState {
@@ -256,6 +277,7 @@ function ruleToState(rule: any): WizardState {
     trigger_on: rule.trigger_on || 'down',
     min_duration: rule.min_duration ?? rule.duration ?? 0,
     recovery_alert: rule.recovery_alert ?? false,
+    notify_while_flapping: rule.notify_while_flapping === true,
     reset_mode: rule.recovery_alert ? 'auto' : 'none',
     device_id: rule.device_id || '',
     group_id: rule.group_id || '',
@@ -325,6 +347,7 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
       ? s.target.trim() || null
       : null,
     min_duration: isSyslog || isTrap ? 0 : s.min_duration,
+    notify_while_flapping: flapHoldApplies(s) ? s.notify_while_flapping : false,
     severity: s.severity,
     cooldown: s.cooldown,
     max_repeat: s.max_repeat,
@@ -397,6 +420,10 @@ export function AlertRuleWizardDialog({
   const [preview, setPreview] = useState<any>(null)
   const [livePreview, setLivePreview] = useState<any>(null)
   const isRumMetric = s.source === 'apm' && s.conditions[0]?.metric.startsWith('apm_rum_')
+  // A device rule evaluated on confirmed status changes (ping status, RTT, packet loss); unless it triggers on Up, its
+  // alerts are held while the device flaps.
+  const statusRule = isStatusRule(s)
+  const flapHold = flapHoldApplies(s)
   const nfErrors = useMemo(() => (s.source === 'netflow' ? validateNetflowForm(s.nf) : {}), [s.source, s.nf])
 
   // Which default wording this rule's notifications are built from. Service
@@ -1011,12 +1038,23 @@ export function AlertRuleWizardDialog({
                   <NetflowConditionFields form={s.nf} errors={nfErrors} onChange={(nf) => setS((st) => ({ ...st, nf }))} />
                 )}
 
-                {s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && <FormField label="Condition must exist for" hint="Hold time before firing — prevents flapping alerts (SolarWinds 'condition must exist for more than').">
+                {s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && <FormField label="Condition must exist for" hint={statusRule
+                  ? `Counted from the confirmed status change. Device status already needs several checks before it changes (Settings → Monitoring), so a hold here adds to that${flapHold ? '; while a device\'s up/down or latency/loss changes flap, its status alerts for that kind of change are also held automatically until a status lasts the flap stability time' : ''}.`
+                  : "Hold time before firing: the condition must persist this long (SolarWinds 'condition must exist for more than')."}>
                   <div className="flex items-center gap-3">
                     <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
                     <span className="text-sm text-muted">seconds (0 = fire immediately)</span>
                   </div>
                 </FormField>}
+                {flapHold && (
+                  <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border px-3 py-2">
+                    <input type="checkbox" className="mt-0.5 h-3.5 w-3.5 accent-primary" checked={s.notify_while_flapping} onChange={(e) => setS({ ...s, notify_while_flapping: e.target.checked })} />
+                    <span className="text-xs">
+                      <span className="font-medium">Notify immediately even while the device is flapping</span><br />
+                      <span className="text-muted">Skips the automatic flapping hold for this rule, for example for core routers. Flapping started and stopped notices are not affected.</span>
+                    </span>
+                  </label>
+                )}
               </div>
             )}
 
@@ -1382,6 +1420,7 @@ export function AlertRuleWizardDialog({
                 ) : (
                   <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
                 )}
+                {flapHold && <ReviewRow label="While flapping" value={s.notify_while_flapping ? 'Notify immediately' : 'Held until a status lasts the flap stability time'} />}
                 <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution' : s.reset_mode === 'auto' ? 'Auto + recovery notify' : 'No recovery notify'} />
                 <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None (alert only)'} />
                 <ReviewRow

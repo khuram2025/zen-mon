@@ -46,6 +46,8 @@ import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { relativeTime } from '@/lib/utils'
 import { serverNow } from '@/lib/serverClock'
+import { attentionEmptyText, isFlapping, problemSeverity, type DeviceFlapFields } from '@/components/devices/deviceStatus'
+import { FlappingTag } from '@/components/devices/FlappingTag'
 import { useNfQuery } from '@/lib/netflow/api'
 import { apiErrorMessage, panelStatus } from '@/lib/netflow/status'
 import { StaleChip } from '@/components/netflow/QueryPanel'
@@ -83,7 +85,8 @@ import {
 
 /* ── Types (server response shapes) ─────────────────────────────────────── */
 
-type DeviceSummary = { total: number; up: number; down: number; degraded: number; unknown: number; maintenance: number }
+// `flapping` overlays the status counts (a flapping device is also counted under its confirmed status).
+type DeviceSummary = { total: number; up: number; down: number; degraded: number; unknown: number; maintenance: number; flapping?: number }
 
 type Device = {
   id: string
@@ -91,7 +94,7 @@ type Device = {
   ip_address: string
   device_type: string
   status: 'up' | 'down' | 'degraded' | 'unknown' | 'maintenance'
-}
+} & DeviceFlapFields
 
 type AlertRow = {
   id: string
@@ -338,7 +341,7 @@ export function NetworkSecurityDashboard() {
     return (devices || [])
       .map((d) => {
         const a = ac[d.id]
-        const sev = d.status === 'down' ? 3 : d.status === 'degraded' ? 2 : (a?.active || 0) > 0 ? 1 : 0
+        const sev = problemSeverity(d, a?.active || 0)
         return { d, alerts: a?.active || 0, critical: a?.critical || 0, sev }
       })
       .filter((r) => r.sev > 0)
@@ -688,12 +691,16 @@ export function NetworkSecurityDashboard() {
             </div>
             <div className="mt-3 border-t border-border pt-2">
               <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Needs attention</div>
-              {problemDevices.length === 0 && <Empty text="All devices healthy 🎉" />}
+              {problemDevices.length === 0 && ((summary?.flapping ?? 0) > 0
+                // Flapping devices beyond the loaded rows still count in the summary: never the all-healthy message then.
+                ? <Link to="/devices?flapping=1" className="block py-3 text-center text-xs font-medium text-warning hover:underline">{attentionEmptyText(summary?.flapping)}</Link>
+                : <Empty text={attentionEmptyText(summary?.flapping)} />)}
               <div className="space-y-1">
                 {problemDevices.map(({ d, alerts, critical }) => (
                   <Link key={d.id} to={`/devices/${d.id}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-xs transition hover:bg-surface2/60">
                     <span className={`h-2 w-2 shrink-0 rounded-full ${d.status === 'down' ? 'bg-danger' : d.status === 'degraded' ? 'bg-warning' : critical > 0 ? 'bg-danger' : 'bg-warning'}`} />
                     <span className="min-w-0 flex-1 truncate font-medium text-text">{d.hostname}</span>
+                    {isFlapping(d) && <FlappingTag device={d} />}
                     {alerts > 0 && <span className={`rounded px-1 font-mono text-[10px] font-bold ${critical > 0 ? 'bg-danger/15 text-danger-fg' : 'bg-warning/15 text-warning-fg'}`}>{alerts}</span>}
                     <span className="shrink-0 text-[10px] capitalize text-muted">{d.status}</span>
                   </Link>

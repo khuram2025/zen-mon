@@ -213,6 +213,9 @@ class AlertRuleCreate(BaseModel):
     cooldown: int = Field(default=300, ge=0)
     min_duration: int = Field(default=0, ge=0)
     max_repeat: int = Field(default=0, ge=0)
+    # Device status rules: notify at once even while the device is flapping
+    # (by default a flapping device's triggers wait for its status to settle).
+    notify_while_flapping: bool = False
 
     # SLA escalation tiers (see EscalationLevel). None/empty = no escalation.
     escalation_levels: Optional[list[EscalationLevel]] = None
@@ -264,6 +267,7 @@ class AlertRuleUpdate(BaseModel):
     cooldown: Optional[int] = Field(None, ge=0)
     min_duration: Optional[int] = Field(None, ge=0)
     max_repeat: Optional[int] = Field(None, ge=0)
+    notify_while_flapping: Optional[bool] = None
 
     escalation_levels: Optional[list[EscalationLevel]] = None
 
@@ -346,7 +350,7 @@ _RULE_COLUMNS = (
     "device_id, group_id, service_check_id, service_check_group_id, "
     "severity, notify_channels, cooldown, "
     "device_type, location, scope_tag, trigger_on, recovery_alert, "
-    "min_duration, max_repeat, escalation_levels, "
+    "min_duration, max_repeat, notify_while_flapping, escalation_levels, "
     "schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -386,6 +390,7 @@ def _row_to_dict(row) -> dict:
         "recovery_alert": row.recovery_alert,
         "min_duration": row.min_duration,
         "max_repeat": row.max_repeat,
+        "notify_while_flapping": bool(getattr(row, "notify_while_flapping", False)),
         "escalation_levels": getattr(row, "escalation_levels", None) or [],
         "schedule_start": schedule_start,
         "schedule_end": schedule_end,
@@ -607,6 +612,7 @@ async def create_alert_rule(
         "recovery_alert": False if metric == 'syslog' else data.recovery_alert,
         "min_duration": 0 if metric == 'syslog' else data.min_duration,
         "max_repeat": data.max_repeat,
+        "notify_while_flapping": data.notify_while_flapping,
         "escalation_levels": json.dumps(_validated_escalation(data.escalation_levels))
                              if data.escalation_levels else None,
         "schedule_start": data.schedule_start,
@@ -638,7 +644,7 @@ async def create_alert_rule(
             "device_id, group_id, service_check_id, service_check_group_id, "
             "severity, notify_channels, cooldown, "
             "device_type, location, scope_tag, trigger_on, recovery_alert, "
-            "min_duration, max_repeat, escalation_levels, "
+            "min_duration, max_repeat, notify_while_flapping, escalation_levels, "
             "schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
             "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -650,7 +656,7 @@ async def create_alert_rule(
             ":device_id, :group_id, :service_check_id, :service_check_group_id, "
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
             ":device_type, :location, :scope_tag, :trigger_on, :recovery_alert, "
-            ":min_duration, :max_repeat, CAST(:escalation_levels AS jsonb), "
+            ":min_duration, :max_repeat, :notify_while_flapping, CAST(:escalation_levels AS jsonb), "
             "CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
@@ -697,6 +703,9 @@ async def update_alert_rule(
     user: User = Depends(require_rule_manager),
 ):
     fields = data.model_dump(exclude_unset=True)
+    # NOT NULL column: an explicit null means "leave it as it is".
+    if fields.get("notify_while_flapping", False) is None:
+        del fields["notify_while_flapping"]
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
     before = await rs.rule_row(db, rule_id)

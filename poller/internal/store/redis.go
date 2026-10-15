@@ -60,19 +60,27 @@ func (s *RedisStore) PublishMetric(ctx context.Context, result *pinger.PingResul
 	return s.client.Publish(ctx, ChannelMetrics, data).Err()
 }
 
-// PublishStatusChange publishes a status change event.
+// PublishStatusChange publishes a confirmed device status change.
 func (s *RedisStore) PublishStatusChange(ctx context.Context, sc *pinger.StatusChange) error {
-	data, err := json.Marshal(map[string]interface{}{
-		"device_id":  sc.DeviceID.String(),
-		"old_status": sc.OldStatus,
-		"new_status": sc.NewStatus,
-		"reason":     sc.Reason,
-		"timestamp":  sc.Timestamp,
-	})
+	data, err := json.Marshal(statusChangePayload(sc))
 	if err != nil {
 		return err
 	}
 	return s.client.Publish(ctx, ChannelStatusChange, data).Err()
+}
+
+// statusChangePayload is the zenplus:status_change message (the remote-sensor
+// writer publishes the same keys). is_flapping is the device flag after the
+// change; older consumers ignore it.
+func statusChangePayload(sc *pinger.StatusChange) map[string]any {
+	return map[string]any{
+		"device_id":   sc.DeviceID.String(),
+		"old_status":  sc.OldStatus,
+		"new_status":  sc.NewStatus,
+		"reason":      sc.Reason,
+		"timestamp":   sc.Timestamp,
+		"is_flapping": sc.IsFlapping,
+	}
 }
 
 // PublishServiceMetric publishes a service check result.

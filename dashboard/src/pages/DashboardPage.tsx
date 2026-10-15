@@ -47,6 +47,8 @@ import { Badge } from '@/components/ui/Badge'
 import { relativeTime } from '@/lib/utils'
 import { useCan } from '@/stores/auth'
 import { serverNow } from '@/lib/serverClock'
+import { attentionEmptyText, isFlapping, problemSeverity, type DeviceFlapFields } from '@/components/devices/deviceStatus'
+import { FlappingTag } from '@/components/devices/FlappingTag'
 import { buildNetflowLink, hostPath } from '@/lib/netflow/links'
 import { RingGauge } from '@/components/dashboard/RingGauge'
 import { Sparkline } from '@/components/dashboard/Sparkline'
@@ -54,7 +56,8 @@ import { fmtMs, fmtPct } from '@/components/apm/shared'
 
 /* ── Types ──────────────────────────────────────────────────────────────── */
 
-type DeviceSummary = { total: number; up: number; down: number; degraded: number; unknown: number; maintenance: number }
+// `flapping` overlays the status counts (a flapping device is also counted under its confirmed status).
+type DeviceSummary = { total: number; up: number; down: number; degraded: number; unknown: number; maintenance: number; flapping?: number }
 
 type Device = {
   id: string
@@ -65,7 +68,7 @@ type Device = {
   group_id: string | null
   status: 'up' | 'down' | 'degraded' | 'unknown' | 'maintenance'
   last_rtt_ms: number | null
-}
+} & DeviceFlapFields
 
 type AlertRow = {
   id: string
@@ -291,13 +294,13 @@ export function DashboardPage() {
     return (nfSeries || []).map((p) => ({ t: fmt(new Date(p.ts)), mbps: p.bps / 1_000_000, flows: p.flows }))
   }, [nfSeries, range.minutes])
 
-  // Problem devices: down/degraded first, then most-alerting (real alert counts).
+  // Problem devices: down, then degraded or flapping, then most-alerting (real alert counts).
   const problemDevices = useMemo(() => {
     const ac = alertCounts?.devices || {}
     const rows = (devices || [])
       .map((d) => {
         const a = ac[d.id]
-        const sev = d.status === 'down' ? 3 : d.status === 'degraded' ? 2 : (a?.active || 0) > 0 ? 1 : 0
+        const sev = problemSeverity(d, a?.active || 0)
         return { d, alerts: a?.active || 0, critical: a?.critical || 0, sev }
       })
       .filter((r) => r.sev > 0)
@@ -557,13 +560,17 @@ export function DashboardPage() {
           <div className="mt-3 border-t border-border px-4 pb-3 pt-2">
             <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Needs attention</div>
             {problemDevices.length === 0 && (
-              <div className="py-3 text-center text-xs text-muted">All devices healthy 🎉</div>
+              // Flapping devices beyond the loaded rows still count in the summary: never the all-healthy message then.
+              (summary?.flapping ?? 0) > 0
+                ? <Link to="/devices?flapping=1" className="block py-3 text-center text-xs font-medium text-warning hover:underline">{attentionEmptyText(summary?.flapping)}</Link>
+                : <div className="py-3 text-center text-xs text-muted">{attentionEmptyText(summary?.flapping)}</div>
             )}
             <div className="space-y-1">
               {problemDevices.map(({ d, alerts, critical }) => (
                 <Link key={d.id} to={`/devices/${d.id}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-xs transition hover:bg-surface2/60">
                   <span className={`h-2 w-2 shrink-0 rounded-full ${d.status === 'down' ? 'bg-danger' : d.status === 'degraded' ? 'bg-warning' : critical > 0 ? 'bg-danger' : 'bg-warning'}`} />
                   <span className="min-w-0 flex-1 truncate font-medium text-text">{d.hostname}</span>
+                  {isFlapping(d) && <FlappingTag device={d} />}
                   {alerts > 0 && <span className={`rounded px-1 font-mono text-[10px] font-bold ${critical > 0 ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning'}`}>{alerts}</span>}
                   <span className="shrink-0 text-[10px] capitalize text-muted">{d.status}</span>
                 </Link>

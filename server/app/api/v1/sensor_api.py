@@ -42,9 +42,11 @@ import json
 import logging
 import os
 import re
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
@@ -59,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db, get_clickhouse_client
+from app.services import device_status_machine as dsm
 from app.services.sensor_health_service import create_sensor_alert, resolve_sensor_alert
 from app.services.sensor_rate_limit import enforce_sensor_quota
 from app.services.audit_service import write_audit_log
@@ -959,12 +962,88 @@ async def _insert_clickhouse(table: str, rows: list[list[Any]], column_names: li
     )
 
 
+STATUS_CHANGE_CHANNEL = "zenplus:status_change"
+_STATUS_REDIS_RETRY_S = 30.0
+_status_redis = None
+_status_redis_down_until = 0.0
+
+
+def _stream_timestamp(value: Any) -> Any:
+    return dsm.format_ts(value) if isinstance(value, datetime) else value
+
+
+async def _publish_status_change(item: Mapping[str, Any]) -> None:
+    """Live status stream (SSE /realtime/status), the remote-sensor twin of the
+    central poller's PublishStatusChange.
+
+    Best effort, as in the poller: the stream is a live view, never a record.
+    After a Redis failure publishing pauses for a while, so an unavailable Redis
+    costs the outbox one short timeout, not one per transition.
+    """
+    global _status_redis, _status_redis_down_until
+    if time.monotonic() < _status_redis_down_until:
+        return
+    message = json.dumps({
+        "device_id": str(item["device_id"]),
+        "old_status": item["old_status"],
+        "new_status": item["new_status"],
+        "reason": item.get("reason") or "",
+        "timestamp": _stream_timestamp(item.get("timestamp")),
+        "is_flapping": bool(item.get("is_flapping", False)),
+    }, default=str)
+    try:
+        if _status_redis is None:
+            import redis.asyncio as redis
+            _status_redis = redis.from_url(
+                get_settings().REDIS_URL,
+                socket_connect_timeout=0.5,
+                socket_timeout=0.5,
+            )
+        await _status_redis.publish(STATUS_CHANGE_CHANNEL, message)
+    except Exception as exc:
+        _status_redis_down_until = time.monotonic() + _STATUS_REDIS_RETRY_S
+        logger.warning("remote-sensor status change not published to Redis: %s", exc)
+
+
+def _device_outbox_payload(transitions: list[dict[str, Any]]) -> dict[str, Any]:
+    """One outbox 'device' row per device per batch.
+
+    The top-level fields are the LAST transition (what a dispatcher that predates
+    multi-transition rows delivers). A batch that confirmed more than one change
+    also lists every transition in order with a ``next_index`` delivery cursor.
+    """
+    if len(transitions) == 1:
+        return transitions[0]
+    return {**transitions[-1], "transitions": transitions, "next_index": 0}
+
+
+def _device_outbox_events(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    """The transitions a 'device' outbox payload carries and the index to deliver
+    next. A single-transition payload (every row before multi-transition batches
+    too) is its own only transition."""
+    listed = payload.get("transitions")
+    if isinstance(listed, list) and listed:
+        events = [dict(item) for item in listed]
+    else:
+        events = [{k: v for k, v in payload.items() if k not in ("transitions", "next_index")}]
+    try:
+        index = int(payload.get("next_index") or 0)
+    except (TypeError, ValueError):
+        index = 0
+    return events, max(0, min(index, len(events)))
+
+
 async def _dispatch_device_transitions(
     transitions: list[dict[str, Any]],
     db: AsyncSession,
     *,
     raise_on_error: bool = False,
 ) -> None:
+    """Side effects of confirmed remote-sensor transitions, in the central
+    poller's order: ClickHouse device_status_log, alert evaluation (not for
+    maintenance entry) with the transition's flap flags, then the live Redis
+    stream (best effort; a transition whose evaluation failed is streamed when
+    its retry succeeds)."""
     if not transitions:
         return
     try:
@@ -986,30 +1065,493 @@ async def _dispatch_device_transitions(
 
     from app.api.v1.alert_engine import StatusChangeEvent, evaluate_status_change
     for item in transitions:
-        if item["new_status"] == "maintenance":
-            continue
+        if item["new_status"] != "maintenance":
+            try:
+                await evaluate_status_change(
+                    StatusChangeEvent(
+                        device_id=item["device_id"],
+                        hostname=item["hostname"],
+                        ip_address=item["ip_address"],
+                        old_status=item["old_status"],
+                        new_status=item["new_status"],
+                        device_type=item.get("device_type"),
+                        group_id=item.get("group_id"),
+                        location=item.get("location"),
+                        rtt_ms=item["rtt_ms"],
+                        packet_loss=item["packet_loss"],
+                        flapping=bool(item.get("flapping", False)),
+                        is_flapping=bool(item.get("is_flapping", False)),
+                    ),
+                    db,
+                )
+            except Exception:
+                logger.exception(
+                    "remote-sensor alert evaluation failed for device %s", item["device_id"]
+                )
+                if raise_on_error:
+                    raise
+        await _publish_status_change(item)
+
+
+# ── Remote-sensor device status ─────────────────────────────────────
+#
+# Devices this sensor OWNS (device_polling_owner) run the shared state machine
+# (app.services.device_status_machine, the twin of the poller's
+# internal/devicestatus): every fresh sample is one check, in timestamp order,
+# and devices.status only takes confirmed (hard) changes. Samples from other
+# vantages only feed ping_metrics. Lock order, as in every writer:
+# devices -> device_status_state -> device_flap_episodes. Devices are locked
+# FOR NO KEY UPDATE: it serializes the status writers as strongly, but lets the
+# KEY SHARE of a foreign-key check pass. The flap notice sweep inserts its
+# notice row (alerts.device_id) while it holds its claimed episode, so FOR
+# UPDATE here would deadlock it against this writer waiting for that episode.
+#
+# Maintenance is decided per sample (as the central poller decides it per
+# check), from the in-scope windows that overlap the freshness range
+# [NOW() - max(2 x interval, 60 s), NOW()]: a backlog that crosses a window's
+# end must not exit the overlay with failures taken inside the window.
+
+_LOCK_OWNED_DEVICES = text("""
+    SELECT d.id::text AS device_id, d.status, d.status_changed_at,
+           COALESCE(d.ping_interval, 60) AS ping_interval,
+           d.last_seen, d.is_flapping, d.flapping_since, d.flap_kind,
+           d.hostname, host(d.ip_address)::text AS ip_address,
+           d.device_type, d.group_id::text AS group_id, d.location,
+           NOW() AS db_now,
+           COALESCE((
+               SELECT jsonb_agg(jsonb_build_array(m.starts_at, m.ends_at) ORDER BY m.starts_at, m.ends_at)
+                 FROM device_maintenance m
+                WHERE m.starts_at <= NOW()
+                  AND m.ends_at >= NOW() - make_interval(
+                          secs => GREATEST(COALESCE(d.ping_interval, 60) * 2, 60))
+                  AND (   (m.scope_type = 'device' AND m.scope_device_id = d.id)
+                       OR (m.scope_type = 'group' AND m.scope_group_id = d.group_id)
+                       OR (m.scope_type = 'tag' AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+                       OR m.scope_type = 'all')
+           ), '[]'::jsonb) AS maintenance_windows
+      FROM devices d
+     WHERE d.id = ANY(:ids)
+       -- device_polling_owner ignores ping_enabled: a batch still in flight
+       -- when ping was switched off must not recreate the state row or flap
+       -- flags that the device update just released.
+       AND COALESCE(d.ping_enabled, false)
+       AND EXISTS (
+           SELECT 1 FROM device_polling_owner owner
+            WHERE owner.device_id = d.id
+              AND owner.owner_kind = 'sensor'
+              AND owner.sensor_id = :sid
+       )
+     ORDER BY d.id
+       FOR NO KEY UPDATE OF d
+""")
+
+_READ_STATE_ROWS = text("""
+    SELECT device_id::text AS device_id, owner, hard_status, in_maintenance, status_since,
+           fail_streak, ok_streak, clear_streak, window_bits, window_len,
+           reach_changes, perf_changes, reach_flapping, perf_flapping,
+           flapping_since, last_sample_at
+      FROM device_status_state
+     WHERE device_id = ANY(:ids)
+""")
+
+# No row lock: the devices row lock taken above serializes every writer of a device.
+_READ_OPEN_EPISODES = text("""
+    SELECT id::text AS id, device_id::text AS device_id, kind, started_at
+      FROM device_flap_episodes
+     WHERE device_id = ANY(:ids) AND ended_at IS NULL
+""")
+
+_WRITE_DEVICES = text("""
+    UPDATE devices d
+       SET status = r.status,
+           last_seen = COALESCE(r.last_seen, d.last_seen),
+           last_rtt_ms = COALESCE(r.last_rtt_ms, d.last_rtt_ms),
+           is_flapping = r.is_flapping,
+           flapping_since = r.flapping_since,
+           flap_kind = r.flap_kind,
+           status_changed_at = COALESCE(r.status_changed_at, d.status_changed_at),
+           updated_at = NOW()
+      FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(
+               id uuid, status text, last_seen timestamptz, last_rtt_ms double precision,
+               is_flapping boolean, flapping_since timestamptz, flap_kind text,
+               status_changed_at timestamptz)
+     WHERE d.id = r.id
+""")
+
+_WRITE_STATES = text("""
+    INSERT INTO device_status_state AS s (
+        device_id, owner, hard_status, in_maintenance, status_since,
+        fail_streak, ok_streak, clear_streak, window_bits, window_len,
+        reach_changes, perf_changes, reach_flapping, perf_flapping,
+        flapping_since, last_sample_at, updated_at
+    )
+    SELECT r.device_id, r.owner, r.hard_status, r.in_maintenance, r.status_since,
+           r.fail_streak, r.ok_streak, r.clear_streak, r.window_bits, r.window_len,
+           r.reach_changes, r.perf_changes, r.reach_flapping, r.perf_flapping,
+           r.flapping_since, r.last_sample_at, NOW()
+      FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(
+               device_id uuid, owner text, hard_status text, in_maintenance boolean,
+               status_since timestamptz, fail_streak smallint, ok_streak smallint,
+               clear_streak smallint, window_bits integer, window_len smallint,
+               reach_changes timestamptz[], perf_changes timestamptz[],
+               reach_flapping boolean, perf_flapping boolean,
+               flapping_since timestamptz, last_sample_at timestamptz)
+    ON CONFLICT (device_id) DO UPDATE SET
+        owner = EXCLUDED.owner, hard_status = EXCLUDED.hard_status,
+        in_maintenance = EXCLUDED.in_maintenance, status_since = EXCLUDED.status_since,
+        fail_streak = EXCLUDED.fail_streak, ok_streak = EXCLUDED.ok_streak,
+        clear_streak = EXCLUDED.clear_streak, window_bits = EXCLUDED.window_bits,
+        window_len = EXCLUDED.window_len, reach_changes = EXCLUDED.reach_changes,
+        perf_changes = EXCLUDED.perf_changes, reach_flapping = EXCLUDED.reach_flapping,
+        perf_flapping = EXCLUDED.perf_flapping, flapping_since = EXCLUDED.flapping_since,
+        last_sample_at = EXCLUDED.last_sample_at, updated_at = EXCLUDED.updated_at
+""")
+
+# The stored open episode: widen its kind, or close it.
+_WRITE_EPISODE_UPDATES = text("""
+    UPDATE device_flap_episodes e
+       SET kind = r.kind,
+           ended_at = CASE WHEN r.ended_at IS NULL THEN NULL
+                           ELSE GREATEST(e.started_at, r.ended_at) END,
+           end_reason = r.end_reason,
+           status_at_end = r.status_at_end
+      FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(
+               id uuid, kind text, ended_at timestamptz, end_reason text, status_at_end text)
+     WHERE e.id = r.id AND e.ended_at IS NULL
+""")
+
+# Episodes this batch started. Closed ones are history; an open one converges
+# on the one-open-episode index if it already exists.
+_WRITE_EPISODE_INSERTS = text("""
+    INSERT INTO device_flap_episodes (
+        device_id, started_at, ended_at, kind, start_changes, window_minutes,
+        status_at_start, status_at_end, end_reason
+    )
+    SELECT r.device_id, r.started_at, r.ended_at, r.kind, r.start_changes, r.window_minutes,
+           r.status_at_start, r.status_at_end, r.end_reason
+      FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(
+               device_id uuid, started_at timestamptz, ended_at timestamptz, kind text,
+               start_changes integer, window_minutes integer, status_at_start text,
+               status_at_end text, end_reason text)
+    ON CONFLICT (device_id) WHERE ended_at IS NULL DO NOTHING
+""")
+
+
+@dataclass
+class _DeviceStatusPlan:
+    """Everything one owned device's checks of a batch write, built without I/O."""
+    device_id: str
+    device: dict[str, Any]
+    state: Optional[dict[str, Any]]
+    episode_update: Optional[dict[str, Any]]
+    episode_inserts: list[dict[str, Any]] = field(default_factory=list)
+    transitions: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _kind_union(current: Optional[str], kind: Optional[str]) -> Optional[str]:
+    if not current:
+        return kind
+    if not kind or kind == current:
+        return current
+    return "both"
+
+
+def _flap_change_count(state: dsm.State) -> int:
+    """An episode's start_changes: the confirmed changes of both classes inside
+    the flap window when it opens (what the central writer records)."""
+    return len(state.reach_changes) + len(state.perf_changes)
+
+
+def _close_episode(episode: dict[str, Any], ts: datetime, reason: str, status: str) -> None:
+    episode.update(ended_at=ts, end_reason=reason, status_at_end=status)
+
+
+def _maintenance_windows(info: Mapping[str, Any]) -> list[tuple[datetime, datetime]]:
+    """The locked device's in-scope maintenance windows ([starts_at, ends_at])."""
+    raw = info.get("maintenance_windows") or []
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return [(dsm.parse_ts(start), dsm.parse_ts(end)) for start, end in raw]
+
+
+def _sample_in_maintenance(
+    windows: list[tuple[datetime, datetime]], ts: datetime, db_now: datetime
+) -> bool:
+    """Whether a window covered the device when the sample was taken.
+
+    The sample time is clamped to the server clock: a sensor clock running
+    ahead (up to SENSOR_FUTURE_SKEW) must not leave the overlay while the
+    window is still active, because the dispatcher would then suppress that
+    exit (the window is active when it delivers) and a device that stays down
+    after the window would never page. A clock running behind only delays the
+    exit."""
+    at = min(ts, db_now)
+    return any(start <= at <= end for start, end in windows)
+
+
+def _plan_device_status(
+    info: Mapping[str, Any],
+    row_state: Optional[dsm.State],
+    open_episode: Optional[Mapping[str, Any]],
+    samples: list[dict[str, Any]],
+    policy: dsm.Policy,
+    owner: str,
+    sensor_name: str,
+) -> _DeviceStatusPlan:
+    """Step one owned device's fresh samples (timestamp order) through the machine.
+
+    Reseeds silently first when the stored state is missing, belongs to another
+    owner, or another writer changed devices.status; that closes a stored open
+    episode with the reseed reason. Episodes follow the flap events of every
+    check (same rules as the central writer: open on start, kind = union over the
+    episode, close with the end reason and the status shown then).
+    status_changed_at is the time of the last accepted check that changed the
+    displayed status, with or without an event (the central writer's rule).
+    Maintenance is decided per sample, at the sample time clamped to the server
+    clock. last_seen and last_rtt_ms follow the central writer check by check:
+    last_seen moves only for a reply; last_rtt_ms takes a reply's RTT, 0 once
+    Down is confirmed, and otherwise keeps the stored value, so a lost check
+    never shows an Up device at 0 ms or an outage as a recent response.
+    """
+    device_id = info["device_id"]
+    devices_status = info["status"]
+    reseed = dsm.reseed_reason(row_state, owner, devices_status)
+    state = (dsm.seed_state(devices_status, info["status_changed_at"], owner)
+             if reseed else row_state)
+    first_ts, last_ts = samples[0]["ts"], samples[-1]["ts"]
+    windows = _maintenance_windows(info)
+
+    stored_episode = None
+    if open_episode is not None:
+        stored_episode = {"id": open_episode["id"], "kind": open_episode["kind"],
+                          "ended_at": None, "end_reason": None, "status_at_end": None}
+        if reseed:
+            _close_episode(stored_episode, first_ts, reseed, devices_status)
+    stored_kind = stored_episode["kind"] if stored_episode else None
+    current = stored_episode if stored_episode and not reseed else None
+    inserts: list[dict[str, Any]] = []
+    transitions: list[dict[str, Any]] = []
+    shown, changed_at = devices_status, None
+    accepted = False
+    reply_at: Optional[datetime] = None     # the newest accepted reply
+    rtt_ms: Optional[float] = None          # None keeps devices.last_rtt_ms
+    rtt_from_reply = False
+
+    for sample in samples:
+        responding = bool(sample["is_up"])
+        check = dsm.Check(
+            ts=sample["ts"],
+            responding=responding,
+            rtt_ms=sample["rtt"] if responding else None,
+            loss=sample["packet_loss"],
+            interval_s=int(info["ping_interval"]),
+            maintenance=_sample_in_maintenance(windows, sample["ts"], info["db_now"]),
+            ordered=False,
+            source="sensor",
+        )
+        previous = state
+        state, events = dsm.step(state, check, policy)
+        if state.last_sample_at == previous.last_sample_at:
+            continue  # a duplicate, or older than the state: the machine ignored it
+        accepted = True
+        # The central writer's last_seen / lastRTT rule, applied per check.
+        if responding:
+            reply_at, rtt_ms, rtt_from_reply = check.ts, sample["rtt"], True
+        elif state.hard_status == "down":
+            rtt_ms, rtt_from_reply = 0.0, False
+        if state.displayed != shown:
+            shown, changed_at = state.displayed, check.ts
+        for event in events:
+            if event.type == "transition":
+                transitions.append({
+                    "device_id": device_id,
+                    "hostname": info["hostname"],
+                    "ip_address": info["ip_address"],
+                    "device_type": info["device_type"],
+                    "group_id": info["group_id"],
+                    "location": info["location"],
+                    "old_status": event.old,
+                    "new_status": event.new,
+                    "timestamp": check.ts,
+                    "rtt_ms": sample["rtt"],
+                    "packet_loss": sample["packet_loss"],
+                    "reason": f"remote sensor {sensor_name}: {event.reason}",
+                    "flapping": event.flapping,
+                    "is_flapping": state.is_flapping,
+                })
+            elif event.type == "flap_start":
+                if current is not None:
+                    # An open episode the state did not know about.
+                    _close_episode(current, check.ts, "reseed", state.displayed)
+                current = {
+                    "device_id": device_id, "started_at": check.ts, "ended_at": None,
+                    "kind": event.kind, "start_changes": _flap_change_count(state),
+                    "window_minutes": policy.flap_window_minutes,
+                    "status_at_start": state.displayed, "status_at_end": None, "end_reason": None,
+                }
+                inserts.append(current)
+            elif event.type == "flap_stop" and current is not None:
+                _close_episode(current, check.ts, event.end_reason, state.displayed)
+                current = None
+        if current is not None and state.is_flapping:
+            current["kind"] = _kind_union(current["kind"], state.flap_kind)
+
+    if accepted:
+        # Converge with the state: a flapping device has exactly one open episode
+        # (repairs an episode write lost earlier), a steady one none.
+        if state.is_flapping and current is None:
+            inserts.append({
+                "device_id": device_id, "started_at": state.flapping_since or last_ts, "ended_at": None,
+                "kind": state.flap_kind, "start_changes": _flap_change_count(state),
+                "window_minutes": policy.flap_window_minutes,
+                "status_at_start": state.displayed, "status_at_end": None, "end_reason": None,
+            })
+        elif not state.is_flapping and current is not None and current["ended_at"] is None:
+            _close_episode(current, last_ts, "reseed", state.displayed)
+        status_fields = {
+            "status": state.displayed, "is_flapping": state.is_flapping,
+            "flapping_since": dsm.format_ts(state.flapping_since), "flap_kind": state.flap_kind,
+        }
+    else:
+        # Every sample was a duplicate or older than the state: nothing to re-derive.
+        status_fields = {
+            "status": devices_status, "is_flapping": bool(info["is_flapping"]),
+            "flapping_since": dsm.format_ts(info["flapping_since"]), "flap_kind": info["flap_kind"],
+        }
+    # A reply older than the stored last_seen (another writer's, e.g. before an
+    # owner handoff) moves neither last_seen nor the RTT measured with it.
+    newer_reply = reply_at is not None and (info["last_seen"] is None or info["last_seen"] <= reply_at)
+    if rtt_from_reply and not newer_reply:
+        rtt_ms = None
+    device_row = {
+        "id": device_id,
+        **status_fields,
+        "last_seen": dsm.format_ts(reply_at) if newer_reply else None,
+        "last_rtt_ms": rtt_ms,
+        "status_changed_at": dsm.format_ts(changed_at),
+    }
+
+    state_row = None
+    if reseed is not None or row_state is None or state != row_state:
+        state_row = {"device_id": device_id, **dsm.state_to_json(state)}
+
+    episode_update = None
+    if stored_episode is not None and (
+        stored_episode["ended_at"] is not None or stored_episode["kind"] != stored_kind
+    ):
+        episode_update = {**stored_episode, "ended_at": dsm.format_ts(stored_episode["ended_at"])}
+    episode_inserts = [
+        {**row, "started_at": dsm.format_ts(row["started_at"]), "ended_at": dsm.format_ts(row["ended_at"])}
+        for row in inserts
+    ]
+    return _DeviceStatusPlan(device_id, device_row, state_row, episode_update, episode_inserts, transitions)
+
+
+async def _write_device_status(plans: list[_DeviceStatusPlan], db: AsyncSession) -> None:
+    """One statement per table for the whole batch, in the global lock order."""
+    def rows(values: list[dict[str, Any]]) -> dict[str, str]:
+        return {"rows": json.dumps(values, default=str)}
+
+    await db.execute(_WRITE_DEVICES, rows([plan.device for plan in plans]))
+    states = [plan.state for plan in plans if plan.state is not None]
+    if states:
+        await db.execute(_WRITE_STATES, rows(states))
+    updates = [plan.episode_update for plan in plans if plan.episode_update is not None]
+    if updates:
+        await db.execute(_WRITE_EPISODE_UPDATES, rows(updates))
+    inserts = [row for plan in plans for row in plan.episode_inserts]
+    if inserts:
+        await db.execute(_WRITE_EPISODE_INSERTS, rows(inserts))
+
+
+async def _persist_device_status(
+    plans: list[_DeviceStatusPlan], db: AsyncSession
+) -> list[_DeviceStatusPlan]:
+    """Write the batch inside a savepoint. If that fails, retry device by device
+    (one savepoint each), so one bad device cannot poison the batch transaction:
+    the others, the ledger and the outbox still commit. Returns what was written."""
+    if not plans:
+        return []
+    try:
+        async with db.begin_nested():
+            await _write_device_status(plans, db)
+        return plans
+    except Exception:
+        if len(plans) == 1:
+            logger.exception("device status update failed for %s", plans[0].device_id)
+            return []
+        logger.warning("batched device status update failed; retrying per device", exc_info=True)
+    written: list[_DeviceStatusPlan] = []
+    for plan in plans:
         try:
-            await evaluate_status_change(
-                StatusChangeEvent(
-                    device_id=item["device_id"],
-                    hostname=item["hostname"],
-                    ip_address=item["ip_address"],
-                    old_status=item["old_status"],
-                    new_status=item["new_status"],
-                    device_type=item.get("device_type"),
-                    group_id=item.get("group_id"),
-                    location=item.get("location"),
-                    rtt_ms=item["rtt_ms"],
-                    packet_loss=item["packet_loss"],
-                ),
-                db,
-            )
+            async with db.begin_nested():
+                await _write_device_status([plan], db)
+            written.append(plan)
         except Exception:
-            logger.exception(
-                "remote-sensor alert evaluation failed for device %s", item["device_id"]
-            )
-            if raise_on_error:
-                raise
+            logger.exception("device status update failed for %s", plan.device_id)
+    return written
+
+
+async def _load_status_policy(db: AsyncSession) -> dsm.Policy:
+    raw = (await db.execute(
+        text("SELECT value FROM system_settings WHERE key = 'monitoring'")
+    )).scalar()
+    return dsm.policy_from_settings(raw if isinstance(raw, dict) else None)
+
+
+async def _apply_owned_device_status(
+    sensor: Mapping[str, Any],
+    samples_by_device: dict[str, list[dict[str, Any]]],
+    db: AsyncSession,
+) -> list[_DeviceStatusPlan]:
+    """Run this batch's fresh samples of OWNED devices through the state machine
+    and persist the result. Returns the written plans (their transitions go to
+    the outbox in the same transaction)."""
+    if not samples_by_device:
+        return []
+    locked = (await db.execute(
+        _LOCK_OWNED_DEVICES,
+        {"ids": [UUID(device_id) for device_id in samples_by_device], "sid": sensor["id"]},
+    )).mappings().all()
+
+    # Freshness guard: a sample older than max(2 x ping interval, 60 s) never
+    # affects the live status (backfill only feeds ping_metrics).
+    candidates: list[tuple[Mapping[str, Any], list[dict[str, Any]]]] = []
+    for info in locked:
+        oldest = info["db_now"] - timedelta(seconds=max(int(info["ping_interval"]) * 2, 60))
+        fresh = sorted(
+            (s for s in samples_by_device[info["device_id"]] if s["ts"] >= oldest),
+            key=lambda s: s["ts"],
+        )
+        if fresh:
+            candidates.append((info, fresh))
+    if not candidates:
+        return []
+
+    ids = [UUID(info["device_id"]) for info, _ in candidates]
+    state_rows = {
+        row["device_id"]: row
+        for row in (await db.execute(_READ_STATE_ROWS, {"ids": ids})).mappings().all()
+    }
+    episodes = {
+        row["device_id"]: row
+        for row in (await db.execute(_READ_OPEN_EPISODES, {"ids": ids})).mappings().all()
+    }
+    policy = await _load_status_policy(db)
+    owner = str(sensor["id"])
+
+    plans: list[_DeviceStatusPlan] = []
+    for info, fresh in candidates:
+        device_id = info["device_id"]
+        try:
+            row = state_rows.get(device_id)
+            plans.append(_plan_device_status(
+                info, dsm.state_from_row(row) if row is not None else None,
+                episodes.get(device_id), fresh, policy, owner, sensor["name"],
+            ))
+        except Exception:
+            logger.exception("device status evaluation failed for %s", device_id)
+    return await _persist_device_status(plans, db)
 
 
 @router.post("/results/ping")
@@ -1034,7 +1576,7 @@ async def post_ping_results(
         return {"inserted": 0, "dropped": 0, "duplicate": False}
 
     rows: list[list] = []
-    last_status: dict[str, dict] = {}
+    samples_by_device: dict[str, list[dict[str, Any]]] = {}
     normalized_items: list[tuple[dict, UUID, datetime, bool]] = []
     now = datetime.now(timezone.utc)
 
@@ -1095,12 +1637,9 @@ async def post_ping_results(
             str(sensor["id"]),
             ip,
         ])
-        prior = last_status.get(device_id)
-        if prior is None or ts > prior["ts"]:
-            last_status[device_id] = {
-                "is_up": is_up, "rtt": rtt, "packet_loss": packet_loss,
-                "ts": ts, "ip": ip,
-            }
+        samples_by_device.setdefault(device_id, []).append({
+            "is_up": is_up, "rtt": rtt, "packet_loss": packet_loss, "ts": ts,
+        })
 
     if rows:
         await _insert_clickhouse(
@@ -1113,92 +1652,13 @@ async def post_ping_results(
             ],
         )
 
-    # Update each device's current state and capture exactly one transition.
-    threshold_row = (await db.execute(text("""
-        SELECT COALESCE((value->>'degraded_rtt_ms')::float8, 100.0) AS rtt_ms,
-               COALESCE((value->>'degraded_loss_pct')::float8, 10.0) AS loss_pct
-          FROM system_settings WHERE key = 'monitoring'
-    """))).mappings().first()
-    degraded_rtt_ms = float(threshold_row["rtt_ms"]) if threshold_row else 100.0
-    degraded_loss = (float(threshold_row["loss_pct"]) / 100.0) if threshold_row else 0.10
-    from app.services.device_status_explanation import degraded_reason
-    transitions: list[dict[str, Any]] = []
-    for did, s in sorted(last_status.items()):
-        try:
-            if not s["is_up"]:
-                new_status = "down"
-            elif s["rtt"] > degraded_rtt_ms or s["packet_loss"] > degraded_loss:
-                new_status = "degraded"
-            else:
-                new_status = "up"
-            changed = (await db.execute(
-                text("""WITH current AS (
-                            SELECT d.id, d.status AS old_status, d.hostname,
-                                   host(d.ip_address)::text AS ip_address,
-                                   d.device_type, d.group_id, d.location
-                              FROM devices d
-                             WHERE d.id = :id
-                             FOR UPDATE
-                        )
-                        , maintenance AS (
-                            SELECT EXISTS (
-                                SELECT 1
-                                  FROM device_maintenance m
-                                  JOIN devices md ON md.id = :id AND (
-                                         (m.scope_type = 'device' AND m.scope_device_id = md.id)
-                                      OR (m.scope_type = 'group' AND m.scope_group_id = md.group_id)
-                                      OR (m.scope_type = 'tag' AND jsonb_exists(COALESCE(md.tags, '[]'::jsonb), m.scope_tag))
-                                      OR m.scope_type = 'all'
-                                  )
-                                 WHERE m.starts_at <= NOW() AND m.ends_at >= NOW()
-                            ) AS active
-                        )
-                        UPDATE devices d SET
-                          status = CASE WHEN maintenance.active THEN 'maintenance' ELSE :st END,
-                          last_seen = :ts,
-                          last_rtt_ms = :rtt,
-                          updated_at = NOW()
-                        FROM current c, maintenance
-                        WHERE d.id = c.id
-                          AND :ts >= NOW() - make_interval(
-                                secs => GREATEST(COALESCE(d.ping_interval, 60) * 2, 60)
-                              )
-                          AND (d.last_seen IS NULL OR d.last_seen <= :ts)
-                          AND EXISTS (
-                              SELECT 1 FROM device_polling_owner owner
-                               WHERE owner.device_id = d.id
-                                 AND owner.owner_kind = 'sensor'
-                                 AND owner.sensor_id = :sid
-                          )
-                        RETURNING c.old_status, d.status AS new_status,
-                                  c.hostname, c.ip_address, c.device_type,
-                                  c.group_id, c.location"""),
-                {
-                    "st": new_status,
-                    "ts": s["ts"],
-                    "rtt": s["rtt"],
-                    "id": did,
-                    "sid": sensor["id"],
-                },
-            )).mappings().first()
-            if changed and changed["old_status"] != changed["new_status"]:
-                transitions.append({
-                    **dict(changed),
-                    "device_id": did,
-                    "group_id": str(changed["group_id"]) if changed["group_id"] else None,
-                    "timestamp": s["ts"],
-                    "rtt_ms": s["rtt"],
-                    "packet_loss": s["packet_loss"],
-                    "reason": (
-                        f"remote sensor {sensor['name']}: " + degraded_reason(s["rtt"], s["packet_loss"], degraded_rtt_ms, degraded_loss * 100)
-                        if new_status == "degraded"
-                        else f"remote sensor {sensor['name']}"
-                    ),
-                })
-        except Exception as e:
-            logger.warning("device update failed for %s: %s", did, e)
+    # Confirmed status for the devices this sensor owns: every fresh sample is
+    # one check. One outbox row per device carries the batch's transitions.
+    written = await _apply_owned_device_status(sensor, samples_by_device, db)
     await _queue_transitions(
-        sensor["id"], "ping", body.idempotency_key or "", "device", transitions, db
+        sensor["id"], "ping", body.idempotency_key or "", "device",
+        [_device_outbox_payload(plan.transitions) for plan in written if plan.transitions],
+        db,
     )
     await _complete_ingest(
         sensor["id"], "ping", body.idempotency_key or "", len(rows), dropped, db

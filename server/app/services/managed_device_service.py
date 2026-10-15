@@ -262,6 +262,7 @@ async def _sync_controller(db: AsyncSession, ctrl) -> dict:
         new_status = entry["status"]
         if is_child and new_status and new_status != old_status and old_status != "maintenance":
             sets.append("status = :status")
+            sets.append("status_changed_at = NOW()")
             params["status"] = new_status
             if new_status == "up":
                 sets.append("last_seen = :seen_at2")
@@ -336,7 +337,7 @@ async def sync_all_controllers(db: AsyncSession, only_controller: UUID | None = 
     if only_controller is None:
         stale = (await db.execute(
             text("""
-                UPDATE devices SET status = 'unknown', updated_at = NOW()
+                UPDATE devices SET status = 'unknown', status_changed_at = NOW(), updated_at = NOW()
                 WHERE poll_mode = 'via_controller'
                   AND status NOT IN ('unknown', 'maintenance')
                   AND (managed_last_seen IS NULL

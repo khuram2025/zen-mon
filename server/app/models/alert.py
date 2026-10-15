@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, Integer, Float, Text, DateTime, ForeignKey
+from sqlalchemy import String, Boolean, Integer, Float, Text, DateTime, ForeignKey, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
@@ -28,6 +28,9 @@ class AlertRule(Base):
     severity: Mapped[str] = mapped_column(String(20), default="warning")
     notify_channels: Mapped[dict] = mapped_column(JSONB, default=list)
     cooldown: Mapped[int] = mapped_column(Integer, default=300)
+    # migrate-161: notify at once even while the device is flapping.
+    notify_while_flapping: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                        server_default=text("false"))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

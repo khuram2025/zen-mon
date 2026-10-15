@@ -161,12 +161,31 @@ func (s *ClickHouseStore) insertBatch(ctx context.Context, results []*pinger.Pin
 	return batch.Send()
 }
 
-// WriteStatusChange logs a status transition to ClickHouse.
+// deviceStatusLogInsert is the device_status_log insert. Values are bound by
+// the native batch protocol, never formatted into the SQL text, so reasons
+// ("Packet loss 50.00% exceeds 5%; ...") are stored verbatim.
+const deviceStatusLogInsert = `INSERT INTO device_status_log (device_id, timestamp, old_status, new_status, reason, duration_sec)`
+
+// deviceStatusLogRow returns the column values for one device_status_log row,
+// in deviceStatusLogInsert column order. The timestamp is the time of the
+// check that confirmed the change (status-explanation matches it to that
+// check's ping sample), not the writer's clock.
+func deviceStatusLogRow(sc *pinger.StatusChange, durationSec uint64) []any {
+	return []any{sc.DeviceID, sc.Timestamp.UTC(), sc.OldStatus, sc.NewStatus, sc.Reason, durationSec}
+}
+
+// WriteStatusChange logs a confirmed device status transition (hard
+// transitions and the maintenance overlay only; never flapping markers).
 func (s *ClickHouseStore) WriteStatusChange(ctx context.Context, sc *pinger.StatusChange, durationSec uint64) error {
-	return s.conn.Exec(ctx, `
-		INSERT INTO device_status_log (device_id, timestamp, old_status, new_status, reason, duration_sec)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, sc.DeviceID, sc.Timestamp, sc.OldStatus, sc.NewStatus, sc.Reason, durationSec)
+	batch, err := s.conn.PrepareBatch(ctx, deviceStatusLogInsert)
+	if err != nil {
+		return fmt.Errorf("prepare device status log: %w", err)
+	}
+	if err := batch.Append(deviceStatusLogRow(sc, durationSec)...); err != nil {
+		_ = batch.Abort()
+		return fmt.Errorf("append device status log: %w", err)
+	}
+	return batch.Send()
 }
 
 // --- Service Check Methods ---

@@ -577,6 +577,7 @@ export function AlertsPage() {
           <ViewTabs
             view={s.view}
             count={tabCount}
+            pendingTitle={flapHeldTitle(summary.data?.open.flap_held)}
             onSelect={(v) => {
               const keepWindow = v === 'resolved'
               patch({
@@ -892,7 +893,18 @@ function emptyText(view: PageView, filtered: boolean): string {
 
 /* ── Tabs ─────────────────────────────────────────────────────────────── */
 
-function ViewTabs({ view, count, onSelect }: { view: PageView; count: (v: PageView) => number | null; onSelect: (v: PageView) => void }) {
+/** The Pending tab's tooltip when some of its rows wait because their device is flapping (summary open.flap_held). */
+function flapHeldTitle(n: number | null | undefined): string | undefined {
+  if (typeof n !== 'number' || n <= 0) return undefined
+  return `${n.toLocaleString()} held because ${n === 1 ? 'its device is' : 'their devices are'} flapping: sent only if the status lasts the flap stability time`
+}
+
+function ViewTabs({ view, count, pendingTitle, onSelect }: {
+  view: PageView
+  count: (v: PageView) => number | null
+  pendingTitle?: string
+  onSelect: (v: PageView) => void
+}) {
   const refs = useRef<Record<string, HTMLButtonElement | null>>({})
   const onKey = (e: React.KeyboardEvent, idx: number) => {
     let next = -1
@@ -928,7 +940,7 @@ function ViewTabs({ view, count, onSelect }: { view: PageView; count: (v: PageVi
                 focusRing,
                 active ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
               )}
-              title={t.key === 'resolved' ? 'Incidents closed in the selected window (notices excluded)' : undefined}
+              title={t.key === 'resolved' ? 'Incidents closed in the selected window (notices excluded)' : t.key === 'pending' ? pendingTitle : undefined}
             >
               {t.label}
               {n != null && (
@@ -1248,7 +1260,7 @@ function AlertTableRow({
           </div>
         )}
       </Td>
-      <Td><NotifyCell channels={a.channels} delivery={a.delivery} /></Td>
+      <Td><NotifyCell channels={a.channels} delivery={a.delivery} alert={a} /></Td>
       {canTriage && (
         <Td className="text-right">
           <div className="flex justify-end gap-1">

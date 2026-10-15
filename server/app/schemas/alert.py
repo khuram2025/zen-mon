@@ -17,6 +17,7 @@ class AlertRuleCreate(BaseModel):
     service_check_group_id: Optional[UUID] = None
     severity: str = Field(default="warning", pattern="^(info|warning|critical)$")
     cooldown: int = Field(default=300, ge=60)
+    notify_while_flapping: bool = False
 
 
 class AlertRuleResponse(BaseModel):
@@ -34,6 +35,7 @@ class AlertRuleResponse(BaseModel):
     service_check_group_id: Optional[UUID] = None
     severity: str
     cooldown: int
+    notify_while_flapping: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
