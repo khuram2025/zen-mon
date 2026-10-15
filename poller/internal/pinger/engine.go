@@ -105,10 +105,16 @@ type SNMPDeviceLookup interface {
 	LookupDeviceByIP(ctx context.Context, ip net.IP) (uuid.UUID, bool)
 }
 
+// batchPinger runs the ICMP checks of one ping cycle (*Pinger; a stub in
+// tests).
+type batchPinger interface {
+	PingBatch(ctx context.Context, devices []*Device, pollerID string, maxWorkers int) []*PingResult
+}
+
 // Engine is the main monitoring engine.
 type Engine struct {
 	cfg       *config.Config
-	pinger    *Pinger
+	pinger    batchPinger
 	loader    DeviceLoader
 	writer    MetricWriter
 	publisher EventPublisher
@@ -151,6 +157,8 @@ type Engine struct {
 	policy devicestatus.Policy
 	// alerts delivers confirmed device transitions to the alert engine.
 	alerts AlertEvaluator
+	// stateEpoch numbers device state lineages (Device.epoch), under e.mu.
+	stateEpoch uint64
 	// status is the ordered device status writer (see device_status.go),
 	// started on first use.
 	statusMu    sync.Mutex
@@ -397,14 +405,17 @@ func (e *Engine) syncDevices(ctx context.Context) error {
 
 	// A device already known keeps its in-memory machine state (the poller
 	// is its only writer and the reloaded row may lag behind queued writes);
-	// a new one starts from its persisted row or a silent seed.
+	// a new one, or one a save found no longer centrally polled (its state
+	// stopped being the truth then), starts from its row or a silent seed,
+	// on a new lineage so jobs still queued from the old state are dropped.
 	seen := make(map[uuid.UUID]bool)
 	for _, d := range devices {
 		seen[d.ID] = true
-		if existing, ok := e.devices[d.ID]; ok {
+		if existing, ok := e.devices[d.ID]; ok && !existing.ownerLost {
 			adoptDeviceState(d, existing)
 		} else {
 			initDeviceState(d)
+			d.epoch = e.nextEpochLocked()
 		}
 		e.devices[d.ID] = d
 	}
@@ -438,7 +449,7 @@ func (e *Engine) runPingCycle(ctx context.Context) {
 	for _, d := range e.devices {
 		last := e.lastPingAt[d.ID]
 		interval := effectiveInterval(d.PingInterval, 60*time.Second)
-		if d.PingEnabled && due(now, last, interval) {
+		if d.PingEnabled && !d.ownerLost && due(now, last, interval) {
 			deviceList = append(deviceList, d)
 		}
 	}
@@ -481,6 +492,16 @@ func (e *Engine) runPingCycle(ctx context.Context) {
 	e.activePings = 0
 	e.lastCycleMs = time.Since(start).Milliseconds()
 	e.mu.Unlock()
+
+	// Shutdown: pings cut short by the cancelled context come back as
+	// unanswered. They are not checks, so none of this cycle's results may
+	// reach the metrics or the status machine (a persisted fake failure
+	// would count towards Down after the restart, or confirm it at once with
+	// down_confirm_checks=1).
+	if ctx.Err() != nil {
+		e.logger.Infof("Ping cycle cancelled: %d results discarded", len(results))
+		return
+	}
 
 	e.logger.Infof("Ping cycle complete: %d results in %dms", len(results), time.Since(start).Milliseconds())
 

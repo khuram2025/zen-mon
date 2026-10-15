@@ -258,12 +258,17 @@ async def _response_stats(ctx: SectionCtx, frm: datetime, to: datetime, targets:
     acked = f"x.acknowledged_at {w} AND x.tta >= 0"
     closed = f"x.status = 'resolved' AND x.resolved_at {w} AND x.ttc >= 0"
     recovered = f"{closed} AND x.reason = 'recovered'"
+    # The population is the incidents opened in the period (triggered_at); the
+    # deadline runs from when the alert was sent (ack_at: metadata.notified_at
+    # after a hold), like the Alert Center's ack_due. tta/ttc stay on
+    # triggered_at: an acknowledgement during a hold would otherwise be negative.
     judged = (f"x.triggered_at {w} AND x.status <> 'pending' AND x.target_min IS NOT NULL"
               " AND (x.acknowledged_at IS NOT NULL OR x.resolved_at IS NOT NULL"
-              " OR NOW() > x.triggered_at + make_interval(mins => x.target_min))")
+              " OR NOW() > x.ack_at + make_interval(mins => x.target_min))")
     sql = f"""
         WITH x AS (
             SELECT a.severity, a.status, a.triggered_at, a.acknowledged_at, a.resolved_at,
+                   {wf.ack_anchor_sql('a')} AS ack_at,
                    {wf.closure_reason_sql('a')} AS reason,
                    EXTRACT(EPOCH FROM (a.acknowledged_at - a.triggered_at)) AS tta,
                    EXTRACT(EPOCH FROM (a.resolved_at - a.triggered_at)) AS ttc,
@@ -285,7 +290,7 @@ async def _response_stats(ctx: SectionCtx, frm: datetime, to: datetime, targets:
                {p.format(q=0.95, col='ttc', cond=closed)} AS ttc_p95,
                count(*) FILTER (WHERE {judged}) AS judged,
                count(*) FILTER (WHERE {judged} AND COALESCE(x.acknowledged_at, x.resolved_at, NOW())
-                                > x.triggered_at + make_interval(mins => x.target_min)) AS breached,
+                                > x.ack_at + make_interval(mins => x.target_min)) AS breached,
                count(*) FILTER (WHERE x.tta < 0 OR (x.status = 'resolved' AND x.resolved_at {w}
                                 AND x.ttc < 0)) AS anomalies,
                count(*) FILTER (WHERE x.status = 'resolved' AND x.resolved_at {w}

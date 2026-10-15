@@ -35,7 +35,8 @@ inside the cycle; that still counts as one check.
   `degraded_loss_pct` (strictly above; equal values do not count).
 * Recovery limits default to 80% of the Degraded limits (`degraded_rtt_clear_ms`,
   `degraded_loss_clear_pct`). Between the two limits a device keeps its status
-  (hysteresis), so it cannot bounce at the threshold.
+  (hysteresis), so it cannot bounce at the threshold. A Degraded device that stays in that
+  band still recovers once a full window (5 checks) has no slow, lossy or unanswered check.
 * A failing check never enters Degraded: Down outranks Degraded.
 * Maintenance windows keep the existing behaviour: status shows Maintenance, checks keep
   being evaluated, and the confirmed status is applied (with alerts) when the window ends.
@@ -76,9 +77,14 @@ and the settings page show the longest interval at which flapping can still be d
   Rules that trigger only on *Up* announce recoveries and are never held.
 * One **Flapping started** and one **Flapping stopped** notice per episode, delivered in
   episode order from the stored episode (so a restart cannot lose them). Recipients are the
-  in-scope, enabled device rules whose trigger matches the episode class (Down or Any for
-  up/down flapping, Degraded or Any for latency/loss flapping), that are not snoozed and are
-  inside their schedule. Each channel receives one message; PagerDuty-type channels never
+  in-scope, enabled device rules whose notifications the episode actually holds: the trigger
+  matches the episode class (Down or Any for up/down flapping, Degraded or Any for
+  latency/loss flapping) and the rule's conditions can match that kind of change (the default
+  *Device Down* rule is not told about latency/loss flapping, a *High latency* rule is not
+  told about up/down flapping). Rules that are snoozed, outside their schedule, or set to
+  notify immediately while flapping are not told. The start notice names what is held:
+  up/down notifications, or Degraded notifications for latency/loss flapping (Down
+  notifications are then not affected). Each channel receives one message; PagerDuty-type channels never
   receive them, so they never open incidents. The stop notice goes only to the channels that
   received the start notice, as an all-clear when the device is Up. An episode that is
   already over when its start notice comes due sends neither notice. Notices are skipped

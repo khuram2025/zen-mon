@@ -28,6 +28,43 @@ def thresholds_for(policy: dsm.Policy) -> dict:
             "degraded_loss_clear_pct": policy.degraded_loss_clear_pct}
 
 
+# Key of the stored 'monitoring' document that PUT /settings/monitoring stamps (UTC, ISO 8601) when the
+# limits a sample is judged against change. The policy loaders ignore it. null: the limits have not changed
+# since the document was created.
+THRESHOLDS_CHANGED_AT = "thresholds_changed_at"
+_THRESHOLD_KEYS = ("degraded_rtt_ms", "degraded_loss_pct", "degraded_rtt_clear_ms", "degraded_loss_clear_pct")
+
+
+def thresholds_changed(before: dict, after: dict) -> bool:
+    """Whether two stored 'monitoring' documents judge samples differently.
+
+    Compares the effective limits (derived recovery limits included) and the stored limit values
+    themselves: a limit the document leaves unset follows the central poller's configured fallback,
+    which may differ from the built-in default, so setting it explicitly counts as a change. The
+    confirmation counts, the window and the flap settings never change a sample's judgement."""
+    if thresholds_for(dsm.policy_from_settings(before)) != thresholds_for(dsm.policy_from_settings(after)):
+        return True
+    return any(before.get(key) != after.get(key) for key in _THRESHOLD_KEYS)
+
+
+def thresholds_changed_at(document: dict, updated_at) -> datetime | None:
+    """When the judging limits last changed (None: not since the document was created).
+
+    The settings PUT stamps THRESHOLDS_CHANGED_AT. A document it has not stamped yet (written before
+    the stamp existed) falls back to the row's ``updated_at``, as the explanation read it until then.
+    So does a malformed stamp: every PUT now moves ``updated_at``, so it is never earlier than the last
+    change and can only hide evidence, never present the current limits as historical ones."""
+    if THRESHOLDS_CHANGED_AT not in document:
+        return utc(updated_at)
+    value = document[THRESHOLDS_CHANGED_AT]
+    if value is None:
+        return None
+    try:
+        return utc(datetime.fromisoformat(value))
+    except (TypeError, ValueError):
+        return utc(updated_at)
+
+
 def _limits(thresholds: dict) -> dsm.Policy:
     """The thresholds as the machine's policy for classify(). Thresholds without recovery limits
     (older callers) get an empty hysteresis band: a check is then 'breach' or 'clear'."""
@@ -208,13 +245,18 @@ def confirmation_block(policy: dsm.Policy, source: str, interval_s) -> dict:
 
 # --------------------------------------------------------------------------- ClickHouse evidence
 
-def evidence(device_id, poller_id, thresholds, settings_updated_at, interval):
+def evidence(device_id, poller_id, thresholds, changed_at, interval):
     """The owning poller's latest sample and the most recent degraded transition with its sample.
 
     Transitions are stamped with the timestamp of the check that confirmed them, so the
     confirming sample is found at the transition time (the -5 s..+1 s tolerance also covers
     rows written before confirmation existed, stamped at write time).
+
+    ``changed_at`` is when the limits last changed (thresholds_changed_at; None when they
+    have not): a sample taken before it, or within the minute the writers take to reload the
+    policy, is not judged against the current limits.
     """
+    changed_at = utc(changed_at)
     client = get_clickhouse_client()
     params = {"id": str(device_id), "poller": poller_id}
     rows = client.query("""SELECT timestamp, rtt_ms, packet_loss, is_up
@@ -225,7 +267,7 @@ def evidence(device_id, poller_id, thresholds, settings_updated_at, interval):
     now = datetime.now(timezone.utc)
     if latest:
         latest["stale"] = now - latest["timestamp"] > timedelta(seconds=max(60, interval * 2))
-        latest["settings_pending"] = bool(settings_updated_at and latest["timestamp"] < utc(settings_updated_at) + timedelta(seconds=60))
+        latest["settings_pending"] = bool(changed_at and latest["timestamp"] < changed_at + timedelta(seconds=60))
 
     events = client.query("""SELECT timestamp, reason FROM device_status_log
         WHERE device_id = {id:UUID} AND new_status = 'degraded'
@@ -244,7 +286,7 @@ def evidence(device_id, poller_id, thresholds, settings_updated_at, interval):
         recovered = client.query("""SELECT timestamp FROM device_status_log
             WHERE device_id = {id:UUID} AND new_status = 'up' AND timestamp > {at:DateTime}
             ORDER BY timestamp LIMIT 1""", parameters=params).result_rows
-        unchanged = not settings_updated_at or utc(settings_updated_at) + timedelta(seconds=60) <= utc(at)
+        unchanged = not changed_at or changed_at + timedelta(seconds=60) <= utc(at)
         recent = {"timestamp": utc(at), "reason": reason,
                   "sample": measurement(samples[0] if samples else None, thresholds),
                   "thresholds_unchanged": unchanged,

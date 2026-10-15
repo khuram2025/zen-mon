@@ -5,8 +5,8 @@ import { flapBadgeText, flapTooltip, type DeviceFlapFields } from './deviceStatu
 
 /**
  * The Flapping marker beside a device's confirmed status (never instead of it): dashed amber, with the kind, since
- * when, and that status notifications are held in its tooltip. `title` replaces the tooltip when the caller knows
- * more (the device page passes the episode's counters and earliest end).
+ * when, and which notifications are held (only the flapping kind) in its tooltip. `title` replaces the tooltip when
+ * the caller knows more (the device page passes the episode's counters and earliest end).
  */
 export function FlappingTag({ device, title, withKind = false, className }: {
   device: DeviceFlapFields

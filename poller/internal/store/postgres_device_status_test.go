@@ -45,16 +45,16 @@ func TestSaveDeviceStatusArgsBindValues(t *testing.T) {
 	}
 	save := &pinger.DeviceStatusSave{
 		DeviceID: id, At: at, Responded: false, RTTMs: 0, State: st, WriteState: true,
-		FlapChanges: 4, FlapWindowMinutes: 30, EndReason: "maintenance",
+		FlapChanges: 4, FlapWindowMinutes: 30, EndReason: "maintenance", TakeoverOwner: "7f9c",
 	}
 	args := saveDeviceStatusArgs(save)
-	if len(args) != 25 || maxPlaceholder(saveDeviceStatusSQL) != 25 {
+	if len(args) != 26 || maxPlaceholder(saveDeviceStatusSQL) != 26 {
 		t.Fatalf("%d args for $%d", len(args), maxPlaceholder(saveDeviceStatusSQL))
 	}
 	want := map[int]any{
 		1: id, 2: "down", 3: false, 5: 0.0, 6: true, 8: "reachability", 9: true, 10: "down",
 		11: false, 13: 7, 14: 1, 15: 2, 16: 0b10110, 17: 5, 20: true, 21: false,
-		23: 4, 24: 30, 25: "maintenance",
+		23: 4, 24: 30, 25: "maintenance", 26: "7f9c",
 	}
 	for pos, v := range want {
 		if args[pos-1] != v {
@@ -86,7 +86,7 @@ func TestSaveDeviceStatusArgsNullsAndOverlay(t *testing.T) {
 	if args[1] != "maintenance" || args[9] != "up" || args[10] != true {
 		t.Fatalf("displayed/hard = %#v/%#v", args[1], args[9])
 	}
-	for _, pos := range []int{7, 8, 12, 22} {
+	for _, pos := range []int{7, 8, 12, 22, 26} {
 		if args[pos-1] != nil {
 			t.Fatalf("$%d = %#v, want NULL", pos, args[pos-1])
 		}
@@ -138,6 +138,26 @@ func TestLastRTTArg(t *testing.T) {
 	}
 }
 
+// Every central write is limited to what the loader polls: a check still
+// queued when ping was switched off (or the address removed) must not
+// restore the flap mirror, the state row or an episode the server's release
+// just cleared.
+func TestCentralWritesUseTheLoaderPredicate(t *testing.T) {
+	const polled = "COALESCE(d.ping_enabled, false) AND d.ip_address IS NOT NULL"
+	for name, sql := range map[string]string{
+		"save": saveDeviceStatusSQL, "legacy save": saveDeviceStatusLegacySQL, "release": releaseDevicesSQL,
+	} {
+		if !strings.Contains(sql, polled) || !strings.Contains(sql, "owner_kind = 'central'") {
+			t.Fatalf("%s statement does not use the central polling predicate", name)
+		}
+	}
+	for _, sql := range []string{loadDevicesSQL, loadDevicesLegacySQL} {
+		if !strings.Contains(sql, "d.ping_enabled = TRUE") || !strings.Contains(sql, "d.ip_address IS NOT NULL") {
+			t.Fatal("loader predicate changed: keep the writes in step with it")
+		}
+	}
+}
+
 func TestApplyDeviceStateReseedRule(t *testing.T) {
 	changed := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	stored := func(owner, hard string) *devicestatus.State {
@@ -155,15 +175,24 @@ func TestApplyDeviceStateReseedRule(t *testing.T) {
 	}{
 		{"no row: silent seed", nil, "down", false, "reseed", "down"},
 		{"another owner: taken over", stored("7f9c", "up"), "up", false, "owner_change", "up"},
+		{"another owner, status changed too", stored("7f9c", "up"), "down", false, "owner_change", "down"},
 		{"status changed behind the row", stored("central", "up"), "unknown", false, "reseed", "unknown"},
 		{"maintenance overlay keeps the row", stored("central", "down"), "maintenance", true, "", "down"},
 		{"matching row is used", stored("central", "degraded"), "degraded", true, "", "degraded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var d pinger.Device
+			d := pinger.Device{SeedOwner: "stale"}
 			applyDeviceState(&d, tc.row, tc.status, &changed)
 			if d.StateLoaded != tc.loaded || d.SeedEndReason != tc.reason || d.State.HardStatus != tc.wantStatus {
 				t.Fatalf("loaded=%v reason=%q hard=%q", d.StateLoaded, d.SeedEndReason, d.State.HardStatus)
+			}
+			// Only an owner_change seed may take a row over: the one it replaced.
+			wantOwner := ""
+			if tc.reason == "owner_change" {
+				wantOwner = tc.row.Owner
+			}
+			if d.SeedOwner != wantOwner {
+				t.Fatalf("seed owner %q, want %q", d.SeedOwner, wantOwner)
 			}
 			if tc.loaded && d.State.FailStreak != 2 {
 				t.Fatal("persisted counters lost")
@@ -285,9 +314,15 @@ func TestStatusChangePayloadIncludesIsFlapping(t *testing.T) {
 
 func addPolledDevice(t *testing.T, pool *pgxpool.Pool, status string) uuid.UUID {
 	t.Helper()
+	return addPolledDeviceAt(t, pool, status, "192.0.2.10")
+}
+
+// addPolledDeviceAt adds a centrally polled device at ip (unique per device).
+func addPolledDeviceAt(t *testing.T, pool *pgxpool.Pool, status, ip string) uuid.UUID {
+	t.Helper()
 	id, _ := addMigratedDevice(t, pool, "status")
 	if _, err := pool.Exec(context.Background(),
-		`UPDATE devices SET ip_address = '192.0.2.10', ping_enabled = true, status = $2 WHERE id = $1`, id, status); err != nil {
+		`UPDATE devices SET ip_address = $3::inet, ping_enabled = true, status = $2 WHERE id = $1`, id, status, ip); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -509,14 +544,17 @@ func TestDeviceStatusMigratedSchema(t *testing.T) {
 			t.Fatal(err)
 		}
 		d := loadedDevice(t, s, id)
-		if d == nil || d.StateLoaded || d.SeedEndReason != "owner_change" || d.State.FailStreak != 0 || d.State.IsFlapping() {
+		if d == nil || d.StateLoaded || d.SeedEndReason != "owner_change" || d.SeedOwner != sensorOwner ||
+			d.State.FailStreak != 0 || d.State.IsFlapping() {
 			t.Fatalf("takeover load = %+v", d)
 		}
 		st := d.State
 		st.LastSampleAt = tsPtr(base.Add(time.Minute))
-		if _, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{
-			DeviceID: id, At: base.Add(time.Minute), Responded: true, State: st, WriteState: true, EndReason: d.SeedEndReason}); err != nil {
-			t.Fatal(err)
+		saved, err = s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{
+			DeviceID: id, At: base.Add(time.Minute), Responded: true, State: st, WriteState: true,
+			EndReason: d.SeedEndReason, TakeoverOwner: d.SeedOwner})
+		if err != nil || !saved.Device || !saved.State || saved.Foreign {
+			t.Fatalf("takeover save: %+v %v", saved, err)
 		}
 		var owner string
 		if err := pool.QueryRow(ctx, `SELECT owner FROM device_status_state WHERE device_id = $1`, id).Scan(&owner); err != nil || owner != "central" {
@@ -567,6 +605,233 @@ func TestDeviceStatusMigratedSchema(t *testing.T) {
 		}
 	})
 
+	// A flapping device whose ping is switched off: the server's release
+	// (device_service.release_device_status) runs while checks of the device
+	// are still queued in the poller (it only drops the device at its next
+	// sync). Those checks must not restore the flag, the state row or an
+	// episode, and the poller's own release must leave nothing behind.
+	t.Run("checks queued when ping is switched off write nothing", func(t *testing.T) {
+		id := addPolledDevice(t, pool, "up")
+		start := base
+		st := devicestatus.Seed("up", nil, "central")
+		st.ReachChanges = []time.Time{start.Add(-3 * time.Minute), start.Add(-2 * time.Minute), start.Add(-time.Minute), start}
+		st.ReachFlapping, st.FlappingSince = true, &start
+		st.LastSampleAt = &start
+		save := func(at time.Time, writeState bool) pinger.DeviceStatusSaved {
+			t.Helper()
+			saved, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{DeviceID: id, At: at, Responded: true, RTTMs: 1,
+				State: st, WriteState: writeState, FlapChanges: 4, FlapWindowMinutes: 30})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return saved
+		}
+		if saved := save(start, true); !saved.Device || !saved.State {
+			t.Fatalf("flapping save: %+v", saved)
+		}
+		serverRelease(t, pool, id)
+
+		// A steady reply (devices row only) and a changed state (full write).
+		for _, writeState := range []bool{false, true} {
+			if saved := save(start.Add(time.Minute), writeState); saved.Device || saved.Foreign || (writeState && saved.State) {
+				t.Fatalf("write_state=%v save after ping was switched off: %+v", writeState, saved)
+			}
+			assertReleased(t, pool, id, "after a queued check")
+		}
+		if err := s.ReleaseDevices(ctx, []uuid.UUID{id}); err != nil {
+			t.Fatal(err)
+		}
+		assertReleased(t, pool, id, "after the poller's release")
+
+		// The pre-161 statement is limited the same way.
+		tag, err := pool.Exec(ctx, saveDeviceStatusLegacySQL, saveDeviceStatusLegacyArgs(&pinger.DeviceStatusSave{
+			DeviceID: id, At: start.Add(2 * time.Minute), Responded: true, State: devicestatus.Seed("down", nil, "central")})...)
+		if err != nil || tag.RowsAffected() != 0 {
+			t.Fatalf("legacy save on a ping-disabled device: %v %v", tag, err)
+		}
+	})
+
+	t.Run("release clears a flap mirror and episode without a state row", func(t *testing.T) {
+		id := addPolledDevice(t, pool, "up")
+		if _, err := pool.Exec(ctx, `
+			UPDATE devices SET ping_enabled = false, is_flapping = true, flapping_since = $2, flap_kind = 'reachability'
+			 WHERE id = $1`, id, base); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO device_flap_episodes (device_id, started_at, kind) VALUES ($1, $2, 'reachability')`, id, base); err != nil {
+			t.Fatal(err)
+		}
+		// A sensor's row is left alone (it already took over).
+		sensorDev := addPolledDeviceAt(t, pool, "up", "192.0.2.11")
+		sensorOwner := uuid.New().String()
+		if _, err := pool.Exec(ctx, `
+			UPDATE devices SET ping_enabled = false, is_flapping = true, flap_kind = 'reachability' WHERE id = $1`, sensorDev); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO device_status_state (device_id, owner, hard_status, reach_flapping) VALUES ($1, $2, 'up', true)`,
+			sensorDev, sensorOwner); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ReleaseDevices(ctx, []uuid.UUID{sensorDev, id}); err != nil {
+			t.Fatal(err)
+		}
+		assertReleased(t, pool, id, "after the release")
+		var flapping bool
+		var owner string
+		if err := pool.QueryRow(ctx, `
+			SELECT d.is_flapping, s.owner FROM devices d JOIN device_status_state s ON s.device_id = d.id
+			 WHERE d.id = $1`, sensorDev).Scan(&flapping, &owner); err != nil || !flapping || owner != sensorOwner {
+			t.Fatalf("a sensor-owned device was released: flapping=%v owner=%q (%v)", flapping, owner, err)
+		}
+	})
+
+	// Ownership moved to a sensor and back within one poller sync: the
+	// sensor confirmed a change and left its row. The poller's state is from
+	// before; its saves must not overwrite the sensor's status silently.
+	t.Run("a state row another writer wrote since is foreign", func(t *testing.T) {
+		id := addPolledDevice(t, pool, "up")
+		d := loadedDevice(t, s, id)
+		st := d.State
+		st.LastSampleAt = tsPtr(base)
+		if saved, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{
+			DeviceID: id, At: base, Responded: true, State: st, WriteState: true, EndReason: "reseed"}); err != nil || !saved.Device {
+			t.Fatalf("central save: %+v %v", saved, err)
+		}
+		sensorOwner := uuid.New().String()
+		changed := base.Add(time.Minute)
+		for _, stmt := range []struct {
+			sql  string
+			args []any
+		}{
+			{`UPDATE devices SET status = 'down', status_changed_at = $2 WHERE id = $1`, []any{id, changed}},
+			{`UPDATE device_status_state SET owner = $2, hard_status = 'down', fail_streak = 1 WHERE device_id = $1`, []any{id, sensorOwner}},
+			{`INSERT INTO device_flap_episodes (device_id, started_at, kind) VALUES ($1, $2, 'reachability')`, []any{id, changed}},
+		} {
+			if _, err := pool.Exec(ctx, stmt.sql, stmt.args...); err != nil {
+				t.Fatalf("%s: %v", stmt.sql, err)
+			}
+		}
+		stale := st
+		stale.LastSampleAt = tsPtr(base.Add(2 * time.Minute))
+		for _, tc := range []struct {
+			writeState bool
+			takeover   string
+		}{{false, ""}, {true, ""}, {true, uuid.New().String()}} {
+			saved, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{DeviceID: id, At: base.Add(2 * time.Minute),
+				Responded: true, RTTMs: 1, State: stale, WriteState: tc.writeState, TakeoverOwner: tc.takeover})
+			if err != nil || !saved.Foreign || saved.Device || saved.State || saved.ForeignOwner != sensorOwner ||
+				saved.Status != "down" || saved.StatusChangedAt == nil || !saved.StatusChangedAt.Equal(changed) {
+				t.Fatalf("stale save %+v: %+v %v", tc, saved, err)
+			}
+		}
+		var status, owner string
+		if err := pool.QueryRow(ctx, `
+			SELECT d.status, s.owner FROM devices d JOIN device_status_state s ON s.device_id = d.id WHERE d.id = $1`,
+			id).Scan(&status, &owner); err != nil || status != "down" || owner != sensorOwner {
+			t.Fatalf("foreign row overwritten: %s %s (%v)", status, owner, err)
+		}
+		if eps := episodes(t, pool, id); len(eps) != 1 || eps[0].endedAt != nil {
+			t.Fatalf("sensor episode touched: %+v", eps)
+		}
+
+		// Reseeded from the sensor's down, the next (responding) check
+		// confirms up and takes the row over, closing the sensor's episode.
+		up := devicestatus.Seed("down", &changed, "central")
+		up.HardStatus, up.OkStreak, up.StatusSince = "up", 1, tsPtr(base.Add(3*time.Minute))
+		up.LastSampleAt = tsPtr(base.Add(3 * time.Minute))
+		saved, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{DeviceID: id, At: base.Add(3 * time.Minute),
+			Responded: true, RTTMs: 1, State: up, WriteState: true, EndReason: "owner_change", TakeoverOwner: sensorOwner})
+		if err != nil || !saved.Device || !saved.State || saved.Foreign {
+			t.Fatalf("takeover save: %+v %v", saved, err)
+		}
+		if err := pool.QueryRow(ctx, `
+			SELECT d.status, s.owner FROM devices d JOIN device_status_state s ON s.device_id = d.id WHERE d.id = $1`,
+			id).Scan(&status, &owner); err != nil || status != "up" || owner != "central" {
+			t.Fatalf("after takeover: %s %s (%v)", status, owner, err)
+		}
+		if eps := episodes(t, pool, id); len(eps) != 1 || eps[0].endedAt == nil || *eps[0].endReason != "owner_change" {
+			t.Fatalf("sensor episode not closed: %+v", eps)
+		}
+		// The central row is the engine's own again.
+		if saved, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{DeviceID: id, At: base.Add(4 * time.Minute),
+			Responded: true, RTTMs: 1, State: up}); err != nil || !saved.Device || saved.Foreign {
+			t.Fatalf("central save after takeover: %+v %v", saved, err)
+		}
+	})
+
+	// The save locks the devices row before its statement takes a snapshot,
+	// so a save that waited for another status writer (which locks the
+	// devices row first) sees everything that writer committed, also rows of
+	// other tables: a sensor's state row, the server's ping-off release.
+	t.Run("a save waiting for another writer's lock sees what it committed", func(t *testing.T) {
+		id := addPolledDevice(t, pool, "up")
+		start := base
+		flapping := devicestatus.Seed("up", nil, "central")
+		flapping.ReachChanges = []time.Time{start.Add(-3 * time.Minute), start.Add(-2 * time.Minute), start.Add(-time.Minute), start}
+		flapping.ReachFlapping, flapping.FlappingSince, flapping.LastSampleAt = true, &start, &start
+		saveAsync := func(at time.Time, st devicestatus.State) <-chan pinger.DeviceStatusSaved {
+			out := make(chan pinger.DeviceStatusSaved, 1)
+			go func() {
+				saved, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{DeviceID: id, At: at, Responded: true, RTTMs: 1,
+					State: st, WriteState: true, FlapChanges: 4, FlapWindowMinutes: 30})
+				if err != nil {
+					t.Errorf("save: %v", err)
+				}
+				out <- saved
+			}()
+			return out
+		}
+		if saved := <-saveAsync(start, flapping); !saved.Device || !saved.State {
+			t.Fatalf("flapping save: %+v", saved)
+		}
+
+		// A sensor that owned the device for a moment writes its row.
+		sensorOwner := uuid.New().String()
+		changed := start.Add(time.Minute)
+		commitBlocked := holdDeviceLock(t, pool, id, []sqlStmt{
+			{`UPDATE device_status_state SET owner = $2, hard_status = 'down', reach_flapping = false,
+			         flapping_since = NULL WHERE device_id = $1`, []any{id, sensorOwner}},
+			{`UPDATE devices SET status = 'down', status_changed_at = $2, is_flapping = false,
+			         flapping_since = NULL, flap_kind = NULL WHERE id = $1`, []any{id, changed}},
+		})
+		pending := saveAsync(start.Add(2*time.Minute), flapping)
+		commitBlocked(true)
+		if saved := <-pending; !saved.Foreign || saved.ForeignOwner != sensorOwner || saved.Status != "down" || saved.Device {
+			t.Fatalf("save that waited for the sensor's write: %+v", saved)
+		}
+		var owner string
+		var isFlapping bool
+		if err := pool.QueryRow(ctx, `
+			SELECT s.owner, d.is_flapping FROM devices d JOIN device_status_state s ON s.device_id = d.id
+			 WHERE d.id = $1`, id).Scan(&owner, &isFlapping); err != nil || owner != sensorOwner || isFlapping {
+			t.Fatalf("sensor write overwritten: owner %q flapping %v (%v)", owner, isFlapping, err)
+		}
+
+		// The server's ping-off release commits while a check waits.
+		if _, err := pool.Exec(ctx, `UPDATE device_status_state SET owner = 'central' WHERE device_id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+		if saved := <-saveAsync(start.Add(3*time.Minute), flapping); !saved.Device {
+			t.Fatalf("flapping save: %+v", saved)
+		}
+		commitBlocked = holdDeviceLock(t, pool, id, serverReleaseStmts(id))
+		pending = saveAsync(start.Add(4*time.Minute), flapping)
+		commitBlocked(true)
+		if saved := <-pending; saved.Device || saved.Foreign {
+			t.Fatalf("save that waited for the release: %+v", saved)
+		}
+		var flags bool
+		var rows, open int
+		if err := pool.QueryRow(ctx, `
+			SELECT d.is_flapping, (SELECT count(*) FROM device_status_state s WHERE s.device_id = d.id),
+			       (SELECT count(*) FROM device_flap_episodes e WHERE e.device_id = d.id AND e.ended_at IS NULL)
+			  FROM devices d WHERE d.id = $1`, id).Scan(&flags, &rows, &open); err != nil || flags || rows != 0 || open != 0 {
+			t.Fatalf("release undone: is_flapping=%v state rows=%d open episodes=%d (%v)", flags, rows, open, err)
+		}
+	})
+
 	t.Run("status policy from the monitoring settings", func(t *testing.T) {
 		var prior *string
 		_ = pool.QueryRow(ctx, `SELECT value::text FROM system_settings WHERE key = 'monitoring'`).Scan(&prior)
@@ -594,6 +859,97 @@ func TestDeviceStatusMigratedSchema(t *testing.T) {
 			t.Fatalf("stored: %+v %v", p, err)
 		}
 	})
+}
+
+type sqlStmt struct {
+	sql  string
+	args []any
+}
+
+// serverReleaseStmts is what device_service.update_device does when ping is
+// switched off (release_device_status), after locking the devices row.
+func serverReleaseStmts(id uuid.UUID) []sqlStmt {
+	return []sqlStmt{
+		{`DELETE FROM device_status_state WHERE device_id = $1`, []any{id}},
+		{`UPDATE device_flap_episodes
+		     SET ended_at = GREATEST(started_at, NOW()), end_reason = 'not_polled',
+		         status_at_end = (SELECT status FROM devices WHERE id = $1)
+		   WHERE device_id = $1 AND ended_at IS NULL`, []any{id}},
+		{`UPDATE devices SET ping_enabled = false, is_flapping = false, flapping_since = NULL, flap_kind = NULL
+		   WHERE id = $1`, []any{id}},
+	}
+}
+
+// serverRelease runs serverReleaseStmts as the server does: one transaction.
+func serverRelease(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) {
+	t.Helper()
+	holdDeviceLock(t, pool, id, serverReleaseStmts(id))(false)
+}
+
+// holdDeviceLock starts another status writer's transaction: it locks the
+// devices row (as every status writer does first) and runs stmts. The
+// returned commit, called with wait, first waits until another backend is
+// blocked behind this transaction.
+func holdDeviceLock(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, stmts []sqlStmt) (commit func(wait bool)) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM devices WHERE id = $1 FOR NO KEY UPDATE`, id); err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range stmts {
+		if _, err := tx.Exec(ctx, st.sql, st.args...); err != nil {
+			t.Fatalf("%s: %v", st.sql, err)
+		}
+	}
+	return func(wait bool) {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); wait; {
+			var blocked int
+			if err := tx.QueryRow(ctx, `
+				SELECT count(*) FROM pg_locks
+				 WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))`).Scan(&blocked); err != nil {
+				t.Fatal(err)
+			}
+			if blocked > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("no backend is waiting for the devices row lock")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertReleased checks a device that left central polling: no flap mirror,
+// no state row, and every flap episode closed as not_polled.
+func assertReleased(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, when string) {
+	t.Helper()
+	var flapping bool
+	var since *time.Time
+	var kind *string
+	var rows int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT d.is_flapping, d.flapping_since, d.flap_kind,
+		       (SELECT count(*) FROM device_status_state s WHERE s.device_id = d.id)
+		  FROM devices d WHERE d.id = $1`, id).Scan(&flapping, &since, &kind, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if flapping || since != nil || kind != nil || rows != 0 {
+		t.Fatalf("%s: is_flapping=%v since=%v kind=%v state rows=%d", when, flapping, since, kind, rows)
+	}
+	eps := episodes(t, pool, id)
+	if len(eps) != 1 || eps[0].endedAt == nil || eps[0].endReason == nil || *eps[0].endReason != "not_polled" {
+		t.Fatalf("%s: episodes = %+v, want the one closed as not_polled", when, eps)
+	}
 }
 
 // statusLegacyDDL is the part of the schema the device status statements use,
@@ -694,6 +1050,16 @@ func TestDeviceStatusSchemaLagFallback(t *testing.T) {
 	}
 	if err := s.ReleaseDevices(ctx, []uuid.UUID{id}); err != nil {
 		t.Fatalf("release must be a no-op while the schema lags: %v", err)
+	}
+	// A device that is not centrally polled any more is not written.
+	if _, err := pool.Exec(ctx, `UPDATE devices SET ping_enabled = false WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := s.SaveDeviceStatus(ctx, &pinger.DeviceStatusSave{DeviceID: id, At: at, State: d.State}); err != nil || saved.Device {
+		t.Fatalf("legacy save on a ping-disabled device: %+v %v", saved, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE devices SET ping_enabled = true WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
 	}
 	var status string
 	var seen *time.Time

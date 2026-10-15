@@ -296,6 +296,18 @@ func TestSyncPreservesInMemoryState(t *testing.T) {
 	if f.device().State.FailStreak != 1 || f.device().SeedEndReason != "" {
 		t.Fatalf("sync replaced the in-memory state: %+v", f.device().State)
 	}
+	// Nor is a row of another owner trusted while the device is not parked:
+	// the reload can lag (or lead) queued writes, so the save itself detects
+	// a row another writer changed (DeviceStatusSaved.Foreign).
+	f.loader.mu.Lock()
+	f.loader.devices[0].SeedEndReason, f.loader.devices[0].SeedOwner = devicestatus.EndOwnerChange, "sensor-x"
+	f.loader.mu.Unlock()
+	if err := f.e.syncDevices(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.device().State.FailStreak != 1 || f.device().takeover != "" {
+		t.Fatalf("sync replaced the in-memory state on an owner_change row: %+v", f.device().State)
+	}
 	f.fail()
 	if f.status() != "down" {
 		t.Fatalf("status %s, want down", f.status())
@@ -511,8 +523,11 @@ func waitFor(t *testing.T, cond func() bool) {
 // the sync and the write) drops the check's events.
 func TestEventsDroppedWhenTheDeviceIsNoLongerCentral(t *testing.T) {
 	f := newStatusFixture(t, "up")
+	saves := 0
 	f.loader.saveResult = func(*DeviceStatusSave) (DeviceStatusSaved, error) {
-		return DeviceStatusSaved{}, nil
+		saves++
+		// The first check is written; the second (confirming Down) is not.
+		return DeviceStatusSaved{Device: saves == 1, State: saves == 1}, nil
 	}
 	f.fail()
 	f.fail()
@@ -522,6 +537,236 @@ func TestEventsDroppedWhenTheDeviceIsNoLongerCentral(t *testing.T) {
 	f.flush()
 	if rows, pub, alerts := f.logged(), f.pub.changes(), f.alerts.eventsCopy(); len(rows)+len(pub)+len(alerts) != 0 {
 		t.Fatalf("events delivered for a device that is no longer central: %v %v %v", rows, pub, alerts)
+	}
+}
+
+// foreignRow fakes a device whose state row belongs to owner (another writer
+// that left devices.status at status): every save is Foreign until a state
+// write takes that owner's row over; from then on the row is central.
+func foreignRow(owner, status string, changedAt *time.Time) func(*DeviceStatusSave) (DeviceStatusSaved, error) {
+	taken := false
+	return func(s *DeviceStatusSave) (DeviceStatusSaved, error) {
+		if taken || s.TakeoverOwner == owner {
+			taken = taken || s.WriteState
+			return DeviceStatusSaved{Device: true, State: true}, nil
+		}
+		return DeviceStatusSaved{Foreign: true, ForeignOwner: owner, Status: status, StatusChangedAt: changedAt}, nil
+	}
+}
+
+func (f *statusFixture) setSaveResult(fn func(*DeviceStatusSave) (DeviceStatusSaved, error)) {
+	f.loader.mu.Lock()
+	defer f.loader.mu.Unlock()
+	f.loader.saveResult = fn
+}
+
+func transitions(alerts []DeviceAlertEvent) string {
+	var out []string
+	for _, a := range alerts {
+		out = append(out, a.OldStatus+">"+a.NewStatus)
+	}
+	return strings.Join(out, ",")
+}
+
+// Ownership moved to sensor X and back within one sync (a wrong assignment
+// corrected within a minute). The save during X's ownership updates no
+// devices row: the device is parked (neither pinged nor stepped) and the next
+// sync reloads it from the database, where X confirmed Down. The first
+// responding check then confirms the real recovery, with its alert, and its
+// write takes X's row over.
+func TestDeviceParkedWhenItsSaveFindsItNotCentral(t *testing.T) {
+	f := newStatusFixture(t, "up")
+	f.clean()
+	f.flush()
+	f.setSaveResult(func(*DeviceStatusSave) (DeviceStatusSaved, error) { return DeviceStatusSaved{}, nil })
+	f.fail()
+	f.flush()
+	if d := f.device(); !d.ownerLost || d.persisted != nil {
+		t.Fatalf("device not parked: ownerLost=%v persisted=%v", d.ownerLost, d.persisted)
+	}
+	before := len(f.loader.savesCopy())
+	f.fail()
+	f.fail() // two failures confirm Down in the test policy, if they were stepped
+	stub := &stubPinger{reply: func(*Device) *PingResult {
+		return &PingResult{IsUp: true, RTT: time.Millisecond, Timestamp: time.Now()}
+	}}
+	f.e.pinger = stub
+	f.e.runPingCycle(context.Background())
+	f.flush()
+	if got := len(f.loader.savesCopy()); got != before || f.status() != "up" || f.device().State.FailStreak != 1 ||
+		len(stub.pingedCopy()) != 0 {
+		t.Fatalf("parked device was checked: saves %d->%d, status %s, fail streak %d, pinged %d",
+			before, got, f.status(), f.device().State.FailStreak, len(stub.pingedCopy()))
+	}
+
+	// Central again: the loader seeds from X's down (owner_change).
+	f.setSaveResult(nil)
+	f.loader.mu.Lock()
+	f.loader.devices = []*Device{{ID: f.id, Hostname: "edge-01", IPAddress: net.ParseIP("192.0.2.10"),
+		PingInterval: 30 * time.Second, PingEnabled: true, Status: "down",
+		State: devicestatus.Seed("down", nil, ownerCentral), SeedEndReason: devicestatus.EndOwnerChange, SeedOwner: "sensor-x"}}
+	f.loader.mu.Unlock()
+	if err := f.e.syncDevices(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if d := f.device(); d.Status != "down" || d.ownerLost || d.takeover != "sensor-x" {
+		t.Fatalf("reloaded device: status %s parked %v takeover %q", d.Status, d.ownerLost, d.takeover)
+	}
+	f.clean()
+	f.flush()
+	if got := transitions(f.alerts.eventsCopy()); got != "down>up" {
+		t.Fatalf("alerts %q, want the recovery", got)
+	}
+	if rows := f.logged(); len(rows) != 1 || rows[0].OldStatus != "down" || rows[0].NewStatus != "up" {
+		t.Fatalf("status log = %+v", rows)
+	}
+	saves := f.loader.savesCopy()
+	if takeover := saves[len(saves)-1]; !takeover.WriteState || takeover.TakeoverOwner != "sensor-x" ||
+		takeover.EndReason != devicestatus.EndOwnerChange {
+		t.Fatalf("takeover save = %+v", takeover)
+	}
+	// Once written, the row is the engine's own: later saves take nothing over.
+	f.clean()
+	f.flush()
+	saves = f.loader.savesCopy()
+	if last := saves[len(saves)-1]; last.TakeoverOwner != "" || f.device().takeover != "" {
+		t.Fatalf("takeover kept after the row was written: %+v", last)
+	}
+}
+
+// Ownership moved to sensor X and back with no central save in between: X
+// confirmed a change and left its state row and devices.status. The next
+// central save finds that row (Foreign): its events are dropped, the device
+// is reseeded from the status X left, and the following checks confirm the
+// real transition with its alert instead of overwriting X's status silently.
+func TestForeignStateRowReseedsFromTheOtherWriter(t *testing.T) {
+	t.Run("sensor confirmed down, central sees the device respond", func(t *testing.T) {
+		f := newStatusFixture(t, "up")
+		f.clean()
+		f.flush()
+		changed := f.at()
+		f.setSaveResult(foreignRow("sensor-x", "down", &changed))
+		f.clean() // stepped from the stale up: refused as foreign
+		f.flush()
+		d := f.device()
+		if d.Status != "down" || d.State.HardStatus != "down" || d.takeover != "sensor-x" || d.persisted != nil ||
+			d.SeedEndReason != devicestatus.EndOwnerChange || d.State.StatusSince == nil || !d.State.StatusSince.Equal(changed) {
+			t.Fatalf("not reseeded from the sensor's status: %+v takeover=%q", d.State, d.takeover)
+		}
+		if n := len(f.alerts.eventsCopy()) + len(f.logged()); n != 0 {
+			t.Fatalf("%d events delivered for a refused save", n)
+		}
+		f.clean() // down -> up
+		f.flush()
+		if got := transitions(f.alerts.eventsCopy()); got != "down>up" {
+			t.Fatalf("alerts %q, want the recovery", got)
+		}
+		saves := f.loader.savesCopy()
+		if last := saves[len(saves)-1]; last.TakeoverOwner != "sensor-x" || last.EndReason != devicestatus.EndOwnerChange {
+			t.Fatalf("takeover save = %+v", last)
+		}
+	})
+	t.Run("sensor saw the device up, central confirms down again", func(t *testing.T) {
+		f := newStatusFixture(t, "up")
+		f.fail()
+		f.fail() // up -> down
+		f.flush()
+		f.setSaveResult(foreignRow("sensor-x", "up", nil))
+		f.fail() // stepped from the stale down: refused, reseeded up
+		f.flush()
+		if f.status() != "up" || f.device().State.FailStreak != 0 {
+			t.Fatalf("status %s fail streak %d after the reseed", f.status(), f.device().State.FailStreak)
+		}
+		f.fail()
+		f.fail() // up -> down, confirmed again on central's own checks
+		f.flush()
+		if got := transitions(f.alerts.eventsCopy()); got != "up>down,up>down" {
+			t.Fatalf("alerts %q, want the sensor's recovery to be followed by a new Down page", got)
+		}
+	})
+}
+
+// A job stepped from a state that has been replaced since is not written:
+// its check belongs to an abandoned lineage (here the writer is still in the
+// save that finds the foreign row while the next check is stepped from the
+// old state, confirming Down there).
+func TestJobsOfAReplacedStateAreDropped(t *testing.T) {
+	f := newStatusFixture(t, "up")
+	gate, entered := make(chan struct{}), make(chan struct{})
+	changed := f.base
+	foreign := foreignRow("sensor-x", "down", &changed)
+	first := true
+	f.setSaveResult(func(s *DeviceStatusSave) (DeviceStatusSaved, error) {
+		if first {
+			first = false
+			close(entered)
+			<-gate
+		}
+		return foreign(s)
+	})
+	f.fail() // job 1: the writer blocks in its save
+	<-entered
+	f.fail() // job 2: same lineage, confirms Down in memory
+	if f.status() != "down" {
+		t.Fatalf("status %s, want down in memory", f.status())
+	}
+	close(gate)
+	f.flush()
+	if saves := f.loader.savesCopy(); len(saves) != 1 {
+		t.Fatalf("a job of the replaced state was written: %d saves", len(saves))
+	}
+	if n := len(f.alerts.eventsCopy()) + len(f.logged()); n != 0 {
+		t.Fatalf("%d events of the replaced state delivered", n)
+	}
+	if d := f.device(); d.State.FailStreak != 0 || d.takeover != "sensor-x" {
+		t.Fatalf("device not on the reseeded state: %+v", d.State)
+	}
+	f.clean()
+	f.flush()
+	if got := transitions(f.alerts.eventsCopy()); got != "down>up" {
+		t.Fatalf("alerts %q, want only the recovery from the sensor's down", got)
+	}
+}
+
+// Shutdown cancels the context while a ping cycle runs: pro-bing then
+// returns the pings in flight as unanswered. They are not checks: nothing of
+// that cycle may reach the metrics or the status machine (a persisted fake
+// failure would count towards Down after the restart; with
+// down_confirm_checks=1 every device in flight would be paged Down).
+func TestCancelledPingCycleIsNotAStatusCheck(t *testing.T) {
+	e := testEngine()
+	stopStatusOnCleanup(t, e)
+	e.policy = devicestatus.PolicyFromSettings(map[string]any{"down_confirm_checks": 1.0}, policyDefaults(e.cfg))
+	id := uuid.New()
+	e.devices[id] = &Device{ID: id, Hostname: "edge-01", IPAddress: net.ParseIP("192.0.2.10"),
+		PingInterval: 30 * time.Second, PingEnabled: true, Status: "up"}
+	failed := func(*Device) *PingResult { return &PingResult{IsUp: false, PacketLoss: 1, Timestamp: time.Now()} }
+	loader, writer, alerts := e.loader.(*fakeDeviceLoader), e.writer.(*fakeMetricWriter), e.alerts.(*fakeAlertEvaluator)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stub := &stubPinger{reply: failed, onBatch: cancel}
+	e.pinger = stub
+	e.runPingCycle(ctx)
+	flushStatus(t, e)
+	if len(stub.pingedCopy()) != 1 {
+		t.Fatal("device not pinged")
+	}
+	if d := e.devices[id]; d.Status != "up" || d.State.FailStreak != 0 || d.State.WindowLen != 0 {
+		t.Fatalf("cancelled pings stepped the machine: status=%s state=%+v", d.Status, d.State)
+	}
+	if saves, sent, rows := len(loader.savesCopy()), len(alerts.eventsCopy()), writer.resultCount(); saves+sent+rows != 0 {
+		t.Fatalf("cancelled cycle reached the writers: %d saves, %d alerts, %d metric rows", saves, sent, rows)
+	}
+
+	// The same results from a live cycle are checks.
+	e.lastPingAt[id] = time.Time{}
+	e.pinger = &stubPinger{reply: failed}
+	e.runPingCycle(context.Background())
+	flushStatus(t, e)
+	if e.devices[id].Status != "down" || writer.resultCount() != 1 || len(loader.savesCopy()) != 1 ||
+		transitions(alerts.eventsCopy()) != "up>down" {
+		t.Fatalf("live failed check: status=%s metric rows=%d saves=%d alerts=%v",
+			e.devices[id].Status, writer.resultCount(), len(loader.savesCopy()), alerts.eventsCopy())
 	}
 }
 

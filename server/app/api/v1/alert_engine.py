@@ -653,7 +653,10 @@ def _ping_status_value(new_status: str) -> float | None:
     return None
 
 
-def _conditions_match(rule, values: dict) -> bool:
+_OPERATORS = frozenset({">", "gt", ">=", "gte", "<", "lt", "<=", "lte", "==", "eq", "!=", "neq"})
+
+
+def _conditions_match(rule, values: dict, *, unknown: frozenset = frozenset()) -> bool:
     """
     E1: evaluate a rule's metric condition(s) against live metric values.
 
@@ -668,12 +671,22 @@ def _conditions_match(rule, values: dict) -> bool:
     comes up" and "Device degraded" rules. On an 'any' rule it is the only
     thing selecting the state — skipping it made "Device Down" fire on
     unknown->up and up->degraded.
+
+    ``unknown`` names metrics whose reading is not known yet: a well-formed
+    condition on one of them counts as satisfiable ("could this rule fire?",
+    see :func:`_could_fire_into`).
     """
     status_owned = (getattr(rule, "trigger_on", None) or "any") != "any"
 
     def one(metric, operator, threshold) -> bool:
         if metric == "ping_status" and status_owned:
             return True
+        if metric in unknown:
+            try:
+                float(threshold)
+            except (TypeError, ValueError):
+                return False
+            return (operator or "").strip() in _OPERATORS
         return _eval_one(metric, operator, threshold, values)
 
     conds = getattr(rule, "conditions", None)
@@ -685,6 +698,29 @@ def _conditions_match(rule, values: dict) -> bool:
     if metric in ("service_status", None):
         return True
     return one(metric, getattr(rule, "operator", None), getattr(rule, "threshold", None))
+
+
+# What a move into down carries (see metric_values in evaluate_status_change):
+# the check got no answer, so ping_status 0, 100% loss and the failed check's
+# round-trip time of 0.
+_INTO_DOWN_READINGS = {"ping_status": 0.0, "rtt": 0.0, "packet_loss": 100.0}
+
+
+def _could_fire_into(rule, new_status: str) -> bool:
+    """Can this rule's metric gate pass on a transition into ``new_status``
+    ('down' or 'degraded'), as evaluate_status_change applies it?
+
+    The flap notices tell only the rules a flap can actually hold: the seeded
+    "Device Down" (any, ping_status == 0) never fires on degraded, so it must
+    not hear that up/degraded notifications are held, and an 'any' rtt > 100
+    rule never fires on a move into down. Into degraded the device still
+    answers (ping_status 1) with a latency/loss reading nobody knows in
+    advance, so rtt and packet_loss conditions count as satisfiable.
+    """
+    if new_status == "down":
+        return _conditions_match(rule, _INTO_DOWN_READINGS)
+    return _conditions_match(rule, {"ping_status": _ping_status_value(new_status)},
+                             unknown=frozenset({"rtt", "packet_loss"}))
 
 
 # The metric values a device status transition carries (see metric_values in
@@ -1077,6 +1113,7 @@ async def evaluate_status_change(
             email_body = _render(effective_template(rule.email_body, DEFAULT_EMAIL_BODY), variables)
             sms_body = _render(effective_template(rule.sms_template, DEFAULT_SMS), variables)
 
+        hold_s, flap_held, held = 0, False, False
         if not is_recovery:
             # Respect an active snooze for this rule/device condition: the
             # operator explicitly asked not to be re-alerted on it.
@@ -1090,20 +1127,49 @@ async def evaluate_status_change(
                 suppressed_alerts += 1
                 continue
 
+            # "Condition must exist for" hold: the row is parked as 'pending'
+            # — invisible to active-alert counters, nothing dispatched — and
+            # the hold sweeper (alert_hold_service, 30s cadence) fires it only
+            # if the device is still in this state once min_duration has
+            # passed. A recovery in the meantime resolves it silently: a
+            # 59-second blip under a 100-second hold produces no alert and no
+            # pages.
+            hold_s = int(rule.min_duration or 0)
+            # While this transition's class is flapping, a trigger must last
+            # the flap stable time before it notifies: dropping it would delay
+            # a real outage page until flapping ends, holding it pages a
+            # sustained state within that time and lets every blip cancel
+            # silently. Recoveries are untouched — they follow their trigger's
+            # notified fate, so a trigger paged before the flapping still gets
+            # its all-clear and a held one recovers silently.
+            # notify_while_flapping opts a rule out (core routers).
+            flap_held = (event.flapping
+                         and not getattr(rule, "notify_while_flapping", False))
+            if flap_held:
+                if flap_hold_s is None:
+                    flap_hold_s = (await _status_policy(db)).flap_stable_minutes * 60
+                hold_s = max(hold_s, flap_hold_s)
+            held = hold_s > 0 and await _pending_supported(db)
+
             # A new status supersedes this rule's previous open status alert
             # (down -> degraded and back used to stack a fresh active row per
             # transition, none of which ever closed). A row still in its hold
-            # is a cancelled hold, as on the way up.
+            # is a cancelled hold, as on the way up. A held new row replaces
+            # only an older hold: a trigger that was already sent stays open
+            # until this hold confirms (the hold sweeper supersedes it then)
+            # or a recovery closes it with its all-clear. Closing it here lost
+            # that all-clear whenever the hold was cancelled.
+            open_states = "('pending')" if held else "('pending', 'active', 'acknowledged')"
             superseded = await db.execute(
-                text("""
+                text(f"""
                     UPDATE alerts
                     SET status = 'resolved', resolved_at = :now,
-                        metadata = COALESCE(metadata, '{}'::jsonb) ||
+                        metadata = COALESCE(metadata, '{{}}'::jsonb) ||
                                    CAST(:m AS jsonb)
                                    || CASE WHEN status = 'pending'
                                            THEN jsonb_build_object('hold_cancelled', true)
-                                           ELSE '{}'::jsonb END
-                    WHERE status IN ('pending', 'active', 'acknowledged')
+                                           ELSE '{{}}'::jsonb END
+                    WHERE status IN {open_states}
                       AND device_id = :device_id AND rule_id = :rule_id
                       AND service_check_id IS NULL
                       AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
@@ -1114,29 +1180,6 @@ async def evaluate_status_change(
                                   "resolved_by": "status_transition"})},
             )
             resolved_alerts += superseded.rowcount or 0
-
-        # "Condition must exist for" hold: the row is parked as 'pending' —
-        # invisible to active-alert counters, nothing dispatched — and the hold
-        # sweeper (alert_hold_service, 30s cadence) fires it only if the device
-        # is still in this state once min_duration has passed. A recovery in
-        # the meantime resolves it silently: a 59-second blip under a
-        # 100-second hold produces no alert and no pages.
-        hold_s = 0 if is_recovery else int(rule.min_duration or 0)
-        # While this transition's class is flapping, a trigger must last the
-        # flap stable time before it notifies: dropping it would delay a real
-        # outage page until flapping ends, holding it pages a sustained state
-        # within that time and lets every blip cancel silently. Recoveries are
-        # untouched — they follow their trigger's notified fate, so a trigger
-        # paged before the flapping still gets its all-clear and a held one
-        # recovers silently. notify_while_flapping opts a rule out (core
-        # routers).
-        flap_held = (event.flapping and not is_recovery
-                     and not getattr(rule, "notify_while_flapping", False))
-        if flap_held:
-            if flap_hold_s is None:
-                flap_hold_s = (await _status_policy(db)).flap_stable_minutes * 60
-            hold_s = max(hold_s, flap_hold_s)
-        held = hold_s > 0 and await _pending_supported(db)
 
         # Create alert record in DB. The stored message is a clean human
         # sentence — the rendered SMS/email templates are transport payloads

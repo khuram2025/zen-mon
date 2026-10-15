@@ -17,6 +17,8 @@ from app.services.branding import Branding
 from app.services.netflow_alert_service import REDACTED_MESSAGE
 from app.services.report_packs import alerts_events as pack
 
+from pg_fixture import pg_cluster, pg_db  # noqa: F401  (fixtures are used by name)
+
 TO = datetime(2026, 10, 7, 12, 0)
 FRM = TO - timedelta(days=7)
 TS = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)  # 12:00 in Asia/Riyadh (UTC+3)
@@ -190,6 +192,47 @@ def test_response_metrics_kpis_table_and_closure_mix(monkeypatch):
     assert (p["t_critical"], p["t_warning"], p["t_info"]) == (10, 30, None)
     assert (p["f"], p["t"]) == (FRM, TO)
     assert "NOT (COALESCE(a.metadata->>'is_recovery'" in db.sql_for("GROUPING SETS ((x.severity)")
+
+
+def test_response_stats_ack_deadline_runs_from_when_the_alert_was_sent(pg_db):
+    """A held alert (min_duration or a flapping device) is sent at
+    metadata.notified_at: its acknowledgement target counts from there, as in
+    the Alert Center (ack_due) and the 'overdue now' snapshot. The time to
+    acknowledge still counts from the trigger."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    t = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=2)
+    dev = pg_db.scalar("INSERT INTO devices (hostname, ip_address) VALUES ('core', '10.88.0.1')"
+                       " RETURNING id")
+
+    def alert(severity, notified_after_min=None):
+        meta = {"old_status": "up", "new_status": "down", "is_recovery": False, "notified": True}
+        if notified_after_min is not None:
+            meta["notified_at"] = (t + timedelta(minutes=notified_after_min)).isoformat()
+        # Acknowledged 16 min after the transition: 6 min after a 10-min hold.
+        pg_db.execute("INSERT INTO alerts (device_id, status, severity, message, triggered_at,"
+                      " acknowledged_at, metadata) VALUES ($1, 'acknowledged', $2, 'core is DOWN',"
+                      " $3, $4, $5::jsonb)", dev, severity, t, t + timedelta(minutes=16), meta)
+
+    alert("critical", notified_after_min=10)      # held, then paged: within its 15 min
+    alert("warning")                              # paged at once: breached its 15 min
+
+    async def go():
+        engine = create_async_engine(pg_db.url, poolclass=NullPool)
+        try:
+            async with async_sessionmaker(engine)() as s:
+                ctx = rs.SectionCtx(s, t - timedelta(hours=1), t + timedelta(hours=1))
+                ctx.section_id = "alert_response_metrics"
+                return await pack._response_stats(ctx, ctx.frm, ctx.to,
+                                                  {"critical": 15, "warning": 15}, by_severity=True)
+        finally:
+            await engine.dispose()
+
+    rows = {r["severity"]: r for r in asyncio.run(go()) if not r["is_total"]}
+    assert (rows["critical"]["judged"], rows["critical"]["breached"]) == (1, 0)
+    assert (rows["warning"]["judged"], rows["warning"]["breached"]) == (1, 1)
+    assert rows["critical"]["tta_p50"] == rows["warning"]["tta_p50"] == 960.0
 
 
 def test_response_metrics_severity_option_and_missing_ownership(monkeypatch):

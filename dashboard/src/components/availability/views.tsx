@@ -21,6 +21,7 @@ import type {
 } from './model'
 import { rankServices } from './model'
 import { FlappingTag } from '@/components/devices/FlappingTag'
+import { FLAP_HOLD_FLEET_TEXT } from '@/components/devices/deviceStatus'
 import { AvailCell, complianceMeta, type TimelineItem } from './charts'
 import { AlertVolumeChart } from './viz'
 import {
@@ -173,7 +174,7 @@ export function DevicesOperations({
           {liveFlapping > 0 && (
             <p className="mt-2 text-sm text-muted">
               <Link to="/devices?flapping=1" className="font-medium text-warning hover:underline">{liveFlapping} flapping</Link>
-              {' '}— also counted under their confirmed status above; their status notifications are held.
+              {' '}— also counted under their confirmed status above; while they flap, {FLAP_HOLD_FLEET_TEXT}.
             </p>
           )}
         </Panel>

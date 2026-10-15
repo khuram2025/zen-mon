@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_admin_user, require_permission
 from app.models.user import User
-from app.services import branding, device_status_machine
+from app.services import branding, device_status_explanation, device_status_machine
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
@@ -433,10 +433,10 @@ async def update_monitoring_settings(
     user: User = Depends(require_permission("settings.manage")),
 ):
     incoming = data.model_dump(exclude_unset=True)
-    stored = (await db.execute(
-        text("SELECT value FROM system_settings WHERE key = 'monitoring' FOR UPDATE")
-    )).scalar()
-    stored = dict(stored) if isinstance(stored, dict) else {}
+    row = (await db.execute(
+        text("SELECT value, updated_at FROM system_settings WHERE key = 'monitoring' FOR UPDATE")
+    )).first()
+    stored = dict(row[0]) if row and isinstance(row[0], dict) else {}
     merged = {**stored, **incoming}
     try:
         checked = MonitoringSettings.model_validate(
@@ -448,7 +448,18 @@ async def update_monitoring_settings(
     if problems:
         raise HTTPException(422, "Invalid monitoring settings: " + "; ".join(problems))
 
-    await _merge_system_setting(db, "monitoring", incoming, user)
+    # updated_at moves with every save (the UI sends the full document), so the status explanation
+    # reads when the limits a sample is judged against last changed from a stamp: now when they
+    # change, else the time it used until this save (carried over from a document written before
+    # the stamp existed; null when there was no document). Server-set only: the model drops a
+    # client's own value.
+    explain = device_status_explanation
+    if explain.thresholds_changed(stored, merged):
+        changed_at = datetime.now(timezone.utc)
+    else:
+        changed_at = explain.thresholds_changed_at(stored, row[1] if row else None)
+    patch = {**incoming, explain.THRESHOLDS_CHANGED_AT: changed_at.isoformat() if changed_at else None}
+    await _merge_system_setting(db, "monitoring", patch, user)
     await write_audit_log(
         db,
         actor=user,

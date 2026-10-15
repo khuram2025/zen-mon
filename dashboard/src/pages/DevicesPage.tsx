@@ -1,5 +1,5 @@
 import { formatDeviceAvailability } from '@/components/devices/availability'
-import { isFlapping, type DeviceFlapFields } from '@/components/devices/deviceStatus'
+import { FLAP_HOLD_FLEET_TEXT, isFlapping, type DeviceFlapFields } from '@/components/devices/deviceStatus'
 import { FlappingTag } from '@/components/devices/FlappingTag'
 import {
   ADDED_COLUMNS, buildDevicesCsv, cellText, deviceListFiltersFromParams, deviceListParams, facetMenu, identitySortValue, identityValue, isUnknownValue,
@@ -884,7 +884,7 @@ export function DevicesPage() {
           icon={<Waves className="h-4 w-4" />}
           color="warning"
           active={flappingFilter}
-          title="Devices whose confirmed status keeps changing; their status notifications are held. Combines with the status cards."
+          title={`Devices whose confirmed status keeps changing; while they flap, ${FLAP_HOLD_FLEET_TEXT}. Combines with the status cards.`}
           onClick={() => patchParams({ flapping: flappingFilter ? null : '1', page: '1' })}
         />
         <KpiCard
@@ -1005,7 +1005,7 @@ export function DevicesPage() {
               <div data-flapping-filter="" className="flex items-center gap-2 rounded-md border border-dashed border-warning/40 bg-warning/5 px-3 py-1.5 text-sm">
                 <Waves className="h-3.5 w-3.5 text-warning" aria-hidden />
                 <span className="text-muted">
-                  Showing flapping devices only{statusFilter ? ', with the status filter' : ''}. Their status notifications are held while they flap.
+                  Showing flapping devices only{statusFilter ? ', with the status filter' : ''}. While they flap, {FLAP_HOLD_FLEET_TEXT}.
                 </span>
                 <button
                   className="ml-auto text-muted hover:text-text"

@@ -1105,6 +1105,11 @@ async def _dispatch_device_transitions(
 # KEY SHARE of a foreign-key check pass. The flap notice sweep inserts its
 # notice row (alerts.device_id) while it holds its claimed episode, so FOR
 # UPDATE here would deadlock it against this writer waiting for that episode.
+#
+# Maintenance is decided per sample (as the central poller decides it per
+# check), from the in-scope windows that overlap the freshness range
+# [NOW() - max(2 x interval, 60 s), NOW()]: a backlog that crosses a window's
+# end must not exit the overlay with failures taken inside the window.
 
 _LOCK_OWNED_DEVICES = text("""
     SELECT d.id::text AS device_id, d.status, d.status_changed_at,
@@ -1113,17 +1118,23 @@ _LOCK_OWNED_DEVICES = text("""
            d.hostname, host(d.ip_address)::text AS ip_address,
            d.device_type, d.group_id::text AS group_id, d.location,
            NOW() AS db_now,
-           EXISTS (
-               SELECT 1
+           COALESCE((
+               SELECT jsonb_agg(jsonb_build_array(m.starts_at, m.ends_at) ORDER BY m.starts_at, m.ends_at)
                  FROM device_maintenance m
-                WHERE m.starts_at <= NOW() AND m.ends_at >= NOW()
+                WHERE m.starts_at <= NOW()
+                  AND m.ends_at >= NOW() - make_interval(
+                          secs => GREATEST(COALESCE(d.ping_interval, 60) * 2, 60))
                   AND (   (m.scope_type = 'device' AND m.scope_device_id = d.id)
                        OR (m.scope_type = 'group' AND m.scope_group_id = d.group_id)
                        OR (m.scope_type = 'tag' AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
                        OR m.scope_type = 'all')
-           ) AS maintenance_active
+           ), '[]'::jsonb) AS maintenance_windows
       FROM devices d
      WHERE d.id = ANY(:ids)
+       -- device_polling_owner ignores ping_enabled: a batch still in flight
+       -- when ping was switched off must not recreate the state row or flap
+       -- flags that the device update just released.
+       AND COALESCE(d.ping_enabled, false)
        AND EXISTS (
            SELECT 1 FROM device_polling_owner owner
             WHERE owner.device_id = d.id
@@ -1154,7 +1165,7 @@ _WRITE_DEVICES = text("""
     UPDATE devices d
        SET status = r.status,
            last_seen = COALESCE(r.last_seen, d.last_seen),
-           last_rtt_ms = CASE WHEN r.last_seen IS NULL THEN d.last_rtt_ms ELSE r.last_rtt_ms END,
+           last_rtt_ms = COALESCE(r.last_rtt_ms, d.last_rtt_ms),
            is_flapping = r.is_flapping,
            flapping_since = r.flapping_since,
            flap_kind = r.flap_kind,
@@ -1255,6 +1266,29 @@ def _close_episode(episode: dict[str, Any], ts: datetime, reason: str, status: s
     episode.update(ended_at=ts, end_reason=reason, status_at_end=status)
 
 
+def _maintenance_windows(info: Mapping[str, Any]) -> list[tuple[datetime, datetime]]:
+    """The locked device's in-scope maintenance windows ([starts_at, ends_at])."""
+    raw = info.get("maintenance_windows") or []
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return [(dsm.parse_ts(start), dsm.parse_ts(end)) for start, end in raw]
+
+
+def _sample_in_maintenance(
+    windows: list[tuple[datetime, datetime]], ts: datetime, db_now: datetime
+) -> bool:
+    """Whether a window covered the device when the sample was taken.
+
+    The sample time is clamped to the server clock: a sensor clock running
+    ahead (up to SENSOR_FUTURE_SKEW) must not leave the overlay while the
+    window is still active, because the dispatcher would then suppress that
+    exit (the window is active when it delivers) and a device that stays down
+    after the window would never page. A clock running behind only delays the
+    exit."""
+    at = min(ts, db_now)
+    return any(start <= at <= end for start, end in windows)
+
+
 def _plan_device_status(
     info: Mapping[str, Any],
     row_state: Optional[dsm.State],
@@ -1273,6 +1307,11 @@ def _plan_device_status(
     episode, close with the end reason and the status shown then).
     status_changed_at is the time of the last accepted check that changed the
     displayed status, with or without an event (the central writer's rule).
+    Maintenance is decided per sample, at the sample time clamped to the server
+    clock. last_seen and last_rtt_ms follow the central writer check by check:
+    last_seen moves only for a reply; last_rtt_ms takes a reply's RTT, 0 once
+    Down is confirmed, and otherwise keeps the stored value, so a lost check
+    never shows an Up device at 0 ms or an outage as a recent response.
     """
     device_id = info["device_id"]
     devices_status = info["status"]
@@ -1280,6 +1319,7 @@ def _plan_device_status(
     state = (dsm.seed_state(devices_status, info["status_changed_at"], owner)
              if reseed else row_state)
     first_ts, last_ts = samples[0]["ts"], samples[-1]["ts"]
+    windows = _maintenance_windows(info)
 
     stored_episode = None
     if open_episode is not None:
@@ -1293,6 +1333,9 @@ def _plan_device_status(
     transitions: list[dict[str, Any]] = []
     shown, changed_at = devices_status, None
     accepted = False
+    reply_at: Optional[datetime] = None     # the newest accepted reply
+    rtt_ms: Optional[float] = None          # None keeps devices.last_rtt_ms
+    rtt_from_reply = False
 
     for sample in samples:
         responding = bool(sample["is_up"])
@@ -1302,7 +1345,7 @@ def _plan_device_status(
             rtt_ms=sample["rtt"] if responding else None,
             loss=sample["packet_loss"],
             interval_s=int(info["ping_interval"]),
-            maintenance=bool(info["maintenance_active"]),
+            maintenance=_sample_in_maintenance(windows, sample["ts"], info["db_now"]),
             ordered=False,
             source="sensor",
         )
@@ -1311,6 +1354,11 @@ def _plan_device_status(
         if state.last_sample_at == previous.last_sample_at:
             continue  # a duplicate, or older than the state: the machine ignored it
         accepted = True
+        # The central writer's last_seen / lastRTT rule, applied per check.
+        if responding:
+            reply_at, rtt_ms, rtt_from_reply = check.ts, sample["rtt"], True
+        elif state.hard_status == "down":
+            rtt_ms, rtt_from_reply = 0.0, False
         if state.displayed != shown:
             shown, changed_at = state.displayed, check.ts
         for event in events:
@@ -1370,13 +1418,16 @@ def _plan_device_status(
             "status": devices_status, "is_flapping": bool(info["is_flapping"]),
             "flapping_since": dsm.format_ts(info["flapping_since"]), "flap_kind": info["flap_kind"],
         }
-    newest = samples[-1]
-    seen = info["last_seen"] is None or info["last_seen"] <= newest["ts"]
+    # A reply older than the stored last_seen (another writer's, e.g. before an
+    # owner handoff) moves neither last_seen nor the RTT measured with it.
+    newer_reply = reply_at is not None and (info["last_seen"] is None or info["last_seen"] <= reply_at)
+    if rtt_from_reply and not newer_reply:
+        rtt_ms = None
     device_row = {
         "id": device_id,
         **status_fields,
-        "last_seen": dsm.format_ts(newest["ts"]) if seen else None,
-        "last_rtt_ms": newest["rtt"],
+        "last_seen": dsm.format_ts(reply_at) if newer_reply else None,
+        "last_rtt_ms": rtt_ms,
         "status_changed_at": dsm.format_ts(changed_at),
     }
 

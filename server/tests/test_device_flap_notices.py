@@ -53,16 +53,21 @@ def test_channel_union_is_deduped_in_rule_order():
     assert fns.union_channels(rules) == [a, b, c]
 
 
+def _start_vars(kind):
+    return {"hostname": "sw1", "ip": "10.0.0.1", "changes": 5, "window": 30,
+            "kind_label": ap.flap_kind_label(kind), "stable": 10, **ap.flap_held_labels(kind)}
+
+
 def test_default_texts_are_the_documented_ones():
-    v = {"hostname": "sw1", "ip": "10.0.0.1", "changes": 5, "window": 30,
-         "kind_label": ap.flap_kind_label("reachability"), "stable": 10}
-    start = fns._render("start", v)
+    start = fns._render("start", _start_vars("reachability"))
     assert start["email_subject"] == "[ZenPlus] sw1 is flapping"
     assert start["email_body"] == (
         "sw1 (10.0.0.1) changed status 5 times in the last 30 minutes (up/down). Up/down "
         "notifications for this device are held: a status that lasts 10 minutes still "
         "notifies. Flapping ends after 10 minutes without a change. Other alerts "
         "(interfaces, services, metrics) are not affected.")
+    assert start["sms_template"] == ("ZenPlus — sw1 (10.0.0.1) is flapping: 5 status changes in "
+                                     "30 min. Up/down alerts held until a status lasts 10 min.")
     stop = fns._render("stop", {"hostname": "sw1", "ip": "10.0.0.1", "STATUS": "UP",
                                 "since": "2026-10-14 09:36 UTC",
                                 "end_reason_label": ap.flap_end_reason_label("stable")})
@@ -71,6 +76,91 @@ def test_default_texts_are_the_documented_ones():
                                   "status: UP since 2026-10-14 09:36 UTC. Status notifications "
                                   "have resumed.")
     assert len(stop["sms_template"]) < 160 and len(start["sms_template"]) < 160
+
+
+def test_a_latency_loss_episode_never_says_down_alerts_are_held():
+    """Only the flapping class holds its triggers: up/degraded flapping holds
+    Degraded, while a Down (a reachability change) still notifies as usual."""
+    start = fns._render("start", _start_vars("performance"))
+    assert start["email_body"] == (
+        "sw1 (10.0.0.1) changed status 5 times in the last 30 minutes (up/degraded). Degraded "
+        "(latency/loss) notifications for this device are held: a status that lasts 10 minutes "
+        "still notifies. Flapping ends after 10 minutes without a change. Down notifications "
+        "and other alerts (interfaces, services, metrics) are not affected.")
+    assert start["sms_template"] == ("ZenPlus — sw1 (10.0.0.1) is flapping: 5 status changes in "
+                                     "30 min. Degraded alerts held until a status lasts 10 min.")
+    assert "Up/down" not in start["email_body"] + start["sms_template"]
+    assert ap.flap_held_notice("performance", 10) == (
+        "Degraded (latency/loss) notifications for this device are held until a status lasts "
+        "10 minutes. Down notifications are not affected.")
+    assert ap.flap_held_notice("reachability", 10) == (
+        "Up/down notifications for this device are held until a status lasts 10 minutes.")
+
+
+@pytest.mark.parametrize("kind", ["both", None, "bogus"])
+def test_an_episode_of_both_classes_holds_every_status_notification(kind):
+    start = fns._render("start", _start_vars(kind))
+    assert ("Status notifications for this device are held: a status that lasts 10 minutes "
+            "still notifies.") in start["email_body"]
+    assert start["email_body"].endswith("Other alerts (interfaces, services, metrics) are not "
+                                        "affected.")
+    assert "Status alerts held until a status lasts 10 min." in start["sms_template"]
+    assert "{" not in start["email_body"] + start["sms_template"]
+    assert len(start["sms_template"]) < 160
+
+
+def _rule(trigger_on="any", metric="ping_status", operator="eq", threshold=0, **kw):
+    return NS(trigger_on=trigger_on, metric=metric, operator=operator, threshold=threshold,
+              conditions=kw.pop("conditions", None), condition_logic=kw.pop("logic", "AND"),
+              notify_while_flapping=kw.pop("notify_while_flapping", False), **kw)
+
+
+@pytest.mark.parametrize("rule,reach,perf", [
+    # The seeded rules (trigger_on defaults to 'any').
+    (_rule(), True, False),                                        # Device Down: ping_status == 0
+    (_rule(metric="rtt", operator="gt", threshold=100), False, True),        # High Latency
+    (_rule(metric="packet_loss", operator="gt", threshold=5), True, True),   # Packet Loss
+    # The wizard's explicit triggers store ping_status == 0 whatever the trigger.
+    (_rule(trigger_on="down"), True, False),
+    (_rule(trigger_on="degraded"), False, True),
+    (_rule(trigger_on="up"), False, False),
+    (_rule(trigger_on="down", metric="rtt", operator="gt", threshold=100), False, False),
+    (_rule(trigger_on=None), True, False),
+    # Conditions combine as the status path combines them.
+    (_rule(conditions=[{"metric": "ping_status", "operator": "==", "threshold": 0},
+                       {"metric": "rtt", "operator": ">", "threshold": 100}], logic="OR"), True, True),
+    (_rule(conditions=[{"metric": "ping_status", "operator": "==", "threshold": 0},
+                       {"metric": "rtt", "operator": ">", "threshold": 100}]), False, False),
+    (_rule(conditions=[{"metric": "ping_status", "operator": "==", "threshold": 1},
+                       {"metric": "packet_loss", "operator": ">=", "threshold": 20}]), False, True),
+    (_rule(metric="rtt", operator="bogus", threshold=100), False, False),
+    # Never held, so never told.
+    (_rule(trigger_on="down", notify_while_flapping=True), False, False),
+    (_rule(notify_while_flapping=True), False, False),
+])
+def test_only_rules_a_flap_holds_are_told(rule, reach, perf):
+    """The status path's metric gate decides who a flap holds: a rule whose
+    conditions cannot match the flapping class's move is never held by it."""
+    assert fns.rule_held(rule, "reachability") is reach
+    assert fns.rule_held(rule, "performance") is perf
+    assert fns.rule_held(rule, "both") is (reach or perf)
+
+
+@pytest.mark.parametrize("new_status,values", [
+    ("down", {"ping_status": 0.0, "rtt": 0.0, "packet_loss": 100.0}),
+    ("degraded", {"ping_status": 1.0, "rtt": 250.0, "packet_loss": 40.0}),
+])
+def test_a_rule_the_status_path_fires_is_never_dropped_from_the_notices(new_status, values):
+    """_could_fire_into over-approximates the real gate: whenever the status
+    path would fire a rule on such a move, the notice gate keeps it."""
+    rules = [_rule(), _rule(metric="rtt", operator="gt", threshold=100),
+             _rule(metric="packet_loss", operator="gt", threshold=5),
+             _rule(metric="rtt", operator="lt", threshold=1),
+             _rule(conditions=[{"metric": "ping_status", "operator": "==", "threshold": 1},
+                               {"metric": "rtt", "operator": ">", "threshold": 200}])]
+    for rule in rules:
+        if alert_engine._conditions_match(rule, values):
+            assert alert_engine._could_fire_into(rule, new_status), rule
 
 
 def test_flap_notice_rows_are_notices():
@@ -230,7 +320,104 @@ async def test_a_performance_episode_tells_degraded_and_any_rules_only(world):
     await sweep(w.db)
     [call] = w.calls
     assert call["channels"] == [ch.hook, ch.other]
-    assert "(up/degraded)" in call["ctx"]["body"]
+    ctx = call["ctx"]
+    assert "(up/degraded)" in ctx["body"]
+    # A Down still notifies at once: nobody is told Up/down alerts are held.
+    assert "Up/down" not in ctx["body"] + ctx["message"] + ctx["notice"]
+    assert "Degraded (latency/loss) notifications for this device are held" in ctx["body"]
+    assert "Degraded alerts held until a status lasts 10 min." in ctx["message"]
+    assert ctx["notice"].endswith("Down notifications are not affected.")
+
+
+def add_seeded_rules(w, *, down=None, latency=None, loss=None):
+    """The default rules (those given channels) exactly as
+    scripts/seed-devices.sql creates them: no trigger_on, so the column
+    default ('any') applies."""
+    ids = []
+    for name, metric, op, threshold, channels in (
+            ("Device Down", "ping_status", "eq", 0, down),
+            ("High Latency", "rtt", "gt", 100, latency),
+            ("Packet Loss", "packet_loss", "gt", 5, loss)):
+        if channels is None:
+            continue
+        ids.append(str(w.db.scalar(
+            "INSERT INTO alert_rules (name, metric, operator, threshold, duration, severity,"
+            " cooldown, notify_channels) VALUES ($1, $2, $3, $4, 180, 'critical', 300, $5::jsonb)"
+            " RETURNING id", name, metric, op, threshold, list(channels))))
+    assert {r[0] for r in w.db.query("SELECT trigger_on FROM alert_rules")} == {"any"}
+    return ids
+
+
+@pytest.mark.asyncio
+async def test_the_seeded_device_down_rule_hears_nothing_of_latency_loss_flapping(world):
+    """It fires only on Down (ping_status == 0 on an 'any' rule), so an
+    up/degraded episode holds none of its notifications."""
+    w, ch = world, world.ch
+    add_seeded_rules(w, down=[ch.mail])
+    ep = add_episode(w, kind="performance")
+    out = await sweep(w.db)
+    assert out == {"started": 0, "stopped": 0, "skipped": 1, "failed": 0}
+    assert w.calls == [] and notices(w) == []
+    assert episode(w, ep).start == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["reachability", "both"])
+async def test_the_seeded_device_down_rule_still_hears_of_up_down_flapping(world, kind):
+    w, ch = world, world.ch
+    add_seeded_rules(w, down=[ch.mail])
+    add_episode(w, kind=kind)
+    assert (await sweep(w.db))["started"] == 1
+    [call] = w.calls
+    assert call["channels"] == [ch.mail]
+
+
+@pytest.mark.asyncio
+async def test_seeded_metric_rules_hear_only_of_the_flapping_they_can_fire_on(world):
+    """High Latency (rtt > 100) never fires on a move into down (no answer, no
+    round-trip time); Packet Loss (> 5%) does (100% loss)."""
+    w, ch = world, world.ch
+    down, latency, loss = add_seeded_rules(w, down=[ch.mail], latency=[ch.hook], loss=[ch.chat])
+    add_episode(w, kind="reachability")
+    await sweep(w.db)
+    [call] = w.calls
+    assert call["channels"] == [ch.mail, ch.chat]
+    [row] = notices(w)
+    assert sorted(row.meta["target_rule_ids"]) == sorted([down, loss])
+
+    w.calls.clear()
+    w.db.execute("DELETE FROM device_flap_episodes")
+    add_episode(w, kind="performance")
+    await sweep(w.db)
+    [call] = w.calls
+    assert call["channels"] == [ch.hook, ch.chat]
+
+
+@pytest.mark.asyncio
+async def test_a_rule_that_notifies_while_flapping_is_not_told_it_is_held(world):
+    """Its Down pages at once, so 'held' and later 'resumed' would both be
+    false for a channel only it reaches."""
+    w, ch = world, world.ch
+    add_rule(w, "Core Down", "down", [ch.hook], notify_while_flapping=True)
+    add_rule(w, "Device Down", "down", [ch.mail])
+    add_episode(w)
+    await sweep(w.db)
+    [call] = w.calls
+    assert call["channels"] == [ch.mail]
+
+
+@pytest.mark.asyncio
+async def test_only_rules_that_notify_while_flapping_means_no_notice(world):
+    w, ch = world, world.ch
+    add_rule(w, "Core Down", "down", [ch.hook], notify_while_flapping=True)
+    ep = add_episode(w)
+    out = await sweep(w.db)
+    assert out["skipped"] == 1 and out["started"] == 0
+    assert w.calls == [] and notices(w) == []
+    assert episode(w, ep).start == "skipped"
+    end_episode(w, ep)
+    await sweep(w.db)
+    assert w.calls == [] and episode(w, ep).stop == "skipped"
 
 
 @pytest.mark.asyncio
@@ -367,7 +554,7 @@ async def test_the_stop_follows_the_start(world):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reason,label", [
-    ("owner_change", "polling ownership changed"),
+    ("owner_change", "polling owner changed or went offline"),
     ("reseed", "status re-synchronised"),
     ("not_polled", "no longer polled"),
 ])

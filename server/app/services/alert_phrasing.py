@@ -633,18 +633,19 @@ def normalize_stored_template(value: Optional[str], default: Optional[str]) -> O
 # (device_flap_notice_service). They go once per channel to the union of the
 # channels of every rule whose status notifications the episode holds, so no
 # single rule renders them: these defaults are the whole text. Variables:
-# {hostname} {ip} {changes} {window} {kind_label} {stable} (start) and
+# {hostname} {ip} {changes} {window} {kind_label} {stable} {held_label}
+# {held_sms_label} {unaffected_label} (start; see flap_held_labels) and
 # {hostname} {ip} {end_reason_label} {STATUS} {since} (stop).
 
 FLAP_START_EMAIL_SUBJECT = "[ZenPlus] {hostname} is flapping"
 FLAP_START_EMAIL_BODY = (
     "{hostname} ({ip}) changed status {changes} times in the last {window} minutes "
-    "({kind_label}). Up/down notifications for this device are held: a status that "
+    "({kind_label}). {held_label} for this device are held: a status that "
     "lasts {stable} minutes still notifies. Flapping ends after {stable} minutes "
-    "without a change. Other alerts (interfaces, services, metrics) are not affected."
+    "without a change. {unaffected_label} are not affected."
 )
 FLAP_START_SMS = ("ZenPlus — {hostname} ({ip}) is flapping: {changes} status changes in "
-                  "{window} min. Up/down alerts held until a status lasts {stable} min.")
+                  "{window} min. {held_sms_label} held until a status lasts {stable} min.")
 
 FLAP_STOP_EMAIL_SUBJECT = "[ZenPlus] {hostname} stopped flapping — {STATUS}"
 FLAP_STOP_EMAIL_BODY = (
@@ -660,12 +661,31 @@ FLAP_KIND_LABELS = {
     "both": "up/down and up/degraded",
 }
 
+# Episode kind -> the status notifications it holds. Only the flapping class
+# holds its own triggers: latency/loss flapping holds Degraded, never Down
+# (a move into down is reachability), and recoveries to Up are never held.
+FLAP_HELD_LABELS = {
+    "reachability": "Up/down notifications",
+    "performance": "Degraded (latency/loss) notifications",
+    "both": "Status notifications",
+}
+FLAP_HELD_SMS_LABELS = {
+    "reachability": "Up/down alerts",
+    "performance": "Degraded alerts",
+    "both": "Status alerts",
+}
+# ... and what it leaves alone.
+_FLAP_OTHER_ALERTS = "Other alerts (interfaces, services, metrics)"
+FLAP_UNAFFECTED_LABELS = {
+    "performance": "Down notifications and other alerts (interfaces, services, metrics)",
+}
+
 # device_flap_episodes.end_reason -> why the episode ended.
 FLAP_END_REASON_LABELS = {
     "stable": "status stable",
     "disabled": "flap detection turned off",
     "maintenance": "maintenance window started",
-    "owner_change": "polling ownership changed",
+    "owner_change": "polling owner changed or went offline",
     "reseed": "status re-synchronised",
     "not_polled": "no longer polled",
 }
@@ -682,6 +702,26 @@ def flap_notice_templates(flap_event: str) -> dict:
 
 def flap_kind_label(kind: Optional[str]) -> str:
     return FLAP_KIND_LABELS.get(kind or "", "status changes")
+
+
+def flap_held_labels(kind: Optional[str]) -> dict:
+    """{held_label, held_sms_label, unaffected_label} for a start notice of
+    an episode of ``kind`` (an unknown kind reads as every status)."""
+    k = kind or ""
+    return {
+        "held_label": FLAP_HELD_LABELS.get(k, "Status notifications"),
+        "held_sms_label": FLAP_HELD_SMS_LABELS.get(k, "Status alerts"),
+        "unaffected_label": FLAP_UNAFFECTED_LABELS.get(k, _FLAP_OTHER_ALERTS),
+    }
+
+
+def flap_held_notice(kind: Optional[str], stable_minutes) -> str:
+    """The start notice's callout line: what is held, until when."""
+    text_ = (f"{flap_held_labels(kind)['held_label']} for this device are held until a "
+             f"status lasts {stable_minutes} minutes.")
+    if kind == "performance":
+        text_ += " Down notifications are not affected."
+    return text_
 
 
 def flap_end_reason_label(reason: Optional[str]) -> str:

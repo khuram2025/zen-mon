@@ -33,7 +33,12 @@ import (
 //     log, alert engine, Redis) in a FIFO, so one device's events are never
 //     reordered while a slow alert POST for one device does not hold up the
 //     others. A save that updated no devices row (the device is no longer
-//     centrally owned) drops the events.
+//     centrally polled) drops the events and parks the device until the
+//     next sync reloads it; a save that found another writer's state row
+//     (ownership moved away and back within one sync) drops the events and
+//     reseeds the device from the status that writer left, so the next
+//     check confirms the real change. Jobs stepped from a state that has
+//     been replaced since (Device.epoch) are dropped unwritten.
 
 // ownerCentral is the device_status_state owner of centrally polled devices.
 const ownerCentral = "central"
@@ -191,33 +196,50 @@ func ensureSeeded(d *Device) {
 	}
 }
 
-// initDeviceState prepares a device the engine sees for the first time. A
-// state loaded from its row counts as already persisted; a seeded one is
-// written by the first check.
+// initDeviceState prepares a device the engine (re)loads from the database:
+// one it sees for the first time, or one whose save found it no longer
+// centrally polled. A state loaded from its row counts as already persisted;
+// a seeded one is written by the first check, which may take over the row
+// the seed replaced (SeedOwner).
 func initDeviceState(d *Device) {
 	ensureSeeded(d)
 	d.Status = d.State.Displayed()
 	d.persisted = nil
 	d.stateWrittenAt = time.Time{}
+	d.ownerLost = false
+	d.takeover = ""
 	if d.StateLoaded {
 		snapshot := d.State
 		d.persisted = &snapshot
 		if d.State.LastSampleAt != nil {
 			d.stateWrittenAt = *d.State.LastSampleAt
 		}
+	} else {
+		d.takeover = d.SeedOwner
 	}
 }
 
 // adoptDeviceState carries the engine-owned machine state of a device across
 // a reload: the in-memory state is authoritative (single central writer), the
-// reloaded row may lag behind writes still in the queue.
+// reloaded row may lag behind writes still in the queue. A row another writer
+// changed meanwhile is detected by the save itself (DeviceStatusSaved.Foreign).
 func adoptDeviceState(d, existing *Device) {
 	d.State = existing.State
 	d.StateLoaded = existing.StateLoaded
 	d.SeedEndReason = existing.SeedEndReason
+	d.SeedOwner = existing.SeedOwner
 	d.Status = existing.Status
 	d.persisted = existing.persisted
 	d.stateWrittenAt = existing.stateWrittenAt
+	d.takeover = existing.takeover
+	d.ownerLost = existing.ownerLost
+	d.epoch = existing.epoch
+}
+
+// nextEpochLocked returns a new state lineage id (caller holds e.mu).
+func (e *Engine) nextEpochLocked() uint64 {
+	e.stateEpoch++
+	return e.stateEpoch
 }
 
 // sameState reports whether two states are equal apart from last_sample_at
@@ -306,6 +328,8 @@ type statusJob struct {
 	hostname   string
 	ip         net.IP
 	packetLoss float32
+	// epoch is the device's state lineage the check was stepped from.
+	epoch uint64
 }
 
 // stepDevice advances one device's machine for a ping result. It runs under
@@ -316,7 +340,8 @@ func (e *Engine) stepDevice(result *PingResult) *statusJob {
 	defer e.mu.Unlock()
 
 	device, ok := e.devices[result.DeviceID]
-	if !ok {
+	if !ok || device.ownerLost {
+		// Not (or no longer) centrally polled: the next sync decides.
 		return nil
 	}
 	ensureSeeded(device)
@@ -347,11 +372,13 @@ func (e *Engine) stepDevice(result *PingResult) *statusJob {
 			WriteState:        writeState,
 			FlapChanges:       len(next.ReachChanges) + len(next.PerfChanges),
 			FlapWindowMinutes: e.policy.FlapWindowMinutes,
+			TakeoverOwner:     device.takeover,
 		},
 		events:     events,
 		hostname:   device.Hostname,
 		ip:         device.IPAddress,
 		packetLoss: result.PacketLoss,
+		epoch:      device.epoch,
 	}
 	if writeState {
 		job.save.EndReason = flapEndReason(events, device.SeedEndReason)
@@ -370,19 +397,91 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 	}
 }
 
+// currentDeviceLocked returns the job's device when it is still on the
+// lineage the job was stepped from (caller holds e.mu).
+func (e *Engine) currentDeviceLocked(job *statusJob) (*Device, bool) {
+	d, ok := e.devices[job.save.DeviceID]
+	if !ok || d.epoch != job.epoch {
+		return nil, false
+	}
+	return d, true
+}
+
+// statusJobStale reports whether the job was stepped from a state that has
+// been replaced since (reload or foreign reseed): writing it would put an
+// abandoned lineage back into the database. A device that left the engine
+// is not stale: the save's own guard decides.
+func (e *Engine) statusJobStale(job *statusJob) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	d, ok := e.devices[job.save.DeviceID]
+	return ok && d.epoch != job.epoch
+}
+
 // statusPersistFailed makes the device's next check write its full state
 // again and keeps the episode end reason the failed write carried.
-func (e *Engine) statusPersistFailed(id uuid.UUID, endReason string) {
+func (e *Engine) statusPersistFailed(job *statusJob) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	d, ok := e.devices[id]
+	d, ok := e.currentDeviceLocked(job)
 	if !ok {
 		return
 	}
 	d.persisted = nil
-	if d.SeedEndReason == "" && endReason != devicestatus.EndStable {
-		d.SeedEndReason = endReason
+	if d.SeedEndReason == "" && job.save.EndReason != devicestatus.EndStable {
+		d.SeedEndReason = job.save.EndReason
 	}
+}
+
+// statusStateWritten notes a successful state write: the row is the central
+// writer's now, so a later foreign row is no longer one to take over.
+func (e *Engine) statusStateWritten(job *statusJob) {
+	if job.save.TakeoverOwner == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if d, ok := e.currentDeviceLocked(job); ok && d.takeover == job.save.TakeoverOwner {
+		d.takeover = ""
+	}
+}
+
+// statusOwnerLost parks a device whose save found it no longer centrally
+// polled (moved to a sensor, ping disabled, address removed): it is neither
+// pinged nor stepped until the next sync, which drops it or, when it is
+// central again, reloads it from its row (initDeviceState).
+func (e *Engine) statusOwnerLost(job *statusJob) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if d, ok := e.currentDeviceLocked(job); ok {
+		d.ownerLost = true
+		d.persisted = nil
+	}
+}
+
+// statusForeign reseeds a device whose state row another writer owns (it
+// wrote while the device was briefly not central): the confirmed status is
+// the one that writer left in devices.status, the next check is stepped
+// from it (producing the real transition, e.g. down -> up with its recovery
+// alert) and its write takes that row over and closes its open episode.
+// Jobs stepped from the replaced state are dropped (new epoch).
+func (e *Engine) statusForeign(job *statusJob, saved DeviceStatusSaved) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	d, ok := e.currentDeviceLocked(job)
+	if !ok {
+		return false
+	}
+	d.State = devicestatus.Seed(saved.Status, saved.StatusChangedAt, ownerCentral)
+	d.StateLoaded = false
+	d.SeedEndReason = devicestatus.EndOwnerChange
+	d.SeedOwner = saved.ForeignOwner
+	d.takeover = saved.ForeignOwner
+	d.Status = d.State.Displayed()
+	d.persisted = nil
+	d.stateWrittenAt = time.Time{}
+	d.epoch = e.nextEpochLocked()
+	return true
 }
 
 // statusPipeline returns the engine's status writer, starting it on first use.
@@ -492,6 +591,13 @@ func (p *statusPipeline) run() {
 
 func (p *statusPipeline) persist(job *statusJob) {
 	e := p.e
+	if e.statusJobStale(job) {
+		if len(job.events) > 0 {
+			e.logger.Infof("Device %s (%s) was reloaded; dropped %d status events of its replaced state",
+				job.hostname, job.ip, len(job.events))
+		}
+		return
+	}
 	ctx, cancel := context.WithTimeout(p.ctx, statusWriteTimeout)
 	saved, err := e.loader.SaveDeviceStatus(ctx, &job.save)
 	cancel()
@@ -500,15 +606,25 @@ func (p *statusPipeline) persist(job *statusJob) {
 		// The in-memory machine stays authoritative: the next check rewrites
 		// the full state, and the confirmed changes are still delivered.
 		e.logger.Errorf("Failed to save device status for %s (%s): %v", job.hostname, job.ip, err)
-		e.statusPersistFailed(job.save.DeviceID, job.save.EndReason)
+		e.statusPersistFailed(job)
+	case saved.Foreign:
+		if e.statusForeign(job, saved) {
+			e.logger.Infof("Device %s (%s): status written by %s since the last central write; "+
+				"reseeded from %q, dropped %d status events",
+				job.hostname, job.ip, saved.ForeignOwner, saved.Status, len(job.events))
+		}
+		return
 	case !saved.Device:
+		e.statusOwnerLost(job)
 		if len(job.events) > 0 {
 			e.logger.Infof("Device %s (%s) is no longer centrally polled; dropped %d status events",
 				job.hostname, job.ip, len(job.events))
 		}
 		return
 	case job.save.WriteState && !saved.State:
-		e.statusPersistFailed(job.save.DeviceID, job.save.EndReason)
+		e.statusPersistFailed(job)
+	case job.save.WriteState:
+		e.statusStateWritten(job)
 	}
 	p.deliver(job)
 }

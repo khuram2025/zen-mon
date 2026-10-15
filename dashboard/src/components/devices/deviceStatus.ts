@@ -260,6 +260,40 @@ export const FLAP_KIND_LABEL: Record<FlapKind, string> = {
   both: 'up/down and latency/loss',
 }
 
+/*
+ * What a flap hold covers. The alert engine holds a status trigger only while the class of ITS OWN change flaps
+ * (alert_engine.evaluate_status_change: flap_held = event.flapping, the transition's class flag): a device flapping on
+ * latency/loss still pages a Down at once, one flapping up/down still pages Up -> Degraded at once
+ * (docs/device-status-policy.md: "latency jitter can never hold back a Down notification"). Recoveries are never held;
+ * they follow their trigger. So the copy names the kind of change whose notifications wait, never "all of them".
+ */
+
+const lastsText = (stableMinutes: unknown): string => (typeof stableMinutes === 'number'
+  ? `: a status that lasts ${stableMinutes} min still notifies`
+  : ' until a status lasts the flap stability time')
+
+/** The hold of one flapping device, as sentences: which changes wait, how long, and which still notify at once. */
+export function flapHeldText(kind: unknown, stableMinutes?: number | null): string {
+  const lasts = lastsText(stableMinutes)
+  switch (flapKindOf(kind)) {
+    case 'reachability': return `Notifications for changes into or out of Down are held${lasts}. Changes between Up and Degraded still notify at once.`
+    case 'performance': return `Notifications for changes between Up and Degraded are held${lasts}. Changes into or out of Down still notify at once.`
+    case 'both': return `Status notifications for this device are held${lasts}.`
+    default: return `Notifications for the kind of change that is flapping are held${lasts}.`
+  }
+}
+
+/** The notifications a flap hold covers, as a short noun phrase: "up/down notifications". */
+export function flapHeldNoun(kind: unknown): string {
+  const k = flapKindOf(kind)
+  return k === 'both' ? 'status notifications' : k ? `${FLAP_KIND_LABEL[k]} notifications` : 'notifications for the flapping changes'
+}
+
+/** The hold where the kind is not known per device (fleet counts, filters, settings): only the flapping kind waits. */
+export const FLAP_HOLD_FLEET_TEXT = 'notifications for the kind of change that flaps (up/down or latency/loss) are held; the other kind still notifies at once'
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
 /** Badge text: "Flapping", or "Flapping · up/down" where there is room for the kind. */
 export function flapBadgeText(kind: unknown, withKind = false): string {
   const k = flapKindOf(kind)
@@ -278,7 +312,7 @@ export interface FlapTooltipInput {
 
 /**
  * The tooltip of a Flapping badge: what flaps, since when, how many changes, when it can end at the earliest, and
- * that status notifications are held (a status that lasts the stability time still notifies).
+ * which notifications are held (only the flapping kind; a status that lasts the stability time still notifies).
  */
 export function flapTooltip(info: FlapTooltipInput, nowMs: number, fmtTime: TimeFormatter = defaultTime): string {
   const kind = flapKindOf(info.kind)
@@ -288,10 +322,7 @@ export function flapTooltip(info: FlapTooltipInput, nowMs: number, fmtTime: Time
   if (typeof info.changes === 'number' && typeof info.windowMinutes === 'number') {
     parts.push(`${plural(info.changes, 'status change')} in the last ${info.windowMinutes} min.`)
   }
-  const stable = typeof info.stableMinutes === 'number' ? info.stableMinutes : null
-  parts.push(stable !== null
-    ? `Status notifications for this device are held: a status that lasts ${stable} min still notifies.`
-    : 'Status notifications for this device are held until a status lasts the flap stability time.')
+  parts.push(flapHeldText(kind, info.stableMinutes))
   const earliest = parseApiTime(info.earliestStopAt)
   if (earliest !== null) parts.push(`Ends ${fmtTime(earliest)} at the earliest if the status stops changing.`)
   return parts.join(' ')
@@ -310,7 +341,7 @@ export function problemSeverity(d: { status: string } & DeviceFlapFields, active
  */
 export function attentionEmptyText(summaryFlapping: number | null | undefined): string {
   const n = typeof summaryFlapping === 'number' && summaryFlapping > 0 ? summaryFlapping : 0
-  return n > 0 ? `${plural(n, 'device')} flapping (status notifications held)` : 'All devices healthy 🎉'
+  return n > 0 ? `${plural(n, 'device')} flapping (${flapHeldNoun(null)} held)` : 'All devices healthy 🎉'
 }
 
 /* ── Pending (soft) changes ──────────────────────────────────────────────── */
@@ -369,12 +400,7 @@ export function policySentences(p: MonitoringPolicy, opts: { downConfirm?: numbe
   const degraded = single
     ? `Degraded when a check's latency is above ${rtt} or its packet loss above ${loss} (equal values are within the limit).`
     : `Degraded when ${p.degraded_confirm_checks} of the last ${p.degraded_window_checks} checks have latency above ${rtt}, packet loss above ${loss} or no response (equal values are within the limit).`
-  const band = p.degraded_rtt_clear_ms === p.degraded_rtt_ms && p.degraded_loss_clear_pct === p.degraded_loss_pct
-    ? `at or below the Degraded limits`
-    : `at or below the recovery limits (${fmt3(p.degraded_rtt_clear_ms)} ms, ${fmt3(p.degraded_loss_clear_pct)}%)`
-  const recovery = p.degraded_clear_checks === 1
-    ? `Back to Up from Degraded after one check ${band}.`
-    : `Back to Up from Degraded after ${p.degraded_clear_checks} consecutive checks ${band}, or after ${p.degraded_window_checks} checks in a row with no slow, lossy or unanswered check.`
+  const recovery = recoverySentence(p)
   const packets = typeof opts.packets === 'number' && opts.packets > 0 ? ` (${opts.packets} packets each)` : ''
   const up = p.up_confirm_checks === 1 ? 'the first responding check' : `${p.up_confirm_checks} consecutive responding checks`
   const then = p.degraded_confirm_checks > 1
@@ -383,9 +409,37 @@ export function policySentences(p: MonitoringPolicy, opts: { downConfirm?: numbe
   const downText = `Down after ${plural(down, 'consecutive failed check')}${packets}; back to Up after ${up}. ${then} Unanswered checks also count towards Degraded.`
   const stop = p.flap_stop_changes === 0 ? 'no change remains' : `at most ${plural(p.flap_stop_changes, 'change')} remain${p.flap_stop_changes === 1 ? 's' : ''}`
   const flapping = p.flap_detection_enabled
-    ? `Flapping when the status changes ${p.flap_start_changes} times within ${p.flap_window_minutes} min (up/down and latency/loss changes are counted separately). It ends when ${stop} in the window or after ${p.flap_stable_minutes} min without a change. While flapping, status notifications are held: a status that lasts ${p.flap_stable_minutes} min still notifies.`
+    ? `Flapping when the status changes ${p.flap_start_changes} times within ${p.flap_window_minutes} min (up/down and latency/loss changes are counted separately). It ends when ${stop} in the window or after ${p.flap_stable_minutes} min without a change. While up/down or latency/loss changes flap, notifications for that kind of change are held: a status that lasts ${p.flap_stable_minutes} min still notifies. The other kind still notifies at once.`
     : 'Flap detection is off: every confirmed status change notifies as usual.'
   return { degraded, recovery, down: downText, flapping }
+}
+
+/** Whether the recovery limits equal the Degraded limits: every check that is not slow, lossy or unanswered is clear. */
+const noHysteresis = (p: MonitoringPolicy) => p.degraded_rtt_clear_ms === p.degraded_rtt_ms && p.degraded_loss_clear_pct === p.degraded_loss_pct
+
+/**
+ * Degraded -> Up as the machine decides it: degraded_clear_checks consecutive checks within the recovery limits, OR a
+ * full window (degraded_window_checks since the last change) without a slow, lossy or unanswered check. A check in
+ * the band between the two limits restarts the first path but counts towards the second, so only the paths that can
+ * actually decide are named: without a band both paths need the same checks (the faster count wins); with a band
+ * and a window no longer than the recovery count, the window always recovers first and the recovery limits never
+ * decide.
+ */
+function recoverySentence(p: MonitoringPolicy): string {
+  const clear = p.degraded_clear_checks
+  const win = p.degraded_window_checks
+  if (noHysteresis(p)) {
+    const n = Math.min(clear, win)
+    return `Back to Up from Degraded after ${n === 1 ? 'one check' : plural(n, 'consecutive check')} at or below the Degraded limits.`
+  }
+  const limits = `(${fmt3(p.degraded_rtt_clear_ms)} ms, ${fmt3(p.degraded_loss_clear_pct)}%)`
+  if (win <= clear) {
+    const within = `(latency at or below ${fmt3(p.degraded_rtt_ms)} ms, packet loss at or below ${fmt3(p.degraded_loss_pct)}%)`
+    const after = win === 1 ? `one check that is not slow, lossy or unanswered ${within}` : `${win} checks in a row with no slow, lossy or unanswered check ${within}`
+    return `Back to Up from Degraded after ${after}. The recovery limits ${limits} have no effect: a window of ${plural(win, 'check')} is no longer than ${plural(clear, 'consecutive recovery check')}.`
+  }
+  const streak = clear === 1 ? 'one check' : `${clear} consecutive checks`
+  return `Back to Up from Degraded after ${streak} at or below the recovery limits ${limits}, or after ${plural(win, 'check')} in a row with no slow, lossy or unanswered check.`
 }
 
 /**
@@ -454,7 +508,8 @@ export function timingRows(p: MonitoringPolicy, intervals: readonly number[] = [
       down: confirmationDelay(p.down_confirm_checks, i),
       up: confirmationDelay(p.up_confirm_checks, i),
       degraded: confirmationDelay(p.degraded_confirm_checks, i),
-      degradedClear: confirmationDelay(p.degraded_clear_checks, i),
+      // The faster recovery path, as in maxDetectableIntervals: clear checks, or a full clean window.
+      degradedClear: confirmationDelay(Math.min(p.degraded_clear_checks, p.degraded_window_checks), i),
       flap: reach && perf ? 'both' : reach ? 'reachability' : perf ? 'performance' : 'none',
     }
   })
@@ -487,7 +542,7 @@ export function lossGranularityNote(p: MonitoringPolicy): string {
     ? `With the ${fmt3(p.degraded_loss_pct)}% limit, packet loss never makes a responding check lossy.`
     : `With the ${fmt3(p.degraded_loss_pct)}% limit, a check is lossy when ${lost === 1 ? 'one packet is' : `${lost} of ${PACKETS_PER_CHECK} packets are`} lost.`
   const clear = packetsLostToExceed(p.degraded_loss_clear_pct) === 1
-    ? ` A recovery limit below 33.3% means a check counts towards recovery only with no loss at all.`
+    ? ` A recovery limit below 33.3% means a check counts towards the consecutive recovery checks only with no loss at all.`
     : ''
   return `Each check sends ${PACKETS_PER_CHECK} packets, so its loss is 0%, 33.3%, 66.7% or 100%. ${lossy}${clear}`
 }
@@ -800,7 +855,7 @@ export function explanationView(data: StatusExplanation, nowMs: number, fmtTime:
       `Flapping${kind ? ` (${FLAP_KIND_LABEL[kind]} changes)` : ''}${flapSince !== null ? ` since ${fmtTime(flapSince)}` : ''}.`,
       changes !== null ? `${plural(changes, 'confirmed change')} in the last ${window} min (flapping starts at ${flap.start_changes ?? p.flap_start_changes}).` : '',
       `It ends after ${stable} min without a change${earliest !== null ? ` (${fmtTime(earliest)} at the earliest)` : ''} or when ${stop === 0 ? 'no change remains' : `at most ${plural(stop, 'change')} remain${stop === 1 ? 's' : ''}`} in the window.`,
-      `Status notifications for this device are held meanwhile: a status that lasts ${stable} min still notifies. Interface, service and metric alerts are not affected.`,
+      `${flapHeldText(kind, stable)} Interface, service and metric alerts are not affected.`,
     ].filter(Boolean).join(' ')
   }
 
@@ -830,7 +885,10 @@ export function explanationView(data: StatusExplanation, nowMs: number, fmtTime:
     : null
 
   const flapKind = flapKindOf(flap?.kind)
-  const flapShort = flapping ? `Flapping${flapKind ? ` (${FLAP_KIND_LABEL[flapKind]})` : ''}; status notifications held` : null
+  // Only the flapping kind is held: "Flapping (latency/loss); only latency/loss notifications held".
+  const flapShort = flapping
+    ? `Flapping${flapKind ? ` (${FLAP_KIND_LABEL[flapKind]})` : ''}; ${flapKind && flapKind !== 'both' ? 'only ' : ''}${flapHeldNoun(flapKind)} held`
+    : null
   const latest = data.latest
   const lastCheck = latest
     ? `Last check ${fmtTime(parseApiTime(latest.timestamp) ?? 0)} · ${latest.is_up ? 'Responded' : 'No response'}`
@@ -857,7 +915,8 @@ export interface SampleVerdict { tone: 'success' | 'warning' | 'muted' | 'danger
 
 /**
  * What the latest check means for the current status. While Degraded, both limits matter: a check between the
- * recovery limit and the Degraded limit neither degrades nor counts towards recovery (hysteresis).
+ * recovery limit and the Degraded limit does not degrade and restarts the consecutive recovery checks, but it is not
+ * slow, lossy or unanswered, so it counts towards the clean-window recovery (device_status_machine.step).
  */
 export function latestVerdict(sample: ExplanationSample, data: StatusExplanation): SampleVerdict | null {
   if (sample.stale) return { tone: 'warning', text: 'This sample is overdue and cannot explain the current network condition.' }
@@ -873,9 +932,14 @@ export function latestVerdict(sample: ExplanationSample, data: StatusExplanation
   }
   if (cls === 'breach') return null // the breaches themselves are listed
   if (hard === 'degraded') {
-    return cls === 'clear'
-      ? { tone: 'success', text: `Both measurements are at or below the recovery limits (${fmt3(p.degraded_rtt_clear_ms)} ms, ${fmt3(p.degraded_loss_clear_pct)}%); this check counts towards recovery.` }
-      : { tone: 'muted', text: `Within the Degraded limits but above a recovery limit (${fmt3(p.degraded_rtt_clear_ms)} ms, ${fmt3(p.degraded_loss_clear_pct)}%); this check neither degrades nor counts towards recovery.` }
+    const limits = `(${fmt3(p.degraded_rtt_clear_ms)} ms, ${fmt3(p.degraded_loss_clear_pct)}%)`
+    if (cls === 'clear') return { tone: 'success', text: `Both measurements are at or below the recovery limits ${limits}; this check counts towards recovery.` }
+    const win = p.degraded_window_checks
+    if (win === 1) return { tone: 'muted', text: `Within the Degraded limits but above a recovery limit ${limits}: with a window of one check, this check is enough for recovery.` }
+    const streak = p.degraded_clear_checks === 1
+      ? 'is not a recovery check on its own'
+      : `restarts the count of ${p.degraded_clear_checks} consecutive checks within the recovery limits`
+    return { tone: 'muted', text: `Within the Degraded limits but above a recovery limit ${limits}: this check does not degrade and ${streak}, but it counts towards recovery after ${win} checks in a row with no slow, lossy or unanswered check.` }
   }
   return { tone: 'success', text: 'Both measurements are within the Degraded limits.' }
 }
@@ -898,12 +962,13 @@ export function limitText(metric: 'latency' | 'loss', data: StatusExplanation): 
 
 export type AlertFlapState =
   | { kind: 'held'; label: string; until: string | null; title: string }
-  | { kind: 'notice'; event: 'start' | 'stop'; label: string; title: string }
+  | { kind: 'notice'; event: 'start' | 'stop'; label: string; title: string; detail: string }
 
 /**
  * Flap presentation of an alert row: a pending trigger held because its device is flapping (the row's `flap_held` and
  * `hold_until`, or the same keys in its metadata for older servers), or a flap notice row (metadata.flap_notice,
- * flap_event 'start'|'stop').
+ * flap_event 'start'|'stop', the episode's `kind` and, on a start, `stable_minutes`): a notice names the kind of change
+ * whose notifications are held or resumed, never every status notification.
  */
 export function alertFlapState(
   a: { status?: string | null; metadata?: unknown; flap_held?: boolean | null; hold_until?: string | null },
@@ -912,9 +977,14 @@ export function alertFlapState(
   const meta = isRecord(a.metadata) ? a.metadata : {}
   if (meta.flap_notice === true) {
     const event = meta.flap_event === 'stop' ? 'stop' : 'start'
-    return event === 'start'
-      ? { kind: 'notice', event, label: 'Flapping started', title: 'Notice: the device started flapping. Its status notifications are held until a status lasts the flap stability time.' }
-      : { kind: 'notice', event, label: 'Flapping stopped', title: 'Notice: the device stopped flapping. Status notifications have resumed.' }
+    const kind = flapKindOf(meta.kind)
+    const what = kind ? ` (${FLAP_KIND_LABEL[kind]} changes)` : ''
+    if (event === 'start') {
+      const held = flapHeldText(kind, typeof meta.stable_minutes === 'number' ? meta.stable_minutes : null)
+      return { kind: 'notice', event, label: 'Flapping started', title: `Notice: the device started flapping${what}. ${held}`, detail: `This notice opens no incident. ${held}` }
+    }
+    const resumed = `${capitalize(flapHeldNoun(kind))} for the device have resumed.`
+    return { kind: 'notice', event, label: 'Flapping stopped', title: `Notice: the device stopped flapping${what}. ${resumed}`, detail: `This notice opens no incident. ${resumed}` }
   }
   if (a.status === 'pending' && (a.flap_held === true || meta.flap_held === true)) {
     const until = typeof a.hold_until === 'string' ? a.hold_until : typeof meta.hold_until === 'string' ? meta.hold_until : null
@@ -950,7 +1020,7 @@ export const FLAP_END_REASON_LABEL: Record<string, string> = {
   stable: 'status stable',
   disabled: 'flap detection turned off',
   maintenance: 'maintenance window',
-  owner_change: 'monitoring moved to another poller',
+  owner_change: 'polling owner changed or went offline',
   reseed: 'status reset by another writer',
   not_polled: 'device no longer polled',
 }
@@ -981,13 +1051,28 @@ export function episodeCovers(ep: FlapEpisode, t: StatusTransitionLike, nowMs: n
   return at > start - lead && at <= end
 }
 
+/**
+ * Where a covered transition sits in its episode. 'lead-in': one of the changes that made the class flap, before the
+ * episode started; the class was not flapping yet, so its notifications went out as usual (the machine's transition
+ * flag is false). 'during': at or after the start (the starting change itself carries the flag).
+ */
+export type FlapPhase = 'lead-in' | 'during'
+
+export function flapPhase(ep: FlapEpisode, t: StatusTransitionLike): FlapPhase {
+  const at = parseApiTime(t.timestamp)
+  const start = parseApiTime(ep.started_at)
+  // Both are whole milliseconds (Date.parse truncates finer fractions), so the start change compares equal.
+  return at !== null && start !== null && at < start ? 'lead-in' : 'during'
+}
+
 export type ActivityGroup<T> =
-  | { kind: 'transition'; item: T; episode: FlapEpisode | null }
+  | { kind: 'transition'; item: T; episode: FlapEpisode | null; phase: FlapPhase | null }
   | { kind: 'episode'; episode: FlapEpisode; items: T[] }
 
 /**
  * Status transitions with those inside a flap episode gathered under it (each episode once, also when none of its
- * transitions is in the list). `collapse` false keeps every transition, marked with its episode, for the full log.
+ * transitions is in the list). `collapse` false keeps every transition, marked with its episode and phase, for the
+ * full log.
  */
 export function groupFlapTransitions<T extends StatusTransitionLike>(history: readonly T[], episodes: readonly FlapEpisode[], nowMs: number, collapse = true): ActivityGroup<T>[] {
   const ordered = [...episodes].filter((e) => parseApiTime(e.started_at) !== null)
@@ -997,24 +1082,28 @@ export function groupFlapTransitions<T extends StatusTransitionLike>(history: re
   for (const t of history) {
     const ep = ordered.find((e) => episodeCovers(e, t, nowMs)) ?? null
     if (ep) members.get(ep)!.push(t)
-    if (!ep || !collapse) out.push({ kind: 'transition', item: t, episode: ep })
+    if (!ep || !collapse) out.push({ kind: 'transition', item: t, episode: ep, phase: ep ? flapPhase(ep, t) : null })
   }
   if (collapse) for (const ep of ordered) out.push({ kind: 'episode', episode: ep, items: members.get(ep)! })
   return out
 }
 
-/** The single row an episode becomes in the recent-events widget. */
+/**
+ * The single row an episode becomes in the recent-events widget. The span is the flapping itself (from the episode's
+ * start); the lead-in changes that made it flap were notified as usual and are mentioned separately.
+ */
 export function episodeSummary(ep: FlapEpisode, items: readonly StatusTransitionLike[], nowMs: number, fmtTime: TimeFormatter = defaultTime): { title: string; subtitle: string; timestamp: string } {
   const kind = flapKindOf(ep.kind)
   const times = items.map((t) => parseApiTime(t.timestamp)).filter((t): t is number => t !== null).sort((a, b) => a - b)
   const start = parseApiTime(ep.started_at) ?? nowMs
   const end = parseApiTime(ep.ended_at)
-  const first = times.length ? Math.min(times[0], start) : start
+  const leadIn = times.filter((t) => t < start)
   const last = Math.max(end ?? 0, times.length ? times[times.length - 1] : 0, start)
   const title = `Flapping${kind ? ` (${FLAP_KIND_LABEL[kind]})` : ''}${items.length ? `: ${plural(items.length, 'status change')}` : ''}`
-  const span = `${fmtTime(first)}–${end !== null ? fmtTime(end) : 'now'}`
+  const span = `${fmtTime(start)}–${end !== null ? fmtTime(end) : 'now'}`
+  const led = leadIn.length ? `${plural(leadIn.length, 'earlier change')} from ${fmtTime(leadIn[0])} led to it` : ''
   const state = end !== null
     ? `ended${ep.end_reason ? ` (${FLAP_END_REASON_LABEL[ep.end_reason] ?? ep.end_reason})` : ''}`
     : 'ongoing'
-  return { title, subtitle: `${span} · ${state} · status notifications held while flapping`, timestamp: new Date(last).toISOString() }
+  return { title, subtitle: [span, led, state, `${flapHeldNoun(kind)} held while flapping`].filter(Boolean).join(' · '), timestamp: new Date(last).toISOString() }
 }

@@ -1039,7 +1039,7 @@ export function AlertRuleWizardDialog({
                 )}
 
                 {s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && <FormField label="Condition must exist for" hint={statusRule
-                  ? `Counted from the confirmed status change. Device status already needs several checks before it changes (Settings → Monitoring), so a hold here adds to that${flapHold ? '; while a device is flapping, its status alerts are also held automatically until a status lasts the flap stability time' : ''}.`
+                  ? `Counted from the confirmed status change. Device status already needs several checks before it changes (Settings → Monitoring), so a hold here adds to that${flapHold ? '; while a device\'s up/down or latency/loss changes flap, its status alerts for that kind of change are also held automatically until a status lasts the flap stability time' : ''}.`
                   : "Hold time before firing: the condition must persist this long (SolarWinds 'condition must exist for more than')."}>
                   <div className="flex items-center gap-3">
                     <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />

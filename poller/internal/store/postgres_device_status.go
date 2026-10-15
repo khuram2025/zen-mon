@@ -123,12 +123,18 @@ func (r *stateRow) state() *devicestatus.State {
 // applyDeviceState gives a loaded device its machine state: the persisted
 // row, or — when the row is missing, belongs to another owner or another
 // writer changed devices.status behind it — a silent seed from
-// devices.status whose end reason closes any episode still open.
+// devices.status whose end reason closes any episode still open. A seed that
+// replaces another owner's row names that owner (SeedOwner): only that row
+// may be taken over by the first write.
 func applyDeviceState(d *pinger.Device, row *devicestatus.State, devicesStatus string, statusChangedAt *time.Time) {
+	d.SeedOwner = ""
 	if reseed, reason := devicestatus.NeedsReseed(row, devicesStatus, ownerCentral); reseed {
 		d.State = devicestatus.Seed(devicesStatus, utcPtr(statusChangedAt), ownerCentral)
 		d.StateLoaded = false
 		d.SeedEndReason = reason
+		if reason == devicestatus.EndOwnerChange {
+			d.SeedOwner = row.Owner
+		}
 		return
 	}
 	d.State = *row
@@ -217,22 +223,53 @@ func (s *PostgresStore) loadDevicesLegacy(ctx context.Context) ([]*pinger.Device
 
 // saveDeviceStatusSQL persists one check in one statement:
 //
+//   - cur: the devices row (locked by lockDeviceSQL before this statement's
+//     snapshot), only while the device is centrally polled — the loader's
+//     predicate (ping enabled, an address, central owner), so a check still
+//     queued when ping was switched off or the device moved to a sensor
+//     writes nothing (the server's release already cleared its state, flap
+//     mirror and episode, and a release that committed while this save
+//     waited for the lock is seen);
+//   - foreign_row: a state row of another writer ($26 names the one owner
+//     the engine's seed may take over): that writer changed the device since
+//     the engine's state was built (ownership moved away and back within one
+//     sync), so nothing is written and its owner and devices.status are
+//     returned for the engine to reseed from;
 //   - dev: the devices row (displayed status, last_seen only for a reply,
 //     last_rtt_ms per lastRTT, the flap mirror, status_changed_at when the
-//     displayed status changes), only while the device is centrally owned;
-//   - state: the machine state upsert ($9), taking over a row of another
-//     owner (the central writer is single and ordered, so no age guard);
+//     displayed status changes);
+//   - state: the machine state upsert ($9), taking over the row of the
+//     owner $26 names (the central writer is single and ordered, so no age
+//     guard);
 //   - opened: while flapping, the open episode (one per device, partial
 //     unique index): inserted, or its kind widened to the union;
 //   - closed: while not flapping, any open episode is closed.
 //
 // The episode follows the state on every state write, so a lost or repeated
-// write converges. Only rows of dev are touched, so a device that moved to a
-// sensor is left alone and the caller drops the check's events. The final
-// SELECT reads dev and then state, so their rows are locked before the
-// episode CTEs run: devices -> device_status_state -> device_flap_episodes.
+// write converges. Only rows of dev are touched, so a device that left
+// central polling is left alone and the caller drops the check's events.
+// Lock order devices -> device_status_state -> device_flap_episodes: the
+// devices row is already locked by lockDeviceSQL (cur keeps the statement
+// self-contained), foreign_row (which joins cur) locks a state row, and the
+// final SELECT reads dev and then state before the episode CTEs run.
 const saveDeviceStatusSQL = `
-	WITH dev AS (
+	WITH cur AS (
+	    SELECT d.id, d.status, d.status_changed_at
+	      FROM devices d
+	     WHERE d.id = $1::uuid
+	       AND COALESCE(d.ping_enabled, false) AND d.ip_address IS NOT NULL
+	       AND EXISTS (SELECT 1 FROM device_polling_owner owner
+	                    WHERE owner.device_id = d.id AND owner.owner_kind = 'central')
+	       FOR NO KEY UPDATE OF d
+	),
+	foreign_row AS (
+	    SELECT s.owner
+	      FROM device_status_state s
+	      JOIN cur ON cur.id = s.device_id
+	     WHERE s.owner <> 'central' AND s.owner IS DISTINCT FROM $26::text
+	       FOR NO KEY UPDATE OF s
+	),
+	dev AS (
 	    UPDATE devices d
 	       SET status            = $2::varchar,
 	           last_seen         = CASE WHEN $3::boolean THEN $4::timestamptz ELSE d.last_seen END,
@@ -242,9 +279,9 @@ const saveDeviceStatusSQL = `
 	           flap_kind         = $8::varchar,
 	           status_changed_at = CASE WHEN d.status IS DISTINCT FROM $2::varchar
 	                                    THEN $4::timestamptz ELSE d.status_changed_at END
-	     WHERE d.id = $1::uuid
-	       AND EXISTS (SELECT 1 FROM device_polling_owner owner
-	                    WHERE owner.device_id = d.id AND owner.owner_kind = 'central')
+	      FROM cur
+	     WHERE d.id = cur.id
+	       AND NOT EXISTS (SELECT 1 FROM foreign_row)
 	    RETURNING d.id
 	),
 	state AS (
@@ -296,23 +333,25 @@ const saveDeviceStatusSQL = `
 	     WHERE $9::boolean AND NOT $6::boolean
 	       AND e.device_id = dev.id AND e.ended_at IS NULL
 	)
-	SELECT (SELECT count(*) FROM dev), (SELECT count(*) FROM state)
+	SELECT (SELECT count(*) FROM dev), (SELECT count(*) FROM state),
+	       (SELECT owner FROM foreign_row), (SELECT status FROM cur), (SELECT status_changed_at FROM cur)
 `
 
 // saveDeviceStatusLegacySQL is the pre-161 devices write (schema-lag
 // fallback): displayed status, last_seen for a reply, last_rtt_ms per
-// lastRTT.
+// lastRTT, only while the device is centrally polled (loader predicate).
 const saveDeviceStatusLegacySQL = `
 	UPDATE devices d
 	   SET status      = $2::varchar,
 	       last_seen   = CASE WHEN $3::boolean THEN $4::timestamptz ELSE d.last_seen END,
 	       last_rtt_ms = COALESCE($5::float8, d.last_rtt_ms)
 	 WHERE d.id = $1::uuid
+	   AND COALESCE(d.ping_enabled, false) AND d.ip_address IS NOT NULL
 	   AND EXISTS (SELECT 1 FROM device_polling_owner owner
 	                WHERE owner.device_id = d.id AND owner.owner_kind = 'central')
 `
 
-// saveDeviceStatusArgs binds a save to saveDeviceStatusSQL ($1..$25). Values
+// saveDeviceStatusArgs binds a save to saveDeviceStatusSQL ($1..$26). Values
 // are always bound, never formatted into the statement.
 func saveDeviceStatusArgs(save *pinger.DeviceStatusSave) []any {
 	st := save.State
@@ -321,31 +360,32 @@ func saveDeviceStatusArgs(save *pinger.DeviceStatusSave) []any {
 		endReason = devicestatus.EndStable
 	}
 	return []any{
-		save.DeviceID,             // $1
-		displayedStatus(st),       // $2 devices.status, status_at_start/end
-		save.Responded,            // $3
-		save.At.UTC(),             // $4 last_seen, status_changed_at, episode times
-		lastRTT(save),             // $5
-		st.IsFlapping(),           // $6
-		optTime(st.FlappingSince), // $7
-		optString(st.FlapKind()),  // $8
-		save.WriteState,           // $9
-		hardStatus(st.HardStatus), // $10
-		st.InMaintenance,          // $11
-		optTime(st.StatusSince),   // $12
-		st.FailStreak,             // $13
-		st.OkStreak,               // $14
-		st.ClearStreak,            // $15
-		st.WindowBits,             // $16
-		st.WindowLen,              // $17
-		utcTimes(st.ReachChanges), // $18
-		utcTimes(st.PerfChanges),  // $19
-		st.ReachFlapping,          // $20
-		st.PerfFlapping,           // $21
-		optTime(st.LastSampleAt),  // $22
-		save.FlapChanges,          // $23 start_changes
-		save.FlapWindowMinutes,    // $24 window_minutes
-		endReason,                 // $25
+		save.DeviceID,                 // $1
+		displayedStatus(st),           // $2 devices.status, status_at_start/end
+		save.Responded,                // $3
+		save.At.UTC(),                 // $4 last_seen, status_changed_at, episode times
+		lastRTT(save),                 // $5
+		st.IsFlapping(),               // $6
+		optTime(st.FlappingSince),     // $7
+		optString(st.FlapKind()),      // $8
+		save.WriteState,               // $9
+		hardStatus(st.HardStatus),     // $10
+		st.InMaintenance,              // $11
+		optTime(st.StatusSince),       // $12
+		st.FailStreak,                 // $13
+		st.OkStreak,                   // $14
+		st.ClearStreak,                // $15
+		st.WindowBits,                 // $16
+		st.WindowLen,                  // $17
+		utcTimes(st.ReachChanges),     // $18
+		utcTimes(st.PerfChanges),      // $19
+		st.ReachFlapping,              // $20
+		st.PerfFlapping,               // $21
+		optTime(st.LastSampleAt),      // $22
+		save.FlapChanges,              // $23 start_changes
+		save.FlapWindowMinutes,        // $24 window_minutes
+		endReason,                     // $25
+		optString(save.TakeoverOwner), // $26 foreign row owner this save may take over
 	}
 }
 
@@ -369,12 +409,45 @@ func lastRTT(save *pinger.DeviceStatusSave) any {
 	}
 }
 
+// lockDeviceSQL takes the devices row lock ahead of saveDeviceStatusSQL in the
+// same implicit transaction (one pgx batch, one round trip). Under READ
+// COMMITTED the save statement then takes its snapshot after the lock is
+// held, so it reads the state row and ownership as committed by any writer
+// it waited for (every status writer locks devices first): a sensor row or a
+// server release that committed meanwhile is seen, not just re-checked on the
+// devices row.
+const lockDeviceSQL = `SELECT 1 FROM devices WHERE id = $1::uuid FOR NO KEY UPDATE`
+
+// saveDeviceStatusLocked runs lockDeviceSQL and saveDeviceStatusSQL as one
+// batch (one implicit transaction).
+func (s *PostgresStore) saveDeviceStatusLocked(ctx context.Context, save *pinger.DeviceStatusSave,
+	devRows, stateRows *int64, foreignOwner, curStatus **string, curChangedAt **time.Time) error {
+	batch := &pgx.Batch{}
+	batch.Queue(lockDeviceSQL, save.DeviceID)
+	batch.Queue(saveDeviceStatusSQL, saveDeviceStatusArgs(save)...)
+	br := s.pool.SendBatch(ctx, batch)
+	_, err := br.Exec()
+	if err == nil {
+		err = br.QueryRow().Scan(devRows, stateRows, foreignOwner, curStatus, curChangedAt)
+	}
+	if closeErr := br.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
 // SaveDeviceStatus persists one central check (see saveDeviceStatusSQL).
 func (s *PostgresStore) SaveDeviceStatus(ctx context.Context, save *pinger.DeviceStatusSave) (pinger.DeviceStatusSaved, error) {
 	if !s.statusLegacy.Load() {
 		var devRows, stateRows int64
-		err := s.pool.QueryRow(ctx, saveDeviceStatusSQL, saveDeviceStatusArgs(save)...).Scan(&devRows, &stateRows)
+		var foreignOwner, curStatus *string
+		var curChangedAt *time.Time
+		err := s.saveDeviceStatusLocked(ctx, save, &devRows, &stateRows, &foreignOwner, &curStatus, &curChangedAt)
 		if err == nil {
+			if foreignOwner != nil {
+				return pinger.DeviceStatusSaved{Foreign: true, ForeignOwner: *foreignOwner,
+					Status: deref(curStatus), StatusChangedAt: utcPtr(curChangedAt)}, nil
+			}
 			return pinger.DeviceStatusSaved{Device: devRows > 0, State: stateRows > 0 || !save.WriteState}, nil
 		}
 		if !isStatusSchemaMissing(err) {
@@ -390,21 +463,25 @@ func (s *PostgresStore) SaveDeviceStatus(ctx context.Context, save *pinger.Devic
 }
 
 // releaseDevicesSQL cleans up after devices that left central polling ($1:
-// their ids): only while the central writer still owns their state row (a
-// sensor that already took over is left alone) and the device is really not
-// centrally polled any more. It clears the devices flap mirror, drops the
-// state row (a later return to central polling seeds silently) and closes
-// the open episode: owner_change when a sensor owns the device now,
-// not_polled otherwise (ping disabled, no address, no vantage).
+// their ids): unless a sensor already took their state row over (left
+// alone), and only when the device is really not centrally polled any more.
+// It clears the devices flap mirror, drops the central state row (a later
+// return to central polling seeds silently) and closes the open episode:
+// owner_change when a sensor owns the device now, not_polled otherwise (ping
+// disabled, no address, no vantage). A device without a state row is
+// cleaned up too: the server's own release (ping switched off) deletes the
+// row, and a flap mirror or episode left behind must not stay forever.
 //
 // Lock order is devices -> device_status_state -> device_flap_episodes, as in
-// every writer: gone locks the devices and state rows (in id order) before
-// any write. The un-referenced write CTEs run after it (episodes first), on
-// rows that are already locked, so no writer can deadlock with this one.
-// devices is locked FOR NO KEY UPDATE like the other status writers: the flap
-// notice sweep inserts an alerts row (a KEY SHARE foreign-key check on
-// devices) while holding its claimed episode, and FOR UPDATE here would
-// deadlock against that sweep waiting for the same episode.
+// every writer: gone locks the devices rows and gone_state the central state
+// rows (each in id order; a state row cannot be locked through gone's outer
+// join) before any write, as the final SELECT reads both. The un-referenced
+// write CTEs run after it (episodes first), on rows that are already locked,
+// so no writer can deadlock with this one. devices is locked FOR NO KEY
+// UPDATE like the other status writers: the flap notice sweep inserts an
+// alerts row (a KEY SHARE foreign-key check on devices) while holding its
+// claimed episode, and FOR UPDATE here would deadlock against that sweep
+// waiting for the same episode.
 const releaseDevicesSQL = `
 	WITH gone AS (
 	    SELECT d.id AS device_id, d.status,
@@ -413,14 +490,22 @@ const releaseDevicesSQL = `
 	                                AND o.owner_kind = 'sensor' AND o.sensor_id IS NOT NULL)
 	                THEN 'owner_change' ELSE 'not_polled' END AS end_reason
 	      FROM devices d
-	      JOIN device_status_state s ON s.device_id = d.id
+	      LEFT JOIN device_status_state s ON s.device_id = d.id
 	     WHERE d.id = ANY($1::uuid[])
-	       AND s.owner = 'central'
+	       AND (s.device_id IS NULL OR s.owner = 'central')
 	       AND NOT (COALESCE(d.ping_enabled, false) AND d.ip_address IS NOT NULL
 	                AND EXISTS (SELECT 1 FROM device_polling_owner o
 	                             WHERE o.device_id = d.id AND o.owner_kind = 'central'))
 	     ORDER BY d.id
-	       FOR NO KEY UPDATE OF d, s
+	       FOR NO KEY UPDATE OF d
+	),
+	gone_state AS (
+	    SELECT s.device_id
+	      FROM device_status_state s
+	      JOIN gone g ON g.device_id = s.device_id
+	     WHERE s.owner = 'central'
+	     ORDER BY s.device_id
+	       FOR NO KEY UPDATE OF s
 	),
 	flags AS (
 	    UPDATE devices d
@@ -431,8 +516,8 @@ const releaseDevicesSQL = `
 	),
 	dropped AS (
 	    DELETE FROM device_status_state s
-	     USING gone g
-	     WHERE s.device_id = g.device_id
+	     USING gone_state gs
+	     WHERE s.device_id = gs.device_id AND s.owner = 'central'
 	),
 	closed AS (
 	    UPDATE device_flap_episodes e
@@ -440,7 +525,7 @@ const releaseDevicesSQL = `
 	      FROM gone g
 	     WHERE e.device_id = g.device_id AND e.ended_at IS NULL
 	)
-	SELECT count(*) FROM gone
+	SELECT (SELECT count(*) FROM gone), (SELECT count(*) FROM gone_state)
 `
 
 // ReleaseDevices is called (through the ordered status writer) for devices
@@ -449,8 +534,8 @@ func (s *PostgresStore) ReleaseDevices(ctx context.Context, ids []uuid.UUID) err
 	if len(ids) == 0 || s.statusLegacy.Load() {
 		return nil
 	}
-	var released int64
-	err := s.pool.QueryRow(ctx, releaseDevicesSQL, ids).Scan(&released)
+	var released, releasedState int64
+	err := s.pool.QueryRow(ctx, releaseDevicesSQL, ids).Scan(&released, &releasedState)
 	if err != nil && isStatusSchemaMissing(err) {
 		s.noteStatusSchemaMissing(time.Now(), err)
 		return nil

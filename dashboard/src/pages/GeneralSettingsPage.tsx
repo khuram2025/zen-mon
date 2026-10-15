@@ -213,7 +213,8 @@ export function MonitoringCard() {
             <span className="font-medium text-text">What changed:</span> a status change is now confirmed over several checks. A single slow,
             lossy or unanswered check stays in the ping history but no longer changes the status. Degraded alerts therefore arrive after
             confirmation (plus any rule hold time), device latency and packet-loss alert rules are evaluated when the confirmed status
-            changes, status notifications of flapping devices are held, and status-change counts in reports drop from the upgrade onwards.
+            changes, a flapping device's status notifications are held only for the kind of change that flaps (up/down or
+            latency/loss), and status-change counts in reports drop from the upgrade onwards.
             The Legacy single-check preset closely restores the previous behaviour.
           </p>
         </div>
@@ -281,7 +282,7 @@ export function MonitoringCard() {
                 Remote sensors: Down after {field('sensor_down_confirm_checks', 'Consecutive failed sensor checks for Down')} consecutive failed check(s). A sensor check already retries its ping within the cycle.
               </Sentence>
               <Sentence errors={[errors.flap_stop_changes, errors.flap_stable_minutes]}>
-                Flapping ends when at most {field('flap_stop_changes', 'Changes left in the window to stop flapping', { disabled: !f.flap_detection_enabled })} change(s) remain in the window, or after {field('flap_stable_minutes', 'Minutes without a change to stop flapping', { disabled: !f.flap_detection_enabled })} min without a change. While flapping, a status notifies only once it has lasted that long.
+                Flapping ends when at most {field('flap_stop_changes', 'Changes left in the window to stop flapping', { disabled: !f.flap_detection_enabled })} change(s) remain in the window, or after {field('flap_stable_minutes', 'Minutes without a change to stop flapping', { disabled: !f.flap_detection_enabled })} min without a change. While up/down or latency/loss changes flap, a change of that kind notifies only once its status has lasted that long; the other kind still notifies at once.
               </Sentence>
             </div>
           </details>

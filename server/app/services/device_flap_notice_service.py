@@ -8,12 +8,15 @@ survives an API restart or a lost request (docs/device-status-policy.md).
 
 * Start (``start_notice='pending'``): the target rules are the enabled device
   status rules — the same rule set and scope filters as the status path —
-  whose trigger belongs to the episode's class (reachability: any/down/up,
-  performance: any/degraded), that are not snoozed for this device and are
-  inside their quiet-hours schedule. The notice goes ONCE to each channel in
-  the union of their channels, never to a stateful incident channel
-  (PagerDuty-type): a notice must not open an incident that nothing closes.
-  The channels it went to are stored on the episode.
+  that the episode actually holds (:func:`rule_held`): the trigger belongs to
+  a flapping class (reachability: any/down, performance: any/degraded), the
+  rule's metric gate can pass on that class's move (the seeded "Device Down",
+  any + ping_status == 0, never fires on degraded), and the rule does not
+  notify while flapping. Of those, the ones not snoozed for this device and
+  inside their quiet-hours schedule are told. The notice goes ONCE to each
+  channel in the union of their channels, never to a stateful incident
+  channel (PagerDuty-type): a notice must not open an incident that nothing
+  closes. The channels it went to are stored on the episode.
 * Stop (episode ended, ``stop_notice='pending'``, start already settled): only
   to the channels the start notice reached, with the current status. It
   follows the start notice's fate as a recovery follows its trigger, so quiet
@@ -75,11 +78,17 @@ STATEFUL_CHANNEL_TYPES = frozenset({"pagerduty", "opsgenie"})
 
 # Which rule triggers an episode class holds (and so which rules hear of it).
 # A rule that triggers only on 'up' announces recoveries, which are never
-# held, so a "notifications are held" notice would be false for it.
+# held, so a "notifications are held" notice would be false for it; the same
+# goes for a rule that notifies while flapping and for one whose conditions
+# cannot match the class's move (see rule_held).
 _CLASS_TRIGGERS = {
     "reachability": frozenset({"any", "down"}),
     "performance": frozenset({"any", "degraded"}),
 }
+
+# The move whose triggers a flapping class holds: into down (reachability),
+# into degraded (performance).
+_CLASS_TARGET = {"reachability": "down", "performance": "degraded"}
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
@@ -163,8 +172,28 @@ def rule_relevant(trigger_on: str | None, kind: str | None) -> bool:
     reachability: any/down; performance: any/degraded; both: either.
     """
     trigger = trigger_on or "any"
-    classes = ("reachability", "performance") if kind == "both" else (kind,)
-    return any(trigger in _CLASS_TRIGGERS.get(c or "", ()) for c in classes)
+    return any(trigger in _CLASS_TRIGGERS.get(c or "", ()) for c in _classes(kind))
+
+
+def _classes(kind: str | None) -> tuple:
+    return ("reachability", "performance") if kind == "both" else (kind,)
+
+
+def rule_held(rule, kind: str | None) -> bool:
+    """Would an episode of ``kind`` hold this rule's status notifications?
+
+    For at least one flapping class: the rule's trigger belongs to the class
+    and its metric gate can pass on the class's move, exactly as the status
+    path evaluates it (alert_engine._could_fire_into). A rule that notifies
+    while flapping is never held. Anything else would be told "notifications
+    are held" about notifications the flap never touches.
+    """
+    if getattr(rule, "notify_while_flapping", False):
+        return False
+    return any(
+        c in _CLASS_TARGET and rule_relevant(rule.trigger_on, c)
+        and engine._could_fire_into(rule, _CLASS_TARGET[c])
+        for c in _classes(kind))
 
 
 def union_channels(rules) -> list[str]:
@@ -370,7 +399,7 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
     did = str(device.id)
     candidates = [
         r for r in sweep.rules
-        if rule_relevant(r.trigger_on, episode.kind)
+        if rule_held(r, episode.kind)
         and engine._rule_in_device_scope(
             r, device_id=did, group_id=str(device.group_id) if device.group_id else None,
             device_type=device.device_type, location=device.location,
@@ -401,6 +430,9 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
         "hostname": hostname, "ip": ip, "ip_address": ip,
         "changes": changes, "window": window, "kind_label": kind_label,
         "stable": policy.flap_stable_minutes,
+        # What this kind holds and leaves alone: a latency/loss episode never
+        # holds a Down.
+        **ap.flap_held_labels(episode.kind),
     }
     text_ = _render("start", variables)
     sent = bool(channels)
@@ -430,8 +462,7 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
         "resolved": False,
         "is_recovery": False,
         "rule_name": "Device flapping",
-        "notice": (f"Up/down notifications for this device are held until a status lasts "
-                   f"{policy.flap_stable_minutes} minutes."),
+        "notice": ap.flap_held_notice(episode.kind, policy.flap_stable_minutes),
         "details": [
             ("Status changes", f"{changes} in {window} minutes"),
             ("Flapping", kind_label),

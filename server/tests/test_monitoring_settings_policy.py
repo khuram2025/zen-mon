@@ -9,6 +9,7 @@ stored values over the defaults plus ``effective``, the shared loader's output.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,7 @@ from pg_fixture import PgDatabase, pg_cluster, pg_db  # noqa: F401
 
 URL = "/api/v1/settings/monitoring"
 POLICY_KEYS = set(dsm.DEFAULTS)
+STAMP = "thresholds_changed_at"     # server-set: when the limits a sample is judged against last changed
 
 
 def add_user(db: PgDatabase, role: str = "admin") -> SimpleNamespace:
@@ -90,9 +92,11 @@ def test_a_partial_put_merges_and_keeps_every_other_stored_key(api):
     assert response.json()["effective"]["degraded_rtt_clear_ms"] == 160.0
 
     value, updated_at, updated_by = stored(api.db)
+    stamp = datetime.fromisoformat(value.pop(STAMP))            # the limits changed
     assert value == {"degraded_rtt_ms": 200.0, "degraded_loss_pct": 20.0, "degraded_confirm_checks": 4,
                      "degraded_window_checks": 6, "owned_by_someone_else": "kept"}
     assert updated_at > before and updated_by == api.admin.id
+    assert abs(stamp - updated_at) < timedelta(seconds=5)
     [(actor, metadata)] = audit(api.db)
     assert actor == api.admin.id and metadata == {"degraded_rtt_ms": 200.0, "degraded_loss_pct": 20.0}
 
@@ -160,7 +164,9 @@ def test_out_of_range_or_mistyped_values_are_rejected(api, incoming):
 
 def test_an_integral_float_is_an_integer_and_zero_loss_recovery_is_allowed(api):
     assert api.client.put(URL, json={"degraded_clear_checks": 4.0, "degraded_loss_clear_pct": 0}).status_code == 200
-    assert stored(api.db)[0] == {"degraded_clear_checks": 4, "degraded_loss_clear_pct": 0.0}
+    value = stored(api.db)[0]
+    assert value.pop(STAMP)                                     # the loss recovery limit changed (8 -> 0)
+    assert value == {"degraded_clear_checks": 4, "degraded_loss_clear_pct": 0.0}
 
 
 def test_a_stored_invalid_value_is_shown_as_its_default_and_must_be_fixed_by_the_next_put(api):
@@ -191,3 +197,66 @@ def test_only_settings_managers_may_change_the_policy(api):
     api.current["user"] = add_user(api.db, "viewer")
     assert api.client.get(URL).status_code == 403
     assert stored(api.db) is None
+
+
+# ── when the judging limits changed (the status explanation's thresholds_changed_at) ──
+
+def put_ok(api, document: dict) -> None:
+    response = api.client.put(URL, json=document)
+    assert response.status_code == 200, response.text
+
+
+def test_only_a_change_of_the_judging_limits_moves_the_thresholds_stamp(api):
+    long_ago = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    api.db.execute("INSERT INTO system_settings (key, value, updated_at) VALUES ('monitoring', $1, $2)",
+                   {"degraded_rtt_ms": 150, "degraded_loss_pct": 10, STAMP: long_ago.isoformat()}, long_ago)
+    full = {k: v for k, v in api.client.get(URL).json().items() if k in POLICY_KEYS}
+    assert STAMP not in full
+
+    # The settings card always sends the full document: saving it unchanged, or with other confirmation
+    # and flapping settings, moves updated_at but not the stamp. A client cannot set the stamp itself.
+    for change in ({}, {"degraded_confirm_checks": 2, "degraded_clear_checks": 5, "down_confirm_checks": 4,
+                        "up_confirm_checks": 2, "degraded_window_checks": 6},
+                   {"flap_window_minutes": 60, "flap_stable_minutes": 15, "flap_detection_enabled": False},
+                   {STAMP: "2030-01-01T00:00:00+00:00"}):
+        put_ok(api, {**full, **change})
+        value, updated_at, _ = stored(api.db)
+        assert updated_at > long_ago
+        assert datetime.fromisoformat(value[STAMP]) == long_ago, change
+
+    # Each judging limit, recovery limits included, moves it.
+    for change in ({"degraded_rtt_ms": 120}, {"degraded_loss_pct": 20}, {"degraded_rtt_clear_ms": 90},
+                   {"degraded_loss_clear_pct": 5}, {"degraded_loss_clear_pct": None}):
+        before = stored(api.db)[0][STAMP]
+        put_ok(api, change)
+        value, updated_at, _ = stored(api.db)
+        assert value[STAMP] != before, change
+        assert abs(datetime.fromisoformat(value[STAMP]) - updated_at) < timedelta(seconds=5)
+
+
+def test_setting_an_unset_limit_explicitly_counts_as_a_change(api):
+    # Unset, the central poller uses its configured fallback, which may differ from the built-in 100 ms.
+    api.db.execute("INSERT INTO system_settings (key, value) VALUES ('monitoring', $1)",
+                   {"degraded_loss_pct": 10, STAMP: None})
+    put_ok(api, {"flap_window_minutes": 45})
+    assert stored(api.db)[0][STAMP] is None
+    put_ok(api, {"degraded_rtt_ms": 100})
+    assert stored(api.db)[0][STAMP] is not None
+
+
+def test_the_first_save_keeps_the_time_a_document_without_a_stamp_was_explained_from(api):
+    # Written before the stamp existed: the explanation used updated_at until now, so the first save that
+    # leaves the limits alone records that time instead of its own.
+    written = datetime(2026, 8, 20, 6, 30, tzinfo=timezone.utc)
+    api.db.execute("INSERT INTO system_settings (key, value, updated_at) VALUES ('monitoring', $1, $2)",
+                   {"degraded_rtt_ms": 150, "degraded_loss_pct": 10}, written)
+    put_ok(api, {"flap_start_changes": 5})
+    value, updated_at, _ = stored(api.db)
+    assert updated_at > written and datetime.fromisoformat(value[STAMP]) == written
+    assert value["flap_start_changes"] == 5
+
+
+def test_a_first_document_that_keeps_the_default_limits_has_no_threshold_change(api):
+    put_ok(api, {"degraded_confirm_checks": 2, "degraded_rtt_clear_ms": None})
+    value = stored(api.db)[0]
+    assert STAMP in value and value[STAMP] is None

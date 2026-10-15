@@ -650,8 +650,11 @@ async def get_device_status_explanation(
     if not device or not scoping.entity_visible(device.tags, await scoping.visible_tags(db, user)):
         raise HTTPException(status_code=404, detail="Device not found")
     row = (await db.execute(text("SELECT value, updated_at FROM system_settings WHERE key = 'monitoring'"))).mappings().first()
-    policy = dsm.policy_from_settings(_settings_document(row["value"] if row else None))
+    settings = _settings_document(row["value"] if row else None)
+    policy = dsm.policy_from_settings(settings)
     thresholds = explain.thresholds_for(policy)
+    # Saving other settings (confirmation, flapping) moves updated_at but not the limits.
+    thresholds_changed_at = explain.thresholds_changed_at(settings, row["updated_at"] if row else None)
     output = {"status": device.status, "mode": "ping", "thresholds": thresholds,
               # v1 has one global policy; per-device overrides would change this scope.
               "policy": {**dsm.effective_policy_dict(policy), "scope": "global"},
@@ -677,7 +680,7 @@ async def get_device_status_explanation(
 
     try:
         measured = await asyncio.to_thread(explain.evidence, device_id, poller_id, thresholds,
-                                           row["updated_at"] if row else None, interval)
+                                           thresholds_changed_at, interval)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Status measurements are temporarily unavailable") from exc
     output.update(measured)

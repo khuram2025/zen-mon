@@ -5,8 +5,8 @@ import { inventoryApi } from '@/pages/inventory/api'
 import { averageDevicePacketLoss, packetLossPercent, deviceAvailabilityBuckets, formatDeviceAvailability, type DeviceAvailabilityPoint } from '@/components/devices/availability'
 import { DeviceStatusExplanation, useDeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
 import {
-  FLAP_END_REASON_LABEL, FLAP_KIND_LABEL, episodeSummary, flapChangesInWindow, flapKindOf, flapTooltip,
-  groupFlapTransitions, isFlapping, parseApiTime, pendingDownChip, statusForText, type FlapEpisode,
+  FLAP_END_REASON_LABEL, FLAP_KIND_LABEL, episodeSummary, flapChangesInWindow, flapHeldNoun, flapKindOf, flapTooltip,
+  groupFlapTransitions, isFlapping, parseApiTime, pendingDownChip, statusForText, type FlapEpisode, type FlapPhase,
 } from '@/components/devices/deviceStatus'
 import { FlappingTag } from '@/components/devices/FlappingTag'
 import { serverNow } from '@/lib/serverClock'
@@ -1916,7 +1916,11 @@ function buildActivityEvents(
     subtitle: t.message || t.trap_oid || '',
   }))
 
-  const transitionEvent = (e: StatusHistoryEvent, i: number, episode: FlapEpisode | null): ActivityEvent => {
+  // A change that led to an episode was notified as usual (its class was not flapping yet); one during it is marked
+  // only as such: whether it was held depends on its rule (notify_while_flapping) and recoveries follow their trigger,
+  // so the hold itself is stated once, per kind, on the episode's start row.
+  const flapLabel = (phase: FlapPhase | null) => phase === 'lead-in' ? 'Led to flapping' : phase === 'during' ? 'During flapping' : ''
+  const transitionEvent = (e: StatusHistoryEvent, i: number, phase: FlapPhase | null): ActivityEvent => {
     const next = (e.new_status || '').toLowerCase()
     const severity =
       next === 'down' ? 'critical'
@@ -1939,15 +1943,15 @@ function buildActivityEvents(
       severity,
       icon: next === 'up' ? CheckCircle2 : next === 'down' ? AlertTriangle : Activity,
       title,
-      subtitle: [episode ? 'During flapping (status notifications held)' : '', previous, e.reason, duration].filter(Boolean).join(' · '),
+      subtitle: [flapLabel(phase), previous, e.reason, duration].filter(Boolean).join(' · '),
     }
   }
 
   // Transitions inside a flap episode become one row in the widget (`collapse`); the full log keeps each of them,
-  // marked, between the episode's start and stop rows.
+  // marked: the lead-in changes before the episode's start row, the others between its start and stop rows.
   const nowMs = Date.parse(toISO) || serverNow()
   const statusEvents = groupFlapTransitions(statusHistory, episodes, nowMs, collapse).flatMap((g, i): ActivityEvent[] => {
-    if (g.kind === 'transition') return [transitionEvent(g.item, i, g.episode)]
+    if (g.kind === 'transition') return [transitionEvent(g.item, i, g.phase)]
     const summary = episodeSummary(g.episode, g.items, nowMs, (ms) => formatEventTimestamp(new Date(ms).toISOString()))
     return [{ id: `flap-${g.episode.id || g.episode.started_at}`, timestamp: summary.timestamp, severity: 'warning', icon: Waves, title: summary.title, subtitle: summary.subtitle }]
   })
@@ -1961,7 +1965,7 @@ function buildActivityEvents(
       title: `Flapping started${kind ? ` (${FLAP_KIND_LABEL[kind]})` : ''}`,
       subtitle: [
         ep.start_changes != null && ep.window_minutes != null ? `${ep.start_changes} status changes within ${ep.window_minutes} min` : '',
-        'status notifications held while flapping',
+        `${flapHeldNoun(kind)} held while flapping`,
       ].filter(Boolean).join(' · '),
     }]
     if (ep.ended_at) rows.push({
@@ -1973,7 +1977,7 @@ function buildActivityEvents(
       subtitle: [
         ep.end_reason ? FLAP_END_REASON_LABEL[ep.end_reason] ?? ep.end_reason : '',
         ep.status_at_end ? `status ${titleCase(ep.status_at_end)}` : '',
-        'status notifications resumed',
+        `${flapHeldNoun(kind)} resumed`,
       ].filter(Boolean).join(' · '),
     })
     return rows

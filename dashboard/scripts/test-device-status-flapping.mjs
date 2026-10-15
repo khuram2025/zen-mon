@@ -79,7 +79,7 @@ const LEGACY = S.effectivePolicy(S.settingsPayload(S.legacyPresetForm(S.defaults
   assert.equal(s.degraded, 'Degraded when 3 of the last 5 checks have latency above 100 ms, packet loss above 10% or no response (equal values are within the limit).')
   assert.equal(s.recovery, 'Back to Up from Degraded after 3 consecutive checks at or below the recovery limits (80 ms, 8%), or after 5 checks in a row with no slow, lossy or unanswered check.')
   assert.equal(s.down, 'Down after 3 consecutive failed checks (3 packets each); back to Up after the first responding check. A recovering device returns to Up first; Degraded is then confirmed on its own. Unanswered checks also count towards Degraded.')
-  assert.match(s.flapping, /^Flapping when the status changes 4 times within 30 min .* It ends when at most 1 change remains in the window or after 10 min without a change\. While flapping, status notifications are held: a status that lasts 10 min still notifies\.$/)
+  assert.match(s.flapping, /^Flapping when the status changes 4 times within 30 min .* It ends when at most 1 change remains in the window or after 10 min without a change\. While up\/down or latency\/loss changes flap, notifications for that kind of change are held: a status that lasts 10 min still notifies\. The other kind still notifies at once\.$/)
   const sensor = S.policySentences(DEF, { downConfirm: 1 })
   assert(sensor.down.startsWith('Down after 1 consecutive failed check;'), 'the owner\'s Down count')
   const l = S.policySentences(LEGACY)
@@ -92,6 +92,24 @@ const LEGACY = S.effectivePolicy(S.settingsPayload(S.legacyPresetForm(S.defaults
   assert(custom.recovery.includes('(400 ms, 4%)'))
   assert(custom.down.includes('back to Up after 2 consecutive responding checks'))
   assert(custom.flapping.includes('It ends when no change remains in the window'))
+  // Recovery from Degraded has two paths in the machine: degraded_clear_checks consecutive checks within the recovery
+  // limits, or a full window without a slow, lossy or unanswered check (a check in the band counts towards that one).
+  // The sentence names the paths that can decide.
+  const rec = (raw) => S.policySentences(S.effectivePolicy(raw)).recovery
+  assert.equal(rec({ degraded_confirm_checks: 1, degraded_clear_checks: 1 }),
+    'Back to Up from Degraded after one check at or below the recovery limits (80 ms, 8%), or after 5 checks in a row with no slow, lossy or unanswered check.',
+    'clear=1 with a 5-check window: both paths')
+  assert.equal(rec({ degraded_confirm_checks: 1, degraded_window_checks: 1, degraded_clear_checks: 1 }),
+    'Back to Up from Degraded after one check that is not slow, lossy or unanswered (latency at or below 100 ms, packet loss at or below 10%). The recovery limits (80 ms, 8%) have no effect: a window of 1 check is no longer than 1 consecutive recovery check.',
+    '1 of 1 with auto limits: a 90 ms check recovers through the window, so the 80 ms limit never decides')
+  const win1 = rec({ degraded_confirm_checks: 1, degraded_window_checks: 1, degraded_clear_checks: 3 })
+  assert(!win1.includes('1 checks') && win1.startsWith('Back to Up from Degraded after one check that is not slow'), win1)
+  assert.equal(rec({ degraded_confirm_checks: 2, degraded_window_checks: 4, degraded_clear_checks: 10 }),
+    'Back to Up from Degraded after 4 checks in a row with no slow, lossy or unanswered check (latency at or below 100 ms, packet loss at or below 10%). The recovery limits (80 ms, 8%) have no effect: a window of 4 checks is no longer than 10 consecutive recovery checks.')
+  assert.equal(rec({ degraded_confirm_checks: 1, degraded_window_checks: 4, degraded_clear_checks: 2, degraded_rtt_clear_ms: 100, degraded_loss_clear_pct: 10 }),
+    'Back to Up from Degraded after 2 consecutive checks at or below the Degraded limits.', 'no band: both paths need the same checks, the faster count wins')
+  assert.equal(rec({ degraded_confirm_checks: 1, degraded_window_checks: 2, degraded_clear_checks: 5, degraded_rtt_clear_ms: 100, degraded_loss_clear_pct: 10 }),
+    'Back to Up from Degraded after 2 consecutive checks at or below the Degraded limits.')
 }
 
 // Timing and the longest interval at which flapping can start (changes must fall strictly inside the window).
@@ -109,12 +127,14 @@ const LEGACY = S.effectivePolicy(S.settingsPayload(S.legacyPresetForm(S.defaults
   assert.deepEqual(rows[1], { intervalSeconds: 60, down: '2–3 min', up: 'within 1 min', degraded: '2–3 min', degradedClear: '2–3 min', flap: 'both' })
   assert.deepEqual(rows[2], { intervalSeconds: 300, down: '10–15 min', up: 'within 5 min', degraded: '10–15 min', degradedClear: '10–15 min', flap: 'reachability' })
   assert(S.timingRows(LEGACY).every((r) => r.flap === 'none'), 'no flapping with detection off')
+  assert.deepEqual(S.timingRows(S.effectivePolicy({ degraded_clear_checks: 10, degraded_window_checks: 4, degraded_confirm_checks: 2 })).map((r) => r.degradedClear),
+    ['1 min 30 s–2 min', '3–4 min', '15–20 min'], 'a 4-check clean window recovers before 10 clear checks (as maxDetectableIntervals counts it)')
   assert.equal(S.TIMING_FLAP_LABEL.reachability, 'Up/down only')
   assert.equal(S.confirmationDelay(2, 20), '20–40 s')
   assert.equal(S.flapDetectionLimitText(DEF), 'Flapping can start only on devices polled at intervals of up to 5 min 59 s for up/down changes (9 min 59 s on remote sensors) and up to 3 min 19 s for latency/loss changes; slower devices cannot reach 4 confirmed changes within 30 min.')
   assert.equal(S.flapDetectionLimitText(LEGACY), 'Flap detection is off.')
   // The 3-packet granularity.
-  assert.equal(S.lossGranularityNote(DEF), 'Each check sends 3 packets, so its loss is 0%, 33.3%, 66.7% or 100%. With the 10% limit, a check is lossy when one packet is lost. A recovery limit below 33.3% means a check counts towards recovery only with no loss at all.')
+  assert.equal(S.lossGranularityNote(DEF), 'Each check sends 3 packets, so its loss is 0%, 33.3%, 66.7% or 100%. With the 10% limit, a check is lossy when one packet is lost. A recovery limit below 33.3% means a check counts towards the consecutive recovery checks only with no loss at all.')
   assert.match(S.lossGranularityNote(S.effectivePolicy({ degraded_loss_pct: 50, degraded_loss_clear_pct: 40 })), /lossy when 2 of 3 packets are lost\.$/)
   assert.equal(S.packetsLostToExceed(100), 4, 'a 100% limit is never exceeded')
 }
@@ -204,8 +224,17 @@ const LEGACY = S.effectivePolicy(S.settingsPayload(S.legacyPresetForm(S.defaults
   assert.equal(S.flapBadgeText('performance', true), 'Flapping · latency/loss')
   assert.equal(S.flapBadgeText('bogus', true), 'Flapping')
   const tip = S.flapTooltip({ kind: 'reachability', since: iso(-38), changes: 5, windowMinutes: 30, stableMinutes: 10, earliestStopAt: iso(14) }, T0, utc)
-  assert.equal(tip, 'Flapping (up/down changes) since 11:22 (38m). 5 status changes in the last 30 min. Status notifications for this device are held: a status that lasts 10 min still notifies. Ends 12:14 at the earliest if the status stops changing.')
-  assert.equal(S.flapTooltip({}, T0, utc), 'Flapping. Status notifications for this device are held until a status lasts the flap stability time.')
+  assert.equal(tip, 'Flapping (up/down changes) since 11:22 (38m). 5 status changes in the last 30 min. Notifications for changes into or out of Down are held: a status that lasts 10 min still notifies. Changes between Up and Degraded still notify at once. Ends 12:14 at the earliest if the status stops changing.')
+  assert.equal(S.flapTooltip({}, T0, utc), 'Flapping. Notifications for the kind of change that is flapping are held until a status lasts the flap stability time.')
+  // The engine holds a trigger only while ITS class flaps (alert_engine flap_held = event.flapping): a latency/loss
+  // flapper still pages a Down at once, an up/down flapper still pages Up -> Degraded at once.
+  assert.equal(S.flapTooltip({ kind: 'performance', stableMinutes: 10 }, T0, utc), 'Flapping (latency/loss changes). Notifications for changes between Up and Degraded are held: a status that lasts 10 min still notifies. Changes into or out of Down still notify at once.')
+  assert.equal(S.flapTooltip({ kind: 'both', stableMinutes: 10 }, T0, utc), 'Flapping (up/down and latency/loss changes). Status notifications for this device are held: a status that lasts 10 min still notifies.')
+  assert.equal(S.flapHeldNoun('reachability'), 'up/down notifications')
+  assert.equal(S.flapHeldNoun('performance'), 'latency/loss notifications')
+  assert.equal(S.flapHeldNoun('both'), 'status notifications')
+  assert.equal(S.flapHeldNoun(null), 'notifications for the flapping changes')
+  assert(!S.flapHeldText('performance').includes('Status notifications'), 'a latency/loss episode never claims every status notification')
   assert.equal(S.flapChangesInWindow({ kind: 'both', reach_changes_in_window: 4, perf_changes_in_window: 5 }), 9)
   assert.equal(S.flapChangesInWindow({ kind: 'performance', reach_changes_in_window: 1, perf_changes_in_window: 5 }), 5)
 }
@@ -219,7 +248,7 @@ const LEGACY = S.effectivePolicy(S.settingsPayload(S.legacyPresetForm(S.defaults
   assert.equal(S.problemSeverity({ status: 'up', is_flapping: false }, 0), 0)
   assert.equal(S.attentionEmptyText(0), 'All devices healthy 🎉')
   assert.equal(S.attentionEmptyText(undefined), 'All devices healthy 🎉', 'an older summary without the count')
-  assert.equal(S.attentionEmptyText(2), '2 devices flapping (status notifications held)')
+  assert.equal(S.attentionEmptyText(2), '2 devices flapping (notifications for the flapping changes held)')
 }
 
 // Alerts: held while flapping, and the two notices.
@@ -234,6 +263,15 @@ const LEGACY = S.effectivePolicy(S.settingsPayload(S.legacyPresetForm(S.defaults
   assert.equal(S.alertFlapState({ status: 'pending' }), null)
   assert.equal(S.alertFlapState({ status: 'resolved', metadata: { flap_notice: true, flap_event: 'start' } }).label, 'Flapping started')
   assert.equal(S.alertFlapState({ status: 'resolved', metadata: { flap_notice: true, flap_event: 'stop' } }).label, 'Flapping stopped')
+  // A notice names the kind of change whose notifications are held (device_flap_notice_service: metadata.kind, stable_minutes).
+  const notice = (meta) => S.alertFlapState({ status: 'resolved', metadata: { flap_notice: true, ...meta } })
+  assert.equal(notice({ flap_event: 'start', kind: 'performance', stable_minutes: 10 }).detail,
+    'This notice opens no incident. Notifications for changes between Up and Degraded are held: a status that lasts 10 min still notifies. Changes into or out of Down still notify at once.')
+  assert.equal(notice({ flap_event: 'start', kind: 'reachability', stable_minutes: 10 }).title,
+    'Notice: the device started flapping (up/down changes). Notifications for changes into or out of Down are held: a status that lasts 10 min still notifies. Changes between Up and Degraded still notify at once.')
+  assert.equal(notice({ flap_event: 'start' }).detail, 'This notice opens no incident. Notifications for the kind of change that is flapping are held until a status lasts the flap stability time.')
+  assert.equal(notice({ flap_event: 'stop', kind: 'performance' }).detail, 'This notice opens no incident. Latency/loss notifications for the device have resumed.')
+  assert.equal(notice({ flap_event: 'stop', kind: 'both' }).title, 'Notice: the device stopped flapping (up/down and latency/loss changes). Status notifications for the device have resumed.')
   // The row as alerts.serialize sends it: top-level flap_held/hold_until (pending rows only) beside the full metadata.
   const row = S.alertFlapState({ status: 'pending', flap_held: true, hold_until: iso(10), metadata: {} }, utc)
   assert.equal(row.kind, 'held', 'the top-level flag alone marks the hold')
@@ -273,13 +311,22 @@ const LEGACY = S.effectivePolicy(S.settingsPayload(S.legacyPresetForm(S.defaults
   assert(S.episodeCovers({ ...ep, kind: 'both' }, h(-12, 'up', 'degraded'), T0))
   const summary = S.episodeSummary(ep, episodeRows[0].items, T0, utc)
   assert.equal(summary.title, 'Flapping (up/down): 6 status changes')
-  assert.equal(summary.subtitle, '11:40–12:03 · ended (status stable) · status notifications held while flapping')
+  // The span is the flapping itself; the lead-in changes (notified as usual) are mentioned on their own.
+  assert.equal(summary.subtitle, '11:46–12:03 · 3 earlier changes from 11:40 led to it · ended (status stable) · up/down notifications held while flapping')
   assert.equal(summary.timestamp, iso(3), 'sorted by its last activity')
-  assert.equal(S.episodeSummary({ ...ep, ended_at: null }, [], T0, utc).subtitle, '11:46–now · ongoing · status notifications held while flapping')
-  // The full log keeps every change, marked with its episode.
+  assert.equal(S.episodeSummary({ ...ep, ended_at: null }, [], T0, utc).subtitle, '11:46–now · ongoing · up/down notifications held while flapping')
+  assert.equal(S.episodeSummary({ ...ep, kind: 'performance' }, [h(-14, 'up', 'degraded')], T0, utc).subtitle, '11:46–12:03 · ended (status stable) · latency/loss notifications held while flapping')
+  // The full log keeps every change, marked with its episode and phase: before the start the class was not flapping
+  // yet (the transition flag is false, its Down paged), so those changes only led to the episode.
   const full = S.groupFlapTransitions(history, [ep], T0, false)
   assert.equal(full.length, history.length)
   assert.equal(full.filter((g) => g.episode).length, 6)
+  const phaseAt = (min) => full.find((g) => g.item.timestamp === iso(min)).phase
+  assert.deepEqual([-20, -19, -15].map(phaseAt), ['lead-in', 'lead-in', 'lead-in'], 'the changes before started_at')
+  assert.equal(phaseAt(-14), 'during', 'the change at started_at made the class flap and carries the flag')
+  assert.deepEqual([-8, -7].map(phaseAt), ['during', 'during'])
+  assert.equal(phaseAt(-60), null)
+  assert.equal(S.flapPhase({ ...ep, started_at: '2026-10-14T11:46:00.000123+00:00' }, h(-14, 'up', 'down')), 'during', 'sub-millisecond differences compare equal')
   assert.equal(S.groupFlapTransitions(history, [], T0).length, history.length, 'no episodes: nothing changes')
 }
 
@@ -341,7 +388,11 @@ const view = (data) => { const v = S.explanationView(data, T0, utc); generated.p
   assert.equal(degraded.active, true)
   assert.equal(S.limitText('latency', degradedData), 'Degraded above 100 ms · recovers at or below 80 ms', 'both limits while degraded')
   assert.equal(S.limitText('loss', degradedData), 'Degraded above 10% · recovers at or below 8%')
-  assert.equal(S.latestVerdict(degradedData.latest, degradedData).text, 'Within the Degraded limits but above a recovery limit (80 ms, 8%); this check neither degrades nor counts towards recovery.')
+  // A check in the band restarts the consecutive recovery checks but counts towards the clean-window recovery
+  // (device_status_machine.step: 150,150,150 then 90 ms x5 recovers on the window path).
+  assert.equal(S.latestVerdict(degradedData.latest, degradedData).text, 'Within the Degraded limits but above a recovery limit (80 ms, 8%): this check does not degrade and restarts the count of 3 consecutive checks within the recovery limits, but it counts towards recovery after 5 checks in a row with no slow, lossy or unanswered check.')
+  const clear1 = { ...degradedData, policy: { ...DEF, degraded_clear_checks: 1, scope: 'global' } }
+  assert.equal(S.latestVerdict(clear1.latest, clear1).text, 'Within the Degraded limits but above a recovery limit (80 ms, 8%): this check does not degrade and is not a recovery check on its own, but it counts towards recovery after 5 checks in a row with no slow, lossy or unanswered check.')
   const clearing = { ...degradedData, latest: { ...degradedData.latest, rtt_ms: 40 }, state: { ...degradedData.state, clear_streak: 1, pending: { target: 'up', count: 1, required: 3 } } }
   assert.equal(S.latestVerdict(clearing.latest, clearing).text, 'Both measurements are at or below the recovery limits (80 ms, 8%); this check counts towards recovery.')
   assert.equal(view(clearing).pending, '1 of 3 consecutive checks within the recovery limits; Up at 3')
@@ -357,8 +408,13 @@ const view = (data) => { const v = S.explanationView(data, T0, utc); generated.p
   const flap = view(flapData)
   assert.equal(flap.active, true)
   assert.equal(flap.heading, 'Why this device is flapping')
-  assert.equal(flap.flapping, 'Flapping (up/down changes) since 11:22. 5 confirmed changes in the last 30 min (flapping starts at 4). It ends after 10 min without a change (12:14 at the earliest) or when at most 1 change remains in the window. Status notifications for this device are held meanwhile: a status that lasts 10 min still notifies. Interface, service and metric alerts are not affected.')
-  assert.equal(flap.summary, 'Flapping (up/down); status notifications held')
+  assert.equal(flap.flapping, 'Flapping (up/down changes) since 11:22. 5 confirmed changes in the last 30 min (flapping starts at 4). It ends after 10 min without a change (12:14 at the earliest) or when at most 1 change remains in the window. Notifications for changes into or out of Down are held: a status that lasts 10 min still notifies. Changes between Up and Degraded still notify at once. Interface, service and metric alerts are not affected.')
+  assert.equal(flap.summary, 'Flapping (up/down); only up/down notifications held')
+  const perfFlap = view(explanation({ flapping: { ...explanation().flapping, active: true, kind: 'performance', since: iso(-10), perf_changes_in_window: 4 } }))
+  assert(perfFlap.flapping.includes('Notifications for changes between Up and Degraded are held: a status that lasts 10 min still notifies. Changes into or out of Down still notify at once.'), perfFlap.flapping)
+  assert.equal(perfFlap.summary, 'Flapping (latency/loss); only latency/loss notifications held')
+  assert.equal(view(explanation({ flapping: { ...explanation().flapping, active: true, kind: 'both' } })).summary, 'Flapping (up/down and latency/loss); status notifications held')
+  assert.equal(view(explanation({ flapping: { ...explanation().flapping, active: true, kind: null } })).summary, 'Flapping; notifications for the flapping changes held')
   assert.equal(view({ ...flapData, status: 'down', state: { ...flapData.state, hard_status: 'down' } }).heading, 'Why this device is down and flapping')
 
   // Pending Degraded counts the checks actually in the window (cleared by the last confirmed change).
@@ -436,6 +492,21 @@ const view = (data) => { const v = S.explanationView(data, T0, utc); generated.p
   assert(detail.includes('statusForText(device.status_changed_at, now)') && detail.includes('pendingDownChip(') && detail.includes('<FlappingTag'))
   assert(detail.includes('buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO, flapEpisodes || [])'), 'the widget collapses episodes')
   assert(detail.includes('episodes || [], false)'), 'the full log keeps every change')
+
+  // A flap hold covers only the class that flaps: no surface claims every status notification of a flapping device.
+  const UNQUALIFIED_HOLD = [
+    'During flapping (status notifications held)', 'their status notifications are held', 'Their status notifications are held',
+    'Status notifications for the device are held while it flaps', 'status notifications of flapping devices are held',
+    'While flapping, a status notifies only once', 'its status alerts are also held automatically', "'status notifications held while flapping'",
+    'neither degrades nor counts towards recovery',
+  ]
+  for (const file of ['src/pages/DeviceDetailPage.tsx', 'src/pages/DevicesPage.tsx', 'src/components/availability/views.tsx', 'src/pages/AlertDetailPage.tsx', 'src/pages/GeneralSettingsPage.tsx', 'src/components/forms/AlertRuleWizardDialog.tsx', 'src/components/devices/deviceStatus.ts']) {
+    const text = fs.readFileSync(file, 'utf8')
+    for (const sentence of UNQUALIFIED_HOLD) assert(!text.includes(sentence), `${file}: ${sentence}`)
+  }
+  assert(detail.includes("phase === 'lead-in' ? 'Led to flapping'") && detail.includes('transitionEvent(g.item, i, g.phase)'), 'the full log marks lead-in changes without a hold claim')
+  assert(detail.includes('`${flapHeldNoun(kind)} held while flapping`'), 'the episode start row names the held kind')
+  assert(fs.readFileSync('src/pages/AlertDetailPage.tsx', 'utf8').includes('{flap.detail}'), 'the notice banner uses the kind-aware notice text')
 
   const wizard = fs.readFileSync('src/components/forms/AlertRuleWizardDialog.tsx', 'utf8')
   assert(!wizard.includes('prevents flapping alerts'), 'the hold-time hint is current')
@@ -553,7 +624,8 @@ const renderAt = (qc, url, element) =>
   assert(kpiButton(on).includes('aria-pressed="true"'), 'the KPI shows it is on')
   assert.match(strip(on), /Filtered: 2 devices · cards and charts reflect the filter/, 'a scope filter: the cards count the flapping devices')
   assert.match(strip(on), /Total Devices 2 Online 0 Offline 0 Warning 1 Critical 1 Flapping 2/)
-  assert(strip(on).includes('Showing flapping devices only. Their status notifications are held while they flap.'))
+  assert(strip(on).includes('Showing flapping devices only. While they flap, notifications for the kind of change that flaps (up/down or latency/loss) are held; the other kind still notifies at once.'))
+  assert(kpiButton(on).includes('title="Devices whose confirmed status keeps changing; while they flap, notifications for the kind of change that flaps (up/down or latency/loss) are held; the other kind still notifies at once. Combines with the status cards."'))
   assert(on.includes('aria-label="Clear flapping filter"'))
   assert.deepEqual(names(page('/devices?flapping=1&status=critical', flappingRows)), ['edge-2'])
   assert(strip(page('/devices?flapping=1&status=critical', flappingRows)).includes('Showing flapping devices only, with the status filter.'))
@@ -574,14 +646,14 @@ const renderAt = (qc, url, element) =>
   const degraded = render(explanation({ status: 'degraded', state: { ...explanation().state, hard_status: 'degraded' }, latest: { ...explanation().latest, rtt_ms: 95 } }))
   assert(degraded.includes('Why this device is degraded'))
   assert(degraded.includes('Degraded above 100 ms · recovers at or below 80 ms'), 'both limits while degraded')
-  assert(degraded.includes('neither degrades nor counts towards recovery'))
+  assert(degraded.includes('this check does not degrade and restarts the count of 3 consecutive checks within the recovery limits, but it counts towards recovery after 5 checks in a row'))
   assert(degraded.includes('Degraded when 3 of the last 5 checks'))
   assert(degraded.includes('Global policy'))
   for (const sentence of FORBIDDEN) assert(!degraded.includes(sentence), sentence)
   const pendingCompact = render(explanation({ state: { ...explanation().state, pending: { target: 'down', count: 2, required: 3 }, fail_streak: 2 } }), true)
   assert(pendingCompact.startsWith('Status change pending 2 of 3 consecutive failed checks; Down on the next failure'), pendingCompact.slice(0, 120))
   const flapCompact = render(explanation({ flapping: { ...explanation().flapping, active: true, kind: 'performance', since: iso(-10), perf_changes_in_window: 4 } }), true)
-  assert(flapCompact.startsWith('Why this device is flapping Flapping (latency/loss); status notifications held'))
+  assert(flapCompact.startsWith('Why this device is flapping Flapping (latency/loss); only latency/loss notifications held'), flapCompact.slice(0, 120))
   setUser(['devices.view'])
   const qc = newClient()
   qc.setQueryData(['device-status-explanation', 'd9'], explanation({ flapping: { ...explanation().flapping, active: true } }))

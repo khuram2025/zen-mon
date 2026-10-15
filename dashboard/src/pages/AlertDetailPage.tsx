@@ -203,9 +203,7 @@ export function AlertDetailPage() {
           <Waves className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
           <span>
             <span className="font-medium text-text">{flap.label}.</span>{' '}
-            {flap.event === 'start'
-              ? 'This notice opens no incident. Status notifications for the device are held while it flaps; a status that lasts the flap stability time still notifies.'
-              : 'This notice opens no incident. Status notifications for the device have resumed.'}
+            {flap.detail}
           </span>
         </div>
       )}

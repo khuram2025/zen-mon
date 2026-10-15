@@ -253,3 +253,67 @@ def test_recent_degraded_sample_keeps_no_classification_after_a_threshold_change
     assert result["recent_degraded"]["sample"]["breaches"] == []
     assert result["recent_degraded"]["sample"]["classification"] is None
     assert result["recent_degraded"]["recovered_at"] is None
+
+
+# ── when the judging limits last changed (not the settings row's updated_at) ──
+
+def test_only_the_judging_limits_count_as_a_threshold_change():
+    stored = {"degraded_rtt_ms": 150, "degraded_loss_pct": 10, "degraded_confirm_checks": 3}
+    same = {**stored, "degraded_rtt_ms": 150.0, "degraded_rtt_clear_ms": None, "degraded_confirm_checks": 1,
+            "degraded_window_checks": 1, "degraded_clear_checks": 1, "down_confirm_checks": 9,
+            "sensor_down_confirm_checks": 4, "up_confirm_checks": 3, "flap_detection_enabled": False,
+            "flap_window_minutes": 90, "flap_start_changes": 8, "flap_stop_changes": 3, "flap_stable_minutes": 30,
+            explain.THRESHOLDS_CHANGED_AT: "2026-10-01T00:00:00+00:00"}
+    assert not explain.thresholds_changed(stored, same)
+    for change in ({"degraded_rtt_ms": 151}, {"degraded_loss_pct": 12}, {"degraded_rtt_clear_ms": 100},
+                   {"degraded_loss_clear_pct": 0}):
+        assert explain.thresholds_changed(stored, {**stored, **change}), change
+    # An unset limit follows the poller's configured fallback: setting it explicitly is a change even when
+    # the built-in default is the same value.
+    assert explain.thresholds_changed({}, {"degraded_rtt_ms": 100})
+    assert explain.thresholds_changed({}, {"degraded_rtt_clear_ms": 80})
+    assert not explain.thresholds_changed({}, {"degraded_rtt_clear_ms": None, "flap_window_minutes": 60})
+
+
+def test_thresholds_changed_at_reads_the_stamp_and_falls_back_to_updated_at():
+    updated = datetime(2026, 10, 14, 9, 0)                      # naive from some drivers: UTC
+    at = datetime(2026, 10, 1, 8, 15, tzinfo=timezone.utc)
+    stamp = explain.THRESHOLDS_CHANGED_AT
+    assert explain.thresholds_changed_at({stamp: at.isoformat()}, updated) == at
+    assert explain.thresholds_changed_at({stamp: "2026-10-01T08:15:00Z"}, updated) == at
+    assert explain.thresholds_changed_at({stamp: "2026-10-01T08:15:00"}, updated) == at
+    assert explain.thresholds_changed_at({stamp: None}, updated) is None      # unchanged since created
+    # Not stamped yet (written before the stamp existed) or unreadable: updated_at, never earlier than a change.
+    for document in ({}, {stamp: "yesterday"}, {stamp: 1760000000}):
+        assert explain.thresholds_changed_at(document, updated) == updated.replace(tzinfo=timezone.utc)
+    assert explain.thresholds_changed_at({}, None) is None
+
+
+def test_evidence_keeps_the_breaches_of_an_event_judged_after_the_last_limit_change(monkeypatch):
+    from app.services import device_status_explanation as module
+    at = datetime.now(timezone.utc) - timedelta(hours=2)
+    latest = datetime.now(timezone.utc) - timedelta(seconds=30)
+
+    def client(changed_at):
+        responses = iter([[(latest, 20.0, 0.0, 1)], [(at, "Latency 150.000 ms exceeds 100 ms by 50.000 ms")],
+                          [(at, 150.0, 0.0, 1)], []])
+
+        class Client:
+            def query(self, query, parameters):
+                return SimpleNamespace(result_rows=next(responses))
+        monkeypatch.setattr(module, "get_clickhouse_client", lambda: Client())
+        return module.evidence("00000000-0000-0000-0000-000000000001", "poller-01", BAND, changed_at, 60)
+
+    for changed_at in (None, at - timedelta(days=3), at - timedelta(seconds=60)):
+        result = client(changed_at)
+        assert result["recent_degraded"]["thresholds_unchanged"] is True
+        assert [b["metric"] for b in result["recent_degraded"]["sample"]["breaches"]] == ["Latency"]
+        assert result["recent_degraded"]["sample"]["classification"] == "breach"
+        assert result["latest"]["settings_pending"] is False
+    # Changed after the event (or within the minute the writers take to reload): no historical judgement.
+    for changed_at in (at - timedelta(seconds=59), latest - timedelta(seconds=10)):
+        result = client(changed_at)
+        assert result["recent_degraded"]["thresholds_unchanged"] is False
+        assert result["recent_degraded"]["sample"]["breaches"] == []
+        assert result["recent_degraded"]["sample"]["classification"] is None
+    assert result["latest"]["settings_pending"] is True

@@ -124,7 +124,9 @@ async def _suppress_owned_device_alerts(db: AsyncSession, sensor_id: str, sensor
     The confirmation state goes too (counters and flap history describe checks
     nobody can vouch for any more): state rows are deleted, so the next writer
     reseeds silently from 'unknown', flap flags are cleared and open flap
-    episodes close as an owner change. Lock order, as in every writer:
+    episodes close as an owner change (DESIGN: 'owner_change' covers a polling
+    owner that changed or went offline; the device stays assigned to this
+    sensor). Lock order, as in every writer:
     devices -> device_status_state -> device_flap_episodes; devices FOR NO KEY
     UPDATE, so the flap notice sweep's foreign-key check (it inserts a notice
     row while holding its claimed episode) passes instead of deadlocking.

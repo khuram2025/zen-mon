@@ -13,6 +13,7 @@ alerts table.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -116,7 +117,11 @@ class AlertsDB:
 
     def _status_filter(self, sql, row):
         meta = row["metadata"]
-        if row["status"] not in OPEN or str(row["device_id"]) != DEVICE:
+        # The statuses the UPDATE names (WHERE status IN (...)).
+        listed = re.search(r"WHERE status IN \(([^)]*)\)", sql)
+        states = (tuple(s.strip().strip("'") for s in listed.group(1).split(","))
+                  if listed else OPEN)
+        if row["status"] not in states or str(row["device_id"]) != DEVICE:
             return False
         if "service_check_id IS NULL" in sql and row["service_check_id"] is not None:
             return False

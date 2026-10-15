@@ -261,6 +261,65 @@ async def test_sensor_down_needs_its_own_confirmation_count(pg_db):
     assert entry["payload"]["reason"] == "remote sensor edge-2: No response for 2 consecutive checks"
 
 
+# ------------------------------------------------------------------ last response (last_seen / last_rtt_ms)
+
+@pytest.mark.asyncio
+async def test_unanswered_checks_never_move_the_last_response(pg_db):
+    """The central writer's rule ('Last response' is the newest answered check): last_seen moves only
+    for a reply; last_rtt_ms takes a reply's RTT, 0 once Down is confirmed, and is otherwise kept."""
+    set_policy(pg_db, {"sensor_down_confirm_checks": 3})
+    sensor = add_sensor(pg_db)
+    device = add_device(pg_db, sensor, "up")
+    t = recent(60)
+    await ingest(pg_db, sensor, [sample(device, t, rtt=12.5)])
+    assert (device_row(pg_db, device)["last_seen"], device_row(pg_db, device)["last_rtt_ms"]) == (t, 12.5)
+
+    await ingest(pg_db, sensor, [fail(device, t + timedelta(seconds=10))])
+    row = device_row(pg_db, device)
+    # one lost check: still Up, and neither a fresh "response" nor an Up device at 0 ms
+    assert (row["status"], row["last_seen"], row["last_rtt_ms"]) == ("up", t, 12.5)
+
+    await ingest(pg_db, sensor, [fail(device, t + timedelta(seconds=20)), fail(device, t + timedelta(seconds=30))])
+    row = device_row(pg_db, device)
+    assert (row["status"], row["last_seen"], row["last_rtt_ms"]) == ("down", t, 0.0)
+    await ingest(pg_db, sensor, [fail(device, t + timedelta(seconds=40))])
+    assert (device_row(pg_db, device)["last_seen"], device_row(pg_db, device)["last_rtt_ms"]) == (t, 0.0)
+
+    back = t + timedelta(seconds=50)
+    await ingest(pg_db, sensor, [sample(device, back, rtt=7.0)])
+    row = device_row(pg_db, device)
+    assert (row["status"], row["last_seen"], row["last_rtt_ms"]) == ("up", back, 7.0)
+
+
+@pytest.mark.asyncio
+async def test_a_down_device_keeps_its_last_response_while_it_stays_down(pg_db):
+    sensor = add_sensor(pg_db)
+    device = add_device(pg_db, sensor, "down")
+    answered = datetime.now(UTC) - timedelta(hours=1)
+    pg_db.execute("UPDATE devices SET last_seen = $2, last_rtt_ms = 12.0, status_changed_at = $2 WHERE id = $1",
+                  device, answered)
+    t = recent(30)
+    await ingest(pg_db, sensor, [fail(device, t), fail(device, t + timedelta(seconds=10))])
+    row = device_row(pg_db, device)
+    assert (row["status"], row["last_seen"], row["last_rtt_ms"]) == ("down", answered, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_answers_then_confirms_down_ends_at_zero_ms(pg_db):
+    sensor = add_sensor(pg_db)
+    device = add_device(pg_db, sensor, "up")
+    t = recent(30)
+    # default policy: one sensor failure confirms Down; the RTT follows the newest accepted check
+    await ingest(pg_db, sensor, [sample(device, t, rtt=5.0), fail(device, t + timedelta(seconds=10))])
+    row = device_row(pg_db, device)
+    assert (row["status"], row["last_seen"], row["last_rtt_ms"]) == ("down", t, 0.0)
+
+    # a late reply the machine ignores (older than the state) moves nothing either
+    await ingest(pg_db, sensor, [sample(device, t + timedelta(seconds=5), rtt=3.0)])
+    row = device_row(pg_db, device)
+    assert (row["status"], row["last_seen"], row["last_rtt_ms"]) == ("down", t, 0.0)
+
+
 # ------------------------------------------------------------------ vantages, ordering, idempotency
 
 @pytest.mark.asyncio
@@ -516,6 +575,101 @@ async def test_maintenance_entry_is_logged_and_streamed_but_never_evaluated(pg_d
     assert [p["new_status"] for p in recorders.published] == ["maintenance"]
 
 
+def add_window(db: PgDatabase, device, starts_at: datetime, ends_at: datetime) -> None:
+    db.execute("INSERT INTO device_maintenance (scope_type, scope_device_id, starts_at, ends_at) "
+               "VALUES ('device', $1, $2, $3)", device, starts_at, ends_at)
+
+
+def device_transitions(db: PgDatabase, device) -> list[tuple[str, str]]:
+    steps = []
+    for entry in outbox(db, device):
+        payload = entry["payload"]
+        steps += [(item["old_status"], item["new_status"]) for item in payload.get("transitions", [payload])]
+    return steps
+
+
+@pytest.mark.asyncio
+async def test_a_backlog_that_crosses_a_window_end_decides_maintenance_per_sample(pg_db, recorders):
+    """A failure taken inside the window and uploaded after it ended stays inside the window: the
+    overlay ends with the post-window answer (maintenance -> up), never maintenance -> down -> up."""
+    sensor = add_sensor(pg_db, "edge-7")
+    device = add_device(pg_db, sensor, "up", interval=60)
+    now = datetime.now(UTC)
+    add_window(pg_db, device, now - timedelta(minutes=10), now - timedelta(seconds=30))
+
+    await ingest(pg_db, sensor, [ok(device, now - timedelta(seconds=100))])     # taken inside the window
+    assert device_row(pg_db, device)["status"] == "maintenance"
+    await ingest(pg_db, sensor, [fail(device, now - timedelta(seconds=60)),       # inside: the device rebooting
+                                 ok(device, now - timedelta(seconds=10))])        # after the window
+    row = device_row(pg_db, device)
+    assert (row["status"], row["status_changed_at"]) == ("up", now - timedelta(seconds=10))
+    assert device_transitions(pg_db, device) == [("up", "maintenance"), ("maintenance", "up")]
+    assert outbox(pg_db, device)[-1]["payload"]["reason"] == \
+        "remote sensor edge-7: Maintenance ended; device responding normally"
+
+
+@pytest.mark.asyncio
+async def test_a_device_still_failing_after_the_window_leaves_it_and_is_evaluated(pg_db, recorders):
+    sensor = add_sensor(pg_db, "edge-8")
+    device = add_device(pg_db, sensor, "up", interval=60)
+    now = datetime.now(UTC)
+    add_window(pg_db, device, now - timedelta(minutes=10), now - timedelta(seconds=30))
+    await ingest(pg_db, sensor, [ok(device, now - timedelta(seconds=100))])
+    await ingest(pg_db, sensor, [fail(device, now - timedelta(seconds=60)),
+                                 fail(device, now - timedelta(seconds=10))])
+    assert device_row(pg_db, device)["status"] == "down"
+    assert device_transitions(pg_db, device) == [("up", "maintenance"), ("maintenance", "down")]
+    payload = outbox(pg_db, device)[-1]["payload"]
+    assert payload["reason"] == "remote sensor edge-8: Maintenance ended; no response for 2 consecutive checks"
+    assert sensor_health_service._outbox_timestamp(payload["timestamp"]) == now - timedelta(seconds=10)
+
+    assert await dispatch(pg_db) == {"processed": 2, "failed": 0}
+    assert [(e.old_status, e.new_status) for e in recorders.evaluated] == [("maintenance", "down")]
+    engine, session = await session_for(pg_db)
+    try:
+        async with session:   # the alert engine's own check does not suppress the exit
+            assert await alert_engine._device_in_maintenance(session, str(device)) is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_sensor_clock_ahead_never_leaves_an_active_window_early(pg_db, recorders):
+    """Sample times are clamped to the server clock: a sample stamped after the window's end by a
+    sensor running ahead, uploaded while the window is still active, keeps the overlay (otherwise the
+    dispatcher would suppress that exit and the device would never page after the window)."""
+    sensor = add_sensor(pg_db)
+    device = add_device(pg_db, sensor, "up", interval=60)
+    now = datetime.now(UTC)
+    add_window(pg_db, device, now - timedelta(minutes=5), now + timedelta(seconds=20))
+    await ingest(pg_db, sensor, [fail(device, now + timedelta(seconds=40))])
+    assert device_row(pg_db, device)["status"] == "maintenance"
+    state = state_row(pg_db, device)
+    assert (state["hard_status"], state["in_maintenance"]) == ("down", True)
+    assert device_transitions(pg_db, device) == [("up", "maintenance")]
+
+
+def test_sample_maintenance_is_decided_at_the_clamped_sample_time():
+    raw = [["2026-10-15T01:00:00+00:00", "2026-10-15T02:00:00+00:00"],
+           ["2026-10-15T05:30:10.5+03:00", "2026-10-15T05:30:20+03:00"]]   # jsonb renders the session zone
+    windows = sensor_api._maintenance_windows({"maintenance_windows": raw})
+    assert windows == sensor_api._maintenance_windows({"maintenance_windows": json.dumps(raw)})
+    assert windows[1] == (datetime(2026, 10, 15, 2, 30, 10, 500000, tzinfo=UTC),
+                          datetime(2026, 10, 15, 2, 30, 20, tzinfo=UTC))
+    assert sensor_api._maintenance_windows({"maintenance_windows": None}) == []
+
+    def inside(h, m, s, now=(2, 0, 5)):
+        return sensor_api._sample_in_maintenance(
+            windows, datetime(2026, 10, 15, h, m, s, tzinfo=UTC), datetime(2026, 10, 15, *now, tzinfo=UTC))
+
+    assert inside(1, 59, 50) is True
+    assert inside(2, 0, 0) is True                  # bounds inclusive, like the dispatcher's check
+    assert inside(2, 0, 1) is False                 # taken after the window: no overlay
+    assert inside(2, 0, 50, now=(1, 59, 58)) is True  # sensor clock ahead: decided at the server's 01:59:58
+    assert inside(2, 30, 15, now=(2, 30, 30)) is True
+    assert inside(2, 30, 10, now=(2, 30, 30)) is False
+
+
 @pytest.mark.asyncio
 async def test_an_owner_change_reseeds_silently_and_closes_the_previous_owners_episode(pg_db):
     sensor = add_sensor(pg_db)
@@ -672,3 +826,21 @@ def test_outbox_payload_shapes():
     assert sensor_api._device_outbox_events({**payload, "next_index": 9})[1] == 2
     assert sensor_api._device_outbox_events({**payload, "next_index": "x"})[1] == 0
     assert dsm.format_ts(datetime(2026, 1, 1, tzinfo=UTC)) == "2026-01-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_a_batch_in_flight_after_ping_is_switched_off_never_recreates_the_state(pg_db, recorders):
+    """device_polling_owner ignores ping_enabled; the device update has already released the device,
+    so a late batch only feeds ping_metrics."""
+    sensor = add_sensor(pg_db)
+    device = add_device(pg_db, sensor, "up")
+    pg_db.execute("UPDATE devices SET ping_enabled = false WHERE id = $1", device)
+    t = recent(30)
+
+    await ingest(pg_db, sensor, [slow(device, t), slow(device, t + timedelta(seconds=5)),
+                                 slow(device, t + timedelta(seconds=10))])
+
+    assert state_row(pg_db, device) is None and outbox(pg_db) == []
+    row = device_row(pg_db, device)
+    assert row["status"] == "up" and row["is_flapping"] is False and row["last_seen"] is None
+    assert sum(len(rows) for table, rows in recorders.clickhouse if table == "ping_metrics") == 3

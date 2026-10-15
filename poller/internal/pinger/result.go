@@ -32,12 +32,27 @@ type Device struct {
 	// end_reason ('reseed' or 'owner_change') for closing a flap episode
 	// that is still open from before, on the first persist.
 	SeedEndReason string
+	// SeedOwner is set by the loader for an owner_change seed: the owner of
+	// the state row the seed replaces, which the first state write may take
+	// over (DeviceStatusSave.TakeoverOwner).
+	SeedOwner string
 
 	// persisted is the state handed to the status writer by the last write
 	// that included the state row; nil forces the next check to write it.
 	persisted *devicestatus.State
 	// stateWrittenAt is the check time of that write (stateHeartbeatFor).
 	stateWrittenAt time.Time
+	// takeover is the foreign state row owner the engine's seeded State may
+	// replace, until a state write succeeds (DeviceStatusSave.TakeoverOwner).
+	takeover string
+	// ownerLost is set when a save found the device no longer centrally
+	// polled: it is neither pinged nor stepped until the next sync reloads
+	// it from the database (its in-memory state is no longer the truth).
+	ownerLost bool
+	// epoch identifies the state lineage: it changes whenever State is
+	// replaced (load, reload, foreign reseed), and a job stepped from an
+	// older lineage is dropped instead of written.
+	epoch uint64
 }
 
 // PingResult holds the result of a ping check for a device.
@@ -97,16 +112,30 @@ type DeviceStatusSave struct {
 	FlapWindowMinutes int
 	// EndReason is the end_reason when an open episode is closed.
 	EndReason string
+	// TakeoverOwner is the owner of another writer's state row that this
+	// save may replace: the row the engine's seed was taken over from. A
+	// state row of any other non-central owner makes the save Foreign.
+	TakeoverOwner string
 }
 
 // DeviceStatusSaved reports what SaveDeviceStatus wrote.
 type DeviceStatusSaved struct {
 	// Device is false when the devices row was not updated because the device
-	// is no longer centrally owned: the check's events must be dropped.
+	// is no longer centrally polled (or the save is Foreign): the check's
+	// events must be dropped.
 	Device bool
 	// State is false when the state row was not written although requested
 	// (schema-lag fallback): the next check sends the full state again.
 	State bool
+	// Foreign is set when the device is centrally polled but its state row
+	// belongs to another writer that wrote after the engine's state was built
+	// (a sensor during a short ownership move). Nothing was written; the
+	// engine reseeds from Status/StatusChangedAt (devices.status as that
+	// writer left it) and takes ForeignOwner's row over with its next write.
+	Foreign         bool
+	ForeignOwner    string
+	Status          string
+	StatusChangedAt *time.Time
 }
 
 // HealthStatus represents the health of the poller engine.

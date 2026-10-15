@@ -429,15 +429,18 @@ def test_maintenance_create_and_delete_stamp_status_changed_at(pg_db):
         assert row(pinged)[0] == "maintenance"
 
 
-def test_disabling_ping_releases_the_flap_state(pg_db):
-    """Nobody checks a device again once ping is off (a remote-sensor owner never releases it), so the
-    update itself clears the flap mirror, closes the open episode as not_polled and drops the state row."""
+@pytest.mark.parametrize("owner", ["sensor", "central"])
+def test_disabling_ping_releases_the_flap_state(pg_db, owner):
+    """Nobody checks a device again once ping is off (a remote-sensor owner never releases it; the central poller
+    only notices at its next device sync), so the update itself clears the flap mirror, closes the open episode as
+    not_polled and drops the state row, whichever writer owned it."""
+    owner = str(SENSOR_ID) if owner == "sensor" else "central"
     dev = uuid.uuid4()
     pg_db.execute("INSERT INTO devices (id, hostname, ip_address, status, ping_enabled, is_flapping,"
                   " flapping_since, flap_kind) VALUES ($1, 'flappy-off', '10.9.9.9', 'down', true, true, $2,"
                   " 'reachability')", dev, ago(minutes=8))
     pg_db.execute("INSERT INTO device_status_state (device_id, owner, hard_status, reach_flapping, flapping_since)"
-                  " VALUES ($1, $2, 'down', true, $3)", dev, str(SENSOR_ID), ago(minutes=8))
+                  " VALUES ($1, $2, 'down', true, $3)", dev, owner, ago(minutes=8))
     pg_db.execute("INSERT INTO device_flap_episodes (device_id, started_at, kind, start_changes, window_minutes,"
                   " status_at_start) VALUES ($1, $2, 'reachability', 4, 30, 'up')", dev, ago(minutes=8))
     with api_client(pg_db, role="t_flap_manage", permissions=["devices.view", "devices.manage"]) as c:
@@ -449,3 +452,63 @@ def test_disabling_ping_releases_the_flap_state(pg_db):
     [(ended, reason, at_end)] = pg_db.query(
         "SELECT ended_at, end_reason, status_at_end FROM device_flap_episodes WHERE device_id = $1", dev)
     assert ended is not None and reason == "not_polled" and at_end == "down"
+
+
+# ── saving settings vs the historical breach evidence ───────────────────────
+
+def test_explanation_keeps_breach_evidence_until_a_limit_really_changes(pg_db, monkeypatch):
+    """The settings card saves the full document, which moves system_settings.updated_at even when only the
+    confirmation or flapping settings change. Only a change of the limits a sample is judged against may hide a
+    degraded event's breaches as "judged against other limits" or mark the latest sample as settings-pending."""
+    from app.services import device_status_explanation as module
+    dev = uuid.uuid4()
+    event_at, latest_at = ago(hours=2), ago(seconds=30)
+    pg_db.execute("INSERT INTO devices (id, hostname, ip_address, tags, status, ping_enabled, ping_interval)"
+                  " VALUES ($1, 'wan-history', '10.6.0.1', '[]'::jsonb, 'up', true, 60)", dev)
+    # Written before the threshold stamp existed, days before the event.
+    pg_db.execute("INSERT INTO system_settings (key, value, updated_at) VALUES ('monitoring', $1::jsonb, $2)"
+                  " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
+                  {"degraded_rtt_ms": 150, "degraded_loss_pct": 10}, ago(days=3))
+
+    class Client:
+        def query(self, sql, parameters=None, **kw):
+            if "FROM device_status_log" in sql and "new_status = 'degraded'" in sql:
+                rows = [(event_at, "Latency 180.000 ms exceeds 150 ms by 30.000 ms")]
+            elif "FROM ping_metrics" in sql and "dateDiff" in sql:
+                rows = [(event_at, 180.0, 0.0, 1)]
+            elif "FROM ping_metrics" in sql:
+                rows = [(latest_at, 20.0, 0.0, 1)]
+            else:
+                rows = []
+            return SimpleNamespace(result_rows=rows)
+
+    monkeypatch.setattr(module, "get_clickhouse_client", lambda: Client())
+    with api_client(pg_db, role="t_flap_settings", permissions=["devices.view", "settings.view", "settings.manage"],
+                    persist_user=True) as c:
+        def explained():
+            resp = c.get(f"/api/v1/devices/{dev}/status-explanation")
+            assert resp.status_code == 200, resp.text[:300]
+            return resp.json()
+
+        def save(document):
+            resp = c.put("/api/v1/settings/monitoring", json=document)
+            assert resp.status_code == 200, resp.text[:300]
+
+        full = {k: v for k, v in c.get("/api/v1/settings/monitoring").json().items() if k != "effective"}
+        for change in ({}, {"flap_window_minutes": 60, "flap_stable_minutes": 20},
+                       {"degraded_confirm_checks": 2, "down_confirm_checks": 4, "up_confirm_checks": 2}):
+            save({**full, **change})
+            body = explained()
+            recent = body["recent_degraded"]
+            assert recent["thresholds_unchanged"] is True, change
+            assert recent["sample"]["classification"] == "breach"
+            assert [(b["metric"], b["threshold"]) for b in recent["sample"]["breaches"]] == [("Latency", 150)]
+            assert body["latest"]["settings_pending"] is False
+
+        save({"degraded_rtt_ms": 200})
+        body = explained()
+        recent = body["recent_degraded"]
+        assert recent["thresholds_unchanged"] is False
+        assert recent["sample"]["breaches"] == [] and recent["sample"]["classification"] is None
+        assert recent["reason"] == "Latency 180.000 ms exceeds 150 ms by 30.000 ms"     # as recorded
+        assert body["latest"]["settings_pending"] is True

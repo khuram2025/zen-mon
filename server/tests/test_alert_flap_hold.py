@@ -221,6 +221,70 @@ async def test_only_the_paged_rule_recovers_when_another_rule_was_held(run, sent
     assert [(c["event_type"], c["rule_id"]) for c in sent] == [("recovery", str(paged.id))]
 
 
+def _loss_rule(**kw):
+    """The seeded 'Packet Loss' rule (any, packet_loss > 5): it matches a
+    move into degraded and a move into down alike."""
+    return device_down_rule(name="Packet Loss", trigger_on="any", metric="packet_loss",
+                            operator="gt", threshold=5, notify_channels=[CHANNEL], **kw)
+
+
+@pytest.mark.asyncio
+async def test_a_paged_degraded_followed_by_a_held_down_still_gets_its_all_clear(run, sent):
+    """Default policy: up->degraded pages (latency/loss not flapping), the
+    DOWN after it is held (up/down flapping), and the device is back inside
+    the hold. The DEGRADED that was paged must get its recovery."""
+    db = _with_channel(AlertsDB([_loss_rule()]))
+    await run(db, "up", "degraded", packet_loss=0.33, is_flapping=True)
+    [paged] = db.alerts
+    assert paged["status"] == "active" and paged["metadata"]["notified"] is True
+    await run(db, "degraded", "down", packet_loss=1.0, flapping=True, is_flapping=True)
+    held = db.alerts[-1]
+    assert held["status"] == "pending" and held["metadata"]["flap_held"] is True
+    assert paged["status"] == "active"          # a hold supersedes nothing that was sent
+    await run(db, "down", "up", flapping=True, is_flapping=True)
+    assert paged["status"] == "resolved" and paged["metadata"]["resolved_by_recovery"] is True
+    assert held["status"] == "resolved" and held["metadata"]["hold_cancelled"] is True
+    assert [c["event_type"] for c in sent] == ["trigger", "recovery"]
+    [recovery] = [a for a in db.alerts if a["metadata"].get("is_recovery")]
+    assert recovery["rule_id"] == paged["rule_id"]
+    assert sent[1]["alert_id"] == str(paged["id"])        # the all-clear is about the page
+
+
+@pytest.mark.asyncio
+async def test_a_paged_down_followed_by_a_held_degraded_still_gets_its_all_clear(run, sent):
+    db = _with_channel(AlertsDB([_loss_rule()]))
+    await run(db, "up", "down", packet_loss=1.0)
+    [paged] = db.alerts
+    await run(db, "down", "degraded", packet_loss=0.33, flapping=True, is_flapping=True)
+    assert db.alerts[-1]["status"] == "pending" and paged["status"] == "active"
+    await run(db, "degraded", "up", flapping=True, is_flapping=True)
+    assert paged["metadata"]["resolved_by_recovery"] is True
+    assert [c["event_type"] for c in sent] == ["trigger", "recovery"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_hold_still_replaces_an_older_hold(run):
+    db = AlertsDB([_loss_rule()])
+    await run(db, "up", "down", packet_loss=1.0, flapping=True)
+    first = db.alerts[-1]
+    await run(db, "down", "degraded", packet_loss=0.33, flapping=True)
+    second = db.alerts[-1]
+    assert first["status"] == "resolved" and first["metadata"]["hold_cancelled"] is True
+    assert first["metadata"]["superseded_by_status"] == "degraded"
+    assert second["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_that_is_not_held_still_supersedes_a_paged_one(run):
+    db = AlertsDB([_loss_rule()])
+    await run(db, "up", "down", packet_loss=1.0)
+    paged = db.alerts[-1]
+    await run(db, "down", "degraded", packet_loss=0.33)
+    assert paged["status"] == "resolved"
+    assert paged["metadata"]["resolved_by"] == "status_transition"
+    assert db.alerts[-1]["status"] == "active"
+
+
 @pytest.mark.asyncio
 async def test_a_superseded_hold_is_a_cancelled_hold(run):
     rule = device_down_rule(trigger_on="any")             # 'any' rule: ping_status == 0
@@ -331,6 +395,47 @@ async def test_every_confirmed_hold_stamps_notified_at(sweeper):
     assert "notified_at" in db.settled[0][1]
 
 
+class _LoggingHoldDB(HoldDB):
+    def __init__(self, row):
+        super().__init__(row)
+        self.sql: list[str] = []
+
+    async def execute(self, statement, params=None):
+        self.sql.append(" ".join(str(statement).split()))
+        return await super().execute(statement, params)
+
+    def index(self, fragment):
+        return next(i for i, s in enumerate(self.sql) if fragment in s)
+
+
+_LOCK = "pg_advisory_xact_lock(hashtext(:device_id))"
+_SETTLE = "SET status = :status"
+_SUPERSEDE = "UPDATE alerts SET status = 'resolved'"
+
+
+@pytest.mark.asyncio
+async def test_confirming_a_device_hold_supersedes_under_the_device_lock(sweeper):
+    """The engine leaves a sent trigger open while a newer one is held; the
+    confirmation supersedes it, holding the engine's per-device lock first."""
+    db = _LoggingHoldDB(_flap_pending(new_status="down", device_status="down"))
+    await alert_hold_service.sweep_pending_holds(db)
+    assert db.index(_LOCK) < db.index(_SETTLE) < db.index(_SUPERSEDE)
+    supersede = db.sql[db.index(_SUPERSEDE)]
+    assert "WHERE status IN ('active', 'acknowledged')" in supersede and "id <> :id" in supersede
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_hold_or_a_service_hold_supersedes_nothing(sweeper):
+    db = _LoggingHoldDB(_flap_pending(new_status="down", device_status="up"))
+    await alert_hold_service.sweep_pending_holds(db)
+    assert not any(_SUPERSEDE in s for s in db.sql)
+    row = _pending(new_status="down", device_status=None)
+    row.service_check_id, row.check_status = uuid4(), "down"
+    db = _LoggingHoldDB(row)
+    assert (await alert_hold_service.sweep_pending_holds(db))["confirmed"] == 1
+    assert not any(_SUPERSEDE in s or _LOCK in s for s in db.sql)
+
+
 @pytest.mark.asyncio
 async def test_a_confirmed_flap_hold_says_why_it_waited(monkeypatch):
     captured = {}
@@ -405,6 +510,54 @@ async def test_postgres_flap_hold_confirms_a_sustained_outage(world):
     assert out["confirmed"] == 1
     [(status, meta, _)] = _rows(w)
     assert status == "active" and meta["notified"] is True and meta["notified_at"]
+
+
+def _loss_rule_world(w):
+    """The world's rule as the seeded 'Packet Loss' (any, packet_loss > 5),
+    without cooldown: it matches degraded and down alike."""
+    w.db.execute("UPDATE alert_rules SET trigger_on = 'any', metric = 'packet_loss',"
+                 " operator = 'gt', threshold = 5, cooldown = 0 WHERE id = $1", w.rule)
+
+
+def _by_status(w):
+    return {m["new_status"]: (s, m) for s, m, _ in _rows(w) if not m.get("is_recovery")}
+
+
+@pytest.mark.asyncio
+async def test_postgres_a_confirmed_hold_supersedes_the_trigger_sent_before_it(world):
+    w = world
+    _loss_rule_world(w)
+    await _evaluate(w, "up", "degraded", packet_loss=0.33)
+    await _evaluate(w, "degraded", "down", packet_loss=1.0, flapping=True, is_flapping=True)
+    rows = _by_status(w)
+    assert rows["degraded"][0] == "active" and rows["down"][0] == "pending"
+
+    w.db.execute("UPDATE devices SET status = 'down' WHERE id = $1", w.device)
+    w.db.execute("UPDATE alerts SET metadata = metadata || jsonb_build_object('hold_until', now()::text)"
+                 " WHERE status = 'pending'")
+    async with session(w.db) as s:
+        out = await alert_hold_service.sweep_pending_holds(s)
+    assert out["confirmed"] == 1
+    rows = _by_status(w)
+    assert rows["down"][0] == "active"
+    status, meta = rows["degraded"]
+    assert status == "resolved" and meta["resolved_by"] == "status_transition"
+    assert meta["superseded_by_status"] == "down" and "hold_cancelled" not in meta
+
+
+@pytest.mark.asyncio
+async def test_postgres_a_trigger_sent_before_a_cancelled_hold_gets_its_recovery(world):
+    w = world
+    _loss_rule_world(w)
+    await _evaluate(w, "up", "degraded", packet_loss=0.33)
+    await _evaluate(w, "degraded", "down", packet_loss=1.0, flapping=True, is_flapping=True)
+    await _evaluate(w, "down", "up", flapping=True, is_flapping=True)
+    rows = _rows(w)
+    assert all(s == "resolved" for s, _, _ in rows)
+    by = {("recovery" if m.get("is_recovery") else m["new_status"]): m for _, m, _ in rows}
+    assert by["degraded"]["resolved_by_recovery"] is True and "hold_cancelled" not in by["degraded"]
+    assert by["down"]["hold_cancelled"] is True
+    assert "recovery" in by                                 # the all-clear for the page
 
 
 @pytest.mark.asyncio

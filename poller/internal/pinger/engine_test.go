@@ -153,9 +153,20 @@ func (f *fakeAlertEvaluator) eventsCopy() []DeviceAlertEvent {
 type fakeMetricWriter struct {
 	mu            sync.Mutex
 	statusChanges []*StatusChange
+	results       int
 }
 
-func (f *fakeMetricWriter) WriteResult(result *PingResult) {}
+func (f *fakeMetricWriter) WriteResult(result *PingResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results++
+}
+
+func (f *fakeMetricWriter) resultCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.results
+}
 
 func (f *fakeMetricWriter) RunBatchWriter(ctx context.Context) {}
 
@@ -248,6 +259,38 @@ func (f *fakeServiceEventPublisher) PublishServiceStatusChange(ctx context.Conte
 	defer f.mu.Unlock()
 	f.statusChanges = append(f.statusChanges, sc)
 	return nil
+}
+
+// stubPinger answers a ping cycle without ICMP: every device gets the result
+// reply builds. onBatch, when set, runs before the results are returned (e.g.
+// a shutdown cancelling the context mid-cycle).
+type stubPinger struct {
+	mu      sync.Mutex
+	pinged  []uuid.UUID
+	reply   func(d *Device) *PingResult
+	onBatch func()
+}
+
+func (s *stubPinger) PingBatch(ctx context.Context, devices []*Device, pollerID string, maxWorkers int) []*PingResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*PingResult, 0, len(devices))
+	for _, d := range devices {
+		s.pinged = append(s.pinged, d.ID)
+		r := s.reply(d)
+		r.DeviceID, r.PollerID = d.ID, pollerID
+		out = append(out, r)
+	}
+	if s.onBatch != nil {
+		s.onBatch()
+	}
+	return out
+}
+
+func (s *stubPinger) pingedCopy() []uuid.UUID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]uuid.UUID(nil), s.pinged...)
 }
 
 func testEngine() *Engine {
