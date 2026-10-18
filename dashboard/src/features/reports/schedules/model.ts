@@ -3,7 +3,9 @@
  *
  * Mirrors server/app/api/v1/report_schedules.py and
  * report_scheduler.compute_next_run: run times are wall-clock times in the
- * organisation timezone (Settings → General → Company), day_of_week is
+ * schedule's own IANA time zone (`timezone`, defaulting to the organisation
+ * time zone of Settings → General → Company when the schedule is created;
+ * a later organisation change does not move it), day_of_week is
  * 1=Monday … 7=Sunday, and a monthly day beyond the month's length runs on
  * its last day. Unit-tested by scripts/test-report-schedules.mjs.
  */
@@ -43,9 +45,22 @@ export type ReportSchedule = {
   minute: number
   day_of_week?: number | null
   day_of_month?: number | null
+  /** IANA zone hour/minute are in; null on rows saved before migration 163 (organisation zone). */
+  timezone?: string | null
   notify_channels: string[]
   recipients?: string[]
   // Bookkeeping returned by the API (read-only in the form).
+  /** The zone the schedule runs in (its own, else the organisation's). */
+  effective_timezone?: string | null
+  organisation_timezone?: string | null
+  /** "08:00 Asia/Riyadh (05:00 UTC)". */
+  local_time_label?: string | null
+  /** "Daily at 08:00 Asia/Riyadh (05:00 UTC)". */
+  schedule_label?: string | null
+  /** next_run_at in the schedule's zone (ISO with offset). */
+  next_run_local?: string | null
+  /** The time written in the name when it differs from the stored time ("08:00"). */
+  name_time_mismatch?: string | null
   last_run_at?: string | null
   last_status?: string | null
   last_error?: string | null
@@ -77,6 +92,8 @@ export type ScheduleBody = {
   minute: number
   day_of_week: number | null
   day_of_month: number | null
+  /** null = the organisation time zone (the server stores it explicitly). */
+  timezone: string | null
   notify_channels: string[]
   recipients: string[]
 }
@@ -110,6 +127,8 @@ export type ScheduleForm = {
   minute: number
   day_of_week: number
   day_of_month: number
+  /** IANA zone; '' = the organisation time zone. */
+  timezone: string
   notify_channels: string[]
   recipients: string[]
 }
@@ -212,6 +231,74 @@ export function frequencyText(s: Timing, timeFormat: string = '24h'): string {
 /* ------------------------------------------------------------------ */
 /*  Time                                                               */
 /* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/*  Schedule time zone                                                 */
+/* ------------------------------------------------------------------ */
+
+/** The zone a schedule runs in: its own when valid, else the organisation's, else UTC. */
+export function scheduleZone(s: { timezone?: string | null } | null | undefined, orgTz: string): string {
+  const own = (s?.timezone ?? '').trim()
+  if (own && isValidTimezone(own)) return own
+  return orgTz && isValidTimezone(orgTz) ? orgTz : 'UTC'
+}
+
+/** "Asia/Riyadh" → "Asia/Riyadh"; underscores read as spaces ("America/New York"). */
+export function zoneName(tz: string): string {
+  return tz.replace(/_/g, ' ')
+}
+
+/** "05:00 UTC". */
+export function utcClock(at: Date): string {
+  return `${pad(at.getUTCHours())}:${pad(at.getUTCMinutes())} UTC`
+}
+
+/**
+ * The schedule's time with the UTC equivalent of its next run, like the
+ * server's local_time_label: "08:00 Asia/Riyadh (05:00 UTC)",
+ * "01:00 Asia/Riyadh (22:00 UTC, previous day)", "08:00 UTC".
+ */
+export function localTimeLabel(s: Timing, tz: string, now: Date = new Date(), timeFormat = '24h'): string {
+  const local = clockLabel(s.hour ?? 0, s.minute ?? 0, timeFormat)
+  if (!isValidTimezone(tz) || tz === 'UTC' || tz === 'Etc/UTC') return `${local} UTC`
+  const at = nextRuns(s, tz, 1, now)[0]
+  if (!at) return `${local} ${zoneName(tz)}`
+  const wall = wallDate(at, tz)
+  const utcDay = Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate())
+  const localDay = Date.UTC(wall.y, wall.m - 1, wall.d)
+  const day = utcDay < localDay ? ', previous day' : utcDay > localDay ? ', next day' : ''
+  return `${local} ${zoneName(tz)} (${utcClock(at)}${day})`
+}
+
+/** "Mon 12-Oct-2026 08:00 GMT+3 · 05:00 UTC" for a run instant in the schedule's zone. */
+export function runWithUtc(value: Date, b: Fmt): string {
+  const local = `${runLabel(value, b)} ${zoneLabel(b.timezone, value)}`
+  return zoneLabel(b.timezone, value) === 'UTC' ? local : `${local} · ${utcClock(value)}`
+}
+
+// No lookbehind (Safari < 16.4 rejects it at parse time and the whole page
+// fails): the character before the time is captured instead.
+const TIME_IN_NAME = /(^|[^\d:.])([01]?\d|2[0-3])[:h]([0-5]\d)(?:\s*([AaPp])\.?[Mm]\b\.?)?(?![\d:])/g
+
+/**
+ * The time of day written in a schedule name ("NOC Daily 08:00", "08h30",
+ * "7:30 PM") when it differs from the stored local time, else null — the
+ * server's name_time_mismatch. A title is not evidence of when it runs.
+ */
+export function nameTimeMismatch(name: string | null | undefined, hour: number, minute: number): string | null {
+  if (!name) return null
+  for (const m of name.matchAll(TIME_IN_NAME)) {
+    let h = Number(m[2])
+    const min = Number(m[3])
+    const ampm = (m[4] || '').toLowerCase()
+    if (ampm) {
+      if (h < 1 || h > 12) continue
+      h = (h % 12) + (ampm === 'p' ? 12 : 0)
+    }
+    if (h !== hour || min !== minute) return m[0].slice(m[1].length).trim()
+  }
+  return null
+}
 
 /** Naive API timestamps are UTC. */
 export function toInstant(value: string | number | Date | null | undefined): Date | null {
@@ -517,6 +604,7 @@ export function defaultForm(): ScheduleForm {
     report_type: '', custom_report_id: null,
     period: 'yesterday', format: 'pdf', filters: {},
     frequency: 'daily', hour: 8, minute: 0, day_of_week: 1, day_of_month: 1,
+    timezone: '',
     notify_channels: [], recipients: [],
   }
 }
@@ -539,6 +627,7 @@ export function scheduleToForm(s: ReportSchedule): ScheduleForm {
     minute: s.minute ?? 0,
     day_of_week: s.day_of_week ?? 1,
     day_of_month: s.day_of_month ?? 1,
+    timezone: (s.timezone ?? '').trim(),
     notify_channels: [...(s.notify_channels ?? [])],
     recipients: [...(s.recipients ?? [])],
   }
@@ -563,6 +652,7 @@ export function buildBody(form: ScheduleForm, opts: { keepStoredFilters?: boolea
     minute: form.minute,
     day_of_week: form.frequency === 'weekly' ? form.day_of_week : null,
     day_of_month: form.frequency === 'monthly' ? form.day_of_month : null,
+    timezone: form.timezone.trim() || null,
     notify_channels: [...form.notify_channels],
     recipients: [...form.recipients],
   }
@@ -579,6 +669,8 @@ export type ValidationContext = {
   originalDayOfMonth?: number | null
   /** The stored time (an existing off-step minute stays allowed). */
   originalTime?: { hour: number; minute: number } | null
+  /** The zone the schedule runs in (for wording; the organisation zone when unset). */
+  timezone?: string
 }
 
 export function validateSchedule(form: ScheduleForm, ctx: ValidationContext): { errors: Issue[]; warnings: Issue[] } {
@@ -595,6 +687,9 @@ export function validateSchedule(form: ScheduleForm, ctx: ValidationContext): { 
   const keepsTime = !!ctx.originalTime && ctx.originalTime.hour === form.hour && ctx.originalTime.minute === form.minute
   if (form.hour < 0 || form.hour > 23 || form.minute < 0 || form.minute > 59 || (offStep && !keepsTime)) {
     errors.push({ field: 'time', message: 'Choose a time of day in 15-minute steps.' })
+  }
+  if (form.timezone.trim() && !isValidTimezone(form.timezone.trim())) {
+    errors.push({ field: 'timezone', message: 'Choose a valid time zone.' })
   }
   if (form.frequency === 'weekly' && !(form.day_of_week >= 1 && form.day_of_week <= 7)) {
     errors.push({ field: 'weekday', message: 'Choose the day of the week.' })
@@ -617,6 +712,14 @@ export function validateSchedule(form: ScheduleForm, ctx: ValidationContext): { 
   const name = form.name.trim()
   if (!name) errors.push({ field: 'name', message: 'Enter a schedule name.' })
   else if (name.length > 255) errors.push({ field: 'name', message: 'Keep the name under 255 characters.' })
+  const named = nameTimeMismatch(name, form.hour, form.minute)
+  if (named) {
+    const zone = form.timezone.trim() || ctx.timezone || ''
+    warnings.push({
+      field: 'name',
+      message: `The name says ${named}, but the report runs at ${clockLabel(form.hour, form.minute)}${zone ? ` ${zoneName(zone)}` : ''}. Check the time or the name.`,
+    })
+  }
 
   if (form.notify_channels.length === 0 && form.recipients.length === 0) {
     warnings.push({ field: 'delivery', message: 'Nobody receives this report; runs only appear in the run history.' })

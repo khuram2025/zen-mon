@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 
 import pytest
@@ -497,3 +498,93 @@ def test_a_manager_who_changes_someone_elses_delivery_takes_the_schedule_over(en
     env.state["user"] = admin
     assert _put(env, sid, {"report_type": "alerts"}).status_code == 200
     assert str(env.db.schedules[sid]["created_by"]) == str(manager.id)
+
+
+# ── Timezone (NOTIFY 07) ─────────────────────────────────────────────────────
+
+def test_a_new_schedule_keeps_the_organisation_zone_and_returns_local_and_utc(env):
+    r = _post(env, {"name": "NOC Daily Briefing", "report_type": "availability", "frequency": "daily",
+                    "hour": 8, "minute": 0})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["timezone"] == "Asia/Riyadh" and body["effective_timezone"] == "Asia/Riyadh"
+    assert body["organisation_timezone"] == "Asia/Riyadh"
+    assert body["local_time_label"] == "08:00 Asia/Riyadh (05:00 UTC)"
+    assert body["schedule_label"] == "Daily at 08:00 Asia/Riyadh (05:00 UTC)"
+    nxt = datetime.fromisoformat(body["next_run_at"])
+    assert (nxt.hour, nxt.minute, nxt.utcoffset()) == (5, 0, timedelta(0))
+    assert body["next_run_local"].endswith("T08:00:00+03:00")
+    assert next(iter(env.db.schedules.values()))["timezone"] == "Asia/Riyadh"
+
+
+def test_weekly_sunday_in_a_chosen_zone(env):
+    r = _post(env, {"name": "Weekly", "report_type": "availability", "frequency": "weekly", "day_of_week": 7,
+                    "hour": 8, "minute": 0, "timezone": " Europe/Berlin "})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["timezone"] == "Europe/Berlin"
+    nxt = datetime.fromisoformat(body["next_run_at"])
+    local = nxt.astimezone(ZoneInfo("Europe/Berlin"))
+    assert local.isoweekday() == 7 and (local.hour, local.minute) == (8, 0)
+    assert body["local_time_label"].startswith("08:00 Europe/Berlin (0")
+
+
+@pytest.mark.parametrize("tz", ["Mars/Olympus", "GMT+3 Riyadh", "x" * 70])
+def test_an_unknown_zone_is_rejected(env, tz):
+    r = _post(env, {"name": "Bad", "report_type": "availability", "timezone": tz})
+    assert r.status_code == 422, r.text
+    assert not env.db.schedules
+
+
+def test_an_organisation_zone_change_does_not_move_a_schedule(env, monkeypatch):
+    sid = _post(env, {"name": "Daily", "report_type": "availability", "hour": 8}).json()["id"]
+    before = env.client.get(f"/api/v1/report-schedules/{sid}").json()
+
+    async def utc(_db):
+        return "UTC"
+
+    monkeypatch.setattr(RS, "get_configured_timezone", utc)
+    after = env.client.get(f"/api/v1/report-schedules/{sid}").json()
+    assert after["next_run_at"] == before["next_run_at"]
+    assert after["local_time_label"] == "08:00 Asia/Riyadh (05:00 UTC)"
+    # Re-timing and toggling compute in the schedule's own zone.
+    moved = _put(env, sid, {"hour": 9}).json()
+    assert datetime.fromisoformat(moved["next_run_at"]).hour == 6
+    env.client.post(f"/api/v1/report-schedules/{sid}/toggle")
+    resumed = env.client.post(f"/api/v1/report-schedules/{sid}/toggle").json()
+    assert datetime.fromisoformat(resumed["next_run_at"]).hour == 6
+    # Changing the zone recomputes; clearing it pins the organisation zone of the moment.
+    tokyo = _put(env, sid, {"timezone": "Asia/Tokyo"}).json()
+    assert tokyo["timezone"] == "Asia/Tokyo" and datetime.fromisoformat(tokyo["next_run_at"]).hour == 0
+    cleared = _put(env, sid, {"timezone": None}).json()
+    assert cleared["timezone"] == "UTC" and datetime.fromisoformat(cleared["next_run_at"]).hour == 9
+
+
+def test_rows_from_before_the_migration_fall_back_to_the_organisation_zone(env):
+    sid = env.db.add_schedule()                    # no timezone key at all
+    row = env.client.get(f"/api/v1/report-schedules/{sid}").json()
+    assert row["timezone"] is None and row["effective_timezone"] == "Asia/Riyadh"
+    assert row["local_time_label"] == "08:00 Asia/Riyadh (05:00 UTC)"
+
+
+def test_a_time_in_the_name_that_differs_from_the_schedule_is_flagged(env):
+    sid = env.db.add_schedule(name="NOC Daily Briefing 08:00 Riyadh", frequency="daily", hour=5,
+                              timezone="Asia/Riyadh")
+    row = env.client.get(f"/api/v1/report-schedules/{sid}").json()
+    assert row["name_time_mismatch"] == "08:00"
+    assert row["local_time_label"] == "05:00 Asia/Riyadh (02:00 UTC)"
+    fixed = _put(env, sid, {"hour": 8}).json()           # the one-by-one correction
+    assert fixed["name_time_mismatch"] is None
+    assert datetime.fromisoformat(fixed["next_run_at"]).hour == 5
+    assert env.db.audits[-1]["metadata"]["changed"] == ["hour"]
+
+
+def test_audit_records_the_timing(env):
+    sid = _post(env, {"name": "Weekly", "report_type": "availability", "frequency": "weekly", "day_of_week": 7,
+                      "hour": 8, "minute": 30, "timezone": "Europe/Berlin"}).json()["id"]
+    _put(env, sid, {"hour": 7})
+    create, update = env.db.audits[-2:]
+    for a, hour in ((create, 8), (update, 7)):
+        meta = a["metadata"]
+        assert (meta["frequency"], meta["hour"], meta["minute"], meta["timezone"], meta["day_of_week"]) == \
+            ("weekly", hour, 30, "Europe/Berlin", 7)

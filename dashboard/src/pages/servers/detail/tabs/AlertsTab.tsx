@@ -51,9 +51,19 @@ export interface HostRule {
   threshold: number | null
   severity: string
   min_duration: number
+  /** Seconds the cleared condition must hold before the alert resolves; null = default (300 s). */
+  clear_duration?: number | null
+  /** Explicit clear level; null = automatic (see auto_reset_threshold). */
+  reset_threshold?: number | null
+  /** The automatic clear level the evaluator uses when reset_threshold is null. */
+  auto_reset_threshold?: number | null
+  recovery_alert?: boolean
   server_id: string | null
   target: string | null
 }
+
+/** Default clear hold the evaluator applies when a rule leaves clear_duration empty. */
+const DEFAULT_CLEAR_SECONDS = 300
 
 /** Pre-fills the new-rule dialog, e.g. from a service or process row. */
 export type HostRulePrefill = {
@@ -110,6 +120,25 @@ function fmtDuration(seconds: number): string {
   if (seconds < 60) return `for ${seconds}s`
   const m = Math.round(seconds / 60)
   return m >= 60 && m % 60 === 0 ? `for ${m / 60}h` : `for ${m} min`
+}
+
+/** The automatic clear level: 2 points on the healthy side of the trigger. */
+function autoReset(operator: string, threshold: number): number | null {
+  if (!Number.isFinite(threshold)) return null
+  if ((operator === 'gt' || operator === 'gte') && threshold - 2 >= 0) return threshold - 2
+  if ((operator === 'lt' || operator === 'lte') && threshold + 2 <= 100) return threshold + 2
+  return null
+}
+
+/** "clears below 88% for 5 min" — when an open alert resolves. */
+export function ruleClearing(
+  r: Pick<HostRule, 'operator' | 'threshold' | 'reset_threshold' | 'auto_reset_threshold' | 'clear_duration'>,
+): string {
+  const level = r.reset_threshold ?? r.auto_reset_threshold ?? autoReset(r.operator, Number(r.threshold))
+  const below = r.operator === 'gt' || r.operator === 'gte' || r.operator === '>' || r.operator === '>='
+  const hold = r.clear_duration ?? DEFAULT_CLEAR_SECONDS
+  const where = level != null ? `clears ${below ? 'below' : 'above'} ${level}%` : 'clears'
+  return hold ? `${where} ${fmtDuration(hold)}` : `${where} at once`
 }
 
 type StatusFilter = 'active' | 'acknowledged' | 'resolved' | 'all'
@@ -514,7 +543,9 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                 <Td className="py-2">
                   <div className="truncate text-text2" title={ruleCondition(r)}>{ruleCondition(r)}</div>
                   {HOST_METRICS.find((m) => m.value === r.metric)?.kind === 'pct' && (
-                    <div className="text-xs text-muted">{fmtDuration(r.min_duration)}</div>
+                    <div className="text-xs text-muted">
+                      {fmtDuration(r.min_duration)} · {ruleClearing(r)}{r.recovery_alert ? ' · recovery notice' : ''}
+                    </div>
                   )}
                 </Td>
                 <Td className="py-2"><SevPill sev={r.severity} /></Td>
@@ -577,6 +608,9 @@ export function CreateHostRuleDialog({
   const [threshold, setThreshold] = useState('90')
   const [severity, setSeverity] = useState('warning')
   const [minutes, setMinutes] = useState('5')
+  const [clearMinutes, setClearMinutes] = useState('')
+  const [resetLevel, setResetLevel] = useState('')
+  const [recovery, setRecovery] = useState(true)
   const [target, setTarget] = useState('')
   const [allServers, setAllServers] = useState(false)
   const [channels, setChannels] = useState<string[]>([])
@@ -586,6 +620,7 @@ export function CreateHostRuleDialog({
   const reset = () => {
     setName(''); setMetric('host_cpu_pct'); setOperator('gt'); setThreshold('90')
     setSeverity('warning'); setMinutes('5'); setTarget(''); setAllServers(false); setChannels([])
+    setClearMinutes(''); setResetLevel(''); setRecovery(true)
   }
 
   // Apply the prefill (e.g. from a service row) each time the dialog opens.
@@ -618,6 +653,10 @@ export function CreateHostRuleDialog({
         threshold: kind === 'pct' ? Number(threshold) : 0,
         severity,
         min_duration: kind === 'pct' ? Math.round(Number(minutes) * 60) : 0,
+        // Empty = the evaluator defaults: clear after 5 minutes, 2 points on the healthy side.
+        clear_duration: kind === 'pct' && clearMinutes.trim() !== '' ? Math.round(Number(clearMinutes) * 60) : null,
+        reset_threshold: kind === 'pct' && resetLevel.trim() !== '' ? Number(resetLevel) : null,
+        recovery_alert: recovery,
         target: (kind === 'svc' || kind === 'proc') ? target.trim() : null,
         server_id: allServers ? null : serverId,
         notify_channels: channels,
@@ -630,11 +669,20 @@ export function CreateHostRuleDialog({
   const toggleChannel = (id: string) =>
     setChannels((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]))
 
+  const autoLevel = autoReset(operator, Number(threshold))
   const preview = kind === 'svc'
     ? `Service ${target.trim() || '…'} stopped`
     : kind === 'proc'
       ? `Process ${target.trim() || '…'} not running`
       : `${metricLabel(metric)} ${OP_SYMBOL[operator]} ${threshold || '…'}% ${fmtDuration(Math.round(Number(minutes || 0) * 60))}`
+  const clearPreview = kind === 'pct'
+    ? ruleClearing({
+        operator, threshold: Number(threshold),
+        reset_threshold: resetLevel.trim() !== '' ? Number(resetLevel) : null,
+        auto_reset_threshold: autoLevel,
+        clear_duration: clearMinutes.trim() !== '' ? Math.round(Number(clearMinutes) * 60) : null,
+      })
+    : ''
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -693,6 +741,26 @@ export function CreateHostRuleDialog({
                 <Label>For (min)</Label>
                 <Input type="number" min={0} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
               </div>
+              <div className="space-y-1.5">
+                <Label>Clear level %</Label>
+                <Input
+                  type="number" min={0} max={100} step="any" value={resetLevel}
+                  onChange={(e) => setResetLevel(e.target.value)}
+                  placeholder={autoLevel != null ? `auto (${autoLevel}%)` : 'same as threshold'}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Clear after (min)</Label>
+                <Input
+                  type="number" min={0} value={clearMinutes}
+                  onChange={(e) => setClearMinutes(e.target.value)}
+                  placeholder={String(DEFAULT_CLEAR_SECONDS / 60)}
+                />
+              </div>
+              <label className="flex cursor-pointer items-end gap-2 pb-2">
+                <Switch checked={recovery} onCheckedChange={setRecovery} />
+                <span className="text-[13px]">Recovery notice</span>
+              </label>
             </div>
           ) : (
             <div className="space-y-1.5">
@@ -709,6 +777,10 @@ export function CreateHostRuleDialog({
           <div className="rounded-md border border-border bg-surface2/40 px-3 py-2 text-xs text-muted">
             Alerts when <span className="font-medium text-text">{preview}</span> on{' '}
             <span className="font-medium text-text">{allServers ? 'any server' : 'this server'}</span>.
+            {clearPreview && (
+              <> One alert per {metric === 'host_filesystem_pct' ? 'filesystem' : 'server'} until it{' '}
+                <span className="font-medium text-text">{clearPreview}</span>; missing data never clears it.</>
+            )}
           </div>
 
           <label className="flex cursor-pointer items-center gap-2">

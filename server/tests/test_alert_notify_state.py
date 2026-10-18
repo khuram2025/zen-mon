@@ -89,3 +89,21 @@ async def test_pending_is_true_only_for_an_explicitly_suppressed_trigger():
     assert await ns.is_pending(FakeDB("false"), "alert-1") is True   # owed a send
     assert await ns.is_pending(FakeDB("true"), "alert-1") is False   # already sent
     assert await ns.is_pending(FakeDB(), "alert-1") is False         # legacy, leave alone
+    assert await ns.is_pending(FakeDB("sending"), "alert-1") is False  # in flight, no claim time
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_send_becomes_pending_again():
+    """A claim older than STALE_SENDING_S means the worker died mid-send:
+    the trigger is owed again rather than lost; a fresh claim is left alone."""
+    from datetime import datetime, timedelta, timezone
+
+    class Row:
+        def __init__(self, age_s):
+            self.row = ("sending", (datetime.now(timezone.utc) - timedelta(seconds=age_s)).isoformat(), None)
+
+        async def execute(self, statement, params=None):
+            return FakeResult(self.row)
+
+    assert await ns.is_pending(Row(ns.STALE_SENDING_S + 60), "a") is True
+    assert await ns.is_pending(Row(5), "a") is False

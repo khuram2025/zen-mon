@@ -65,7 +65,11 @@ async def node(db, ip='192.0.2.10', **kw):
 
 
 async def rule(db, user, metric='cpu', **kw):
-    data = dict(name=f'fixture-{uuid4()}', metric=metric, operator='>', threshold=90, notify_channels=[])
+    # clear_duration=0: these contracts pin hold, unknown-data and recovery
+    # semantics with an immediate clear; the default 300 s clear hold has its
+    # own tests (tests/test_metric_alert_lifecycle.py).
+    data = dict(name=f'fixture-{uuid4()}', metric=metric, operator='>', threshold=90, notify_channels=[],
+                clear_duration=0)
     data.update(kw)
     return await alert_rules.create_alert_rule(alert_rules.AlertRuleCreate(**data), db, user)
 

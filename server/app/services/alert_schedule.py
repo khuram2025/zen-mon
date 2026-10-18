@@ -24,14 +24,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger("zenplus.alert_schedule")
 
 
+def normalize_timezone(value, default: str = "UTC") -> str:
+    """``value`` as a usable IANA zone name: trimmed and capped like the
+    branding reader (``branding.branding_from_values``), ``default`` when it
+    is blank, not a string or not a zone this system knows."""
+    from app.services.branding import valid_timezone
+
+    name = value.strip()[:64] if isinstance(value, str) else ""
+    return name if valid_timezone(name) else default
+
+
 async def get_configured_timezone(db: AsyncSession) -> str:
-    """Return the appliance's configured IANA timezone name (default 'UTC')."""
+    """Return the appliance's configured IANA timezone name (default 'UTC').
+
+    Validated the same way report branding is, so alert windows, report
+    schedules and report labels agree on the zone: a stored value with stray
+    whitespace is trimmed, an unknown zone reads as UTC."""
     try:
         row = (await db.execute(
             text("SELECT value FROM system_settings WHERE key = 'company'")
         )).first()
         if row and isinstance(row[0], dict):
-            return row[0].get("timezone") or "UTC"
+            return normalize_timezone(row[0].get("timezone"))
     except Exception as exc:
         logger.debug("could not read configured timezone: %s", exc)
     return "UTC"

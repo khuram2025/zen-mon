@@ -11,7 +11,15 @@ one of the network keys, computes the current value for every in-scope device
 (and interface, for per-interface metrics), and raises/resolves a device-scoped
 row in ``alerts``. Rules dedupe on (rule_id, device_id, if_index): an alert is
 only raised when no matching active alert already exists. Transaction locks
-serialize rule/entity evaluation; outbound notifications remain best-effort.
+serialize rule/entity evaluation, the whole pass runs in one API worker at a
+time (``alert_worker_lock``), and a trigger in flight is marked "sending" so
+no other pass announces it again; deliveries are keyed per incident event,
+channel and recipient (``dispatch_to_channels``).
+
+An open incident resolves only after its cleared condition held for the rule's
+``clear_duration`` (NULL = 300 s, 0 = immediate) against its reset threshold —
+the explicit one, or for device CPU/memory 2 points on the healthy side of the
+trigger (``network_conditions``). Missing data never counts as clear time.
 
 Scope: a rule with no device_id/group_id/device_type/location applies to every
 SNMP-monitored device; otherwise the usual scope filters apply. For interface
@@ -34,6 +42,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_phrasing as ap
+from app.services import network_history as _nh
 from app.services.host_alert_service import dispatch_to_channels
 from app.services.tag_service import tag_set as _tag_set
 from app.services import alert_notify_state as ns
@@ -388,8 +397,11 @@ async def _active_alert(db: AsyncSession, rule_id, device_id: str, if_index):
 async def _raise(db: AsyncSession, rule, device_id: str, message: str,
                  value: float, if_index, extra: dict):
     now = datetime.now(timezone.utc)
+    # The trigger is "sending" until _apply stamps its outcome: neither pending
+    # nor notified, so another pass never announces it a second time.
     meta = {"rule_id": str(rule.id), "metric": rule.metric,
-            "value": round(value, 2), "threshold": float(rule.threshold or 0), "notified": False}
+            "value": round(value, 2), "threshold": float(rule.threshold or 0),
+            **ns.sending_metadata()}
     if if_index is not None:
         meta["if_index"] = str(if_index)
     meta.update(extra)
@@ -448,17 +460,12 @@ def _message(rule, hostname: str, detail: str, iface_label: str | None,
     return f"{rule.name}: {where} — {detail}"
 
 
-async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
-                  iface_label: str | None = None, is_recovery: bool = False,
-                  duration: str = "", device_id=None, if_index=None,
-                  ip_address: str = "") -> bool:
-    """Send one metric alert — or its all-clear. True when it was dispatched."""
-    # Quiet hours: the alert row is already recorded; only the outbound
-    # notification is gated by the rule's schedule window. A recovery notice is
-    # never suppressed, or an operator is left believing it is still breached.
+async def _trigger_allowed(db: AsyncSession, rule, *, device_id=None, if_index=None) -> bool:
+    """Whether a trigger may be sent now: outside the rule's cooldown and
+    inside its schedule window. Recoveries never ask."""
     from app.services.alert_schedule import notifications_allowed, get_configured_timezone
     cooldown = int(getattr(rule, 'cooldown', 0) or 0)
-    if not is_recovery and device_id is not None and cooldown > 0:
+    if device_id is not None and cooldown > 0:
         prior = (await db.execute(text("SELECT 1 FROM alerts WHERE rule_id = :rid AND device_id = :did "
             "AND COALESCE(metadata->>'if_index','') = :ifx AND metadata->>'notified' = 'true' "
             "AND triggered_at > now() - make_interval(secs => :seconds) LIMIT 1"),
@@ -467,22 +474,49 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         if prior:
             return False
     tz = await get_configured_timezone(db)
-    if not is_recovery and not notifications_allowed(
+    return notifications_allowed(
         getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
         getattr(rule, "schedule_days", None), tz,
-    ):
+    )
+
+
+async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
+                  iface_label: str | None = None, is_recovery: bool = False,
+                  duration: str = "", device_id=None, if_index=None,
+                  ip_address: str = "", value=None, value_context: dict | None = None,
+                  alert_id=None, first_seen=None, event: str | None = None,
+                  checked: bool = False) -> bool:
+    """Send one metric alert — or its all-clear. True when it was dispatched.
+
+    ``alert_id`` + ``event`` key the delivery (one send per incident event,
+    channel and recipient). ``checked`` means the caller already asked
+    :func:`_trigger_allowed`.
+    """
+    # Quiet hours: the alert row is already recorded; only the outbound
+    # notification is gated by the rule's schedule window. A recovery notice is
+    # never suppressed, or an operator is left believing it is still breached.
+    if not is_recovery and not checked and not await _trigger_allowed(
+            db, rule, device_id=device_id, if_index=if_index):
         return False
     sev = (rule.severity or "warning")
+    threshold = float(rule.threshold) if rule.threshold is not None else None
+    if value is not None and not reading:
+        reading = ap.reading_text(rule.metric, value, rule.operator, threshold, value_context)
+    now = datetime.now(timezone.utc)
+    incident = ap.incident_context(alert_id=alert_id, first_seen=first_seen, now=now,
+                                   lifecycle="recovered" if is_recovery else "new") if alert_id else {}
     # An interface rule is about the port, not the chassis, so the sentence
     # names "core-router-01 (10.0.0.1) / port14" and the details table repeats it.
     label = ap.host_label(hostname, ip_address)
     v = ap.rule_phrasing(rule, hostname=f"{label} / {iface_label}" if iface_label else label,
-                         is_recovery=is_recovery, reading=reading, duration=duration)
+                         is_recovery=is_recovery, reading=reading, duration=duration,
+                         value=value, value_context=value_context)
     v.update({"rule_name": rule.name or "Alert",
               "hostname": f"{hostname} / {iface_label}" if iface_label else hostname,
               "ip_address": ip_address or "",
               "severity": sev.upper(),
               "status": "RESOLVED" if is_recovery else "ALERT"})
+    v.update(incident)
     prefix = 'recovery_' if is_recovery else ''
     body = _render(getattr(rule, prefix + 'email_body', None) or (ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery else ap.DEFAULT_EMAIL_BODY), v)
     sms = _render(getattr(rule, 'recovery_sms_template' if is_recovery else 'sms_template', None) or (ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS), v)
@@ -494,16 +528,22 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         "status": "RESOLVED" if is_recovery else "ALERT", "severity": sev,
         "resolved": is_recovery,
         "rule_name": rule.name,
-        "headline_metric": {
-            "label": ap.metric_noun(rule.metric), "value": reading,
-            "secondary_label": "Threshold", "secondary_value": v.get("threshold_value"),
-        } if reading else None,
+        "headline_metric": (
+            ap.headline_metric(rule.metric, value, rule.operator, threshold, context=value_context)
+            if value is not None else {
+                "label": ap.metric_noun(rule.metric), "value": reading,
+                "secondary_label": "Threshold", "secondary_value": v.get("threshold_value"),
+            }) if reading else None,
         "details": [("Alert rule", rule.name),
                     ("Interface", iface_label),
                     ("Condition", v.get("condition_label")),
                     ("Active for", duration if is_recovery else None)],
-        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "triggered_at": now.isoformat(),
         "rule_id": str(rule.id),
+        "alert_id": str(alert_id) if alert_id else None,
+        "delivery_event": event or ("recovery" if is_recovery else "trigger"),
+        "is_recovery": is_recovery,
+        **incident,
     })
     return bool(sent)
 
@@ -516,17 +556,40 @@ def _render(template: str, variables: dict) -> str:
 
 # ─── Main evaluation pass ────────────────────────────────────────────────────
 
-async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
+_warned_missing_clear_duration = False
+
+
+async def _load_rules(db: AsyncSession) -> list:
+    """Enabled network rules. Before migrate-162 the clear hold is the default."""
+    global _warned_missing_clear_duration
     metric_list = ",".join(f"'{m}'" for m in sorted(NETWORK_METRICS))
-    rules = (await db.execute(text(
-        f"SELECT id, name, metric, operator, threshold, severity, min_duration, "
-        f"notify_channels, cooldown, device_id, group_id, device_type, location, scope_tag, target, "
-        f"recovery_alert, conditions, condition_logic, "
-        f"email_subject, email_body, sms_template, recovery_email_subject, recovery_email_body, recovery_sms_template, "
-        f"schedule_start, schedule_end, schedule_days "
-        f"FROM alert_rules WHERE enabled = true "
-        f"AND (metric IN ({metric_list}) OR metric LIKE 'tpl\\_%')"
-    ))).all()
+
+    def sql(clear: str):
+        return text(
+            f"SELECT id, name, metric, operator, threshold, severity, min_duration, {clear}, "
+            f"notify_channels, cooldown, device_id, group_id, device_type, location, scope_tag, target, "
+            f"recovery_alert, conditions, condition_logic, "
+            f"email_subject, email_body, sms_template, recovery_email_subject, recovery_email_body, recovery_sms_template, "
+            f"schedule_start, schedule_end, schedule_days "
+            f"FROM alert_rules WHERE enabled = true "
+            f"AND (metric IN ({metric_list}) OR metric LIKE 'tpl\\_%')")
+    try:
+        return (await db.execute(sql("clear_duration"))).all()
+    except Exception as exc:
+        if "clear_duration" not in str(exc):
+            raise
+        await db.rollback()
+        if not _warned_missing_clear_duration:
+            logger.warning("alert_rules.clear_duration missing — run migrate-162; "
+                           "using the default clear hold")
+            _warned_missing_clear_duration = True
+        return (await db.execute(sql("NULL AS clear_duration"))).all()
+
+
+async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) -> dict[str, int]:
+    """One pass over every enabled network rule. ``now`` (epoch seconds) is
+    the evaluation instant; tests replay history with it."""
+    rules = await _load_rules(db)
     if not rules:
         return {"rules": 0, "raised": 0, "resolved": 0}
 
@@ -544,12 +607,12 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
         ))).all()
     }
 
-    from app.services.network_conditions import evaluate, validate_conditions
+    from app.services.network_conditions import clear_hold_seconds, evaluate, validate_conditions
     from app.services.network_history import fetch_history, entities
     from app.api.v1.alert_engine import _find_suppressing_dependency, _device_in_maintenance
 
     raised = resolved = 0
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
     dependency_cache = {}
     maintenance_cache = {}
     history_cache = {}
@@ -566,13 +629,16 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
             continue
         metrics = tuple(sorted({c['metric'] for c in conditions}))
         hold = int(rule.min_duration or 0)
-        # Include enough context for the first breach and freshness expiry.
+        clear_hold = clear_hold_seconds(getattr(rule, 'clear_duration', None))
+        # Include enough context for the first breach (or the whole clear
+        # hold) and freshness expiry.
         max_gap = max(max(freshness_budgets(d, metrics).values()) for d in devices.values())
-        cache_key = (metrics, hold, max_gap)
+        lookback = max(max(hold, clear_hold) + 2 * max_gap, 900)
+        cache_key = (metrics, lookback)
         if cache_key not in history_cache:
             try:
                 history_cache[cache_key] = await asyncio.to_thread(
-                    fetch_history, metrics, now - max(hold + 2 * max_gap, 900), now)
+                    fetch_history, metrics, now - lookback, now)
             except Exception:
                 logger.exception("Network rule %s history unavailable; preserving alerts", rule.id)
                 continue
@@ -617,7 +683,8 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
                 if legacy and bound_entities:
                     from app.services.network_conditions import combine
                     legacy_results = [evaluate(conditions, rule.condition_logic or 'AND', h,
-                                      now=now, max_gap=freshness_budgets(dev, metrics), active=True)
+                                      now=now, max_gap=freshness_budgets(dev, metrics), active=True,
+                                      clear_hold=clear_hold)
                                       for _, _, h, _ in bound_entities]
                     state = combine([r.breach for r in legacy_results], 'OR')
                     if state is not None:
@@ -631,14 +698,20 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
                 existing = await _active_alert(db, rule.id, did, identity)
                 result = evaluate(conditions, rule.condition_logic or 'AND', history,
                                   now=now, hold=hold, max_gap=freshness_budgets(dev, metrics),
-                                  active=existing is not None)
+                                  active=existing is not None, clear_hold=clear_hold)
                 if result.breach is None:
                     if existing:
                         await db.execute(text("UPDATE alerts SET metadata = COALESCE(metadata,'{}'::jsonb) "
                                               "|| CAST(:meta AS jsonb) WHERE id = :id"),
-                                         {'id': existing[0], 'meta': json.dumps({'data_state': result.reason})})
-                    continue  # unknown/pending is neither a trigger nor a recovery
-                value = next((v for v in result.values.values() if v is not None), 0)
+                                         {'id': existing[0], 'meta': json.dumps({
+                                             'data_state': result.reason,
+                                             'cleared_seconds': round(result.cleared_seconds)})})
+                    # Unknown, pending hold or pending clear is neither a
+                    # trigger nor a recovery: an open incident just continues.
+                    continue
+                value = result.values.get(rule.metric)
+                if value is None:
+                    value = next((v for v in result.values.values() if v is not None), 0)
                 detail = ', '.join(f"{m}={v:g}" if v is not None else f"{m}=unknown"
                                    for m, v in result.values.items())
                 extra.update({'held_seconds': result.held_seconds, 'values': result.values,
@@ -648,7 +721,8 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
                 # the inserted/resolved row before releasing the transaction lock.
                 raised, resolved = await _apply(db, rule, did, dev['hostname'], identity,
                     label, result.breach, value, detail, extra, raised, resolved, silences,
-                    ip_address=dev.get('ip', ''))
+                    ip_address=dev.get('ip', ''),
+                    value_context=_counter_context(history, rule.metric, now))
                 await db.commit()
         await db.commit()
 
@@ -657,16 +731,32 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
     return {"rules": len(rules), "raised": raised, "resolved": resolved}
 
 
+def _counter_context(history, metric, now):
+    """Interval and direction of a per-poll counter reading, when known."""
+    fn = getattr(_nh, 'counter_context', None)
+    try:
+        return fn(history, metric, now) if fn else None
+    except Exception:
+        logger.debug("counter context unavailable for %s", metric, exc_info=True)
+        return None
+
+
 async def _apply(db, rule, device_id, hostname, if_index, iface_label,
                  breach, value, detail, extra, raised, resolved,
-                 silences: set[tuple[str, str]] | None = None, *, ip_address: str = ""):
+                 silences: set[tuple[str, str]] | None = None, *, ip_address: str = "",
+                 value_context: dict | None = None):
     """Raise (if breaching and not already open) or resolve one rule/device/iface."""
     existing = await _active_alert(db, rule.id, device_id, if_index)
     if existing:
         await db.execute(text("UPDATE alerts SET metadata = COALESCE(metadata,'{}'::jsonb) "
                               "|| CAST(:meta AS jsonb) WHERE id = :id"),
                          {'id': existing[0], 'meta': json.dumps(extra)})
-    reading = ap.format_value(rule.metric, value)
+    reading = ap.reading_text(rule.metric, value, rule.operator,
+                              float(rule.threshold) if rule.threshold is not None else None,
+                              value_context)
+    notify = dict(reading=reading, iface_label=iface_label, device_id=device_id,
+                  if_index=if_index, ip_address=ip_address, value=value,
+                  value_context=value_context)
     if breach:
         # An active snooze suppresses re-raising this exact condition; the
         # resolve branch below still runs so a snoozed condition that clears
@@ -680,21 +770,24 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             if alert_id is not None:
                 raised += 1
                 await db.commit()
-                sent = await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
-                                     device_id=device_id, if_index=if_index, ip_address=ip_address)
+                sent = await _notify(db, rule, hostname, alert_id=alert_id,
+                                     first_seen=datetime.now(timezone.utc), **notify)
                 await ns.stamp(db, alert_id, sent)
                 await db.commit()
-        elif await ns.is_pending(db, existing[0]):
+        elif await ns.is_pending(db, existing[0]) and rule.notify_channels and \
+                await _trigger_allowed(db, rule, device_id=device_id, if_index=if_index) and \
+                await ns.claim_pending(db, existing[0]):
             # The trigger was suppressed by quiet hours and the condition is
             # still breaching. Without this the breach is never announced at
             # all: the alert row already exists, so the branch above never
-            # runs again, and the only mail ever sent is the all-clear.
-            active = (await db.execute(text("SELECT 1 FROM alerts WHERE id = :id AND status = 'active'"),
-                                       {'id': existing[0]})).first()
-            if active and await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
-                                       device_id=device_id, if_index=if_index, ip_address=ip_address):
-                await ns.stamp(db, existing[0], True)
-                await db.commit()
+            # runs again, and the only mail ever sent is the all-clear. The
+            # claim (false -> sending, only while active) is committed before
+            # the send, so a second pass or worker cannot send it as well.
+            await db.commit()
+            sent = await _notify(db, rule, hostname, alert_id=existing[0],
+                                 first_seen=existing[1], checked=True, **notify)
+            await ns.stamp(db, existing[0], sent)
+            await db.commit()
     else:
         if existing is not None:
             alert_id, started_at = existing
@@ -706,20 +799,23 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             # Metric rules used to close silently, so whoever got the 2am page
             # never learned it had cleared — let alone after how long.
             if notified and getattr(rule, "recovery_alert", True):
-                await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
-                              is_recovery=True, duration=ap.duration_between(started_at),
-                              ip_address=ip_address)
+                await _notify(db, rule, hostname, is_recovery=True,
+                              duration=ap.duration_between(started_at),
+                              alert_id=alert_id, first_seen=started_at, **notify)
     return raised, resolved
 
 
-async def network_alert_evaluator_loop() -> None:
-    from app.core.database import AsyncSessionLocal
+async def run_network_alert_pass(session_factory=None):
+    """One evaluation pass, in one API worker at a time (None when skipped)."""
+    from app.services.alert_worker_lock import NETWORK_ALERT_PASS, run_pass
+    return await run_pass(NETWORK_ALERT_PASS, evaluate_network_rules, session_factory)
 
+
+async def network_alert_evaluator_loop() -> None:
     await asyncio.sleep(25)  # let the app boot and first SNMP metrics land
     while True:
         try:
-            async with AsyncSessionLocal() as db:
-                await evaluate_network_rules(db)
+            await run_network_alert_pass()
         except asyncio.CancelledError:
             raise
         except Exception:

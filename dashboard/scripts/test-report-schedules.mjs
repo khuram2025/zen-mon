@@ -1,5 +1,6 @@
 // Report schedule helpers (features/reports/schedules/model.ts): frequency wording,
-// next-run calculation in the organisation timezone, period defaults, relative
+// next-run calculation in the schedule's own timezone (organisation fallback),
+// local + UTC labels, name/time mismatch, period defaults, relative
 // times in both directions, recipients, validation and the request body.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -78,6 +79,50 @@ assert.equal(m.crossesClockChange('America/New_York', ny[0], nyNow), true)
 assert.equal(m.crossesClockChange(RIYADH, now, new Date('2027-03-01T00:00:00Z')), false)
 // UTC fallback for an unknown zone.
 assert.deepEqual(iso(m.nextRuns({ frequency: 'daily', hour: 8, minute: 0 }, 'Not/AZone', 1, now)), ['2026-10-08T08:00:00.000Z'])
+
+/* Schedule time zone (NOTIFY 07) ------------------------------------------- */
+// The schedule's own zone wins; the organisation zone is only the fallback.
+assert.equal(m.scheduleZone({ timezone: 'Asia/Riyadh' }, 'UTC'), RIYADH)
+assert.equal(m.scheduleZone({ timezone: ' Europe/Berlin ' }, RIYADH), 'Europe/Berlin')
+assert.equal(m.scheduleZone({ timezone: null }, RIYADH), RIYADH)
+assert.equal(m.scheduleZone({ timezone: 'Not/AZone' }, RIYADH), RIYADH)
+assert.equal(m.scheduleZone({}, 'Not/AZone'), 'UTC')
+const riyadh8 = { frequency: 'daily', hour: 8, minute: 0, timezone: RIYADH }
+for (const org of ['UTC', 'Europe/London', 'Asia/Tokyo']) {
+  // An organisation zone change does not move a schedule that has its own zone.
+  assert.deepEqual(iso(m.nextRuns(riyadh8, m.scheduleZone(riyadh8, org), 1, now)), ['2026-10-08T05:00:00.000Z'])
+}
+// Weekly Sunday 08:00 Riyadh: Sundays only, 05:00 UTC.
+const sunday = m.nextRuns({ frequency: 'weekly', hour: 8, minute: 0, day_of_week: 7 }, RIYADH, 3, now)
+assert.deepEqual(iso(sunday), ['2026-10-11T05:00:00.000Z', '2026-10-18T05:00:00.000Z', '2026-10-25T05:00:00.000Z'])
+assert.ok(sunday.every((d) => m.weekdayIn(d, RIYADH) === 'Sun'))
+// DST: Europe/Berlin leaves summer time on 2026-10-25; 08:00 local moves from 06:00Z to 07:00Z.
+const BERLIN = 'Europe/Berlin'
+const berlinNow = new Date('2026-10-23T12:00:00Z')
+assert.deepEqual(iso(m.nextRuns({ frequency: 'daily', hour: 8, minute: 0 }, BERLIN, 3, berlinNow)),
+  ['2026-10-24T06:00:00.000Z', '2026-10-25T07:00:00.000Z', '2026-10-26T07:00:00.000Z'])
+assert.deepEqual(iso(m.nextRuns({ frequency: 'weekly', hour: 8, minute: 0, day_of_week: 7 }, BERLIN, 2, new Date('2027-03-22T00:00:00Z'))),
+  ['2027-03-28T06:00:00.000Z', '2027-04-04T06:00:00.000Z'])
+// Labels: local time with the UTC clock of the next run, as the server prints them.
+assert.equal(m.localTimeLabel(riyadh8, RIYADH, now), '08:00 Asia/Riyadh (05:00 UTC)')
+assert.equal(m.localTimeLabel({ frequency: 'daily', hour: 1, minute: 0 }, RIYADH, now), '01:00 Asia/Riyadh (22:00 UTC, previous day)')
+assert.equal(m.localTimeLabel({ frequency: 'daily', hour: 8, minute: 0 }, 'UTC', now), '08:00 UTC')
+assert.equal(m.localTimeLabel({ frequency: 'daily', hour: 8, minute: 0 }, BERLIN, berlinNow), '08:00 Europe/Berlin (06:00 UTC)')
+assert.equal(m.localTimeLabel({ frequency: 'daily', hour: 8, minute: 0 }, BERLIN, new Date('2026-10-24T12:00:00Z')), '08:00 Europe/Berlin (07:00 UTC)')
+assert.equal(m.localTimeLabel({ frequency: 'daily', hour: 20, minute: 0 }, 'America/New_York', nyNow, '12h'), '8:00 PM America/New York (00:00 UTC, next day)')
+const rb = { timezone: RIYADH, date_format: 'DD-MMM-YYYY', time_format: '24h' }
+assert.equal(m.runWithUtc(new Date('2026-10-11T05:00:00Z'), rb), 'Sun 11-Oct-2026 08:00 GMT+3 · 05:00 UTC')
+assert.equal(m.runWithUtc(new Date('2026-10-11T05:00:00Z'), { ...rb, timezone: 'UTC' }), 'Sun 11-Oct-2026 05:00 UTC')
+assert.equal(m.utcClock(new Date('2026-10-11T05:00:00Z')), '05:00 UTC')
+// A time in the name that differs from the stored time (the field case: "08:00" saved as 05:00).
+assert.equal(m.nameTimeMismatch('NOC Daily Briefing 08:00 Riyadh', 5, 0), '08:00')
+assert.equal(m.nameTimeMismatch('NOC Daily Briefing 08:00 Riyadh', 8, 0), null)
+assert.equal(m.nameTimeMismatch('Ops digest 7:30 PM', 19, 30), null)
+assert.equal(m.nameTimeMismatch('Ops digest 7:30 PM', 7, 30), '7:30 PM')
+assert.equal(m.nameTimeMismatch('Brief 08h30', 8, 0), '08h30')
+for (const n of ['Weekly SLA', 'Release 1.24 notes', 'Week of 18.10.2026', 'Ratio 3:2:1', '', null]) {
+  assert.equal(m.nameTimeMismatch(n, 8, 0), null, String(n))
+}
 
 /* Relative times: future is never "just now" -------------------------------- */
 const t = now.getTime()
@@ -167,6 +212,14 @@ assert.deepEqual(m.validateSchedule({ ...form, recipients: [...many, 'z@example.
 const w = m.validateSchedule({ ...form, notify_channels: [], filters: { netflow: { exporter: '10.0.0.1' } } }, { template: tpl }).warnings
 assert.deepEqual(w.map((x) => x.field), ['delivery', 'scope'])
 
+// Name/time disagreement is a warning (with the zone); an unknown zone is an error.
+const mis = m.validateSchedule({ ...form, name: 'NOC Daily 08:00', hour: 5 }, { template: tpl, timezone: RIYADH })
+assert.deepEqual(mis.errors, [])
+assert.deepEqual(mis.warnings.find((x) => x.field === 'name')?.message,
+  'The name says 08:00, but the report runs at 05:00 Asia/Riyadh. Check the time or the name.')
+assert.equal(m.validateSchedule({ ...form, name: 'NOC Daily 08:00' }, { template: tpl }).warnings.some((x) => x.field === 'name'), false)
+assert.deepEqual(m.validateSchedule({ ...form, timezone: 'Mars/Olympus' }, { template: tpl }).errors.map((e) => e.field), ['timezone'])
+
 /* Request body ------------------------------------------------------------- */
 const body = m.buildBody({
   ...form, frequency: 'weekly', day_of_week: 5, day_of_month: 9, description: '  ',
@@ -177,6 +230,10 @@ assert.equal(body.day_of_month, null)
 assert.equal(body.description, null)
 assert.equal(body.custom_report_id, null)
 assert.deepEqual(body.filters, { netflow: { exporter: '10.0.0.1' } })
+// '' = the organisation zone (the server stores it explicitly); a chosen zone is sent as is.
+assert.equal(body.timezone, null)
+assert.equal(m.buildBody({ ...form, timezone: ' Europe/Berlin ' }).timezone, 'Europe/Berlin')
+assert.equal(m.defaultForm().timezone, '')
 // A withheld NetFlow scope is never overwritten: the body carries no filters.
 const kept = m.buildBody(form, { keepStoredFilters: true })
 assert.equal('filters' in kept, false)
@@ -188,6 +245,10 @@ const fromApi = m.scheduleToForm({
   frequency: 'monthly', hour: 6, minute: 30, day_of_week: null, day_of_month: 15, notify_channels: ['c1'],
 })
 assert.equal(fromApi.period, 'last_24h')
+assert.equal(fromApi.timezone, '')                                   // pre-migration row: organisation zone
+assert.equal(m.scheduleToForm({ ...fromApi, timezone: RIYADH, notify_channels: [] }).timezone, RIYADH)
+assert.equal(m.buildBody(m.scheduleToForm({ id: 'x', name: 'Dup', enabled: true, report_type: 'availability', period: 'yesterday',
+  format: 'pdf', frequency: 'daily', hour: 8, minute: 0, timezone: BERLIN, notify_channels: [] })).timezone, BERLIN) // duplicate keeps it
 assert.equal(fromApi.day_of_month, 15)
 assert.deepEqual(fromApi.recipients, [])
 assert.equal(m.buildBody(fromApi).custom_report_id, 'u1')

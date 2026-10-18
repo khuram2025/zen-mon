@@ -28,6 +28,9 @@ class AlertRule(Base):
     severity: Mapped[str] = mapped_column(String(20), default="warning")
     notify_channels: Mapped[dict] = mapped_column(JSONB, default=list)
     cooldown: Mapped[int] = mapped_column(Integer, default=300)
+    # migrate-162: seconds a metric incident's cleared condition must hold
+    # before it resolves. NULL = the evaluator default; 0 = immediately.
+    clear_duration: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # migrate-161: notify at once even while the device is flapping.
     notify_while_flapping: Mapped[bool] = mapped_column(Boolean, default=False,
                                                         server_default=text("false"))

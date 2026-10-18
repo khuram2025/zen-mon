@@ -31,8 +31,14 @@ Rules of the game (the ones an on-call engineer expects):
 
 Escalation state is kept on the alert row as ``metadata->'escalation'``:
 ``{"level": n, "last_at": iso, "repeats": n, "channels": [...], "closed": bool}``.
-The sweeper is idempotent per sweep and safe to run in both uvicorn workers:
-the state row is updated in the same transaction as the dispatch attempt.
+
+Both uvicorn workers start this loop. A sweep runs in one worker at a time
+(``alert_worker_lock``), and each step is claimed before it is sent: the new
+state is written with a compare-and-set against the state the sweep read and
+committed, so a step another sweep already took is skipped, and the dispatch
+is keyed per incident, step ("escalation:L2:r1", "all_clear") and recipient,
+so a retry or restart never pages a tier twice for the same step. Repeats of a
+level are labelled as reminders with their count ("Reminder 2 of 3").
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_phrasing as ap
+from app.services import alert_notify_state as ns
 from app.services.alert_workflow import closure_reason, record_event, suppressed_sql
 
 logger = logging.getLogger("zenplus.alert_escalation")
@@ -128,8 +135,9 @@ def escalated_channel_ids(levels: list[dict], upto_level: int) -> list[str]:
 
 
 def _was_notified(meta: dict) -> bool:
-    """Whether the trigger notification actually went out (legacy = yes)."""
-    return str(meta.get("notified", True)).lower() != "false"
+    """Whether the trigger notification actually went out (legacy = yes).
+    A trigger still "sending" is not escalated until its outcome is known."""
+    return ns.flag_means_notified(meta.get("notified"))
 
 
 # ── Sweep ────────────────────────────────────────────────────────────────────
@@ -170,18 +178,32 @@ def _subject_noun(row) -> tuple[str, str]:
     return name, (row.device_ip or "")
 
 
-async def _store_state(db: AsyncSession, alert_id, state: dict) -> None:
-    await db.execute(
+async def _store_state(db: AsyncSession, alert_id, state: dict, expected=None) -> bool:
+    """Write the escalation state if it is still ``expected`` (the state this
+    sweep read, None = none yet). False when another sweep got there first."""
+    row = (await db.execute(
         text("UPDATE alerts SET metadata = COALESCE(metadata,'{}'::jsonb) || "
-             "jsonb_build_object('escalation', CAST(:e AS jsonb)) WHERE id = :id"),
-        {"id": alert_id, "e": json.dumps(state)},
-    )
+             "jsonb_build_object('escalation', CAST(:e AS jsonb)) WHERE id = :id "
+             "AND COALESCE(metadata->'escalation', 'null'::jsonb) = CAST(:old AS jsonb) "
+             "RETURNING id"),
+        {"id": alert_id, "e": json.dumps(state), "old": json.dumps(expected)},
+    )).first()
+    return row is not None
+
+
+def _incident(row, now, lifecycle: str, **extra) -> dict:
+    return ap.incident_context(alert_id=row.id, first_seen=row.triggered_at, now=now,
+                               lifecycle=lifecycle, **extra)
 
 
 async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
                                level: dict, *, is_repeat: bool,
-                               action_url: str) -> int:
-    """Send one escalation (or repeat) notification to the level's channels."""
+                               action_url: str, repeats: int = 0) -> int:
+    """Send one escalation (or repeat) notification to the level's channels.
+
+    A repeat is a reminder of the same incident and says which one it is
+    ("Reminder 2 of 3"; the total is the rule's max_repeat, open-ended when 0).
+    """
     from app.services.host_alert_service import dispatch_to_channels
 
     now = datetime.now(timezone.utc)
@@ -193,11 +215,22 @@ async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
         row.conditions, row.condition_logic or "AND",
         metric=row.metric, operator=row.operator, threshold=row.threshold,
     )
-    verb = "is repeating at" if is_repeat else "has been escalated to"
-    body = (f"{row.message} This alert has been active for {duration} without "
-            f"being acknowledged and {verb} escalation level {level_no}.")
+    total = int(row.max_repeat or 0) or None
+    if is_repeat:
+        incident = _incident(row, now, "reminder", reminder_index=repeats or None,
+                             reminder_total=total)
+        reminder = incident.get("lifecycle_label") or "Reminder"
+        body = (f"{row.message} This alert has been active for {duration} without "
+                f"being acknowledged. {reminder} at escalation level {level_no}.")
+    else:
+        incident = _incident(row, now, "escalated", escalation_level=level_no)
+        # "Escalation L2:" already leads the subject; the tag would repeat it.
+        incident["lifecycle_tag"] = ""
+        body = (f"{row.message} This alert has been active for {duration} without "
+                f"being acknowledged and has been escalated to escalation level {level_no}.")
     sms = (f"ZenPlus ESCALATION L{level_no} {sev.upper()} — "
-           f"{row.rule_name}: {row.message} Active {duration}, unacknowledged.")
+           f"{row.rule_name}: {row.message} Active {duration}, unacknowledged."
+           + (f" {incident.get('lifecycle_label')}." if is_repeat else ""))
     sent = await dispatch_to_channels(db, level.get("notify_channels") or [], {
         "subject": f"[{sev.upper()}] Escalation L{level_no}: {row.rule_name} — {hostname}",
         "body": body,
@@ -215,7 +248,8 @@ async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
             ("Alert rule", row.rule_name),
             ("Condition", condition),
             ("Escalation", f"Level {level_no} of {len(levels)}"
-                           + (" · repeat" if is_repeat else "")),
+                           + (f" · {incident.get('lifecycle_label', 'reminder').lower()}"
+                              if is_repeat else "")),
             ("Active for", duration),
             ("Acknowledged", "No"),
         ],
@@ -225,6 +259,8 @@ async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
         "is_recovery": False,
         "escalation_level": level_no,
         "alert_id": str(row.id),
+        "delivery_event": f"escalation:L{level_no}:r{repeats if is_repeat else 0}",
+        **incident,
     })
     return sent
 
@@ -239,6 +275,12 @@ async def _dispatch_all_clear(db: AsyncSession, row, channels: list[str],
     sev = (row.rule_severity or row.alert_severity or "warning")
     duration = ap.duration_between(row.triggered_at, row.resolved_at)
     meta = dict(row.metadata or {})
+    incident = _incident(row, row.resolved_at or datetime.now(timezone.utc),
+                         "changed" if manual else "recovered")
+    if manual:
+        # Not a recovery: name it for what it is, and let the subject's own
+        # "Closed by operator:" carry it.
+        incident.update({"lifecycle_label": "Closed by operator", "lifecycle_tag": ""})
     if manual:
         who = meta.get("resolved_by_name") or "an operator"
         note = meta.get("resolution_note")
@@ -273,6 +315,8 @@ async def _dispatch_all_clear(db: AsyncSession, row, channels: list[str],
         "is_recovery": True,
         "alert_id": str(row.id),
         "delivery_kind": "closure" if manual else "all_clear",
+        "delivery_event": "closure" if manual else "all_clear",
+        **incident,
     })
 
 
@@ -306,7 +350,8 @@ async def sweep_escalations(db: AsyncSession) -> dict[str, int]:
         try:
             meta = dict(row.metadata or {})
             levels = [lv for lv in (row.escalation_levels or []) if isinstance(lv, dict)]
-            state = meta.get("escalation") if isinstance(meta.get("escalation"), dict) else None
+            stored = meta.get("escalation")      # exactly as read: the claim's expected value
+            state = stored if isinstance(stored, dict) else None
 
             if row.status == "resolved":
                 # All-clear for the tiers that were paged. Base channels are
@@ -319,14 +364,19 @@ async def sweep_escalations(db: AsyncSession) -> dict[str, int]:
                 if row.recovery_alert and reason == "recovered":
                     base = {str(c) for c in (row.notify_channels or [])}
                     chans = [c for c in chans if c not in base]
-                if chans and reason in ("recovered", "manual"):
-                    await _dispatch_all_clear(db, row, chans, action_url=action_url,
-                                              manual=(reason == "manual"))
                 new_state = dict(state or {})
                 new_state["closed"] = True
                 new_state["closed_at"] = now.isoformat()
-                await _store_state(db, row.id, new_state)
+                # Claim the closure first: of two sweeps that read the same
+                # open state, only the one whose write lands sends the notice.
+                if not await _store_state(db, row.id, new_state, expected=stored):
+                    await db.rollback()
+                    continue
                 await db.commit()
+                if chans and reason in ("recovered", "manual"):
+                    await _dispatch_all_clear(db, row, chans, action_url=action_url,
+                                              manual=(reason == "manual"))
+                    await db.commit()
                 closed += 1
                 continue
 
@@ -350,10 +400,13 @@ async def sweep_escalations(db: AsyncSession) -> dict[str, int]:
                            if kind == "repeat" else 0,
                 "channels": escalated_channel_ids(levels, level_no),
             }
-            # State first, then dispatch, one transaction per alert: a crashed
-            # dispatch retries next sweep via repeat cadence rather than
-            # double-paging every tier.
-            await _store_state(db, row.id, new_state)
+            # Claim the step first (compare-and-set against the state read
+            # above), then dispatch: a step another sweep already took is
+            # skipped, and a crashed dispatch retries next sweep via the
+            # repeat cadence rather than double-paging every tier.
+            if not await _store_state(db, row.id, new_state, expected=stored):
+                await db.rollback()
+                continue
             ch_ids = [str(c) for c in (level.get("notify_channels") or [])]
             ch_names = [r[0] for r in (await db.execute(text(
                 "SELECT name FROM notification_channels WHERE id::text = ANY(CAST(:ids AS text[]))"
@@ -363,9 +416,11 @@ async def sweep_escalations(db: AsyncSession) -> dict[str, int]:
                                detail={"level": level_no, "repeat": kind == "repeat",
                                        "channels": ch_ids, "channel_names": ch_names,
                                        "of_levels": len(levels)})
+            await db.commit()
             await _dispatch_escalation(db, row, level_no, level,
                                        is_repeat=(kind == "repeat"),
-                                       action_url=action_url)
+                                       action_url=action_url,
+                                       repeats=new_state["repeats"])
             await db.commit()
             if kind == "repeat":
                 repeated += 1
@@ -381,14 +436,19 @@ async def sweep_escalations(db: AsyncSession) -> dict[str, int]:
             "repeated": repeated, "closed": closed}
 
 
+async def run_escalation_pass(session_factory=None):
+    """One escalation sweep, in one API worker at a time (None when skipped)."""
+    from app.services.alert_worker_lock import ESCALATION_PASS, run_pass
+    return await run_pass(ESCALATION_PASS, sweep_escalations, session_factory)
+
+
 async def escalation_sweeper_loop() -> None:
     from app.core.database import AsyncSessionLocal
 
     await asyncio.sleep(30)  # let the app boot
     while True:
         try:
-            async with AsyncSessionLocal() as db:
-                await sweep_escalations(db)
+            await run_escalation_pass()
         except asyncio.CancelledError:
             raise
         except Exception:

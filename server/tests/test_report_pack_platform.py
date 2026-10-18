@@ -665,6 +665,7 @@ def test_data_retention_coverage_windows(monkeypatch):
     status_log = next(r for r in ds["rows"] if r[1] == "device_status_log")
     assert status_log[col(ds, "Newest data")] == "2026-10-07"
     pg = table(sec, "Application history")
+    assert pg["title"] == "Application history"                 # no database engine name
     audit = pg["rows"][0]
     assert audit[:3] == ["Audit log", "Kept until deleted", "2026-06-29"] and audit[-1] == "100 d"
     sensors = next(r for r in pg["rows"] if r[0] == "Sensor status changes")
@@ -694,7 +695,15 @@ def test_storage_utilization_volume_categories_and_events(monkeypatch):
     sec = run(db, "storage_utilization", ch=_inventory_ch(), monkeypatch=monkeypatch)
     vol = kpi(sec, "Data volume used")
     assert vol["value"] == "78.4%" and vol["accent"] == "warning"
-    assert kpi(sec, "PostgreSQL database")["value"] == "5.0 GB"
+    # Customer-facing category, never the engine name.
+    assert kpi(sec, "Configuration and event database")["value"] == "5.0 GB"
+    assert not any("PostgreSQL" in k["label"] or "ClickHouse" in k["label"] for k in sec["kpis"])
+    assert not any("PostgreSQL" in t["title"] or "ClickHouse" in t["title"] for t in sec["tables"])
+    assert sec["email_scope"] == "This appliance"
+    # 78.4% is within 10 points of the 85% purge threshold: a warning to act on.
+    assert [(f["severity"], f["text"]) for f in sec["findings"]] == [
+        ("warning", "The data volume is 78.4% full (automatic purge at 85%)")]
+    assert sec["findings"][0]["path"] == "/settings/general?tab=storage"
     assert kpi(sec, "Purges in period")["value"] == "2"
     assert kpi(sec, "Space freed")["value"] == "1.0 GB"
     assert kpi(sec, "Automatic purge")["value"] == "At 85%"
@@ -758,9 +767,27 @@ def test_backup_status_age_failures_and_schedule():
 def test_backup_status_overdue_option_and_never():
     sec = run(_backup_db(), "backup_status", {"max_age_days": 1})
     assert kpi(sec, "Since last successful backup")["accent"] == "danger"
+    assert [f["severity"] for f in sec["findings"]] == ["danger", "danger"]   # overdue, 1 failed
+    assert sec["findings"][0]["text"] == "The last catalogued backup is 2 d 0 h old (overdue after 1 days)"
     never = run(FakeDB({}), "backup_status")
-    assert kpi(never, "Since last successful backup")["value"] == "Never"
+    assert kpi(never, "Since last successful backup")["value"] == "None catalogued"
     assert kpi(never, "Schedule")["value"] == "Off"
+    # Only the ZenPlus catalogue is read: say so, never "no backup has been taken".
+    note = never["notes"][0]
+    assert note.startswith("No backup is recorded in the ZenPlus backup catalogue (Settings → Storage → "
+                           "Backups) as of ")
+    assert note.endswith("Pre-upgrade snapshots and external backups are not listed in the catalogue.")
+    assert not any("has been taken" in n for n in never["notes"])
+    assert [(f["severity"], f["text"]) for f in never["findings"]] == [
+        ("danger", "No backup is recorded in the ZenPlus backup catalogue")]
+
+
+def test_backup_status_healthy_has_no_findings():
+    sec = run(_backup_db(), "backup_status")
+    # Recent backup, schedule on; the one failed backup in the period is the only action.
+    assert [(f["severity"], f["text"]) for f in sec["findings"]] == [
+        ("danger", "1 backup(s) failed in the period")]
+    assert any("Pre-upgrade snapshots and external backups are not listed" in n for n in sec["notes"])
 
 
 # ── report_delivery ─────────────────────────────────────────────────────────

@@ -28,6 +28,15 @@ Alert ctx keys (all optional):
   timestamp     ISO string or display string
   action_url    optional "View in dashboard" button target
   product_name  defaults to 'ZenPlus'
+  headline_metric  {label, value, secondary_label, secondary_value, detail}
+  incident_ref, first_seen, active_for, lifecycle, lifecycle_label
+                (alert_phrasing.incident_context) — the incident line: which
+                incident, where it is in its life, since when. Subjects get
+                the matching tag and ref through ``alert_subject``.
+
+The status pill names the state ("DOWN", "ALERT") in a neutral colour and a
+separate pill names the severity in its own colour, so a warning-severity rule
+on a down device reads "DOWN" + "WARNING" rather than a DOWN banner in amber.
 
 Notification ctx adds nothing new; account ctx additionally understands:
   recipient_name  greeting name ("Hi Khuram,")
@@ -39,6 +48,10 @@ from __future__ import annotations
 
 import html
 from datetime import datetime, timezone
+
+from app.services.alert_phrasing import (  # re-exported for senders
+    INCIDENT_KEYS, incident_context, incident_subject,
+)
 
 # ── Palette (kept in sync with report_html.py and the dashboard) ─────────────
 _ACCENT = {
@@ -60,6 +73,7 @@ _BORDER = "#E2E8F0"
 _BG = "#F1F5F9"
 _CARD = "#FFFFFF"
 _PANEL = "#F8FAFC"
+_STATUS_CHIP = "#334155"
 
 _FONT = ("-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,"
          "Arial,sans-serif")
@@ -127,8 +141,18 @@ def _shell(inner: str, *, title: str, preheader: str, accent: str) -> str:
 </body></html>"""
 
 
-def _header(product: str, *, chip_label: str, chip_color: str) -> str:
-    """Logo badge + wordmark on the left, status pill on the right."""
+def _chip(label: str, color: str) -> str:
+    return (f'<span style="display:inline-block;background:{color};color:#ffffff;font-size:11px;'
+            f'font-weight:700;letter-spacing:.6px;padding:6px 13px;border-radius:999px;">{label}</span>')
+
+
+def _header(product: str, *, chip_label: str, chip_color: str,
+            severity_label: str = "", severity_color: str = "") -> str:
+    """Logo badge + wordmark on the left, status pill (and, for an open alert,
+    a separate severity pill) on the right."""
+    chips = _chip(chip_label, chip_color)
+    if severity_label:
+        chips += "&nbsp;" + _chip(severity_label, severity_color or _BRAND)
     return f"""  <tr><td style="padding:20px 28px 0;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
       <td width="36" valign="middle">
@@ -139,7 +163,7 @@ def _header(product: str, *, chip_label: str, chip_color: str) -> str:
         <div style="font-size:10px;font-weight:600;color:{_MUTED};letter-spacing:.8px;text-transform:uppercase;">Network Monitoring</div>
       </td>
       <td align="right" valign="middle">
-        <span style="display:inline-block;background:{chip_color};color:#ffffff;font-size:11px;font-weight:700;letter-spacing:.6px;padding:6px 13px;border-radius:999px;">{chip_label}</span>
+        {chips}
       </td>
     </tr></table>
   </td></tr>"""
@@ -200,6 +224,10 @@ def _metric_block(metric: dict, *, accent: str, tint: str) -> str:
     label = _esc(metric.get("label") or "Value")
     sec_label = metric.get("secondary_label")
     sec_value = metric.get("secondary_value")
+    detail = ""
+    if metric.get("detail"):
+        detail = (f'\n          <div style="margin-top:4px;font-size:12px;color:{_MUTED};">'
+                  f'{_esc(metric.get("detail"))}</div>')
 
     secondary = ""
     if sec_value not in (None, ""):
@@ -214,7 +242,7 @@ def _metric_block(metric: dict, *, accent: str, tint: str) -> str:
       <tr>
         <td valign="middle" style="padding:16px 18px;">
           <div style="font-size:10px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:{_MUTED};">{label}</div>
-          <div style="margin-top:3px;font-size:30px;line-height:1.1;font-weight:800;color:{accent};">{_esc(value)}</div>
+          <div style="margin-top:3px;font-size:30px;line-height:1.1;font-weight:800;color:{accent};">{_esc(value)}</div>{detail}
         </td>{secondary}
       </tr>
     </table>
@@ -266,6 +294,52 @@ def _footer(product: str, reason: str) -> str:
 
 # ── Alert emails ─────────────────────────────────────────────────────────────
 
+def alert_subject(subject: str, ctx: dict | None) -> str:
+    """The subject an alert email is sent with: ``subject`` plus the lifecycle
+    tag and incident ref when ``ctx`` carries incident_context keys
+    ("[WARNING] [New] Memory high — srv-a [INC-3f2a9c1d]")."""
+    return incident_subject(subject, ctx)
+
+
+def _incident_summary(ctx: dict) -> str:
+    """"Incident INC-3f2a9c1d · New" / "... · Recovered after 2 hours"."""
+    ref = str(ctx.get("incident_ref") or "").strip()
+    label = str(ctx.get("lifecycle_label") or "").strip()
+    if not ref and not label:
+        return ""
+    if label and str(ctx.get("lifecycle") or "").lower() == "recovered" and ctx.get("active_for"):
+        label = f"{label} after {ctx['active_for']}"
+    bits = [f"Incident {ref}" if ref else "", label]
+    return " · ".join(b for b in bits if b)
+
+
+def _incident_rows(ctx: dict, existing_labels: set[str]) -> list[tuple[str, str]]:
+    """First seen / Active for (Total duration on a recovery) rows, skipping
+    any label the sender already put in the details."""
+    if not (ctx.get("incident_ref") or ctx.get("lifecycle_label")):
+        return []
+    rows = []
+    if ctx.get("first_seen"):
+        rows.append(("First seen", _fmt_ts(ctx["first_seen"])))
+    if ctx.get("active_for"):
+        recovered = str(ctx.get("lifecycle") or "").lower() == "recovered"
+        rows.append(("Total duration" if recovered else "Active for", str(ctx["active_for"])))
+    seen = {s.strip().lower() for s in existing_labels}
+    if "active for" in seen:
+        seen.add("total duration")
+    return [(label, value) for label, value in rows if label.lower() not in seen]
+
+
+def _incident_line(text_: str, *, accent: str) -> str:
+    if not text_:
+        return ""
+    return f"""  <tr><td style="padding:14px 28px 0;">
+    <div style="background:{_PANEL};border:1px solid {_BORDER};border-left:4px solid {accent};border-radius:8px;padding:9px 14px;color:{_INK};font-size:13px;font-weight:600;line-height:1.5;">
+      {_esc(text_)}
+    </div>
+  </td></tr>"""
+
+
 def build_alert_email_text(ctx: dict) -> str:
     """Plain-text alternative (always attached alongside the HTML)."""
     sev = (ctx.get("severity") or "warning").upper()
@@ -273,6 +347,9 @@ def build_alert_email_text(ctx: dict) -> str:
         f"[{_status_label(ctx)}] {ctx.get('title') or ctx.get('rule_name') or 'Alert'}",
         "",
     ]
+    summary = _incident_summary(ctx)
+    if summary:
+        lines += [summary, ""]
     if ctx.get("message"):
         lines += [str(ctx["message"]), ""]
 
@@ -285,6 +362,7 @@ def build_alert_email_text(ctx: dict) -> str:
     rows.append(("Severity", sev))
     rows += [(str(label), str(value)) for label, value in (ctx.get("details") or [])
              if value not in (None, "")]
+    rows += _incident_rows(ctx, {label for label, _ in rows})
     rows.append(("Time", _fmt_ts(ctx.get("timestamp"))))
 
     # Size the label column to the widest label actually present; a fixed width
@@ -336,14 +414,24 @@ def build_alert_email_html(ctx: dict) -> str:
         if str(label).strip().lower() in shown_above:
             continue
         detail_pairs.append((label, value))
+    detail_pairs += _incident_rows(ctx, {str(label) for label, _ in detail_pairs})
     # Severity and time already appear in the status pill and the hero subtitle.
     if not headline:
         detail_pairs.append(("Severity", sev_label))
     detail_pairs.append(("Time", ts))
 
+    # The state and the severity are separate facts with separate pills: the
+    # state chip is neutral, the severity chip carries the severity colour.
+    if resolved:
+        header = _header(product, chip_label=status, chip_color=accent)
+    else:
+        header = _header(product, chip_label=status, chip_color=_STATUS_CHIP,
+                         severity_label=sev_label, severity_color=accent)
+
     inner = (
-        _header(product, chip_label=status, chip_color=accent)
+        header
         + _hero(title, subtitle, icon=icon, accent=accent)
+        + _incident_line(_incident_summary(ctx), accent=accent)
         + _notice(ctx.get("notice") or "")
         + _callout(message, accent=accent, tint=tint)
         + _metric_block(ctx.get("headline_metric") or {}, accent=accent, tint=tint)

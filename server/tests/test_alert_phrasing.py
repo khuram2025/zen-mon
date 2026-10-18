@@ -189,3 +189,121 @@ def test_service_defaults_keep_no_host_suffix():
     would reach the inbox as literal text."""
     for tpl in ap.default_templates("service").values():
         assert "{host_suffix}" not in (tpl or "")
+
+
+# ── Reading precision next to the threshold (NOTIFY 01) ─────────────────────
+
+@pytest.mark.parametrize("metric,value,op,threshold,expected", [
+    # The field case: 90.1..91.5% against 90% used to read "currently 90%".
+    ("host_memory_pct", 90.3, ">", 90, "90.3%"),
+    ("host_memory_pct", 90.04, ">", 90, "90.04%"),
+    # Three extra decimals is the cap; the kept zeros show the precision used.
+    ("host_memory_pct", 90.0004, ">", 90, "90.000%"),
+    # Near the threshold a whole-percent reading keeps one decimal (never "92%").
+    ("host_memory_pct", 91.5, ">", 90, "91.5%"),
+    ("host_memory_pct", 91.0, ">", 90, "91.0%"),
+    ("host_memory_pct", 95.2, ">", 90, "95%"),        # clearly over: catalogue format
+    ("host_memory_pct", 89.6, ">", 90, "89.6%"),      # just back below: never "90%"
+    ("host_memory_pct", 90, ">=", 90, "90%"),         # equal is shown equal
+    ("cpu", 90.5, ">", 90.4, "90.5%"),                # the threshold's own decimals
+    ("rtt", 100.04, ">", 100, "100.04 ms"),
+    ("rtt", 250, ">", 100, "250 ms"),
+    ("packet_loss", 0.4, None, None, "0.4%"),         # non-zero never shown as zero
+    ("packet_loss", 100.0, ">", 5, "100%"),
+    ("if_errors", 152, ">", 100, "152 errors"),
+    ("host_memory_pct", None, ">", 90, "unavailable"),
+    ("host_memory_pct", float("nan"), ">", 90, "unavailable"),
+])
+def test_format_reading_never_prints_equal_to_a_threshold_it_crossed(metric, value, op,
+                                                                     threshold, expected):
+    assert ap.format_reading(metric, value, op, threshold) == expected
+
+
+@pytest.mark.parametrize("value,threshold,reading,shown_threshold", [
+    (90.3, 90, "90.3%", "90.0%"),
+    (90.04, 90, "90.04%", "90.00%"),
+    (95.2, 90, "95%", "90%"),
+    (92, 90.5, "92.0%", "90.5%"),
+])
+def test_threshold_is_shown_with_the_readings_precision(value, threshold, reading, shown_threshold):
+    assert ap.format_reading("host_memory_pct", value, ">", threshold) == reading
+    assert ap.format_threshold("host_memory_pct", threshold, ">", value) == shown_threshold
+
+
+def test_format_value_is_unchanged_for_existing_callers():
+    assert ap.format_value("host_memory_pct", 90.3) == "90%"
+    assert ap.format_value("if_in_bps", 1_500_000_000) == "1.5 Gbps"
+    assert ap.format_value("rtt", None) == ""
+    assert ap.format_value("rtt", "n/a") == "n/a"
+
+
+def test_headline_condition_and_sentence_share_one_precision():
+    v = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90,
+                              value=90.3, subject_noun="srv-a")
+    assert v["event_sentence"] == "Host memory on srv-a rose above 90.0% (currently 90.3%)."
+    assert v["condition_label"] == "Host memory above 90.0%"
+    assert v["threshold_value"] == "90.0%"
+    assert v["reading"] == v["reading_value"] == "90.3%"
+    # A reading the evaluator already formatted with format_reading gets the
+    # same threshold precision without passing the raw value.
+    pre = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90,
+                                reading=ap.format_reading("host_memory_pct", 90.3, ">", 90),
+                                subject_noun="srv-a")
+    assert pre["event_sentence"] == v["event_sentence"]
+    assert pre["condition_label"] == v["condition_label"]
+    # A clear breach keeps the catalogue wording.
+    clear = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90,
+                                  value=97.2, subject_noun="srv-a")
+    assert clear["event_sentence"] == "Host memory on srv-a rose above 90% (currently 97%)."
+
+
+def test_old_callers_get_the_same_text_as_before():
+    v = ap.phrasing_variables(metric="if_util_pct", operator=">", threshold=80,
+                              reading="87%", subject_noun="core-1")
+    assert v["event_sentence"] == "Interface utilisation on core-1 rose above 80% (currently 87%)."
+    assert v["threshold_value"] == "80%" and v["condition_label"] == "Interface utilisation above 80%"
+
+
+def test_multi_condition_label_matches_only_the_rules_own_threshold():
+    conds = [{"metric": "host_memory_pct", "operator": ">", "threshold": 90},
+             {"metric": "host_cpu_pct", "operator": ">", "threshold": 90}]
+    v = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90,
+                              conditions=conds, value=90.3)
+    assert v["condition_label"] == "Host memory above 90.0% and Host CPU above 90%"
+
+
+# ── Interface error readings (NOTIFY 04) ─────────────────────────────────────
+
+def test_interface_errors_state_the_interval_and_direction():
+    ctx = {"interval_s": 60, "in": 150, "out": 2}
+    assert ap.reading_text("if_errors", 152, ">", 100, ctx) == \
+        "152 errors in the last 60 s (150 in, 2 out)"
+    v = ap.phrasing_variables(metric="if_errors", operator=">", threshold=100, value=152,
+                              value_context=ctx, subject_noun="sw-1 (10.0.0.1) / Gi0/1")
+    assert v["event_sentence"] == ("Interface errors on sw-1 (10.0.0.1) / Gi0/1 rose above "
+                                   "100 errors (currently 152 errors in the last 60 s: "
+                                   "150 in, 2 out).")
+    assert v["reading_value"] == "152 errors"
+    assert v["reading_detail"] == "in the last 60 s (150 in, 2 out)"
+    head = ap.headline_metric("if_errors", 152, ">", 100, context=ctx)
+    assert head == {"label": "Interface errors", "value": "152 errors",
+                    "secondary_label": "Threshold", "secondary_value": "100 errors",
+                    "detail": "In the last 60 s (150 in, 2 out)"}
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (60, "60 s"), (30.0, "30 s"), (300, "5 min"), (90, "90 s"), (150, "2 minutes 30 seconds"),
+    (7200, "2 hours"), (0, ""), (None, ""),
+])
+def test_compact_interval(seconds, expected):
+    assert ap.compact_interval(seconds) == expected
+
+
+def test_counter_detail_names_an_unknown_direction():
+    assert ap.counter_detail("if_errors", {"interval_s": 60, "in": 7, "out": None}) == \
+        "in the last 60 s (7 in, out unknown)"
+    assert ap.counter_detail("if_errors", {"interval_s": None, "in": 7, "out": 1}) == ""
+    assert ap.reading_text("if_errors", 152, ">", 100, None) == "152 errors"
+    # Only per-poll counters carry a window.
+    assert ap.reading_text("cpu", 91, ">", 90, {"interval_s": 60}) == "91.0%"
+    assert ap.reading_text("cpu", 97, ">", 90, {"interval_s": 60}) == "97%"   # far: catalogue format

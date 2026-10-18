@@ -58,12 +58,16 @@ async def create_server_alert(
     source: str,
     dedupe: str,
     metadata: Optional[dict[str, Any]] = None,
-) -> bool:
+) -> Any:
     """Insert an active alert for a server unless an identical one is open.
 
     ``dedupe`` identifies the condition instance (e.g. ``baseline:<rule_id>``
     or ``agent_offline``) so repeat evaluations don't stack duplicates.
-    Returns True when a new alert row was created.
+    Returns the new alert's id (truthy) when a row was created, else None.
+
+    The check-then-insert is only atomic for callers that serialize the
+    condition first (the host evaluator takes a per rule/server/dimension
+    advisory lock and runs one pass per worker at a time).
     """
     # Respect an active silence (snooze until a time, or mute forever).
     silenced = (await db.execute(
@@ -74,7 +78,7 @@ async def create_server_alert(
         {"sid": server_id, "dedupe": dedupe},
     )).first()
     if silenced:
-        return False
+        return None
 
     # Treat acknowledged like active so an acknowledged alert isn't re-created
     # every evaluation cycle while the condition persists.
@@ -86,7 +90,7 @@ async def create_server_alert(
         {"sid": server_id, "dedupe": dedupe},
     )).first()
     if existing:
-        return False
+        return None
 
     meta = dict(metadata or {})
     meta["source"] = source
@@ -97,14 +101,14 @@ async def create_server_alert(
     rule_id = meta.get("rule_id")
     if not (isinstance(rule_id, str) and _UUID_RE.fullmatch(rule_id)):
         rule_id = None
-    await db.execute(
+    return (await db.execute(
         text("""INSERT INTO alerts (server_id, rule_id, severity, message, status, metadata)
                 VALUES (:sid, (SELECT id FROM alert_rules WHERE id = CAST(:rid AS uuid)),
-                        :sev, :msg, 'active', CAST(:meta AS jsonb))"""),
+                        :sev, :msg, 'active', CAST(:meta AS jsonb))
+                RETURNING id"""),
         {"sid": server_id, "rid": rule_id, "sev": severity, "msg": message,
          "meta": json.dumps(meta)},
-    )
-    return True
+    )).scalar()
 
 
 async def server_condition_silenced(db: AsyncSession, server_id: str, dedupe: str) -> bool:

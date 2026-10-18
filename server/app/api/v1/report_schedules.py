@@ -6,15 +6,23 @@ Full CRUD plus ``/{id}/run-now`` (fire immediately) and ``/{id}/toggle``
 (enable/disable); every change is audited. A schedule delivers a built-in
 template (any ``report_sections.REPORT_PRESETS`` key), an organisation
 template (``custom`` + ``custom_report_id``) or a legacy report type, for a
-rolling or calendar period (``report_periods``) in the organisation timezone.
+rolling or calendar period (``report_periods``).
+
+A schedule's hour and minute are wall-clock time in its own IANA ``timezone``
+(migrate-163), which defaults to the organisation timezone when the schedule
+is created; changing the organisation timezone later does not move it. Every
+schedule is returned with ``next_run_at`` (UTC), its ``effective_timezone``
+and a ``local_time_label`` such as "08:00 Asia/Riyadh (05:00 UTC)".
 """
 
 from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Annotated, Any, Optional
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import AfterValidator, BaseModel, BeforeValidator, Field
@@ -29,6 +37,7 @@ from app.models.user import User
 from app.services import report_periods
 from app.services.alert_schedule import get_configured_timezone
 from app.services.audit_service import write_audit_log
+from app.services.branding import valid_timezone
 from app.services.report_scheduler import (
     LEGACY_FORMATS,
     LEGACY_REPORT_TYPES,
@@ -36,7 +45,11 @@ from app.services.report_scheduler import (
     TEMPLATE_FORMATS,
     compute_next_run,
     generate_and_deliver,
+    local_time_label,
+    name_time_mismatch,
     normalize_recipients,
+    schedule_text,
+    schedule_timezone,
 )
 
 router = APIRouter(prefix="/report-schedules", tags=["Report Schedules"])
@@ -102,10 +115,23 @@ def _check_recipients(value: Any) -> Any:
     return normalize_recipients(value)
 
 
+def _check_timezone(value: Optional[str]) -> Optional[str]:
+    """An IANA zone name, trimmed; blank means "the organisation timezone"."""
+    if value is None:
+        return None
+    name = value.strip()
+    if not name:
+        return None
+    if len(name) > 64 or not valid_timezone(name):
+        raise ValueError(f"Unknown timezone '{name[:64]}': use an IANA name such as Asia/Riyadh or Europe/Berlin")
+    return name
+
+
 ReportType = Annotated[str, Field(max_length=50), AfterValidator(_check_report_type)]
 Period = Annotated[str, AfterValidator(_check_period)]
 Format = Annotated[str, AfterValidator(_check_format)]
 Recipients = Annotated[list[str], BeforeValidator(_check_recipients)]
+TimezoneName = Annotated[str, Field(max_length=100), AfterValidator(_check_timezone)]
 
 
 class ReportScheduleCreate(BaseModel):
@@ -121,6 +147,8 @@ class ReportScheduleCreate(BaseModel):
     minute: int = Field(0, ge=0, le=59)
     day_of_week: Optional[int] = Field(None, ge=1, le=7)
     day_of_month: Optional[int] = Field(None, ge=1, le=31)
+    # The zone hour/minute are in; omitted or blank = the organisation timezone.
+    timezone: Optional[TimezoneName] = None
     notify_channels: list[str] = Field(default_factory=list)
     custom_report_id: Optional[str] = None
     recipients: Recipients = Field(default_factory=list)
@@ -139,6 +167,8 @@ class ReportScheduleUpdate(BaseModel):
     minute: Optional[int] = Field(None, ge=0, le=59)
     day_of_week: Optional[int] = Field(None, ge=1, le=7)
     day_of_month: Optional[int] = Field(None, ge=1, le=31)
+    # null or blank = the organisation timezone (stored explicitly).
+    timezone: Optional[TimezoneName] = None
     notify_channels: Optional[list[str]] = None
     custom_report_id: Optional[str] = None
     recipients: Optional[Recipients] = None
@@ -159,6 +189,7 @@ def _row_to_dict(row) -> dict:
         "minute": row.minute,
         "day_of_week": row.day_of_week,
         "day_of_month": row.day_of_month,
+        "timezone": getattr(row, "timezone", None),
         "notify_channels": row.notify_channels or [],
         "recipients": list(getattr(row, "recipients", None) or []),
         "custom_report_id": str(row.custom_report_id) if getattr(row, "custom_report_id", None) else None,
@@ -286,8 +317,17 @@ async def _readable_template_id(db: AsyncSession, user: User, custom_id: Optiona
 
 
 def _audit_meta(row, **extra) -> dict:
+    """What the schedule delivers and when: the timing fields make a later
+    "why did it run at 05:00?" answerable from the audit log alone."""
+    timing = {"frequency": getattr(row, "frequency", None), "hour": getattr(row, "hour", None),
+              "minute": getattr(row, "minute", None), "timezone": getattr(row, "timezone", None)}
+    if timing["frequency"] == "weekly":
+        timing["day_of_week"] = getattr(row, "day_of_week", None)
+    elif timing["frequency"] == "monthly":
+        timing["day_of_month"] = getattr(row, "day_of_month", None)
     return {"name": row.name, "report_type": row.report_type, "period": row.period,
-            "format": row.format, "recipients": len(getattr(row, "recipients", None) or []), **extra}
+            "format": row.format, "recipients": len(getattr(row, "recipients", None) or []),
+            **timing, **extra}
 
 
 async def _audit(db: AsyncSession, user: User, action: str, row, **extra) -> None:
@@ -313,21 +353,45 @@ def _report_title(row, user: User, admin: bool) -> str:
     return preset["title"] if preset else rt
 
 
+def timing_fields(item: dict, org_tz: str) -> dict:
+    """Derived timing facts of a serialised schedule: the zone it runs in, its
+    local time with the UTC equivalent, the full wording, the next run in
+    local time, and the time written in its name when that differs."""
+    zone = schedule_timezone(item, org_tz)
+    out = {
+        "effective_timezone": zone,
+        "organisation_timezone": org_tz,
+        "local_time_label": local_time_label(item, org_tz),
+        "schedule_label": schedule_text(item, org_tz),
+        "next_run_local": None,
+        "name_time_mismatch": name_time_mismatch(item.get("name"), item.get("hour"), item.get("minute")),
+    }
+    nxt = item.get("next_run_at")
+    if nxt:
+        try:
+            out["next_run_local"] = datetime.fromisoformat(nxt).astimezone(ZoneInfo(zone)).isoformat()
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 class _Viewer:
     """Per-request facts for serialising schedules for ``user``."""
 
-    def __init__(self, user: User, admin: bool, manager: bool, vis):
+    def __init__(self, user: User, admin: bool, manager: bool, vis, org_tz: str = "UTC"):
         self.user, self.admin, self.manager, self.vis = user, admin, manager, vis
+        self.org_tz = org_tz
 
     @classmethod
     async def load(cls, db: AsyncSession, user: User) -> "_Viewer":
         from app.api.v1.netflow.access import visibility_for_user
 
         return cls(user, await _is_full_admin(db, user), await is_report_manager(db, user),
-                   await visibility_for_user(db, user))
+                   await visibility_for_user(db, user), await get_configured_timezone(db))
 
     def serialize(self, row) -> dict:
         item = _row_to_dict(row)
+        item.update(timing_fields(item, self.org_tz))
         filters = item.get("filters") or {}
         if isinstance(filters, dict) and "netflow" in filters and not _netflow_scope_visible(filters["netflow"], self.vis):
             # The scope names hosts or exporters the caller may not see (or
@@ -384,16 +448,18 @@ async def create_report_schedule(
         data.custom_report_id = None
     data.filters = await _validated_filters(data.filters)
     tz_name = await get_configured_timezone(db)
+    # The schedule keeps its own zone: the organisation's, unless one was chosen.
+    data.timezone = data.timezone or tz_name
     sched = data.model_dump()
     next_run = compute_next_run(sched, tz_name) if data.enabled else None
     row = (await db.execute(
         text("""INSERT INTO report_schedules
                 (name, description, enabled, report_type, period, format, filters,
-                 frequency, hour, minute, day_of_week, day_of_month, notify_channels,
+                 frequency, hour, minute, day_of_week, day_of_month, timezone, notify_channels,
                  recipients, custom_report_id, next_run_at, created_by, created_at, updated_at)
                 VALUES (:name, :description, :enabled, :report_type, :period, :format,
                         CAST(:filters AS jsonb), :frequency, :hour, :minute,
-                        :day_of_week, :day_of_month, CAST(:notify_channels AS jsonb),
+                        :day_of_week, :day_of_month, :timezone, CAST(:notify_channels AS jsonb),
                         CAST(:recipients AS jsonb), :custom_report_id, :next_run_at, :created_by, NOW(), NOW())
                 RETURNING *"""),
         {
@@ -402,7 +468,7 @@ async def create_report_schedule(
             "filters": json.dumps(data.filters or {}), "frequency": data.frequency,
             "custom_report_id": data.custom_report_id,
             "hour": data.hour, "minute": data.minute, "day_of_week": data.day_of_week,
-            "day_of_month": data.day_of_month,
+            "day_of_month": data.day_of_month, "timezone": data.timezone,
             "notify_channels": json.dumps(data.notify_channels or []),
             "recipients": json.dumps(data.recipients or []),
             "next_run_at": next_run, "created_by": getattr(user, "id", None),
@@ -445,6 +511,11 @@ async def update_report_schedule(
         fields["custom_report_id"] = None
     if "filters" in fields:
         fields["filters"] = await _filters_for_update(db, user, current.filters, fields["filters"])
+    tz_name = await get_configured_timezone(db)
+    if "timezone" in fields and not fields["timezone"]:
+        # Cleared: back to the organisation timezone, stored explicitly so a
+        # later organisation change does not move the schedule.
+        fields["timezone"] = tz_name
 
     # A schedule renders with its owner's permissions. Someone else who changes
     # what it delivers, or to whom, takes it over: from then on it runs with the
@@ -478,9 +549,8 @@ async def update_report_schedule(
         raise HTTPException(status_code=404, detail="Report schedule not found")
 
     # Recompute next_run whenever timing/enabled changed.
-    timing_keys = {"enabled", "frequency", "hour", "minute", "day_of_week", "day_of_month"}
+    timing_keys = {"enabled", "frequency", "hour", "minute", "day_of_week", "day_of_month", "timezone"}
     if timing_keys & set(fields.keys()):
-        tz_name = await get_configured_timezone(db)
         sched = _row_to_dict(row)
         next_run = compute_next_run(sched, tz_name) if row.enabled else None
         row = (await db.execute(
