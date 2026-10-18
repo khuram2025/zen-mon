@@ -1,4 +1,4 @@
-# ZenPlus 1.24.17 — Device page redesign
+# ZenPlus 1.24.19 — Device page redesign
 
 The device page now answers three questions in order: is the device healthy, what is wrong right now, and where to go next. See `docs/device-detail-page.md`.
 
