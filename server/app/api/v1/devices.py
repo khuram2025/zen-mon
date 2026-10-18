@@ -36,6 +36,7 @@ from sqlalchemy import text
 import time
 import asyncio
 import json
+import re
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
 
@@ -223,6 +224,7 @@ async def dashboard_uptime_stats(
     hours: int = Query(default=24, ge=1, le=8760),
     from_: Optional[datetime] = Query(default=None, alias="from"),
     to: Optional[datetime] = Query(default=None),
+    device_id: Optional[UUID] = Query(default=None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -230,6 +232,8 @@ async def dashboard_uptime_stats(
 
     Explicit `from`/`to` bound the window exactly (so a historical range is not
     answered with one ending now); otherwise it is the last `hours`.
+    ``device_id`` narrows the same calculation to one device (the device page
+    reads its headline this way instead of the whole fleet).
     """
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
@@ -255,6 +259,9 @@ async def dashboard_uptime_stats(
         )).scalars().all()
         params["ids"] = [str(i) for i in visible]
         where += " AND toString(device_id) IN %(ids)s"
+    if device_id is not None:
+        params["device"] = str(device_id)
+        where += " AND toString(device_id) = %(device)s"
 
     # Coarsest-but-longest-lived table that covers the window, then finer ones
     # as a fallback for installs whose rollups have not caught up yet.
@@ -293,10 +300,12 @@ async def dashboard_uptime_stats(
                     FROM device_maintenance m
                     JOIN devices d ON {MAINT_COVERS_DEVICE_SQL}
                     WHERE m.starts_at < :to_ts AND m.ends_at > :from_ts
+                      {"AND d.id = CAST(:one_device AS uuid)" if device_id is not None else ""}
                     LIMIT 500
                 """),
                 {"from_ts": from_time.replace(tzinfo=timezone.utc),
-                 "to_ts": to_time.replace(tzinfo=timezone.utc)},
+                 "to_ts": to_time.replace(tzinfo=timezone.utc),
+                 **({"one_device": str(device_id)} if device_id is not None else {})},
             )).all()
         except Exception:
             win_rows = []
@@ -1829,49 +1838,12 @@ async def _profile_name_map(db) -> dict:
     return {r[0]: r[1] for r in rows}
 
 
-_SEV_RANK = {"ok": 0, "info": 0, "warn": 1, "crit": 2}
-
-
-# Ring-redundancy metrics that report "open" on a standalone switch, keyed to
-# the template group listing stack members.
-_STANDALONE_RING_METRICS = {"cisco_stack_ring": "stack_members"}
-
-
-def _metric_status(metric: dict, value_num, value_text: str) -> str:
-    """Evaluate a template metric's status from its enum labels or thresholds."""
-    labels = metric.get("labels") or {}
-    if labels and value_num is not None:
-        code = str(int(value_num)) if float(value_num).is_integer() else str(value_num)
-        lab = labels.get(code)
-        if lab:
-            return lab.get("sev", "info")
-    th = metric.get("thresholds") or {}
-    if value_num is None or (th.get("warn") is None and th.get("crit") is None):
-        return "none"
-    op = th.get("op", ">=")
-    v = float(value_num)
-    if op == "<=":
-        if th.get("crit") is not None and v <= th["crit"]:
-            return "crit"
-        if th.get("warn") is not None and v <= th["warn"]:
-            return "warn"
-    else:
-        if th.get("crit") is not None and v >= th["crit"]:
-            return "crit"
-        if th.get("warn") is not None and v >= th["warn"]:
-            return "warn"
-    return "ok"
-
-
-def _metric_display(metric: dict, value_num, value_text: str) -> str:
-    """Human display string for enum metrics (label text beats raw text/code)."""
-    labels = metric.get("labels") or {}
-    if value_num is not None and labels:
-        code = str(int(value_num)) if float(value_num).is_integer() else str(value_num)
-        lab = labels.get(code)
-        if lab and lab.get("text"):
-            return lab["text"]
-    return value_text or ""
+# Shared with the hardware report pack, which imports these names from here.
+from app.services import device_insights as _insights
+_SEV_RANK = _insights.SEV_RANK
+_STANDALONE_RING_METRICS = _insights.STANDALONE_RING_METRICS
+_metric_status = _insights.metric_status
+_metric_display = _insights.metric_display
 
 
 @router.get("/{device_id}/template-insights", dependencies=[Depends(_device_in_scope)])
@@ -1931,95 +1903,7 @@ async def device_template_insights(
         """),
         {"id": device_id},
     )).mappings().all()
-
-    by_group: dict = {}
-    latest_ts = None
-    for v in vals:
-        by_group.setdefault(v["group_key"], []).append(v)
-        if latest_ts is None or v["updated_at"] > latest_ts:
-            latest_ts = v["updated_at"]
-
-    groups_out = []
-    for gr in oid_groups:
-        gkey = gr.get("key")
-        metrics_def = {m["key"]: m for m in gr.get("metrics", [])}
-        rows_for_group = by_group.get(gkey, [])
-        worst = "none"
-
-        def bump(status: str):
-            nonlocal worst
-            if _SEV_RANK.get(status, -1) > _SEV_RANK.get(worst, -1):
-                worst = status
-
-        if gr.get("kind") == "table":
-            # rows keyed by instance
-            by_inst: dict = {}
-            for v in rows_for_group:
-                by_inst.setdefault(v["instance"], {"label": v["label"], "cells": {}})
-                inst = by_inst[v["instance"]]
-                if v["label"]:
-                    inst["label"] = v["label"]
-                m = metrics_def.get(v["metric_key"], {})
-                status = _metric_status(m, v["value_num"], v["value_text"])
-                bump(status)
-                inst["cells"][v["metric_key"]] = {
-                    "value": v["value_num"],
-                    "text": _metric_display(m, v["value_num"], v["value_text"]),
-                    "status": status,
-                    "series_key": v["series_key"],
-                }
-            has_children = isinstance(gr.get("children"), dict)
-            rows = [
-                {"instance": inst, "label": data["label"] or inst, "cells": data["cells"],
-                 **({"child_device_id": child_ids.get((gkey, inst))} if has_children else {})}
-                for inst, data in sorted(by_inst.items(), key=lambda kv: (kv[1]["label"] or kv[0]).lower())
-            ]
-            groups_out.append({
-                "key": gkey, "name": gr.get("name"), "kind": "table",
-                "description": gr.get("description"),
-                "children_capable": has_children,
-                "status": worst,
-                "columns": [
-                    {"key": m["key"], "name": m.get("name"), "unit": m.get("unit"),
-                     "type": m.get("type", "gauge")}
-                    for m in gr.get("metrics", [])
-                ],
-                "rows": rows,
-            })
-        else:
-            by_metric = {v["metric_key"]: v for v in rows_for_group}
-            metrics_out = []
-            for m in gr.get("metrics", []):
-                v = by_metric.get(m["key"])
-                status = _metric_status(m, v["value_num"], v["value_text"]) if v else "none"
-                text_out = _metric_display(m, v["value_num"], v["value_text"]) if v else ""
-                members_group = _STANDALONE_RING_METRICS.get(m["key"])
-                if v and members_group and status == "warn" and v["value_num"] == 2:
-                    members = {r["instance"] for r in by_group.get(members_group, [])}
-                    if len(members) <= 1:
-                        # A single-member "stack" can never close its ring.
-                        status, text_out = "info", "Standalone — no stack ring"
-                if v:
-                    bump(status)
-                metrics_out.append({
-                    "key": m["key"], "name": m.get("name"),
-                    "type": m.get("type", "gauge"), "unit": m.get("unit"),
-                    "thresholds": m.get("thresholds"),
-                    "value": v["value_num"] if v else None,
-                    "text": text_out,
-                    "status": status,
-                    "series_key": v["series_key"] if v else f"tpl_{m['key']}",
-                    "has_data": v is not None,
-                })
-            groups_out.append({
-                "key": gkey, "name": gr.get("name"), "kind": "scalar",
-                "description": gr.get("description"),
-                "status": worst,
-                "metrics": metrics_out,
-            })
-
-    from app.services.f5_insights import enrich_f5_groups
-    groups_out = enrich_f5_groups(groups_out)
+    groups_out, latest_ts = _insights.shape_template_groups(oid_groups, vals, child_ids)
 
     return {
         "template": {
@@ -2033,6 +1917,269 @@ async def device_template_insights(
         "groups": groups_out,
         "children_capable": children_capable,
         "promote_managed": bool(dev["promote_managed"]),
+    }
+
+
+_SUMMARY_ALERT_SEVERITY = {"critical": "critical", "high": "critical", "warning": "warning", "medium": "warning"}
+
+
+def _iso(ts) -> str | None:
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        return _aware(ts).isoformat()
+    return str(ts)
+
+
+def _latest_interface_rates(device_id: UUID) -> dict[int, dict]:
+    """Latest in/out bps per interface from the last 15 minutes of samples."""
+    from app.core.database import get_clickhouse_client
+    res = get_clickhouse_client().query(
+        """
+        SELECT if_index, argMax(in_bps, timestamp), argMax(out_bps, timestamp),
+               toUnixTimestamp64Milli(max(timestamp))
+        FROM zenplus.snmp_if_metrics
+        WHERE device_id = %(id)s AND timestamp >= now() - INTERVAL 15 MINUTE
+        GROUP BY if_index
+        """,
+        parameters={"id": str(device_id)},
+    )
+    return {int(r[0]): {"in_bps": float(r[1] or 0), "out_bps": float(r[2] or 0), "ts": int(r[3])}
+            for r in res.result_rows}
+
+
+def _recent_traps(device_id: UUID, limit: int = 5) -> list[dict]:
+    from app.core.database import get_clickhouse_client
+    res = get_clickhouse_client().query(
+        """
+        SELECT trap_oid, trap_name, severity, message, toUnixTimestamp64Milli(timestamp)
+        FROM zenplus.snmp_traps
+        WHERE device_id = %(id)s AND timestamp >= now() - INTERVAL 7 DAY
+        ORDER BY timestamp DESC
+        LIMIT %(limit)s
+        """,
+        parameters={"id": str(device_id), "limit": limit},
+    )
+    return [{"trap_oid": r[0], "trap_name": r[1], "severity": r[2], "message": r[3],
+             "timestamp": datetime.fromtimestamp(r[4] / 1000, tz=timezone.utc).isoformat()}
+            for r in res.result_rows]
+
+
+_WAN_NAME = re.compile(r"^(wan\d*|internet\d*|isp\d*)$|\b(wan|isp|dia|internet|uplink)\b", re.I)
+
+
+@router.get("/{device_id}/summary", dependencies=[Depends(_device_in_scope)])
+async def get_device_page_summary(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Everything the device page header, issues bar and Summary tab need in
+    one request: resolved identity, the confirmed status (unchanged, as stored),
+    a separate health rollup with its issues, interface counts, the busiest
+    interfaces, open alerts and recent events.
+
+    The health rollup never changes the confirmed status: a device can be Up
+    with three issues. Sections whose source is unavailable are ``null`` (with
+    the source named in ``unavailable``), never zero."""
+    from app.core.security import user_has_permission
+    from app.services import alert_workflow as wf
+
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    unavailable: list[str] = []
+
+    # Template readings, shaped exactly as the template-insights API shapes them.
+    profile = (await db.execute(text("""
+        SELECT p.name, p.vendor, p.oid_groups FROM device_profiles p WHERE p.id = :pid
+    """), {"pid": device.profile_id})).mappings().first() if device.profile_id else None
+    groups: list[dict] = []
+    template_updated = None
+    if profile:
+        oid_groups = profile["oid_groups"] or []
+        if isinstance(oid_groups, str):
+            oid_groups = json.loads(oid_groups)
+        vals = (await db.execute(text("""
+            SELECT group_key, metric_key, instance, series_key, label, unit,
+                   value_num, value_text, updated_at
+            FROM device_template_values WHERE device_id = :id
+        """), {"id": device_id})).mappings().all()
+        groups, template_updated = _insights.shape_template_groups(oid_groups, vals)
+    shown_groups = [g for g in groups if (g.get("rows") if g.get("kind") == "table"
+                                          else any(m.get("has_data") for m in g.get("metrics") or []))]
+
+    chassis = (await db.execute(text("""
+        SELECT model_name, serial_number, fw_revision FROM device_entities
+        WHERE device_id = :id AND class = 'chassis'
+        ORDER BY COALESCE(parent_index, 0) <> 0, ent_index LIMIT 1
+    """), {"id": device_id})).mappings().first()
+    try:
+        normalized = (await db.execute(text("""
+            SELECT os_product, os_version, os_build, hw_model, hw_serial
+            FROM inventory_identity WHERE asset_kind = 'device' AND asset_id = :id
+        """), {"id": device_id})).mappings().first()
+    except Exception:
+        await db.rollback()
+        normalized = None
+    identity = _insights.resolve_identity(
+        {"model": device.model, "os_version": device.os_version, "firmware_version": device.firmware_version,
+         "serial_number": device.serial_number},
+        groups, dict(chassis) if chassis else None, dict(normalized) if normalized else None)
+
+    # Interfaces: counted by what an operator can act on.
+    try:
+        if_rows = (await db.execute(text("""
+            SELECT if_index, if_name, if_descr, if_alias, if_type, if_speed, configured_speed_bps,
+                   admin_status, oper_status, monitored, last_up_at IS NOT NULL AS ever_up
+            FROM device_interfaces WHERE device_id = :id ORDER BY if_index
+        """), {"id": device_id})).mappings().all()
+    except Exception:
+        await db.rollback()
+        if_rows = (await db.execute(text("""
+            SELECT if_index, if_name, if_descr, if_alias, if_type, if_speed, configured_speed_bps,
+                   admin_status, oper_status, monitored, TRUE AS ever_up
+            FROM device_interfaces WHERE device_id = :id ORDER BY if_index
+        """), {"id": device_id})).mappings().all()
+    interfaces = _insights.interface_breakdown([dict(r) for r in if_rows]) if if_rows else None
+
+    busiest: list[dict] | None = None
+    if if_rows and device.snmp_enabled:
+        try:
+            rates = await asyncio.to_thread(_latest_interface_rates, device_id)
+            busiest = []
+            for r in if_rows:
+                rate = rates.get(int(r["if_index"]))
+                if not rate:
+                    continue
+                speed = r["configured_speed_bps"] or r["if_speed"] or None
+                total = rate["in_bps"] + rate["out_bps"]
+                name = r["if_name"] or r["if_descr"] or f"ifIndex {r['if_index']}"
+                busiest.append({
+                    "if_index": r["if_index"], "name": name, "alias": r["if_alias"] or None,
+                    "speed_bps": speed, "in_bps": rate["in_bps"], "out_bps": rate["out_bps"],
+                    # Utilisation of the busier direction, as link utilisation reports it.
+                    "util_pct": round(max(rate["in_bps"], rate["out_bps"]) / speed * 100, 1) if speed else None,
+                    "wan": bool(_WAN_NAME.search(name) or _WAN_NAME.search(r["if_alias"] or "")),
+                    "oper_status": r["oper_status"], "sampled_at": rate["ts"],
+                })
+            busiest.sort(key=lambda i: (not i["wan"], -(i["in_bps"] + i["out_bps"])))
+            busiest = busiest[:8]
+        except Exception:
+            unavailable.append("interface_rates")
+            busiest = None
+
+    # Open alerts (incidents, not notices), only for callers who may read alerts.
+    alerts = None
+    if await user_has_permission(db, user, "alerts.view"):
+        rows = (await db.execute(text(f"""
+            SELECT a.id, a.severity, a.status, a.message, a.triggered_at
+            FROM alerts a
+            WHERE a.device_id = :id AND a.status IN ('pending', 'active', 'acknowledged')
+              AND NOT {wf.notice_sql('a')}
+            ORDER BY CASE a.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, a.triggered_at ASC
+            LIMIT 50
+        """), {"id": device_id})).mappings().all()
+        alerts = {
+            "active": sum(1 for r in rows if r["status"] in ("active", "pending")),
+            "acknowledged": sum(1 for r in rows if r["status"] == "acknowledged"),
+            "items": [{"id": str(r["id"]), "severity": r["severity"], "status": r["status"],
+                       "message": re.sub(r"^\[ZenPlus\s+[A-Z]+\]\s*", "", r["message"] or "Alert"),
+                       "triggered_at": _iso(r["triggered_at"])} for r in rows[:10]],
+        }
+
+    maintenance_rows = (await db.execute(text(f"""
+        SELECT m.ends_at, m.reason FROM device_maintenance m
+        JOIN devices d ON d.id = :did AND {MAINT_COVERS_DEVICE_SQL}
+        WHERE m.starts_at <= now() AND m.ends_at >= now()
+        ORDER BY m.ends_at DESC LIMIT 1
+    """), {"did": str(device_id)})).mappings().all()
+    maintenance = ({"active": True, "ends_at": _iso(maintenance_rows[0]["ends_at"]),
+                    "reason": maintenance_rows[0]["reason"]} if maintenance_rows else {"active": False})
+
+    # Recent events for the Summary card (the Events tab reads the full,
+    # range-bound timeline itself).
+    recent: dict = {"status_changes": None, "traps": None, "flap_episodes": None}
+    try:
+        history = await asyncio.to_thread(metric_service.get_status_history, device_id, None, None, 10)
+        recent["status_changes"] = [jsonable_encoder(e) for e in history]
+    except Exception:
+        unavailable.append("status_history")
+    if device.snmp_enabled:
+        try:
+            recent["traps"] = await asyncio.to_thread(_recent_traps, device_id)
+        except Exception:
+            unavailable.append("traps")
+    flap_rows = (await db.execute(text("""
+        SELECT id, started_at, ended_at, kind, start_changes, window_minutes, status_at_start,
+               status_at_end, end_reason
+        FROM device_flap_episodes WHERE device_id = :id
+          AND (ended_at IS NULL OR ended_at >= now() - INTERVAL '30 days')
+        ORDER BY started_at DESC LIMIT 5
+    """), {"id": device_id})).mappings().all()
+    recent["flap_episodes"] = [{**{k: r[k] for k in ("kind", "start_changes", "window_minutes",
+                                                      "status_at_start", "status_at_end", "end_reason")},
+                                "id": str(r["id"]), "started_at": _iso(r["started_at"]),
+                                "ended_at": _iso(r["ended_at"]), "ongoing": r["ended_at"] is None}
+                               for r in flap_rows]
+
+    # Issues: the confirmed status itself first, then everything that needs attention.
+    issues: list[dict] = []
+    changed = _iso(device.status_changed_at)
+    if device.status == "down":
+        issues.append({"source": "status", "severity": "critical", "title": "Device is down (confirmed)",
+                       "detail": None, "since": changed, "tab": "events"})
+    elif device.status == "degraded":
+        reason = next((e.get("reason") for e in (recent["status_changes"] or []) if e.get("new_status") == "degraded"), None)
+        issues.append({"source": "status", "severity": "warning", "title": "Device is degraded (confirmed)",
+                       "detail": reason, "since": changed, "tab": "events"})
+    if device.is_flapping:
+        issues.append({"source": "flapping", "severity": "warning", "title": "Status is flapping",
+                       "detail": "Status alerts are held until it is stable", "since": _iso(device.flapping_since),
+                       "tab": "events"})
+    if alerts:
+        for a in [r for r in alerts["items"] if r["status"] in ("active", "pending")][:5]:
+            issues.append({"source": "alert", "severity": _SUMMARY_ALERT_SEVERITY.get(a["severity"], "info"),
+                           "title": a["message"], "detail": None, "since": a["triggered_at"], "tab": "events",
+                           "alert_id": a["id"]})
+    if interfaces and interfaces["unexpected_down"]:
+        names = [i["name"] for i in interfaces["unexpected"]]
+        n = len(names)
+        issues.append({"source": "interfaces", "severity": "warning",
+                       "title": f"{n} interface{'s' if n != 1 else ''} down unexpectedly",
+                       "detail": ", ".join(names[:3]) + (f", +{n - 3}" if n > 3 else ""),
+                       "since": None, "tab": "interfaces"})
+    issues.extend(_insights.template_issues(shown_groups, template_updated))
+    issues = _insights.sort_issues(issues)
+    if maintenance["active"]:
+        issues.append({"source": "maintenance", "severity": "info", "title": "In maintenance",
+                       "detail": maintenance.get("reason"), "since": None, "until": maintenance["ends_at"],
+                       "tab": "configuration"})
+    not_applicable = [{"key": g["key"], "name": g.get("name"), "reason": g.get("not_applicable_reason")}
+                      for g in shown_groups if g.get("applicable") is False]
+
+    return {
+        "device_id": str(device_id),
+        "status": device.status,
+        "status_changed_at": changed,
+        "flapping": bool(device.is_flapping),
+        "identity": identity,
+        "template": {"name": profile["name"], "vendor": profile["vendor"],
+                     "updated_at": _iso(template_updated)} if profile else None,
+        "health": {**_insights.health_rollup(issues), "groups": [_insights.group_digest(g) for g in shown_groups]},
+        "issues": issues,
+        "not_applicable": not_applicable,
+        "interfaces": {k: v for k, v in interfaces.items() if k != "unexpected"} | {
+            "unexpected": interfaces["unexpected"][:20]} if interfaces else None,
+        "busiest_interfaces": busiest,
+        "alerts": alerts,
+        "maintenance": maintenance,
+        "recent": recent,
+        "polling": {"ping_interval_s": device.ping_interval if device.ping_enabled else None,
+                    "snmp_interval_s": device.snmp_poll_interval if device.snmp_enabled else None,
+                    "last_response": _iso(device.last_seen)},
+        "unavailable": unavailable,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
