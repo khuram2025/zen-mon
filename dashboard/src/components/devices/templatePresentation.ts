@@ -27,6 +27,9 @@ export function readableInstanceLabel(label: string): string {
       index += length
     }
     if (valid && index === values.length && names.length && names.some(name => /[A-Za-z]/.test(name))) {
+      // A lone name behind a numeric table index (a FortiAP keyed by VDOM) reads
+      // as "1 · AP-name"; the index means nothing to an operator, so drop it.
+      if (start && names.length === 1) return names[0]
       return [...(start ? [`${values[0]}`] : []), ...names].join(' · ')
     }
   }

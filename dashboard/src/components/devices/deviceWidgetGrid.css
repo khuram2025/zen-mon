@@ -21,7 +21,9 @@
 /* Standard cards fit their contents; saved custom layouts keep explicit sizes. */
 .device-widget-grid.is-standard { display:block; }
 .device-summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,160px),1fr)); gap:12px; margin-bottom:16px; }
-.device-panel-grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); align-items:start; gap:16px; }
+.device-panel-grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); align-items:stretch; gap:16px; }
+/* Cards in one row share its height: no dead gap under a shorter neighbour. */
+.is-standard .device-panel-grid > .device-widget > .device-widget-content > * { height:100%; }
 .is-standard .device-widget-content > * { min-height:0; height:auto; }
 .is-standard .device-widget-content { overflow:visible; }
 .device-widget { container-type:inline-size; }

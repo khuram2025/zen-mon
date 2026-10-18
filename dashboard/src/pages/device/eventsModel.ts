@@ -1,0 +1,255 @@
+import type { ComponentType } from 'react'
+
+/* The Events tab's model: one range-aware timeline merged from alerts,
+ * confirmed status transitions, flap episodes, SNMP traps, an inferred reboot
+ * and maintenance windows. Pure functions only (no React, no API), so the
+ * merging, filtering, URL state and mini-chart bucketing are unit tested by
+ * scripts/test-device-events.mjs. */
+
+export type EventKind = 'alert' | 'status' | 'flapping' | 'trap' | 'maintenance' | 'reboot'
+export type EventSeverity = 'critical' | 'warning' | 'info' | 'success'
+
+export const EVENT_KINDS: EventKind[] = ['alert', 'status', 'flapping', 'trap', 'maintenance', 'reboot']
+export const EVENT_SEVERITIES: EventSeverity[] = ['critical', 'warning', 'info', 'success']
+
+export const KIND_LABEL: Record<EventKind, string> = {
+  alert: 'Alerts', status: 'Status', flapping: 'Flapping', trap: 'Traps', maintenance: 'Maintenance', reboot: 'Reboots',
+}
+export const KIND_SINGULAR: Record<EventKind, string> = {
+  alert: 'Alert', status: 'Status change', flapping: 'Flapping', trap: 'SNMP trap', maintenance: 'Maintenance', reboot: 'Reboot',
+}
+export const SEVERITY_LABEL: Record<EventSeverity, string> = {
+  critical: 'Critical', warning: 'Warning', info: 'Info', success: 'Recovered',
+}
+
+/** Rows shown per page, and added by "Show 50 more". */
+export const EVENTS_PAGE_SIZE = 50
+
+export type TimelineEvent = {
+  id: string
+  kind: EventKind
+  severity: EventSeverity
+  /** Event time as received (UTC). */
+  timestamp: string
+  /** Parsed `timestamp`, epoch ms. */
+  ts: number
+  title: string
+  subtitle?: string
+  /** In-app link (alerts open their detail page). */
+  href?: string
+  /** Alert workflow state. */
+  status?: 'active' | 'acknowledged' | 'resolved'
+  /** Short qualifier shown as a chip: "In progress", "Upcoming". */
+  tag?: string
+  /** Maintenance windows: their end. */
+  endsAt?: string
+  icon?: ComponentType<{ className?: string }>
+}
+
+/** Backend timestamps are UTC; a naive value (no offset) is UTC, not local time (same rule as format.parseTime). */
+export function eventTime(value: string | number | null | undefined): number | null {
+  if (value == null || value === '') return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  let s = String(value)
+  if (!/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) s = s.replace(' ', 'T') + 'Z'
+  const ms = Date.parse(s)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/* ── Sources → timeline rows ────────────────────────────────────────────── */
+
+/** Legacy alert rows stored the rendered SMS template: drop the "[ZenPlus CRITICAL] " transport prefix. */
+export function stripAlertPrefix(message: string | null | undefined): string {
+  return (message || '').replace(/^\s*\[ZenPlus\s+[A-Za-z_-]+\]\s*/, '').trim()
+}
+
+export function alertSeverity(severity: string | null | undefined): EventSeverity {
+  const s = (severity || '').toLowerCase()
+  if (s === 'critical' || s === 'high' || s === 'emergency' || s === 'alert') return 'critical'
+  if (s === 'warning' || s === 'major' || s === 'minor' || s === 'medium' || s === 'error') return 'warning'
+  return 'info'
+}
+
+export type AlertRow = {
+  id: string
+  status?: string | null
+  severity?: string | null
+  message?: string | null
+  rule_name?: string | null
+  triggered_at?: string | null
+  acknowledged_at?: string | null
+  resolved_at?: string | null
+}
+
+export function alertEvents(alerts: AlertRow[]): TimelineEvent[] {
+  return alerts.flatMap((a): TimelineEvent[] => {
+    const ts = eventTime(a.triggered_at)
+    if (ts == null || !a.id) return []
+    const status = a.status === 'active' || a.status === 'acknowledged' || a.status === 'resolved' ? a.status : undefined
+    const message = stripAlertPrefix(a.message)
+    const title = message || a.rule_name || 'Alert'
+    return [{
+      id: `alert-${a.id}`,
+      kind: 'alert',
+      severity: alertSeverity(a.severity),
+      timestamp: String(a.triggered_at),
+      ts,
+      title,
+      subtitle: a.rule_name && a.rule_name !== title ? `Rule: ${a.rule_name}` : undefined,
+      href: `/alerts/${a.id}`,
+      status,
+    }]
+  })
+}
+
+export type MaintenanceWindow = { id: string; starts_at: string; ends_at: string; reason?: string | null; scope_label?: string | null; active?: boolean }
+
+/** Active and upcoming maintenance windows (the endpoint returns only those), labelled; not limited to the range. */
+export function maintenanceEvents(body: { active?: MaintenanceWindow[]; upcoming?: MaintenanceWindow[] } | null | undefined): TimelineEvent[] {
+  const rows = [
+    ...(body?.active || []).map((w) => ({ w, active: true })),
+    ...(body?.upcoming || []).map((w) => ({ w, active: false })),
+  ]
+  return rows.flatMap(({ w, active }): TimelineEvent[] => {
+    const ts = eventTime(w.starts_at)
+    if (ts == null) return []
+    return [{
+      id: `maint-${w.id}`,
+      kind: 'maintenance',
+      severity: 'info',
+      timestamp: w.starts_at,
+      ts,
+      title: active ? 'Maintenance in progress' : 'Maintenance scheduled',
+      subtitle: [w.reason, w.scope_label ? `Scope: ${w.scope_label}` : '', 'status changes, alerting and SLA impact paused'].filter(Boolean).join(' · '),
+      tag: active ? 'In progress' : 'Upcoming',
+      endsAt: w.ends_at,
+    }]
+  })
+}
+
+/** Activity rows (traps, status changes, flap boundaries, reboot) from buildActivityEvents. */
+export function activityToTimeline(events: Array<{
+  id: string; timestamp: string; severity: EventSeverity; title: string; subtitle?: string; kind?: string; icon?: ComponentType<{ className?: string }>
+}>): TimelineEvent[] {
+  return events.flatMap((e): TimelineEvent[] => {
+    const ts = eventTime(e.timestamp)
+    const kind = (EVENT_KINDS as string[]).includes(e.kind || '') ? (e.kind as EventKind) : 'status'
+    if (ts == null) return []
+    return [{ id: e.id, kind, severity: e.severity, timestamp: e.timestamp, ts, title: e.title, subtitle: e.subtitle || undefined, icon: e.icon }]
+  })
+}
+
+/** Traps come from a "last N hours" endpoint: keep only those inside the selected window. */
+export function trapsInRange<T extends { timestamp?: string | null }>(traps: T[], fromMs: number, toMs: number): T[] {
+  return traps.filter((t) => {
+    const ts = eventTime(t.timestamp)
+    return ts != null && ts >= fromMs && ts <= toMs
+  })
+}
+
+/** All sources into one list, newest first; duplicate ids keep the first. */
+export function mergeEvents(...lists: TimelineEvent[][]): TimelineEvent[] {
+  const seen = new Set<string>()
+  const out: TimelineEvent[] = []
+  for (const list of lists) {
+    for (const e of list) {
+      if (!Number.isFinite(e.ts) || seen.has(e.id)) continue
+      seen.add(e.id)
+      out.push(e)
+    }
+  }
+  return out.sort((a, b) => b.ts - a.ts || a.id.localeCompare(b.id))
+}
+
+/* ── Filters (URL state: etype=alert,trap  esev=critical  eq=text) ──────── */
+
+export type EventFilter = { kinds: EventKind[]; severities: EventSeverity[]; q: string }
+
+export const EMPTY_FILTER: EventFilter = { kinds: [], severities: [], q: '' }
+
+function listParam<T extends string>(raw: string | null, allowed: readonly T[]): T[] {
+  if (!raw) return []
+  const wanted = new Set(raw.split(',').map((s) => s.trim().toLowerCase()))
+  return allowed.filter((v) => wanted.has(v))
+}
+
+export function parseEventFilter(params: { get(name: string): string | null }): EventFilter {
+  return {
+    kinds: listParam(params.get('etype'), EVENT_KINDS),
+    severities: listParam(params.get('esev'), EVENT_SEVERITIES),
+    q: (params.get('eq') || '').slice(0, 200),
+  }
+}
+
+/** A copy of `params` with the filter written (empty values removed); other params are kept. */
+export function writeEventFilter(params: URLSearchParams, filter: EventFilter): URLSearchParams {
+  const next = new URLSearchParams(params)
+  const set = (key: string, value: string) => (value ? next.set(key, value) : next.delete(key))
+  set('etype', EVENT_KINDS.filter((k) => filter.kinds.includes(k)).join(','))
+  set('esev', EVENT_SEVERITIES.filter((s) => filter.severities.includes(s)).join(','))
+  set('eq', filter.q.trim() ? filter.q : '')
+  return next
+}
+
+export function toggleValue<T>(list: T[], value: T): T[] {
+  return list.includes(value) ? list.filter((v) => v !== value) : [...list, value]
+}
+
+function matchesText(e: TimelineEvent, q: string): boolean {
+  const needle = q.trim().toLowerCase()
+  if (!needle) return true
+  return [e.title, e.subtitle, e.status, e.tag, KIND_SINGULAR[e.kind], SEVERITY_LABEL[e.severity]]
+    .some((s) => !!s && s.toLowerCase().includes(needle))
+}
+
+export function filterEvents(events: TimelineEvent[], f: EventFilter): TimelineEvent[] {
+  return events.filter((e) =>
+    (!f.kinds.length || f.kinds.includes(e.kind))
+    && (!f.severities.length || f.severities.includes(e.severity))
+    && matchesText(e, f.q))
+}
+
+/** Chip counts: each chip row counts what the other filters leave, so a count is what selecting it shows. */
+export function chipCounts(events: TimelineEvent[], f: EventFilter): { kinds: Record<EventKind, number>; severities: Record<EventSeverity, number>; all: number } {
+  const kinds = Object.fromEntries(EVENT_KINDS.map((k) => [k, 0])) as Record<EventKind, number>
+  const severities = Object.fromEntries(EVENT_SEVERITIES.map((s) => [s, 0])) as Record<EventSeverity, number>
+  let all = 0
+  for (const e of filterEvents(events, { ...f, kinds: [] })) { kinds[e.kind]++; all++ }
+  for (const e of filterEvents(events, { ...f, severities: [] })) severities[e.severity]++
+  return { kinds, severities, all }
+}
+
+/* ── Mini chart: events per bucket, stacked by severity ─────────────────── */
+
+export type EventBucket = { start: number; end: number; mid: number } & Record<EventSeverity, number>
+
+const MINUTE = 60_000
+const BUCKET_STEPS = [1, 5, 10, 15, 30, 60, 180, 360, 720, 1440, 2880, 10080].map((m) => m * MINUTE)
+
+/** The smallest "round" bucket width giving at most `maxBuckets` buckets across the range. */
+export function bucketWidth(fromMs: number, toMs: number, maxBuckets = 60): number {
+  const span = Math.max(1, toMs - fromMs)
+  return BUCKET_STEPS.find((w) => span / w <= maxBuckets) ?? Math.ceil(span / maxBuckets)
+}
+
+/** Counts per bucket from `fromMs`; events outside [from, to] are not counted. */
+export function bucketEvents(events: TimelineEvent[], fromMs: number, toMs: number, maxBuckets = 60): EventBucket[] {
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return []
+  const width = bucketWidth(fromMs, toMs, maxBuckets)
+  const count = Math.max(1, Math.ceil((toMs - fromMs) / width))
+  const buckets: EventBucket[] = Array.from({ length: count }, (_, i) => {
+    const start = fromMs + i * width
+    const end = Math.min(toMs, start + width)
+    return { start, end, mid: (start + end) / 2, critical: 0, warning: 0, info: 0, success: 0 }
+  })
+  for (const e of events) {
+    if (e.ts < fromMs || e.ts > toMs) continue
+    buckets[Math.min(count - 1, Math.floor((e.ts - fromMs) / width))][e.severity]++
+  }
+  return buckets
+}
+
+/** Events whose time falls inside the selected range (maintenance windows may lie outside it). */
+export function countInRange(events: TimelineEvent[], fromMs: number, toMs: number): number {
+  return events.filter((e) => e.ts >= fromMs && e.ts <= toMs).length
+}
