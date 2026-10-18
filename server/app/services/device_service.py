@@ -356,6 +356,10 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
     update_data = data.model_dump(exclude_unset=True)
     if "tags" in update_data:
         update_data["tags"] = await tag_service.canonicalize_tags(db, update_data["tags"] or [])
+    # Owner and notes are free text; blank means "none recorded".
+    for key in ("owner", "notes"):
+        if key in update_data:
+            update_data[key] = (update_data[key] or "").strip() or None
     # Passphrases are write-only: encrypt then remove from the plain setattr loop.
     if "snmp_community" in update_data:
         community = update_data.pop("snmp_community")

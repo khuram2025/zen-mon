@@ -27,6 +27,7 @@ from app.services.tag_service import tag_set as _tag_set
 from app.services import alert_funnel as funnel
 from app.services import alert_notify_state as ns
 from app.services import device_status_machine as dsm
+from app.services import alert_condition
 from app.services.alert_schedule import notifications_allowed, get_configured_timezone
 from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
@@ -958,6 +959,12 @@ async def evaluate_status_change(
     # "unavailable (no reply)", never "0.0 ms" next to 100% loss.
     rtt_value = _reply_rtt(event)
     loss_pct = float(event.packet_loss or 0.0) * 100.0
+    # The alert is named after what triggered it ("Packet loss 33% (limit
+    # 10%)"), not the rule name and status; the limits are the status policy's.
+    condition = alert_condition.status_condition(
+        event.new_status, event.old_status, rtt_value,
+        loss_pct if event.new_status == "degraded" else None,
+        await _status_policy(db) if event.new_status == "degraded" else None)
 
     # Template variables
     variables = {
@@ -1242,7 +1249,9 @@ async def evaluate_status_change(
         # sentence — the rendered SMS/email templates are transport payloads
         # only (persisting sms_body here put "[ZenPlus WARNING] ..." template
         # text all over the alert UIs).
-        row_metadata = {"old_status": event.old_status, "new_status": event.new_status, "is_recovery": is_recovery}
+        row_metadata = {"old_status": event.old_status, "new_status": event.new_status, "is_recovery": is_recovery,
+                        "condition": condition["title"], "condition_metric": condition["metric"],
+                        "condition_value": condition["value"], "condition_limit": condition["limit"]}
         if held:
             row_metadata["notified"] = False
             row_metadata["hold_until"] = (now + timedelta(seconds=hold_s)).isoformat()
@@ -1262,11 +1271,7 @@ async def evaluate_status_change(
                 "rule_id": str(rule.id),
                 "status": "resolved" if is_recovery else ("pending" if held else "active"),
                 "severity": rule.severity or "warning",
-                "message": (
-                    f"{rule.name}: {event.hostname} ({event.ip_address}) recovered — UP"
-                    if is_recovery else
-                    f"{rule.name}: {event.hostname} ({event.ip_address}) is {event.new_status.upper()}"
-                ),
+                "message": alert_condition.alert_message(condition["title"], event.hostname, event.ip_address),
                 "triggered_at": now,
                 "resolved_at": now if is_recovery else None,
                 "metadata": json.dumps(row_metadata),

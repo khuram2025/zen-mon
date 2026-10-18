@@ -249,7 +249,9 @@ async def test_up_to_down_fires_device_down(engine):
     [row] = db.alerts
     assert row["status"] == "active"
     assert row["metadata"]["new_status"] == "down"
-    assert row["message"] == "Device Down: sw (10.0.0.1) is DOWN"
+    # Named after the condition, not "<rule>: <host> is DOWN" (D-09).
+    assert row["message"] == "No response — sw (10.0.0.1)"
+    assert row["metadata"]["condition"] == "No response"
 
 
 @pytest.mark.asyncio
@@ -272,7 +274,7 @@ async def test_down_to_up_resolves_with_a_recovery(engine):
     [recovery] = [a for a in db.alerts if a is not down]
     assert recovery["status"] == "resolved"
     assert recovery["metadata"]["is_recovery"] is True
-    assert "recovered" in recovery["message"]
+    assert recovery["message"] == "Responding again — sw (10.0.0.1)"
 
 
 @pytest.mark.asyncio
