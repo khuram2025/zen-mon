@@ -256,14 +256,36 @@ def _direct_targets(ctx: dict) -> dict[str, list[tuple[str, str, dict]]]:
     return out
 
 
+async def _direct_gateway_row(db: AsyncSession, gw_type: str):
+    """The gateway row direct-to-person deliveries of a type ("smtp" / "sms")
+    use: the enabled default, else the only enabled gateway of that type (a
+    single gateway nobody flagged as default is still the obvious route).
+    None when there is no enabled gateway, or several and none is default."""
+    rows = (await db.execute(text(
+        "SELECT id, config, enabled, is_default FROM notification_gateways WHERE type = :t"
+        " ORDER BY is_default DESC, created_at, id"), {"t": gw_type})).fetchall()
+    enabled = [r for r in rows if r.enabled]
+    for r in enabled:
+        if r.is_default:
+            return r
+    return enabled[0] if len(enabled) == 1 else None
+
+
 async def _default_gateway(db: AsyncSession, gw_type: str) -> dict | None:
-    """The enabled default gateway of a type ("smtp" / "sms"), or None."""
-    row = (await db.execute(text(
-        "SELECT config, enabled FROM notification_gateways "
-        "WHERE type = :t AND is_default = true LIMIT 1"), {"t": gw_type})).first()
-    if not row or not row.enabled:
-        return None
-    return decrypt_config(row.config)
+    """Config of the gateway direct pages of a type use (see
+    :func:`_direct_gateway_row`), or None."""
+    row = await _direct_gateway_row(db, gw_type)
+    return decrypt_config(row.config) if row is not None else None
+
+
+async def direct_gateway_kinds(db: AsyncSession) -> set[str]:
+    """Contact kinds ("email", "sms") that direct pages to people can reach
+    now (a usable SMTP / SMS gateway exists). Read-only; for coverage checks."""
+    out = set()
+    for kind, gw_type in (("email", "smtp"), ("sms", "sms")):
+        if await _direct_gateway_row(db, gw_type) is not None:
+            out.add(kind)
+    return out
 
 
 def _mail_ctx(ctx: dict) -> dict:
@@ -546,8 +568,9 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                 if gw is None:
                     gw = await _default_gateway(db, "smtp" if dkind == "email" else "sms") or False
                 if not gw:
-                    await route.log("skipped", "config: no enabled default "
-                                               f"{'SMTP' if dkind == 'email' else 'SMS'} gateway")
+                    await route.log("skipped", "config: no usable "
+                                               f"{'SMTP' if dkind == 'email' else 'SMS'} gateway (none"
+                                               " enabled, or several and none is the default)")
                     continue
                 targets = await route.gated([(key, addr)], direct_kind=dkind)
                 if not targets:

@@ -6,7 +6,11 @@ notifications, recoveries and non-groupable sends go out at once; budget
 overflow is held into a digest, never dropped; a digest whose incidents all
 recovered is cancelled with its reason; two concurrent release sweeps send a
 digest once; with the settings off nothing changes; every hold is on the
-incident timeline with its reason and release condition.
+incident timeline with its reason and release condition. PagerDuty is never
+held or budgeted (its incidents resolve by their own dedup key); a failed
+digest is retried (three attempts) before it is marked failed; a manual
+release is never re-claimed by the sweep mid-send; direct pages use the only
+enabled gateway when none is flagged default.
 
 Only the transports (SMTP, webhooks) and the dashboard base URL are faked.
 """
@@ -83,10 +87,12 @@ def world(pg_db, monkeypatch):
 
     messages: list[dict] = []
     hooks: list[dict] = []
-    behaviour = NS(delay=0.0)
+    behaviour = NS(delay=0.0, fail_email=False)
 
     async def send_email(gw, recipients, subject, body, html_body=None):
         await asyncio.sleep(behaviour.delay)
+        if behaviour.fail_email:
+            return False
         messages.append({"to": sorted(r.strip().lower() for r in recipients.split(",")),
                          "subject": subject, "body": body, "html": html_body or ""})
         return True
@@ -108,6 +114,10 @@ def world(pg_db, monkeypatch):
                    " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                    {**ng.RECOMMENDED_SETTINGS, **kw})
 
+    # The senders handle PagerDuty, but migrate-001's type CHECK does not list
+    # it yet; lift it on this disposable database to model the channel.
+    db.execute("ALTER TABLE notification_channels DROP CONSTRAINT IF EXISTS notification_channels_type_check")
+    ch.pd = channel("pager", "pagerduty", {"routing_key": "R0UT1NGKEY"})
     return NS(db=db, ch=ch, rule=rule, alert=alert, messages=messages, hooks=hooks,
               behaviour=behaviour, settings=settings, sites=sites)
 
@@ -417,3 +427,107 @@ def test_holds_are_on_the_timeline_and_the_api_manages_digests(world):
         assert client.get(f"/api/v1/alerts/digests/{did}").status_code == 404
         assert client.post(f"/api/v1/alerts/digests/{did}/release").status_code == 403
         assert client.put("/api/v1/alerts/notification-grouping", json={}).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_pagerduty_is_never_held_or_budgeted_and_its_recoveries_go_out(world):
+    w = world
+    w.settings()
+    aid = w.alert()
+    assert await dispatch(w, aid, [w.ch.pd]) == 1
+    assert len(w.hooks) == 1 and digests(w) == []
+    # Budget only: a PagerDuty route over budget is still paged.
+    w.settings(group_wait_seconds=0, budget_per_recipient_per_hour=1)
+    for _ in range(3):
+        assert await dispatch(w, w.alert(), [w.ch.pd]) == 1
+    assert len(w.hooks) == 4 and digests(w) == []
+    # A trigger held on another channel does not swallow the PagerDuty recovery.
+    w.settings()
+    other = w.alert()
+    await dispatch(w, other, [w.ch.noc, w.ch.pd])
+    assert len(w.hooks) == 5 and len(digests(w)) == 1
+    assert await dispatch(w, other, [w.ch.pd], event="recovery") == 1
+    assert len(w.hooks) == 6 and w.hooks[-1]["delivery_event"] == "recovery"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_digest_is_retried_then_marked_failed(world):
+    w = world
+    w.settings()
+    await dispatch(w, w.alert(), [w.ch.noc])
+    w.behaviour.fail_email = True
+    for attempt in (1, 2):
+        counts = await release(w)
+        assert counts["retrying"] == 1 and counts["failed"] == 0
+        (row,) = digests(w)
+        assert row[5] == "open" and row[9].startswith(f"Attempt {attempt} of 3 failed")
+        wait = w.db.scalar("SELECT extract(epoch FROM release_at - now()) FROM notification_digests")
+        assert 250 < wait <= 300                                     # one group interval later
+    counts = await release(w)
+    assert counts["failed"] == 1
+    (row,) = digests(w)
+    assert row[5] == "failed" and row[9].startswith("Attempt 3 of 3 failed")
+    assert w.db.scalar("SELECT count(*) FROM alert_events WHERE kind = 'notification_release_failed'") == 3
+    # Fixed route: a manual release still sends it.
+    w.behaviour.fail_email = False
+    async with session(w.db) as s:
+        assert await ng.release_now(s, row[0]) == "sent"
+    assert len(w.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_retry_merges_into_a_digest_opened_while_it_was_sending(world):
+    w = world
+    w.settings()
+    await dispatch(w, w.alert(), [w.ch.noc])
+
+    async def failing_send(db_, channels, ctx):
+        await dispatch(w, w.alert(), [w.ch.noc])                     # a new hold meanwhile
+        return 0
+
+    w.db.execute("UPDATE notification_digests SET release_at = now() - interval '1 second'")
+    async with session(w.db) as s:
+        counts = await ng.release_due(s, dispatch=failing_send)
+    assert counts["retrying"] == 1
+    rows = {r[5]: r for r in digests(w)}
+    assert set(rows) == {"open", "cancelled"}
+    assert rows["open"][8] == 2 and "moved to the open summary" in rows["cancelled"][9]
+    assert w.db.scalar("SELECT count(*) FROM notification_digest_items WHERE digest_id = $1",
+                       rows["open"][0]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_manual_release_is_not_reclaimed_by_the_sweep_mid_send(world):
+    w = world
+    w.settings()
+    await dispatch(w, w.alert(), [w.ch.noc])
+    w.db.execute("UPDATE notification_digests SET status = 'failed', release_at = now() - interval '1 hour'")
+    (row,) = digests(w)
+    reclaimed = []
+
+    async def slow_send(db_, channels, ctx):
+        async with session(w.db) as other:
+            reclaimed.append((await ng.release_due(other))["claimed"])
+        return await has.dispatch_to_channels(db_, channels, ctx)
+
+    async with session(w.db) as s:
+        assert await ng.release_now(s, row[0], dispatch=slow_send) == "sent"
+    assert reclaimed == [0] and len(w.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_pages_use_the_only_enabled_gateway_when_none_is_default(world):
+    w = world
+    w.db.execute("UPDATE notification_gateways SET is_default = false")
+    lead = [{"kind": "email", "address": "lead@example.test", "user_id": None, "label": "Lead"}]
+    assert await dispatch(w, w.alert(), [], groupable=False, recipients=lead) == 1
+    assert w.messages[-1]["to"] == ["lead@example.test"]
+    async with session(w.db) as s:
+        assert await has.direct_gateway_kinds(s) == {"email"}
+    # Two enabled gateways and no default: ambiguous, so nothing is guessed.
+    w.db.execute("INSERT INTO notification_gateways (name, type, config, is_default, enabled)"
+                 " VALUES ('mail-2', 'smtp', '{}'::jsonb, false, true)")
+    assert await dispatch(w, w.alert(), [], groupable=False, recipients=lead) == 0
+    assert len(w.messages) == 1
+    async with session(w.db) as s:
+        assert await has.direct_gateway_kinds(s) == set()

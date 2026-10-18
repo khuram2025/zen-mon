@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_priority as prio
@@ -87,7 +88,13 @@ REASON_BUDGET = "budget"
 BUDGET_GROUP_KEY = "budget"
 RELEASE_BATCH = 50
 # A digest claimed (sending) this long ago without finishing was interrupted.
+# The claim stamps release_at, so staleness counts from the claim.
 STALE_SENDING_MINUTES = 10
+# A digest whose send failed is re-opened and retried one group interval
+# later, this many attempts in all; then it is marked failed (release it by
+# hand from the digest list).
+MAX_RELEASE_ATTEMPTS = 3
+_ATTEMPT_RE = re.compile(r"^Attempt (\d+) of \d+")
 
 _UUID_RE = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 
@@ -414,6 +421,13 @@ class Gate:
         address); a webhook-style channel passes [("", "")]."""
         if not targets:
             return targets, []
+        if str(channel_type or "").lower() == "pagerduty":
+            # A PagerDuty event opens (and is resolved by) its own incident
+            # dedup key. A digest would open a PagerDuty incident under the
+            # digest's key that no recovery ever resolves, so PagerDuty
+            # triggers are never held or budgeted, and their recoveries are
+            # sent as usual instead of being folded into a summary.
+            return targets, []
         try:
             async with db.begin_nested():
                 result = await self._route(db, channel_id=channel_id, channel_name=channel_name,
@@ -711,14 +725,19 @@ _DIGEST_COLS = ("id, group_key, group_label, channel_id, recipient, status, reas
 
 
 async def _claim(db: AsyncSession, *, digest_id: str | None = None, limit: int = RELEASE_BATCH) -> list:
-    """Move due digests open -> sending (one owner each) and commit."""
+    """Move due digests open -> sending (one owner each) and commit.
+
+    The claim stamps ``release_at = now()``: a stale ``sending`` claim is
+    measured from it, so a manual release of a digest whose scheduled time is
+    long past is not re-claimed by the sweep while it is still sending. The
+    error column is kept (it carries the attempt count of earlier failures)."""
     if digest_id:
         where = "id = CAST(:id AS uuid) AND status IN ('open', 'failed')"
     else:
         where = ("(status = 'open' AND release_at <= now()) OR (status = 'sending' AND sent_at IS NULL"
                  f" AND release_at < now() - interval '{STALE_SENDING_MINUTES} minutes')")
     rows = (await db.execute(text(
-        f"UPDATE notification_digests SET status = 'sending', error = NULL WHERE id IN ("
+        f"UPDATE notification_digests SET status = 'sending', release_at = now() WHERE id IN ("
         f" SELECT id FROM notification_digests WHERE {where}"
         f" ORDER BY release_at LIMIT :lim FOR UPDATE SKIP LOCKED) RETURNING {_DIGEST_COLS}"),
         {"id": digest_id, "lim": limit})).all()
@@ -799,17 +818,76 @@ async def _release_one(db: AsyncSession, d, dispatch: Callable | None = None) ->
                          detail={**detail, "active": len(active), "recovered": len(items) - len(active)})
         await db.commit()
         return "sent"
-    await _finish(db, d.id, "failed", error=err)
-    await _event_all(db, items, "notification_release_failed", reason=err, detail=detail)
+    return await _fail_or_retry(db, d, err, items, detail,
+                                interval=int(settings["group_interval_seconds"]))
+
+
+def _attempts(error) -> int:
+    """Failed release attempts recorded on a digest so far."""
+    m = _ATTEMPT_RE.match(str(error or ""))
+    return int(m.group(1)) if m else 0
+
+
+async def _fail_or_retry(db: AsyncSession, d, err: str, items: list, detail: dict, *,
+                         interval: int) -> str:
+    """A release attempt failed: re-open the digest for another attempt one
+    group interval later ("retrying"), or after MAX_RELEASE_ATTEMPTS mark it
+    failed. When a newer open digest of the same group, channel and
+    recipient appeared meanwhile, the incidents move into that one (one open
+    digest per route) and this one is closed as merged."""
+    attempt = _attempts(getattr(d, "error", None)) + 1
+    if attempt >= MAX_RELEASE_ATTEMPTS:
+        why = (f"Attempt {attempt} of {MAX_RELEASE_ATTEMPTS} failed: {err} No further automatic "
+               "retries; release it from the digest list once the route works.")
+        await _finish(db, d.id, "failed", error=why)
+        await _event_all(db, items, "notification_release_failed", reason=why,
+                         detail={**detail, "attempt": attempt, "retrying": False})
+        await db.commit()
+        return "failed"
+    retry_at = (await db.execute(text("SELECT now() + make_interval(secs => :i)"),
+                                 {"i": interval})).scalar()
+    why = (f"Attempt {attempt} of {MAX_RELEASE_ATTEMPTS} failed: {err} Retrying at "
+           f"{_fmt_utc(retry_at)}.")
+    params = {"d": str(d.id), "err": why, "rel": retry_at}
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "UPDATE notification_digests SET status = 'open', error = :err, release_at = :rel"
+                " WHERE id = CAST(:d AS uuid)"), params)
+    except IntegrityError:
+        other = (await db.execute(text(
+            "SELECT id FROM notification_digests WHERE status = 'open' AND group_key = :gk"
+            " AND channel_id IS NOT DISTINCT FROM CAST(:cid AS uuid) AND recipient = :rcpt"
+            " AND id <> CAST(:d AS uuid) FOR UPDATE"),
+            {"gk": d.group_key, "cid": str(d.channel_id) if d.channel_id else None,
+             "rcpt": d.recipient or "", "d": str(d.id)})).scalar()
+        if other is None:
+            raise
+        await db.execute(text(
+            "DELETE FROM notification_digest_items i WHERE i.digest_id = CAST(:d AS uuid) AND EXISTS ("
+            " SELECT 1 FROM notification_digest_items j WHERE j.digest_id = CAST(:o AS uuid)"
+            " AND j.alert_id IS NOT DISTINCT FROM i.alert_id AND j.event = i.event)"),
+            {"d": str(d.id), "o": str(other)})
+        await db.execute(text("UPDATE notification_digest_items SET digest_id = CAST(:o AS uuid)"
+                              " WHERE digest_id = CAST(:d AS uuid)"), {"d": str(d.id), "o": str(other)})
+        await db.execute(text(
+            "UPDATE notification_digests SET item_count = (SELECT count(*) FROM notification_digest_items"
+            " WHERE digest_id = CAST(:o AS uuid)), release_at = LEAST(release_at, :rel)"
+            " WHERE id = CAST(:o AS uuid)"), {"o": str(other), "rel": retry_at})
+        why += f" Its incidents moved to the open summary {str(other)[:8]}."
+        await _finish(db, d.id, "cancelled", error=why)
+    await _event_all(db, items, "notification_release_failed", reason=why,
+                     detail={**detail, "attempt": attempt, "retrying": True,
+                             "retry_at": retry_at.isoformat()})
     await db.commit()
-    return "failed"
+    return "retrying"
 
 
 async def release_due(db: AsyncSession, *, dispatch: Callable | None = None) -> dict:
     """Send (or cancel) every digest whose release time has passed."""
     if not await available(db):
         return {"claimed": 0}
-    counts = {"claimed": 0, "sent": 0, "failed": 0, "cancelled": 0}
+    counts = {"claimed": 0, "sent": 0, "failed": 0, "cancelled": 0, "retrying": 0}
     while True:
         batch = await _claim(db)
         if not batch:
@@ -822,11 +900,14 @@ async def release_due(db: AsyncSession, *, dispatch: Callable | None = None) -> 
                 await db.rollback()
                 logger.exception("digest %s release failed", d.id)
                 try:
-                    await _finish(db, d.id, "failed", error="release failed; see the server log")
-                    await db.commit()
+                    settings = await load_settings(db)
+                    counts[await _fail_or_retry(
+                        db, d, "release failed; see the server log.", await _items(db, d.id),
+                        {"digest_id": str(d.id), "group_label": d.group_label},
+                        interval=int(settings["group_interval_seconds"]))] += 1
                 except Exception:
                     await db.rollback()
-                counts["failed"] += 1
+                    counts["failed"] += 1
         if len(batch) < RELEASE_BATCH:
             break
     return counts
@@ -845,9 +926,6 @@ async def release_now(db: AsyncSession, digest_id: str, *, dispatch: Callable | 
         if status is None:
             raise LookupError("digest not found")
         raise ReleaseConflict(f"digest is {status}" if status != "open" else "digest is being sent")
-    await db.execute(text("UPDATE notification_digests SET release_at = LEAST(release_at, now())"
-                          " WHERE id = CAST(:d AS uuid)"), {"d": str(digest_id)})
-    await db.commit()
     return await _release_one(db, batch[0], dispatch)
 
 

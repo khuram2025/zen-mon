@@ -34,6 +34,8 @@ export type EscalationPolicy = {
   steps: PolicyStep[]
   used_by_rules: number
   updated_at?: string | null
+  /** The server breaks ties between policies claiming one priority by created_at (oldest first). */
+  created_at?: string | null
 }
 
 /** Editor state: numbers as typed text so a half-typed field is not coerced. */

@@ -338,6 +338,7 @@ async def coverage(days: int = Query(default=7, ge=1, le=31), db: AsyncSession =
     all_targets += [t for p in policies.values() for t in p.fallback_targets]
     await directory.prime(all_targets, now)
 
+    usable = await eps.usable_direct_kinds(db)
     out_prio: dict[str, Any] = {}
     unrouted = []
     for p in prio.PRIORITIES:
@@ -352,14 +353,25 @@ async def coverage(days: int = Query(default=7, ge=1, le=31), db: AsyncSession =
         gaps, ok = [], True
         if policy:
             fb = directory.resolve(policy.fallback_targets, now)
+            fb_ok = eps.deliverable(fb, usable)
+            kinds = {r.get("kind") for r in fb.recipients}
             for i, st in enumerate(policy.steps):
                 res = directory.resolve(st.targets, now)
+                kinds |= {r.get("kind") for r in res.recipients}
                 gaps += [f"Step {i + 1}: {g}" for g in res.gaps]
                 if res.empty:
                     ok = False if fb.empty else ok
                     gaps.append(f"Step {i + 1} reaches nobody now"
                                 + ("; the fallback route would be used." if not fb.empty
                                    else " and there is no working fallback."))
+                elif not eps.deliverable(res, usable):
+                    ok = ok if fb_ok else False
+                    gaps.append(f"Step {i + 1} only pages people and no gateway can deliver those pages"
+                                + ("; the fallback route would be used." if fb_ok
+                                   else " and there is no working fallback."))
+            targets = [t for st in policy.steps for t in st.targets] + list(policy.fallback_targets)
+            gaps += eps.direct_page_gaps(targets_people=eps.pages_people(targets),
+                                         recipient_kinds=kinds, usable=usable)
         out_prio[p] = {"policy_id": d["id"], "policy_name": d["name"], "steps_ok": ok,
                        "steps": len(policy.steps) if policy else 0, "gaps": gaps}
 
@@ -386,4 +398,5 @@ async def coverage(days: int = Query(default=7, ge=1, le=31), db: AsyncSession =
             no_contacts.append({"id": uid, "name": person.name, "reason": "No email or SMS contact method"})
     return {"at": now, "priorities": out_prio, "unrouted_priorities": unrouted,
             "schedules_without_members": without_members, "schedule_gaps": schedule_gaps,
-            "users_without_contacts": no_contacts}
+            "users_without_contacts": no_contacts,
+            "direct_page_gateways": {"email": "email" in usable, "sms": "sms" in usable}}

@@ -480,22 +480,24 @@ async def sweep_legacy_escalations(db: AsyncSession) -> dict[str, int]:
 # same ``metadata->'escalation'`` with ``"mode": "policy"`` and is claimed with
 # the same compare-and-set, so two sweeps (two workers, or a retry) page a step
 # once. Sends name people directly (``ctx["recipients"]``) and channels; the
-# delivery keys are "escalation:S<step>:r<repeat>", "review:<n>",
-# "ack_expired:<n>" and "fallback:S<step>".
+# delivery keys are "trigger:S0" (the step-0 page at delay 0, groupable for a
+# P3/P4 warning like any trigger, minus the rule's own already-paged
+# channels), "escalation:S<step>:r<repeat>" (":x<n>" after the n-th expired
+# acknowledgement), "review:<n>", "ack_expired:<n>" and
+# "fallback:S<step>[:r<repeat>][:x<n>]". The policy takes an incident over
+# with a state anchored at that moment, so step 0 is always next.
 
-def _policy_sweep_sql() -> str:
+POLICY_SWEEP_BATCH = 1000
+
+
+def _policy_sweep_sql(*, ids_only: bool = False) -> str:
+    """The policy sweep's candidates. ``ids_only``: every candidate id, most
+    urgent work first — closures of resolved incidents (their all-clear),
+    then by priority (P1 first), then the newest incident — so a backlog
+    never starves today's P1 behind old warnings. Otherwise: the full rows
+    of the ids in ``:ids`` that are still candidates."""
     route = eps.route_policy_sql("a", "r")
-    return f"""
-    SELECT a.id, a.rule_id, a.device_id, a.server_id, a.service_check_id,
-           a.status, a.severity AS alert_severity, a.priority AS alert_priority, a.message,
-           a.triggered_at, a.resolved_at, a.acknowledged_at, a.acknowledged_by, a.assigned_to,
-           a.metadata, {suppressed_sql('a')} AS suppressed,
-           r.id AS eff_rule_id, r.name AS rule_name, r.metric, r.operator, r.threshold,
-           r.conditions, r.condition_logic, r.severity AS rule_severity, r.priority AS rule_priority,
-           r.notify_channels, r.recovery_alert, r.escalation_policy_id,
-           d.hostname AS device_hostname, host(d.ip_address) AS device_ip,
-           s.hostname AS server_hostname, sc.name AS check_name,
-           {route} AS route_policy_id
+    where = f"""
     FROM alerts a
     JOIN alert_rules r ON r.id = {effective_rule_sql('a')}
     LEFT JOIN devices d ON d.id = a.device_id
@@ -509,9 +511,26 @@ def _policy_sweep_sql() -> str:
              AND a.metadata->'escalation'->>'mode' = 'policy'
              AND COALESCE(a.metadata->'escalation'->>'closed', 'false') <> 'true'
              AND a.resolved_at > now() - interval '1 day')
-      )
-    ORDER BY a.triggered_at
-    LIMIT 1000
+      )"""
+    if ids_only:
+        rank = (f"CASE {prio.priority_sql('a', 'r')} WHEN 'P1' THEN 1 WHEN 'P2' THEN 2"
+                f" WHEN 'P3' THEN 3 WHEN 'P4' THEN 4 ELSE 5 END")
+        return (f"SELECT a.id {where}"
+                f" ORDER BY CASE WHEN a.status = 'resolved' THEN 0 ELSE 1 END, {rank},"
+                f" a.triggered_at DESC, a.id")
+    return f"""
+    SELECT a.id, a.rule_id, a.device_id, a.server_id, a.service_check_id,
+           a.status, a.severity AS alert_severity, a.priority AS alert_priority, a.message,
+           a.triggered_at, a.resolved_at, a.acknowledged_at, a.acknowledged_by, a.assigned_to,
+           a.metadata, {suppressed_sql('a')} AS suppressed,
+           r.id AS eff_rule_id, r.name AS rule_name, r.metric, r.operator, r.threshold,
+           r.conditions, r.condition_logic, r.severity AS rule_severity, r.priority AS rule_priority,
+           r.notify_channels, r.recovery_alert, r.escalation_policy_id,
+           d.hostname AS device_hostname, host(d.ip_address) AS device_ip,
+           s.hostname AS server_hostname, sc.name AS check_name,
+           {route} AS route_policy_id
+    {where}
+      AND a.id = ANY(CAST(:ids AS uuid[]))
 """
 
 
@@ -565,7 +584,7 @@ def incident_links(base: str, alert_id) -> tuple[str, str]:
 async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Policy, *,
                            channels: list[str], people: list[dict], event: str,
                            links: tuple[str, str], fallback: bool = False,
-                           owner_name: str | None = None) -> int:
+                           owner_name: str | None = None, groupable: bool = False) -> int:
     """One policy notification (step page, repeat, review or acknowledgement
     expiry) to ``channels`` and ``people``. Returns deliveries (held counts)."""
     from app.services.host_alert_service import dispatch_to_channels
@@ -647,7 +666,9 @@ async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Po
         "alert_id": str(row.id), "delivery_event": event,
         "recipients": [{"kind": r["kind"], "address": r["address"], "user_id": r.get("user_id"),
                         "label": r.get("label") or r.get("user_name")} for r in people],
-        "groupable": False,
+        # Only the step-0 page of a P3/P4 warning may be held for a digest;
+        # escalations, repeats, reviews and expiries always go out at once.
+        "groupable": bool(groupable),
         "email_overrides": {"incident_url": view_url, "ack_url": ack_url, "priority": priority},
         **incident,
     })
@@ -693,17 +714,29 @@ async def sweep_policy_escalations(db: AsyncSession, *, now: datetime | None = N
               "ack_expired": 0, "fallbacks": 0, "closed": 0}
     if not await eps.supported(db):
         return counts
-    rows = (await db.execute(text(_policy_sweep_sql()))).fetchall()
-    counts["checked"] = len(rows)
+    ids = [str(r[0]) for r in (await db.execute(text(_policy_sweep_sql(ids_only=True)))).fetchall()]
+    await db.commit()
+    directory = eps.Directory(db)
+    from app.api.v1.alert_engine import _dashboard_url
+    base_url = await _dashboard_url(db, "") if ids else ""
+    for start in range(0, len(ids), POLICY_SWEEP_BATCH):
+        chunk = ids[start:start + POLICY_SWEEP_BATCH]
+        found = {str(r.id): r for r in (await db.execute(text(_policy_sweep_sql()),
+                                                         {"ids": chunk})).fetchall()}
+        rows = [found[i] for i in chunk if i in found]
+        counts["checked"] += len(rows)
+        await _sweep_policy_rows(db, rows, now, base_url, directory, counts)
+    return counts
+
+
+async def _sweep_policy_rows(db: AsyncSession, rows, now, base_url, directory, counts) -> None:
+    """One batch of the policy sweep, in the order given."""
     if not rows:
-        return counts
+        return
     policy_ids = {str(r.route_policy_id) for r in rows if r.route_policy_id}
     policy_ids |= {str((r.metadata or {}).get("escalation", {}).get("policy_id"))
                    for r in rows if eps.is_policy_state((r.metadata or {}).get("escalation"))}
     policies = await eps.load_policies(db, [p for p in policy_ids if p and p != "None"])
-    directory = eps.Directory(db)
-    from app.api.v1.alert_engine import _dashboard_url
-    base_url = await _dashboard_url(db, "")
     for row in rows:
         try:
             clock = now or datetime.now(timezone.utc)
@@ -718,18 +751,29 @@ async def sweep_policy_escalations(db: AsyncSession, *, now: datetime | None = N
             policy = policies.get(str(row.route_policy_id))
             if policy is None:
                 continue
-            if state is not None and state.get("policy_id") != policy.id:
-                # The route changed (rule now names another policy): keep
-                # who was paged for the all-clear, restart under the new one.
-                state = dict(eps.new_state(policy.id, carry=state),
-                             people=list(state.get("people") or []))
             # Escalate only once the trigger was announced (quiet hours or a
             # flap cooldown leave it unannounced: paging step 1 first would
             # page the backup before the primary).
             if not _was_notified(meta):
                 continue
+            if state is None or state.get("policy_id") != policy.id:
+                # Takeover: the policy owns this incident from now on (a new
+                # incident, one a legacy route or another policy escalated, or
+                # an old incident whose rule / priority default just changed).
+                # Its steps and reviews count from this moment, so step 0 is
+                # next — never the highest step at once. Who was paged before
+                # still gets the all-clear. Claimed before anything is planned.
+                fresh = eps.new_state(policy.id, at=clock,
+                                      carry=stored if isinstance(stored, dict) else None)
+                if state is not None:
+                    fresh["people"] = list(state.get("people") or [])
+                if not await _store_state(db, row.id, fresh, expected=stored):
+                    await db.rollback()
+                    continue
+                await db.commit()
+                state = stored = fresh
             anchor = ack_anchor(row.triggered_at, meta)
-            plan = eps.plan_policy(policy, state if state is not None else stored, status=row.status,
+            plan = eps.plan_policy(policy, state, status=row.status,
                                    anchor=anchor, acknowledged_at=row.acknowledged_at, now=clock,
                                    suppressed=bool(row.suppressed))
             if plan is None or plan.kind == "close":
@@ -738,11 +782,18 @@ async def sweep_policy_escalations(db: AsyncSession, *, now: datetime | None = N
         except Exception:
             await db.rollback()
             logger.exception("policy escalation sweep failed for alert %s", row.id)
-    return counts
+
+
+def _initial_groupable(row) -> bool:
+    """The step-0 page may be grouped like any trigger: a warning/info
+    incident of priority P3/P4 (alert_funnel.notification_fields)."""
+    sev = str(row.alert_severity or row.rule_severity or "warning").strip().lower()
+    return sev in ("warning", "info") and not prio.is_urgent(_priority_of(row))
 
 
 async def _run_plan(db, row, policy, plan, state, stored, clock, links, directory, counts) -> None:
     new_state = eps.apply_plan(state if state is not None else stored, plan, policy, clock)
+    initial = eps.is_initial_page(policy, plan)
     if plan.kind == "review" and plan.covered:
         # A step page went out at the review's due time: it was the update.
         if await _store_state(db, row.id, new_state, expected=stored):
@@ -786,6 +837,12 @@ async def _run_plan(db, row, policy, plan, state, stored, clock, links, director
         new_state["last_people"], new_state["last_channels"] = people, channels
     new_state["people"] = _merge_people(new_state.get("people") or [], people)
     new_state["channels"] = _merge_ids(new_state.get("channels") or [], channels)
+    send_channels = channels
+    if initial:
+        # The base trigger already paged the rule's own channels: step 0 does
+        # not page them twice (they stay recorded for the all-clear).
+        base = {str(c) for c in (row.notify_channels or [])}
+        send_channels = [c for c in channels if c not in base]
 
     # Claim (compare-and-set), then record, commit, and only then send.
     if plan.kind == "ack_expired":
@@ -822,20 +879,28 @@ async def _run_plan(db, row, policy, plan, state, stored, clock, links, director
 
     if not (people or channels):
         return
-    event = eps.fallback_event(plan.step) if fallback_used and plan.step >= 0 else eps.delivery_event(plan)
-    sent = await _dispatch_policy(db, row, plan, policy, channels=channels, people=people,
+    count_key = {"escalate": "escalated", "repeat": "repeated", "review": "reviews",
+                 "ack_expired": "ack_expired"}[plan.kind]
+    if not (people or send_channels):
+        counts[count_key] += 1          # step 0 reached only the rule's own (already paged) channels
+        return
+    expiries = int(new_state.get("expiries") or 0)
+    step_event = eps.delivery_event(plan, expiries=expiries, initial=initial)
+    fb_event = eps.fallback_event(plan.step, repeat=plan.repeat, expiries=expiries)
+    event = fb_event if fallback_used and plan.step >= 0 else step_event
+    sent = await _dispatch_policy(db, row, plan, policy, channels=send_channels, people=people,
                                   event=event, links=links, fallback=fallback_used,
-                                  owner_name=owner_name)
+                                  owner_name=owner_name,
+                                  groupable=initial and _initial_groupable(row))
     await db.commit()
-    counts[{"escalate": "escalated", "repeat": "repeated", "review": "reviews",
-            "ack_expired": "ack_expired"}[plan.kind]] += 1
+    counts[count_key] += 1
     if fallback_used:
         counts["fallbacks"] += 1
     problem = eps.delivery_problem(sent, True)
     if (problem and not fallback_used and plan.kind != "review" and plan.step >= 0
             and policy.fallback_targets):
         await _route_failed(db, row, policy, plan, new_state, directory, clock, links,
-                            owner_name, detail, counts)
+                            owner_name, detail, counts, step_event=step_event, fb_event=fb_event)
     elif problem:
         await record_event(db, row.id, "route_failed", source="system", old_status=row.status,
                            new_status=row.status, reason="No delivery of this notification succeeded.",
@@ -844,7 +909,7 @@ async def _run_plan(db, row, policy, plan, state, stored, clock, links, director
 
 
 async def _route_failed(db, row, policy, plan, state, directory, clock, links, owner_name,
-                        detail, counts) -> None:
+                        detail, counts, *, step_event: str, fb_event: str) -> None:
     """Every delivery of a step failed: record it and use the fallback route."""
     fb = directory.resolve(policy.fallback_targets, clock)
     people, channels = _person_keys(fb.recipients), fb.channel_ids
@@ -852,7 +917,7 @@ async def _route_failed(db, row, policy, plan, state, directory, clock, links, o
                        new_status=row.status,
                        reason=f"No delivery for {_step_label(policy, plan.step).lower()} succeeded;"
                               f" fallback route used.",
-                       detail={**detail, "event": eps.delivery_event(plan), "fallback": True,
+                       detail={**detail, "event": step_event, "fallback": True,
                                "fallback_channels": channels, "gaps": fb.gaps})
     expected = state
     new_state = dict(state)
@@ -866,7 +931,7 @@ async def _route_failed(db, row, policy, plan, state, directory, clock, links, o
     await db.commit()
     if people or channels:
         await _dispatch_policy(db, row, plan, policy, channels=channels, people=people,
-                               event=eps.fallback_event(plan.step), links=links, fallback=True,
+                               event=fb_event, links=links, fallback=True,
                                owner_name=owner_name)
         await db.commit()
         counts["fallbacks"] += 1
@@ -944,7 +1009,8 @@ async def explain_route(db: AsyncSession, alert_id, *, now: datetime | None = No
         if policy is None:
             return out
         state = stored if eps.is_policy_state(stored) and stored.get("policy_id") == policy.id else None
-        st = state or eps.new_state(policy.id)
+        # Not taken over yet: the sweep will anchor its steps at takeover.
+        st = state or eps.new_state(policy.id, at=now)
         next_at, next_what = eps.next_action(policy, st, status=row.status, anchor=anchor,
                                              acknowledged_at=row.acknowledged_at, now=now,
                                              suppressed=bool(row.suppressed))

@@ -163,6 +163,36 @@ def test_fallback_on_an_empty_step_and_on_all_deliveries_failed():
     assert eps.fallback_event(2) == "fallback:S2"
 
 
+def test_delivery_keys_are_new_per_repeat_and_per_expired_acknowledgement():
+    pol = p1()
+    assert eps.fallback_event(2, repeat=1) == "fallback:S2:r1"
+    assert eps.fallback_event(2, repeat=1, expiries=2) == "fallback:S2:r1:x2"
+    repeat = eps.Plan("repeat", step=1, repeat=1)
+    assert eps.delivery_event(repeat) == "escalation:S1:r1"
+    assert eps.delivery_event(repeat, expiries=1) == "escalation:S1:r1:x1"
+    first = eps.Plan("escalate", step=0)
+    assert eps.is_initial_page(pol, first) and eps.delivery_event(first, initial=True) == "trigger:S0"
+    assert not eps.is_initial_page(pol, eps.Plan("escalate", step=1))
+    assert not eps.is_initial_page(p1(steps=[eps.Step(0, 5, "Late", [])]), first)
+
+
+def test_a_takeover_state_anchors_steps_and_reviews_at_the_takeover():
+    pol = p1()
+    st = eps.new_state(pol.id, at=at(120))                 # an incident open since T0
+    plan = run(pol, st, at(120))
+    assert (plan.kind, plan.step, plan.skipped) == ("escalate", 0, [])
+    st = eps.apply_plan(st, plan, pol, at(120))
+    assert run(pol, st, at(124)) is None
+    assert run(pol, st, at(125)).step == 1
+    # Acknowledged long ago: the review clock starts at the takeover.
+    acked = eps.new_state(pol.id, at=at(120))
+    assert run(pol, acked, at(120), status="acknowledged", ack=at(100)) is None
+    assert run(pol, acked, at(135), status="acknowledged", ack=at(100)).review == 1
+    when, what = eps.next_action(pol, acked, status="acknowledged", anchor=T0, acknowledged_at=at(100),
+                                 now=at(120))
+    assert (when, what) == (at(135), "review:1")
+
+
 def test_policy_without_steps_only_reviews():
     pol = p1(steps=[], repeat_minutes=None)
     assert run(pol, None, at(10)) is None
@@ -222,3 +252,15 @@ def test_validation_normalises_and_rejects():
 def test_address_masking():
     assert eps.mask_address("email", "aisha@example.test") == "a***@example.test"
     assert eps.mask_address("sms", "+966501234567") == "•••567"
+
+
+def test_a_takeover_restarts_the_acknowledgement_expiry_clock():
+    """A policy with an expiry that takes over an incident acknowledged long
+    ago does not re-open it at once: the clock starts at the takeover."""
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc)
+    taken = t0 + timedelta(hours=6)
+    st = eps.new_state("p1", at=taken)
+    assert eps._ack_clock(st, t0) == taken
+    assert eps._ack_clock(st, taken + timedelta(minutes=5)) == taken + timedelta(minutes=5)
+    assert eps._ack_clock(None, t0) == t0 and eps._ack_clock(st, None) is None

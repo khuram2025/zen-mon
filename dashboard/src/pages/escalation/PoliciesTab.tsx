@@ -25,7 +25,7 @@ import { toast } from '@/components/ui/Toast'
 import { fmtAlertDate } from '@/components/alerts/format'
 import { useDirectory, useDraftDryRun, usePolicies, usePolicyPreview } from '@/features/escalation/api'
 import {
-  MAX_STEPS, PRIORITIES, PRIORITY_META, addTarget, draftFromPolicy, draftOutline, emptyPolicyDraft, fmtMinutes, fmtOffset,
+  DEFAULT_CONFLICT_REFUSAL, MAX_STEPS, PRIORITIES, PRIORITY_META, addTarget, draftFromPolicy, draftOutline, emptyPolicyDraft, fmtMinutes, fmtOffset,
   hasErrors, newStep, policyDirty, policyPayload, removeTarget, reviewText, stepSummary, validatePolicy,
   type Directory, type PolicyErrors,
 } from '@/features/escalation/model'
@@ -65,7 +65,7 @@ export function PoliciesTab({ canManage, focusId }: { canManage: boolean; focusI
         <div className="flex flex-col gap-2 border-b border-border p-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-sm font-semibold">Escalation policies</h2>
-            <p className="text-xs text-muted">A rule can name a policy; otherwise the policy that is the default for the incident&apos;s priority applies.</p>
+            <p className="text-xs text-muted">A rule can name a policy; otherwise its own legacy tiers apply; otherwise the policy that is the default for the incident&apos;s priority.</p>
           </div>
           {canManage && (
             <Button size="sm" onClick={() => setEditing('new')}><Plus className="h-3.5 w-3.5" aria-hidden /> New policy</Button>
@@ -145,7 +145,7 @@ export function PoliciesTab({ canManage, focusId }: { canManage: boolean; focusI
         onOpenChange={(o) => { if (!o) setDeleting(null) }}
         title={`Delete “${deleting?.name ?? ''}”?`}
         description={deleting?.used_by_rules
-          ? `${deleting.used_by_rules} rule${deleting.used_by_rules === 1 ? '' : 's'} name this policy. They fall back to the priority default policy, or to their legacy tiers.`
+          ? `${deleting.used_by_rules} rule${deleting.used_by_rules === 1 ? '' : 's'} name this policy. They fall back to their own legacy tiers, otherwise the priority default policy, otherwise no escalation.`
           : 'Incidents of the priorities it is the default for will no longer escalate through it.'}
         confirmText="Delete policy"
         destructive
@@ -292,10 +292,11 @@ export function PolicyEditorBody({ draft, setDraft, errors, dir, readOnly, other
           </div>
           {draft.default_priorities.some((p) => claimedBy(p).length) && (
             <p className="flex items-start gap-1 text-xs text-warning"><AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden />
-              {draft.default_priorities.filter((p) => claimedBy(p).length).map((p) => `${p} is also the default in ${claimedBy(p).join(', ')}`).join('; ')}. Only the first by name is used.
+              {draft.default_priorities.filter((p) => claimedBy(p).length).map((p) => `${p} is also the default in ${claimedBy(p).join(', ')}`).join('; ')}
+              {draft.enabled ? `: ${DEFAULT_CONFLICT_REFUSAL}.` : `. This policy is disabled, so it can be saved, but enabling it later will be refused unless the other policy drops it.`}
             </p>
           )}
-          <p className="text-[11px] text-muted">Used for incidents whose rule names no policy. Leave all off for a policy that rules choose explicitly.</p>
+          <p className="text-[11px] text-muted">Used for incidents whose rule names no policy and has no legacy tiers. Leave all off for a policy that rules choose explicitly.</p>
         </fieldset>
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -306,7 +307,7 @@ export function PolicyEditorBody({ draft, setDraft, errors, dir, readOnly, other
             <MinutesField value={draft.repeat_minutes} max={1440} disabled={readOnly} onChange={(v) => set({ repeat_minutes: v })} placeholder="never" invalid={!!errors.repeat_minutes} />
           </FormField>
           <FormField label="Max repeats" error={errors.max_repeats} hint="Per step">
-            <Input type="number" min={0} max={100} className="w-24" value={draft.max_repeats} disabled={readOnly} onChange={(e) => set({ max_repeats: e.target.value })} />
+            <Input type="number" min={0} max={20} className="w-24" value={draft.max_repeats} disabled={readOnly} onChange={(e) => set({ max_repeats: e.target.value })} />
           </FormField>
           <FormField label="Unresolved updates every" error={errors.review_minutes} hint="Continue after acknowledgement, until resolved">
             <MinutesField value={draft.review_minutes} disabled={readOnly} onChange={(v) => set({ review_minutes: v })} placeholder="none" invalid={!!errors.review_minutes} />

@@ -7,8 +7,9 @@
  *  - Priority P1 Critical, P2 High, P3 Warning, P4 Information. A rule with no
  *    priority derives it from severity: critical -> P2, warning -> P3,
  *    info -> P4. P1 is only ever chosen explicitly.
- *  - Routing precedence: the rule's policy > the enabled policy that is the
- *    default for the alert priority > the rule's legacy tiers > nothing.
+ *  - Routing precedence: the rule's own enabled policy > the rule's own legacy
+ *    tiers > the enabled policy that is the default for the alert priority >
+ *    nothing. A priority default never takes over a rule that has tiers.
  *  - Step 0 (delay 0) pages in addition to the rule's own channels; later
  *    steps fire at their delay while the incident is active and unacknowledged.
  *  - Only P3/P4 trigger notifications are ever grouped; P1/P2, recoveries,
@@ -307,6 +308,7 @@ export function policyFromApi(raw: unknown): EscalationPolicy {
     steps,
     used_by_rules: Math.max(0, intOr(r.used_by_rules, 0)),
     updated_at: strOrNull(r.updated_at),
+    created_at: strOrNull(r.created_at),
   }
 }
 
@@ -471,17 +473,102 @@ export function draftOutline(d: PolicyDraft, dir: Directory): { steps: OutlineSt
   return { steps, warnings }
 }
 
-/** Default policy for a priority: the enabled policy whose default_priorities contains it (first by name). */
+/**
+ * The order the server uses when several enabled policies claim one priority
+ * (escalation_policy_service: ORDER BY created_at, id): oldest first. Without
+ * created_at on both, by name (then id) so the choice is still stable.
+ */
+function defaultClaimOrder(a: EscalationPolicy, b: EscalationPolicy): number {
+  const ta = a.created_at ? Date.parse(a.created_at) : NaN
+  const tb = b.created_at ? Date.parse(b.created_at) : NaN
+  if (Number.isFinite(ta) && Number.isFinite(tb)) {
+    if (ta !== tb) return ta - tb
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+  }
+  return a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+}
+
+/** Default policy for a priority: the enabled policy whose default_priorities contains it (the oldest when several claim it). */
 export function policyForPriority(policies: EscalationPolicy[], p: Priority): EscalationPolicy | null {
   return [...policies]
     .filter((x) => x.enabled && x.default_priorities.includes(p))
-    .sort((a, b) => a.name.localeCompare(b.name))[0] ?? null
+    .sort(defaultClaimOrder)[0] ?? null
 }
 
-/** Priorities claimed as default by more than one enabled policy (only the first by name is used). */
+/**
+ * Priorities claimed as default by more than one enabled policy, in the order the server picks them (the first is used).
+ * The server refuses to save a second enabled claim (409), so these only come from older data.
+ */
 export function priorityConflicts(policies: EscalationPolicy[]): Array<{ priority: Priority; policies: string[] }> {
-  return PRIORITIES.map((p) => ({ priority: p, policies: policies.filter((x) => x.enabled && x.default_priorities.includes(p)).map((x) => x.name).sort() }))
+  return PRIORITIES.map((p) => ({ priority: p, policies: policies.filter((x) => x.enabled && x.default_priorities.includes(p)).sort(defaultClaimOrder).map((x) => x.name) }))
     .filter((x) => x.policies.length > 1)
+}
+
+/** Shown next to a default-priority conflict: the server refuses the save (409) while another enabled policy claims it. */
+export const DEFAULT_CONFLICT_REFUSAL = 'saving will be refused unless the other policy drops it'
+
+/* ── Rule escalation (the rule wizard and the rule list) ──────────────── */
+
+/**
+ * What the server routes a saved rule's incidents through: the rule's own
+ * enabled policy > the rule's own legacy tiers > the priority default policy >
+ * nothing. `policyEnabled` is unknown (undefined) when the policy list is not
+ * loaded; the server then still has the policy, so it counts as enabled.
+ */
+export function ruleRouteSource(r: { policyId?: string | null; policyEnabled?: boolean; tiers: number; defaultPolicy: EscalationPolicy | null }): RouteSource {
+  if (r.policyId && r.policyEnabled !== false) return 'rule'
+  if (r.tiers > 0) return 'legacy_levels'
+  if (r.defaultPolicy) return 'priority_default'
+  return 'none'
+}
+
+const tierCount = (n: number) => `${n} legacy tier${n === 1 ? '' : 's'}`
+
+/** Legacy-tiers mode: the tiers win over the priority default; with no tiers the default (or nothing) applies. */
+export function legacyTiersText(tiers: number, priority: Priority, defaultPolicy: EscalationPolicy | null): string {
+  if (tiers > 0) {
+    return defaultPolicy
+      ? `These tiers take precedence over the ${priority} default policy (${defaultPolicy.name}).`
+      : `No policy is the default for ${priority}; these tiers are this rule's only escalation.`
+  }
+  return defaultPolicy
+    ? `No tiers yet: without one, the ${priority} default policy (${defaultPolicy.name}) applies.`
+    : `No tiers yet: without one, this rule's incidents do not escalate (no policy is the default for ${priority}).`
+}
+
+/** Tiers the wizard drops on save outside legacy mode, and what applies instead. */
+export function tiersRemovedText(tiers: number, mode: 'default' | 'policy', priority: Priority, defaultPolicy: EscalationPolicy | null): string | null {
+  if (tiers <= 0) return null
+  const lead = `The ${tierCount(tiers)} on this rule ${tiers === 1 ? 'is' : 'are'} removed when you save`
+  if (mode === 'policy') return `${lead}; the chosen policy replaces ${tiers === 1 ? 'it' : 'them'}.`
+  return defaultPolicy
+    ? `${lead}, so the ${priority} default policy applies.`
+    : `${lead}; no policy is the default for ${priority}, so this rule will not escalate.`
+}
+
+/**
+ * A chosen policy that is disabled routes nothing: the server falls back to
+ * the rule's own tiers, otherwise the priority default, otherwise nothing.
+ * `tiersAfterSave` is what the rule keeps (the wizard drops tiers in policy mode).
+ */
+export function disabledPolicyText(priority: Priority, defaultPolicy: EscalationPolicy | null, tiersAfterSave = 0): string {
+  const now = tiersAfterSave > 0 ? `its ${tierCount(tiersAfterSave)}` : defaultPolicy ? `the ${priority} default policy (${defaultPolicy.name})` : 'no escalation'
+  return `Disabled: until it is enabled, this rule falls back to its own legacy tiers, otherwise the ${priority} default policy, otherwise no escalation — here: ${now}.`
+}
+
+/** One line for the wizard's Review step and the rule list. */
+export function ruleEscalationSummary(r: {
+  policy: EscalationPolicy | null; policyId?: string | null; tiers: number[]; priority: Priority; defaultPolicy: EscalationPolicy | null
+}): string {
+  const source = ruleRouteSource({ policyId: r.policyId ?? r.policy?.id, policyEnabled: r.policy?.enabled, tiers: r.tiers.length, defaultPolicy: r.defaultPolicy })
+  const tiers = `${tierCount(r.tiers.length)} (${r.tiers.map((m) => `${m}m`).join(' → ')})`
+  const disabled = r.policy && !r.policy.enabled ? `Policy ${r.policy.name} is disabled — ` : ''
+  switch (source) {
+    case 'rule': return `Policy: ${r.policy?.name ?? 'chosen on the rule'}`
+    case 'legacy_levels': return `${disabled}${tiers}${r.defaultPolicy ? `, taking precedence over the ${r.priority} default (${r.defaultPolicy.name})` : ''}`
+    case 'priority_default': return `${disabled}${r.priority} default: ${r.defaultPolicy!.name}`
+    default: return `${disabled}None (no default policy for ${r.priority})`
+  }
 }
 
 /** One line for a policy list row: "3 steps · 0 → 5 min → 15 min". */

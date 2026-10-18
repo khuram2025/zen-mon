@@ -66,7 +66,7 @@ _DUE_SQL = """
            r.notify_channels, r.metric, r.operator, r.threshold, r.trigger_on,
            r.conditions, r.condition_logic,
            r.email_subject, r.email_body, r.sms_template,
-           r.schedule_start, r.schedule_end, r.schedule_days, r.priority AS rule_priority,
+           r.schedule_start, r.schedule_end, r.schedule_days, {rule_priority} AS rule_priority,
            d.status AS device_status, d.hostname AS device_hostname,
            host(d.ip_address) AS device_ip,
            sc.status AS check_status, sc.name AS check_name,
@@ -79,6 +79,14 @@ _DUE_SQL = """
       AND (a.metadata->>'hold_until') IS NOT NULL
       AND (a.metadata->>'hold_until')::timestamptz <= now()
 """
+
+
+async def _due_sql(db: AsyncSession) -> str:
+    """_DUE_SQL with the rule priority column only once migrate-164 added it
+    (alert_funnel.rule_priority_column): a code update that lands before its
+    migration must not stop confirming held alerts."""
+    col = await alert_funnel.rule_priority_column(db)
+    return _DUE_SQL.format(rule_priority="r.priority" if col == "priority" else "NULL")
 
 
 async def _settle(db: AsyncSession, alert_id, *, status: str, extra: dict) -> bool:
@@ -203,7 +211,7 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
 
 async def sweep_pending_holds(db: AsyncSession) -> dict[str, int]:
     """Settle every pending alert whose hold has expired."""
-    rows = (await db.execute(text(_DUE_SQL))).fetchall()
+    rows = (await db.execute(text(await _due_sql(db)))).fetchall()
     if not rows:
         return {"checked": 0, "confirmed": 0, "cancelled": 0, "suppressed": 0}
 

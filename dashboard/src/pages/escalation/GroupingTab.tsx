@@ -107,13 +107,13 @@ function GroupingSettingsCard({ canManage }: { canManage: boolean }) {
             <Input type="number" min={0} max={3600} disabled={ro} value={Number.isFinite(form.group_wait_seconds) ? form.group_wait_seconds : ''} onChange={(e) => set({ group_wait_seconds: num(e.target.value) })} />
           </FormField>
           <FormField label="Group interval (seconds)" error={errors.group_interval_seconds} hint="Later events join the open digest">
-            <Input type="number" min={0} max={86400} disabled={ro} value={Number.isFinite(form.group_interval_seconds) ? form.group_interval_seconds : ''} onChange={(e) => set({ group_interval_seconds: num(e.target.value) })} />
+            <Input type="number" min={30} max={86400} disabled={ro} value={Number.isFinite(form.group_interval_seconds) ? form.group_interval_seconds : ''} onChange={(e) => set({ group_interval_seconds: num(e.target.value) })} />
           </FormField>
           <FormField label="Max incidents per digest" error={errors.max_items}>
-            <Input type="number" min={1} max={500} disabled={ro} value={Number.isFinite(form.max_items) ? form.max_items : ''} onChange={(e) => set({ max_items: num(e.target.value) })} />
+            <Input type="number" min={5} max={500} disabled={ro} value={Number.isFinite(form.max_items) ? form.max_items : ''} onChange={(e) => set({ max_items: num(e.target.value) })} />
           </FormField>
           <FormField label="Budget per recipient / hour" error={errors.budget_per_recipient_per_hour} hint="0 = no budget">
-            <Input type="number" min={0} max={1000} disabled={ro} value={Number.isFinite(form.budget_per_recipient_per_hour) ? form.budget_per_recipient_per_hour : ''} onChange={(e) => set({ budget_per_recipient_per_hour: num(e.target.value) })} />
+            <Input type="number" min={0} max={10000} disabled={ro} value={Number.isFinite(form.budget_per_recipient_per_hour) ? form.budget_per_recipient_per_hour : ''} onChange={(e) => set({ budget_per_recipient_per_hour: num(e.target.value) })} />
           </FormField>
         </div>
         <label className="flex items-center gap-2 text-sm">

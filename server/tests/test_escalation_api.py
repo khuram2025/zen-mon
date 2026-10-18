@@ -304,3 +304,28 @@ def test_response_targets_rules_and_alert_route(world):
         assert detail["ack_due_at"] is not None                                          # P1 target: 10 min
     with nobody(db) as c:
         assert c.get(f"/api/v1/alerts/{mine}/route").status_code == 403
+
+
+def test_direct_pages_without_a_usable_gateway_are_a_coverage_gap(world):
+    db, u = world["db"], world["users"]
+    db.execute("DELETE FROM alert_rules; DELETE FROM escalation_policies; DELETE FROM notification_gateways")
+    people = [{"type": "user", "id": u["lena"]}]
+    with manager(db) as c:
+        r = c.post("/api/v1/escalation-policies", json=_policy("Lead only", people, prio=["P1"]))
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        cov = c.get("/api/v1/oncall/coverage").json()
+        p1 = cov["priorities"]["P1"]
+        assert any("No usable SMTP or SMS gateway for direct pages" in g for g in p1["gaps"])
+        assert p1["steps_ok"] is False and cov["direct_page_gateways"] == {"email": False, "sms": False}
+        prev = c.post(f"/api/v1/escalation-policies/{pid}/preview", json={"priority": "P1"}).json()
+        assert any("No usable SMTP or SMS gateway for direct pages" in w for w in prev["warnings"])
+        # One enabled SMTP gateway, not flagged default, carries the direct email pages.
+        db.execute("INSERT INTO notification_gateways (name, type, config, is_default, enabled)"
+                   " VALUES ('mail', 'smtp', '{}'::jsonb, false, true)")
+        cov = c.get("/api/v1/oncall/coverage").json()
+        assert cov["direct_page_gateways"] == {"email": True, "sms": False}
+        assert not any("gateway" in g for g in cov["priorities"]["P1"]["gaps"])
+        assert cov["priorities"]["P1"]["steps_ok"] is True
+        prev = c.post(f"/api/v1/escalation-policies/{pid}/preview", json={"priority": "P1"}).json()
+        assert not any("gateway" in w for w in prev["warnings"])

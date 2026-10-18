@@ -18,7 +18,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { toast } from '@/components/ui/Toast'
 import { useCoverage, useDirectory, usePolicies, useResponseTargets } from '@/features/escalation/api'
 import {
-  PRIORITIES, PRIORITY_META, describeTarget, fmtMinutes, policyForPriority, priorityConflicts, priorityCoverageStatus,
+  DEFAULT_CONFLICT_REFUSAL, PRIORITIES, PRIORITY_META, describeTarget, fmtMinutes, policyForPriority, priorityConflicts, priorityCoverageStatus,
   recommendedPayload, recommendedPlan, validateRecommended, type Directory, type EscalationTab, type RecommendedForm,
 } from '@/features/escalation/model'
 import { PriorityBadge, StepTimeline, TargetChip } from '@/features/escalation/ui'
@@ -74,7 +74,7 @@ export function MatrixView({ policies, coverage, coverageError, targets, dir, ca
         <div className="min-w-0 text-sm">
           <p className="font-medium">Timers start when an incident is confirmed firing. Critical notification never waits for a warning digest.</p>
           <p className="text-xs text-muted">
-            A rule&apos;s own policy wins; otherwise the default policy for the incident&apos;s priority applies; otherwise the rule&apos;s legacy tiers. Acknowledging stops step escalation and assigns the owner; unresolved-incident updates continue until resolution.
+            A rule&apos;s own policy wins; otherwise the rule&apos;s legacy tiers; otherwise the default policy for the incident&apos;s priority. Acknowledging stops step escalation and assigns the owner; unresolved-incident updates continue until resolution.
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
@@ -94,7 +94,7 @@ export function MatrixView({ policies, coverage, coverageError, targets, dir, ca
           )}
           {conflicts.map((c) => (
             <p key={c.priority} className="flex items-start gap-1.5"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden />
-              <span><b className="text-text">Route conflict for {c.priority}:</b> {c.policies.join(', ')} all claim it; only “{c.policies[0]}” is used.</span>
+              <span><b className="text-text">Route conflict for {c.priority}:</b> {c.policies.join(', ')} all claim it; only “{c.policies[0]}” is used, and {DEFAULT_CONFLICT_REFUSAL} — editing another of them must remove {c.priority} from it.</span>
             </p>
           ))}
         </div>

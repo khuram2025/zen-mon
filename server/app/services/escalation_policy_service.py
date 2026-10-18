@@ -289,14 +289,23 @@ def is_policy_state(state: Any) -> bool:
     return isinstance(state, dict) and state.get("mode") == STATE_MODE
 
 
-def new_state(policy_id: str, *, carry: Optional[dict] = None) -> dict:
+def new_state(policy_id: str, *, carry: Optional[dict] = None,
+              at: Optional[datetime] = None) -> dict:
     """Empty policy state. ``carry`` (a legacy state being taken over) keeps
-    the channels it paged so they still get the all-clear."""
+    the channels it paged so they still get the all-clear.
+
+    ``at`` is the takeover instant: the moment the policy sweep first owns
+    the incident (no state yet, a legacy state, or another policy's). Step
+    deadlines and the review clock then count from it, so enabling a policy
+    (or pointing a rule at one) starts every already-open incident at step 0
+    instead of paging its highest step at once — and an incident that was
+    acknowledged long ago does not get an immediate "Unresolved update"."""
+    iso = _ts(at).isoformat() if at is not None else None
     return {
         "mode": STATE_MODE, "policy_id": str(policy_id),
         "step": -1, "repeats": 0, "last_at": None,
         "reviews": 0, "last_review_at": None,
-        "expiries": 0, "anchor_at": None,
+        "expiries": 0, "anchor_at": iso, "taken_over_at": iso,
         "history": {},                    # step index -> first notified at
         "channels": [str(c) for c in ((carry or {}).get("channels") or [])],
         "people": [],                     # recipients ever paged (all-clear)
@@ -322,8 +331,26 @@ def escalation_anchor(state: Optional[dict], anchor: Optional[datetime]) -> Opti
     return _ts((state or {}).get("anchor_at")) or _ts(anchor)
 
 
+def _ack_clock(state: Optional[dict], acknowledged_at) -> Optional[datetime]:
+    """When the acknowledgement-expiry clock started: the acknowledgement, or
+    the policy's takeover of the incident if that is later. Enabling a policy
+    with an expiry must not re-open every incident acknowledged long ago."""
+    ack = _ts(acknowledged_at)
+    taken = _ts((state or {}).get("taken_over_at"))
+    if ack is None:
+        return None
+    return max(ack, taken) if taken else ack
+
+
+def review_anchor(state: Optional[dict], anchor: Optional[datetime]) -> Optional[datetime]:
+    """Reviews count from the announcement, or from the policy's takeover of
+    an incident that was already open."""
+    return _ts((state or {}).get("taken_over_at")) or _ts(anchor)
+
+
 def _review_due(policy: Policy, state: dict, anchor: datetime, now: datetime) -> Optional[int]:
     """The review number due now (missed ones are skipped), or None."""
+    anchor = review_anchor(state, anchor)
     every = policy.review_minutes
     if not every:
         return None
@@ -354,7 +381,7 @@ def plan_policy(policy: Policy, state: Optional[dict], *, status: str, anchor,
     current = int(st.get("step") if st.get("step") is not None else -1)
 
     if status == "acknowledged":
-        ack = _ts(acknowledged_at)
+        ack = _ack_clock(st, acknowledged_at)
         if policy.ack_expiry_minutes and ack and now >= ack + timedelta(minutes=policy.ack_expiry_minutes):
             return Plan("ack_expired", step=max(current, 0) if policy.steps else -1,
                         expiry=int(st.get("expiries") or 0) + 1)
@@ -379,7 +406,7 @@ def plan_policy(policy: Policy, state: Optional[dict], *, status: str, anchor,
         return Plan("repeat", step=current, repeat=int(st.get("repeats") or 0) + 1)
     n = _review_due(policy, st, base, now)
     if n:
-        due_at = base + timedelta(minutes=policy.review_minutes * n)
+        due_at = review_anchor(st, base) + timedelta(minutes=policy.review_minutes * n)
         covered = last_at is not None and last_at >= due_at - timedelta(seconds=REVIEW_COVER_S)
         return Plan("review", review=n, covered=covered)
     return None
@@ -416,12 +443,26 @@ def apply_plan(state: Optional[dict], plan: Plan, policy: Policy, now: datetime)
     return st
 
 
-def delivery_event(plan: Plan) -> str:
-    """Durable delivery key for a planned send (contract)."""
+def is_initial_page(policy: Policy, plan: Plan) -> bool:
+    """Step 0 with no delay: the policy's part of the first notification."""
+    first = policy.step(0)
+    return (plan.kind == "escalate" and plan.step == 0 and first is not None
+            and first.delay_minutes == 0)
+
+
+def delivery_event(plan: Plan, *, expiries: int = 0, initial: bool = False) -> str:
+    """Durable delivery key for a planned send (contract).
+
+    ``initial`` (:func:`is_initial_page`) is "trigger:S0": the first page,
+    which grouping may hold like any P3/P4 trigger. Step pages and repeats
+    after an expired acknowledgement carry the expiry count (":x<n>"), so a
+    repeat number reused after escalation re-opened is a new delivery, not a
+    duplicate of the one sent before the acknowledgement."""
+    x = f":x{expiries}" if expiries else ""
     if plan.kind == "escalate":
-        return f"escalation:S{plan.step}:r0"
+        return "trigger:S0" if initial and not expiries else f"escalation:S{plan.step}:r0{x}"
     if plan.kind == "repeat":
-        return f"escalation:S{plan.step}:r{plan.repeat}"
+        return f"escalation:S{plan.step}:r{plan.repeat}{x}"
     if plan.kind == "review":
         return f"review:{plan.review}"
     if plan.kind == "ack_expired":
@@ -429,8 +470,11 @@ def delivery_event(plan: Plan) -> str:
     raise ValueError(f"no delivery event for {plan.kind}")
 
 
-def fallback_event(step: int) -> str:
-    return f"fallback:S{step}"
+def fallback_event(step: int, *, repeat: int = 0, expiries: int = 0) -> str:
+    """Fallback key of a step: per repeat and per expiry, so a later repeat
+    (or a re-opened escalation) that falls back again is delivered again."""
+    return (f"fallback:S{step}" + (f":r{repeat}" if repeat else "")
+            + (f":x{expiries}" if expiries else ""))
 
 
 def coverage_problem(recipients: list, channels: list) -> Optional[str]:
@@ -456,7 +500,7 @@ def next_action(policy: Policy, state: Optional[dict], *, status: str, anchor,
     current = int(st.get("step") if st.get("step") is not None else -1)
     options: list[tuple[datetime, str]] = []
     if status == "acknowledged":
-        ack = _ts(acknowledged_at)
+        ack = _ack_clock(st, acknowledged_at)
         if policy.ack_expiry_minutes and ack:
             options.append((ack + timedelta(minutes=policy.ack_expiry_minutes), "ack_expiry"))
     else:
@@ -470,7 +514,8 @@ def next_action(policy: Policy, state: Optional[dict], *, status: str, anchor,
             options.append((last_at + timedelta(minutes=policy.repeat_minutes), f"repeat:{current}"))
     if policy.review_minutes:
         n = int(st.get("reviews") or 0) + 1
-        options.append((base + timedelta(minutes=policy.review_minutes * n), f"review:{n}"))
+        options.append((review_anchor(st, base) + timedelta(minutes=policy.review_minutes * n),
+                        f"review:{n}"))
     if not options:
         return None, None
     at, what = min(options, key=lambda o: o[0])
@@ -746,6 +791,40 @@ class Directory:
         return out
 
 
+_GATEWAY_NAMES = {"email": "SMTP", "sms": "SMS"}
+_KIND_WORDS = {"email": "email", "sms": "SMS"}
+
+
+async def usable_direct_kinds(db: AsyncSession) -> set[str]:
+    """Contact kinds a direct page to a person can be delivered by now (an
+    enabled default gateway, or the only enabled one, of that type)."""
+    from app.services.host_alert_service import direct_gateway_kinds
+    return await direct_gateway_kinds(db)
+
+
+def pages_people(targets: Iterable[dict]) -> bool:
+    return any(t.get("type") in ("user", "schedule") for t in targets)
+
+
+def direct_page_gaps(*, targets_people: bool, recipient_kinds: Iterable[str],
+                     usable: set[str]) -> list[str]:
+    """Coverage gaps when steps page people directly but no gateway can carry
+    those pages (pure; ``usable`` from :func:`usable_direct_kinds`)."""
+    if not targets_people:
+        return []
+    if not usable:
+        return ["No usable SMTP or SMS gateway for direct pages: steps that page people (users or "
+                "on-call schedules) deliver nothing. Enable a gateway, or mark one as the default."]
+    return [f"No usable {_GATEWAY_NAMES[k]} gateway for direct pages: {_KIND_WORDS[k]} pages to "
+            f"people are not delivered. Enable one, or mark one as the default."
+            for k in ("email", "sms") if k in set(recipient_kinds) and k not in usable]
+
+
+def deliverable(res: "Resolved", usable: set[str]) -> bool:
+    """Whether a resolved step reaches anyone a send can actually deliver to."""
+    return bool(res.channels) or any(r.get("kind") in usable for r in res.recipients)
+
+
 def mask_address(kind: str, address: str) -> str:
     """Partially hidden contact address for viewers without user management."""
     a = str(address or "")
@@ -813,6 +892,12 @@ async def preview(db: AsyncSession, policy: Policy, *, priority: str, at: dateti
                                 f" the fallback route would be used.")
         steps.append(item)
     fb_now = fallback_at(at)
+    all_people = list(fb_now.recipients)
+    for s in policy.steps:
+        all_people += d.resolve(s.targets, at + timedelta(minutes=s.delay_minutes)).recipients
+    warnings += direct_page_gaps(targets_people=pages_people(targets),
+                                 recipient_kinds={r.get("kind") for r in all_people},
+                                 usable=await usable_direct_kinds(db))
     if not policy.fallback_targets:
         warnings.append("No fallback route: a step that reaches nobody, or whose deliveries all fail,"
                         " is recorded as a coverage gap with no alternate route.")

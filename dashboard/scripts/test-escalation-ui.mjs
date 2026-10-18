@@ -8,7 +8,9 @@
 //       (saved policy by id, unsaved draft through /escalation-policies/dry-run), read-only for alerts.view,
 //   (c) the acknowledgement link never acknowledges: rendering /alerts/<id>?ack=1 sends nothing, the confirmation
 //       body only calls its handler on an explicit click, and the page wires the POST to that button only,
-//   (d) the rule wizard: priority picker and escalation mode, the legacy tier cap matches the server (5).
+//   (d) the rule wizard: priority picker and escalation mode, the legacy tier cap matches the server (5),
+//   (e) routing precedence (rule policy > the rule's own tiers > priority default) in the wizard, the rule list and the
+//       matrix; default-priority conflicts are refused by the server (409); input bounds match validation.
 // Run from dashboard/: node scripts/test-escalation-ui.mjs
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -190,6 +192,53 @@ const API_POLICY = {
   assert.equal(M.policyForPriority(pols, 'P2').id, 'b')
   assert.equal(M.policyForPriority(pols, 'P1'), null, 'a disabled policy routes nothing')
   assert.deepEqual(M.priorityConflicts(pols), [{ priority: 'P3', policies: ['A policy', 'B policy'] }])
+  // The server picks the oldest claim (ORDER BY created_at, id); name only breaks ties when created_at is missing.
+  const dated = [
+    M.policyFromApi({ ...API_POLICY, id: 'a', name: 'A newer', default_priorities: ['P2'], created_at: '2026-10-02T00:00:00Z' }),
+    M.policyFromApi({ ...API_POLICY, id: 'z', name: 'Z older', default_priorities: ['P2'], created_at: '2026-10-01T00:00:00Z' }),
+  ]
+  assert.equal(dated[0].created_at, '2026-10-02T00:00:00Z')
+  assert.equal(M.policyForPriority(dated, 'P2').id, 'z', 'the oldest policy wins, as on the server')
+  assert.deepEqual(M.priorityConflicts(dated), [{ priority: 'P2', policies: ['Z older', 'A newer'] }], 'the used policy is listed first')
+  const sameTime = dated.map((x) => M.policyFromApi({ ...x, created_at: '2026-10-01T00:00:00Z' }))
+  assert.equal(M.policyForPriority(sameTime, 'P2').id, 'a', 'equal created_at: lowest id, like the server')
+  const partly = [dated[0], M.policyFromApi({ ...API_POLICY, id: 'z', name: 'Z older', default_priorities: ['P2'] })]
+  assert.equal(M.policyForPriority(partly, 'P2').id, 'a', 'without created_at on both, by name')
+  assert.equal(M.DEFAULT_CONFLICT_REFUSAL, 'saving will be refused unless the other policy drops it')
+}
+
+// Rule routing precedence (server): the rule's enabled policy > the rule's own legacy tiers > the priority default > none.
+{
+  const def = M.policyFromApi({ ...API_POLICY, id: 'd', name: 'P2 default policy', default_priorities: ['P2'] })
+  const off = M.policyFromApi({ ...API_POLICY, id: 'o', name: 'Old policy', enabled: false, default_priorities: [] })
+  assert.equal(M.ruleRouteSource({ policyId: 'x', policyEnabled: true, tiers: 2, defaultPolicy: def }), 'rule')
+  assert.equal(M.ruleRouteSource({ policyId: 'x', tiers: 0, defaultPolicy: null }), 'rule', 'an unknown policy state counts as enabled')
+  assert.equal(M.ruleRouteSource({ policyId: null, tiers: 2, defaultPolicy: def }), 'legacy_levels', 'a priority default never takes over a rule with tiers')
+  assert.equal(M.ruleRouteSource({ policyId: 'o', policyEnabled: false, tiers: 1, defaultPolicy: def }), 'legacy_levels', 'a disabled policy falls back to the tiers first')
+  assert.equal(M.ruleRouteSource({ policyId: 'o', policyEnabled: false, tiers: 0, defaultPolicy: def }), 'priority_default')
+  assert.equal(M.ruleRouteSource({ policyId: 'o', policyEnabled: false, tiers: 0, defaultPolicy: null }), 'none')
+  assert.equal(M.ruleRouteSource({ tiers: 0, defaultPolicy: def }), 'priority_default')
+  // Wizard copy.
+  assert.equal(M.legacyTiersText(2, 'P2', def), 'These tiers take precedence over the P2 default policy (P2 default policy).')
+  assert.match(M.legacyTiersText(2, 'P2', null), /No policy is the default for P2; these tiers are this rule's only escalation/)
+  assert.match(M.legacyTiersText(0, 'P2', def), /No tiers yet: without one, the P2 default policy \(P2 default policy\) applies/)
+  assert.match(M.legacyTiersText(0, 'P2', null), /do not escalate/)
+  assert.equal(M.tiersRemovedText(0, 'default', 'P2', def), null)
+  assert.equal(M.tiersRemovedText(2, 'default', 'P2', def), 'The 2 legacy tiers on this rule are removed when you save, so the P2 default policy applies.')
+  assert.match(M.tiersRemovedText(1, 'default', 'P2', null), /The 1 legacy tier on this rule is removed when you save; no policy is the default for P2, so this rule will not escalate/)
+  assert.equal(M.tiersRemovedText(2, 'policy', 'P2', def), 'The 2 legacy tiers on this rule are removed when you save; the chosen policy replaces them.')
+  assert.match(M.disabledPolicyText('P2', def), /falls back to its own legacy tiers, otherwise the P2 default policy, otherwise no escalation — here: the P2 default policy \(P2 default policy\)/)
+  assert.match(M.disabledPolicyText('P2', null), /here: no escalation/)
+  assert.match(M.disabledPolicyText('P2', def, 2), /here: its 2 legacy tiers/)
+  // Review row / rule list.
+  assert.equal(M.ruleEscalationSummary({ policy: def, tiers: [], priority: 'P2', defaultPolicy: def }), 'Policy: P2 default policy')
+  assert.equal(M.ruleEscalationSummary({ policy: null, tiers: [15, 30], priority: 'P2', defaultPolicy: def }), '2 legacy tiers (15m → 30m), taking precedence over the P2 default (P2 default policy)')
+  assert.equal(M.ruleEscalationSummary({ policy: null, tiers: [15], priority: 'P2', defaultPolicy: null }), '1 legacy tier (15m)')
+  assert.equal(M.ruleEscalationSummary({ policy: null, tiers: [], priority: 'P2', defaultPolicy: def }), 'P2 default: P2 default policy')
+  assert.equal(M.ruleEscalationSummary({ policy: null, tiers: [], priority: 'P3', defaultPolicy: null }), 'None (no default policy for P3)')
+  assert.equal(M.ruleEscalationSummary({ policy: off, tiers: [10], priority: 'P2', defaultPolicy: def }), 'Policy Old policy is disabled — 1 legacy tier (10m), taking precedence over the P2 default (P2 default policy)')
+  assert.equal(M.ruleEscalationSummary({ policy: off, tiers: [], priority: 'P2', defaultPolicy: def }), 'Policy Old policy is disabled — P2 default: P2 default policy')
+  assert.equal(M.ruleEscalationSummary({ policy: off, tiers: [], priority: 'P2', defaultPolicy: null }), 'Policy Old policy is disabled — None (no default policy for P2)')
 }
 
 // Dry run / route explanation (escalation_policy_service.preview + alert_escalation_service.explain_route shapes).
@@ -443,6 +492,8 @@ export { Dialog } from '@/components/ui/Dialog'
 export { AlertDetailPage } from '@/pages/AlertDetailPage'
 export { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 export { EscalationPage } from '@/pages/escalation/EscalationPage'
+export { GroupingTab } from '@/pages/escalation/GroupingTab'
+export { AlertRulesPage } from '@/pages/AlertRulesPage'
 export * as EM from '@/features/escalation/model'
 export { api } from '@/lib/api'
 export { useAuth } from '@/stores/auth'
@@ -559,7 +610,8 @@ function seed(qc) {
     policies: [...POLICIES, M.policyFromApi({ ...API_POLICY, id: 'pol-x', name: 'Another P1', default_priorities: ['P1', 'P2'] })],
     coverage: null, targets: TARGETS, dir: DIR, canManage: false, go: () => {}, onRecommended: () => {},
   })))
-  assert(text.includes('Route conflict for P1: Another P1, P1 Critical — major incident all claim it; only “Another P1” is used.'))
+  assert(text.includes('Route conflict for P1: Another P1, P1 Critical — major incident all claim it; only “Another P1” is used, and saving will be refused unless the other policy drops it'))
+  assert(text.includes("A rule's own policy wins; otherwise the rule's legacy tiers; otherwise the default policy for the incident's priority."), 'matrix states the server precedence')
   assert(text.includes('Coverage not checked'))
 }
 
@@ -621,7 +673,49 @@ function seed(qc) {
   const conflict = strip(renderAt(qc, '/escalation?tab=policies', h(m.PolicyEditorBody, {
     draft: { ...draft, default_priorities: ['P3'] }, setDraft: () => {}, errors: {}, dir, readOnly: false, others: [POLICIES[1]], policyId: 'pol-1', revision: 'rev-1', dirty: true,
   })))
-  assert(conflict.includes('P3 is also the default in P3 Warning — team queue'))
+  assert(conflict.includes('P3 is also the default in P3 Warning — team queue: saving will be refused unless the other policy drops it.'))
+  assert(!conflict.includes('Only the first by name is used'))
+  const offConflict = strip(renderAt(qc, '/escalation?tab=policies', h(m.PolicyEditorBody, {
+    draft: { ...draft, enabled: false, default_priorities: ['P3'] }, setDraft: () => {}, errors: {}, dir, readOnly: false, others: [POLICIES[1]], policyId: 'pol-1', revision: 'rev-1', dirty: true,
+  })))
+  assert(offConflict.includes('enabling it later will be refused unless the other policy drops it'), 'a disabled draft can be saved; enabling it is refused')
+  assert(/min="0" max="20"[^>]*value="2"/.test(html), 'max repeats input is bounded like the server (0..20)')
+  assert(!html.includes('max="100"'))
+}
+
+// Grouping inputs carry the same bounds as validateGrouping (interval >= 30 s, max items >= 5, budget <= 10000).
+{
+  setUser(USER(['alerts.view', 'alerts.manage']))
+  const qc = newClient()
+  qc.setQueryData(['alerts', 'notification-grouping'], M.groupingFromApi({ enabled: true, group_by: ['site'], group_wait_seconds: 60, group_interval_seconds: 300, max_items: 50, budget_per_recipient_per_hour: 30, critical_reserve: true }))
+  calls.length = 0
+  const html = renderAt(qc, '/escalation?tab=grouping', h(m.GroupingTab, { canManage: true }))
+  assert(/min="30" max="86400"[^>]*value="300"/.test(html), 'group interval min=30')
+  assert(/min="5" max="500"[^>]*value="50"/.test(html), 'max items min=5')
+  assert(/min="0" max="10000"[^>]*value="30"/.test(html), 'budget max=10000')
+  assert(/min="0" max="3600"[^>]*value="60"/.test(html), 'group wait 0..3600')
+  assert.deepEqual(calls.filter(([verb]) => verb !== 'get'), [])
+}
+
+// The rule list states each rule's escalation route with the server precedence.
+{
+  setUser(USER(['alerts.view', 'alerts.manage']))
+  const qc = newClient()
+  const P2DEF = M.policyFromApi({ ...API_POLICY, id: 'pol-2', name: 'P2 High — on-call', default_priorities: ['P2'] })
+  const OFF = M.policyFromApi({ ...API_POLICY, id: 'pol-off', name: 'Retired policy', enabled: false, default_priorities: [] })
+  qc.setQueryData(['escalation', 'policies'], [...POLICIES, P2DEF, OFF])
+  const base = { enabled: true, metric: 'ping_status', trigger_on: 'down', severity: 'critical', created_at: '2026-10-01T00:00:00Z' }
+  qc.setQueryData(['alert-rules'], [
+    { ...base, id: 'r1', name: 'Tiered rule', escalation_levels: [{ after_minutes: 15, notify_channels: [NOC] }, { after_minutes: 30, notify_channels: [NOC] }] },
+    { ...base, id: 'r2', name: 'Default rule' },
+    { ...base, id: 'r3', name: 'Named rule', escalation_policy_id: 'pol-1', escalation_levels: [{ after_minutes: 15, notify_channels: [NOC] }] },
+    { ...base, id: 'r4', name: 'Retired rule', escalation_policy_id: 'pol-off', severity: 'warning' },
+  ])
+  const text = strip(renderAt(qc, '/alert-rules', h(m.AlertRulesPage)))
+  assert(text.includes('2 legacy tiers (15m → 30m), taking precedence over the P2 default (P2 High — on-call)'), 'tiers win over the priority default')
+  assert(text.includes('P2 default: P2 High — on-call'), 'a rule without policy or tiers uses the priority default')
+  assert(text.includes('Policy: P1 Critical — major incident'), "the rule's own policy wins over its tiers")
+  assert(text.includes('Policy Retired policy is disabled — P3 default: P3 Warning — team queue'), 'a disabled policy falls back to the priority default')
 }
 
 // (c) /alerts/<id>?ack=1 never acknowledges by itself.
@@ -686,6 +780,15 @@ function seed(qc) {
   assert(wiz.includes("escalation_policy_id: s.escalation_mode === 'policy' ? s.escalation_policy_id || null : null"), 'only "choose a policy" names one')
   assert(wiz.includes("escalation_levels: s.escalation_mode === 'legacy' && s.escalation_levels.length"), 'legacy tiers are sent only in legacy mode')
   for (const label of ['Use priority default', 'Choose a policy', 'Legacy tiers']) assert(wiz.includes(`label: '${label}'`), `escalation mode ${label}`)
+  // Server precedence: rule policy > the rule's own tiers > priority default. The wizard copy follows it.
+  assert(!wiz.includes('Precedence on the server is policy > priority'), 'no stale "default beats tiers" precedence')
+  assert(wiz.includes('legacyTiersText(s.escalation_levels.length, effPriority, defaultPolicy)'), 'legacy mode explains that the tiers beat the priority default')
+  assert(wiz.includes("tiersRemovedText(s.escalation_levels.length, 'default', effPriority"), 'default mode: the tiers are removed on save, so the default applies')
+  assert(wiz.includes("tiersRemovedText(s.escalation_levels.length, 'policy', effPriority, defaultPolicy)"), 'policy mode: the tiers are removed on save too')
+  assert(wiz.includes('disabledPolicyText(effPriority, defaultPolicy)') && !wiz.includes('this rule will not escalate until it is enabled'), 'a disabled policy falls back to tiers, then the default, then nothing')
+  const defaultBlock = wiz.slice(wiz.indexOf("{s.escalation_mode === 'default' && ("), wiz.indexOf("{s.escalation_mode === 'policy' && ("))
+  assert(defaultBlock.indexOf('policiesQ.isError') > -1 && defaultBlock.indexOf('policiesQ.isError') < defaultBlock.indexOf('No policy is the default for'), 'a policy load failure shows the error, not "No policy is the default"')
+  assert(/ruleEscalationSummary\(\{[\s\S]*?tiers: s\.escalation_mode === 'legacy' \? s\.escalation_levels\.map/.test(wiz), 'the Review row summarises what is saved, with the same precedence')
   // Round trip through the wizard's own ruleToState / stateToPayload (sliced like test-network-contracts.mjs).
   const start = wiz.indexOf('const TEMPLATE_FIELDS =')
   const end = wiz.indexOf('export function AlertRuleWizardDialog(')

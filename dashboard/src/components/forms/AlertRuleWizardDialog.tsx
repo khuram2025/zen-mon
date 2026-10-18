@@ -52,7 +52,10 @@ import {
   type NetflowRuleForm,
 } from './netflowAlertRule'
 import { usePolicies } from '@/features/escalation/api'
-import { PRIORITIES, PRIORITY_META, autoPriorityText, derivePriority, effectivePriority, fmtMinutes, policyForPriority, stepSummary } from '@/features/escalation/model'
+import {
+  PRIORITIES, PRIORITY_META, autoPriorityText, derivePriority, disabledPolicyText, effectivePriority, fmtMinutes, legacyTiersText,
+  policyForPriority, ruleEscalationSummary, stepSummary, tiersRemovedText,
+} from '@/features/escalation/model'
 import { PriorityBadge } from '@/features/escalation/ui'
 import type { Priority } from '@/features/escalation/types'
 
@@ -68,8 +71,9 @@ const MAX_ESC_LEVELS = 5
 
 /**
  * How the rule escalates: the default policy for its priority, a named policy,
- * or the legacy inline tiers. Precedence on the server is policy > priority
- * default > legacy tiers, so "default" clears both the policy and the tiers.
+ * or the legacy inline tiers. Precedence on the server is the rule's enabled
+ * policy > the rule's own tiers > the priority default, so "default" clears both
+ * the policy and the tiers, and "policy" clears the tiers.
  */
 type EscalationMode = 'default' | 'policy' | 'legacy'
 
@@ -1392,7 +1396,7 @@ export function AlertRuleWizardDialog({
                   {([
                     { v: 'default', label: 'Use priority default', hint: `The policy that is the default for ${effPriority}` },
                     { v: 'policy', label: 'Choose a policy', hint: 'Always this policy, whatever the priority' },
-                    { v: 'legacy', label: 'Legacy tiers', hint: 'Channel tiers stored on this rule' },
+                    { v: 'legacy', label: 'Legacy tiers', hint: 'Channel tiers on this rule; they override the priority default' },
                   ] as const).map((o) => (
                     <button
                       key={o.v}
@@ -1412,12 +1416,14 @@ export function AlertRuleWizardDialog({
                     <div className="mb-1 flex items-center gap-2"><PriorityBadge priority={effPriority} />
                       <span className="text-muted">{s.priority ? 'chosen on this rule' : `derived from ${s.severity} severity`}</span>
                     </div>
-                    {policiesQ.isLoading ? <span className="text-muted">Loading policies…</span> : defaultPolicy ? (
+                    {policiesQ.isLoading ? <span className="text-muted">Loading policies…</span> : policiesQ.isError ? (
+                      <span className="text-danger">Could not load policies, so the {effPriority} default is unknown: {apiErrorMessage(policiesQ.error)}</span>
+                    ) : defaultPolicy ? (
                       <span>Escalates through <span className="font-semibold text-text">{defaultPolicy.name}</span> <span className="text-muted">({stepSummary(defaultPolicy.steps)}{defaultPolicy.review_minutes ? `; updates every ${fmtMinutes(defaultPolicy.review_minutes)}` : ''})</span>.</span>
                     ) : (
                       <span className="text-warning">No policy is the default for {effPriority}: this rule&apos;s incidents notify only its trigger channels and do not escalate. Set one under Alerting → <a href="/escalation?tab=policies" className="underline">Escalation &amp; On-call</a>.</span>
                     )}
-                    {s.escalation_levels.length > 0 && <p className="mt-1 text-muted">The {s.escalation_levels.length} legacy tier{s.escalation_levels.length === 1 ? '' : 's'} on this rule are removed when you save.</p>}
+                    {s.escalation_levels.length > 0 && <p className="mt-1 text-muted">{tiersRemovedText(s.escalation_levels.length, 'default', effPriority, policiesQ.isError ? null : defaultPolicy)}</p>}
                   </div>
                 )}
                 {s.escalation_mode === 'policy' && (
@@ -1436,13 +1442,19 @@ export function AlertRuleWizardDialog({
                         {stepSummary(chosenPolicy.steps)}
                         {chosenPolicy.ack_target_minutes ? ` · acknowledge within ${fmtMinutes(chosenPolicy.ack_target_minutes)}` : ''}
                         {chosenPolicy.review_minutes ? ` · updates every ${fmtMinutes(chosenPolicy.review_minutes)}` : ''}
-                        {!chosenPolicy.enabled && <span className="text-warning"> · disabled: this rule will not escalate until it is enabled</span>}
                       </p>
                     )}
+                    {chosenPolicy && !chosenPolicy.enabled && <p className="text-xs text-warning">{disabledPolicyText(effPriority, defaultPolicy)}</p>}
+                    {s.escalation_levels.length > 0 && <p className="text-xs text-muted">{tiersRemovedText(s.escalation_levels.length, 'policy', effPriority, defaultPolicy)}</p>}
                     {policiesQ.isError && <p className="text-xs text-danger">Could not load policies: {apiErrorMessage(policiesQ.error)}</p>}
                   </div>
                 )}
                 {s.escalation_mode === 'legacy' && (<>
+                <p className="text-xs text-muted">
+                  {policiesQ.isLoading ? 'Loading policies…' : policiesQ.isError
+                    ? `These tiers take precedence over any ${effPriority} default policy (policies could not be loaded: ${apiErrorMessage(policiesQ.error)}).`
+                    : legacyTiersText(s.escalation_levels.length, effPriority, defaultPolicy)}
+                </p>
                 <div className="rounded-lg border border-border bg-surface2/40 px-4 py-3 text-xs">
                   <span className="font-semibold text-text">Immediately on trigger:</span>{' '}
                   <span className="text-muted">
@@ -1600,13 +1612,18 @@ export function AlertRuleWizardDialog({
                 <ReviewRow label="Priority" value={<span className="inline-flex items-center gap-1.5"><PriorityBadge priority={effPriority} />{s.priority ? '' : <span className="text-xs text-muted">auto from severity</span>}</span>} />
                 <ReviewRow
                   label="Escalation"
-                  value={s.escalation_mode === 'policy'
-                    ? chosenPolicy ? `Policy: ${chosenPolicy.name}` : 'Policy not chosen'
-                    : s.escalation_mode === 'default'
-                      ? defaultPolicy ? `${effPriority} default: ${defaultPolicy.name}` : `None (no default policy for ${effPriority})`
-                      : s.escalation_levels.length
-                        ? `${s.escalation_levels.length} legacy level${s.escalation_levels.length > 1 ? 's' : ''} (${s.escalation_levels.map((lv) => `${lv.after_minutes}m`).join(' → ')})`
-                        : 'None'}
+                  value={s.escalation_mode === 'policy' && !s.escalation_policy_id
+                    ? 'Policy not chosen'
+                    : policiesQ.isError && !(s.escalation_mode === 'legacy' && s.escalation_levels.length)
+                      ? `Unknown (policies could not be loaded)`
+                      : ruleEscalationSummary({
+                          // What is saved: a policy only in policy mode, tiers only in legacy mode.
+                          policy: s.escalation_mode === 'policy' ? chosenPolicy : null,
+                          policyId: s.escalation_mode === 'policy' ? s.escalation_policy_id : null,
+                          tiers: s.escalation_mode === 'legacy' ? s.escalation_levels.map((lv) => lv.after_minutes) : [],
+                          priority: effPriority,
+                          defaultPolicy,
+                        })}
                 />
                 <ReviewRow label="Enabled" value={s.enabled ? 'Yes' : 'No'} />
                 <div className="flex gap-2 pt-2">
