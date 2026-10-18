@@ -224,3 +224,26 @@ record commit in one transaction.
 * `POST /alert-rules/{id}/toggle` accepts optional `{enabled: bool, reason?: string}`; without a body it flips.
 * `GET /alert-rules/{id}/impact` → `{scope, affected: {count, noun, shared}, open_alerts: n, enabled}`.
 * Create/update/delete/toggle write audit records with before/after of changed fields.
+
+## Escalation, on-call and grouping (1.24.18)
+
+Reads need `alerts.view`; changes need `alerts.manage`. Preview and dry-run are
+POST but read-only. Behaviour is described in `docs/alert-notification-policy.md`.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET/POST /escalation-policies`, `GET/PUT/DELETE /escalation-policies/{id}` | Reusable policies: `default_priorities`, `ack_target_minutes`, `repeat_minutes`, `max_repeats`, `review_minutes`, `ack_expiry_minutes`, `fallback_targets`, `steps[{position, delay_minutes, name, targets[{type: schedule\|user\|channel, id}]}]`. A second enabled policy claiming the same default priority is refused (409). |
+| `POST /escalation-policies/{id}/preview`, `POST /escalation-policies/dry-run` | Who each step would reach (saved policy, or an unsaved draft); never sends. |
+| `POST /escalation-policies/recommended` | Creates the four P1–P4 matrix policies (`replace_defaults` to move existing defaults). |
+| `GET/POST /oncall/schedules`, `GET/PUT/DELETE /oncall/schedules/{id}` | Schedules with `timezone` and `layers[{name, position, shift_hours, handoff_at, members[], restrict_to[{days, start, end}]}]` (days 0 = Monday). |
+| `GET /oncall/schedules/{id}/timeline?from&to`, `/now`, `POST/DELETE /oncall/schedules/{id}/overrides[/{override_id}]` | Shifts and gaps; who is on call now; time-boxed overrides. |
+| `GET /oncall/coverage` | Unrouted priorities, schedule gaps, people without contact methods, missing direct-page gateways. |
+| `GET/PUT /users/me/contact-methods`, `GET/PUT /users/{id}/contact-methods` | Email/SMS contact methods and `timezone`. |
+| `GET/PUT /alerts/response-targets` | Acknowledgement minutes keyed `P1`–`P4` (legacy severity keys still accepted and mirrored). |
+| `GET /alerts/{id}/route` | The incident's route: policy and source (`rule`, `legacy_levels`, `priority_default`, `none`), current step, next action and time, recipients per step. |
+| `GET/PUT /alerts/notification-grouping` | Grouping settings (`enabled`, `group_by`, `group_wait_seconds`, `group_interval_seconds`, `max_items`, `budget_per_recipient_per_hour`, `critical_reserve`) plus `recommended`. |
+| `GET /alerts/digests?status&limit`, `GET /alerts/digests/{id}`, `POST /alerts/digests/{id}/release` | Held summaries with reason, release condition and child incidents; release now. |
+
+Alert rows and details gain `priority` and `priority_label`; details gain
+`notification_holds`. Rules accept `priority` (`P1`–`P4` or null for "from
+severity") and `escalation_policy_id`.
