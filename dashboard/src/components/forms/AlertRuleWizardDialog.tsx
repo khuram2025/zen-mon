@@ -51,6 +51,13 @@ import {
   validateNetflowForm,
   type NetflowRuleForm,
 } from './netflowAlertRule'
+import { usePolicies } from '@/features/escalation/api'
+import {
+  PRIORITIES, PRIORITY_META, autoPriorityText, derivePriority, disabledPolicyText, effectivePriority, fmtMinutes, legacyTiersText,
+  policyForPriority, ruleEscalationSummary, stepSummary, tiersRemovedText,
+} from '@/features/escalation/model'
+import { PriorityBadge } from '@/features/escalation/ui'
+import type { Priority } from '@/features/escalation/types'
 
 type Cond = { metric: string; operator: string; threshold: number; reset_threshold?: number | null }
 
@@ -59,11 +66,26 @@ type Cond = { metric: string; operator: string; threshold: number; reset_thresho
 // re-pages the tier on that cadence until ack/resolve (null = no repeat).
 type EscLevel = { after_minutes: number; notify_channels: string[]; repeat_every_minutes: number | null }
 
+/** The server accepts at most this many legacy tiers (alert_rules.py). */
+const MAX_ESC_LEVELS = 5
+
+/**
+ * How the rule escalates: the default policy for its priority, a named policy,
+ * or the legacy inline tiers. Precedence on the server is the rule's enabled
+ * policy > the rule's own tiers > the priority default, so "default" clears both
+ * the policy and the tiers, and "policy" clears the tiers.
+ */
+type EscalationMode = 'default' | 'policy' | 'legacy'
+
 type WizardState = {
   name: string
   description: string
   enabled: boolean
   severity: 'info' | 'warning' | 'critical'
+  /** '' = derived from severity (critical -> P2, warning -> P3, info -> P4). */
+  priority: '' | Priority
+  escalation_mode: EscalationMode
+  escalation_policy_id: string
   source: 'device' | 'service' | 'trap' | 'syslog' | 'apm' | 'netflow'
   conditions: Cond[]
   condition_logic: 'AND' | 'OR'
@@ -195,6 +217,9 @@ const DEFAULT_STATE: WizardState = {
   description: '',
   enabled: true,
   severity: 'critical',
+  priority: '',
+  escalation_mode: 'default',
+  escalation_policy_id: '',
   source: 'device',
   conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }],
   condition_logic: 'AND',
@@ -287,6 +312,10 @@ function ruleToState(rule: any): WizardState {
     description: rule.description || '',
     enabled: rule.enabled ?? true,
     severity: rule.severity || 'warning',
+    // Self-contained (scripts/test-network-contracts.mjs evaluates this function on its own).
+    priority: (['P1', 'P2', 'P3', 'P4'].includes(String(rule.priority || '').toUpperCase()) ? String(rule.priority).toUpperCase() : '') as WizardState['priority'],
+    escalation_mode: rule.escalation_policy_id ? 'policy' : Array.isArray(rule.escalation_levels) && rule.escalation_levels.length ? 'legacy' : 'default',
+    escalation_policy_id: rule.escalation_policy_id || '',
     source,
     conditions:
       Array.isArray(rule.conditions) && rule.conditions.length
@@ -375,6 +404,8 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
     clear_duration: usesMetricLifecycle(s) ? s.clear_duration : null,
     notify_while_flapping: flapHoldApplies(s) ? s.notify_while_flapping : false,
     severity: s.severity,
+    priority: s.priority || null,
+    escalation_policy_id: s.escalation_mode === 'policy' ? s.escalation_policy_id || null : null,
     cooldown: s.cooldown,
     max_repeat: s.max_repeat,
     device_id: isService || isApm ? null : s.device_id || null,
@@ -385,7 +416,7 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
     service_check_id: isService ? s.service_check_id || null : null,
     service_check_group_id: isService ? s.service_check_group_id || null : null,
     notify_channels: s.notify_channels,
-    escalation_levels: s.escalation_levels.length
+    escalation_levels: s.escalation_mode === 'legacy' && s.escalation_levels.length
       ? s.escalation_levels.map((lv) => ({
           after_minutes: lv.after_minutes,
           notify_channels: lv.notify_channels,
@@ -523,6 +554,12 @@ export function AlertRuleWizardDialog({
     queryFn: async () => (await api.get('/service-check-groups')).data,
     enabled: open,
   })
+
+  const policiesQ = usePolicies(open)
+  const policies = policiesQ.data ?? []
+  const effPriority = effectivePriority(s.priority, s.severity)
+  const defaultPolicy = policyForPriority(policies, effPriority)
+  const chosenPolicy = policies.find((p) => p.id === s.escalation_policy_id) ?? null
 
   const { data: channelsResp } = useQuery<any>({
     queryKey: ['channels', 'list-min'],
@@ -737,8 +774,19 @@ export function AlertRuleWizardDialog({
       setStep('scope')
       return
     }
-    for (let i = 0; i < s.escalation_levels.length; i++) {
-      const lv = s.escalation_levels[i]
+    if (s.escalation_mode === 'policy' && !s.escalation_policy_id) {
+      toast.error('Choose an escalation policy', 'Or use the priority default.')
+      setStep('escalation')
+      return
+    }
+    const legacyLevels = s.escalation_mode === 'legacy' ? s.escalation_levels : []
+    if (legacyLevels.length > MAX_ESC_LEVELS) {
+      toast.error(`At most ${MAX_ESC_LEVELS} escalation levels`)
+      setStep('escalation')
+      return
+    }
+    for (let i = 0; i < legacyLevels.length; i++) {
+      const lv = legacyLevels[i]
       if (!lv.notify_channels.length) {
         toast.error(`Escalation level ${i + 1} has no channels`, 'Pick at least one channel or remove the level.')
         setStep('escalation')
@@ -749,7 +797,7 @@ export function AlertRuleWizardDialog({
         setStep('escalation')
         return
       }
-      if (i > 0 && lv.after_minutes <= s.escalation_levels[i - 1].after_minutes) {
+      if (i > 0 && lv.after_minutes <= legacyLevels[i - 1].after_minutes) {
         toast.error('Escalation delays must increase', `Level ${i + 1} must fire later than level ${i}.`)
         setStep('escalation')
         return
@@ -872,6 +920,31 @@ export function AlertRuleWizardDialog({
                         )}
                       >
                         {sev}
+                      </button>
+                    ))}
+                  </div>
+                </FormField>
+                <FormField
+                  label="Priority"
+                  hint={s.priority
+                    ? `${PRIORITY_META[s.priority].label}: ${PRIORITY_META[s.priority].trigger}`
+                    : `${autoPriorityText(s.severity)} P1 is never derived — choose it only for a confirmed major outage.`}
+                >
+                  <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Incident priority">
+                    {(['', ...PRIORITIES] as const).map((p) => (
+                      <button
+                        key={p || 'auto'}
+                        type="button"
+                        role="radio"
+                        aria-checked={s.priority === p}
+                        onClick={() => setS({ ...s, priority: p })}
+                        title={p ? PRIORITY_META[p].trigger : 'Derived from the severity when the incident is raised'}
+                        className={cn(
+                          'rounded-lg border px-3 py-2 text-xs font-semibold',
+                          s.priority === p ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted hover:text-text',
+                        )}
+                      >
+                        {p ? PRIORITY_META[p].label : `Auto (${derivePriority(s.severity)})`}
                       </button>
                     ))}
                   </div>
@@ -1317,8 +1390,71 @@ export function AlertRuleWizardDialog({
               <div className="space-y-4">
                 <SectionTitle
                   title="Escalation Policy"
-                  hint="SLA tiers: if the alert stays active and nobody acknowledges it, page the next level. Acknowledging the alert stops escalation; resolving sends an all-clear to every level that was paged."
+                  hint="Who is paged when the incident stays active and nobody acknowledges it. Acknowledging stops escalation; resolving sends an all-clear to everyone who was notified."
                 />
+                <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="How this rule escalates">
+                  {([
+                    { v: 'default', label: 'Use priority default', hint: `The policy that is the default for ${effPriority}` },
+                    { v: 'policy', label: 'Choose a policy', hint: 'Always this policy, whatever the priority' },
+                    { v: 'legacy', label: 'Legacy tiers', hint: 'Channel tiers on this rule; they override the priority default' },
+                  ] as const).map((o) => (
+                    <button
+                      key={o.v}
+                      type="button"
+                      role="radio"
+                      aria-checked={s.escalation_mode === o.v}
+                      onClick={() => setS({ ...s, escalation_mode: o.v })}
+                      className={cn('rounded-lg border px-3 py-2 text-left', s.escalation_mode === o.v ? 'border-primary bg-primary/10' : 'border-border hover:bg-surface2')}
+                    >
+                      <div className={cn('text-xs font-semibold', s.escalation_mode === o.v ? 'text-primary' : 'text-text')}>{o.label}</div>
+                      <div className="text-[11px] text-muted">{o.hint}</div>
+                    </button>
+                  ))}
+                </div>
+                {s.escalation_mode === 'default' && (
+                  <div className="rounded-lg border border-border bg-surface2/40 px-4 py-3 text-xs">
+                    <div className="mb-1 flex items-center gap-2"><PriorityBadge priority={effPriority} />
+                      <span className="text-muted">{s.priority ? 'chosen on this rule' : `derived from ${s.severity} severity`}</span>
+                    </div>
+                    {policiesQ.isLoading ? <span className="text-muted">Loading policies…</span> : policiesQ.isError ? (
+                      <span className="text-danger">Could not load policies, so the {effPriority} default is unknown: {apiErrorMessage(policiesQ.error)}</span>
+                    ) : defaultPolicy ? (
+                      <span>Escalates through <span className="font-semibold text-text">{defaultPolicy.name}</span> <span className="text-muted">({stepSummary(defaultPolicy.steps)}{defaultPolicy.review_minutes ? `; updates every ${fmtMinutes(defaultPolicy.review_minutes)}` : ''})</span>.</span>
+                    ) : (
+                      <span className="text-warning">No policy is the default for {effPriority}: this rule&apos;s incidents notify only its trigger channels and do not escalate. Set one under Alerting → <a href="/escalation?tab=policies" className="underline">Escalation &amp; On-call</a>.</span>
+                    )}
+                    {s.escalation_levels.length > 0 && <p className="mt-1 text-muted">{tiersRemovedText(s.escalation_levels.length, 'default', effPriority, policiesQ.isError ? null : defaultPolicy)}</p>}
+                  </div>
+                )}
+                {s.escalation_mode === 'policy' && (
+                  <div className="space-y-2 rounded-lg border border-border bg-surface2/40 px-4 py-3">
+                    <select
+                      aria-label="Escalation policy"
+                      value={s.escalation_policy_id}
+                      onChange={(e) => setS({ ...s, escalation_policy_id: e.target.value })}
+                      className="h-9 w-full rounded-md border border-border bg-surface px-2 text-sm"
+                    >
+                      <option value="">{policiesQ.isLoading ? 'Loading…' : policies.length ? 'Choose a policy…' : 'No policies exist yet'}</option>
+                      {policies.map((p) => <option key={p.id} value={p.id}>{p.name}{p.enabled ? '' : ' (disabled)'}</option>)}
+                    </select>
+                    {chosenPolicy && (
+                      <p className="text-xs text-muted">
+                        {stepSummary(chosenPolicy.steps)}
+                        {chosenPolicy.ack_target_minutes ? ` · acknowledge within ${fmtMinutes(chosenPolicy.ack_target_minutes)}` : ''}
+                        {chosenPolicy.review_minutes ? ` · updates every ${fmtMinutes(chosenPolicy.review_minutes)}` : ''}
+                      </p>
+                    )}
+                    {chosenPolicy && !chosenPolicy.enabled && <p className="text-xs text-warning">{disabledPolicyText(effPriority, defaultPolicy)}</p>}
+                    {s.escalation_levels.length > 0 && <p className="text-xs text-muted">{tiersRemovedText(s.escalation_levels.length, 'policy', effPriority, defaultPolicy)}</p>}
+                    {policiesQ.isError && <p className="text-xs text-danger">Could not load policies: {apiErrorMessage(policiesQ.error)}</p>}
+                  </div>
+                )}
+                {s.escalation_mode === 'legacy' && (<>
+                <p className="text-xs text-muted">
+                  {policiesQ.isLoading ? 'Loading policies…' : policiesQ.isError
+                    ? `These tiers take precedence over any ${effPriority} default policy (policies could not be loaded: ${apiErrorMessage(policiesQ.error)}).`
+                    : legacyTiersText(s.escalation_levels.length, effPriority, defaultPolicy)}
+                </p>
                 <div className="rounded-lg border border-border bg-surface2/40 px-4 py-3 text-xs">
                   <span className="font-semibold text-text">Immediately on trigger:</span>{' '}
                   <span className="text-muted">
@@ -1334,13 +1470,13 @@ export function AlertRuleWizardDialog({
                         Escalation level {i + 1}
                       </span>
                       <Button type="button" variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
-                        onClick={() => removeEscLevel(i)}>
+                        aria-label={`Remove escalation level ${i + 1}`} onClick={() => removeEscLevel(i)}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>
                     <div className="flex items-center gap-2 text-sm">
                       <span className="text-muted">If still unacknowledged after</span>
-                      <Input type="number" min={1} className="w-24" value={lv.after_minutes}
+                      <Input type="number" min={1} className="w-24" value={lv.after_minutes} aria-label={`Escalation level ${i + 1} delay in minutes`}
                         onChange={(e) => updateEsc(i, { after_minutes: Number(e.target.value) })} />
                       <span className="text-muted">minutes, notify:</span>
                     </div>
@@ -1375,7 +1511,7 @@ export function AlertRuleWizardDialog({
                     </div>
                   </div>
                 ))}
-                {s.escalation_levels.length < 4 && (
+                {s.escalation_levels.length < MAX_ESC_LEVELS && (
                   <Button type="button" variant="outline" size="sm" onClick={addEscLevel}>
                     <Plus className="h-3.5 w-3.5" />Add escalation level
                   </Button>
@@ -1386,6 +1522,7 @@ export function AlertRuleWizardDialog({
                   <span className="font-mono text-text">[CRITICAL] Escalation L2: Core router down — core-router-01</span>.
                   &quot;Max escalation repeats&quot; on the Trigger Actions step caps repeats.
                 </p>
+                </>)}
               </div>
             )}
 
@@ -1472,11 +1609,21 @@ export function AlertRuleWizardDialog({
                 {flapHold && <ReviewRow label="While flapping" value={s.notify_while_flapping ? 'Notify immediately' : 'Held until a status lasts the flap stability time'} />}
                 <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution' : s.reset_mode === 'auto' ? 'Auto + recovery notify' : 'No recovery notify'} />
                 <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None (alert only)'} />
+                <ReviewRow label="Priority" value={<span className="inline-flex items-center gap-1.5"><PriorityBadge priority={effPriority} />{s.priority ? '' : <span className="text-xs text-muted">auto from severity</span>}</span>} />
                 <ReviewRow
                   label="Escalation"
-                  value={s.escalation_levels.length
-                    ? `${s.escalation_levels.length} level${s.escalation_levels.length > 1 ? 's' : ''} (${s.escalation_levels.map((lv) => `${lv.after_minutes}m`).join(' → ')})`
-                    : 'None'}
+                  value={s.escalation_mode === 'policy' && !s.escalation_policy_id
+                    ? 'Policy not chosen'
+                    : policiesQ.isError && !(s.escalation_mode === 'legacy' && s.escalation_levels.length)
+                      ? `Unknown (policies could not be loaded)`
+                      : ruleEscalationSummary({
+                          // What is saved: a policy only in policy mode, tiers only in legacy mode.
+                          policy: s.escalation_mode === 'policy' ? chosenPolicy : null,
+                          policyId: s.escalation_mode === 'policy' ? s.escalation_policy_id : null,
+                          tiers: s.escalation_mode === 'legacy' ? s.escalation_levels.map((lv) => lv.after_minutes) : [],
+                          priority: effPriority,
+                          defaultPolicy,
+                        })}
                 />
                 <ReviewRow label="Enabled" value={s.enabled ? 'Yes' : 'No'} />
                 <div className="flex gap-2 pt-2">

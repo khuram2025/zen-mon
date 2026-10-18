@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.services import alert_funnel
 
 logger = logging.getLogger("netpath.alerts")
 
@@ -34,9 +35,10 @@ _NUMERIC_METRICS = ("netpath_rtt", "netpath_loss", "netpath_hop_count")
 
 
 async def _rules(db: AsyncSession) -> list:
-    rows = (await db.execute(text("""
+    prio = await alert_funnel.rule_priority_column(db)
+    rows = (await db.execute(text(f"""
         SELECT id, name, metric, operator, threshold, severity, enabled, target,
-               notify_channels, cooldown
+               notify_channels, cooldown, schedule_start, schedule_end, schedule_days, {prio}
         FROM alert_rules
         WHERE enabled AND metric LIKE 'netpath\\_%' ESCAPE '\\'
     """))).mappings().all()
@@ -80,13 +82,18 @@ async def _active_alert(db: AsyncSession, rule_id, dedupe: str):
     ), {"rid": str(rule_id), "dk": dedupe})).first()
 
 
-async def _raise(db: AsyncSession, rule, message: str, meta: dict) -> None:
+async def _raise(db: AsyncSession, rule, message: str, meta: dict):
+    """Insert the alert; returns its id."""
     meta = {"metric": rule["metric"], **meta}
-    await db.execute(text(
-        "INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata) "
-        "VALUES (NULL, :rid, 'active', :sev, :msg, NOW(), CAST(:meta AS jsonb))"
+    # The incident's priority is fixed when it is raised (migrate-164).
+    p_col, p_val, p_params = alert_funnel.priority_insert(
+        await alert_funnel.priority_supported(db), rule.get("priority"), rule["severity"] or "warning")
+    row = (await db.execute(text(
+        f"INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata{p_col}) "
+        f"VALUES (NULL, :rid, 'active', :sev, :msg, NOW(), CAST(:meta AS jsonb){p_val}) RETURNING id"
     ), {"rid": str(rule["id"]), "sev": rule["severity"] or "warning",
-        "msg": message, "meta": json.dumps(meta)})
+        "msg": message, "meta": json.dumps(meta), **p_params})).first()
+    return row[0] if row else None
 
 
 async def _resolve(db: AsyncSession, alert_id) -> None:
@@ -95,13 +102,25 @@ async def _resolve(db: AsyncSession, alert_id) -> None:
 
 
 async def _notify(db: AsyncSession, rule, probe: dict, message: str, *, is_recovery: bool = False,
-                  headline: dict | None = None, details: list | None = None) -> None:
+                  headline: dict | None = None, details: list | None = None,
+                  alert_id=None, outbox: list | None = None) -> None:
+    """Announce a NetPath alert or its recovery.
+
+    With an ``outbox`` the send is queued and goes out after the pass commits
+    (:func:`_flush`): the shared dispatcher commits keyed sends, and the event
+    batch is row-locked until its transaction ends.
+    """
+    # Quiet hours: the rule's own schedule in the appliance time zone. (This
+    # used to call notifications_allowed(db), which raised and was swallowed,
+    # so quiet hours never applied here.)
     try:
-        from app.services.alert_schedule import notifications_allowed
-        if not is_recovery and not await notifications_allowed(db):
+        from app.services.alert_schedule import get_configured_timezone, notifications_allowed
+        r = dict(rule)
+        if not is_recovery and not notifications_allowed(r.get("schedule_start"), r.get("schedule_end"),
+                                                r.get("schedule_days"), await get_configured_timezone(db)):
             return
     except Exception:
-        pass
+        logger.warning("quiet-hours check failed; notifying anyway", exc_info=True)
     try:
         from app.services.host_alert_service import dispatch_to_channels
         sev = rule["severity"] or "warning"
@@ -122,16 +141,37 @@ async def _notify(db: AsyncSession, rule, probe: dict, message: str, *, is_recov
             "details": details or [("Alert rule", rule["name"]), ("Probe", name)],
             "triggered_at": datetime.now(timezone.utc).isoformat(),
             "rule_id": str(rule["id"]),
+            "is_recovery": is_recovery,
+            # Keyed on the alert row: one send per incident event, channel and
+            # recipient, linked to it in the delivery log.
+            "alert_id": str(alert_id) if alert_id else None,
+            "delivery_event": "recovery" if is_recovery else "trigger",
+            **alert_funnel.notification_fields(sev, rule.get("priority"), trigger=not is_recovery),
         }
         channels = rule["notify_channels"] or []
         if isinstance(channels, str):
             channels = json.loads(channels)
+        if outbox is not None:
+            outbox.append((channels, ctx))
+            return
         await dispatch_to_channels(db, channels, ctx)
     except Exception:
         logger.exception("netpath alert notify failed")
 
 
-async def _process_events(db: AsyncSession, rules) -> int:
+async def _flush(db: AsyncSession, outbox: list) -> None:
+    """Send the notifications a committed pass queued."""
+    from app.services.host_alert_service import dispatch_to_channels
+    while outbox:
+        channels, ctx = outbox.pop(0)
+        try:
+            await dispatch_to_channels(db, channels, ctx)
+        except Exception:
+            logger.exception("netpath alert notify failed")
+            await db.rollback()
+
+
+async def _process_events(db: AsyncSession, rules, outbox: list | None = None) -> int:
     evrules = [r for r in rules if r["metric"] in _EVENT_METRIC.values()]
     unreach_rules = [r for r in rules if r["metric"] == "netpath_unreachable"]
     rows = (await db.execute(text("""
@@ -155,7 +195,7 @@ async def _process_events(db: AsyncSession, rules) -> int:
                 if active:
                     await _resolve(db, active[0])
                     await _notify(db, rule, probe, f"Path to {ev['probe_name']} is reachable again",
-                                  is_recovery=True)
+                                  is_recovery=True, alert_id=active[0], outbox=outbox)
             await db.execute(text("UPDATE netpath_events SET alerted = TRUE WHERE id = :id"), {"id": ev["id"]})
             continue
 
@@ -178,15 +218,16 @@ async def _process_events(db: AsyncSession, rules) -> int:
                     msg = f"Target {ev['probe_name']} became unreachable"
                     details = [("Alert rule", rule["name"]), ("Probe", ev["probe_name"]),
                                ("Last hops", str(det.get("last_hop_count", "?")))]
-                await _raise(db, rule, msg, {"netpath_dedupe": dedupe, "probe_id": str(ev["probe_id"]),
-                                             "probe_name": ev["probe_name"], **det})
-                await _notify(db, rule, probe, msg, details=details)
+                alert_id = await _raise(db, rule, msg, {"netpath_dedupe": dedupe,
+                                                        "probe_id": str(ev["probe_id"]),
+                                                        "probe_name": ev["probe_name"], **det})
+                await _notify(db, rule, probe, msg, details=details, alert_id=alert_id, outbox=outbox)
                 n += 1
         await db.execute(text("UPDATE netpath_events SET alerted = TRUE WHERE id = :id"), {"id": ev["id"]})
     return n
 
 
-async def _process_numeric(db: AsyncSession, rules) -> None:
+async def _process_numeric(db: AsyncSession, rules, outbox: list | None = None) -> None:
     numrules = [r for r in rules if r["metric"] in _NUMERIC_METRICS]
     if not numrules:
         return
@@ -228,24 +269,28 @@ async def _process_numeric(db: AsyncSession, rules) -> None:
                 msg = f"{label} to {pr['name']} is {disp} (threshold {rule['operator']} {rule['threshold']:g}{unit if unit!='hops' else ''})"
                 headline = {"label": label, "value": disp,
                             "secondary_label": "Threshold", "secondary_value": f"{rule['operator']} {rule['threshold']:g}{unit if unit!='hops' else ''}"}
-                await _raise(db, rule, msg, {"netpath_dedupe": dedupe, "probe_id": str(pr["id"]),
-                                             "probe_name": pr["name"], "value": round(value, 2)})
+                alert_id = await _raise(db, rule, msg, {"netpath_dedupe": dedupe,
+                                                        "probe_id": str(pr["id"]),
+                                                        "probe_name": pr["name"],
+                                                        "value": round(value, 2)})
                 await _notify(db, rule, probe, msg, headline=headline,
                               details=[("Alert rule", rule["name"]), ("Probe", pr["name"]),
-                                       (label, disp)])
+                                       (label, disp)], alert_id=alert_id, outbox=outbox)
             elif not breach and active:
                 await _resolve(db, active[0])
                 await _notify(db, rule, probe, f"{label} to {pr['name']} recovered ({value:g}{unit if unit!='hops' else ' hops'})",
-                              is_recovery=True)
+                              is_recovery=True, alert_id=active[0], outbox=outbox)
 
 
 async def run_eval_once(db: AsyncSession) -> None:
     rules = await _rules(db)
     if not rules:
         return
-    await _process_events(db, rules)
-    await _process_numeric(db, rules)
+    outbox: list = []
+    await _process_events(db, rules, outbox)
+    await _process_numeric(db, rules, outbox)
     await db.commit()
+    await _flush(db, outbox)
 
 
 async def netpath_alert_evaluator_loop() -> None:

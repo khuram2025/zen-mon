@@ -83,6 +83,7 @@ const requiredRoutes = [
   '/mibs',
   '/alerts',
   '/alert-rules',
+  '/escalation',
   '/reports',
   '/reports/executive',
   '/reports/technical',

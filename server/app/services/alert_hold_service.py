@@ -50,6 +50,7 @@ from types import SimpleNamespace
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import alert_funnel
 from app.services import alert_notify_state as ns
 from app.services import alert_phrasing as ap
 from app.services.alert_schedule import get_configured_timezone, notifications_allowed
@@ -65,7 +66,7 @@ _DUE_SQL = """
            r.notify_channels, r.metric, r.operator, r.threshold, r.trigger_on,
            r.conditions, r.condition_logic,
            r.email_subject, r.email_body, r.sms_template,
-           r.schedule_start, r.schedule_end, r.schedule_days,
+           r.schedule_start, r.schedule_end, r.schedule_days, {rule_priority} AS rule_priority,
            d.status AS device_status, d.hostname AS device_hostname,
            host(d.ip_address) AS device_ip,
            sc.status AS check_status, sc.name AS check_name,
@@ -78,6 +79,14 @@ _DUE_SQL = """
       AND (a.metadata->>'hold_until') IS NOT NULL
       AND (a.metadata->>'hold_until')::timestamptz <= now()
 """
+
+
+async def _due_sql(db: AsyncSession) -> str:
+    """_DUE_SQL with the rule priority column only once migrate-164 added it
+    (alert_funnel.rule_priority_column): a code update that lands before its
+    migration must not stop confirming held alerts."""
+    col = await alert_funnel.rule_priority_column(db)
+    return _DUE_SQL.format(rule_priority="r.priority" if col == "priority" else "NULL")
 
 
 async def _settle(db: AsyncSession, alert_id, *, status: str, extra: dict) -> bool:
@@ -192,6 +201,9 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         # A confirmed hold is the incident's first page: label it New and
         # claim it once (alert_delivery_keys) however many workers sweep.
         "delivery_event": "trigger",
+        # Priority routes and may group a confirmed warning like any other
+        # first page (alert_funnel: P3/P4 warning/info triggers only).
+        **alert_funnel.notification_fields(sev, getattr(row, "rule_priority", None), trigger=True),
         **ap.incident_context(alert_id=row.id, first_seen=row.triggered_at, now=now,
                               lifecycle="new"),
     })
@@ -199,7 +211,7 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
 
 async def sweep_pending_holds(db: AsyncSession) -> dict[str, int]:
     """Settle every pending alert whose hold has expired."""
-    rows = (await db.execute(text(_DUE_SQL))).fetchall()
+    rows = (await db.execute(text(await _due_sql(db)))).fetchall()
     if not rows:
         return {"checked": 0, "confirmed": 0, "cancelled": 0, "suppressed": 0}
 

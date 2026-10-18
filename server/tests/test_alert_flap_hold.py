@@ -661,3 +661,25 @@ async def test_postgres_rule_api_round_trips_notify_while_flapping(world, monkey
         listed = await api.get_alert_rule(UUID(core["id"]), db=s, user=user)
     assert kept["name"] == "Core" and kept["notify_while_flapping"] is False
     assert listed["notify_while_flapping"] is False
+
+
+@pytest.mark.asyncio
+async def test_postgres_the_hold_sweep_runs_before_the_priority_migration(world):
+    """Code updated before migrate-164: alert_rules.priority does not exist
+    yet, and held alerts must still be confirmed."""
+    from app.services import alert_funnel
+
+    w = world
+    await _evaluate(w, "up", "down", flapping=True, is_flapping=True)
+    w.db.execute("ALTER TABLE alert_rules DROP COLUMN priority CASCADE")
+    w.db.execute("UPDATE devices SET status = 'down' WHERE id = $1", w.device)
+    w.db.execute("UPDATE alerts SET metadata = metadata || jsonb_build_object('hold_until', now()::text)")
+    alert_funnel.reset_for_tests()
+    try:
+        async with session(w.db) as s:
+            out = await alert_hold_service.sweep_pending_holds(s)
+    finally:
+        alert_funnel.reset_for_tests()
+    assert out["confirmed"] == 1
+    [(status, meta, _)] = _rows(w)
+    assert status == "active" and meta["notified"] is True

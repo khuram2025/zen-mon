@@ -1324,3 +1324,72 @@ def incident_subject(subject: str, ctx: Optional[dict]) -> str:
     if ref and f"[{ref}]" not in out:
         out = f"{out} [{ref}]".strip()
     return out
+
+
+# ── Priority in subjects, incident links ─────────────────────────────────────
+
+def priority_subject(subject: str, priority) -> str:
+    """Put the priority tag after the leading severity tag:
+    "[WARNING] [New] Memory high [INC-3f2a9c1d]" becomes
+    "[WARNING] [P3] [New] Memory high [INC-3f2a9c1d]". Idempotent; a subject
+    without a leading tag gets the priority first; no priority = unchanged."""
+    from app.services.alert_priority import subject_tag
+
+    subject = subject or ""
+    tag = subject_tag(priority)
+    if not tag or tag in subject:
+        return subject
+    if subject.startswith("[") and "]" in subject:
+        close = subject.index("]") + 1
+        return f"{subject[:close]} {tag} {subject[close:].lstrip()}".rstrip()
+    return f"{tag} {subject}".rstrip()
+
+
+# Top-level dashboard sections an alert action_url may point into; what
+# precedes the first of them is the dashboard base URL.
+_DASHBOARD_SECTIONS = ("/alerts", "/alert-rules", "/services", "/devices", "/servers", "/apm",
+                       "/netflow", "/netpath", "/udt", "/sensors", "/network", "/maps")
+
+
+def dashboard_base(action_url: Optional[str]) -> str:
+    """The dashboard base of an absolute action URL ("" when it is not one)."""
+    from urllib.parse import urlsplit
+
+    url = str(action_url or "").strip()
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return ""
+    path = parts.path or ""
+    cut = len(path)
+    for section in _DASHBOARD_SECTIONS:
+        i = path.find(section)
+        while i >= 0:
+            end = i + len(section)
+            if end == len(path) or path[end] in "/?#":
+                cut = min(cut, i)
+                break
+            i = path.find(section, i + 1)
+    return f"{parts.scheme}://{parts.netloc}{path[:cut].rstrip('/')}"
+
+
+def incident_links(ctx: Optional[dict]) -> tuple[str, str]:
+    """("View incident" URL, "Acknowledge" URL) for an alert email.
+
+    Explicit ``incident_url`` / ``ack_url`` win; otherwise they are built
+    from the dashboard base of ``action_url`` and ``incident_id``:
+    ``/alerts/<id>`` and ``/alerts/<id>?ack=1``. The acknowledge page needs a
+    signed-in user and asks for an explicit confirmation — the link itself
+    never changes anything (mail scanners follow links). ("", "") when
+    neither can be known.
+    """
+    c = ctx or {}
+    view = str(c.get("incident_url") or "").strip()
+    ack = str(c.get("ack_url") or "").strip()
+    if not view:
+        base = dashboard_base(c.get("action_url"))
+        aid = str(c.get("incident_id") or c.get("alert_id") or "").strip()
+        if base and aid:
+            view = f"{base}/alerts/{aid}"
+    if view and not ack:
+        ack = f"{view}{'&' if '?' in view else '?'}ack=1"
+    return view, ack

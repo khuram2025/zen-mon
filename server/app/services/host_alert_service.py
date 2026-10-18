@@ -232,10 +232,96 @@ def _key_context(ctx: dict):
     return alert_id, event[:64]
 
 
+# Direct-to-person deliveries (ctx["recipients"], e.g. escalation targets
+# resolved to a user's contact methods) are keyed and logged against this
+# constant channel id; equal to notification_grouping.DIRECT_CHANNEL_ID.
+DIRECT_CHANNEL_ID = "00000000-0000-0000-0000-0000000000e1"
+
+
+def _direct_targets(ctx: dict) -> dict[str, list[tuple[str, str, dict]]]:
+    """``ctx['recipients']`` by kind: {"email": [(key, address, entry)], "sms": [...]},
+    in order, each address once (same normalization as channel recipients)."""
+    out: dict[str, list[tuple[str, str, dict]]] = {"email": [], "sms": []}
+    seen: set[tuple[str, str]] = set()
+    for entry in ctx.get("recipients") or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "").strip().lower()
+        if kind not in out:
+            continue
+        for key, addr in _recipients([entry.get("address")], kind):
+            if (kind, key) not in seen:
+                seen.add((kind, key))
+                out[kind].append((key, addr, entry))
+    return out
+
+
+async def _direct_gateway_row(db: AsyncSession, gw_type: str):
+    """The gateway row direct-to-person deliveries of a type ("smtp" / "sms")
+    use: the enabled default, else the only enabled gateway of that type (a
+    single gateway nobody flagged as default is still the obvious route).
+    None when there is no enabled gateway, or several and none is default."""
+    rows = (await db.execute(text(
+        "SELECT id, config, enabled, is_default FROM notification_gateways WHERE type = :t"
+        " ORDER BY is_default DESC, created_at, id"), {"t": gw_type})).fetchall()
+    enabled = [r for r in rows if r.enabled]
+    for r in enabled:
+        if r.is_default:
+            return r
+    return enabled[0] if len(enabled) == 1 else None
+
+
+async def _default_gateway(db: AsyncSession, gw_type: str) -> dict | None:
+    """Config of the gateway direct pages of a type use (see
+    :func:`_direct_gateway_row`), or None."""
+    row = await _direct_gateway_row(db, gw_type)
+    return decrypt_config(row.config) if row is not None else None
+
+
+async def direct_gateway_kinds(db: AsyncSession) -> set[str]:
+    """Contact kinds ("email", "sms") that direct pages to people can reach
+    now (a usable SMTP / SMS gateway exists). Read-only; for coverage checks."""
+    out = set()
+    for kind, gw_type in (("email", "smtp"), ("sms", "sms")):
+        if await _direct_gateway_row(db, gw_type) is not None:
+            out.add(kind)
+    return out
+
+
+def _mail_ctx(ctx: dict) -> dict:
+    """The email_render context of an alert notification."""
+    from app.api.v1.alert_engine import _clean_details
+
+    mail_ctx = {
+        "severity": ctx.get("severity"),
+        "status": ctx.get("status"),
+        "resolved": bool(ctx.get("resolved")) or (ctx.get("status") == "RESOLVED"),
+        "title": ctx.get("rule_name"),
+        "hostname": ctx.get("hostname"),
+        "ip_address": ctx.get("ip_address"),
+        # `body` is the prose written for mail; `message` is the
+        # SMS line. Reading them the wrong way round put a 140-
+        # character telegram in the callout of a full-width mail.
+        "message": ctx.get("body") or ctx.get("message"),
+        "notice": ctx.get("notice") or "",
+        "details": _clean_details(ctx.get("details") or []),
+        "headline_metric": ctx.get("headline_metric") or {},
+        "action_url": ctx.get("action_url") or "",
+        "timestamp": ctx.get("triggered_at"),
+    }
+    # Incident identity and lifecycle (alert_phrasing.incident_context).
+    mail_ctx.update({k: ctx[k] for k in ap.INCIDENT_KEYS if ctx.get(k)})
+    # A sender whose mail differs from its webhook payload
+    # (the service path's mail has no IP line) says so here.
+    mail_ctx.update(ctx.get("email_overrides") or {})
+    return mail_ctx
+
+
 async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -> int:
     """Send an alert to notification channels. Best-effort; returns how many
-    channels accepted it. Every channel's outcome is written to the delivery
-    log (accepted / failed / skipped) against ``ctx['alert_id']`` if given.
+    channels (and direct recipients) accepted it — or hold it in a digest.
+    Every outcome is written to the delivery log (accepted / failed / skipped
+    / held) against ``ctx['alert_id']`` if given.
 
     Channel ids are deduplicated, and so are recipients across the channels of
     one dispatch (an address on two email channels gets one mail;
@@ -250,9 +336,26 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
     one is retried. The key records accepted / failed / uncertain — an error
     that may have come after the provider took the message is uncertain and is
     never re-sent. Without both keys this behaves as it always has.
+
+    Further ``ctx`` keys (1.24.17):
+
+    * ``recipients``: [{"kind": "email"|"sms", "address", "user_id", "label"}]
+      delivered one by one through the default SMTP / SMS gateway, with the
+      same cross-channel dedupe and delivery keys (channel id
+      :data:`DIRECT_CHANNEL_ID`).
+    * ``priority`` (P1..P4) and ``groupable`` (default False): a groupable
+      P3/P4 trigger may be held into a digest by notification_grouping
+      (grouping wait or per-recipient budget). P1/P2/critical, recoveries,
+      escalations and reviews are never held. A held send counts as handled.
+      A recovery whose trigger still waits in an open digest is listed there
+      as already recovered instead of being sent on its own.
+    * ``only_recipients``: restrict channels to these recipient keys (digest
+      release); ``html_body``: a pre-rendered mail body.
     """
     from app.api.v1.alert_engine import _send_email, _send_sms, _dispatch_channel_result
     from app.services import alert_delivery_log as dl
+    from app.services import notification_grouping as ng
+    from app.services.email_render import alert_subject, build_alert_email_html
 
     kind = dl.kind_from_ctx(ctx)
     keyed = _key_context(ctx)
@@ -262,31 +365,38 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
     # ... of which these were delivered (or claimed) by an earlier dispatch.
     prior = await dl.delivered_recipients(db, *keyed) if keyed else {}
     covered.update(prior)
-    sent = 0
-    for ch_id in _unique_channels(channel_ids):
-        ch = None
-        timer = dl.Timer()
+    raw_only = ctx.get("only_recipients")
+    only = None if raw_only is None else {str(k) for k in raw_only}
+    gate = await ng.gate_for(db, ctx, keyed)
+    # Channels / direct recipients that accepted (or hold) this notification.
+    credited: set[str] = set()
 
-        async def _log(outcome: str, error=None):
+    class _Route:
+        """One channel, or one direct recipient, of this dispatch."""
+
+        def __init__(self, ch_id: str, credit_key: str, name=None, ctype=None):
+            self.id, self.credit_key, self.name, self.type = ch_id, credit_key, name, ctype
+            self.timer = dl.Timer()
+            self.claimed: list[str] = []
+            self.in_flight: list[str] = []
+
+        async def log(self, outcome: str, error=None):
             await dl.record(
                 db, alert_id=ctx.get("alert_id"), rule_id=ctx.get("rule_id"),
-                channel_id=ch_id, channel_name=getattr(ch, "name", None),
-                channel_type=getattr(ch, "type", None), kind=kind, outcome=outcome,
-                error=error, latency_ms=timer.ms if outcome != "skipped" else None)
+                channel_id=self.id, channel_name=self.name, channel_type=self.type, kind=kind,
+                outcome=outcome, error=error,
+                latency_ms=self.timer.ms if outcome not in ("skipped", "held") else None)
 
-        claimed: list[str] = []
-        in_flight: list[str] = []
-
-        async def _claim(targets: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], bool]:
-            """Claim targets for this channel: (targets to send to, any already
-            delivered). Unkeyed dispatches send to every target."""
-            if not keyed or not dl._uuid_or_none(ch_id):
+        async def claim(self, targets: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], bool]:
+            """Claim targets: (targets to send to, any already delivered).
+            Unkeyed dispatches send to every target."""
+            if not keyed or not dl._uuid_or_none(self.id):
                 return targets, False
             fresh, already = [], False
             for key, addr in targets:
-                key_id, state = await dl.claim_key(db, keyed[0], keyed[1], ch_id, key)
+                key_id, state = await dl.claim_key(db, keyed[0], keyed[1], self.id, key)
                 if key_id:
-                    claimed.append(key_id)
+                    self.claimed.append(key_id)
                     fresh.append((key, addr))
                 elif state is None:
                     fresh.append((key, addr))      # keys unavailable: send as before
@@ -295,34 +405,94 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                     # this event: no other channel of ours sends it again.
                     covered.add(key)
                     already = already or state in dl.DELIVERED_STATES
-            if claimed:
+            if self.claimed:
                 await db.commit()                  # the claim is durable before the send
             return fresh, already
 
-        async def _finish(state: str, error=None):
-            if claimed:
-                await dl.finish_keys(db, claimed, state, error)
+        async def finish(self, state: str, error=None):
+            if self.claimed:
+                await dl.finish_keys(db, self.claimed, state, error)
                 await db.commit()
 
+        async def gated(self, targets: list[tuple[str, str]], direct_kind: str | None = None):
+            """Targets still to send now after the grouping/budget gate held
+            (or folded) the rest; held ones count as handled."""
+            if not gate:
+                return targets
+            rest, routed = await gate.route(db, channel_id=self.id, channel_name=self.name,
+                                            channel_type=self.type or "", targets=targets,
+                                            direct_kind=direct_kind)
+            for r in routed:
+                covered.update(k for k in r.keys if k)
+                await self.log(r.log_outcome, r.log_text)
+            if routed:
+                credited.add(self.credit_key)
+            return rest
+
+        async def send_addresses(self, gw: dict, ctype: str, rcpt: str, targets) -> None:
+            self.in_flight = [k for k, _ in targets]
+            if ctype == "email":
+                mail_ctx = _mail_ctx(ctx)
+                ok = await _send_email(gw, rcpt, alert_subject(ctx["subject"], ctx),
+                                       mail_ctx["message"],
+                                       html_body=ctx.get("html_body") or build_alert_email_html(mail_ctx))
+                skip_reason = "config: SMTP gateway has no host"
+            else:
+                # Gateway template placeholders the sender offers
+                # (device path: {hostname}, {ip_address}, {status}).
+                ok = await _send_sms(gw, rcpt, ctx["message"],
+                                     values=ctx.get("sms_template_values"))
+                skip_reason = "config: SMS gateway is not a usable HTTP gateway"
+            # Log first: the key's commit then makes both durable.
+            if ok:
+                credited.add(self.credit_key)
+                covered.update(self.in_flight)
+                await self.log("accepted")
+                await self.finish("accepted")
+            else:
+                await self.log("skipped", skip_reason)
+                await self.finish("failed", skip_reason)
+
+        async def failed(self, exc: BaseException):
+            logger.warning("alert notify: channel %s failed: %s", self.name or self.id, exc)
+            outcome = dl.outcome_for_exception(exc)
+            if outcome == "uncertain":
+                covered.update(self.in_flight)   # it may have arrived: never twice
+            await self.log("failed", exc if outcome == "failed"
+                           else f"uncertain: {dl.sanitize_error(exc)}")
+            if self.claimed:
+                try:
+                    await self.finish(outcome, exc)
+                except Exception:
+                    logger.warning("alert notify: could not record outcome for channel %s", self.id)
+
+    for ch_id in _unique_channels(channel_ids):
+        route = _Route(ch_id, ch_id)
         try:
             ch = (await db.execute(text(
                 "SELECT name, type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"
             ), {"id": ch_id})).first()
             if not ch:
-                await _log("skipped", "config: channel no longer exists")
+                await route.log("skipped", "config: channel no longer exists")
                 continue
+            route.name, route.type = ch.name, ch.type
             if not ch.enabled:
-                await _log("skipped", "config: channel disabled")
+                await route.log("skipped", "config: channel disabled")
                 continue
             cfg = decrypt_config(ch.config)
             if ch.type in ("email", "sms"):
                 field = "recipients" if ch.type == "email" else "phone_numbers"
                 listed = _recipients(cfg.get(field, ""), ch.type)
+                if only is not None:
+                    listed = [(k, a) for k, a in listed if k in only]
+                    if not listed:
+                        await route.log("skipped", "config: the held recipients are no longer on this channel")
+                        continue
                 gw = await _gateway_config(db, ch, "smtp" if ch.type == "email" else "sms")
                 if not listed or not gw:
                     what = "recipients" if ch.type == "email" else "phone numbers"
-                    await _log("skipped", f"config: no {what}" if not listed
-                               else f"config: no enabled {'SMTP' if ch.type == 'email' else 'SMS'} gateway")
+                    await route.log("skipped", f"config: no {what}" if not listed
+                                    else f"config: no enabled {'SMTP' if ch.type == 'email' else 'SMS'} gateway")
                     continue
                 # A recipient counts as covered only once a channel accepted
                 # the message (or possibly did): a backup channel on another
@@ -330,98 +500,93 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                 targets = [(k, a) for k, a in listed if k not in covered]
                 if not targets:
                     if any(k in prior for k, _ in listed):
-                        sent += 1        # an earlier dispatch of this event reached them
-                        await _log("skipped", "duplicate: already delivered for this event")
+                        credited.add(ch_id)     # an earlier dispatch of this event reached them
+                        await route.log("skipped", "duplicate: already delivered for this event")
                     else:
-                        await _log("skipped", "duplicate: every recipient was already notified "
-                                              "for this event by another channel")
+                        await route.log("skipped", "duplicate: every recipient was already notified "
+                                                   "for this event by another channel")
                     continue
-                targets, already = await _claim(targets)
+                targets = await route.gated(targets)
+                if not targets:
+                    continue
+                targets, already = await route.claim(targets)
                 if not targets:
                     if already:
-                        sent += 1
-                    await _log("skipped", "duplicate: already delivered for this event")
+                        credited.add(ch_id)
+                    await route.log("skipped", "duplicate: already delivered for this event")
                     continue
-                in_flight = [k for k, _ in targets]
                 if ch.type == "email":
                     rcpt = ", ".join(a for _, a in targets)
-                elif len(targets) == len(listed) and isinstance(cfg.get(field), str):
+                elif len(targets) == len(listed) and only is None and isinstance(cfg.get(field), str):
                     rcpt = cfg[field]     # SMS gateways substitute the list verbatim
                 else:
                     rcpt = ",".join(a for _, a in targets)
-                if ch.type == "email":
-                    from app.services.email_render import alert_subject, build_alert_email_html
-                    from app.api.v1.alert_engine import _clean_details
-                    mail_ctx = {
-                        "severity": ctx.get("severity"),
-                        "status": ctx.get("status"),
-                        "resolved": bool(ctx.get("resolved")) or (ctx.get("status") == "RESOLVED"),
-                        "title": ctx.get("rule_name"),
-                        "hostname": ctx.get("hostname"),
-                        "ip_address": ctx.get("ip_address"),
-                        # `body` is the prose written for mail; `message` is the
-                        # SMS line. Reading them the wrong way round put a 140-
-                        # character telegram in the callout of a full-width mail.
-                        "message": ctx.get("body") or ctx.get("message"),
-                        "notice": ctx.get("notice") or "",
-                        "details": _clean_details(ctx.get("details") or []),
-                        "headline_metric": ctx.get("headline_metric") or {},
-                        "action_url": ctx.get("action_url") or "",
-                        "timestamp": ctx.get("triggered_at"),
-                    }
-                    # Incident identity and lifecycle (alert_phrasing.incident_context).
-                    mail_ctx.update({k: ctx[k] for k in ap.INCIDENT_KEYS if ctx.get(k)})
-                    ok = await _send_email(gw, rcpt, alert_subject(ctx["subject"], ctx),
-                                           mail_ctx["message"],
-                                           html_body=build_alert_email_html(mail_ctx))
-                    skip_reason = "config: SMTP gateway has no host"
-                else:
-                    ok = await _send_sms(gw, rcpt, ctx["message"])
-                    skip_reason = "config: SMS gateway is not a usable HTTP gateway"
-                # Log first: the key's commit then makes both durable.
-                if ok:
-                    sent += 1
-                    covered.update(in_flight)
-                    await _log("accepted")
-                    await _finish("accepted")
-                else:
-                    await _log("skipped", skip_reason)
-                    await _finish("failed", skip_reason)
+                await route.send_addresses(gw, ch.type, rcpt, targets)
             elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
-                targets, already = await _claim([("", "")])
+                if not await route.gated([("", "")]):
+                    continue
+                targets, already = await route.claim([("", "")])
                 if not targets:
                     if already:
-                        sent += 1
-                    await _log("skipped", "duplicate: already delivered for this event")
+                        credited.add(ch_id)
+                    await route.log("skipped", "duplicate: already delivered for this event")
                     continue
                 ok, err = await _dispatch_channel_result(ch.type, cfg, ctx)
                 if ok:
-                    sent += 1
-                    await _log("accepted")
-                    await _finish("accepted")
+                    credited.add(ch_id)
+                    await route.log("accepted")
+                    await route.finish("accepted")
                 elif err is not None:
                     outcome = dl.outcome_for_exception(err)
-                    await _log("failed", err if outcome == "failed"
-                               else f"uncertain: {dl.sanitize_error(err)}")
-                    await _finish(outcome, err)
+                    await route.log("failed", err if outcome == "failed"
+                                    else f"uncertain: {dl.sanitize_error(err)}")
+                    await route.finish(outcome, err)
                 else:
-                    await _log("skipped", "config: no URL or routing key")
-                    await _finish("failed", "config: no URL or routing key")
+                    await route.log("skipped", "config: no URL or routing key")
+                    await route.finish("failed", "config: no URL or routing key")
             else:
-                await _log("skipped", f"config: unsupported channel type {ch.type}")
+                await route.log("skipped", f"config: unsupported channel type {ch.type}")
         except Exception as exc:
-            logger.warning("alert notify: channel %s failed: %s", ch_id, exc)
-            outcome = dl.outcome_for_exception(exc)
-            if outcome == "uncertain":
-                covered.update(in_flight)   # it may have arrived: never twice
-            await _log("failed", exc if outcome == "failed"
-                       else f"uncertain: {dl.sanitize_error(exc)}")
-            if claimed:
-                try:
-                    await _finish(outcome, exc)
-                except Exception:
-                    logger.warning("alert notify: could not record outcome for channel %s", ch_id)
-    return sent
+            await route.failed(exc)
+
+    # Direct to person: one message per recipient through the default gateway.
+    direct = _direct_targets(ctx)
+    for dkind in ("email", "sms"):
+        gw: dict | None | bool = None
+        for key, addr, entry in direct[dkind]:
+            route = _Route(DIRECT_CHANNEL_ID, f"direct:{dkind}:{key}",
+                           name=str(entry.get("label") or ng.DIRECT_CHANNEL_NAME)[:255], ctype=dkind)
+            try:
+                if key in covered:
+                    if key in prior:
+                        credited.add(route.credit_key)
+                        await route.log("skipped", "duplicate: already delivered for this event")
+                    else:
+                        await route.log("skipped", "duplicate: already notified for this event "
+                                                   "by another channel")
+                    continue
+                if gw is None:
+                    gw = await _default_gateway(db, "smtp" if dkind == "email" else "sms") or False
+                if not gw:
+                    await route.log("skipped", "config: no usable "
+                                               f"{'SMTP' if dkind == 'email' else 'SMS'} gateway (none"
+                                               " enabled, or several and none is the default)")
+                    continue
+                targets = await route.gated([(key, addr)], direct_kind=dkind)
+                if not targets:
+                    continue
+                targets, already = await route.claim(targets)
+                if not targets:
+                    if already:
+                        credited.add(route.credit_key)
+                    await route.log("skipped", "duplicate: already delivered for this event")
+                    continue
+                await route.send_addresses(gw, dkind, addr, targets)
+            except Exception as exc:
+                await route.failed(exc)
+    if gate is not None and gate.changed:
+        await db.commit()
+    return len(credited)
 
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
@@ -565,8 +730,14 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
         "alert_id": str(alert_id) if alert_id else None,
         "delivery_event": event or ("recovery" if is_recovery else "trigger"),
         "is_recovery": is_recovery,
+        **_funnel_fields(sev, getattr(rule, "priority", None), trigger=not is_recovery),
         **incident,
     })
+
+
+def _funnel_fields(severity, rule_priority, *, trigger: bool) -> dict:
+    from app.services import alert_funnel
+    return alert_funnel.notification_fields(severity, rule_priority, trigger=trigger)
 
 
 def _detail(rule, value: float | None, dimension: str | None) -> str:
@@ -639,6 +810,11 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
                 message=_message(rule, hostname, detail),
                 source="host_metric", dedupe=dedupe, metadata=meta,
             )
+            if new_id:
+                # The incident's priority is fixed when it is raised.
+                from app.services import alert_funnel
+                await alert_funnel.stamp_priority(db, new_id, getattr(rule, "priority", None),
+                                                  rule.severity or "warning")
             await db.commit()
             if not new_id:
                 return  # silenced, or another evaluator opened it first
@@ -701,7 +877,7 @@ async def _adopt_legacy_mount_incident(db: AsyncSession, rule, sid: str,
 _RULES_SQL = (
     "SELECT id, name, metric, operator, threshold, severity, min_duration, {clear}, "
     "notify_channels, server_id, target, recovery_alert, conditions, condition_logic, "
-    "schedule_start, schedule_end, schedule_days "
+    "schedule_start, schedule_end, schedule_days, {prio} "
     "FROM alert_rules WHERE enabled = true AND metric LIKE 'host\\_%'"
 )
 _warned_missing_clear_duration = False
@@ -710,8 +886,10 @@ _warned_missing_clear_duration = False
 async def _load_rules(db: AsyncSession) -> list:
     """Enabled host rules. Before migrate-162 the clear hold is the default."""
     global _warned_missing_clear_duration
+    from app.services import alert_funnel
+    prio = await alert_funnel.rule_priority_column(db)
     try:
-        return (await db.execute(text(_RULES_SQL.format(clear="clear_duration")))).all()
+        return (await db.execute(text(_RULES_SQL.format(clear="clear_duration", prio=prio)))).all()
     except Exception as exc:
         if "clear_duration" not in str(exc):
             raise
@@ -720,7 +898,7 @@ async def _load_rules(db: AsyncSession) -> list:
             logger.warning("alert_rules.clear_duration missing — run migrate-162; "
                            "using the default clear hold")
             _warned_missing_clear_duration = True
-        return (await db.execute(text(_RULES_SQL.format(clear="NULL AS clear_duration")))).all()
+        return (await db.execute(text(_RULES_SQL.format(clear="NULL AS clear_duration", prio=prio)))).all()
 
 
 async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> dict[str, int]:

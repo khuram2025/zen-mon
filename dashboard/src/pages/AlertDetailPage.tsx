@@ -12,7 +12,7 @@
  *    live in their own card with impact confirmation.
  */
 import { useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   ArrowLeft, Check, Clock, Eye, Loader2, MessageSquare, RefreshCw, Repeat, ShieldAlert, Timer, TriangleAlert,
@@ -31,6 +31,9 @@ import {
 import { AlertTimeline } from '@/components/alerts/AlertTimeline'
 import { PolicyCard } from '@/components/alerts/PolicyCard'
 import { RoutingCard } from '@/components/alerts/RoutingCard'
+import { AckConfirmDialog, NotificationHolds, RoutePanel } from '@/components/alerts/RoutePanel'
+import { ackRequested, withoutAck } from '@/features/escalation/model'
+import { PriorityBadge } from '@/features/escalation/ui'
 import {
   ageOf, fmtAgo, fmtAlertDate, fmtClock, fmtDur, parseTs, spanSeconds, useApplianceNow,
 } from '@/components/alerts/format'
@@ -40,6 +43,7 @@ import { alertFlapState } from '@/components/devices/deviceStatus'
 export function AlertDetailPage() {
   const { id = '' } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const can = useCan()
   const me = useAuth((s) => s.user)
   const commentRef = useRef<HTMLTextAreaElement>(null)
@@ -55,6 +59,11 @@ export function AlertDetailPage() {
   const alert = q.data
   const now = useApplianceNow(alert?.server_time ?? null)
   const actions = useAlertActions()
+
+  // /alerts/<id>?ack=1 (the email "Acknowledge" button) only opens a confirmation; the GET never acknowledges.
+  // The prompt is derived from the address, and closing it drops ?ack so a refresh does not ask again.
+  const askAck = ackRequested(location.search)
+  const closeAck = () => navigate({ pathname: location.pathname, search: withoutAck(location.search) }, { replace: true })
 
   const goBack = () => {
     if (window.history.length > 1) navigate(-1)
@@ -114,6 +123,7 @@ export function AlertDetailPage() {
           <div className="min-w-0 space-y-2">
             <h1 className="break-words text-xl font-semibold tracking-tight sm:text-2xl">{msg}</h1>
             <div className="flex flex-wrap items-center gap-2 text-sm">
+              <PriorityBadge priority={alert.priority} />
               <SeverityBadge severity={alert.severity} />
               <StatusChip alert={alert} />
               <EntityCell entity={entity} compact className="max-w-[280px]" />
@@ -208,6 +218,8 @@ export function AlertDetailPage() {
         </div>
       )}
 
+      <NotificationHolds alert={alert} />
+
       <SummaryTiles alert={alert} now={now} statusKeyValue={key} />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
@@ -219,12 +231,22 @@ export function AlertDetailPage() {
         </div>
         <div className="min-w-0 space-y-4">
           <EntityCard alert={alert} />
+          <RoutePanel alert={alert} now={now} />
           <PolicyCard rule={alert.rule} snapshot={alert.policy_snapshot} />
           <RoutingCard alert={alert} now={now} />
           {alert.rule && <MessagePreviewCard ruleId={alert.rule.id} />}
         </div>
       </div>
 
+      <AckConfirmDialog
+        open={askAck}
+        alert={alert}
+        canAcknowledge={canTriage}
+        message={msg}
+        pending={actions.acknowledge.isPending}
+        onConfirm={() => actions.acknowledge.mutate({ id: alert.id }, { onSuccess: closeAck })}
+        onClose={closeAck}
+      />
       <ResolveDialog
         open={dialog === 'resolve'}
         onOpenChange={(v) => { if (!v) setDialog(null) }}
@@ -295,7 +317,7 @@ function SummaryTiles({ alert, now, statusKeyValue }: { alert: AlertDetail; now:
   if (alert.acknowledged_at) {
     target = { value: `Acknowledged in ${fmtDur(ackSpan)}`, sub: alert.acknowledged_by ? `by ${alert.acknowledged_by.name}` : undefined, tone: 'info' }
   } else if (!alert.ack_due_at) {
-    target = { value: open ? 'No target' : 'Not acknowledged', sub: open ? 'No response target for this severity' : undefined, tone: 'neutral' }
+    target = { value: open ? 'No target' : 'Not acknowledged', sub: open ? `No response target for ${alert.priority ? `priority ${alert.priority}` : 'this severity'}` : undefined, tone: 'neutral' }
   } else {
     const due = parseTs(alert.ack_due_at) ?? 0
     const delta = Math.abs(due - now) / 1000

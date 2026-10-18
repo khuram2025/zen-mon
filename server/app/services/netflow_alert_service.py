@@ -1423,6 +1423,7 @@ async def notify(db: AsyncSession, rule: NetflowRule, reading: Reading, *, alert
     """Send a trigger (or all-clear) through the rule's channels in the house
     style. True when it was dispatched (quiet hours say no)."""
     from app.services.alert_schedule import get_configured_timezone, notifications_allowed
+    from app.services import alert_funnel
     from app.services.host_alert_service import dispatch_to_channels
 
     if not is_recovery:
@@ -1480,6 +1481,9 @@ async def notify(db: AsyncSession, rule: NetflowRule, reading: Reading, *, alert
         "headline_metric": headline, "details": details,
         "triggered_at": datetime.now(timezone.utc).isoformat(), "rule_id": rule.id, "rule_name": rule.name,
         "alert_id": str(alert_id) if alert_id else None, "is_recovery": is_recovery,
+        # Keyed: one send per incident event, channel and recipient.
+        "delivery_event": "recovery" if is_recovery else "trigger",
+        **alert_funnel.notification_fields(sev, None, trigger=not is_recovery),
         "action_url": action_url,
     })
     logger.debug("netflow alert %s: %s channel(s) accepted", alert_id, sent)

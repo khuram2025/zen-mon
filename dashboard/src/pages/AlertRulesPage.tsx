@@ -13,6 +13,10 @@ import { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 import { AlertMessagePreviewDialog } from '@/components/alerts/AlertMessagePreviewDialog'
 import { toast } from '@/components/ui/Toast'
 import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
+import { effectivePriority, policyForPriority, ruleEscalationSummary, ruleRouteSource } from '@/features/escalation/model'
+import { usePolicies } from '@/features/escalation/api'
+import type { EscalationPolicy } from '@/features/escalation/types'
+import { PriorityBadge } from '@/features/escalation/ui'
 
 const TRIGGER_LABELS: Record<string, string> = {
   down: 'Goes down',
@@ -40,6 +44,34 @@ function scopeLabel(r: any): string {
   return 'All'
 }
 
+/**
+ * The rule's escalation route as the server resolves it: its own enabled policy > its own legacy tiers >
+ * the priority default policy > nothing. Without the policy list the policy counts as enabled and the default is unknown.
+ */
+function RuleEscalationLine({ rule, policies }: { rule: any; policies: EscalationPolicy[] | null }) {
+  const priority = effectivePriority(rule.priority, rule.severity)
+  const tiers: number[] = Array.isArray(rule.escalation_levels)
+    ? rule.escalation_levels.map((lv: any) => Number(lv?.after_minutes)).filter((m: number) => Number.isFinite(m))
+    : []
+  const policy = rule.escalation_policy_id && policies ? policies.find((p) => p.id === rule.escalation_policy_id) ?? null : null
+  const defaultPolicy = policies ? policyForPriority(policies, priority) : null
+  const source = ruleRouteSource({ policyId: rule.escalation_policy_id, policyEnabled: policy?.enabled, tiers: tiers.length, defaultPolicy })
+  if (source === 'none' && !rule.escalation_policy_id) return null
+  if (source === 'priority_default' && !rule.escalation_policy_id) {
+    return <div className="mt-0.5 text-[10px] text-muted" title="No policy or legacy tiers on this rule">{priority} default: {defaultPolicy!.name}</div>
+  }
+  const text = policies
+    ? ruleEscalationSummary({ policy, policyId: rule.escalation_policy_id, tiers, priority, defaultPolicy })
+    : source === 'rule' ? 'Escalation policy' : `${tiers.length} legacy tier${tiers.length === 1 ? '' : 's'}`
+  const tone = rule.escalation_policy_id && source !== 'rule' ? 'text-warning' : source === 'rule' ? 'text-primary' : 'text-amber-600'
+  return (
+    <div className={`mt-0.5 max-w-[16rem] text-[10px] font-medium ${tone}`}
+      title={source === 'legacy_levels' ? `The rule's own tiers take precedence over the ${priority} default policy` : undefined}>
+      {text}
+    </div>
+  )
+}
+
 export function AlertRulesPage() {
   const qc = useQueryClient()
   const [formOpen, setFormOpen] = useState(false)
@@ -47,6 +79,7 @@ export function AlertRulesPage() {
   const [deleting, setDeleting] = useState<any>(null)
   const [previewing, setPreviewing] = useState<any>(null)
 
+  const policiesQ = usePolicies()
   const { data: rules, isError, error } = useQuery<any[]>({
     queryKey: ['alert-rules'],
     queryFn: async () => {
@@ -176,9 +209,14 @@ export function AlertRulesPage() {
                       <Badge variant="outline" className="text-[10px]">{scopeLabel(r)}</Badge>
                     </Td>
                     <Td>
-                      <Badge variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}>
-                        {r.severity}
-                      </Badge>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}>
+                          {r.severity}
+                        </Badge>
+                        <span title={r.priority ? 'Priority chosen on the rule' : 'Priority derived from severity'}>
+                          <PriorityBadge priority={effectivePriority(r.priority, r.severity)} compact className={r.priority ? undefined : 'opacity-70'} />
+                        </span>
+                      </div>
                     </Td>
                     <Td className="text-xs text-muted">
                       {['trap', 'syslog'].includes(r.metric) ? <span>Manual resolution</span> : r.recovery_alert ? (
@@ -186,11 +224,7 @@ export function AlertRulesPage() {
                       ) : (
                         <span>Silent</span>
                       )}
-                      {Array.isArray(r.escalation_levels) && r.escalation_levels.length > 0 && (
-                        <div className="mt-0.5 text-[10px] font-medium text-amber-600">
-                          {r.escalation_levels.length} escalation level{r.escalation_levels.length > 1 ? 's' : ''}
-                        </div>
-                      )}
+                      <RuleEscalationLine rule={r} policies={policiesQ.data ?? null} />
                     </Td>
                     <Td className="text-xs text-muted">{relativeTime(r.created_at)}</Td>
                     <Td>

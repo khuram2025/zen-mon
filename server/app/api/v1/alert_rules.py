@@ -22,6 +22,7 @@ from app.services.audit_service import write_audit_log
 require_rule_manager = require_permission("alerts.manage")
 from app.models.user import User
 from app.services import alert_phrasing as ap
+from app.services import alert_priority as prio
 from app.services import netflow_alert_service as nfa
 
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
@@ -162,6 +163,17 @@ class EscalationLevel(BaseModel):
     repeat_every_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
 
 
+async def _validated_policy(db: AsyncSession, policy_id) -> Optional[UUID]:
+    """The rule's escalation policy id if it exists (422 otherwise)."""
+    if policy_id is None:
+        return None
+    found = (await db.execute(text("SELECT 1 FROM escalation_policies WHERE id = :id"),
+                              {"id": policy_id})).first()
+    if not found:
+        raise HTTPException(status_code=422, detail="Escalation policy not found")
+    return policy_id
+
+
 def _validated_escalation(levels: Optional[list[EscalationLevel]]) -> Optional[list[dict]]:
     """Normalise and sanity-check escalation tiers; None when empty.
 
@@ -230,6 +242,12 @@ class AlertRuleCreate(BaseModel):
 
     # SLA escalation tiers (see EscalationLevel). None/empty = no escalation.
     escalation_levels: Optional[list[EscalationLevel]] = None
+    # Incident priority (None = derived from severity: critical -> P2,
+    # warning -> P3, info -> P4) and the escalation policy that routes this
+    # rule's incidents (None = the priority's default policy, else the legacy
+    # escalation_levels above).
+    priority: Optional[str] = Field(default=None, pattern="^P[1-4]$")
+    escalation_policy_id: Optional[UUID] = None
 
     # NetFlow rules only (metric netflow_*): FlowFilter scope and parameters.
     flow_scope: Optional[dict] = None
@@ -283,6 +301,9 @@ class AlertRuleUpdate(BaseModel):
     notify_while_flapping: Optional[bool] = None
 
     escalation_levels: Optional[list[EscalationLevel]] = None
+    # Explicit null: priority derived from severity / no rule policy.
+    priority: Optional[str] = Field(default=None, pattern="^P[1-4]$")
+    escalation_policy_id: Optional[UUID] = None
 
     flow_scope: Optional[dict] = None
     flow_params: Optional[dict] = None
@@ -364,6 +385,7 @@ _RULE_COLUMNS = (
     "severity, notify_channels, cooldown, "
     "device_type, location, scope_tag, trigger_on, recovery_alert, "
     "min_duration, clear_duration, max_repeat, notify_while_flapping, escalation_levels, "
+    "priority, escalation_policy_id, "
     "schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -406,6 +428,10 @@ def _row_to_dict(row) -> dict:
         "max_repeat": row.max_repeat,
         "notify_while_flapping": bool(getattr(row, "notify_while_flapping", False)),
         "escalation_levels": getattr(row, "escalation_levels", None) or [],
+        "priority": getattr(row, "priority", None),
+        "effective_priority": prio.priority_for(getattr(row, "priority", None), row.severity),
+        "escalation_policy_id": (str(row.escalation_policy_id)
+                                 if getattr(row, "escalation_policy_id", None) else None),
         "schedule_start": schedule_start,
         "schedule_end": schedule_end,
         "schedule_days": row.schedule_days if row.schedule_days else [],
@@ -630,6 +656,8 @@ async def create_alert_rule(
         "notify_while_flapping": data.notify_while_flapping,
         "escalation_levels": json.dumps(_validated_escalation(data.escalation_levels))
                              if data.escalation_levels else None,
+        "priority": data.priority,
+        "escalation_policy_id": await _validated_policy(db, data.escalation_policy_id),
         "schedule_start": data.schedule_start,
         "schedule_end": data.schedule_end,
         "schedule_days": json.dumps(data.schedule_days) if data.schedule_days else None,
@@ -660,6 +688,7 @@ async def create_alert_rule(
             "severity, notify_channels, cooldown, "
             "device_type, location, scope_tag, trigger_on, recovery_alert, "
             "min_duration, clear_duration, max_repeat, notify_while_flapping, escalation_levels, "
+            "priority, escalation_policy_id, "
             "schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
             "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -672,6 +701,7 @@ async def create_alert_rule(
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
             ":device_type, :location, :scope_tag, :trigger_on, :recovery_alert, "
             ":min_duration, :clear_duration, :max_repeat, :notify_while_flapping, CAST(:escalation_levels AS jsonb), "
+            ":priority, :escalation_policy_id, "
             "CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
@@ -822,6 +852,9 @@ async def update_alert_rule(
             set_parts.append("escalation_levels = CAST(:escalation_levels AS jsonb)")
             validated = _validated_escalation(levels)
             params["escalation_levels"] = json.dumps(validated) if validated else None
+        elif key == "escalation_policy_id":
+            set_parts.append("escalation_policy_id = :escalation_policy_id")
+            params[key] = await _validated_policy(db, value)
         elif key == "notify_channels":
             set_parts.append("notify_channels = CAST(:notify_channels AS jsonb)")
             params[key] = json.dumps(_unique_channels(value)) if value is not None else None

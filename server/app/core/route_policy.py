@@ -229,6 +229,10 @@ _POLICIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "tags": ((ANY_VIEW,), ("devices.manage", "service_checks.manage", "servers.manage", "apm.manage")),
     "monitoring_sites": ((ANY_VIEW,), ("devices.manage", "service_checks.manage")),
     "alerts": (("alerts.view",), ("alerts.manage",)),
+    # Escalation matrix and on-call (1.24.17): read with alerts.view, change
+    # with alerts.manage. POST dry runs declare their own alerts.view guard.
+    "escalation": (("alerts.view",), ("alerts.manage",)),
+    "oncall": (("alerts.view",), ("alerts.manage",)),
     "events": (("alerts.view", "devices.view"), ("alerts.manage",)),
     "settings": (("settings.view",), ("settings.manage",)),
     "service_checks": (("service_checks.view",), ("service_checks.manage",)),

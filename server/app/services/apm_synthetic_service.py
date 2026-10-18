@@ -56,6 +56,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.host_alert_service import dispatch_to_channels
+from app.services import alert_funnel
 
 logger = logging.getLogger("zenplus.apm_synthetics")
 
@@ -289,10 +290,14 @@ async def _active_down_alert(db: AsyncSession, monitor_id: str):
 async def _raise_down(db: AsyncSession, monitor: dict, result: dict) -> None:
     msg = (f"Synthetic scenario DOWN: {monitor['name']} — "
            f"failed at step '{result['failed_step'] or 'n/a'}': {result['error']}")
-    await db.execute(text(
-        "INSERT INTO alerts (status, severity, message, triggered_at, metadata) "
-        "VALUES ('active', 'critical', :msg, :ts, CAST(:meta AS jsonb))"
+    # The incident's priority is fixed when it is raised (migrate-164).
+    p_col, p_val, p_params = alert_funnel.priority_insert(
+        await alert_funnel.priority_supported(db), None, "critical")
+    row = (await db.execute(text(
+        f"INSERT INTO alerts (status, severity, message, triggered_at, metadata{p_col}) "
+        f"VALUES ('active', 'critical', :msg, :ts, CAST(:meta AS jsonb){p_val}) RETURNING id"
     ), {
+        **p_params,
         "msg": msg, "ts": datetime.now(timezone.utc),
         "meta": json.dumps({
             "source": "apm_synthetic", "metric": "apm_synthetic_down",
@@ -300,7 +305,8 @@ async def _raise_down(db: AsyncSession, monitor: dict, result: dict) -> None:
             "monitor_id": str(monitor["id"]), "monitor_name": monitor["name"],
             "failed_step": result["failed_step"], "error": result["error"],
         }),
-    })
+    })).first()
+    alert_id = row[0] if row else None
     channels = (monitor.get("config") or {}).get("notify_channels") or []
     if channels:
         await dispatch_to_channels(db, channels, {
@@ -314,6 +320,11 @@ async def _raise_down(db: AsyncSession, monitor: dict, result: dict) -> None:
                         ("Steps passed", f"{result['steps_passed']}/{result['steps_total']}")],
             "triggered_at": datetime.now(timezone.utc).isoformat(),
             "rule_id": str(monitor["id"]), "rule_name": monitor["name"],
+            # Keyed on the scenario's alert: one page per incident, channel
+            # and recipient.
+            "alert_id": str(alert_id) if alert_id else None,
+            "delivery_event": "trigger",
+            **alert_funnel.notification_fields("critical", None, trigger=True),
         })
 
 
@@ -336,6 +347,8 @@ async def _resolve_down(db: AsyncSession, alert_id, monitor: dict) -> None:
             "details": [("Scenario", monitor["name"])],
             "triggered_at": now.isoformat(),
             "rule_id": str(monitor["id"]), "rule_name": monitor["name"],
+            "alert_id": str(alert_id), "delivery_event": "recovery",
+            **alert_funnel.notification_fields("critical", None, trigger=False),
         })
 
 

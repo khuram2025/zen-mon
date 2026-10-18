@@ -38,6 +38,7 @@ import {
 } from '@/components/alerts/AlertBits'
 import { AlertInsights } from '@/components/alerts/AlertInsights'
 import { DataConfidence, SavedViewsMenu, SummaryStrip } from '@/components/alerts/AlertCenterBits'
+import { PriorityBadge } from '@/features/escalation/ui'
 import { SilencesPanel } from '@/components/alerts/SilencesPanel'
 import {
   ageOf, fmtAgo, fmtAge, fmtAlertDate, fmtDur, parseTs, spanSeconds, useApplianceNow,
@@ -1213,6 +1214,7 @@ function AlertTableRow({
               {msg}
             </Link>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+              <PriorityBadge priority={a.priority} compact />
               <SeverityBadge severity={a.severity} />
               <span className="truncate text-xs text-muted">{a.rule_name ? `Rule: ${a.rule_name}` : 'No rule'}</span>
             </div>

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.schemas.alert import AlertStats
+from app.services import alert_priority as prio
 from app.services import alert_workflow as wf
 
 OPEN = "('pending', 'active', 'acknowledged')"
@@ -255,6 +256,8 @@ async def list_rows(db: AsyncSession, f: AlertFilters, *, sort: str = "newest",
     owner_cols = (", a.assigned_to, a.assigned_at, ug.username AS assignee_username,"
                   " ug.full_name AS assignee_full_name") if workflow else ""
     owner_join = " LEFT JOIN users ug ON ug.id = a.assigned_to" if workflow else ""
+    if await wf.priority_supported(db):
+        owner_cols += ", a.priority AS alert_priority, r.priority AS rule_priority"
     sql = (
         "SELECT a.id, a.status, a.severity, a.message, a.triggered_at, a.acknowledged_at,"
         " a.resolved_at, a.rule_id AS raw_rule_id, r.id AS rule_id, r.name AS rule_name,"
@@ -305,10 +308,13 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
     clauses = clauses + [f"a.status IN {OPEN}", f"NOT {wf.notice_sql('a')}"]
     owner = "a.assigned_to IS NULL" if workflow else "TRUE"
     tgt_sql = []
-    for sev in ("critical", "warning", "info"):
-        if targets.get(sev):
-            tgt_sql.append(f"(x.severity = '{sev}' AND x.ack_at < NOW() - make_interval(mins => :t_{sev}))")
-            params[f"t_{sev}"] = int(targets[sev])
+    # Acknowledgement targets are per priority (legacy severity keys still read).
+    for p in prio.PRIORITIES:
+        minutes = prio.response_target_minutes(targets, p)
+        if minutes:
+            tgt_sql.append(f"(x.priority = '{p}' AND x.ack_at < NOW() - make_interval(mins => :t_{p}))")
+            params[f"t_{p}"] = int(minutes)
+    priority_expr = prio.priority_sql("a", "r", columns=await wf.priority_supported(db))
     overdue = "(" + " OR ".join(tgt_sql) + ")" if tgt_sql else "FALSE"
     delivery_failed = ("EXISTS (SELECT 1 FROM alert_deliveries _dl WHERE _dl.alert_id = a.id"
                        " AND _dl.outcome = 'failed')") if workflow else "FALSE"
@@ -324,6 +330,8 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
         " count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND NOT x.sup AND x.severity = 'warning') AS warning,"
         " count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND NOT x.sup AND x.severity = 'info') AS info,"
         " count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND NOT x.sup AND x.severity = 'critical' AND x.unowned) AS unassigned_critical,"
+        + "".join(f" count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND NOT x.sup"
+                  f" AND x.priority = '{p}') AS open_{p.lower()}," for p in prio.PRIORITIES) +
         f" count(*) FILTER (WHERE x.status = 'active' AND NOT x.sup AND {overdue}) AS ack_overdue,"
         " min(x.triggered_at) FILTER (WHERE x.status IN ('active','acknowledged')) AS oldest,"
         " count(*) FILTER (WHERE x.status IN ('active','acknowledged') AND NOT x.sup AND x.triggered_at >= NOW() - interval '1 hour') AS lt_1h,"
@@ -334,7 +342,8 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
         " count(*) FILTER (WHERE x.rule_missing) AS rule_missing,"
         " count(*) FILTER (WHERE x.triggered_at < NOW() - interval '7 days') AS older_7d,"
         " count(*) FILTER (WHERE x.delivery_failed) AS delivery_failed"
-        f" FROM (SELECT a.status, a.severity, a.triggered_at, {wf.suppressed_sql('a')} AS sup,"
+        f" FROM (SELECT a.status, a.severity, {priority_expr} AS priority, a.triggered_at,"
+        f" {wf.suppressed_sql('a')} AS sup,"
         f" {wf.ack_anchor_sql('a')} AS ack_at,"
         f" COALESCE(a.metadata->>'flap_held', 'false') = 'true' AS flap_held,"
         f" {delivery_failed} AS delivery_failed,"
@@ -417,6 +426,7 @@ async def summary(db: AsyncSession, f: AlertFilters, *, window_hours: int = 24,
             # Pending because the device is flapping (part of ``pending``).
             "flap_held": o.flap_held,
             "by_severity": {"critical": o.critical, "warning": o.warning, "info": o.info},
+            "by_priority": {p: getattr(o, f"open_{p.lower()}") for p in prio.PRIORITIES},
             "unassigned_critical": o.unassigned_critical if workflow else None,
             "ack_overdue": o.ack_overdue,
             "oldest_triggered_at": o.oldest,

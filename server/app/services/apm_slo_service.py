@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.apm_rollup import min_window_for, rollup_window
 from app.services.host_alert_service import dispatch_to_channels
+from app.services import alert_funnel
 
 logger = logging.getLogger("zenplus.apm_slo")
 
@@ -292,11 +293,16 @@ async def _active_alert_id(db: AsyncSession, dedupe: str):
     return row[0] if row else None
 
 
-async def _raise(db: AsyncSession, slo: dict, tier: dict, dedupe: str, message: str) -> None:
-    await db.execute(text(
-        "INSERT INTO alerts (status, severity, message, triggered_at, metadata) "
-        "VALUES ('active', :sev, :msg, :ts, CAST(:meta AS jsonb))"
+async def _raise(db: AsyncSession, slo: dict, tier: dict, dedupe: str, message: str):
+    """Insert the burn alert; returns its id."""
+    # The incident's priority is fixed when it is raised (migrate-164).
+    p_col, p_val, p_params = alert_funnel.priority_insert(
+        await alert_funnel.priority_supported(db), None, tier["severity"])
+    row = (await db.execute(text(
+        f"INSERT INTO alerts (status, severity, message, triggered_at, metadata{p_col}) "
+        f"VALUES ('active', :sev, :msg, :ts, CAST(:meta AS jsonb){p_val}) RETURNING id"
     ), {
+        **p_params,
         "sev": tier["severity"], "msg": message, "ts": datetime.now(timezone.utc),
         "meta": json.dumps({
             "source": "apm_slo_burn", "dedupe": dedupe,
@@ -305,7 +311,8 @@ async def _raise(db: AsyncSession, slo: dict, tier: dict, dedupe: str, message: 
             "long_burn": tier["long_burn"], "short_burn": tier["short_burn"],
             "factor": tier["factor"],
         }),
-    })
+    })).first()
+    return row[0] if row else None
 
 
 async def _resolve(db: AsyncSession, alert_id) -> int:
@@ -337,7 +344,7 @@ def _burn_message(slo: dict, tier: dict) -> str:
             f"(page threshold {tier['factor']}x, target {slo['target']}%)")
 
 
-async def _notify(db: AsyncSession, slo: dict, tier: dict, message: str) -> None:
+async def _notify(db: AsyncSession, slo: dict, tier: dict, message: str, *, alert_id=None) -> None:
     await dispatch_to_channels(db, slo.get("notify_channels") or [], {
         "subject": f"[{tier['severity'].upper()}] SLO burn — {slo['name']}",
         "body": message, "message": message,
@@ -349,6 +356,10 @@ async def _notify(db: AsyncSession, slo: dict, tier: dict, message: str) -> None
                     ("Tier", f"{tier['tier']} ({tier['factor']}x)")],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "rule_id": str(slo["id"]), "rule_name": slo["name"],
+        # Keyed on the burn alert: one page per incident, channel and recipient.
+        "alert_id": str(alert_id) if alert_id else None,
+        "delivery_event": "trigger",
+        **alert_funnel.notification_fields(tier["severity"], None, trigger=True),
     })
 
 
@@ -384,11 +395,11 @@ async def evaluate_slo_burn(db: AsyncSession) -> dict[str, int]:
             if tier["breaching"]:
                 if existing is None:
                     msg = _burn_message(slo, tier)
-                    await _raise(db, slo, tier, dedupe, msg)
+                    alert_id = await _raise(db, slo, tier, dedupe, msg)
                     raised += 1
                     await db.commit()
                     if slo.get("burn_alert_enabled", True):
-                        await _notify(db, slo, tier, msg)
+                        await _notify(db, slo, tier, msg, alert_id=alert_id)
             elif existing is not None:
                 resolved += await _resolve(db, existing)
         await db.commit()

@@ -5,8 +5,8 @@
  */
 import { forwardRef, useState } from 'react'
 import {
-  AlarmClockOff, AlertTriangle, ArrowRight, BellOff, CheckCircle2, CircleDot, Hourglass, Loader2, MessageSquare,
-  Megaphone, UserCheck, UserMinus, UserPlus, XCircle,
+  AlarmClockOff, AlertTriangle, ArrowRight, BellOff, CheckCircle2, CircleDot, Hourglass, Inbox, Loader2, MessageSquare,
+  Megaphone, RefreshCw, ShieldAlert, UserCheck, UserMinus, UserPlus, XCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
@@ -34,6 +34,12 @@ const ICON: Record<string, { icon: typeof CircleDot; cls: string }> = {
   superseded: { icon: XCircle, cls: 'bg-surface2 text-muted' },
   hold_cancelled: { icon: XCircle, cls: 'bg-surface2 text-muted' },
   closed: { icon: XCircle, cls: 'bg-surface2 text-text2' },
+  // 1.24.17 escalation policies and grouping.
+  review: { icon: RefreshCw, cls: 'bg-primary/10 text-primary' },
+  ack_expired: { icon: AlarmClockOff, cls: 'bg-warning/10 text-warning' },
+  coverage_gap: { icon: ShieldAlert, cls: 'bg-danger/10 text-danger' },
+  route_failed: { icon: ShieldAlert, cls: 'bg-danger/10 text-danger' },
+  notification_held: { icon: Inbox, cls: 'bg-info/10 text-info' },
 }
 
 const SOURCE: Record<string, string> = { user: 'User', system: 'System', evaluator: 'Evaluator' }
@@ -63,12 +69,18 @@ function Transition({ from, to }: { from: AlertStatus | null; to: AlertStatus | 
 function detailText(e: AlertEvent): string | null {
   const d = e.detail
   if (!d) return null
-  if (e.kind === 'escalated') {
+  if (e.kind === 'escalated' || e.kind === 'review' || e.kind === 'coverage_gap' || e.kind === 'route_failed') {
     const parts: string[] = []
-    if (d.level != null) parts.push(`Level ${d.level}`)
+    // Policy escalation: 0-based step of a named policy; legacy tiers: 1-based level.
+    if (typeof d.policy_name === 'string' && typeof d.step === 'number') parts.push(`${d.policy_name} · step ${d.step + 1}${typeof d.of_steps === 'number' ? ` of ${d.of_steps}` : ''}`)
+    else if (d.level != null) parts.push(`Level ${d.level}`)
+    const people = Array.isArray(d.recipients) ? (d.recipients as Array<{ label?: string | null }>).map((r) => r?.label).filter(Boolean) : []
+    if (people.length) parts.push(`paged ${people.join(', ')}`)
     const names = (d.channel_names ?? d.channels) as unknown
     if (Array.isArray(names) && names.length) parts.push(`notified ${names.join(', ')}`)
-    if (d.repeat != null) parts.push(`repeat ${d.repeat}`)
+    if (d.repeat === true && typeof d.repeat_no === 'number') parts.push(`repeat ${d.repeat_no}`)
+    else if (typeof d.repeat === 'number') parts.push(`repeat ${d.repeat}`)
+    if (Array.isArray(d.gaps) && d.gaps.length) parts.push((d.gaps as string[]).join('; '))
     return parts.join(' · ') || null
   }
   if (e.kind === 'snoozed') {

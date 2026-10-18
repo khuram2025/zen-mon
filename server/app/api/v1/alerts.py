@@ -34,6 +34,7 @@ from app.core.security import get_role_permissions, require_permission
 from app.models.alert import Alert
 from app.models.user import User
 from app.schemas.alert import AlertStats
+from app.services import alert_priority as prio
 from app.services import alert_rule_scope as rs
 from app.services import alert_service as svc
 from app.services import alert_workflow as wf
@@ -177,8 +178,10 @@ def serialize(row, ctx: dict) -> dict:
     rid = str(row.rule_id) if row.rule_id else None
     sil = ctx["silences"].get(str(row.id))
     suppressed = bool(sil) and row.status in ("active", "acknowledged")
+    priority = prio.effective_priority(getattr(row, "alert_priority", None),
+                                       getattr(row, "rule_priority", None), row.severity)
     due, overdue = wf.ack_due(row.status, row.severity, wf.ack_anchor(row.triggered_at, meta),
-                              ctx["targets"], suppressed)
+                              ctx["targets"], suppressed, priority=priority)
     chans = [ctx["channels"][str(c)] for c in (row.notify_channels or [])
              if isinstance(row.notify_channels, list) and str(c) in ctx["channels"]]
     assigned = None
@@ -188,6 +191,9 @@ def serialize(row, ctx: dict) -> dict:
         "id": str(row.id),
         "status": row.status,
         "severity": row.severity,
+        # P1..P4: stamped when raised; derived from severity for older rows.
+        "priority": priority,
+        "priority_label": prio.priority_label(priority),
         "message": row.message,
         "triggered_at": row.triggered_at,
         "acknowledged_at": row.acknowledged_at,
@@ -545,6 +551,13 @@ async def channel_directory(
 
 
 class ResponseTargets(BaseModel):
+    """Acknowledgement targets in minutes per priority (null = no target).
+    Only the keys sent change. The severity keys of earlier releases are
+    still accepted (critical = P2, warning = P3, info = P4)."""
+    P1: Optional[int] = Field(default=None, ge=1, le=10080)
+    P2: Optional[int] = Field(default=None, ge=1, le=10080)
+    P3: Optional[int] = Field(default=None, ge=1, le=10080)
+    P4: Optional[int] = Field(default=None, ge=1, le=10080)
     critical: Optional[int] = Field(default=None, ge=1, le=10080)
     warning: Optional[int] = Field(default=None, ge=1, le=10080)
     info: Optional[int] = Field(default=None, ge=1, le=10080)
@@ -552,19 +565,24 @@ class ResponseTargets(BaseModel):
 
 @router.get("/response-targets")
 async def get_response_targets(db: AsyncSession = Depends(get_db), user: User = Depends(can_view)):
-    return await wf.response_targets(db)
+    """{"P1".."P4": minutes|null} plus the legacy severity mirrors."""
+    return wf.legacy_target_view(await wf.response_targets(db))
 
 
 @router.put("/response-targets")
 async def put_response_targets(body: ResponseTargets, db: AsyncSession = Depends(get_db),
                                user: User = Depends(can_manage)):
     before = await wf.response_targets(db)
-    after = await wf.save_response_targets(db, body.model_dump())
+    given = body.model_dump(exclude_unset=True)
+    if any(p in given for p in prio.PRIORITIES):
+        # P-keys are authoritative when both forms are sent.
+        given = {k: v for k, v in given.items() if k in prio.PRIORITIES}
+    after = await wf.save_response_targets(db, given)
     await write_audit_log(db, actor=user, action="alert.response_targets.update",
                           resource_type="settings", resource_id=wf.RESPONSE_TARGETS_KEY,
                           metadata={"before": before, "after": after})
     await db.commit()
-    return after
+    return wf.legacy_target_view(after)
 
 
 # ── Silences (suppression workspace) ─────────────────────────────────────────
@@ -675,6 +693,8 @@ _EVENT_LABELS = {
     "comment": "Comment", "snoozed": "Snoozed (notifications suppressed)",
     "unsnoozed": "Snooze removed", "suppression_expired": "Snooze expired — still active",
     "escalated": "Escalated", "resolved": "Closed by operator",
+    "review": "Unresolved update sent", "ack_expired": "Acknowledgement expired — escalation re-opened",
+    "coverage_gap": "Coverage gap — fallback route used", "route_failed": "Delivery failed on this route",
     "recovered": "Recovered automatically", "superseded": "Superseded by a newer status",
     "hold_cancelled": "Hold cancelled", "dependency": "Suppressed by upstream dependency",
     "closed": "Closed",
@@ -1005,6 +1025,8 @@ async def get_alert_detail(
                 " ORDER BY attempted_at DESC LIMIT 100"
             ), {"id": row.id})).fetchall()
         ]
+    from app.services import notification_grouping as ng
+    await ng.attach_alert_holds(db, payload, row.id)
     return payload
 
 
@@ -1075,6 +1097,23 @@ async def comment_alert(alert_id: UUID, body: CommentBody,
         await wf.comment(db, alert_id, user, body.text.strip())
         return True
     return await _act(db, user, alert_id, run)
+
+
+@router.get("/{alert_id}/route")
+async def alert_route(alert_id: UUID, db: AsyncSession = Depends(get_db),
+                      user: User = Depends(can_view)):
+    """The incident's escalation route now: which policy (and why), its
+    position in that policy, the next timed action and who each step
+    reaches. Read-only; scope-checked like the detail (404)."""
+    from app.services.alert_escalation_service import explain_route
+
+    await _in_scope_or_404(db, user, alert_id)
+    perms = await _perms(db, user)
+    reveal = has_permission(perms, "alerts.manage") or has_permission(perms, "users.manage")
+    out = await explain_route(db, alert_id, reveal=reveal)
+    if out is None:
+        raise HTTPException(404, "Alert not found")
+    return out
 
 
 @router.get("/{alert_id}/snooze-preview")

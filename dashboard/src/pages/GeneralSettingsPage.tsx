@@ -34,6 +34,7 @@ import { AccessTabContent, ACCESS_TAB_PERMISSIONS } from '@/components/access/Ac
 import { MfaPanel } from '@/components/security/MfaPanel'
 import { NewPasswordFields, usePasswordCheck } from '@/components/security/PasswordFields'
 import { QueryBoundary } from '@/components/ui/QueryState'
+import { ContactMethodsCard } from '@/components/settings/ContactMethodsCard'
 
 // `permission`: hidden unless the user's role grants it (system.admin
 // always passes). Tabs without one are visible to everyone.
@@ -502,6 +503,7 @@ function ProfileCard() {
           )}
         </CardContent>
       </Card>
+      <ContactMethodsCard />
       <Card>
         <CardHeader><CardTitle>Two-step verification</CardTitle></CardHeader>
         <CardContent><MfaPanel /></CardContent>

@@ -40,7 +40,9 @@ export function RoutingCard({ alert, now }: { alert: AlertDetail; now: number })
   const deliveries = [...(alert.deliveries ?? [])].sort((a, b) => (a.at < b.at ? 1 : -1))
   const canRoute = !!rule && rule.editable && can('alerts.manage')
   const failed = deliveries.filter((d) => d.outcome === 'failed').length
-  const esc = alert.escalation_state
+  // Legacy tier state only: a policy's state (policy_id / step) is explained by the Escalation route panel.
+  const raw = alert.escalation_state as (AlertDetail['escalation_state'] & { policy_id?: string; step?: number }) | null
+  const esc = raw && raw.policy_id == null && raw.level != null ? raw : null
 
   return (
     <Card>
