@@ -119,6 +119,103 @@ assert.deepEqual(m.bucketEvents([], NaN, to), [])
 assert.equal(m.EVENTS_PAGE_SIZE, 50)
 console.log('Device events model passed: prefix stripping, UTC parsing, source mapping, trap windowing, merge order, filters, chip counts, URL state and severity buckets.')
 
+// Repeated alerts (D-09): key and label replay the vectors the server's device_insights replays too.
+const vectors = JSON.parse(fs.readFileSync('../scripts/dev/device-alert-groups/vectors.json', 'utf8'))
+for (const c of vectors.key_cases) assert.equal(m.alertGroupKey(c.rule_id, c.rule_name, c.metadata), c.expect, `key: ${c.name}`)
+for (const c of vectors.label_cases) assert.equal(m.alertGroupLabel(c.titles, c.rule_name, c.metadata), c.expect, `label: ${c.name}`)
+assert.equal(m.spanPhrase(0), '1 min')
+assert.equal(m.spanPhrase(12 * 60_000 + 1), '13 min')
+assert.equal(m.spanPhrase(3600_000), '1 hour')
+assert.equal(m.spanPhrase(5 * 3600_000), '5 hours')
+assert.equal(m.spanPhrase(2 * 86400_000 + 1), '3 days', 'rounded up')
+assert.equal(m.repeatPhrase(5, 0, 2.5 * 86400_000), '×5 in 3 days')
+
+const H = 3600_000, T0 = Date.parse('2026-10-18T12:00:00Z')
+const at = (hoursAgo) => new Date(T0 - hoursAgo * H).toISOString()
+const lossMeta = (pct) => ({ condition: `Packet loss ${pct}% (limit 10%)`, condition_metric: 'packet_loss', new_status: 'degraded' })
+const repeated = m.alertEvents([
+  { id: 'p1', status: 'resolved', severity: 'warning', rule_id: 'r-1', rule_name: 'High Latency', triggered_at: at(60), metadata: lossMeta(33) },
+  { id: 'p2', status: 'resolved', severity: 'critical', rule_id: 'r-1', rule_name: 'High Latency', triggered_at: at(30), metadata: lossMeta(52) },
+  { id: 'p3', status: 'active', severity: 'warning', rule_id: 'r-1', rule_name: 'High Latency', triggered_at: at(1), metadata: lossMeta(41) },
+  { id: 'l1', status: 'resolved', severity: 'warning', rule_id: 'r-1', rule_name: 'High Latency', triggered_at: at(20),
+    metadata: { condition: 'Latency 412 ms (limit 100 ms)', condition_metric: 'rtt', new_status: 'degraded' } },
+  { id: 'd1', status: 'resolved', severity: 'critical', rule_id: 'r-2', rule_name: 'Device Down', triggered_at: at(10),
+    metadata: { condition: 'No response', condition_metric: 'reachability', new_status: 'down' } },
+  { id: 'd2', status: 'acknowledged', severity: 'critical', rule_id: 'r-2', rule_name: 'Device Down', triggered_at: at(5),
+    metadata: { condition: 'No response', condition_metric: 'reachability', new_status: 'down' } },
+  { id: 'u1', status: 'resolved', severity: 'critical', rule_id: 'r-2', rule_name: 'Device Down', triggered_at: at(9),
+    metadata: { condition: 'Responding again', condition_metric: 'reachability', new_status: 'up', is_recovery: true } },
+  { id: 'g1', status: 'resolved', severity: 'warning', rule_name: 'High Latency', triggered_at: at(50), metadata: { new_status: 'degraded' },
+    message: 'High Latency: fw-01 (10.0.0.1) is DEGRADED' },
+  { id: 'g2', status: 'resolved', severity: 'warning', rule_name: 'High Latency', triggered_at: at(40), metadata: { new_status: 'degraded' },
+    message: 'High Latency: fw-01 (10.0.0.1) is DEGRADED' },
+  { id: 'n1', status: 'active', severity: 'info', triggered_at: at(3), message: 'Unruled' },
+  { id: 'n2', status: 'active', severity: 'info', triggered_at: at(4), message: 'Unruled' },
+], { hostname: 'fw-01', ip_address: '10.0.0.1' })
+assert.equal(repeated.find(e => e.id === 'alert-p1').group.key, 'r-1|packet_loss|degraded|')
+assert.equal(repeated.find(e => e.id === 'alert-n1').group, undefined, 'no rule: no group key')
+const status = m.activityToTimeline([{ id: 'status-x', timestamp: at(30), severity: 'warning', title: 'Device degraded', kind: 'status' }])
+const timeline = m.mergeEvents(repeated, status)
+const rows = m.groupEvents(timeline)
+const byId = Object.fromEntries(rows.map(r => [r.id, r]))
+assert.deepEqual(rows.map(r => r.id), [
+  'group-r-1|packet_loss|degraded|', 'alert-n1', 'alert-n2', 'group-r-2|reachability|down|', 'alert-u1',
+  'alert-l1', 'status-x', 'group-High Latency||degraded|',
+], 'a group takes its newest alert’s place; other events and alerts without a rule stay as they are')
+const loss = byId['group-r-1|packet_loss|degraded|']
+assert(m.isGroup(loss) && !m.isGroup(byId['alert-l1']))
+assert.equal(loss.title, 'Degraded (packet loss) ×3 in 3 days')
+assert.equal(loss.label, 'Degraded (packet loss)')
+assert.deepEqual(loss.members.map(e => e.id), ['alert-p3', 'alert-p2', 'alert-p1'], 'members newest first')
+assert.deepEqual(loss.members.map(e => e.href), ['/alerts/p3', '/alerts/p2', '/alerts/p1'], 'every alert stays reachable')
+assert.equal(loss.severity, 'critical', 'the worst member')
+assert.equal(loss.status, 'active', 'the most urgent workflow state')
+assert.equal(loss.open, 1)
+assert.equal(loss.ts, Date.parse(at(1)))
+assert.equal(loss.firstTs, Date.parse(at(60)))
+assert.equal(loss.href, undefined, 'the group row expands; its alerts link')
+assert.equal(loss.subtitle, 'Latest: Packet loss 41% (limit 10%) · Rule: High Latency · 1 open')
+const down = byId['group-r-2|reachability|down|']
+assert.equal(down.title, 'No response ×2 in 5 hours', 'one shared title is the label')
+assert.equal(down.status, 'acknowledged')
+assert.equal(byId['alert-u1'].title, 'Responding again', 'a recovery is not grouped with the outage')
+assert.equal(byId['group-High Latency||degraded|'].title, 'High Latency · Degraded ×2 in 10 hours', 'legacy rows: rule name and new status')
+assert.equal(byId['group-High Latency||degraded|'].status, 'resolved')
+assert.equal(m.groupEvents(timeline, false), timeline, 'grouping off: the plain list')
+assert.equal(m.groupEvents([]).length, 0)
+
+// Filters apply to each alert before grouping: a group holds only what the filters show, and a lone match is a plain row.
+const critical = m.groupEvents(m.filterEvents(timeline, { ...m.EMPTY_FILTER, severities: ['critical'] }))
+assert.deepEqual(critical.map(r => r.id), ['group-r-2|reachability|down|', 'alert-u1', 'alert-p2'])
+const warnLoss = m.groupEvents(m.filterEvents(timeline, { ...m.EMPTY_FILTER, severities: ['warning'], q: 'packet loss' }))
+assert.deepEqual(warnLoss.map(r => r.id), ['group-r-1|packet_loss|degraded|'])
+assert.equal(warnLoss[0].title, 'Degraded (packet loss) ×2 in 3 days')
+assert.equal(warnLoss[0].severity, 'warning', 'severity from the alerts the filter shows')
+const counts2 = m.chipCounts(timeline, m.EMPTY_FILTER)
+assert.equal(counts2.kinds.alert, 11, 'chip counts still count every alert')
+assert.equal(m.countInRange(timeline, T0 - 72 * H, T0), 12, 'the chart still counts every alert')
+
+// Paging counts rows: 120 repeats of one condition and 60 other alerts are 61 rows, two pages.
+const many = m.mergeEvents(m.alertEvents([
+  ...Array.from({ length: 120 }, (_, i) => ({ id: `r${i}`, status: 'resolved', severity: 'warning', rule_id: 'r-9', rule_name: 'Loss',
+    triggered_at: new Date(T0 - i * 60_000).toISOString(), metadata: lossMeta(20 + (i % 5)) })),
+  ...Array.from({ length: 60 }, (_, i) => ({ id: `o${i}`, status: 'resolved', severity: 'info', rule_id: `x-${i}`, rule_name: `Rule ${i}`,
+    triggered_at: new Date(T0 - (i * 2 + 1) * 60_000).toISOString(), message: `Other ${i}` })),
+]))
+const pageRows = m.groupEvents(many)
+assert.equal(pageRows.length, 61)
+assert.equal(pageRows[0].members.length, 120)
+assert.equal(pageRows.slice(0, m.EVENTS_PAGE_SIZE).length, 50)
+
+// URL: grouping is on by default; egroup=off turns it off, other params are kept.
+assert.equal(m.groupingEnabled(new URLSearchParams('tab=events')), true)
+assert.equal(m.groupingEnabled(new URLSearchParams('egroup=off')), false)
+const off = m.writeGrouping(new URLSearchParams('tab=events&etype=alert'), false)
+assert.equal(off.toString(), 'tab=events&etype=alert&egroup=off')
+assert.equal(m.writeGrouping(off, true).toString(), 'tab=events&etype=alert')
+assert.equal(m.ruleOpenAlertsHref('d 1', 'r-1'), '/alerts?device_id=d%201&rule_id=r-1&view=open')
+console.log('Repeated alerts passed: shared key/label vectors, span wording, grouping order, members and links, filters before grouping, row paging and URL state.')
+
 // Wiring: the tab builds the full log without collapsing flap episodes and keeps each source independent.
 const tab = fs.readFileSync('src/pages/device/EventsTab.tsx', 'utf8')
 assert(tab.includes('buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO, episodes || [], false)'), 'full log keeps every change')
@@ -133,4 +230,16 @@ assert(tab.includes('{ replace: true }'), 'filter changes do not add history ent
 assert(tab.includes('No events in {rangePhrase(range.label)}'), 'the empty state names the range')
 assert(!/text-\[(9|10|11)px\]/.test(tab), 'labels are at least 12 px')
 assert(!/#[0-9a-fA-F]{6}\b/.test(tab), 'theme tokens only')
-console.log('Events tab wiring passed: full flap log, permission-gated alerts, range-bound sources, polling rules, per-source failures and URL filters.')
+assert(tab.includes('groupEvents(filtered, grouped)'), 'grouping runs on the filtered alerts')
+assert(tab.includes('items.slice(0, shown)'), 'paging counts grouped rows')
+assert(tab.includes('aria-expanded={open}'), 'a group expands to its alerts')
+assert(tab.includes('writeGrouping(prev, !grouped), { replace: true }'), 'the grouping toggle lives in the URL')
+assert(tab.includes('${grouped}|${range.fromISO}'), 'paging resets when grouping or the range changes')
+const summaryTab = fs.readFileSync('src/pages/device/SummaryTab.tsx', 'utf8')
+assert(summaryTab.includes('summary.alerts?.groups'), 'Summary recent events use the grouped open alerts')
+assert(summaryTab.includes('`/alerts/${m.id}`'), 'grouped Summary rows list every alert with its link')
+const issuesBar = fs.readFileSync('src/pages/device/IssuesBar.tsx', 'utf8')
+assert(issuesBar.includes('repeatPhrase(issue.count!, first, last)'), 'repeated alert issues show their count and span')
+const page = fs.readFileSync('src/pages/DeviceDetailPage.tsx', 'utf8')
+assert(page.includes('ruleOpenAlertsHref(id, issue.rule_id)'), 'a repeated alert issue opens the rule’s open alerts')
+console.log('Events tab wiring passed: full flap log, permission-gated alerts, range-bound sources, polling rules, per-source failures, URL filters and grouped repeats.')

@@ -19,6 +19,7 @@ import { ConfigurationTab } from './device/ConfigurationTab'
 import { DeviceHeader } from './device/DeviceHeader'
 import { DeviceMaintenanceDialog } from './device/DeviceActions'
 import { EventsTab } from './device/EventsTab'
+import { ruleOpenAlertsHref } from './device/eventsModel'
 import { displayTimezone, formatRelative } from './device/format'
 import { HardwareTab } from './device/HardwareTab'
 import { useDeviceRecord, useDeviceSummary, useSnmpMetrics } from './device/hooks'
@@ -121,10 +122,12 @@ export function DeviceDetailPage() {
   }, [setSearchParams, summary?.health.groups, tabs])
 
   const openIssue = useCallback((issue: DeviceIssue) => {
+    // Repeats of one condition open the rule's open alerts for this device; a single alert opens itself.
+    if (issue.source === 'alert' && (issue.count ?? 1) > 1 && issue.rule_id && id) { navigate(ruleOpenAlertsHref(id, issue.rule_id)); return }
     if (issue.source === 'alert' && issue.alert_id) { navigate(`/alerts/${issue.alert_id}`); return }
     const groupOf = (key: string) => summary?.health.groups.find((g) => g.key === key)
     openTab(issueTab(issue, tabs, groupOf), { group: issue.group })
-  }, [navigate, openTab, summary?.health.groups, tabs])
+  }, [id, navigate, openTab, summary?.health.groups, tabs])
 
   const chart = useCallback((request: ChartRequest) => openTab('performance', { pin: request }), [openTab])
 

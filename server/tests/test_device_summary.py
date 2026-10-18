@@ -276,7 +276,7 @@ async def test_summary_keeps_status_and_reports_issues_separately(summary_env):
     assert out["interfaces"]["unexpected_down"] == 0 and out["interfaces"]["unused"] == 1
     assert [i["name"] for i in out["busiest_interfaces"]] == ["wan2", "port1"]  # WAN first
     assert out["busiest_interfaces"][0]["util_pct"] == 24.0
-    assert out["alerts"] == {"active": 0, "acknowledged": 0, "items": []}
+    assert out["alerts"] == {"active": 0, "acknowledged": 0, "items": [], "groups": []}
     assert out["unavailable"] == []
 
 

@@ -2158,21 +2158,33 @@ async def get_device_page_summary(
     if await user_has_permission(db, user, "alerts.view"):
         rows = (await db.execute(text(f"""
             SELECT a.id, a.severity, a.status, a.message, a.triggered_at,
-                   a.metadata->>'condition' AS condition
+                   a.metadata->>'condition' AS condition, a.rule_id, r.name AS rule_name,
+                   a.metadata->>'condition_metric' AS condition_metric,
+                   a.metadata->>'new_status' AS new_status, a.metadata->>'if_index' AS if_index
             FROM alerts a
+            LEFT JOIN alert_rules r ON r.id = a.rule_id
             WHERE a.device_id = :id AND a.status IN ('pending', 'active', 'acknowledged')
               AND NOT {wf.notice_sql('a')}
             ORDER BY CASE a.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, a.triggered_at ASC
             LIMIT 50
         """), {"id": device_id})).mappings().all()
+        shaped = [{"id": str(r["id"]), "severity": r["severity"], "status": r["status"],
+                   "message": re.sub(r"^\[ZenPlus\s+[A-Z]+\]\s*", "", r["message"] or "Alert"),
+                   "title": _insights.alert_title(r["message"], r.get("condition"), host, host_ip),
+                   "triggered_at": _iso(r["triggered_at"]),
+                   "rule_id": str(r["rule_id"]) if r.get("rule_id") else None, "rule_name": r.get("rule_name"),
+                   "metadata": {"condition_metric": r.get("condition_metric"), "new_status": r.get("new_status"),
+                                "if_index": r.get("if_index")}} for r in rows]
+        for a in shaped:
+            a["group_key"] = _insights.alert_group_key(a["rule_id"], a["rule_name"], a["metadata"])
         alerts = {
             "active": sum(1 for r in rows if r["status"] in ("active", "pending")),
             "acknowledged": sum(1 for r in rows if r["status"] == "acknowledged"),
-            "items": [{"id": str(r["id"]), "severity": r["severity"], "status": r["status"],
-                       "message": re.sub(r"^\[ZenPlus\s+[A-Z]+\]\s*", "", r["message"] or "Alert"),
-                       "title": _insights.alert_title(r["message"], r.get("condition"), host, host_ip),
-                       "triggered_at": _iso(r["triggered_at"])} for r in rows[:10]],
+            "items": [{k: v for k, v in a.items() if k != "metadata"} for a in shaped[:10]],
+            # Repeats of one condition from one rule as one row (D-09), over every open alert read.
+            "groups": _insights.group_device_alerts(shaped),
         }
+        firing = _insights.group_device_alerts([a for a in shaped if a["status"] in ("active", "pending")])
 
     maintenance_rows = (await db.execute(text(f"""
         SELECT m.ends_at, m.reason FROM device_maintenance m
@@ -2224,10 +2236,15 @@ async def get_device_page_summary(
                        "detail": "Status alerts are held until it is stable", "since": _iso(device.flapping_since),
                        "tab": "events"})
     if alerts:
-        for a in [r for r in alerts["items"] if r["status"] in ("active", "pending")][:5]:
-            issues.append({"source": "alert", "severity": _SUMMARY_ALERT_SEVERITY.get(a["severity"], "info"),
-                           "title": a["title"], "detail": None, "since": a["triggered_at"], "tab": "events",
-                           "alert_id": a["id"]})
+        # One issue per repeated condition: "Degraded (packet loss)" with its count and first time.
+        for g in firing[:5]:
+            issue = {"source": "alert", "severity": _SUMMARY_ALERT_SEVERITY.get(g["severity"], "info"),
+                     "title": g["label"] if g["count"] > 1 else g["latest_title"], "detail": None,
+                     "since": g["first_at"], "tab": "events", "alert_id": g["members"][0]["id"]}
+            if g["count"] > 1:
+                issue.update(count=g["count"], last_at=g["last_at"], rule_id=g["rule_id"],
+                             detail=f"latest: {g['latest_title']}" if g["latest_title"] != g["label"] else None)
+            issues.append(issue)
     if interfaces and interfaces["unexpected_down"]:
         names = [i["name"] for i in interfaces["unexpected"]]
         n = len(names)

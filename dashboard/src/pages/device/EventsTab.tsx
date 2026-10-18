@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react'
 import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, CheckCircle2, Info, Loader2, OctagonAlert, RefreshCw, Search, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Info, Layers, Loader2, OctagonAlert, RefreshCw, Search, X } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import type { FlapEpisode } from '@/components/devices/deviceStatus'
 import { rangePhrase } from '@/components/TimeRangePicker'
@@ -15,9 +15,9 @@ import { Legend, Panel, SERIES_COLORS } from './charts'
 import { formatAbsolute, formatRelative, plural } from './format'
 import {
   activityToTimeline, alertEvents, bucketEvents, chipCounts, countInRange, EMPTY_FILTER, EVENT_KINDS, EVENT_SEVERITIES,
-  EVENTS_PAGE_SIZE, filterEvents, KIND_LABEL, KIND_SINGULAR, maintenanceEvents, mergeEvents, parseEventFilter,
-  SEVERITY_LABEL, toggleValue, trapsInRange, writeEventFilter,
-  type AlertRow, type EventFilter, type EventSeverity, type MaintenanceWindow, type TimelineEvent,
+  EVENTS_PAGE_SIZE, filterEvents, groupEvents, groupingEnabled, isGroup, KIND_LABEL, KIND_SINGULAR, maintenanceEvents,
+  mergeEvents, parseEventFilter, SEVERITY_LABEL, toggleValue, trapsInRange, writeEventFilter, writeGrouping,
+  type AlertRow, type EventFilter, type EventGroup, type EventSeverity, type MaintenanceWindow, type TimelineEvent,
 } from './eventsModel'
 import type { DeviceRange, DeviceRecord, DeviceSummary, MetricSeriesMap, StatusHistoryEvent, TrapRow } from './types'
 
@@ -25,7 +25,10 @@ import type { DeviceRange, DeviceRecord, DeviceSummary, MetricSeriesMap, StatusH
  * the range, a per-bucket count of events by severity, then one timeline that
  * merges alerts, confirmed status changes, flapping, SNMP traps, an inferred
  * reboot and maintenance windows. Every source loads and fails on its own;
- * a failed source is named, the others stay visible. Filters live in the URL. */
+ * a failed source is named, the others stay visible. Filters live in the URL.
+ * Repeats of one alert condition from one rule show as one expandable row
+ * ("Degraded (packet loss) ×5 in 3 days"); the chart and the chip counts still
+ * count every alert. */
 
 const SEVERITY_ICON: Record<EventSeverity, ComponentType<{ className?: string }>> = {
   critical: OctagonAlert, warning: AlertTriangle, info: Info, success: CheckCircle2,
@@ -35,6 +38,9 @@ const SEVERITY_TONE: Record<EventSeverity, string> = {
 }
 const SEVERITY_COLOR: Record<EventSeverity, string> = {
   critical: SERIES_COLORS.danger, warning: SERIES_COLORS.warning, info: SERIES_COLORS.info, success: SERIES_COLORS.success,
+}
+const SEVERITY_DOT: Record<EventSeverity, string> = {
+  critical: 'bg-danger', warning: 'bg-warning', info: 'bg-info', success: 'bg-success',
 }
 const ALERT_STATUS_TONE: Record<string, string> = {
   active: 'border-danger/40 text-danger', acknowledged: 'border-warning/40 text-warning', resolved: 'border-border text-muted',
@@ -244,9 +250,16 @@ function EventList({ events, range, canAlerts, snmp, loading, anyFailed }: {
   const [params, setParams] = useSearchParams()
   const filter = parseEventFilter(params)
   const [query, setQuery] = useState(filter.q)
+  const grouped = groupingEnabled(params)
   const [shown, setShown] = useState(EVENTS_PAGE_SIZE)
-  const filterKey = `${params.get('etype') || ''}|${params.get('esev') || ''}|${params.get('eq') || ''}|${range.fromISO}|${range.toISO}`
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const filterKey = `${params.get('etype') || ''}|${params.get('esev') || ''}|${params.get('eq') || ''}|${grouped}|${range.fromISO}|${range.toISO}`
   useEffect(() => { setShown(EVENTS_PAGE_SIZE) }, [filterKey])
+  const toggleGroup = (groupId: string) => setExpanded((prev) => {
+    const next = new Set(prev)
+    if (!next.delete(groupId)) next.add(groupId)
+    return next
+  })
 
   const update = (next: EventFilter) => setParams((prev) => writeEventFilter(prev, next), { replace: true })
   // Debounce typing into the URL.
@@ -259,9 +272,12 @@ function EventList({ events, range, canAlerts, snmp, loading, anyFailed }: {
 
   const filtered = useMemo(() => filterEvents(events, filter), [events, filter.kinds.join(), filter.severities.join(), filter.q]) // eslint-disable-line react-hooks/exhaustive-deps
   const counts = useMemo(() => chipCounts(events, filter), [events, filter.kinds.join(), filter.severities.join(), filter.q]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Filters apply to each alert first, so a group holds only the alerts they show; paging counts rows.
+  const items = useMemo(() => groupEvents(filtered, grouped), [filtered, grouped])
   const kinds = EVENT_KINDS.filter((k) => (k !== 'alert' || canAlerts) && (k !== 'trap' || snmp) && (k !== 'reboot' || snmp))
   const filtering = filter.kinds.length > 0 || filter.severities.length > 0 || !!filter.q.trim()
-  const visible = filtered.slice(0, shown)
+  const visible = items.slice(0, shown)
+  const repeats = items.length < filtered.length
   const now = serverNow()
 
   return (
@@ -292,6 +308,10 @@ function EventList({ events, range, canAlerts, snmp, loading, anyFailed }: {
             <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search events"
               className="h-8 w-full rounded-md border border-border bg-surface pl-7 pr-2 text-sm outline-none focus:border-primary" />
           </label>
+          <Chip active={grouped}
+            onClick={() => setParams((prev) => writeGrouping(prev, !grouped), { replace: true })}>
+            <Layers className="h-3.5 w-3.5" aria-hidden />Group repeats
+          </Chip>
           {filtering && (
             <button type="button" onClick={() => { setQuery(''); update(EMPTY_FILTER) }}
               className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted hover:text-text">
@@ -318,14 +338,20 @@ function EventList({ events, range, canAlerts, snmp, loading, anyFailed }: {
       ) : (
         <>
           <ol className="divide-y divide-border">
-            {visible.map((e) => <EventRow key={e.id} event={e} now={now} />)}
+            {visible.map((e) => isGroup(e)
+              ? <GroupRow key={e.id} group={e} now={now} open={expanded.has(e.id)} onToggle={() => toggleGroup(e.id)} />
+              : <EventRow key={e.id} event={e} now={now} />)}
           </ol>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-            <span>Showing {visible.length.toLocaleString()} of {plural(filtered.length, 'event')}</span>
-            {filtered.length > shown && (
+            <span>
+              {repeats
+                ? <>Showing {visible.length.toLocaleString()} of {plural(items.length, 'row')} · {plural(filtered.length, 'event')}, repeated alerts grouped</>
+                : <>Showing {visible.length.toLocaleString()} of {plural(filtered.length, 'event')}</>}
+            </span>
+            {items.length > shown && (
               <button type="button" onClick={() => setShown((n) => n + EVENTS_PAGE_SIZE)}
                 className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-text hover:bg-surface2">
-                Show {Math.min(EVENTS_PAGE_SIZE, filtered.length - shown)} more
+                Show {Math.min(EVENTS_PAGE_SIZE, items.length - shown)} more
               </button>
             )}
           </div>
@@ -364,6 +390,65 @@ function EventRow({ event: e, now }: { event: TimelineEvent; now: number }) {
         <div className="tabular-nums">{formatAbsolute(e.timestamp, { seconds: true })}</div>
         <div className="text-muted">{future ? 'starts later' : formatRelative(e.timestamp)}</div>
       </div>
+    </li>
+  )
+}
+
+/** Repeated alerts as one row; expanding lists every alert with its own link. */
+const GROUP_MEMBERS_SHOWN = 10
+
+function GroupRow({ group: g, now, open, onToggle }: { group: EventGroup; now: number; open: boolean; onToggle: () => void }) {
+  const [all, setAll] = useState(false)
+  const Icon = SEVERITY_ICON[g.severity]
+  const members = all ? g.members : g.members.slice(0, GROUP_MEMBERS_SHOWN)
+  const listId = `${g.id}-alerts`
+  return (
+    <li className="py-2.5">
+      <div className="flex items-start gap-3">
+        <span className={cn('mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full', SEVERITY_TONE[g.severity])}>
+          <Icon className="h-4 w-4" aria-hidden />
+          <span className="sr-only">{SEVERITY_LABEL[g.severity]}</span>
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+            <button type="button" onClick={onToggle} aria-expanded={open} aria-controls={listId}
+              className="inline-flex min-w-0 items-center gap-1 text-left font-medium text-text hover:text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+              {open ? <ChevronDown className="h-4 w-4 shrink-0" aria-hidden /> : <ChevronRight className="h-4 w-4 shrink-0" aria-hidden />}
+              <span className="break-words">{g.title}</span>
+            </button>
+            <span className="rounded border border-border px-1.5 text-xs text-muted">{KIND_LABEL.alert}</span>
+            {g.status && <span className={cn('rounded border px-1.5 text-xs capitalize', ALERT_STATUS_TONE[g.status])}>{g.status}</span>}
+          </div>
+          {g.subtitle && <div className="mt-0.5 break-words text-xs text-muted">{g.subtitle}</div>}
+        </div>
+        <div className="shrink-0 text-right text-xs">
+          <div className="tabular-nums">{formatAbsolute(g.timestamp, { seconds: true })}</div>
+          <div className="text-muted">latest · {formatRelative(g.timestamp)}</div>
+        </div>
+      </div>
+      {open && (
+        <div id={listId} className="ml-10 mt-2 border-l border-border pl-3">
+          <ol className="space-y-1.5">
+            {members.map((m) => (
+              <li key={m.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
+                <span className={cn('h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[m.severity])} aria-hidden />
+                <span className="sr-only">{SEVERITY_LABEL[m.severity]}</span>
+                {m.href ? <Link to={m.href} className="min-w-0 break-words text-text hover:text-primary hover:underline">{m.title}</Link>
+                  : <span className="min-w-0 break-words">{m.title}</span>}
+                {m.status && <span className={cn('rounded border px-1.5 text-xs capitalize', ALERT_STATUS_TONE[m.status])}>{m.status}</span>}
+                <span className="ml-auto shrink-0 text-xs tabular-nums text-muted" title={formatRelative(m.timestamp)}>
+                  {m.ts > now ? 'later' : formatAbsolute(m.timestamp, { seconds: true })}
+                </span>
+              </li>
+            ))}
+          </ol>
+          {g.members.length > GROUP_MEMBERS_SHOWN && (
+            <button type="button" onClick={() => setAll((v) => !v)} className="mt-1.5 text-xs font-medium text-primary hover:underline">
+              {all ? 'Show fewer' : `Show all ${g.members.length}`}
+            </button>
+          )}
+        </div>
+      )}
     </li>
   )
 }
