@@ -1,6 +1,6 @@
 /**
  * Reports → Scheduled reports: every schedule with what it sends, when it runs
- * next (organisation timezone), who receives it and how its last run went;
+ * next (in the schedule's own time zone, with UTC), who receives it and how its last run went;
  * run now, edit, duplicate, pause and delete for report managers; and each
  * schedule's run history. The list is shared with Channels → Routing
  * (query key ['report-schedules']).
@@ -9,7 +9,7 @@ import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
   AlertOctagon, CalendarClock, ChevronDown, ChevronRight, Copy, History, Info, Loader2, Lock, MoreHorizontal,
-  Pencil, Play, Plus, Search, Trash2, X,
+  Pencil, Play, Plus, Search, Trash2, TriangleAlert, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatDateTime, zoneLabel, type Branding } from '@/lib/branding'
@@ -35,8 +35,9 @@ import {
   useToggleSchedule,
 } from '@/features/reports/schedules/api'
 import {
-  SCOPED_EXPLANATION, buildBody, filterSchedules, frequencyText, isFailing, isMine, isNetflowWithheld, isVisibilityScoped,
-  periodLabel, relativeTo, runHealth, runLabel, scheduleToForm, scopeOf, soonestRun, templateTitle, toInstant,
+  SCOPED_EXPLANATION, buildBody, clockLabel, filterSchedules, frequencyText, isFailing, isMine, isNetflowWithheld,
+  isVisibilityScoped, localTimeLabel, nameTimeMismatch, periodLabel, relativeTo, runHealth, runLabel, scheduleToForm,
+  scheduleZone, scopeOf, soonestRun, templateTitle, toInstant, utcClock, zoneName,
   type NotificationChannel, type ReportSchedule, type StatusFilter,
 } from '@/features/reports/schedules/model'
 import {
@@ -181,7 +182,7 @@ export default function SchedulesPage() {
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-muted">
             Generate reports automatically and deliver them by email and notification channels.
-            {brandingLoaded && <> Times are in the organisation time zone, {tzLabel}.</>}
+            {brandingLoaded && <> Each schedule runs in its own time zone, shown with UTC; new schedules use the organisation time zone, {tzLabel}.</>}
           </p>
         </div>
         {canManage && (
@@ -413,15 +414,53 @@ function ownerLabel(s: ReportSchedule, userId?: string): string {
   return s.owner_name || (s.owner_id ? 'Another user' : '—')
 }
 
+/** The branding with the schedule's own zone: its times are shown in it. */
+function zoned(s: ReportSchedule, ctx: Ctx): Branding {
+  const tz = scheduleZone(s, ctx.branding.timezone)
+  return tz === ctx.branding.timezone ? ctx.branding : { ...ctx.branding, timezone: tz }
+}
+
+/** "Daily at 08:00" over "08:00 Asia/Riyadh (05:00 UTC)", in the organisation's time format. */
+function ScheduleTime({ s, ctx, className }: { s: ReportSchedule; ctx: Ctx; className?: string }) {
+  const tz = scheduleZone(s, ctx.branding.timezone)
+  const label = localTimeLabel(s, tz, new Date(ctx.now), ctx.branding.time_format)
+  return (
+    <div className={className}>
+      <div>{frequencyText(s, ctx.branding.time_format)}</div>
+      <div className="text-xs tabular-nums text-muted">{label}</div>
+    </div>
+  )
+}
+
+/** A time written in the schedule's name that disagrees with when it runs. */
+function NameTimeWarning({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
+  const named = s.name_time_mismatch ?? nameTimeMismatch(s.name, s.hour, s.minute)
+  if (!named) return null
+  const tz = scheduleZone(s, ctx.branding.timezone)
+  return (
+    <div role="note" className="mt-1 flex items-start gap-1 text-[11px] text-warning-fg">
+      <TriangleAlert className="mt-px h-3 w-3 shrink-0" aria-hidden />
+      <span>
+        The name says {named}; it runs at {clockLabel(s.hour, s.minute, ctx.branding.time_format)} {zoneName(tz)}. Check the time or the name.
+      </span>
+    </div>
+  )
+}
+
 function NextRun({ s, ctx, compact }: { s: ReportSchedule; ctx: Ctx; compact?: boolean }) {
   if (!s.enabled) return <span className="text-sm text-muted">Paused</span>
   const at = toInstant(s.next_run_at)
   if (!at) return <span className="text-sm text-muted">Not scheduled</span>
   const overdue = at.getTime() < ctx.now - 5 * 60_000
+  const b = zoned(s, ctx)
+  const zone = zoneLabel(b.timezone, at)
   return (
     <div className={compact ? 'inline' : ''}>
-      <div className="whitespace-nowrap text-sm tabular-nums text-text">{runLabel(at, ctx.branding)}</div>
+      <div className="whitespace-nowrap text-sm tabular-nums text-text">
+        {runLabel(at, b)} <span className="text-xs text-muted">{zone}</span>
+      </div>
       <div className={cn('text-xs tabular-nums', overdue ? 'text-warning-fg' : 'text-muted')}>
+        {zone !== 'UTC' && <>{utcClock(at)} · </>}
         {overdue ? `Due ${relativeTo(at, ctx.now)}` : relativeTo(at, ctx.now)}
       </div>
     </div>
@@ -534,6 +573,7 @@ function ScheduleRow({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx; 
               <div className="text-xs text-muted">
                 {templateTitle(s, ctx.catalog)} · {periodLabel(s.period)}
               </div>
+              <NameTimeWarning s={s} ctx={ctx} />
               <div className="mt-1 flex flex-wrap items-center gap-x-1.5 text-xs text-muted xl:hidden">
                 <RunStatusBadge status={s.last_status} />
                 {toInstant(s.last_run_at) && <span className="tabular-nums">{relativeTo(s.last_run_at, ctx.now)}</span>}
@@ -542,7 +582,7 @@ function ScheduleRow({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx; 
             </div>
           </div>
         </Td>
-        <Td className="hidden text-sm text-text2 xl:table-cell">{frequencyText(s, ctx.branding.time_format)}</Td>
+        <Td className="hidden text-sm text-text2 xl:table-cell"><ScheduleTime s={s} ctx={ctx} /></Td>
         <Td>
           <div className="space-y-1">
             <RecipientsSummary channelIds={s.notify_channels ?? []} recipients={s.recipients ?? []} channels={ctx.channels} />
@@ -551,7 +591,7 @@ function ScheduleRow({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx; 
         </Td>
         <Td className="hidden xl:table-cell"><FormatBadge format={s.format} /></Td>
         <Td>
-          <div className="mb-0.5 text-xs text-text2 xl:hidden">{frequencyText(s, ctx.branding.time_format)}</div>
+          <ScheduleTime s={s} ctx={ctx} className="mb-1 text-xs text-text2 xl:hidden" />
           <NextRun s={s} ctx={ctx} />
         </Td>
         <Td className="hidden xl:table-cell"><LastRun s={s} ctx={ctx} /></Td>
@@ -578,13 +618,14 @@ function ScheduleCard({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx;
         <div className="min-w-0">
           <div className="font-medium text-text">{s.name}</div>
           <div className="text-xs text-muted">{templateTitle(s, ctx.catalog)} · {periodLabel(s.period)}</div>
+          <NameTimeWarning s={s} ctx={ctx} />
         </div>
         <EnabledSwitch s={s} ctx={ctx} />
       </div>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
         <div className="col-span-2">
           <dt className="text-[11px] uppercase tracking-wide text-muted">Frequency</dt>
-          <dd className="text-text2">{frequencyText(s, ctx.branding.time_format)}</dd>
+          <dd className="text-text2"><ScheduleTime s={s} ctx={ctx} /></dd>
         </div>
         <div>
           <dt className="text-[11px] uppercase tracking-wide text-muted">Next run</dt>

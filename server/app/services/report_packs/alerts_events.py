@@ -518,10 +518,13 @@ async def alert_backlog_aging(ctx: SectionCtx) -> dict:
         " ORDER BY a.triggered_at ASC, a.id ASC LIMIT :n"), lparams)).mappings().all()
     message = await _redactor(ctx)
 
+    # Every alert source (devices, servers, services, APM, NetFlow, ...), not
+    # limited by a report's device scope: the labels say so, so the backlog
+    # is not read against a device count next to it.
     kpis = [
-        {"label": "Open incidents", "value": f"{tot['open']:,}", "accent": "primary",
+        {"label": "Open alert incidents (all sources)", "value": f"{tot['open']:,}", "accent": "primary",
          "subtitle": "Active or acknowledged, as of report generation"},
-        {"label": "Critical", "value": f"{crit:,}", "accent": "danger" if crit else "success"},
+        {"label": "Critical open incidents", "value": f"{crit:,}", "accent": "danger" if crit else "success"},
         {"label": "Unacknowledged", "value": f"{tot['unacked']:,}",
          "accent": "warning" if tot["unacked"] else "success"},
         {"label": "Acknowledgement overdue", "value": f"{tot['ack_overdue']:,}",
@@ -547,10 +550,29 @@ async def alert_backlog_aging(ctx: SectionCtx) -> dict:
     if tot["pending"]:
         notes.append(f"{tot['pending']:,} alert(s) are pending confirmation and not yet incidents.")
     notes.append(_targets_note(targets))
+    findings = []
+    if tot["ack_overdue"]:
+        findings.append({"severity": "danger", "weight": tot["ack_overdue"],
+                         "text": f"{tot['ack_overdue']:,} open incident(s) are past their acknowledgement target",
+                         "action": "Assign an owner and acknowledge in Alert Center", "path": "/alerts"})
+    if crit:
+        findings.append({"severity": "danger", "weight": crit,
+                         "text": f"{crit:,} critical open incident(s)",
+                         "action": "Triage in Alert Center", "path": "/alerts"})
+    if workflow and tot["unassigned"]:
+        findings.append({"severity": "warning", "weight": tot["unassigned"],
+                         "text": f"{tot['unassigned']:,} open incident(s) have no owner",
+                         "action": "Assign owners in Alert Center", "path": "/alerts"})
+    if by_bucket["gt_7d"]:
+        findings.append({"severity": "warning", "weight": by_bucket["gt_7d"],
+                         "text": f"{by_bucket['gt_7d']:,} incident(s) have been open longer than 7 days",
+                         "action": "Resolve or close stale incidents in Alert Center", "path": "/alerts"})
     return _section(
         sid, title,
-        description=f"{tot['open']:,} open alert incident(s) by age and severity, as of report "
-                    "generation.",
+        description=f"{tot['open']:,} open alert incident(s) from every alert source by age and severity, "
+                    "as of report generation.",
+        email_scope="All alert sources",
+        findings=findings,
         kpis=kpis,
         charts=[{"title": "Open incidents by age",
                  "series": {"kind": "rank", "unit": "incidents", "color": "warning",

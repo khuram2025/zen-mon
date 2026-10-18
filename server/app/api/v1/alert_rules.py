@@ -82,6 +82,12 @@ async def _netflow_definition(metric, operator, threshold, flow_scope, flow_para
     return ap.normalize_operator(operator), float(threshold), scope, params
 
 
+def _unique_channels(ids) -> list[str]:
+    """Channel ids as stored: strings, each once, in order. A channel listed
+    twice used to be sent twice."""
+    return list(dict.fromkeys(str(c) for c in ids or [] if c not in (None, "")))
+
+
 def _json_value(value):
     if isinstance(value, str):
         try:
@@ -168,6 +174,8 @@ def _validated_escalation(levels: Optional[list[EscalationLevel]]) -> Optional[l
     if len(levels) > 5:
         raise HTTPException(status_code=422, detail="At most 5 escalation levels")
     out = sorted((lv.model_dump() for lv in levels), key=lambda lv: lv["after_minutes"])
+    for lv in out:
+        lv["notify_channels"] = _unique_channels(lv.get("notify_channels"))
     deadlines = [lv["after_minutes"] for lv in out]
     if len(set(deadlines)) != len(deadlines):
         raise HTTPException(status_code=422,
@@ -212,6 +220,9 @@ class AlertRuleCreate(BaseModel):
     notify_channels: list[str] = Field(default_factory=list)
     cooldown: int = Field(default=300, ge=0)
     min_duration: int = Field(default=0, ge=0)
+    # Metric (SNMP) rules: seconds the cleared condition must hold before an
+    # open incident resolves. None = the evaluator default (300 s); 0 = at once.
+    clear_duration: Optional[int] = Field(default=None, ge=0, le=86400)
     max_repeat: int = Field(default=0, ge=0)
     # Device status rules: notify at once even while the device is flapping
     # (by default a flapping device's triggers wait for its status to settle).
@@ -266,6 +277,8 @@ class AlertRuleUpdate(BaseModel):
     notify_channels: Optional[list[str]] = None
     cooldown: Optional[int] = Field(None, ge=0)
     min_duration: Optional[int] = Field(None, ge=0)
+    # Explicit null resets to the evaluator default.
+    clear_duration: Optional[int] = Field(None, ge=0, le=86400)
     max_repeat: Optional[int] = Field(None, ge=0)
     notify_while_flapping: Optional[bool] = None
 
@@ -350,7 +363,7 @@ _RULE_COLUMNS = (
     "device_id, group_id, service_check_id, service_check_group_id, "
     "severity, notify_channels, cooldown, "
     "device_type, location, scope_tag, trigger_on, recovery_alert, "
-    "min_duration, max_repeat, notify_while_flapping, escalation_levels, "
+    "min_duration, clear_duration, max_repeat, notify_while_flapping, escalation_levels, "
     "schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -389,6 +402,7 @@ def _row_to_dict(row) -> dict:
         "trigger_on": row.trigger_on,
         "recovery_alert": row.recovery_alert,
         "min_duration": row.min_duration,
+        "clear_duration": getattr(row, "clear_duration", None),
         "max_repeat": row.max_repeat,
         "notify_while_flapping": bool(getattr(row, "notify_while_flapping", False)),
         "escalation_levels": getattr(row, "escalation_levels", None) or [],
@@ -603,7 +617,7 @@ async def create_alert_rule(
         "service_check_id": data.service_check_id,
         "service_check_group_id": data.service_check_group_id,
         "severity": data.severity,
-        "notify_channels": json.dumps(data.notify_channels),
+        "notify_channels": json.dumps(_unique_channels(data.notify_channels)),
         "cooldown": data.cooldown,
         "device_type": data.device_type,
         "location": data.location,
@@ -611,6 +625,7 @@ async def create_alert_rule(
         "trigger_on": data.trigger_on,
         "recovery_alert": False if metric == 'syslog' else data.recovery_alert,
         "min_duration": 0 if metric == 'syslog' else data.min_duration,
+        "clear_duration": data.clear_duration,
         "max_repeat": data.max_repeat,
         "notify_while_flapping": data.notify_while_flapping,
         "escalation_levels": json.dumps(_validated_escalation(data.escalation_levels))
@@ -644,7 +659,7 @@ async def create_alert_rule(
             "device_id, group_id, service_check_id, service_check_group_id, "
             "severity, notify_channels, cooldown, "
             "device_type, location, scope_tag, trigger_on, recovery_alert, "
-            "min_duration, max_repeat, notify_while_flapping, escalation_levels, "
+            "min_duration, clear_duration, max_repeat, notify_while_flapping, escalation_levels, "
             "schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
             "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -656,7 +671,7 @@ async def create_alert_rule(
             ":device_id, :group_id, :service_check_id, :service_check_group_id, "
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
             ":device_type, :location, :scope_tag, :trigger_on, :recovery_alert, "
-            ":min_duration, :max_repeat, :notify_while_flapping, CAST(:escalation_levels AS jsonb), "
+            ":min_duration, :clear_duration, :max_repeat, :notify_while_flapping, CAST(:escalation_levels AS jsonb), "
             "CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
@@ -807,6 +822,9 @@ async def update_alert_rule(
             set_parts.append("escalation_levels = CAST(:escalation_levels AS jsonb)")
             validated = _validated_escalation(levels)
             params["escalation_levels"] = json.dumps(validated) if validated else None
+        elif key == "notify_channels":
+            set_parts.append("notify_channels = CAST(:notify_channels AS jsonb)")
+            params[key] = json.dumps(_unique_channels(value)) if value is not None else None
         elif key in _jsonb_cols:
             set_parts.append(f"{key} = CAST(:{key} AS jsonb)")
             params[key] = json.dumps(value) if value is not None else None

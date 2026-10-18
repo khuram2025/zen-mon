@@ -1777,7 +1777,7 @@ async def data_retention_coverage(ctx: SectionCtx) -> dict:
                       (f"{_covered_days(t, now):,.0f} days" if _covered_days(t, now) is not None else "—")]
                      for t in shown]})
     if pg_rows:
-        out_tables.append({"title": "Application history (PostgreSQL)",
+        out_tables.append({"title": "Application history",
                            "headers": ["Dataset", "Retention", "Oldest record"] + window_heads,
                            "styles": ["text", "text", "text"] + ["text"] * len(_WINDOWS),
                            "rows": pg_rows})
@@ -1867,8 +1867,9 @@ async def storage_utilization(ctx: SectionCtx) -> dict:
               f"{_fmt_bytes(_n(vol.get('free_bytes')))} free") if vol else "Not measured"),
         _kpi("Time-series data", _fmt_bytes(ch_total) if tables else "—", "info",
              f"{sum(c['rows'] for c in by_cat.values()):,} rows" if tables else None),
-        _kpi("PostgreSQL database", _fmt_bytes(_n(pg_size)) if pg_size is not None else "—", "info",
-             "Inventory, alerts, audit and settings"),
+        # Customer-facing storage categories; engine names stay in support diagnostics.
+        _kpi("Configuration and event database", _fmt_bytes(_n(pg_size)) if pg_size is not None else "—",
+             "info", "Inventory, alerts, audit and settings"),
         _kpi("Purges in period", _c(purges), "warning" if totals.get("auto_purge") else "neutral",
              f"{totals.get('auto_purge', (0, 0))[0]:,} automatic"),
         _kpi("Space freed", _fmt_bytes(freed), "info" if freed else "neutral", "In the period"),
@@ -1925,9 +1926,20 @@ async def storage_utilization(ctx: SectionCtx) -> dict:
         notes.append("No purge, retention change or OS cleanup was recorded in this period.")
     notes.append("Volume usage and sizes are measured when the report is generated; purges and space "
                  "freed cover the reporting period.")
+    findings = []
+    if used_pct is not None and threshold and used_pct >= threshold - 10:
+        findings.append({"severity": "danger" if used_pct >= threshold else "warning", "weight": used_pct,
+                         "text": f"The data volume is {_pct1(used_pct)} full (automatic purge at {threshold:.0f}%)",
+                         "action": "Review retention in Settings → Storage", "path": "/settings/general?tab=storage"})
+    if not auto.get("enabled"):
+        findings.append({"severity": "warning",
+                         "text": "Automatic purge is off: the data volume can fill up",
+                         "action": "Turn it on in Settings → Storage", "path": "/settings/general?tab=storage"})
     return _section(
         sid, title,
         description="Data volume usage and storage by category, with storage maintenance in the period.",
+        email_scope="This appliance",
+        findings=findings,
         kpis=kpis,
         charts=[{"title": "Time-series storage by category",
                  "series": {"kind": "donut", "unit": "B",
@@ -1997,12 +2009,21 @@ async def backup_status(ctx: SectionCtx) -> dict:
     schedule = await get_backup_schedule(ctx.db)
 
     stored_total = _n(agg[4]) if agg else 0
+    catalogue_note = ("Pre-upgrade snapshots and external backups are not listed in the catalogue.")
     if not stored_total and not events:
-        notes = ["No appliance backup has been taken yet."]
+        # Only the in-app catalogue is read: the updater's pre-upgrade
+        # snapshots and backups taken outside ZenPlus may exist regardless.
+        notes = [f"No backup is recorded in the ZenPlus backup catalogue (Settings → Storage → Backups) "
+                 f"as of {ctx.fmt_dt(now)} {ctx.tz_label()}. {catalogue_note}"]
+        findings = [{"severity": "danger",
+                     "text": "No backup is recorded in the ZenPlus backup catalogue",
+                     "action": "Take a backup or turn on scheduled backups in Settings → Storage",
+                     "path": "/settings/general?tab=storage"}]
         if not schedule.get("enabled"):
             notes.append("Scheduled backups are off: turn them on in Settings → Storage → Backups.")
-        return _section(sid, title, kpis=[
-            _kpi("Since last successful backup", "Never", "danger"),
+        return _section(sid, title, email_scope="ZenPlus backup catalogue", findings=findings, kpis=[
+            _kpi("Since last successful backup", "None catalogued", "danger",
+                 "No backup in the ZenPlus catalogue"),
             _kpi("Schedule", "Off" if not schedule.get("enabled") else str(schedule.get("frequency")).title(),
                  "warning" if not schedule.get("enabled") else "info")], notes=notes)
 
@@ -2015,7 +2036,7 @@ async def backup_status(ctx: SectionCtx) -> dict:
     # The next run is shown in the organisation timezone (the setting itself is UTC).
     sched_label = ("Daily" if freq == "daily" else "Weekly") if schedule.get("enabled") else "Off"
     kpis = [
-        _kpi("Since last successful backup", _duration(age) if age is not None else "Never",
+        _kpi("Since last successful backup", _duration(age) if age is not None else "None catalogued",
              "danger" if overdue else "success",
              (f"{ctx.fmt_dt(last_at)} · overdue after {max_age} days" if overdue and last_at else
               ctx.fmt_dt(last_at) if last_at else f"Overdue after {max_age} days")),
@@ -2058,13 +2079,31 @@ async def backup_status(ctx: SectionCtx) -> dict:
     if agg and _n(agg[3]):
         notes.append(f"{_n(agg[3]):,} backup(s) are running now.")
     notes.append("Counts in the period come from the storage event log, which keeps the outcome of "
-                 "backups pruned by the schedule's retention; the table lists the backup catalogue.")
+                 "backups pruned by the schedule's retention; the table lists the backup catalogue. "
+                 + catalogue_note)
     if not schedule.get("enabled"):
         notes.append("Scheduled backups are off: backups are only taken when someone starts one.")
+    findings = []
+    if overdue:
+        findings.append({"severity": "danger", "weight": (age or 0) / 86400,
+                         "text": (f"The last catalogued backup is {_duration(age)} old (overdue after "
+                                  f"{max_age} days)") if age is not None else
+                                 "No successful backup is recorded in the ZenPlus backup catalogue",
+                         "action": "Take a backup in Settings → Storage", "path": "/settings/general?tab=storage"})
+    if failed:
+        findings.append({"severity": "danger", "weight": failed,
+                         "text": f"{failed:,} backup(s) failed in the period",
+                         "action": "Review the failure reason in Settings → Storage",
+                         "path": "/settings/general?tab=storage"})
+    if not schedule.get("enabled"):
+        findings.append({"severity": "warning", "text": "Scheduled backups are off",
+                         "action": "Turn them on in Settings → Storage", "path": "/settings/general?tab=storage"})
     return _section(
         sid, title,
         description=(f"Appliance backups: the last success, outcomes in the period and the schedule; "
                      f"a backup older than {max_age} days is overdue."),
+        email_scope="ZenPlus backup catalogue",
+        findings=findings,
         kpis=kpis,
         tables=[{"title": _titled("Backups", len(rows_out), stored_total, "backups"),
                  "headers": ["Started", "Type", "Started by", "Status", "Size", "Duration", "Last restore",

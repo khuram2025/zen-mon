@@ -4,8 +4,11 @@ A 60-second loop (started from main.py) fires every due, enabled
 ``report_schedules`` row. Each run:
 
 * resolves its window with ``report_periods.resolve_period`` in the
-  organisation timezone and week start (Settings -> General -> Company), so
-  "Previous month" is the local calendar month, as in the report viewer;
+  schedule's own timezone (``report_schedules.timezone``, migrate-163; the
+  organisation timezone when unset) and the organisation week start, so
+  "Previous month" is the local calendar month, as in the report viewer, and
+  the period, generated time and email footer all name the zone the schedule
+  runs in;
 * renders built-in templates (``report_sections.REPORT_PRESETS``) and
   organisation templates (``custom_reports``) with the section engine the way
   the viewer does, as the schedule's owner; legacy report types keep their
@@ -16,14 +19,19 @@ A 60-second loop (started from main.py) fires every due, enabled
   schedule's direct recipients; other channel types get a KPI line and the
   link.
 
-Next-run is computed in the appliance's configured timezone. Mirrors the
-discovery scheduler's shape (compute_next_run + tick loop) and reuses the SMTP
-gateway resolution.
+A schedule's hour and minute are wall-clock time in its own IANA timezone,
+stored with the schedule: changing the organisation timezone later does not
+move it. Next-run is that wall time converted to an absolute UTC instant
+(``compute_next_run``, DST-aware). Manual runs ("Run now") are labelled as
+such in the subject and body so they are never mistaken for scheduled ones.
+Mirrors the discovery scheduler's shape (compute_next_run + tick loop) and
+reuses the SMTP gateway resolution.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -47,7 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.crypto import decrypt_config
 from app.services import report_html, report_periods
-from app.services.alert_schedule import get_configured_timezone
+from app.services.alert_schedule import get_configured_timezone, normalize_timezone
 from app.services.branding import Branding, load_branding
 from app.services.export_service import generate_excel_report, generate_csv_report
 from app.services.report_data_service import build_executive
@@ -118,16 +126,26 @@ def _tz(tz_name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+def schedule_timezone(sched: dict, fallback: str = "UTC") -> str:
+    """The IANA zone a schedule's hour and minute are expressed in: its own
+    stored ``timezone`` when that is a valid zone, else ``fallback`` (the
+    organisation timezone), else UTC."""
+    return normalize_timezone((sched or {}).get("timezone"), normalize_timezone(fallback))
+
+
 def compute_next_run(sched: dict, tz_name: str, *, after: datetime | None = None) -> datetime | None:
     """Return the next fire time (UTC, tz-aware) for a schedule, or None.
 
     ``sched`` keys: frequency, hour, minute, day_of_week (1=Mon..7=Sun),
-    day_of_month (1..31). Evaluated in the appliance timezone so "08:00 daily"
-    means local 08:00.
+    day_of_month (1..31) and timezone. The wall-clock time is read in the
+    schedule's own ``timezone``; ``tz_name`` (the organisation timezone) is
+    only the fallback for a schedule without a valid one. "08:00 daily" in
+    Asia/Riyadh is 05:00 UTC; in a DST zone the UTC instant follows the
+    clock change while the local time stays 08:00.
     """
     if not sched.get("enabled", True):
         return None
-    tz = _tz(tz_name)
+    tz = _tz(schedule_timezone(sched, tz_name))
     now_local = (after or datetime.now(timezone.utc)).astimezone(tz)
     hour = int(sched.get("hour", 8) or 0)
     minute = int(sched.get("minute", 0) or 0)
@@ -173,6 +191,69 @@ def _days_in_month(year: int, month: int) -> int:
     else:
         nxt = datetime(year, month + 1, 1, tzinfo=timezone.utc)
     return (nxt - timedelta(days=1)).day
+
+
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def local_time_label(sched: dict, tz_name: str, *, now: datetime | None = None) -> str:
+    """The schedule's time of day in its own zone with the UTC equivalent of
+    its next run: "08:00 Asia/Riyadh (05:00 UTC)", "01:00 Asia/Riyadh
+    (22:00 UTC, previous day)", "08:00 UTC". In a DST zone the UTC part is
+    the one of the next run."""
+    zone = schedule_timezone(sched, tz_name)
+    hour = int(sched.get("hour", 8) or 0)
+    minute = int(sched.get("minute", 0) or 0)
+    local = f"{hour:02d}:{minute:02d}"
+    if zone in ("UTC", "Etc/UTC"):
+        return f"{local} UTC"
+    nxt = compute_next_run({**sched, "enabled": True, "timezone": zone}, zone, after=now)
+    if nxt is None:
+        return f"{local} {zone}"
+    utc = nxt.astimezone(timezone.utc)
+    wall = nxt.astimezone(_tz(zone))
+    day = (", previous day" if utc.date() < wall.date() else
+           ", next day" if utc.date() > wall.date() else "")
+    return f"{local} {zone} ({utc:%H:%M} UTC{day})"
+
+
+def schedule_text(sched: dict, tz_name: str, *, now: datetime | None = None) -> str:
+    """'Daily at 08:00 Asia/Riyadh (05:00 UTC)', 'Weekly on Sunday at …',
+    'Monthly on day 1 at …' (the dashboard's frequencyText plus the zone)."""
+    at = local_time_label(sched, tz_name, now=now)
+    freq = sched.get("frequency") or "daily"
+    if freq == "weekly":
+        dow = int(sched.get("day_of_week") or 1)
+        return f"Weekly on {_WEEKDAYS[min(7, max(1, dow)) - 1]} at {at}"
+    if freq == "monthly":
+        return f"Monthly on day {int(sched.get('day_of_month') or 1)} at {at}"
+    return f"Daily at {at}"
+
+
+_TIME_IN_NAME = re.compile(r"(?<![\d:.])([01]?\d|2[0-3])[:h]([0-5]\d)(?:\s*([AaPp])\.?[Mm]\b\.?)?(?![\d:])")
+
+
+def name_time_mismatch(name: Any, hour: Any, minute: Any) -> Optional[str]:
+    """The time of day written in a schedule's name ("Daily NOC 08:00",
+    "08h30 brief", "7:00 PM digest") when it differs from the stored local
+    time, else None. A human-entered title is not evidence of when a schedule
+    runs; the UI warns when the two disagree."""
+    if not isinstance(name, str):
+        return None
+    try:
+        h, m = int(hour), int(minute)
+    except (TypeError, ValueError):
+        return None
+    for match in _TIME_IN_NAME.finditer(name):
+        nh, nm = int(match.group(1)), int(match.group(2))
+        ampm = (match.group(3) or "").lower()
+        if ampm:
+            if not 1 <= nh <= 12:
+                continue
+            nh = (nh % 12) + (12 if ampm == "p" else 0)
+        if (nh, nm) != (h, m):
+            return match.group(0).strip()
+    return None
 
 
 
@@ -394,10 +475,29 @@ def _base_url(branding: Branding | None) -> str:
     return base.rstrip("/")
 
 
-def email_subject(branding: Branding | None, title: str, period_label: str) -> str:
-    """'[Confidential] Monthly SLA — Previous month (1 Sep 2026 – 30 Sep 2026)'."""
+MANUAL_SUBJECT_TAG = "[Manual run]"
+MANUAL_RUN_NOTE = ("Manual run: generated on request, not at the schedule's time. "
+                   "Scheduled deliveries are not affected.")
+
+
+def email_subject(branding: Branding | None, title: str, period_label: str, *, manual: bool = False) -> str:
+    """'[Confidential] Monthly SLA — Previous month (1 Sep 2026 – 30 Sep 2026)';
+    a manual run carries '[Manual run]' after the classification."""
     prefix = f"[{branding.confidentiality}] " if branding is not None and branding.confidentiality else ""
+    if manual:
+        prefix += f"{MANUAL_SUBJECT_TAG} "
     return _clean_header(f"{prefix}{title} — {period_label}")
+
+
+def _utc_clock(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%H:%M UTC")
+
+
+def _schedule_branding(org: Branding, schedule: dict) -> Branding:
+    """The organisation branding in the schedule's own timezone: the period,
+    generated time and footer of a schedule's report name the zone it runs in."""
+    zone = schedule_timezone(schedule, org.timezone)
+    return org if zone == org.timezone else dataclasses.replace(org, timezone=zone)
 
 
 def _naive_utc(dt: datetime) -> datetime:
@@ -534,7 +634,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
     fmt = schedule.get("format") or "pdf"
     filters = {k: v for k, v in (schedule.get("filters") or {}).items() if k != "netflow_withheld"}
 
-    branding = await load_branding(db)
+    manual = triggered_by == "manual"
+    branding = _schedule_branding(await load_branding(db), schedule)
     start, end, plabel = report_periods.resolve_period(period, branding.timezone, branding.week_start)
 
     from app.services import report_render
@@ -594,23 +695,35 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         data = await build_executive(db, start, end)
         title = schedule.get("name") or report_html.report_title(report_type)
 
+    generated_at = datetime.now(timezone.utc)
     meta = {
         "title": title,
         "report_type": report_type,
         "period": period,
         "period_label": plabel,
-        "generated_at": datetime.now(timezone.utc),
+        "generated_at": generated_at,
         "company_name": branding.display_name,
         "product_name": "ZenPlus",
     }
+    # Every label names the schedule's zone and, outside UTC, the UTC clock:
+    # recipients compare the generated time with the receipt time.
+    run_facts: dict[str, Any] = {"run_kind": "manual" if manual else "scheduled"}
+    if schedule.get("id") and schedule.get("hour") is not None:
+        run_facts["schedule_label"] = schedule_text(schedule, branding.timezone, now=generated_at)
+    if manual:
+        run_facts["run_note"] = MANUAL_RUN_NOTE
     if not is_sections:
         # Legacy reports carry the same branding as template reports: logo,
         # colour, footer, disclaimer, window and generated time in the
-        # organisation timezone (report_html reads these keys).
+        # schedule's timezone (report_html reads these keys).
         legacy_meta = await _sections.build_report_meta(
             db, title, _naive_utc(start), _naive_utc(end), branding=branding)
         meta = {**legacy_meta, **meta, "start": start, "end": end,
                 "generated_label": legacy_meta["generated_label"]}
+    for m in ((sec_meta,) if is_sections else (meta,)):
+        if m.get("generated_label") and branding.timezone not in ("UTC", "Etc/UTC"):
+            m["generated_label"] = f"{m['generated_label']} ({_utc_clock(m.get('generated_at') or generated_at)})"
+        m.update(run_facts)
 
     # Persist a shareable HTML artifact.
     token = secrets.token_urlsafe(24)
@@ -626,7 +739,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                 VALUES (:sid, :rt, :pd, :title, :token, :html, 'success', NOW())
                 RETURNING id"""),
         {"sid": schedule.get("id"), "rt": report_type, "pd": period,
-         "title": meta["title"], "token": token, "html": html_page},
+         "title": (f"{meta['title']} (manual run)" if manual else meta["title"])[:255],
+         "token": token, "html": html_page},
     )).first()
     run_id = str(run_row.id)
     await db.commit()
@@ -693,16 +807,15 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         email_html = report_html.build_report_email_html(email_meta, data, view_url,
                                                          attached=attachment is not None)
         email_text = report_html.build_report_email_text(meta, data, view_url)
-    subject = email_subject(branding, meta["title"], plabel)
+    subject = email_subject(branding, meta["title"], plabel, manual=manual)
 
-    # Compact KPI pairs for non-email channel payloads.
+    # Compact KPI pairs for non-email channel payloads: the same per-section
+    # groups as the email, each figure prefixed with its section.
     kpi_pairs: list[tuple[str, str]] = []
     if is_sections:
-        for s in secs:
-            for k in (s.get("kpis") or []):
-                kpi_pairs.append((str(k.get("label") or ""), str(k.get("value") or "")))
-            if len(kpi_pairs) >= 6:
-                break
+        for g in _sections.email_kpi_groups(secs, sec_meta):
+            for k in g["kpis"]:
+                kpi_pairs.append((f"{g['title']}: {k.get('label') or ''}", str(k.get("value") or "")))
     elif data:
         k = data.get("kpis") or {}
         if k.get("availability_pct") is not None:
@@ -741,7 +854,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                 continue
 
             # Every other channel gets a KPI summary plus the share link.
-            body_msg = f"{meta['title']} — {plabel}"
+            body_msg = f"{MANUAL_SUBJECT_TAG} " if manual else ""
+            body_msg += f"{meta['title']} — {plabel}"
             if kpi_pairs:
                 body_msg += "\n" + " · ".join(f"{l}: {v}" for l, v in kpi_pairs[:4])
             if view_url:
@@ -834,6 +948,8 @@ def _row_to_sched(row) -> dict:
         "minute": row.minute,
         "day_of_week": row.day_of_week,
         "day_of_month": row.day_of_month,
+        # The zone hour/minute are in (migrate-163); None before the migration.
+        "timezone": getattr(row, "timezone", None),
         "notify_channels": row.notify_channels or [],
         # Custom (template) schedules render by this id; without it every
         # timer-fired custom schedule failed and only "Run now" worked.
@@ -855,6 +971,7 @@ async def run_scheduler_tick(db: AsyncSession) -> dict:
     claiming one at a time means a worker that dies mid-batch loses at most the
     run in progress — the other due schedules stay due for either worker."""
     now = datetime.now(timezone.utc)
+    # Only the fallback for a schedule without its own valid timezone.
     tz_name = await get_configured_timezone(db)
     fired: list[str] = []
     done: list[str] = []

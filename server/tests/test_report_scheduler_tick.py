@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from app.services import report_scheduler as rs
 
@@ -598,3 +599,221 @@ def test_tick_claims_one_schedule_at_a_time(monkeypatch):
     # s1 was generated after only its own claim; s2 after s1's claim, s1's
     # result and its own claim — never both claimed up front.
     assert order == [("s1", 1), ("s2", 3)]
+
+
+# ── Schedule timezone (NOTIFY 07) ────────────────────────────────────────────
+
+RIYADH, BERLIN = "Asia/Riyadh", "Europe/Berlin"
+
+
+def _timing(**kw):
+    base = dict(enabled=True, frequency="daily", hour=8, minute=0, day_of_week=None, day_of_month=None,
+                timezone=RIYADH)
+    base.update(kw)
+    return base
+
+
+def _iso(d):
+    return d.isoformat().replace("+00:00", "Z")
+
+
+def test_daily_0800_riyadh_runs_at_0500_utc_every_day():
+    nxt = rs.compute_next_run(_timing(), "UTC", after=NOW)          # Wed 14:05 Riyadh
+    assert _iso(nxt) == "2026-10-08T05:00:00Z"
+    runs, at = [], NOW
+    for _ in range(3):
+        at = rs.compute_next_run(_timing(), "UTC", after=at + timedelta(seconds=1))
+        runs.append(_iso(at))
+    assert runs == ["2026-10-08T05:00:00Z", "2026-10-09T05:00:00Z", "2026-10-10T05:00:00Z"]
+    # Just before and exactly at 05:00Z: that day's run, then the next day's.
+    assert _iso(rs.compute_next_run(_timing(), "UTC", after=datetime(2026, 10, 8, 4, 59, tzinfo=timezone.utc))) \
+        == "2026-10-08T05:00:00Z"
+    assert _iso(rs.compute_next_run(_timing(), "UTC", after=datetime(2026, 10, 8, 5, 0, tzinfo=timezone.utc))) \
+        == "2026-10-09T05:00:00Z"
+
+
+def test_weekly_sunday_0800_riyadh_runs_only_on_sunday():
+    sched = _timing(frequency="weekly", day_of_week=7)
+    at, runs = NOW, []
+    for _ in range(3):
+        at = rs.compute_next_run(sched, "UTC", after=at + timedelta(seconds=1))
+        runs.append(at)
+    assert [_iso(r) for r in runs] == ["2026-10-11T05:00:00Z", "2026-10-18T05:00:00Z", "2026-10-25T05:00:00Z"]
+    assert all(r.astimezone(ZoneInfo(RIYADH)).isoweekday() == 7 for r in runs)
+    # Sunday after the run: next Sunday, never Monday.
+    assert _iso(rs.compute_next_run(sched, "UTC", after=datetime(2026, 10, 11, 5, 0, 1, tzinfo=timezone.utc))) \
+        == "2026-10-18T05:00:00Z"
+
+
+def test_stored_timezone_wins_and_the_organisation_zone_is_only_a_fallback():
+    stored = rs.compute_next_run(_timing(), "Europe/London", after=NOW)
+    assert _iso(stored) == "2026-10-08T05:00:00Z"
+    # Changing the organisation timezone does not move a schedule with its own zone.
+    for org in ("UTC", "America/New_York", "Asia/Tokyo"):
+        assert rs.compute_next_run(_timing(), org, after=NOW) == stored
+    # Without a (valid) zone of its own, the organisation zone applies.
+    for missing in (None, "", "Not/AZone"):
+        assert _iso(rs.compute_next_run(_timing(timezone=missing), RIYADH, after=NOW)) == "2026-10-08T05:00:00Z"
+        assert _iso(rs.compute_next_run(_timing(timezone=missing), "UTC", after=NOW)) == "2026-10-08T08:00:00Z"
+    assert rs.schedule_timezone({"timezone": "  Asia/Riyadh "}, "UTC") == RIYADH
+    assert rs.schedule_timezone({}, " Not/AZone ") == "UTC"
+
+
+def test_dst_zone_keeps_local_time_across_the_clock_change():
+    # Europe/Berlin leaves summer time on Sunday 2026-10-25 (03:00 CEST -> 02:00 CET).
+    daily = _timing(timezone=BERLIN)
+    at, runs = datetime(2026, 10, 23, 12, tzinfo=timezone.utc), []
+    for _ in range(4):
+        at = rs.compute_next_run(daily, "UTC", after=at + timedelta(seconds=1))
+        runs.append(_iso(at))
+    assert runs == ["2026-10-24T06:00:00Z", "2026-10-25T07:00:00Z", "2026-10-26T07:00:00Z",
+                    "2026-10-27T07:00:00Z"]
+    weekly = _timing(timezone=BERLIN, frequency="weekly", day_of_week=7)
+    assert _iso(rs.compute_next_run(weekly, "UTC", after=datetime(2026, 10, 18, 12, tzinfo=timezone.utc))) \
+        == "2026-10-25T07:00:00Z"
+    # Spring forward (2027-03-28): 08:00 CET (07:00Z) becomes 08:00 CEST (06:00Z).
+    assert _iso(rs.compute_next_run(weekly, "UTC", after=datetime(2027, 3, 22, tzinfo=timezone.utc))) \
+        == "2027-03-28T06:00:00Z"
+    assert _iso(rs.compute_next_run(weekly, "UTC", after=datetime(2027, 3, 15, tzinfo=timezone.utc))) \
+        == "2027-03-21T07:00:00Z"
+    # The label names the zone and the UTC clock of the next run.
+    assert rs.local_time_label(daily, "UTC", now=datetime(2026, 10, 23, 12, tzinfo=timezone.utc)) == \
+        "08:00 Europe/Berlin (06:00 UTC)"
+    assert rs.local_time_label(daily, "UTC", now=datetime(2026, 10, 24, 12, tzinfo=timezone.utc)) == \
+        "08:00 Europe/Berlin (07:00 UTC)"
+
+
+def test_time_labels_and_name_mismatch():
+    assert rs.local_time_label(_timing(), "UTC", now=NOW) == "08:00 Asia/Riyadh (05:00 UTC)"
+    assert rs.local_time_label(_timing(hour=1), "UTC", now=NOW) == "01:00 Asia/Riyadh (22:00 UTC, previous day)"
+    assert rs.local_time_label(_timing(timezone="UTC"), RIYADH, now=NOW) == "08:00 UTC"
+    assert rs.schedule_text(_timing(frequency="weekly", day_of_week=7), "UTC", now=NOW) == \
+        "Weekly on Sunday at 08:00 Asia/Riyadh (05:00 UTC)"
+    assert rs.schedule_text(_timing(frequency="monthly", day_of_month=1), "UTC", now=NOW) == \
+        "Monthly on day 1 at 08:00 Asia/Riyadh (05:00 UTC)"
+    # The field case: titled 08:00 but stored as 05:00 local.
+    assert rs.name_time_mismatch("NOC Daily Briefing 08:00 Riyadh", 5, 0) == "08:00"
+    assert rs.name_time_mismatch("NOC Daily Briefing 08:00 Riyadh", 8, 0) is None
+    assert rs.name_time_mismatch("Ops digest 7:30 PM", 19, 30) is None
+    assert rs.name_time_mismatch("Ops digest 7:30 PM", 7, 30) == "7:30 PM"
+    assert rs.name_time_mismatch("Brief 08h30", 8, 0) == "08h30"
+    for no_time in ("Weekly SLA", "Release 1.24 notes", "Week of 18.10.2026", "Ratio 3:2:1"):
+        assert rs.name_time_mismatch(no_time, 8, 0) is None, no_time
+
+
+def test_tick_uses_the_schedule_zone_not_the_organisation_zone(monkeypatch):
+    claims = []
+
+    async def org_utc(db):
+        return "UTC"
+
+    async def fake_generate(db, sched, **kw):
+        return {"status": "success", "errors": []}
+
+    db = TickDB([_row(timezone=RIYADH, report_type="availability", custom_report_id=None)])
+    orig = db.execute
+
+    async def spy(statement, params=None):
+        if params and "nxt" in params:
+            claims.append(params)
+        return await orig(statement, params)
+
+    db.execute = spy
+    monkeypatch.setattr(rs, "get_configured_timezone", org_utc)
+    monkeypatch.setattr(rs, "generate_and_deliver", fake_generate)
+    asyncio.run(rs.run_scheduler_tick(db))
+    nxt = claims[0]["nxt"]
+    assert nxt > claims[0]["now"]
+    assert nxt.astimezone(ZoneInfo(RIYADH)).strftime("%H:%M") == "08:00"
+    assert nxt.strftime("%H:%M") == "05:00"
+    assert rs._row_to_sched(_row(timezone=RIYADH))["timezone"] == RIYADH
+    assert rs._row_to_sched(_row())["timezone"] is None           # column absent before migrate-163
+
+
+def test_schedule_runs_label_the_schedule_zone(gen):
+    # The organisation moved to Europe/London; the schedule keeps Asia/Riyadh.
+    db = GenDB(company={**COMPANY, "timezone": "Europe/London"})
+    sched = _sched(id="s1", frequency="daily", hour=8, minute=0, timezone=RIYADH, period="yesterday",
+                   name="NOC Daily Briefing", recipients=[])
+    out = asyncio.run(rs.generate_and_deliver(db, sched))
+    assert out["status"] == "success"
+    assert gen["periods"] == [("yesterday", RIYADH, "sunday")]        # window in the schedule zone
+    assert gen["build"]["branding"].timezone == RIYADH
+    meta = gen["email_html"]["meta"]
+    assert meta["timezone"] == RIYADH and "GMT+3" in meta["period_label"]
+    assert meta["generated_label"].endswith(" UTC)") and "GMT+3" in meta["generated_label"]
+    assert meta["schedule_label"].startswith("Daily at 08:00 Asia/Riyadh (05:00 UTC")
+    assert meta["run_kind"] == "scheduled" and "run_note" not in meta
+    assert gen["pdf_meta"]["schedule_label"] == meta["schedule_label"]
+    assert "[Manual run]" not in gen["sent"][0]["subject"]
+    assert db.runs[0]["title"] == "NOC Daily Briefing"
+
+
+def test_manual_runs_are_labelled_as_manual(gen):
+    db = GenDB()
+    sched = _sched(frequency="daily", hour=8, minute=0, timezone=RIYADH)
+    out = asyncio.run(rs.generate_and_deliver(db, sched, triggered_by="manual"))
+    assert out["status"] == "success"
+    assert gen["sent"][0]["subject"] == ("[Confidential] [Manual run] Monthly SLA — Previous month "
+                                         "(1 Sep 2026 – 30 Sep 2026)")
+    assert gen["individual"][0]["subject"] == gen["sent"][0]["subject"]
+    meta = gen["email_html"]["meta"]
+    assert meta["run_kind"] == "manual" and meta["run_note"] == rs.MANUAL_RUN_NOTE
+    assert db.runs[0]["title"] == "Monthly SLA (manual run)"            # run history shows it too
+
+
+def test_a_restarted_scheduler_runs_a_missed_schedule_once(monkeypatch):
+    """Down for three days: the overdue schedule fires once on the first tick
+    and is claimed forward to its next local 08:00, not replayed per missed day."""
+    rows = {"s1": dict(id="s1", name="Daily", enabled=True, report_type="availability", period="yesterday",
+                       format="pdf", filters={}, frequency="daily", hour=8, minute=0, day_of_week=None,
+                       day_of_month=None, notify_channels=[], custom_report_id=None, timezone=RIYADH,
+                       next_run_at=datetime(2026, 10, 4, 5, tzinfo=timezone.utc))}
+    fired = []
+
+    class StateDB:
+        async def execute(self, statement, params=None):
+            sql = " ".join(str(statement).split())
+            params = params or {}
+
+            class R:
+                def __init__(self, row=None):
+                    self.row = row
+
+                def first(self):
+                    return self.row
+
+            if sql.startswith("SELECT * FROM report_schedules"):
+                due = [r for r in rows.values() if r["enabled"] and r["next_run_at"] <= params["now"]
+                       and r["id"] not in params["done"]]
+                return R(SimpleNamespace(**due[0]) if due else None)
+            if "next_run_at = :nxt" in sql:
+                rows[params["id"]]["next_run_at"] = params["nxt"]
+            return R()
+
+        async def commit(self):
+            pass
+
+        async def rollback(self):
+            pass
+
+    async def org(db):
+        return "UTC"
+
+    async def gen_(db, sched, **kw):
+        fired.append(sched["id"])
+        return {"status": "success", "errors": []}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 7, 11, 5, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(rs, "datetime", Clock)
+    monkeypatch.setattr(rs, "get_configured_timezone", org)
+    monkeypatch.setattr(rs, "generate_and_deliver", gen_)
+    db = StateDB()
+    asyncio.run(rs.run_scheduler_tick(db))
+    asyncio.run(rs.run_scheduler_tick(db))           # a second worker / the next tick
+    assert fired == ["s1"]
+    assert _iso(rows["s1"]["next_run_at"]) == "2026-10-08T05:00:00Z"

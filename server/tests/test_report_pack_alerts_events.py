@@ -279,8 +279,17 @@ def test_backlog_aging_buckets_oldest_list_and_redaction(monkeypatch):
     db = _backlog_db()
     sec = run(db, "alert_backlog_aging", {"top_n": 2}, redact=True, monkeypatch=monkeypatch)
     well_formed(sec)
-    assert kpi(sec, "Open incidents")["value"] == "6"
-    assert kpi(sec, "Critical")["value"] == "3"
+    assert kpi(sec, "Open alert incidents (all sources)")["value"] == "6"
+    assert kpi(sec, "Critical open incidents")["value"] == "3"
+    assert sec["email_scope"] == "All alert sources"
+    # Action findings, never the acknowledgement-targets note.
+    assert [(f["severity"], f["text"]) for f in sec["findings"]] == [
+        ("danger", "1 open incident(s) are past their acknowledgement target"),
+        ("danger", "3 critical open incident(s)"),
+        ("warning", "3 open incident(s) have no owner"),
+        ("warning", "2 incident(s) have been open longer than 7 days"),
+    ]
+    assert all(f["path"] == "/alerts" for f in sec["findings"])
     assert kpi(sec, "Unacknowledged")["value"] == "4"
     assert kpi(sec, "Acknowledgement overdue")["value"] == "1"
     assert kpi(sec, "Open longer than 7 days")["value"] == "2"

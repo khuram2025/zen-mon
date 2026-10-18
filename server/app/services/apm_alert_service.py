@@ -28,8 +28,9 @@ Rule semantics:
   sweeper (F8's ``apm_nodata_sweeper``), not to threshold rules.
 
 Alerts dedupe on (rule_id, metadata->>'service'): a rule/service pair raises
-at most one active alert, so running in both uvicorn workers is harmless
-(mirrors host/network evaluators). ``apm_slo_burn`` is *not* evaluated here —
+at most one active alert. Both uvicorn workers start this loop; a pass runs in
+one of them at a time (``alert_worker_lock``), as for the host and network
+evaluators, because the open-alert check and the insert are not atomic. ``apm_slo_burn`` is *not* evaluated here —
 the SLO burn loop (apm_slo_service) raises directly. ``apm_synthetic_down``
 and ``apm_anomaly`` are whitelisted but their sources don't exist yet
 (AM-E9/E12), so they are intentionally not handled.
@@ -475,14 +476,17 @@ async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
     return {"rules": len(rules), "raised": raised, "resolved": resolved}
 
 
-async def apm_alert_evaluator_loop() -> None:
-    from app.core.database import AsyncSessionLocal
+async def run_apm_alert_pass(session_factory=None):
+    """One evaluation pass, in one API worker at a time (None when skipped)."""
+    from app.services.alert_worker_lock import APM_ALERT_PASS, run_pass
+    return await run_pass(APM_ALERT_PASS, evaluate_apm_rules, session_factory)
 
+
+async def apm_alert_evaluator_loop() -> None:
     await asyncio.sleep(30)  # let the app boot and first rollup buckets land
     while True:
         try:
-            async with AsyncSessionLocal() as db:
-                await evaluate_apm_rules(db)
+            await run_apm_alert_pass()
         except asyncio.CancelledError:
             raise
         except Exception:

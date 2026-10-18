@@ -1,7 +1,8 @@
 /**
  * Schedule editor: what to send (template + carried scope), which data period
- * each run covers, when it runs (organisation timezone, with the next runs
- * previewed), and how it is delivered (format, notification channels, direct
+ * each run covers, when it runs (in the schedule's own time zone, the
+ * organisation's by default, with the next runs previewed in local time and
+ * UTC), and how it is delivered (format, notification channels, direct
  * email recipients). Props are shared with the report viewer and the
  * Schedules page: {open, onOpenChange, schedule?, prefill?}.
  */
@@ -35,12 +36,14 @@ import { useNotificationChannels, useRunScheduleNow, useSaveSchedule } from '@/f
 import {
   FORMAT_META, FREQUENCIES, MAX_MONTH_DAY, MAX_RECIPIENTS, PERIOD_GROUPS, SCOPED_EXPLANATION, TIME_STEPS,
   addRecipients, buildBody, clockLabel, coverageText, crossesClockChange, defaultForm, formatsForEngine,
-  frequencyText, groupTemplateOptions, isNetflowWithheld, isVisibilityScoped, nextRuns, ordinal, relativeTo,
-  runLabel, scheduleToForm, scopeOf, searchTemplateOptions, suggestedName, suggestedPeriod, templateOptions,
-  templateTitle, templateValue, validateSchedule, weekdaysFrom,
+  frequencyText, groupTemplateOptions, isNetflowWithheld, isVisibilityScoped, localTimeLabel, nameTimeMismatch,
+  nextRuns, ordinal, relativeTo, runLabel, runWithUtc, scheduleToForm, scheduleZone, scopeOf, searchTemplateOptions,
+  suggestedName, suggestedPeriod, templateOptions, templateTitle, templateValue, utcClock, validateSchedule,
+  weekdaysFrom, zoneName,
   type Issue, type ReportSchedule, type ScheduleForm, type ScheduleFrequency, type TemplateOption,
 } from '@/features/reports/schedules/model'
 import { ScopeChips, scheduleErrorText, useNow } from '@/features/reports/schedules/ui'
+import { TimezoneSelect } from '@/features/reports/schedules/TimezoneSelect'
 
 export type { ReportSchedule } from '@/features/reports/schedules/model'
 
@@ -85,6 +88,7 @@ const FIELD_ID: Record<string, string> = {
   template: 'sched-template',
   period: 'sched-period',
   time: 'sched-time',
+  timezone: 'sched-timezone',
   weekday: 'sched-weekday',
   monthday: 'sched-monthday',
   format: 'sched-format',
@@ -135,7 +139,10 @@ function ScheduleEditor({
   const options = useMemo(() => templateOptions(catalog.data), [catalog.data])
   const value = templateValue(form.report_type, form.custom_report_id)
   const template = options.find((o) => o.value === value) ?? null
-  const tz = branding.timezone
+  // The schedule's own zone ('' = the organisation's); every time in the
+  // editor is shown in it.
+  const tz = scheduleZone(form, branding.timezone)
+  const zb = useMemo(() => ({ ...branding, timezone: tz }), [branding, tz])
 
   // A name derived from the template and frequency until the user types one.
   useEffect(() => {
@@ -161,11 +168,13 @@ function ScheduleEditor({
     template,
     originalDayOfMonth: original.dom,
     originalTime: original.time,
+    timezone: tz,
   })
   const valid = errors.length === 0
 
   const runs = useMemo(() => nextRuns(form, tz, 3, new Date(now)), [form.frequency, form.hour, form.minute, form.day_of_week, form.day_of_month, tz, now]) // eslint-disable-line react-hooks/exhaustive-deps
-  const coverage = isPeriodId(form.period) ? coverageText(form.period, runs[0] ?? new Date(now), branding) : ''
+  const coverage = isPeriodId(form.period) ? coverageText(form.period, runs[0] ?? new Date(now), zb) : ''
+  const nameWarning = nameTimeMismatch(form.name.trim(), form.hour, form.minute)
 
   const submit = async (andRun: boolean) => {
     setAttempted(true)
@@ -179,7 +188,7 @@ function ScheduleEditor({
         id: isEdit ? schedule!.id : null,
         body: buildBody(form, { keepStoredFilters: withheld }),
       })
-      toast.success(isEdit ? 'Schedule saved' : 'Schedule created', `"${form.name.trim()}" ${form.enabled ? `runs ${lowerFirst(frequencyText(form, branding.time_format))}` : 'is paused'}.`)
+      toast.success(isEdit ? 'Schedule saved' : 'Schedule created', `"${form.name.trim()}" ${form.enabled ? `runs ${lowerFirst(frequencyText(form, branding.time_format))} ${zoneName(tz)}` : 'is paused'}.`)
       onClose()
       const id = saved?.id ?? schedule?.id
       if (andRun && id) {
@@ -217,7 +226,7 @@ function ScheduleEditor({
   }
 
   const pending = save.isPending
-  const tzName = `${tz.replace(/_/g, ' ')} (${zoneLabel(tz, runs[0] ?? now)})`
+  const tzName = `${zoneName(tz)} (${zoneLabel(tz, runs[0] ?? now)})`
 
   return (
     <DialogContent className="max-w-5xl pb-0 sm:pb-0">
@@ -227,7 +236,7 @@ function ScheduleEditor({
           {isEdit ? 'Edit schedule' : 'New schedule'}
         </DialogTitle>
         <DialogDescription>
-          Generate a report automatically and deliver it by email and notification channels. Times use the organisation time zone, {tzName}.
+          Generate a report automatically and deliver it by email and notification channels. This schedule runs in {tzName}{form.timezone ? '' : ', the organisation time zone'}.
         </DialogDescription>
       </DialogHeader>
 
@@ -340,7 +349,7 @@ function ScheduleEditor({
           </Step>
 
           {/* 3. When */}
-          <Step n={3} title="Schedule" description={`When the report is generated, in ${tzName}.`}>
+          <Step n={3} title="Schedule" description={`When the report is generated: local time in ${tzName}.`}>
             <div className="space-y-1.5">
               <span className={GROUP_LABEL} id="sched-frequency-label">Repeats</span>
               <ChoiceGroup
@@ -383,7 +392,7 @@ function ScheduleEditor({
                   </Select>
                 </FormField>
               )}
-              <FormField label="Time of day" hint={`Organisation time, ${zoneLabel(tz, runs[0] ?? now)}`}>
+              <FormField label="Time of day" hint={localTimeLabel(form, tz, new Date(now), branding.time_format)}>
                 <Select
                   value={`${String(form.hour).padStart(2, '0')}:${String(form.minute).padStart(2, '0')}`}
                   onValueChange={(v) => {
@@ -404,8 +413,24 @@ function ScheduleEditor({
                   </SelectContent>
                 </Select>
               </FormField>
+              <FormField
+                label="Time zone"
+                hint={form.timezone
+                  ? (form.timezone === branding.timezone ? 'Same as the organisation; kept if the organisation zone changes later.' : `Differs from the organisation time zone (${zoneName(branding.timezone)}).`)
+                  : 'The organisation time zone, saved with the schedule.'}
+                error={attempted ? errors.find((e) => e.field === 'timezone')?.message : null}
+              >
+                <TimezoneSelect
+                  id={FIELD_ID.timezone}
+                  value={form.timezone}
+                  orgTz={branding.timezone}
+                  at={runs[0] ?? new Date(now)}
+                  onChange={(v) => set('timezone', v)}
+                  invalid={attempted && errors.some((e) => e.field === 'timezone')}
+                />
+              </FormField>
             </div>
-            <NextRunsPreview runs={runs} branding={branding} now={now} />
+            <NextRunsPreview runs={runs} branding={zb} now={now} />
           </Step>
 
           {/* 4. Delivery */}
@@ -440,7 +465,9 @@ function ScheduleEditor({
                 label="Schedule name"
                 required
                 error={attempted ? errors.find((e) => e.field === 'name')?.message : null}
-                hint={!nameTouched && template ? 'Suggested from the template; type to change it.' : undefined}
+                hint={nameWarning
+                  ? <span className="inline-flex items-start gap-1 text-warning-fg"><TriangleAlert className="mt-px h-3 w-3 shrink-0" aria-hidden /> The name says {nameWarning}; the report runs at {clockLabel(form.hour, form.minute, branding.time_format)} {zoneName(tz)}.</span>
+                  : !nameTouched && template ? 'Suggested from the template; type to change it.' : undefined}
               >
                 <Input
                   id={FIELD_ID.name}
@@ -481,7 +508,7 @@ function ScheduleEditor({
           fallbackTitle={templateTitle({ report_type: form.report_type, custom_report_id: form.custom_report_id }, catalog.data)}
           coverage={coverage}
           nextRun={runs[0] ?? null}
-          branding={branding}
+          branding={zb}
           now={now}
           errors={errors}
           warnings={warnings}
@@ -827,6 +854,9 @@ function NextRunsPreview({ runs, branding, now }: { runs: Date[]; branding: Bran
             <li key={r.getTime()} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-sm">
               <span className="tabular-nums text-text">
                 {runLabel(r, branding)} <span className="text-xs text-muted">{zoneLabel(tz, r)}</span>
+                {zoneLabel(tz, r) !== 'UTC' && (
+                  <span className="ml-1.5 text-xs text-muted">· {utcClock(r)}</span>
+                )}
                 {i > 0 && crossesClockChange(tz, r, runs[i - 1]) && (
                   <span className="ml-2 rounded border border-warning/40 px-1 text-[10px] text-warning-fg">Clock change</span>
                 )}
@@ -1053,8 +1083,9 @@ function ScheduleSummary({
           </SummaryRow>
           <SummaryRow icon={CalendarClock} label="Runs">
             {frequencyText(form, branding.time_format)}
+            <span className="block text-xs tabular-nums text-muted">{localTimeLabel(form, branding.timezone, new Date(now), branding.time_format)}</span>
             {nextRun && form.enabled && (
-              <span className="block text-xs tabular-nums text-muted">Next {runLabel(nextRun, branding)} · {relativeTo(nextRun, now)}</span>
+              <span className="block text-xs tabular-nums text-muted">Next {runWithUtc(nextRun, branding)} · {relativeTo(nextRun, now)}</span>
             )}
           </SummaryRow>
           {coverage && (

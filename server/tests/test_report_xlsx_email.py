@@ -277,7 +277,11 @@ def test_email_html_is_email_safe_and_branded():
     assert "The full report is attached" in html
     assert "Acme NOC" in html and "https://acme.example" in html and "Internal use only." in html
     assert "Generated " in html
-    assert "Two devices breached the availability target." in html   # top finding (danger KPI)
+    # Top finding: the flagged figure with where to act on it, linked into the
+    # appliance (the share link's origin); never the section's explanatory note.
+    assert "Outages: 3. " in html and 'href="https://zen.example.com/availability"' in html
+    assert "Review in Availability</a>" in html
+    assert "Two devices breached the availability target." not in html
     assert "1 section not included" in html and "1 section could not be generated" in html
     # Restricted/failed sections do not leak KPIs; at most six KPIs.
     assert html.count("border-top:3px solid") <= 6
@@ -302,13 +306,18 @@ def test_email_html_size_budget_with_40_sections():
     html = rs.email_summary_html(meta, many_sections(40), "https://zen.example.com/r/x", attached=True,
                                  logo_cid="report-logo@zenplus")
     assert len(html.encode("utf-8")) < 100 * 1024
-    assert html.count("border-top:3px solid") == 6
+    # One figure from each of the first three sections, each under its own caption.
+    assert html.count("border-top:3px solid") == 3
+    assert [t for t in re.findall(r'font-weight:700;color:#111827">(Section \d+)</div>', html)] == \
+        ["Section 0", "Section 1", "Section 2"]
     findings = re.findall(r"<strong>Section (\d+)</strong>", html)
     assert len(findings) == 5
-    # Danger findings first (sections 0, 4, 8, ...).
-    assert findings[:5] == ["0", "4", "8", "12", "16"]
+    # Danger findings first, the larger figure first within a severity
+    # (sections 36, 32, ... read 93.6%, 93.2%, ...).
+    assert findings[:5] == ["36", "32", "28", "24", "20"]
+    assert "Finding for section" not in html                  # notes are never findings
     cols = re.findall(r'<td width="(\d+)%" valign="top" style="padding:5px">', html)
-    assert set(cols) == {"33"}                                 # six KPIs → 3 columns
+    assert set(cols) == {"50"}                                 # one figure per group → 2 columns
 
 
 def test_email_text_alternative():
@@ -318,10 +327,110 @@ def test_email_text_alternative():
     assert "Acme Networks" in text and "Weekly Operations" in text
     assert "Period: " in text and "GMT+3" in text
     assert "- Availability: 99.95% (target 99.9%)" in text
-    assert "Top findings" in text and "Two devices breached" in text
+    assert "Device Availability (All sources · over the report period)" in text
+    assert "Top findings" in text and "- [!] Device Availability — Outages: 3. Review in Availability." in text
+    linked = rs.email_summary_text(meta, sections(), "https://zen.example.com/api/v1/reports/shared/tok")
+    assert "Outages: 3. Review in Availability: https://zen.example.com/availability" in linked
+    assert "Two devices breached" not in text
     assert "Open the full report: https://zen.example.com/r/x" in text
     assert "Internal use only." in text and "Generated " in text
     assert "<" not in text.replace("<Co>", "")
+
+
+def _noc_sections() -> list[dict]:
+    """The field report's NOC briefing: current device status (device scope,
+    snapshot) next to the fleet-wide open alert backlog."""
+    return [
+        {"id": "device_status_now", "title": "Current Device Status", "category": "Availability",
+         "scope": "device", "semantics": "snapshot",
+         "kpis": [{"label": "Network devices up", "value": "34", "accent": "success",
+                   "subtitle": "of 34, at generation"},
+                  {"label": "Down", "value": "0", "accent": "success"},
+                  {"label": "Degraded", "value": "0", "accent": "neutral"},
+                  {"label": "Unknown", "value": "0", "accent": "neutral"}],
+         "findings": [], "notes": ["Every node in scope is up or not yet measured."]},
+        {"id": "alert_backlog_aging", "title": "Open Alert Backlog", "category": "Alerting",
+         "scope": "fleet", "semantics": "snapshot", "email_scope": "All alert sources",
+         "kpis": [{"label": "Open alert incidents (all sources)", "value": "761", "accent": "primary"},
+                  {"label": "Critical open incidents", "value": "285", "accent": "danger"},
+                  {"label": "Unacknowledged", "value": "700", "accent": "warning"},
+                  {"label": "Acknowledgement overdue", "value": "12", "accent": "danger"}],
+         "findings": [{"severity": "danger", "text": "285 critical open incidents", "weight": 285,
+                       "action": "Triage in Alert Center", "path": "/alerts?severity=critical"},
+                      {"severity": "danger", "text": "12 incidents are past their acknowledgement target",
+                       "weight": 12, "action": "Assign and acknowledge in Alert Center", "path": "/alerts"}],
+         "notes": ["Acknowledgement targets (Alert Center settings): critical 15 min."]},
+        {"id": "server_telemetry_coverage", "title": "Server Telemetry Coverage", "category": "Servers",
+         "scope": "fleet", "semantics": "window",
+         "kpis": [{"label": "Telemetry samples received", "value": "66.14%", "accent": "warning"}],
+         "notes": ["Coverage compares the CPU samples stored for each agent-monitored server ..."]},
+    ]
+
+
+def test_email_groups_kpis_per_section_with_scope_and_as_of():
+    meta = make_meta(scope_label="All monitored infrastructure")
+    groups = rs.email_kpi_groups(_noc_sections(), meta)
+    assert [g["title"] for g in groups] == ["Current Device Status", "Open Alert Backlog"]
+    assert [len(g["kpis"]) for g in groups] == [3, 3]           # capped per section, six in all
+    assert groups[0]["caption"] == f"All network devices · as of {meta['generated_label']}"
+    assert groups[1]["caption"] == f"All alert sources · as of {meta['generated_label']}"
+    # The cap keeps a section's alarm: headline, then danger, then warning figures.
+    assert [k["label"] for k in groups[1]["kpis"]] == [
+        "Open alert incidents (all sources)", "Critical open incidents", "Acknowledgement overdue"]
+    # A device filter is named; a period section says so.
+    scoped = rs.email_kpi_groups(_noc_sections(), {**meta, "scope_label": "3 selected device(s)"})
+    assert scoped[0]["caption"].startswith("3 selected device(s) · as of ")
+    window = rs.email_kpi_groups(_noc_sections()[2:], meta)
+    assert window[0]["caption"] == "All sources · over the report period"
+
+    html = rs.email_summary_html(meta, _noc_sections(), "https://nms.acme.example/api/v1/reports/shared/tok",
+                                 attached=False)
+    assert html.count("border-top:3px solid") == 6
+    card = html[html.index('width="600"'):]                    # past the hidden preheader
+    assert card.index("Current Device Status") < card.index("Network devices up") < \
+        card.index("Open Alert Backlog") < card.index("Open alert incidents (all sources)")
+    assert "All alert sources · as of " in html
+
+
+def test_email_findings_are_explicit_actions_ranked_by_severity_and_size():
+    found = rs._email_findings(_noc_sections())
+    assert [(f["severity"], f["section"], f["text"]) for f in found] == [
+        ("danger", "Open Alert Backlog", "285 critical open incidents"),
+        ("danger", "Open Alert Backlog", "12 incidents are past their acknowledgement target"),
+        ("warning", "Server Telemetry Coverage", "Telemetry samples received: 66.14%"),
+    ]
+    assert found[0]["path"] == "/alerts?severity=critical" and found[2]["path"] == "/servers"
+    # A section that judged its figures (findings: []) adds none; notes never become findings.
+    assert all(f["section"] != "Current Device Status" for f in found)
+    assert not any("Acknowledgement targets" in f["text"] or "compares the CPU samples" in f["text"]
+                   for f in found)
+    html = rs.email_summary_html(make_meta(), _noc_sections(),
+                                 "https://nms.acme.example/api/v1/reports/shared/tok", attached=False)
+    assert 'href="https://nms.acme.example/alerts?severity=critical"' in html
+    assert ">Triage in Alert Center</a>" in html
+    # Without an appliance address the action is plain text.
+    text = rs.email_summary_text(make_meta(), _noc_sections(), None)
+    assert "- [!] Open Alert Backlog — 285 critical open incidents. Triage in Alert Center." in text
+    # An unsafe path is never linked.
+    evil = [{**_noc_sections()[1], "findings": [{"severity": "danger", "text": "x", "path": "//evil.example"}]}]
+    assert "evil.example" not in rs.email_summary_html(make_meta(), evil, "https://nms.acme.example/api/v1/"
+                                                       "reports/shared/t", attached=False)
+
+
+def test_email_labels_manual_runs_and_the_schedule_time():
+    meta = make_meta(run_kind="manual", run_note="Manual run: generated on request, not at the schedule's time.",
+                     schedule_label="Daily at 08:00 Asia/Riyadh (05:00 UTC)")
+    html = rs.email_summary_html(meta, sections(), None, attached=False)
+    assert "Manual run: generated on request" in html
+    assert "Schedule: Daily at 08:00 Asia/Riyadh (05:00 UTC) · this was a manual run" in html
+    text = rs.email_summary_text(meta, sections(), None)
+    assert "Manual run: generated on request" in text
+    assert "Schedule: Daily at 08:00 Asia/Riyadh (05:00 UTC) · this was a manual run" in text
+    scheduled = rs.email_summary_html(make_meta(run_kind="scheduled",
+                                                schedule_label="Daily at 08:00 Asia/Riyadh (05:00 UTC)"),
+                                      sections(), None, attached=False)
+    assert "Scheduled: Daily at 08:00 Asia/Riyadh (05:00 UTC)</div>" in scheduled
+    assert "Manual run" not in scheduled
 
 
 def test_email_logo_attachment_png_jpeg_only():

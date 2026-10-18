@@ -603,3 +603,22 @@ def test_templates_are_registered_valid_and_published():
     assert rt.TEMPLATES["node_availability_previous_month"].section_ids == [
         "availability_kpis", "availability_trend", "device_availability", "top_outages",
         "maintenance_summary"]
+
+
+# ── device_status_now (email wording, NOTIFY 08) ────────────────────────────
+
+def test_device_status_now_says_what_it_counts_and_when(monkeypatch):
+    rows = [("core-sw1", "10.0.0.1", "DC1", "up", None), ("core-sw2", "10.0.0.2", "DC1", "down", None),
+            ("edge-rtr1", "10.0.0.3", "—", "degraded", None), ("printer-3f", "10.0.0.4", "—", "up", None)]
+    sec = run(monkeypatch, FakeDB([("FROM devices d", rows)]), FakeCH([]), "device_status_now")
+    up = kpi(sec, "Network devices up")
+    assert up["value"] == "2" and up["subtitle"] == "of 4, at generation"
+    # Registered scope and semantics travel with the section (the email captions them).
+    assert sec["scope"] == "device" and sec["semantics"] == "snapshot"
+    assert [(f["severity"], f["text"], f["path"]) for f in sec["findings"]] == [
+        ("danger", "1 network device(s) down at generation", "/devices"),
+        ("warning", "1 network device(s) degraded at generation", "/devices"),
+    ]
+    healthy = run(monkeypatch, FakeDB([("FROM devices d", rows[:1])]), FakeCH([]), "device_status_now")
+    assert healthy["findings"] == []                      # judged: nothing to act on
+    assert rs._email_findings([healthy]) == []

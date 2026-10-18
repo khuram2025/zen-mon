@@ -239,14 +239,13 @@ def metric_noun(metric: Optional[str]) -> str:
     return key.replace("_", " ").strip().capitalize() or "Metric"
 
 
-def format_value(metric: Optional[str], value) -> str:
-    """Render a reading or threshold with its unit — 80 -> "80%", 200 -> "200 ms"."""
-    if value in (None, ""):
-        return ""
-    try:
-        num = float(value)
-    except (TypeError, ValueError):
-        return str(value)
+def _display(metric: Optional[str], num: float, *, extra: int = 0,
+             strip: bool = True) -> tuple[str, str]:
+    """(number text, unit) for a numeric value in the metric's display units.
+
+    ``extra`` adds decimals to the catalogue precision; ``strip`` drops
+    trailing zeros ("80%" rather than "80.0%").
+    """
     info = METRICS.get((metric or "").strip(), {})
     unit = info.get("unit", "")
     num /= float(info.get("scale") or 1.0)
@@ -255,11 +254,214 @@ def format_value(metric: Optional[str], value) -> str:
     if unit == " Mbps" and abs(num) >= 1000:
         num /= 1000.0
         unit, decimals = " Gbps", 2
-    text_ = f"{num:.{decimals}f}"
+    text_ = f"{num:.{decimals + max(0, extra)}f}"
     # Drop a trailing ".0" — "80%" reads better than "80.0%".
-    if "." in text_:
+    if strip and "." in text_:
         text_ = text_.rstrip("0").rstrip(".")
+    return text_, unit
+
+
+def format_value(metric: Optional[str], value) -> str:
+    """Render a reading or threshold with its unit — 80 -> "80%", 200 -> "200 ms"."""
+    if value in (None, ""):
+        return ""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    text_, unit = _display(metric, num)
     return f"{text_}{unit}"
+
+
+# ── Readings next to their threshold ─────────────────────────────────────────
+#
+# The catalogue rounds percentages to whole numbers, which is right for a rule
+# description ("above 90%") and wrong for a reading that sits just over it: a
+# 90.3% reading printed as "currently 90%" next to "rose above 90%" reads like
+# a false alarm. A reading therefore gets as many extra decimals (up to
+# READING_MAX_EXTRA_DECIMALS) as it needs to differ visibly from the threshold,
+# and the threshold is shown with the same precision.
+
+READING_MAX_EXTRA_DECIMALS = 3
+UNAVAILABLE = "unavailable"
+
+
+def _finite(value) -> Optional[float]:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if num == num and num not in (float("inf"), float("-inf")) else None
+
+
+def reading_precision(metric: Optional[str], value, operator: Optional[str] = None,
+                      threshold=None) -> int:
+    """Extra decimals a reading and its threshold are both shown with.
+
+    Near its threshold (within ``NEAR_THRESHOLD_POINTS``) a whole-percent
+    reading keeps one decimal: 91.5% against 90% is "91.5%", never "92%"
+    (field report: readings of 90.1-91.5% read as "90%"/"91%"). Readings far
+    from the threshold keep the catalogue format ("100%", "95%").
+    """
+    extra = _reading_precision(metric, value, operator, threshold)
+    info = METRICS.get((metric or "").strip(), {})
+    num, thr = _finite(value), _finite(threshold)
+    if (num is not None and thr is not None and num != thr and abs(num - thr) < NEAR_THRESHOLD_POINTS
+            and info.get("unit") == "%" and int(info.get("decimals", 1)) == 0):
+        extra = max(extra, 1)
+    return extra
+
+
+NEAR_THRESHOLD_POINTS = 5.0
+
+
+def _reading_precision(metric: Optional[str], value, operator: Optional[str] = None,
+                       threshold=None) -> int:
+    """Extra decimals (0..3) a reading and its threshold are both shown with.
+
+    The threshold first gets enough decimals to print exactly (a 90.5% rule is
+    never shown as "90%"); the reading then gets more only while it would
+    still print identical to a threshold it differs from. A non-zero reading
+    with no threshold is never shown as zero ("0.4%", not "0%").
+    ``operator`` is accepted for symmetry with the rule columns: rounding is
+    monotonic, so a reading on the breaching side of an exactly printed
+    threshold can only collide with it, never print on the wrong side.
+    """
+    num = _finite(value)
+    thr = _finite(threshold)
+    cap = READING_MAX_EXTRA_DECIMALS
+    if num is None:
+        return 0
+    if thr is None:
+        for extra in range(cap + 1):
+            if num == 0 or float(_display(metric, num, extra=extra, strip=False)[0]) != 0:
+                return extra
+        return cap
+    base = 0
+    for extra in range(cap + 1):
+        base = extra
+        shown = float(_display(metric, thr, extra=extra, strip=False)[0])
+        exact = float(_display(metric, thr, extra=cap + 6, strip=False)[0])
+        if abs(shown - exact) <= 1e-9 * max(1.0, abs(exact)):
+            break
+    if num == thr:
+        return base
+    for extra in range(base, cap + 1):
+        if (_display(metric, num, extra=extra, strip=False)
+                != _display(metric, thr, extra=extra, strip=False)):
+            return extra
+    return cap
+
+
+def format_reading(metric: Optional[str], value: float | None, operator: Optional[str],
+                   threshold: float | None) -> str:
+    """A reading formatted against its rule's threshold.
+
+    The catalogue format, with as many extra decimals (max 3) as needed so the
+    reading never prints equal to a threshold it is on the other side of:
+    90.3 against 90 -> "90.3%", 90.04 -> "90.04%", None -> "unavailable".
+    Use :func:`format_threshold` for the threshold next to it.
+    """
+    num = _finite(value)
+    if num is None:
+        return UNAVAILABLE
+    extra = reading_precision(metric, num, operator, threshold)
+    text_, unit = _display(metric, num, extra=extra, strip=extra == 0)
+    return f"{text_}{unit}"
+
+
+def format_threshold(metric: Optional[str], threshold, operator: Optional[str] = None,
+                     value=None) -> str:
+    """The threshold with the same decimals :func:`format_reading` gave ``value``.
+
+    "" for a missing threshold, as format_value does.
+    """
+    thr = _finite(threshold)
+    if thr is None:
+        return format_value(metric, threshold)
+    num = _finite(value)
+    extra = reading_precision(metric, thr if num is None else num, operator, thr)
+    text_, unit = _display(metric, thr, extra=extra, strip=extra == 0)
+    return f"{text_}{unit}"
+
+
+# Per-poll counter metrics: a delta between two polls, so the reading names
+# the interval it covers and which direction counted it.
+COUNTER_METRICS = frozenset({"if_errors", "if_discards"})
+
+
+def compact_interval(seconds) -> str:
+    """"60 s", "5 min", "2 hours 10 minutes" — the span a counter delta covers."""
+    secs = _finite(seconds)
+    if secs is None or secs <= 0:
+        return ""
+    if secs < 120:
+        return f"{secs:.0f} s"
+    minutes = secs / 60.0
+    if abs(minutes - round(minutes)) < 1e-6 and minutes < 120:
+        return f"{round(minutes)} min"
+    return humanize_duration(secs)
+
+
+def counter_detail(metric: Optional[str], context: Optional[dict]) -> str:
+    """"in the last 60 s (150 in, 2 out)" for a per-poll counter delta.
+
+    ``context`` carries ``interval_s`` and the per-direction deltas ``in`` /
+    ``out`` (None = not known for that direction). "" without an interval.
+    """
+    if not context:
+        return ""
+    span = compact_interval(context.get("interval_s"))
+    if not span:
+        return ""
+    parts = []
+    for key, word in (("in", "in"), ("out", "out")):
+        if key not in context:
+            continue
+        num = _finite(context.get(key))
+        parts.append(f"{num:.0f} {word}" if num is not None else f"{word} unknown")
+    tail = f" ({', '.join(parts)})" if parts else ""
+    return f"in the last {span}{tail}"
+
+
+def reading_text(metric: Optional[str], value, operator: Optional[str] = None,
+                 threshold=None, context: Optional[dict] = None) -> str:
+    """The reading as a notification states it.
+
+    :func:`format_reading`, plus, for per-poll counters with a value context,
+    the interval and direction: "152 errors in the last 60 s (150 in, 2 out)".
+    """
+    shown = format_reading(metric, value, operator, threshold)
+    key = (metric or "").strip()
+    if key in COUNTER_METRICS and shown != UNAVAILABLE:
+        detail = counter_detail(key, context)
+        if detail:
+            return f"{shown} {detail}"
+    return shown
+
+
+def headline_metric(metric: Optional[str], value, operator: Optional[str] = None,
+                    threshold=None, *, context: Optional[dict] = None,
+                    label: Optional[str] = None) -> dict:
+    """The ``headline_metric`` block for an alert email.
+
+    Reading and threshold share one precision; a counter's interval and
+    direction go in ``detail`` so the large value stays short.
+    """
+    key = (metric or "").strip()
+    out = {
+        "label": label or metric_noun(key),
+        "value": format_reading(key, value, operator, threshold),
+        "secondary_label": "Threshold" if threshold is not None else None,
+        "secondary_value": (format_threshold(key, threshold, operator, value)
+                            if threshold is not None else None),
+    }
+    detail = counter_detail(key, context) if key in COUNTER_METRICS else ""
+    if detail:
+        out["detail"] = detail[0].upper() + detail[1:]
+    return out
 
 
 def _cmp(value: float, operator: str, threshold: float) -> bool:
@@ -309,7 +511,8 @@ def _state_phrase(metric: str, operator: str, threshold, *, cleared: bool,
 
 
 def condition_phrase(metric: Optional[str], operator: Optional[str], threshold,
-                     *, tense: str = "present", subject: Optional[str] = None) -> str:
+                     *, tense: str = "present", subject: Optional[str] = None,
+                     threshold_text: Optional[str] = None) -> str:
     """One condition as a clause: "Interface utilisation is above 80%".
 
     ``tense`` is "present" (describing the rule), "past" (it just happened) or
@@ -317,6 +520,7 @@ def condition_phrase(metric: Optional[str], operator: Optional[str], threshold,
     about — a hostname reads better than "the device" — and applies only to
     state metrics; a quantity is always described by its own noun, never by the
     host ("core-router-01 rose above 80%" is not a sentence anyone wants).
+    ``threshold_text`` replaces the formatted threshold (see format_threshold).
     """
     key = (metric or "").strip()
     info = METRICS.get(key, {})
@@ -327,11 +531,12 @@ def condition_phrase(metric: Optional[str], operator: Optional[str], threshold,
     verb = _OPERATORS.get(normalize_operator(operator), _OPERATORS[">"])[
         tense if tense in ("present", "past", "cleared") else "present"
     ]
-    value = format_value(key, threshold)
+    value = threshold_text if threshold_text is not None else format_value(key, threshold)
     return " ".join(p for p in (noun, verb, value) if p)
 
 
-def condition_label(metric: Optional[str], operator: Optional[str], threshold) -> str:
+def condition_label(metric: Optional[str], operator: Optional[str], threshold,
+                    *, threshold_text: Optional[str] = None) -> str:
     """Compact form for the "Condition" row of the details table."""
     key = (metric or "").strip()
     info = METRICS.get(key, {})
@@ -344,26 +549,40 @@ def condition_label(metric: Optional[str], operator: Optional[str], threshold) -
     verb = _OPERATORS.get(normalize_operator(operator), _OPERATORS[">"])["present"]
     # "Interface utilisation above 80%" — the "is" is noise in a table cell.
     verb = verb[3:] if verb.startswith("is ") else verb
-    return " ".join(p for p in (metric_noun(key), verb, format_value(key, threshold)) if p)
+    value = threshold_text if threshold_text is not None else format_value(key, threshold)
+    return " ".join(p for p in (metric_noun(key), verb, value) if p)
+
+
+def _same_threshold(a, b) -> bool:
+    x, y = _finite(a), _finite(b)
+    return x is not None and x == y
 
 
 def conditions_label(conditions: Optional[Iterable[dict]], logic: str = "AND",
                      *, metric: Optional[str] = None, operator: Optional[str] = None,
-                     threshold=None) -> str:
+                     threshold=None, threshold_text: Optional[str] = None) -> str:
     """Label for a rule that may carry several conditions.
 
     Falls back to the rule's single metric/operator/threshold columns when the
     ``conditions`` array is empty, which is how most rules are still stored.
+    ``threshold_text`` is applied to the rule's own metric/threshold only.
     """
+    def own(c) -> Optional[str]:
+        if (threshold_text is not None and c.get("metric") == metric
+                and _same_threshold(c.get("threshold"), threshold)):
+            return threshold_text
+        return None
+
     parts = [
-        condition_label(c.get("metric"), c.get("operator"), c.get("threshold"))
+        condition_label(c.get("metric"), c.get("operator"), c.get("threshold"),
+                        threshold_text=own(c))
         for c in (conditions or [])
         if isinstance(c, dict) and c.get("metric")
     ]
     if not parts:
         if not metric:
             return ""
-        return condition_label(metric, operator, threshold)
+        return condition_label(metric, operator, threshold, threshold_text=threshold_text)
     joiner = " or " if (logic or "AND").upper() == "OR" else " and "
     return joiner.join(parts)
 
@@ -728,26 +947,72 @@ def flap_end_reason_label(reason: Optional[str]) -> str:
     return FLAP_END_REASON_LABELS.get(reason or "", "ended")
 
 
+def _reading_extra(metric: Optional[str], reading: Optional[str]) -> int:
+    """Extra decimals a pre-formatted reading ("90.3%") carries over the
+    catalogue precision, so the threshold beside it can match. 0 when the
+    reading is not in the metric's plain unit (a "1.25 Gbps" reading against
+    a Mbps catalogue entry, "unavailable", a counter sentence's tail)."""
+    import re as _re
+    if not reading:
+        return 0
+    m = _re.match(r"-?\d+(?:\.(\d+))?", str(reading).strip())
+    if not m:
+        return 0
+    info = METRICS.get((metric or "").strip(), {})
+    unit = info.get("unit", "")
+    rest = str(reading).strip()[m.end():]
+    if unit and not rest.startswith(unit):
+        return 0
+    shown = len(m.group(1) or "")
+    return max(0, min(READING_MAX_EXTRA_DECIMALS, shown - int(info.get("decimals", 1))))
+
+
+def _threshold_text(metric: Optional[str], operator: Optional[str], threshold,
+                    value, reading: Optional[str]) -> str:
+    """The threshold as every part of one message shows it."""
+    thr = _finite(threshold)
+    if thr is None:
+        return format_value(metric, threshold) if threshold is not None else ""
+    if _finite(value) is not None:
+        return format_threshold(metric, thr, operator, value)
+    extra = max(_reading_extra(metric, reading), reading_precision(metric, thr, operator, thr))
+    text_, unit = _display(metric, thr, extra=extra, strip=extra == 0)
+    return f"{text_}{unit}"
+
+
 def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] = None,
                        threshold=None, conditions: Optional[Iterable[dict]] = None,
                        condition_logic: str = "AND", reading: Optional[str] = None,
                        duration: str = "", is_recovery: bool = False,
-                       subject_noun: Optional[str] = None) -> dict:
+                       subject_noun: Optional[str] = None, value=None,
+                       value_context: Optional[dict] = None) -> dict:
     """The condition/duration half of the template variables.
 
     Kept separate from the identity half (host, severity, timestamps) because
     every evaluator already knows who it is talking about, but each phrases the
     condition the same way. ``reading`` is the current value already formatted
     for display ("87%"), which the evaluators know and the rule columns do not.
-    """
-    tense = "cleared" if is_recovery else "past"
-    phrase = condition_phrase(metric, operator, threshold, tense=tense)
-    present = condition_phrase(metric, operator, threshold, tense="present")
-    label = conditions_label(conditions, condition_logic, metric=metric,
-                             operator=operator, threshold=threshold)
 
+    ``value`` is the raw reading: when given (and ``reading`` is not), the
+    reading is formatted here with :func:`reading_text`, so it never prints
+    equal to a threshold it is on the other side of, and a per-poll counter
+    states its interval and direction (``value_context``: ``interval_s``,
+    ``in``, ``out``). The threshold is shown with the reading's precision in
+    the sentence, the condition label and ``{threshold_value}``.
+    """
     key = (metric or "").strip()
     is_state = "state" in METRICS.get(key, {})
+    if reading is None and value is not None and not is_state:
+        reading = reading_text(key, value, operator, threshold, value_context)
+    thr_text = None if is_state else _threshold_text(key, operator, threshold, value, reading)
+
+    tense = "cleared" if is_recovery else "past"
+    phrase = condition_phrase(metric, operator, threshold, tense=tense, threshold_text=thr_text)
+    present = condition_phrase(metric, operator, threshold, tense="present",
+                               threshold_text=thr_text)
+    label = conditions_label(conditions, condition_logic, metric=metric,
+                             operator=operator, threshold=threshold,
+                             threshold_text=thr_text)
 
     noun_ = metric_noun(key)
 
@@ -762,7 +1027,12 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
         if not keeps_case:
             text_ = text_[0].upper() + text_[1:]
         if reading:
-            text_ += f" ({'now' if is_recovery else 'currently'} {reading})"
+            shown = str(reading)
+            # "152 errors in the last 60 s (150 in, 2 out)" inside the
+            # sentence's own parentheses reads as "...60 s: 150 in, 2 out".
+            if shown.endswith(")") and shown.count(" (") == 1:
+                shown = shown[:-1].replace(" (", ": ")
+            text_ += f" ({'now' if is_recovery else 'currently'} {shown})"
         return text_ + "."
 
     # One sentence that names who it is about, so a template needs nothing else:
@@ -778,6 +1048,8 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
         event = phrase
 
     sentence = _finish(phrase)
+    reading_value = (format_reading(key, value, operator, threshold)
+                     if value is not None and not is_state else (reading or ""))
 
     return {
         "event_sentence": _finish(event),
@@ -788,12 +1060,18 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
         # module existed say "{threshold}%", and a formatted value would double
         # the unit. `{threshold_value}` is the formatted one.
         "threshold": "" if threshold is None else str(threshold),
-        "threshold_value": format_value(metric, threshold) if threshold is not None else "",
+        "threshold_value": (thr_text if thr_text is not None
+                            else format_value(metric, threshold)) if threshold is not None else "",
         "condition": label or present,
         "condition_label": label or present,
         "condition_sentence": sentence,
         "recovery_sentence": sentence,
         "reading": reading or "",
+        # The bare value ("152 errors") and, for counters, the window it
+        # covers ("in the last 60 s (150 in, 2 out)").
+        "reading_value": reading_value,
+        "reading_detail": (counter_detail(key, value_context)
+                           if key in COUNTER_METRICS else ""),
         "duration": duration,
         # Both read as a clause appended after a finished sentence, so a
         # template can end with one without gluing words together.
@@ -839,7 +1117,8 @@ def sample_reading(metric: Optional[str], operator: Optional[str], threshold,
 
 def rule_phrasing(rule, *, hostname: str = "", is_recovery: bool = False,
                   reading: Optional[str] = None, duration: str = "",
-                  subject_noun: Optional[str] = None) -> dict:
+                  subject_noun: Optional[str] = None, value=None,
+                  value_context: Optional[dict] = None) -> dict:
     """`phrasing_variables` for an alert_rules row (ORM row, mapping or dict)."""
     def field(name, default=None):
         if isinstance(rule, dict):
@@ -859,6 +1138,7 @@ def rule_phrasing(rule, *, hostname: str = "", is_recovery: bool = False,
         conditions=conditions, condition_logic=field("condition_logic") or "AND",
         reading=reading, duration=duration, is_recovery=is_recovery,
         subject_noun=subject_noun or (hostname or None),
+        value=value, value_context=value_context,
     )
 
 
@@ -877,3 +1157,170 @@ def message_variables(*, rule_name: str, hostname: str, ip_address: str = "",
         "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
         **phrasing_variables(**phrasing),
     }
+
+
+# ── Incident lifecycle context ───────────────────────────────────────────────
+#
+# Every alert delivery says which incident it is about and where that incident
+# is in its life: the first mail, a reminder of a continuing fault, an
+# escalation, a material change, or the recovery. Without it a recipient cannot
+# tell the fourth mail about one memory incident from four separate incidents.
+
+LIFECYCLES = ("new", "reminder", "escalated", "changed", "recovered")
+# The ctx keys incident_context returns (copy these into an email ctx).
+INCIDENT_KEYS = ("incident_ref", "incident_id", "first_seen", "active_for",
+                 "lifecycle", "lifecycle_label", "lifecycle_tag")
+_LIFECYCLE_ALIASES = {
+    "new": "new", "trigger": "new", "triggered": "new", "late_trigger": "new",
+    "reminder": "reminder", "repeat": "reminder",
+    "escalated": "escalated", "escalation": "escalated",
+    "changed": "changed", "change": "changed",
+    "recovered": "recovered", "recovery": "recovered", "resolved": "recovered",
+    "all_clear": "recovered",
+}
+
+
+def normalize_lifecycle(lifecycle: Optional[str]) -> str:
+    """One of :data:`LIFECYCLES`; ValueError for anything else."""
+    key = _LIFECYCLE_ALIASES.get(str(lifecycle or "").strip().lower())
+    if key is None:
+        raise ValueError(f"unknown alert lifecycle {lifecycle!r}; expected one of {LIFECYCLES}")
+    return key
+
+
+def incident_ref(alert_id) -> str:
+    """Short stable incident reference: "INC-3f2a9c1d" for an alert uuid.
+
+    The first 8 hex digits of the uuid (no dashes), so the same incident
+    carries the same reference in every mail, the UI and the delivery log.
+    "" for a missing id; a non-uuid id is used as it is.
+    """
+    if alert_id in (None, ""):
+        return ""
+    raw = str(alert_id).strip()
+    try:
+        from uuid import UUID
+        return f"INC-{UUID(raw).hex[:8]}"
+    except (ValueError, AttributeError, TypeError):
+        return f"INC-{raw}" if raw else ""
+
+
+def _as_utc(ts) -> Optional[datetime]:
+    if ts in (None, ""):
+        return None
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def lifecycle_label(lifecycle: str, *, reminder_index: Optional[int] = None,
+                    reminder_total: Optional[int] = None,
+                    escalation_level: Optional[int] = None) -> str:
+    """"New", "Reminder 2 of 3", "Escalated to level 2", "Changed", "Recovered"."""
+    kind = normalize_lifecycle(lifecycle)
+    if kind == "reminder":
+        if reminder_index and reminder_total:
+            return f"Reminder {int(reminder_index)} of {int(reminder_total)}"
+        if reminder_index:
+            return f"Reminder {int(reminder_index)}"
+        return "Reminder"
+    if kind == "escalated":
+        return f"Escalated to level {int(escalation_level)}" if escalation_level else "Escalated"
+    return {"new": "New", "changed": "Changed", "recovered": "Recovered"}[kind]
+
+
+def lifecycle_tag(lifecycle: str, *, reminder_index: Optional[int] = None,
+                  reminder_total: Optional[int] = None,
+                  escalation_level: Optional[int] = None) -> str:
+    """The compact subject form: "New", "Reminder 2/3", "Escalated L2"."""
+    kind = normalize_lifecycle(lifecycle)
+    if kind == "reminder":
+        if reminder_index and reminder_total:
+            return f"Reminder {int(reminder_index)}/{int(reminder_total)}"
+        return f"Reminder {int(reminder_index)}" if reminder_index else "Reminder"
+    if kind == "escalated":
+        return f"Escalated L{int(escalation_level)}" if escalation_level else "Escalated"
+    return {"new": "New", "changed": "Changed", "recovered": "Recovered"}[kind]
+
+
+def incident_context(*, alert_id, first_seen, now, lifecycle: str,
+                     reminder_index: int | None = None, reminder_total: int | None = None,
+                     escalation_level: int | None = None) -> dict:
+    """Incident identity and lifecycle keys for a notification ctx.
+
+    Returns ``incident_ref`` ("INC-3f2a9c1d"), ``incident_id`` (the alert id
+    as a string), ``first_seen`` (ISO 8601 UTC, "" when unknown),
+    ``active_for`` (human duration from first seen to ``now``; on a recovery
+    this is the total duration), ``lifecycle`` (one of :data:`LIFECYCLES`),
+    ``lifecycle_label`` ("New", "Reminder 2 of 3", "Escalated to level 2",
+    "Recovered") and ``lifecycle_tag`` (the subject form). email_render
+    shows them in every alert email that carries them; the same keys are
+    usable as template variables ({incident_ref}, {lifecycle_label}, ...).
+    Aliases such as "trigger"/"recovery"/"escalation" are accepted;
+    an unknown lifecycle raises ValueError.
+    """
+    kind = normalize_lifecycle(lifecycle)
+    seen = _as_utc(first_seen)
+    at = _as_utc(now) or datetime.now(timezone.utc)
+    extras = dict(reminder_index=reminder_index, reminder_total=reminder_total,
+                  escalation_level=escalation_level)
+    return {
+        "incident_ref": incident_ref(alert_id),
+        "incident_id": "" if alert_id in (None, "") else str(alert_id),
+        "first_seen": seen.isoformat() if seen else "",
+        "active_for": duration_between(seen, at) if seen else "",
+        "lifecycle": kind,
+        "lifecycle_label": lifecycle_label(kind, **extras),
+        "lifecycle_tag": lifecycle_tag(kind, **extras),
+    }
+
+
+# Status words a lifecycle tag makes redundant right after "[SEVERITY]":
+# "[WARNING] [New] ALERT: ..." says the same thing twice.
+_SUBJECT_REDUNDANT = {
+    "new": ("ALERT: ",),
+    "reminder": ("ALERT: ",),
+    "escalated": ("ALERT: ",),
+    "changed": ("ALERT: ",),
+    "recovered": ("Resolved: ", "RESOLVED: "),
+}
+
+
+def incident_subject(subject: str, ctx: Optional[dict]) -> str:
+    """Add the lifecycle tag and incident ref to an email subject.
+
+    "[WARNING] ALERT: Memory high — srv-a" becomes
+    "[WARNING] [New] Memory high — srv-a [INC-3f2a9c1d]": the severity stays
+    first so existing inbox rules keep matching, the tag follows it, and the
+    ref goes last. Idempotent; a ctx without incident keys leaves the subject
+    unchanged. A subject the rule's author wrote keeps all of its words.
+    """
+    subject = subject or ""
+    if not ctx:
+        return subject
+    tag = str(ctx.get("lifecycle_tag") or "").strip()
+    ref = str(ctx.get("incident_ref") or "").strip()
+    kind = str(ctx.get("lifecycle") or "").strip().lower()
+    if not tag and not ref:
+        return subject
+    head, rest = "", subject
+    if rest.startswith("[") and "]" in rest:
+        close = rest.index("]") + 1
+        head, rest = rest[:close], rest[close:].lstrip()
+    if tag and f"[{tag}]" not in (head, rest[:len(tag) + 2]):
+        for word in _SUBJECT_REDUNDANT.get(kind, ()):
+            if rest.startswith(word):
+                rest = rest[len(word):]
+                break
+        rest = f"[{tag}] {rest}".rstrip()
+    out = f"{head} {rest}".strip() if head else rest
+    if ref and f"[{ref}]" not in out:
+        out = f"{out} [{ref}]".strip()
+    return out

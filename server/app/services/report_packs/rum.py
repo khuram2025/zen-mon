@@ -1221,7 +1221,7 @@ async def rum_funnel_conversion(ctx: SectionCtx) -> dict:
     if not measured:
         notes.insert(0, "No session reached the first step of any funnel in this period.")
     notes.append("A session converts when it completes every step in order within the funnel's "
-                 "time limit (ClickHouse windowFunnel over sampled sessions). Conversion from "
+                 "time limit (an ordered funnel match over sampled sessions). Conversion from "
                  "start is relative to the sessions that reached step 1.")
     return _section(sid, title, description=desc, kpis=kpis, charts=charts, tables=tables, notes=notes)
 

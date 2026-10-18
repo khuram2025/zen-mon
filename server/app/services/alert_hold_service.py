@@ -189,6 +189,11 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         "rule_id": str(row.rule_id),
         "is_recovery": False,
         "alert_id": str(row.id),
+        # A confirmed hold is the incident's first page: label it New and
+        # claim it once (alert_delivery_keys) however many workers sweep.
+        "delivery_event": "trigger",
+        **ap.incident_context(alert_id=row.id, first_seen=row.triggered_at, now=now,
+                              lifecycle="new"),
     })
 
 

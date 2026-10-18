@@ -17,6 +17,9 @@ class AlertRuleCreate(BaseModel):
     service_check_group_id: Optional[UUID] = None
     severity: str = Field(default="warning", pattern="^(info|warning|critical)$")
     cooldown: int = Field(default=300, ge=60)
+    # Seconds the cleared condition must hold before a metric incident
+    # resolves; None = the evaluator default (300 s), 0 = immediately.
+    clear_duration: Optional[int] = Field(default=None, ge=0, le=86400)
     notify_while_flapping: bool = False
 
 
@@ -35,6 +38,7 @@ class AlertRuleResponse(BaseModel):
     service_check_group_id: Optional[UUID] = None
     severity: str
     cooldown: int
+    clear_duration: Optional[int] = None
     notify_while_flapping: bool = False
     created_at: datetime
 

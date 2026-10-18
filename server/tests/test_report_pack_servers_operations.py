@@ -268,8 +268,15 @@ def test_telemetry_coverage_received_vs_expected(monkeypatch):
     sql, params = ch.call("host_cpu_metrics_5m")
     assert "sum(sample_count)" in sql and params == {"f": FRM, "t": TO}
     # (20,160 capped + 5,040) / (20,160 + 10,080 + 20,160)
-    assert kpi(sec, "Fleet coverage")["value"] == "50.00%"
-    assert kpi(sec, "Fleet coverage")["subtitle"] == "25,200 of 50,400 expected samples"
+    assert kpi(sec, "Telemetry samples received")["value"] == "50.00%"
+    assert kpi(sec, "Telemetry samples received")["subtitle"] == \
+        "25,200 of 50,400 expected · 3 agent server(s) · over the period"
+    assert [(f["severity"], f["text"]) for f in sec["findings"]] == [
+        ("danger", "1 agent-monitored server(s) sent no metrics in the period"),
+        ("warning", "1 server(s) delivered less than 95% of their expected samples"),
+        ("warning", "1 agent-mode server(s) have no enrolled agent and are not monitored"),
+    ]
+    assert not any("Coverage compares" in f["text"] for f in sec["findings"])
     assert kpi(sec, "Servers ≥ 95%")["value"] == "1"
     assert kpi(sec, "Servers with gaps")["value"] == "1"
     assert kpi(sec, "Silent servers")["value"] == "1"

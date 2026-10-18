@@ -75,11 +75,26 @@ async def device_status_now(ctx: SectionCtx) -> dict:
     def share(n: int) -> str:
         return f"{n / total * 100:.1f}% of {total}" if total else "—"
 
+    n_down, n_degraded = counts.get("down", 0), counts.get("degraded", 0)
+    findings = []
+    if n_down:
+        findings.append({"severity": "danger", "weight": n_down,
+                         "text": f"{n_down:,} network device(s) down at generation",
+                         "action": "Review the down devices", "path": "/devices"})
+    if n_degraded:
+        findings.append({"severity": "warning", "weight": n_degraded,
+                         "text": f"{n_degraded:,} network device(s) degraded at generation",
+                         "action": "Review the degraded devices", "path": "/devices"})
+
     return _section(
         "device_status_now", "Current Device Status",
         description=f"State of {total} monitored node(s) when the report was generated.",
+        findings=findings,
         kpis=[
-            {"label": "Up", "value": f"{up:,}", "accent": "success", "subtitle": share(up)},
+            # Reachability of network devices only (the devices table), not
+            # servers, services or alert incidents.
+            {"label": "Network devices up", "value": f"{up:,}", "accent": "success",
+             "subtitle": f"of {total:,}, at generation"},
             {"label": "Down", "value": f"{counts.get('down', 0):,}",
              "accent": "danger" if counts.get("down") else "success", "subtitle": share(counts.get("down", 0))},
             {"label": "Degraded", "value": f"{counts.get('degraded', 0):,}",

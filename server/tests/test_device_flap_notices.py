@@ -147,7 +147,8 @@ def test_only_rules_a_flap_holds_are_told(rule, reach, perf):
 
 
 @pytest.mark.parametrize("new_status,values", [
-    ("down", {"ping_status": 0.0, "rtt": 0.0, "packet_loss": 100.0}),
+    # A move into down got no reply: no round-trip time (None), never 0 ms.
+    ("down", {"ping_status": 0.0, "rtt": None, "packet_loss": 100.0}),
     ("degraded", {"ping_status": 1.0, "rtt": 250.0, "packet_loss": 40.0}),
 ])
 def test_a_rule_the_status_path_fires_is_never_dropped_from_the_notices(new_status, values):

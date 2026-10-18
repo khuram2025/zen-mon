@@ -1,7 +1,7 @@
 from app.services.notification_transport import NotificationHTTPClient
 from app.services.sms_transport import fill_template, send_sms_request
 from app.services import alert_delivery_log as dl
-from app.services.alert_delivery_log import DeliveryRejected, ensure_accepted
+from app.services.alert_delivery_log import DeliveryNotSent, DeliveryRejected, ensure_accepted
 from app.core.crypto import encrypt_config, decrypt_config
 import ssl
 """
@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from app.core.database import get_db
-from app.services.email_render import build_alert_email_html
+from app.services.email_render import alert_subject, build_alert_email_html
 from app.services.tag_service import tag_set as _tag_set
 from app.services import alert_notify_state as ns
 from app.services import device_status_machine as dsm
@@ -31,7 +31,7 @@ from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
     DEFAULT_RECOVERY_EMAIL_SUBJECT, DEFAULT_RECOVERY_SMS, DEFAULT_SMS,
     conditions_label, default_templates, duration_between, effective_template,
-    host_label, rule_phrasing,
+    format_reading, format_threshold, host_label, incident_context, rule_phrasing,
 )
 from pydantic import BaseModel
 
@@ -68,7 +68,10 @@ class StatusChangeEvent(BaseModel):
     group_id: Optional[str] = None
     group_name: Optional[str] = None
     location: Optional[str] = None
-    rtt_ms: float = 0
+    # None when the check got no reply: there is no round-trip time to report
+    # (a producer that still sends 0 for an unanswered check is read the same
+    # way, see _reply_rtt). packet_loss is a fraction, 0..1.
+    rtt_ms: Optional[float] = None
     packet_loss: float = 0
     # Flap state at the check that produced this transition (both optional, so
     # producers from before flap detection still validate). ``flapping``: this
@@ -240,15 +243,26 @@ async def _send_email(gw_config: dict, recipients: str, subject: str, body: str,
         msg.attach(MIMEText(html_body, "html"))
 
     enc = gw_config.get("encryption", "tls")
-    if enc == "ssl":
-        server = smtplib.SMTP_SSL(gw_config["host"], gw_config.get("port", 465), timeout=10, context=ssl.create_default_context())
-    else:
-        server = smtplib.SMTP(gw_config["host"], gw_config.get("port", 587), timeout=10)
-        server.starttls(context=ssl.create_default_context())
-    if gw_config.get("username"):
-        server.login(gw_config["username"], gw_config.get("password", ""))
+    # Until sendmail() starts nothing was handed to the provider: a failure
+    # here (unreachable host, TLS, login) is a definite non-delivery that may
+    # be retried. Only errors from sendmail() on leave the outcome uncertain.
+    try:
+        if enc == "ssl":
+            server = smtplib.SMTP_SSL(gw_config["host"], gw_config.get("port", 465), timeout=10, context=ssl.create_default_context())
+        else:
+            server = smtplib.SMTP(gw_config["host"], gw_config.get("port", 587), timeout=10)
+            server.starttls(context=ssl.create_default_context())
+        if gw_config.get("username"):
+            server.login(gw_config["username"], gw_config.get("password", ""))
+    except smtplib.SMTPAuthenticationError:
+        raise
+    except Exception as exc:
+        raise DeliveryNotSent(f"{type(exc).__name__}: {exc}") from exc
     refused = server.sendmail(gw_config.get("from_email", ""), recipient_list, msg.as_string())
-    server.quit()
+    try:
+        server.quit()
+    except Exception:
+        pass  # the message was accepted by sendmail(); closing is not delivery
     if refused and len(refused) >= len(recipient_list):
         raise DeliveryRejected(f"all {len(refused)} recipient(s) refused")
     return True
@@ -701,9 +715,42 @@ def _conditions_match(rule, values: dict, *, unknown: frozenset = frozenset()) -
 
 
 # What a move into down carries (see metric_values in evaluate_status_change):
-# the check got no answer, so ping_status 0, 100% loss and the failed check's
-# round-trip time of 0.
-_INTO_DOWN_READINGS = {"ping_status": 0.0, "rtt": 0.0, "packet_loss": 100.0}
+# the check got no answer, so ping_status 0, 100% loss and no round-trip time
+# at all — an unanswered check has no latency, and an rtt rule must never read
+# it as 0 ms.
+_INTO_DOWN_READINGS = {"ping_status": 0.0, "rtt": None, "packet_loss": 100.0}
+
+RTT_UNAVAILABLE = "unavailable (no reply)"
+
+
+def _reply_rtt(event: "StatusChangeEvent") -> Optional[float]:
+    """The transition check's round-trip time, or None when it got no reply.
+
+    A move into down is decided on an unanswered check, and 100% loss means
+    nothing came back, so neither carries a latency whatever number the
+    producer sent (older pollers and the sensor path send 0 for "no reply").
+    """
+    if event.rtt_ms is None or event.new_status == "down":
+        return None
+    if float(event.packet_loss or 0.0) >= 1.0:
+        return None
+    try:
+        return float(event.rtt_ms)
+    except (TypeError, ValueError):
+        return None
+
+
+def _reachability_label(new_status: str, rtt: Optional[float]) -> str:
+    """The reachability state, kept apart from the rule's condition and severity."""
+    if new_status == "down":
+        return "Down (no reply)"
+    if rtt is None:
+        return f"{(new_status or 'unknown').capitalize()} (no reply to this check)"
+    if new_status == "degraded":
+        return "Degraded (responding)"
+    if new_status == "up":
+        return "Up (responding)"
+    return (new_status or "unknown").capitalize()
 
 
 def _could_fire_into(rule, new_status: str) -> bool:
@@ -915,6 +962,11 @@ async def evaluate_status_change(
 
     rules = await _load_device_rules(db)
 
+    # What the transition check measured. No reply means no latency: it reads
+    # "unavailable (no reply)", never "0.0 ms" next to 100% loss.
+    rtt_value = _reply_rtt(event)
+    loss_pct = float(event.packet_loss or 0.0) * 100.0
+
     # Template variables
     variables = {
         "hostname": event.hostname,
@@ -932,8 +984,9 @@ async def evaluate_status_change(
         "duration": "",
         "duration_sentence": "",
         "duration_suffix": "",
-        "rtt": f"{event.rtt_ms:.1f}ms",
-        "packet_loss": f"{event.packet_loss:.0%}",
+        "rtt": RTT_UNAVAILABLE if rtt_value is None else format_reading("rtt", rtt_value, None, None),
+        "packet_loss": format_reading("packet_loss", loss_pct, None, None),
+        "reachability": _reachability_label(event.new_status, rtt_value),
         "status_intro": "The following alert has been resolved:" if is_recovery else "An alert has been triggered:",
     }
 
@@ -1009,10 +1062,11 @@ async def evaluate_status_change(
 
     # E1: live metric values for condition evaluation. packet_loss arrives from
     # the poller as a fraction (0..1); rule thresholds are in percent, so scale.
+    # An unanswered check has no rtt (None): rtt conditions do not match it.
     metric_values = {
         "ping_status": _ping_status_value(event.new_status),
-        "rtt": float(event.rtt_ms or 0.0),
-        "packet_loss": float(event.packet_loss or 0.0) * 100.0,
+        "rtt": rtt_value,
+        "packet_loss": loss_pct,
     }
 
     # Flapping: hold, not drop. The flap hold is the policy's stable time,
@@ -1059,10 +1113,15 @@ async def evaluate_status_change(
         variables["rule_name"] = rule.name or "Alert"
         # Per-rule phrasing: the condition sentence depends on which rule
         # matched, so it is rebuilt here rather than with the shared variables.
+        # The rule's own reading, with its threshold's precision: an rtt rule
+        # reads the latency ("unavailable (no reply)" without one), a
+        # packet-loss rule the loss.
+        rule_metric = rule.metric or "ping_status"
+        rule_value = {"rtt": rtt_value, "packet_loss": loss_pct}.get(rule_metric)
         variables.update(rule_phrasing(
             rule, hostname=host_label(event.hostname, event.ip_address), is_recovery=is_recovery,
-            reading=variables["rtt"] if (rule.metric or "ping_status") == "rtt" else None,
-            duration=variables.get("duration", ""),
+            reading=RTT_UNAVAILABLE if rule_metric == "rtt" and rtt_value is None else None,
+            value=rule_value, duration=variables.get("duration", ""),
         ))
 
         if suppressing_dependency and not is_recovery:
@@ -1105,13 +1164,13 @@ async def evaluate_status_change(
             # No falling back to the trigger body here: "core-router-01 is
             # DOWN" is not a resolved notice, and that fallback is how it used
             # to end up in one.
-            email_subject = _render(effective_template(rule.recovery_email_subject, DEFAULT_RECOVERY_EMAIL_SUBJECT), variables)
-            email_body = _render(effective_template(rule.recovery_email_body, DEFAULT_RECOVERY_EMAIL_BODY), variables)
-            sms_body = _render(effective_template(rule.recovery_sms_template, DEFAULT_RECOVERY_SMS), variables)
+            subject_t = effective_template(rule.recovery_email_subject, DEFAULT_RECOVERY_EMAIL_SUBJECT)
+            body_t = effective_template(rule.recovery_email_body, DEFAULT_RECOVERY_EMAIL_BODY)
+            sms_t = effective_template(rule.recovery_sms_template, DEFAULT_RECOVERY_SMS)
         else:
-            email_subject = _render(effective_template(rule.email_subject, DEFAULT_EMAIL_SUBJECT), variables)
-            email_body = _render(effective_template(rule.email_body, DEFAULT_EMAIL_BODY), variables)
-            sms_body = _render(effective_template(rule.sms_template, DEFAULT_SMS), variables)
+            subject_t = effective_template(rule.email_subject, DEFAULT_EMAIL_SUBJECT)
+            body_t = effective_template(rule.email_body, DEFAULT_EMAIL_BODY)
+            sms_t = effective_template(rule.sms_template, DEFAULT_SMS)
 
         hold_s, flap_held, held = 0, False, False
         if not is_recovery:
@@ -1249,6 +1308,42 @@ async def evaluate_status_change(
         channel_ids = rule.notify_channels or []
         delivery_alert_id = (recovered.get(str(rule.id), {}).get("alert_id")
                              if is_recovery else new_alert_id)
+
+        # Which incident this is and where it is in its life: a trigger opens
+        # it ("New"); a reset closes the trigger's incident ("Recovered", with
+        # the total duration since its first trigger). An 'up' rule's trigger
+        # is the up transition itself, so it is a new event.
+        if is_recovery and trigger != "up":
+            closed_inc = recovered.get(str(rule.id), {})
+            incident = incident_context(alert_id=closed_inc.get("alert_id"),
+                                        first_seen=closed_inc.get("since"), now=now,
+                                        lifecycle="recovered")
+        else:
+            incident = incident_context(alert_id=new_alert_id, first_seen=now, now=now,
+                                        lifecycle="new")
+        variables.update(incident)
+        email_subject = _render(subject_t, variables)
+        email_body = _render(body_t, variables)
+        sms_body = _render(sms_t, variables)
+
+        # Lead with what decided the event: on a move into down (or for a
+        # packet-loss rule) that is the loss — there is no latency without a
+        # reply — otherwise the round-trip time.
+        loss_shown = (format_reading("packet_loss", loss_pct, rule.operator, rule.threshold)
+                      if rule_metric == "packet_loss" else variables.get("packet_loss"))
+        rtt_shown = (format_reading("rtt", rtt_value, rule.operator, rule.threshold)
+                     if rule_metric == "rtt" and rtt_value is not None else variables.get("rtt"))
+        loss_block = {"label": "Packet loss", "value": loss_shown}
+        rtt_block = {"label": "Round-trip time", "value": rtt_shown}
+        lead, other = ((loss_block, rtt_block)
+                       if event.new_status == "down" or rule_metric == "packet_loss"
+                       or rtt_value is None else (rtt_block, loss_block))
+        headline = {"label": lead["label"], "value": lead["value"],
+                    "secondary_label": other["label"], "secondary_value": other["value"]}
+        if rule_metric in ("rtt", "packet_loss") and rule.threshold is not None:
+            thr_text = format_threshold(rule_metric, rule.threshold, rule.operator, rule_value)
+            if lead["label"] == ("Round-trip time" if rule_metric == "rtt" else "Packet loss"):
+                headline["detail"] = f"Threshold {thr_text}"
         for ch_id in channel_ids:
             ch = None
             timer = dl.Timer()
@@ -1308,28 +1403,32 @@ async def evaluate_status_change(
                             "ip_address": event.ip_address,
                             "message": email_body,
                             # Lead with what actually fired, then the context.
-                            "headline_metric": {
-                                "label": "Round-trip time",
-                                "value": variables.get("rtt"),
-                                "secondary_label": "Packet loss",
-                                "secondary_value": variables.get("packet_loss"),
-                            },
+                            "headline_metric": headline,
                             "details": _clean_details([
                                 ("Alert rule", rule.name),
+                                # Reachability, the rule's condition and the
+                                # severity (status/severity pills) are three
+                                # separate facts.
+                                ("Reachability", variables.get("reachability")),
                                 ("Condition", variables.get("condition_label")),
-                                # Only on the way back up, and the first thing
-                                # anyone asks about a resolved incident.
-                                ("Active for", variables.get("duration") if is_recovery else None),
-                                ("Round-trip time", variables.get("rtt")),
-                                ("Packet loss", variables.get("packet_loss")),
+                                # An 'up' rule's trigger is the recovery itself:
+                                # how long the outage lasted. A reset's total
+                                # duration comes with its incident line.
+                                ("Active for", variables.get("duration")
+                                 if is_recovery and trigger == "up" else None),
+                                ("Round-trip time", rtt_shown),
+                                ("Packet loss", loss_shown),
                                 ("Group", variables.get("group")),
                                 ("Location", variables.get("location")),
                                 ("Device type", variables.get("device_type")),
                             ]),
                             "action_url": await _dashboard_url(db, "/alerts"),
                             "timestamp": now.isoformat(),
+                            # Incident line, first seen, and active for (total
+                            # duration on a recovery).
+                            **incident,
                         })
-                        if await _send_email(gw_conf, recipients, email_subject,
+                        if await _send_email(gw_conf, recipients, alert_subject(email_subject, incident),
                                              email_body, html_body=email_html):
                             notifications_sent += 1
                             await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,

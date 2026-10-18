@@ -121,7 +121,8 @@ func TestDeviceThreeOfFiveSlowChecksDegrade(t *testing.T) {
 		t.Fatalf("row timestamp %v, want the check time", rows[0].Timestamp)
 	}
 	alerts := f.alerts.eventsCopy()
-	if len(alerts) != 1 || alerts[0].NewStatus != "degraded" || alerts[0].RTTMs != 250 || alerts[0].Flapping {
+	if len(alerts) != 1 || alerts[0].NewStatus != "degraded" || !alerts[0].Responded ||
+		alerts[0].RTTMs != 250 || alerts[0].Flapping {
 		t.Fatalf("alerts = %+v", alerts)
 	}
 }
@@ -154,6 +155,27 @@ func TestPersistedStatusIsNeverTheRawClass(t *testing.T) {
 	}
 	if !saves[8].Responded || saves[8].RTTMs != 250 || saves[7].Responded || saves[7].RTTMs != 0 {
 		t.Fatalf("last_seen/RTT inputs: %+v / %+v", saves[7], saves[8])
+	}
+	// A transition decided on an unanswered check (into down) carries no
+	// reply, so its alert has no round-trip time; every other one answered.
+	alerts := f.alerts.eventsCopy()
+	if len(alerts) == 0 {
+		t.Fatal("no alert events")
+	}
+	sawDown := false
+	for _, a := range alerts {
+		if a.NewStatus == "down" {
+			sawDown = true
+		}
+		if a.Responded == (a.NewStatus == "down") {
+			t.Fatalf("alert %s->%s Responded=%v", a.OldStatus, a.NewStatus, a.Responded)
+		}
+		if got := alertRTT(a); (got == nil) != !a.Responded {
+			t.Fatalf("alert %s->%s rtt payload %v", a.OldStatus, a.NewStatus, got)
+		}
+	}
+	if !sawDown {
+		t.Fatalf("no down transition among %+v", alerts)
 	}
 }
 
@@ -933,16 +955,29 @@ func TestHTTPAlertEvaluatorPayload(t *testing.T) {
 	if err := h.EvaluateDeviceStatus(context.Background(), ev); err != nil {
 		t.Fatal(err)
 	}
+	// No reply: rtt_ms is JSON null, never 0 (which would read as 0 ms).
 	want := map[string]any{"device_id": id.String(), "hostname": "edge-01", "ip_address": "192.0.2.10",
-		"old_status": "up", "new_status": "down", "rtt_ms": 0.0, "packet_loss": 1.0,
+		"old_status": "up", "new_status": "down", "rtt_ms": nil, "packet_loss": 1.0,
 		"flapping": true, "is_flapping": true}
 	if len(got) != len(want) {
 		t.Fatalf("payload keys = %v", got)
+	}
+	if v, ok := got["rtt_ms"]; !ok || v != nil {
+		t.Fatalf("payload rtt_ms = %v (present %v), want null", v, ok)
 	}
 	for k, v := range want {
 		if got[k] != v {
 			t.Fatalf("payload[%s] = %v, want %v", k, got[k], v)
 		}
+	}
+	// A reply carries its round-trip time.
+	answered := ev
+	answered.NewStatus, answered.Responded, answered.RTTMs, answered.PacketLoss = "degraded", true, 412.5, 0.25
+	if err := h.EvaluateDeviceStatus(context.Background(), answered); err != nil {
+		t.Fatal(err)
+	}
+	if got["rtt_ms"] != 412.5 || got["new_status"] != "degraded" || got["packet_loss"] != 0.25 {
+		t.Fatalf("answered payload = %v", got)
 	}
 	h.url = srv.URL + "/fail"
 	if err := h.EvaluateDeviceStatus(context.Background(), ev); err == nil {

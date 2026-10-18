@@ -78,11 +78,14 @@ type AlertEvaluator interface {
 // DeviceAlertEvent is one alertable transition (StatusChangeEvent on the
 // server).
 type DeviceAlertEvent struct {
-	DeviceID   uuid.UUID
-	Hostname   string
-	IPAddress  net.IP
-	OldStatus  string
-	NewStatus  string
+	DeviceID  uuid.UUID
+	Hostname  string
+	IPAddress net.IP
+	OldStatus string
+	NewStatus string
+	// Responded: the check that produced the transition got a reply. Without
+	// one there is no round-trip time, and RTTMs is not sent (rtt_ms null).
+	Responded  bool
 	RTTMs      float64
 	PacketLoss float32
 	// Flapping: this transition's class is flapping (the server holds the
@@ -100,11 +103,21 @@ func deviceAlertPayload(ev DeviceAlertEvent) map[string]any {
 		"ip_address":  ev.IPAddress.String(),
 		"old_status":  ev.OldStatus,
 		"new_status":  ev.NewStatus,
-		"rtt_ms":      ev.RTTMs,
+		"rtt_ms":      alertRTT(ev),
 		"packet_loss": ev.PacketLoss,
 		"flapping":    ev.Flapping,
 		"is_flapping": ev.IsFlapping,
 	}
+}
+
+// alertRTT is the payload's rtt_ms: the reply's round-trip time, or nil
+// (JSON null) when the check got no reply — an unanswered check has no
+// latency, and 0 would read as an excellent one.
+func alertRTT(ev DeviceAlertEvent) any {
+	if !ev.Responded {
+		return nil
+	}
+	return ev.RTTMs
 }
 
 // httpAlertEvaluator is the production AlertEvaluator (the local API).
@@ -690,6 +703,7 @@ func (p *statusPipeline) deliver(job *statusJob) {
 				IPAddress:  job.ip,
 				OldStatus:  ev.Old,
 				NewStatus:  ev.New,
+				Responded:  job.save.Responded,
 				RTTMs:      job.save.RTTMs,
 				PacketLoss: job.packetLoss,
 				Flapping:   ev.Flapping,

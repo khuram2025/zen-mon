@@ -631,7 +631,7 @@ _RT_TEXT = {"p95": "95th-percentile", "p99": "99th-percentile", "p50": "median",
 @register_section(
     "service_response_times", title="Service Response Times", category="Services",
     description=("Response time percentiles (p50/p95/p99) of successful probes per service, "
-                 "computed in ClickHouse, with the slowest services ranked."),
+                 "computed in the time-series database, with the slowest services ranked."),
     scope="fleet", requires=REQUIRES,
     options=[top_n_option(25, 200),
              {"key": "sort", "label": "Rank by", "type": "select", "default": "p95",
@@ -697,8 +697,8 @@ async def service_response_times(ctx: SectionCtx) -> dict:
              "not count towards response times. Each service's probes from every monitoring site "
              "are combined."]
     if raw:
-        notes.append("Percentiles are exact, computed in ClickHouse over every successful probe in "
-                     "the period.")
+        notes.append("Percentiles are exact, computed in the time-series database over every "
+                     "successful probe in the period.")
     else:
         notes.append(f"The period reaches past the {RAW_RETENTION_DAYS}-day raw probe retention, so "
                      "figures come from 5-minute rollups of buckets in which every probe succeeded: "

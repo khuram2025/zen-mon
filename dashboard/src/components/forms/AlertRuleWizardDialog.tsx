@@ -69,6 +69,8 @@ type WizardState = {
   condition_logic: 'AND' | 'OR'
   trigger_on: 'any' | 'down' | 'up' | 'degraded'
   min_duration: number
+  /** Metric (SNMP) rules: seconds the cleared condition must hold before the alert resolves. null = default (300 s). */
+  clear_duration: number | null
   recovery_alert: boolean
   /** Device status rules: skip the automatic hold while the device is flapping (e.g. core routers). */
   notify_while_flapping: boolean
@@ -198,6 +200,7 @@ const DEFAULT_STATE: WizardState = {
   condition_logic: 'AND',
   trigger_on: 'down',
   min_duration: 0,
+  clear_duration: null,
   recovery_alert: true,
   notify_while_flapping: false,
   reset_mode: 'auto',
@@ -232,6 +235,27 @@ const DEFAULT_STATE: WizardState = {
 
 // Metrics a device rule reads from a confirmed status change; only those rules are held while a device flaps.
 const STATUS_EVENT_METRICS = new Set(['ping_status', 'rtt', 'packet_loss'])
+
+/** Default clear hold the evaluator applies when a metric rule leaves clear_duration empty. */
+const DEFAULT_CLEAR_SECONDS = 300
+// Percent metrics that clear 2 points on the healthy side of the trigger when no reset value is set.
+const AUTO_CLEAR_METRICS = new Set(['cpu', 'memory'])
+const AUTO_CLEAR_POINTS = 2
+
+/** A device rule on polled SNMP metrics: periodic, with a breach hold and a clear hold. */
+function usesMetricLifecycle(s: WizardState): boolean {
+  return s.source === 'device' && s.conditions.every((c) => !STATUS_EVENT_METRICS.has(c.metric) && c.metric !== 'jitter')
+}
+
+/** The automatic clear level for a condition without a reset value, or null when none applies. */
+function autoResetThreshold(c: Cond): number | null {
+  if (c.reset_threshold != null || !AUTO_CLEAR_METRICS.has(c.metric)) return null
+  const thr = Number(c.threshold)
+  if (!Number.isFinite(thr)) return null
+  if ((c.operator === '>' || c.operator === '>=') && thr - AUTO_CLEAR_POINTS >= 0) return thr - AUTO_CLEAR_POINTS
+  if ((c.operator === '<' || c.operator === '<=') && thr + AUTO_CLEAR_POINTS <= 100) return thr + AUTO_CLEAR_POINTS
+  return null
+}
 
 /** A device rule evaluated on confirmed status changes (ping status, RTT, packet loss). */
 function isStatusRule(s: WizardState): boolean {
@@ -276,6 +300,7 @@ function ruleToState(rule: any): WizardState {
     condition_logic: rule.condition_logic === 'OR' ? 'OR' : 'AND',
     trigger_on: rule.trigger_on || 'down',
     min_duration: rule.min_duration ?? rule.duration ?? 0,
+    clear_duration: typeof rule.clear_duration === 'number' ? rule.clear_duration : null,
     recovery_alert: rule.recovery_alert ?? false,
     notify_while_flapping: rule.notify_while_flapping === true,
     reset_mode: rule.recovery_alert ? 'auto' : 'none',
@@ -347,6 +372,7 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
       ? s.target.trim() || null
       : null,
     min_duration: isSyslog || isTrap ? 0 : s.min_duration,
+    clear_duration: usesMetricLifecycle(s) ? s.clear_duration : null,
     notify_while_flapping: flapHoldApplies(s) ? s.notify_while_flapping : false,
     severity: s.severity,
     cooldown: s.cooldown,
@@ -979,9 +1005,14 @@ export function AlertRuleWizardDialog({
                           <FormField label={i === 0 ? 'Value' : ' '}>
                             <Input type="number" step="any" value={c.threshold} onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })} />
                           </FormField>
-                          {NETWORK_METRICS.some(m => m.value === c.metric) && ['>', '>=', '<', '<='].includes(c.operator) && <FormField label="Reset value (optional)">
-                            <Input type="number" step="any" placeholder="Same as trigger" value={c.reset_threshold ?? ''} onChange={e => updateCond(i, { reset_threshold: e.target.value === '' ? null : Number(e.target.value) })} />
-                          </FormField>}
+                          {NETWORK_METRICS.some(m => m.value === c.metric) && ['>', '>=', '<', '<='].includes(c.operator) && (() => {
+                            const auto = autoResetThreshold(c)
+                            return (
+                              <FormField label="Reset value (optional)" hint={auto != null ? `Empty = auto: clears ${c.operator.startsWith('>') ? 'below' : 'above'} ${auto}%` : undefined}>
+                                <Input type="number" step="any" placeholder={auto != null ? `auto (${auto}%)` : 'Same as trigger'} value={c.reset_threshold ?? ''} onChange={e => updateCond(i, { reset_threshold: e.target.value === '' ? null : Number(e.target.value) })} />
+                              </FormField>
+                            )
+                          })()}
                         </div>
                         <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-muted hover:text-danger" disabled={s.conditions.length === 1} onClick={() => removeCond(i)}>
                           <Trash2 className="h-4 w-4" />
@@ -1046,6 +1077,21 @@ export function AlertRuleWizardDialog({
                     <span className="text-sm text-muted">seconds (0 = fire immediately)</span>
                   </div>
                 </FormField>}
+                {usesMetricLifecycle(s) && (
+                  <FormField
+                    label="Clear after"
+                    hint={`The cleared condition must hold this long before the alert resolves; a breach in the meantime continues the same alert without a new notification. Missing data never counts as cleared. Empty = ${DEFAULT_CLEAR_SECONDS} seconds.`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Input
+                        type="number" min={0} className="w-28" placeholder={String(DEFAULT_CLEAR_SECONDS)}
+                        value={s.clear_duration ?? ''}
+                        onChange={(e) => setS({ ...s, clear_duration: e.target.value === '' ? null : Math.max(0, Number(e.target.value)) })}
+                      />
+                      <span className="text-sm text-muted">seconds (0 = resolve on the first healthy reading)</span>
+                    </div>
+                  </FormField>
+                )}
                 {flapHold && (
                   <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border px-3 py-2">
                     <input type="checkbox" className="mt-0.5 h-3.5 w-3.5 accent-primary" checked={s.notify_while_flapping} onChange={(e) => setS({ ...s, notify_while_flapping: e.target.checked })} />
@@ -1419,6 +1465,9 @@ export function AlertRuleWizardDialog({
                   </>
                 ) : (
                   <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
+                )}
+                {usesMetricLifecycle(s) && (
+                  <ReviewRow label="Clear after" value={s.clear_duration === 0 ? 'First healthy reading' : `${s.clear_duration ?? DEFAULT_CLEAR_SECONDS}s${s.clear_duration == null ? ' (default)' : ''}`} />
                 )}
                 {flapHold && <ReviewRow label="While flapping" value={s.notify_while_flapping ? 'Notify immediately' : 'Held until a status lasts the flap stability time'} />}
                 <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution' : s.reset_mode === 'auto' ? 'Auto + recovery notify' : 'No recovery notify'} />

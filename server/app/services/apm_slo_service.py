@@ -32,8 +32,9 @@ plain ``timestamp >= now() - 300s`` filter dropped the bucket holding most of
 the window and left ``short_burn`` pinned at 0, which silently disabled every
 burn tier. The tier payload reports the effective window it was measured over.
 
-Alerts dedupe on metadata ``slo:<id>:<tier>`` so both uvicorn workers can run
-the loop (mirrors the host/network/apm evaluators). Notifications go to the
+Alerts dedupe on metadata ``slo:<id>:<tier>``. Both uvicorn workers start
+the loop; a pass runs in one of them at a time (``alert_worker_lock``, as for
+the host/network/apm evaluators), since that dedupe is only a SELECT. Notifications go to the
 SLO's own ``notify_channels``; severity is critical for page tiers, warning
 for the ticket tier.
 """
@@ -397,14 +398,17 @@ async def evaluate_slo_burn(db: AsyncSession) -> dict[str, int]:
     return {"slos": len(slos), "raised": raised, "resolved": resolved}
 
 
-async def apm_slo_burn_loop() -> None:
-    from app.core.database import AsyncSessionLocal
+async def run_slo_burn_pass(session_factory=None):
+    """One evaluation pass, in one API worker at a time (None when skipped)."""
+    from app.services.alert_worker_lock import APM_SLO_PASS, run_pass
+    return await run_pass(APM_SLO_PASS, evaluate_slo_burn, session_factory)
 
+
+async def apm_slo_burn_loop() -> None:
     await asyncio.sleep(35)  # stagger behind the other evaluators
     while True:
         try:
-            async with AsyncSessionLocal() as db:
-                await evaluate_slo_burn(db)
+            await run_slo_burn_pass()
         except asyncio.CancelledError:
             raise
         except Exception:

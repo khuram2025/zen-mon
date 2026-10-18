@@ -688,8 +688,10 @@ async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
             {"label": "Availability", "value": _fmt_avail(avail),
              "accent": ("neutral" if avail is None else
                         "success" if avail >= target else "danger")},
-            {"label": f"Nodes up (of {len(na['nodes'])})", "value": str(na["up"]),
-             "accent": "success" if na["up"] == len(na["nodes"]) else "warning"},
+            # Current status, not the period: say so next to the period figures.
+            {"label": f"Nodes up now (of {len(na['nodes'])})", "value": str(na["up"]),
+             "accent": "success" if na["up"] == len(na["nodes"]) else "warning",
+             "subtitle": "Current status, at generation"},
             {"label": f"Below configured target ({target:g}%)", "value": str(na["below_sla"]),
              "accent": "danger" if na["below_sla"] else "success"},
             {"label": "Total downtime", "value": f"{na['downtime_min']:,.0f} min",
@@ -2892,6 +2894,11 @@ async def build_sections(db: AsyncSession, section_ids: list,
         if item["title"]:
             sec["title"] = item["title"]
         sec.setdefault("category", entry.get("category"))
+        # What the figures cover (device / netflow / fleet) and when (window =
+        # the report period, snapshot = at generation): the email labels each
+        # group of headline figures with them.
+        sec.setdefault("scope", entry.get("scope"))
+        sec.setdefault("semantics", entry.get("semantics"))
         sec["section_id"] = sid
         if ctx.section_options:
             sec["options"] = dict(ctx.section_options)
@@ -3794,42 +3801,184 @@ def _email_safe_url(url: Optional[str]) -> Optional[str]:
     return url if re.match(r"^https?://[^\s\"'<>]+$", url, re.IGNORECASE) else None
 
 
-def _email_kpis(sections: list[dict]) -> list[dict]:
-    out: list[dict] = []
+# Headline figures are grouped by section, at most EMAIL_KPIS_PER_SECTION
+# from each of the first EMAIL_MAX_KPI_SECTIONS sections that have any (and
+# EMAIL_MAX_KPIS in all), and every group is captioned with its section, what
+# it covers and as of when: "34 network devices up" next to "761 open
+# incidents (all sources)" must not read as one measure.
+EMAIL_KPIS_PER_SECTION = 3
+EMAIL_MAX_KPI_SECTIONS = 3
+
+# Coverage wording per registered section scope (SCOPES; "device" names the
+# report's device filter when there is one).
+_EMAIL_SCOPE_WORDS = {"netflow": "NetFlow in the report scope", "fleet": "All sources"}
+
+# Where a flagged figure is acted on, by section category: (action, app path).
+_EMAIL_ACTIONS: dict[str, tuple[str, Optional[str]]] = {
+    "Alerting": ("Triage in Alert Center", "/alerts"),
+    "Events": ("Review in Network Events", "/network-events"),
+    "Availability": ("Review in Availability", "/availability"),
+    "Interfaces": ("Review in Link Utilization", "/link-utilization"),
+    "Capacity": ("Review capacity in Devices", "/devices"),
+    "Performance": ("Review in Devices", "/devices"),
+    "Hardware": ("Review hardware health in Devices", "/devices"),
+    "Inventory": ("Review in Inventory", "/inventory"),
+    "Servers": ("Review in Servers", "/servers"),
+    "Agents": ("Review agents in Servers", "/server-agents"),
+    "Services": ("Review in Services", "/services"),
+    "Applications": ("Review in APM", "/apm"),
+    "Configuration": ("Review in Configuration Management", "/ncm"),
+    "Device Tracker": ("Review in Device Tracker", "/udt"),
+    "Discovery": ("Review in Discovery", "/discovery"),
+    "Paths": ("Review in NetPath", "/netpath"),
+    "Traffic": ("Review in NetFlow", "/netflow"),
+    "Platform": ("Review in Settings", "/settings/general"),
+    "Security": ("Review user access in Settings", "/settings/general?tab=users"),
+}
+_EMAIL_DEFAULT_ACTION = ("See the full report for details", None)
+_SEVERITY_RANK = {"danger": 0, "warning": 1}
+
+
+def _email_usable(s: dict) -> bool:
+    return not (s.get("restricted") or s.get("error"))
+
+
+def _email_pick_kpis(kpis: list[dict], limit: int) -> list[dict]:
+    """``limit`` figures of one section in their own order: its headline
+    figure first, then flagged figures (danger, then warning), then the rest,
+    so a section never hides its alarm behind neutral counts."""
+    valid = [k for k in kpis if isinstance(k, dict) and k.get("label") is not None]
+    if len(valid) <= limit:
+        return valid
+    rank = {id(k): i for i, k in enumerate(valid)}
+
+    def priority(k: dict) -> tuple[int, int]:
+        if k is valid[0]:
+            return (0, 0)
+        return (1 + _SEVERITY_RANK.get(str(k.get("accent")), 2), rank[id(k)])
+
+    chosen = sorted(valid, key=priority)[:limit]
+    return sorted(chosen, key=lambda k: rank[id(k)])
+
+
+def _email_scope_words(s: dict, meta: Optional[dict]) -> str:
+    if s.get("email_scope"):
+        return str(s["email_scope"])
+    scope = s.get("scope")
+    if scope == "device":
+        label = str((meta or {}).get("scope_label") or "")
+        if label and label != "All monitored infrastructure":
+            return label
+        return "All network devices"
+    return _EMAIL_SCOPE_WORDS.get(str(scope or "fleet"), "All sources")
+
+
+def _email_when_words(s: dict, meta: Optional[dict]) -> str:
+    if s.get("semantics") == "snapshot":
+        at = (meta or {}).get("generated_label")
+        return f"as of {at}" if at else "at generation"
+    return "over the report period"
+
+
+def email_kpi_groups(sections: list[dict], meta: Optional[dict] = None) -> list[dict]:
+    """Headline figures for the email and chat summaries, per section:
+    ``[{title, caption, kpis}]``. ``caption`` says what the figures cover and
+    as of when ("All sources · as of 18 Oct 2026 08:00 GMT+3")."""
+    groups: list[dict] = []
+    total = 0
     for s in sections:
-        if s.get("restricted") or s.get("error"):
+        if not _email_usable(s):
             continue
-        for k in s.get("kpis") or []:
-            if isinstance(k, dict) and k.get("label") is not None:
-                out.append(k)
-                if len(out) >= EMAIL_MAX_KPIS:
-                    return out
-    return out
+        room = min(EMAIL_KPIS_PER_SECTION, EMAIL_MAX_KPIS - total)
+        if room <= 0 or len(groups) >= EMAIL_MAX_KPI_SECTIONS:
+            break
+        picked = _email_pick_kpis(s.get("kpis") or [], room)
+        if not picked:
+            continue
+        groups.append({
+            "title": _email_clip(s.get("title") or "", 90),
+            "caption": f"{_email_scope_words(s, meta)} · {_email_when_words(s, meta)}",
+            "kpis": picked,
+        })
+        total += len(picked)
+    return groups
 
 
-def _email_findings(sections: list[dict]) -> list[tuple[str, str, str]]:
-    """(severity, section title, finding) for sections whose headline figures
-    are flagged danger/warning: the section's first note, else the flagged
-    figure itself. Danger first, report order within a severity."""
-    found: list[tuple[int, int, str, str, str]] = []
+def _email_kpis(sections: list[dict]) -> list[dict]:
+    """The figures shown, flattened (preheader, legacy callers)."""
+    return [k for g in email_kpi_groups(sections) for k in g["kpis"]]
+
+
+def _finding_number(value: Any) -> float:
+    """Size of a finding for ranking within a severity ("285" > "12")."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    m = re.search(r"-?\d[\d,]*(?:\.\d+)?", str(value or ""))
+    try:
+        return float(m.group(0).replace(",", "")) if m else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _email_findings(sections: list[dict]) -> list[dict]:
+    """Action findings, most severe first, larger first within a severity,
+    then report order: ``[{severity, section, text, action, path}]``.
+
+    A section states its own (``findings``: ``{severity, text, action?,
+    path?, weight?}``); otherwise each flagged headline figure is one, worded
+    as the figure plus where it is acted on (by section category). Notes are
+    never findings: they explain method, not what to do."""
+    found: list[tuple[int, float, int, int, dict]] = []
     for i, s in enumerate(sections):
-        if s.get("restricted") or s.get("error"):
+        if not _email_usable(s):
             continue
-        flagged = [k for k in (s.get("kpis") or []) if isinstance(k, dict)
-                   and k.get("accent") in ("danger", "warning")]
-        if not flagged:
-            continue
-        severity = "danger" if any(k.get("accent") == "danger" for k in flagged) else "warning"
-        notes = [n for n in (s.get("notes") or []) if n]
-        if notes:
-            text_ = _email_clip(notes[0], 280)
+        title = _email_clip(s.get("title") or "", 90)
+        default_action, default_path = _EMAIL_ACTIONS.get(str(s.get("category") or ""), _EMAIL_DEFAULT_ACTION)
+        explicit = [f for f in (s.get("findings") or []) if isinstance(f, dict) and f.get("text")
+                    and f.get("severity") in _SEVERITY_RANK]
+        if explicit:
+            items = [{"severity": f["severity"], "text": _email_clip(f["text"], 280),
+                      "action": _email_clip(f.get("action") or default_action, 80),
+                      "path": f.get("path") if "path" in f else default_path,
+                      "weight": _finding_number(f.get("weight", 0))} for f in explicit]
+        elif "findings" in s:
+            # The section judged its figures and found nothing to act on.
+            items = []
         else:
-            k = next(k for k in flagged if k.get("accent") == severity)
-            text_ = _email_clip(f"{k.get('label')}: {k.get('value')}", 280)
-        found.append((0 if severity == "danger" else 1, i, severity,
-                      _email_clip(s.get("title") or "", 90), text_))
-    found.sort(key=lambda f: (f[0], f[1]))
-    return [(sev, title, txt) for _, _, sev, title, txt in found[:EMAIL_MAX_FINDINGS]]
+            items = []
+            for k in s.get("kpis") or []:
+                if not isinstance(k, dict) or k.get("accent") not in _SEVERITY_RANK:
+                    continue
+                sub = f" ({_email_clip(k.get('subtitle'), 80)})" if k.get("subtitle") else ""
+                items.append({"severity": k["accent"],
+                              "text": _email_clip(f"{k.get('label')}: {k.get('value')}{sub}", 280),
+                              "action": default_action, "path": default_path,
+                              "weight": _finding_number(k.get("value"))})
+        for j, it in enumerate(items):
+            found.append((_SEVERITY_RANK[it["severity"]], -it["weight"], i, j,
+                          {"severity": it["severity"], "section": title, "text": it["text"].rstrip(" ."),
+                           "action": it["action"], "path": it["path"]}))
+    found.sort(key=lambda f: f[:4])
+    return [f[4] for f in found[:EMAIL_MAX_FINDINGS]]
+
+
+def _email_base_url(meta: dict, view_url: Optional[str]) -> Optional[str]:
+    """The appliance address findings link into: the scheduler's base URL,
+    else the share link's origin."""
+    base = _email_safe_url(meta.get("app_base_url"))
+    if base:
+        return base.rstrip("/")
+    url = _email_safe_url(view_url)
+    if url and "/api/v1/reports/shared/" in url:
+        return url.split("/api/v1/reports/shared/", 1)[0].rstrip("/")
+    return None
+
+
+def _finding_url(f: dict, base: Optional[str]) -> Optional[str]:
+    path = f.get("path")
+    if not base or not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+        return None
+    return _email_safe_url(base + path)
 
 
 def _email_omitted(sections: list[dict]) -> list[str]:
@@ -3860,9 +4009,11 @@ def email_summary_html(meta: dict, sections: list[dict], view_url: Optional[str]
     company = str(meta.get("company_name") or "ZenPlus")
     title = str(meta.get("title") or "Report")
     font = f"font-family:{_EMAIL_FONT}"
-    kpis = _email_kpis(sections)
+    groups = email_kpi_groups(sections, meta)
+    kpis = [k for g in groups for k in g["kpis"]]
     findings = _email_findings(sections)
     url = _email_safe_url(view_url)
+    base = _email_base_url(meta, view_url)
     rows: list[str] = []
 
     classification = str(meta.get("confidentiality") or "").strip()
@@ -3907,14 +4058,23 @@ def email_summary_html(meta: dict, sections: list[dict], view_url: Optional[str]
         + "</td></tr>")
 
     body: list[str] = []
-    if kpis:
-        cols = 2 if len(kpis) in (1, 2, 4) else 3
+    if meta.get("run_note"):
+        body.append(
+            f'<tr><td bgcolor="#FEF3C7" style="background:#FEF3C7;border-bottom:1px solid #FCD34D;'
+            f'padding:10px 28px;{font};font-size:12px;font-weight:600;color:#78350F">'
+            f'{esc(_email_clip(meta.get("run_note"), 200))}</td></tr>')
+    for g in groups:
+        gk = g["kpis"]
+        cols = 3 if len(gk) == 3 else 2
         pct = 100 // cols
-        trs = []
-        for i in range(0, len(kpis), cols):
+        trs = [f'<tr><td colspan="{cols}" style="padding:4px 5px 2px;{font}">'
+               f'<div style="font-size:12px;font-weight:700;color:#111827">{esc(g["title"])}</div>'
+               f'<div style="font-size:11px;color:#6B7280">{esc(_email_clip(g["caption"], 140))}</div>'
+               f'</td></tr>']
+        for i in range(0, len(gk), cols):
             cells = []
-            row_has_sub = any(k.get("subtitle") for k in kpis[i:i + cols])
-            for k in kpis[i:i + cols]:
+            row_has_sub = any(k.get("subtitle") for k in gk[i:i + cols])
+            for k in gk[i:i + cols]:
                 color = rc.accent_ink(k.get("accent"), brand)
                 sub = (f'<div style="{font};font-size:11px;color:#6B7280;margin-top:3px">'
                        f'{esc(_email_clip(k.get("subtitle"), 80)) if k.get("subtitle") else "&nbsp;"}'
@@ -3931,17 +4091,24 @@ def email_summary_html(meta: dict, sections: list[dict], view_url: Optional[str]
                     f'{sub}</td></tr></table></td>')
             cells += [f'<td width="{pct}%" style="padding:5px">&nbsp;</td>'] * (cols - len(cells))
             trs.append("<tr>" + "".join(cells) + "</tr>")
-        body.append(f'<tr><td style="padding:18px 23px 6px">'
+        body.append(f'<tr><td style="padding:14px 23px 2px">'
                     f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
                     f'{"".join(trs)}</table></td></tr>')
 
     if findings:
+        def finding_action(f: dict) -> str:
+            link = _finding_url(f, base)
+            if link:
+                return (f' <a href="{esc(link)}" target="_blank" style="color:{rc.accent_ink("primary", brand)};'
+                        f'text-decoration:underline">{esc(f["action"])}</a>')
+            return f' <span style="color:#4B5563">{esc(f["action"])}.</span>' if f.get("action") else ""
+
         items = "".join(
             f'<tr><td valign="top" width="18" style="{font};font-size:13px;line-height:20px;'
-            f'color:{rc.ACCENT_INK[sev]};padding:3px 0">&#9679;</td>'
+            f'color:{rc.ACCENT_INK[f["severity"]]};padding:3px 0">&#9679;</td>'
             f'<td style="{font};font-size:13px;line-height:20px;color:#1F2937;padding:3px 0">'
-            f'<strong>{esc(stitle)}</strong> — {esc(txt)}</td></tr>'
-            for sev, stitle, txt in findings)
+            f'<strong>{esc(f["section"])}</strong> — {esc(f["text"])}.{finding_action(f)}</td></tr>'
+            for f in findings)
         body.append(
             f'<tr><td style="padding:14px 28px 4px">'
             f'<div style="{font};font-size:14px;font-weight:700;color:#111827;margin-bottom:6px">'
@@ -3977,6 +4144,10 @@ def email_summary_html(meta: dict, sections: list[dict], view_url: Optional[str]
     if meta.get("disclaimer"):
         foot.append(f'<div style="font-size:10px;line-height:1.45;color:#6B7280;margin-bottom:6px">'
                     f'{esc(_email_clip(meta.get("disclaimer"), 1000))}</div>')
+    if meta.get("schedule_label"):
+        foot.append(f'<div>{"Schedule" if meta.get("run_kind") == "manual" else "Scheduled"}: '
+                    f'{esc(_email_clip(meta.get("schedule_label"), 160))}'
+                    f'{" · this was a manual run" if meta.get("run_kind") == "manual" else ""}</div>')
     foot.append(f'<div>Generated {esc(meta.get("generated_label") or "")} · {esc(company)}</div>')
     rows.append(
         f'<tr><td bgcolor="#F9FAFB" style="background:#F9FAFB;border-top:1px solid #E5E7EB;'
@@ -4020,17 +4191,24 @@ def email_summary_text(meta: dict, sections: list[dict], view_url: Optional[str]
         lines.append(f"Period: {meta['period_label']}")
     if meta.get("scope_label"):
         lines.append(f"Scope: {meta['scope_label']}")
-    kpis = _email_kpis(sections)
-    if kpis:
+    if meta.get("run_note"):
+        lines += ["", str(meta["run_note"])]
+    groups = email_kpi_groups(sections, meta)
+    if groups:
         lines += ["", "Key figures"]
-        for k in kpis:
-            sub = f" ({_email_clip(k.get('subtitle'), 80)})" if k.get("subtitle") else ""
-            lines.append(f"- {_email_clip(k.get('label'), 60)}: {_email_clip(k.get('value'), 40)}{sub}")
+        for g in groups:
+            lines.append(f"{g['title']} ({g['caption']})")
+            for k in g["kpis"]:
+                sub = f" ({_email_clip(k.get('subtitle'), 80)})" if k.get("subtitle") else ""
+                lines.append(f"- {_email_clip(k.get('label'), 60)}: {_email_clip(k.get('value'), 40)}{sub}")
     findings = _email_findings(sections)
     if findings:
+        base = _email_base_url(meta, view_url)
         lines += ["", "Top findings"]
-        for sev, stitle, txt in findings:
-            lines.append(f"- [{'!' if sev == 'danger' else '~'}] {stitle} — {txt}")
+        for f in findings:
+            link = _finding_url(f, base)
+            action = f" {f['action']}: {link}" if link else (f" {f['action']}." if f.get("action") else "")
+            lines.append(f"- [{'!' if f['severity'] == 'danger' else '~'}] {f['section']} — {f['text']}.{action}")
     omitted = _email_omitted(sections)
     if omitted:
         lines += [""] + omitted
@@ -4043,6 +4221,10 @@ def email_summary_text(meta: dict, sections: list[dict], view_url: Optional[str]
         lines.append(" · ".join(str(p) for p in footer))
     if meta.get("disclaimer"):
         lines.append(str(meta["disclaimer"]))
+    if meta.get("schedule_label"):
+        manual = meta.get("run_kind") == "manual"
+        lines.append(f"{'Schedule' if manual else 'Scheduled'}: {meta['schedule_label']}"
+                     + (" · this was a manual run" if manual else ""))
     lines.append(f"Generated {meta.get('generated_label') or ''} · {company}".rstrip())
     return "\n".join(lines)
 

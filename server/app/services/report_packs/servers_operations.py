@@ -402,10 +402,13 @@ async def server_telemetry_coverage(ctx: SectionCtx) -> dict:
     if not measured:
         notes.append("No agent-monitored server could be rated for this period.")
 
+    # The share of expected metric samples received from the rated
+    # agent-monitored servers, not the share of the fleet that is monitored.
     kpis = [
-        {"label": "Fleet coverage", "value": _fmt_pct(fleet, 2),
+        {"label": "Telemetry samples received", "value": _fmt_pct(fleet, 2),
          "accent": "neutral" if fleet is None else "success" if fleet >= thr else "warning",
-         "subtitle": f"{rec_total:,} of {exp_total:,} expected samples" if exp_total else "Not measured"},
+         "subtitle": (f"{rec_total:,} of {exp_total:,} expected · {len(measured):,} agent server(s) · "
+                      "over the period") if exp_total else "Not measured"},
         {"label": f"Servers ≥ {target}", "value": f"{len(complete):,}", "accent": "success",
          "subtitle": _share(len(complete), len(measured))},
         {"label": "Servers with gaps", "value": f"{len(partial):,}",
@@ -418,10 +421,26 @@ async def server_telemetry_coverage(ctx: SectionCtx) -> dict:
                      "subtitle": "Not measured"})
     bands = [("Meets target", len(complete)), ("Gaps", len(partial)), ("Silent", len(silent)),
              ("No agent", no_agent)]
+    findings = []
+    if silent:
+        findings.append({"severity": "danger", "weight": len(silent),
+                         "text": f"{len(silent):,} agent-monitored server(s) sent no metrics in the period",
+                         "action": "Check the agents in Servers", "path": "/server-agents"})
+    if partial:
+        findings.append({"severity": "warning", "weight": len(partial),
+                         "text": f"{len(partial):,} server(s) delivered less than {target} of their expected "
+                                 "samples",
+                         "action": "Review telemetry gaps in Servers", "path": "/servers"})
+    if no_agent:
+        findings.append({"severity": "warning", "weight": no_agent,
+                         "text": f"{no_agent:,} agent-mode server(s) have no enrolled agent and are not monitored",
+                         "action": "Enrol an agent", "path": "/server-agents"})
     return _section(
         sid, title,
         description=f"Samples received against expected for {len(measured):,} agent-monitored server(s) "
                     f"over the period (target {target}).",
+        email_scope="Agent-monitored servers",
+        findings=findings,
         kpis=kpis,
         charts=[{"title": "Servers by telemetry coverage",
                  "series": {"kind": "donut", "unit": "servers",
