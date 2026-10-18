@@ -913,20 +913,33 @@ async def get_device_interfaces(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List SNMP-discovered interfaces for a device."""
+    """List SNMP-discovered interfaces for a device.
+
+    ``last_up_at`` is the last time the poller saw the port up; ``ever_up`` is
+    false for a port never seen up (an unused access port), the baseline the
+    Interface-down alert uses to tell an unexpected outage from a spare port."""
     from sqlalchemy import text
-    rows = (await db.execute(
-        text("""
+    sql = """
             SELECT id, if_index, if_name, if_descr, if_alias, if_type, if_speed,
                    configured_speed_bps,
                    mac_address::text AS mac_address, admin_status, oper_status,
-                   monitored, first_seen, last_seen
+                   monitored, first_seen, last_seen, {last_up}
             FROM device_interfaces
             WHERE device_id = :id
             ORDER BY if_index
-        """),
-        {"id": device_id},
-    )).mappings().all()
+        """
+    try:
+        rows = (await db.execute(
+            text(sql.format(last_up="last_up_at, last_up_at IS NOT NULL AS ever_up")), {"id": device_id},
+        )).mappings().all()
+    except Exception as exc:
+        # Rolling upgrade: code ahead of migrate-126. Every port counts as seen up.
+        if "last_up_at" not in str(exc):
+            raise
+        await db.rollback()
+        rows = (await db.execute(
+            text(sql.format(last_up="NULL::timestamptz AS last_up_at, TRUE AS ever_up")), {"id": device_id},
+        )).mappings().all()
     return [dict(r) for r in rows]
 
 
@@ -2167,6 +2180,7 @@ async def get_device_page_summary(
         "template": {"name": profile["name"], "vendor": profile["vendor"],
                      "updated_at": _iso(template_updated)} if profile else None,
         "health": {**_insights.health_rollup(issues), "groups": [_insights.group_digest(g) for g in shown_groups]},
+        "kpis": _insights.template_kpis(shown_groups),
         "issues": issues,
         "not_applicable": not_applicable,
         "interfaces": {k: v for k, v in interfaces.items() if k != "unexpected"} | {

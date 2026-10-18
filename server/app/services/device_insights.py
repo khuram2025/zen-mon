@@ -516,3 +516,63 @@ def resolve_identity(device: dict, groups: list[dict], chassis: dict | None,
                               ("device", device.get("serial_number")), ("template", template_text.get("serial_number")),
                               ("entity", chassis.get("serial_number"))),
     }
+
+
+# ── Summary KPIs from template readings ────────────────────────────────────
+
+_CPU_NAME = re.compile(r"^(cpu|cpu usage|cpu utili[sz]ation|cpu load)$", re.I)
+_MEM_NAME = re.compile(r"^(memory|memory usage|memory utili[sz]ation|system ram utili[sz]ation)$", re.I)
+_HIGHLIGHTS = (
+    ("sessions", re.compile(r"^(active sessions|sessions|active connections|connections|current connections)$", re.I),
+     re.compile(r"(session setup rate|session rate|connections/s|new connections)", re.I)),
+    ("clients", re.compile(r"^(wifi clients|clients|wireless clients|associated clients)$", re.I), None),
+)
+
+
+def _scalar_metrics(groups: list[dict]):
+    for g in groups:
+        if g.get("kind") == "scalar" and g.get("applicable") is not False:
+            for m in g.get("metrics") or []:
+                yield g, m
+
+
+def template_kpis(groups: list[dict]) -> dict:
+    """Thresholds for the CPU and memory tiles and up to two vendor highlights
+    (sessions for a firewall, PoE for a switch, clients for a controller)."""
+    out: dict = {"cpu_thresholds": None, "memory_thresholds": None, "highlights": []}
+    for _, m in _scalar_metrics(groups):
+        name = (m.get("name") or "").strip()
+        if out["cpu_thresholds"] is None and m.get("thresholds") and _CPU_NAME.match(name):
+            out["cpu_thresholds"] = m["thresholds"]
+        if out["memory_thresholds"] is None and m.get("thresholds") and _MEM_NAME.match(name):
+            out["memory_thresholds"] = m["thresholds"]
+    for kind, main, rate in _HIGHLIGHTS:
+        found = next((m for _, m in _scalar_metrics(groups)
+                      if m.get("has_data") and m.get("value") is not None and main.match((m.get("name") or "").strip())), None)
+        if not found:
+            continue
+        sub = None
+        if rate:
+            r = next((m for _, m in _scalar_metrics(groups)
+                      if m.get("has_data") and m.get("value") is not None and rate.search(m.get("name") or "")), None)
+            if r:
+                sub = f"{_fmt_number(float(r['value']), r.get('unit'))} setup rate"
+        out["highlights"].append({"kind": kind, "label": "Sessions" if kind == "sessions" else "Wireless clients",
+                                  "value": found["value"], "unit": found.get("unit"), "sub": sub,
+                                  "series_key": found.get("series_key")})
+    poe = next((g for g in groups if g.get("key") == "poe" and g.get("kind") == "table"
+                and g.get("applicable") is not False), None)
+    if poe:
+        cols = {(c.get("name") or "").lower(): c["key"] for c in poe.get("columns") or []}
+        budget_key, used_key = cols.get("budget"), cols.get("consumed")
+        if budget_key and used_key:
+            budget = sum(r["cells"][budget_key]["value"] for r in poe.get("rows") or []
+                         if r["cells"].get(budget_key, {}).get("value") is not None)
+            used = sum(r["cells"][used_key]["value"] for r in poe.get("rows") or []
+                       if r["cells"].get(used_key, {}).get("value") is not None)
+            if budget:
+                out["highlights"].append({"kind": "poe", "label": "PoE power", "value": used, "unit": "W",
+                                          "sub": f"of {_fmt_number(budget, 'W')} budget ({used / budget * 100:.0f}%)",
+                                          "series_key": None})
+    out["highlights"] = out["highlights"][:2]
+    return out

@@ -307,3 +307,25 @@ async def test_summary_404_for_unknown_device(summary_env):
     with pytest.raises(devices_api.HTTPException) as exc:
         await devices_api.get_device_page_summary(uuid4(), _DB(), NS(id=uuid4()))
     assert exc.value.status_code == 404
+
+
+def test_template_kpis_pick_thresholds_and_vendor_highlights():
+    tpl = [dict(g) for g in FORTIGATE]
+    system = next(g for g in tpl if g["key"] == "system")
+    system["metrics"] = system["metrics"] + [
+        {"key": "fgt_sessions", "name": "Active Sessions", "type": "gauge", "unit": "sessions"},
+        {"key": "fgt_ses_rate", "name": "Session Setup Rate (1m)", "type": "gauge", "unit": "sessions/s"}]
+    vals = _fortigate_values() + [_v("system", "fgt_sessions", 16873), _v("system", "fgt_ses_rate", 136)]
+    groups, _ = di.shape_template_groups(tpl, vals)
+    out = di.template_kpis(groups)
+    assert out["cpu_thresholds"] == {"warn": 80, "crit": 90}
+    assert out["memory_thresholds"] == {"warn": 80, "crit": 88}
+    assert out["highlights"][0] == {"kind": "sessions", "label": "Sessions", "value": 16873, "unit": "sessions",
+                                    "sub": "136 sessions/s setup rate", "series_key": "tpl_fgt_sessions_"}
+    assert out["highlights"][1]["kind"] == "clients"
+    poe = [{"key": "poe", "name": "PoE Budget", "kind": "table", "metrics": [
+        {"key": "b", "name": "Budget", "type": "gauge", "unit": "W"},
+        {"key": "c", "name": "Consumed", "type": "gauge", "unit": "W"}]}]
+    groups, _ = di.shape_template_groups(poe, [_v("poe", "b", 740, instance="1"), _v("poe", "c", 54, instance="1")])
+    assert di.template_kpis(groups)["highlights"] == [
+        {"kind": "poe", "label": "PoE power", "value": 54, "unit": "W", "sub": "of 740 W budget (7%)", "series_key": None}]
