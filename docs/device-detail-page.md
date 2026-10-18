@@ -21,13 +21,14 @@ is wrong right now, and where do I go next.
 
 | Tab | Purpose |
 |---|---|
-| Summary | KPIs (checks answered, latency, CPU, memory, a vendor highlight such as sessions or PoE, interfaces), latency and loss against the Degraded limits with the check strip, recent events, WAN and busiest interfaces, health groups with values, NetFlow. |
-| Performance | Synced charts (CPU, memory, latency, loss, sessions, temperature) with thresholds and min/avg/p95/max; CSV export. A reading opened from another tab is pinned at the top. |
+| Summary | KPIs (checks answered, latency, CPU, memory, a vendor highlight such as sessions or PoE, interfaces), latency and loss against the Degraded limits with the check strip, recent events, WAN and busiest interfaces, health groups with values, related devices, NetFlow. |
+| Performance | Synced charts (CPU, memory, latency, loss, sessions, temperature) with thresholds and min/avg/p95/max; compare with the previous period; CSV and PNG export. A reading opened from another tab is pinned at the top. |
 | Interfaces | The interface table inside the device shell (`/devices/:id/interfaces` redirects here). |
-| *Vendor* metrics | The template's own groups (tunnels, SD-WAN, APs, VDOMs, pools…). |
+| *Vendor* metrics | The template's groups that no declared vendor tab and not Hardware takes. Left out once the declared tabs cover every group. |
+| *Template tabs* | Tabs the template declares, e.g. *VPN & SD-WAN*, *Wireless*, *Pools & virtual servers* (see below). |
 | Hardware | Template hardware groups (sensors, PSU, fans, temperature, stack, PoE, memory pools, disks, optics) and the ENTITY-MIB component inventory. |
 | Events | One range-bound timeline of alerts, status changes, flapping, traps, reboots and maintenance. |
-| Configuration | Identity and monitoring, monitoring sites, the status policy, configuration backups and connected endpoints. |
+| Configuration | Identity and monitoring, owner and notes, monitoring sites, the status policy, configuration backups and connected endpoints. |
 
 Old links keep working: `?tab=overview` opens Summary and `?tab=inventory`
 opens Configuration.
@@ -100,3 +101,102 @@ with units; percentages of CPU and memory as whole numbers; missing values as
 "—". Percent sparklines use a fixed 0–100 scale. Trends are absolute deltas
 against the range average and are coloured only past a significance band or a
 threshold.
+
+## Vendor tabs
+
+A template groups its domain readings into tabs by declaring `tab` on a group:
+
+```json
+{"key": "ipsec", "name": "IPsec Tunnels", "kind": "table", "tab": "VPN & SD-WAN", "metrics": [...]}
+```
+
+`"tab": null` (or an empty string) keeps a group in the default "*Vendor* metrics"
+tab. A group that declares nothing gets the built-in tab for its key from
+`device_insights.BUILTIN_TABS`: IPsec, SD-WAN, SSL-VPN and GlobalProtect go to
+*VPN & SD-WAN*; FortiAP and wireless controller groups to *Wireless*; F5 pools,
+pool members, nodes and virtual servers to *Pools & virtual servers*; session
+tables to *Sessions*; VDOMs and virtual systems to their own tab. Hardware
+groups stay on Hardware unless the template declares otherwise.
+
+The summary (`template.tabs`) and template-insights (`tabs`) APIs list the
+declared tabs that have readings, in template order, with their groups; each
+group digest carries its `tab`. The tab URL id is `tpl-<slug>`
+(`?tab=tpl-vpn-sd-wan`). Issues, health groups and `?group=` links open the tab
+that shows the group; an unknown tab id opens Summary. A declared tab keeps its
+own widget layout (section = the tab id).
+
+## Related
+
+`GET /devices/{id}/related` (devices.view, device scope) answers the Related
+panel on the Summary tab:
+
+* **Depends on**: the managing controller (`managed_by_device_id`) and upstream
+  topology dependencies (with type and whether they suppress alerts).
+* **Depends on this device**: managed devices (counts by status; the ones not
+  Up are listed) and downstream dependencies.
+* **On network maps** (maps.view only): the maps that show the device, each
+  linked as `/maps/manual?map=…&mode=live&focus=<device id>` (the map opens
+  centred on the device with it selected), and the devices linked to it there.
+  No LLDP/CDP neighbour table is collected, so map links are the neighbour source.
+* **Changed at the same time**: devices whose confirmed status changed within
+  ±2 minutes of one of this device's last five confirmed transitions (last 30
+  days), from `device_status_log`, with the offset ("Down 40 s after this device
+  went Down"). The log is only read.
+
+Every listed device is filtered by the caller's tag scope. A section whose
+source is unavailable is `null` and named in `unavailable`.
+
+## Owner and notes
+
+`devices.owner` and `devices.notes` (migrate-165) are free text set through
+`PUT /devices/{id}` with devices.manage; blank clears. The owner shows in the
+header identity strip; both show on the Configuration tab.
+
+## Saved layouts
+
+Widget layouts are saved on the server per user, per device or vendor/type
+template, and per tab (`device_widget_layouts`, migrate-165):
+`GET /devices/{id}/widget-layouts?vendor=&device_type=`, and
+`PUT`/`DELETE /devices/{id}/widget-layouts/{section}` with `scope` `device` or
+`template`. Saving one's own layout needs only devices.view. The browser keeps
+a copy so the page renders at once: a copy marked `synced` mirrors the server;
+an unmarked one (saved before this release or while the server was
+unreachable) is uploaded the first time the server has nothing for that slot;
+a synced copy the server no longer has was reset elsewhere and is dropped. The
+rules are unchanged: a device layout wins over the vendor/type template, an
+empty layout is the "standard layout" override, and entries for temporarily
+absent widgets are kept.
+
+## Alert names
+
+Device status alerts are named after the condition that triggered them, not the
+rule name and new status:
+
+| Transition | Title |
+|---|---|
+| to Degraded by loss | `Packet loss 33% (limit 10%)` |
+| to Degraded by latency | `Latency 412 ms (limit 100 ms)` |
+| both | `Packet loss 33% (limit 10%) · latency 412 ms (limit 100 ms)` |
+| window degradation, latest check within limits | `Latency or packet loss over limits on recent checks` |
+| to Down | `No response` |
+| back to Up | `Responding again` / `Latency and packet loss back within limits` |
+
+The stored message is `<condition> — <host> (<ip>)` and the alert metadata
+carries `condition`, `condition_metric`, `condition_value` and
+`condition_limit` (`app.services.alert_condition`). The limits are the status
+policy's Degraded limits and the over-limit test is the status machine's own
+predicate; which rules match, thresholds and the device-status contract are
+unchanged. On the device's own page the title drops the repeated host and IP;
+alerts raised before this read "<rule> · Degraded". The rule stays visible
+beside the title.
+
+## Performance comparison and export
+
+"Compare with the previous period" (`?compare=previous`) overlays the window
+just before the current one, shifted onto the same time axis and drawn dashed,
+and states the change of the average in the metric's own unit ("+3 pt", "−22
+ms"). Missing samples on either side make the change unknown, never zero. SNMP
+readings use `GET /devices/{id}/snmp-metrics?hours=N&offset_hours=N`.
+"Export PNG" draws every chart with its statistics line onto one image in the
+current theme; nothing leaves the browser.
+

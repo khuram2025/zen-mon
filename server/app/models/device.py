@@ -109,6 +109,9 @@ class Device(Base):
 
     # Metadata
     description: Mapped[str] = mapped_column(Text, nullable=True)
+    # Who looks after it and operational notes (migrate-165); free text, NULL = none.
+    owner: Mapped[str] = mapped_column(String(255), nullable=True)
+    notes: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)

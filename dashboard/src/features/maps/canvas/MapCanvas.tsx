@@ -170,9 +170,11 @@ export type MapCanvasProps = {
   showProblems?: boolean
   /** Lets the palette (outside the ReactFlow tree) insert a shape at the viewport centre. */
   insertRef?: React.MutableRefObject<((spec: ShapeSpec) => void) | null>
+  /** ?focus=<device id> (the device page's Related panel): centre on that device's node and select it. */
+  focusDeviceId?: string | null
 }
 
-export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, liveMode, showThroughput, showIfaceLabels = true, animate = true, showProblems = true, insertRef }: MapCanvasProps) {
+export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, liveMode, showThroughput, showIfaceLabels = true, animate = true, showProblems = true, insertRef, focusDeviceId }: MapCanvasProps) {
   const navigate = useNavigate()
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
@@ -263,6 +265,23 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     return () => clearTimeout(t)
   }, [mapId, liveMode, fitView])
   useEffect(() => { if (!liveMode) setLiveFocusId(null) }, [liveMode])
+  // Deep link from a device page: once per map, after the initial fit, centre on the device and select it
+  // (in live mode its detail card opens too).
+  const focusedFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (!focusDeviceId || focusedFor.current === `${mapId}:${focusDeviceId}`) return
+    const node = detail.nodes.find((n) => n.device_id === focusDeviceId)
+    if (!node) return
+    focusedFor.current = `${mapId}:${focusDeviceId}`
+    const c = pctToPx(node)
+    const t = setTimeout(() => {
+      setCenter(c.x, c.y, { zoom: 1.4, duration: 450 })
+      selectedIds.current = new Set([node.id])
+      setNodes((all) => all.map((n) => ({ ...n, selected: n.id === node.id })))
+      if (liveMode) setLiveFocusId(node.id)
+    }, 450)
+    return () => clearTimeout(t)
+  }, [focusDeviceId, mapId, detail.nodes, liveMode, setCenter, setNodes])
 
   /* ── Smart alignment guides ──────────────────────────────────────────── */
   const onNodesChangeSmart = useCallback((changes: NodeChange[]) => {

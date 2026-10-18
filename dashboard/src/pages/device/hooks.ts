@@ -67,6 +67,17 @@ export function useSnmpMetrics(id: string, hours: number, enabled: boolean, poll
   })
 }
 
+/** SNMP readings for the window `offsetHours` before the current one (the previous-period comparison). */
+export function useSnmpMetricsBefore(id: string, hours: number, offsetHours: number, enabled: boolean) {
+  return useQuery<MetricSeriesMap>({
+    queryKey: ['device', id, 'snmp-metrics', hours, 'offset', offsetHours],
+    queryFn: async () => (await api.get(`/devices/${id}/snmp-metrics?hours=${hours}&offset_hours=${offsetHours}`)).data,
+    staleTime: 5 * 60_000,
+    placeholderData: keepPreviousData,
+    enabled,
+  })
+}
+
 /** The availability headline: the shared uptime-stats calculation, narrowed to this device. */
 export function useDeviceAvailability(id: string, range: DeviceRange, enabled: boolean) {
   return useQuery<{ devices: Record<string, number>; failed_checks?: Record<string, number> }>({

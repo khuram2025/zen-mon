@@ -98,6 +98,7 @@ export function DeviceHeader({
     { label: 'Uptime', value: uptimeSeconds != null ? formatSpan(uptimeSeconds) : MISSING },
     { label: 'Site', value: device.location || 'Not assigned' },
     { label: 'Group', value: device.group_name || 'No group' },
+    ...(device.owner ? [{ label: 'Owner', value: device.owner }] : []),
   ]
 
   return (

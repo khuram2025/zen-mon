@@ -63,6 +63,24 @@ export function stripAlertPrefix(message: string | null | undefined): string {
   return (message || '').replace(/^\s*\[ZenPlus\s+[A-Za-z_-]+\]\s*/, '').trim()
 }
 
+/** An alert's title on its own device's page: the triggering condition without the repeated hostname and IP
+ *  ("Packet loss 33% (limit 10%)"); the same rules as the summary API's device_insights.alert_title.
+ *  Status alerts raised before the condition was recorded ("<rule>: <host> (<ip>) is DEGRADED") become
+ *  "<rule> · Degraded". */
+export function deviceAlertTitle(message: string | null | undefined, condition?: string | null, hostname?: string | null, ip?: string | null): string {
+  if (condition && condition.trim()) return condition.trim()
+  const text = stripAlertPrefix(message)
+  const legacy = /^(.+?):\s+(.+?)\s+(?:is\s+([A-Z]+)|recovered\s+—\s+UP)\s*$/.exec(text)
+  if (legacy && hostname && legacy[2].split(' (')[0] === hostname) {
+    const status = legacy[3] ? legacy[3][0] + legacy[3].slice(1).toLowerCase() : 'Recovered'
+    return `${legacy[1]} · ${status}`
+  }
+  if (hostname) {
+    for (const suffix of [` — ${hostname} (${ip})`, ` — ${hostname}`]) if (text.endsWith(suffix)) return text.slice(0, -suffix.length)
+  }
+  return text
+}
+
 export function alertSeverity(severity: string | null | undefined): EventSeverity {
   const s = (severity || '').toLowerCase()
   if (s === 'critical' || s === 'high' || s === 'emergency' || s === 'alert') return 'critical'
@@ -79,14 +97,15 @@ export type AlertRow = {
   triggered_at?: string | null
   acknowledged_at?: string | null
   resolved_at?: string | null
+  metadata?: { condition?: string | null } | null
 }
 
-export function alertEvents(alerts: AlertRow[]): TimelineEvent[] {
+export function alertEvents(alerts: AlertRow[], device?: { hostname?: string | null; ip_address?: string | null }): TimelineEvent[] {
   return alerts.flatMap((a): TimelineEvent[] => {
     const ts = eventTime(a.triggered_at)
     if (ts == null || !a.id) return []
     const status = a.status === 'active' || a.status === 'acknowledged' || a.status === 'resolved' ? a.status : undefined
-    const message = stripAlertPrefix(a.message)
+    const message = deviceAlertTitle(a.message, a.metadata?.condition, device?.hostname, device?.ip_address)
     const title = message || a.rule_name || 'Alert'
     return [{
       id: `alert-${a.id}`,

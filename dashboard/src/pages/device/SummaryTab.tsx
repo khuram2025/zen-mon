@@ -15,6 +15,7 @@ import {
 import { useDeviceAvailability, usePingMetrics, useSnmpMetrics } from './hooks'
 import { KpiTile, UsageBar } from './KpiTile'
 import { DeviceNetflowCard, useDeviceNetflow } from './NetflowCard'
+import { RelatedPanel } from './RelatedPanel'
 import type { DeviceTabId } from './tabs'
 import type { DeviceRange, DeviceRecord, DeviceSummary, HealthGroupDigest, Thresholds } from './types'
 
@@ -24,7 +25,8 @@ const STATUS_DOT: Record<string, string> = {
 
 /** Is it healthy, and what is wrong? KPIs by device profile, latency and loss
  *  against the status limits, recent events, the busiest (WAN first)
- *  interfaces and template health groups with their values. */
+ *  interfaces, template health groups with their values and related devices
+ *  (dependencies, maps, same-time status changes). */
 export function SummaryTab({ device, summary, range, onOpen }: {
   device: DeviceRecord
   summary?: DeviceSummary
@@ -136,6 +138,8 @@ export function SummaryTab({ device, summary, range, onOpen }: {
     panels.push({ id: 'health-groups', title: 'Health groups', width: 6, height: 8, minWidth: 3, minHeight: 5,
       content: <HealthGroupsPanel groups={summary.health.groups} notApplicable={summary.not_applicable} onOpen={onOpen} /> })
   }
+  panels.push({ id: 'related', title: 'Related', width: 6, height: 9, minWidth: 3, minHeight: 5,
+    content: <RelatedPanel deviceId={id} /> })
   if (netflow.hasNetflow && netflow.overview) {
     panels.push({ id: 'netflow', title: 'NetFlow', width: 12, height: 11, minWidth: 4, minHeight: 7,
       content: <DeviceNetflowCard deviceId={id} exporter={netflow.exporter} qs={netflow.qs} overview={netflow.overview} range={range} /> })

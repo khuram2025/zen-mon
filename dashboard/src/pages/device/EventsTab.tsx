@@ -108,11 +108,11 @@ export function EventsTab({ device, summary, range }: { device: DeviceRecord; su
     // The full log keeps every status change; those made while flapping are marked, between the start and stop rows.
     const activity = buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO, episodes || [], false)
     return mergeEvents(
-      alertEvents(alertsQ.data?.data || []),
+      alertEvents(alertsQ.data?.data || [], device),
       activityToTimeline(activity),
       maintenanceEvents(maintenanceQ.data),
     )
-  }, [traps, statusHistory, metrics, range.fromISO, range.toISO, episodes, alertsQ.data, maintenanceQ.data])
+  }, [traps, statusHistory, metrics, range.fromISO, range.toISO, episodes, alertsQ.data, maintenanceQ.data, device])
 
   const sources: Source[] = [
     { key: 'alerts', label: 'Alerts', enabled: canAlerts, query: alertsQ, truncated: (alertsQ.data?.data?.length ?? 0) >= ALERT_LIMIT },

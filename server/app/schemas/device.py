@@ -71,6 +71,9 @@ class DeviceUpdate(BaseModel):
     ping_enabled: Optional[bool] = None
     ping_interval: Optional[int] = Field(default=None, ge=10, le=3600)
     description: Optional[str] = None
+    # Device page "Owner and notes" (migrate-165). Blank clears.
+    owner: Optional[str] = Field(default=None, max_length=255)
+    notes: Optional[str] = Field(default=None, max_length=20000)
 
     # SNMP — all optional
     snmp_enabled: Optional[bool] = None
@@ -122,6 +125,8 @@ class DeviceResponse(BaseModel):
     flap_kind: Optional[str] = None
     status_changed_at: Optional[datetime] = None
     description: Optional[str]
+    owner: Optional[str] = None
+    notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

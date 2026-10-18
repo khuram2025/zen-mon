@@ -1,39 +1,124 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { GripHorizontal, Maximize2, RotateCcw, Save, Settings2, X } from 'lucide-react'
 import { useAuth } from '@/stores/auth'
 import { Button } from '@/components/ui/Button'
 import { toast } from '@/components/ui/Toast'
+import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { changeWidgetLayout, defaultWidgetLayout, GRID_COLUMNS, GRID_GAP, GRID_ROW, mergeWidgetLayout, readWidgetLayout, restoreWidgetLayout, widgetLayoutKey, widgetTemplateKey, effectiveWidgetLayout, type WidgetDefinition, type WidgetPosition } from './widgetLayout'
+import {
+  changeWidgetLayout, defaultWidgetLayout, effectiveWidgetLayout, GRID_COLUMNS, GRID_GAP, GRID_ROW, layoutTemplateIdentity, mergeWidgetLayout,
+  readStoredLayout, reconcileLayout, restoreWidgetLayout, storedLayoutValue, widgetLayoutKey, widgetTemplateKey,
+  type WidgetDefinition, type WidgetPosition,
+} from './widgetLayout'
 import './deviceWidgetGrid.css'
 
 export type DeviceWidget = WidgetDefinition & { title: string; content: ReactNode; compact?: boolean }
 export type DeviceLayoutContext = { vendor?: string; deviceType?: string }
+
+type LayoutSlot = 'device' | 'template'
+type TemplateIdentity = { vendor: string; device_type: string }
+/** GET /devices/{id}/widget-layouts: the user's layouts for this device and its vendor/type, per section. */
+type ServerLayouts = {
+  device: Record<string, { items: WidgetPosition[]; updated_at?: string | null }>
+  template: Record<string, { items: WidgetPosition[]; updated_at?: string | null }>
+  template_key: TemplateIdentity | null
+}
+
+const layoutsKey = (deviceId: string, identity: TemplateIdentity | null) =>
+  ['device-widget-layouts', deviceId, identity?.vendor ?? '', identity?.device_type ?? ''] as const
+
+/** The user's server-saved layouts for one device page (every tab shares the one request). */
+function useServerLayouts(deviceId: string, identity: TemplateIdentity | null) {
+  return useQuery<ServerLayouts>({
+    queryKey: layoutsKey(deviceId, identity),
+    queryFn: async () => (await api.get(`/devices/${deviceId}/widget-layouts`, { params: identity ?? {} })).data,
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+
 export function DeviceWidgetGrid({ deviceId, widgets, section = 'overview', vendor, deviceType, visibleWidgetIds, onStartEdit }: {
   deviceId: string; widgets: DeviceWidget[]; section?: string; visibleWidgetIds?: string[]; onStartEdit?: () => void
 } & DeviceLayoutContext) {
   const userId = useAuth(state => state.user?.id) || 'anonymous'
   const storageKey = widgetLayoutKey(userId, deviceId, section)
   const templateKey = widgetTemplateKey(userId, vendor, deviceType, section)
-  return <WidgetGrid key={`${storageKey}:${templateKey}`} storageKey={storageKey} templateKey={templateKey} templateLabel={`${vendor} / ${deviceType}`} widgets={widgets} visibleWidgetIds={visibleWidgetIds} onStartEdit={onStartEdit} />
+  const identity = useMemo(() => layoutTemplateIdentity(vendor, deviceType), [vendor, deviceType])
+  const server = useServerLayouts(deviceId, identity)
+  return <WidgetGrid key={`${storageKey}:${templateKey}`} storageKey={storageKey} templateKey={templateKey} templateLabel={`${vendor} / ${deviceType}`}
+    widgets={widgets} visibleWidgetIds={visibleWidgetIds} onStartEdit={onStartEdit}
+    remote={{ deviceId, section, identity, data: server.data }} />
 }
 function storedLayout(key: string | null) {
-  try { return key ? readWidgetLayout(localStorage.getItem(key)) : null } catch { return null }
+  try { return key ? readStoredLayout(localStorage.getItem(key)) : null } catch { return null }
+}
+function writeStored(key: string | null, items: WidgetPosition[] | null, synced: boolean) {
+  if (!key) return
+  try {
+    if (items === null) localStorage.removeItem(key)
+    else localStorage.setItem(key, storedLayoutValue(items, synced))
+  } catch { /* private mode: the server copy still applies */ }
 }
 
+type Remote = { deviceId: string; section: string; identity: TemplateIdentity | null; data: ServerLayouts | undefined }
 type Gesture = { mode: 'move' | 'resize'; widget: DeviceWidget; start: WidgetPosition; layout: WidgetPosition[]; clientX: number; clientY: number; scrollY: number; cell: number; pointerId: number }
-function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWidgetIds, onStartEdit }: {
+function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWidgetIds, onStartEdit, remote }: {
   storageKey: string; templateKey: string | null; templateLabel: string; widgets: DeviceWidget[]; visibleWidgetIds?: string[]; onStartEdit?: () => void
+  remote: Remote
 }) {
-  const [saved, setSaved] = useState<WidgetPosition[] | null>(() => storedLayout(storageKey))
-  const [template, setTemplate] = useState<WidgetPosition[] | null>(() => storedLayout(templateKey))
+  const qc = useQueryClient()
+  const [saved, setSaved] = useState<WidgetPosition[] | null>(() => storedLayout(storageKey)?.items ?? null)
+  const [template, setTemplate] = useState<WidgetPosition[] | null>(() => storedLayout(templateKey)?.items ?? null)
   const [saveScope, setSaveScope] = useState<'device' | 'template'>('device')
+  const [busy, setBusy] = useState(false)
   useEffect(() => {
-    const refresh = () => { setSaved(storedLayout(storageKey)); setTemplate(storedLayout(templateKey)) }
+    const refresh = () => { setSaved(storedLayout(storageKey)?.items ?? null); setTemplate(storedLayout(templateKey)?.items ?? null) }
     window.addEventListener('storage', refresh)
     window.addEventListener('zenplus-widget-layout', refresh)
     return () => { window.removeEventListener('storage', refresh); window.removeEventListener('zenplus-widget-layout', refresh) }
   }, [storageKey, templateKey])
+
+  /** Save (items) or forget (null) one slot on the server, then mirror it in the query cache. */
+  async function persist(slot: LayoutSlot, items: WidgetPosition[] | null): Promise<boolean> {
+    if (slot === 'template' && !remote.identity) return false
+    const url = `/devices/${remote.deviceId}/widget-layouts/${encodeURIComponent(remote.section)}`
+    try {
+      if (items === null) await api.delete(url, { params: { scope: slot, ...(slot === 'template' ? remote.identity : {}) } })
+      else await api.put(url, { scope: slot, ...(slot === 'template' ? remote.identity : {}), items })
+    } catch { return false }
+    qc.setQueryData<ServerLayouts>(layoutsKey(remote.deviceId, remote.identity), (old) => {
+      if (!old) return old
+      const next = { ...old[slot] }
+      if (items === null) delete next[remote.section]
+      else next[remote.section] = { items, updated_at: new Date().toISOString() }
+      return { ...old, [slot]: next }
+    })
+    return true
+  }
+
+  // Once the server answers: its copy wins; a browser-only copy is uploaded once; a synced copy the server
+  // no longer has was reset elsewhere and is dropped.
+  const serverDevice = remote.data ? (remote.data.device?.[remote.section]?.items ?? null) : undefined
+  const serverTemplate = remote.data ? (remote.identity ? (remote.data.template?.[remote.section]?.items ?? null) : null) : undefined
+  const serverSignature = remote.data ? JSON.stringify([serverDevice, serverTemplate]) : ''
+  useEffect(() => {
+    if (!remote.data) return
+    const slots: Array<[LayoutSlot, string | null, WidgetPosition[] | null | undefined, (v: WidgetPosition[] | null) => void]> = [
+      ['device', storageKey, serverDevice, setSaved], ['template', templateKey, serverTemplate, setTemplate]]
+    for (const [slot, key, server, set] of slots) {
+      if (!key) continue
+      const outcome = reconcileLayout(storedLayout(key), server)
+      if (outcome.local === 'write') writeStored(key, outcome.items, true)
+      if (outcome.local === 'remove') writeStored(key, null, false)
+      set(outcome.items)
+      if (outcome.upload && outcome.items) {
+        const items = outcome.items
+        void persist(slot, items).then((ok) => { if (ok) writeStored(key, items, true) })
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverSignature, storageKey, templateKey])
   const [draft, setDraft] = useState<WidgetPosition[] | null>(null)
   const editing = draft !== null
   const [standardDraft, setStandardDraft] = useState(false)
@@ -103,29 +188,43 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
     event.preventDefault()
     apply(widget, mode === 'move' ? { x: item.x + delta[0], y: item.y + delta[1] } : { w: item.w + delta[0], h: item.h + delta[1] })
   }
-  function save() {
-    const destination = saveScope === 'template' ? templateKey : storageKey
-    if (!destination) return
+  async function save() {
+    const slot: LayoutSlot = saveScope
+    const destination = slot === 'template' ? templateKey : storageKey
+    if (!destination || busy) return
     // An empty override intentionally opts into the responsive standard layout.
     // It also overrides a template without deleting that template's preferences.
-    const items = standardDraft ? [] : mergeWidgetLayout(saveScope === 'template' ? template : effectiveWidgetLayout(saved, template), layout)
+    const items = standardDraft ? [] : mergeWidgetLayout(slot === 'template' ? template : effectiveWidgetLayout(saved, template), layout)
+    setBusy(true)
+    const onServer = await persist(slot, items)
+    // Choosing the template for this device also forgets this device's own layout.
+    if (slot === 'template' && onServer) await persist('device', null)
+    setBusy(false)
     try {
-      localStorage.setItem(destination, JSON.stringify({ version: 1, items }))
-      if (saveScope === 'template') { localStorage.removeItem(storageKey); setSaved(null); setTemplate(items) }
+      localStorage.setItem(destination, storedLayoutValue(items, onServer))
+      if (slot === 'template') { localStorage.removeItem(storageKey); setSaved(null); setTemplate(items) }
       else setSaved(items)
-      setDraft(null)
-      const message = saveScope === 'template' ? `Template saved for ${templateLabel}. Matching devices without their own layout inherit it.` : 'Layout saved for this device.'
-      setNotice(message)
-      window.dispatchEvent(new Event('zenplus-widget-layout'))
-      toast.success('Layout saved', message)
-    } catch { toast.error('Could not save layout', 'Browser storage is unavailable. Your edits are still open; try again or cancel.') }
+    } catch {
+      if (!onServer) { toast.error('Could not save layout', 'The server and browser storage are both unavailable. Your edits are still open; try again or cancel.'); return }
+      if (slot === 'template') { setSaved(null); setTemplate(items) } else setSaved(items)
+    }
+    setDraft(null)
+    const message = slot === 'template' ? `Template saved for ${templateLabel}. Matching devices without their own layout inherit it.` : 'Layout saved for this device.'
+    setNotice(message)
+    window.dispatchEvent(new Event('zenplus-widget-layout'))
+    if (onServer) toast.success('Layout saved', `${message} It follows your account to other browsers.`)
+    else toast.warning('Layout saved in this browser only', 'The server could not be reached. It is uploaded the next time this page loads.')
   }
-  function inheritTemplate() {
-    try {
-      localStorage.removeItem(storageKey); setSaved(null); setDraft(null)
-      setNotice('This tab now follows the vendor and device type template.')
-      window.dispatchEvent(new Event('zenplus-widget-layout'))
-    } catch { toast.error('Could not apply template', 'Browser storage is unavailable.') }
+  async function inheritTemplate() {
+    if (busy) return
+    setBusy(true)
+    const onServer = await persist('device', null)
+    setBusy(false)
+    try { localStorage.removeItem(storageKey) } catch { /* nothing cached */ }
+    if (!onServer) toast.warning('Template applied in this browser only', 'The server could not be reached; your saved layout for this device is still on the server.')
+    setSaved(null); setDraft(null)
+    setNotice('This tab now follows the vendor and device type template.')
+    window.dispatchEvent(new Event('zenplus-widget-layout'))
   }
   const handlers = (mode: Gesture['mode'], widget: DeviceWidget, item: WidgetPosition) => ({
     onPointerDown: (event: PointerEvent<HTMLButtonElement>) => begin(event, mode, widget, item),
@@ -161,7 +260,7 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
   const panels = ordered.filter(item => !definitions.get(item.id)?.compact)
   return <div className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
-      <p className="text-xs text-muted" title={editing ? undefined : 'Layouts are saved for your account in this browser, separately for each device section.'}>{editing ? 'Move or resize cards using the handles or arrow keys. Save when finished.' : standard ? 'Standard layout' : saved ? 'Custom layout' : 'Vendor / type layout'}</p>
+      <p className="text-xs text-muted" title={editing ? undefined : 'Layouts are saved for your account, separately for each device section, and follow you to other browsers.'}>{editing ? 'Move or resize cards using the handles or arrow keys. Save when finished.' : standard ? 'Standard layout' : saved ? 'Custom layout' : 'Vendor / type layout'}</p>
       <div className="flex flex-wrap items-center gap-2">
         {editing ? <>
           <label className="flex items-center gap-2 text-xs text-muted">Save layout for
@@ -172,14 +271,14 @@ function WidgetGrid({ storageKey, templateKey, templateLabel, widgets, visibleWi
           </label>
           <Button size="sm" variant="outline" onClick={() => { setDraft(defaultWidgetLayout(widgets)); setStandardDraft(true); setNotice('Standard layout selected. Save to restore automatic sizing.') }}><RotateCcw className="h-3.5 w-3.5" />Restore standard</Button>
           <Button size="sm" variant="outline" onClick={() => { setDraft(null); setNotice('Layout changes discarded.') }}><X className="h-3.5 w-3.5" />Cancel</Button>
-          <Button size="sm" onClick={save}><Save className="h-3.5 w-3.5" />Save layout</Button>
+          <Button size="sm" onClick={() => void save()} disabled={busy}><Save className="h-3.5 w-3.5" />{busy ? 'Saving…' : 'Save layout'}</Button>
         </> : <>
-          {saved && template && <Button size="sm" variant="outline" onClick={inheritTemplate}>Use vendor/type template</Button>}
+          {saved && template && <Button size="sm" variant="outline" disabled={busy} onClick={() => void inheritTemplate()}>Use vendor/type template</Button>}
           <Button size="sm" variant="outline" onClick={() => { onStartEdit?.(); setSaveScope('device'); setStandardDraft(false); setDraft(layout); setNotice('Layout editing enabled.') }}><Settings2 className="h-3.5 w-3.5" />Edit layout</Button>
         </>}
       </div>
     </div>
-    {editing && saveScope === 'template' && <p className="text-xs text-muted">Applies to this tab for {templateLabel} devices in your account on this browser. Device-specific layouts are kept; choose “Use vendor/type template” on those devices to inherit it.</p>}
+    {editing && saveScope === 'template' && <p className="text-xs text-muted">Applies to this tab for {templateLabel} devices in your account. Device-specific layouts are kept; choose “Use vendor/type template” on those devices to inherit it.</p>}
     {editing && !desktop && <p className="text-xs text-muted">Widgets stack on smaller screens. Use the size controls or arrow keys; desktop positions are preserved.</p>}
     <div role="status" aria-live="polite" className="sr-only">{notice}</div>
     <div ref={grid} className={cn('device-widget-grid', editing && 'is-editing', desktop && 'is-desktop', (standard || focused) && 'is-standard', !standard && !focused && 'is-fixed')} style={standard || focused ? undefined : desktop ? { gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gridAutoRows: `${GRID_ROW}px`, gap: GRID_GAP } : { gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: GRID_GAP }}>

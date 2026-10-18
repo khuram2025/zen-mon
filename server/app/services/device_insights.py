@@ -43,6 +43,24 @@ BUILTIN_APPLICABILITY: dict[str, dict] = {
     },
 }
 
+# Vendor tabs for built-in templates whose stored JSON predates the group
+# ``tab`` field. A template groups its domain readings into tabs by declaring
+# ``"tab": "VPN & SD-WAN"`` on a group (``"tab": null`` keeps a group in the
+# default "<Vendor> metrics" tab); a group that declares nothing gets the
+# built-in tab for its key, if any. Hardware groups have their own tab.
+BUILTIN_TABS: dict[str, str] = {
+    # Firewalls: tunnels, SD-WAN members and SLA, remote access
+    "ipsec": "VPN & SD-WAN", "sdwan": "VPN & SD-WAN", "sslvpn": "VPN & SD-WAN",
+    "vpn": "VPN & SD-WAN", "globalprotect": "VPN & SD-WAN",
+    "sessions": "Sessions", "srx_flow": "Sessions",
+    "vdoms": "VDOMs", "vsys": "Virtual systems",
+    # Wireless controllers and FortiGate FortiAP management
+    "access_points": "Wireless", "wifi": "Wireless", "wireless": "Wireless",
+    # F5 BIG-IP LTM
+    "virtual_servers": "Pools & virtual servers", "pools": "Pools & virtual servers",
+    "pool_members": "Pools & virtual servers", "nodes": "Pools & virtual servers",
+}
+
 NOT_APPLICABLE = "na"
 SUPPRESSED_OFFLINE = "Not reported while offline"
 NOT_REPORTED = "Not reported"
@@ -125,6 +143,35 @@ def group_applicability(gdef: dict, values_by_group: dict[str, list]) -> tuple[b
     if applicable:
         return True, None
     return False, str(rule.get("reason") or "Not applicable to this device's configuration.")
+
+
+def group_tab(gdef: dict) -> str | None:
+    """The vendor tab a template group belongs to: its own ``tab`` when it
+    declares one (an empty or null value means the default tab), otherwise the
+    built-in tab for its key."""
+    if "tab" in gdef:
+        declared = gdef.get("tab")
+        return declared.strip()[:60] or None if isinstance(declared, str) else None
+    return BUILTIN_TABS.get(gdef.get("key") or "")
+
+
+def tab_id(label: str) -> str:
+    """URL id of a template tab: "VPN & SD-WAN" -> "tpl-vpn-sd-wan"."""
+    slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+    return f"tpl-{slug or 'tab'}"
+
+
+def template_tabs(groups: list[dict]) -> list[dict]:
+    """The template's vendor tabs in the order their first group appears,
+    with the groups each one shows."""
+    tabs: dict[str, dict] = {}
+    for g in groups:
+        label = g.get("tab")
+        if not label:
+            continue
+        tab = tabs.setdefault(label, {"id": tab_id(label), "label": label, "groups": []})
+        tab["groups"].append(g["key"])
+    return list(tabs.values())
 
 
 def _row_absent(cells: dict, metrics_def: dict) -> bool:
@@ -241,6 +288,7 @@ def shape_template_groups(oid_groups: list[dict], vals: Iterable, child_ids: dic
                 "status": worst,
                 "metrics": metrics_out,
             }
+        group["tab"] = group_tab(gr)
         if not applicable:
             group["status"] = NOT_APPLICABLE
             group["applicable"] = False
@@ -282,7 +330,7 @@ def group_digest(group: dict) -> dict:
     "max 32 °C", "CPU Usage 13% · Memory Usage 54%"."""
     status = group.get("status") or "none"
     out = {"key": group["key"], "name": group.get("name") or group["key"], "kind": group.get("kind"),
-           "status": status, "summary": "", "attention": 0, "total": 0}
+           "status": status, "summary": "", "attention": 0, "total": 0, "tab": group.get("tab")}
     if group.get("applicable") is False:
         out["summary"] = group.get("not_applicable_reason") or "Not applicable"
         return out
@@ -576,3 +624,31 @@ def template_kpis(groups: list[dict]) -> dict:
                                           "series_key": None})
     out["highlights"] = out["highlights"][:2]
     return out
+
+
+# ── Alert titles on the device's own page ──────────────────────────────────
+
+_TRANSPORT_PREFIX = re.compile(r"^\s*\[ZenPlus\s+[A-Za-z_-]+\]\s*")
+_LEGACY_STATUS = re.compile(r"^(?P<rule>.+?):\s+(?P<where>.+?)\s+(?:is\s+(?P<status>[A-Z]+)|recovered\s+—\s+UP)\s*$")
+
+
+def alert_title(message: str | None, condition: str | None = None, hostname: str | None = None,
+                ip_address: str | None = None) -> str:
+    """An alert's title on its own device's page: the triggering condition
+    without the repeated hostname and IP ("Packet loss 33% (limit 10%)").
+
+    Status alerts raised before the condition was recorded read
+    "<rule>: <host> (<ip>) is DEGRADED"; they become "<rule> · Degraded".
+    Anything else is the message without the legacy transport prefix."""
+    if condition and condition.strip():
+        return condition.strip()
+    text = _TRANSPORT_PREFIX.sub("", message or "").strip()
+    m = _LEGACY_STATUS.match(text)
+    if m and hostname and m.group("where").split(" (")[0] == hostname:
+        status = (m.group("status") or "UP").capitalize()
+        return f"{m.group('rule')} · {'Recovered' if not m.group('status') else status}"
+    for suffix in (f" — {hostname} ({ip_address})", f" — {hostname}"):
+        if hostname and text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text or "Alert"
+

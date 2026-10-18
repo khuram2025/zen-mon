@@ -1154,13 +1154,17 @@ async def get_device_sensors(
 async def get_device_snmp_metrics(
     device_id: UUID,
     hours: int = Query(default=24, ge=1, le=2160),
+    offset_hours: int = Query(default=0, ge=0, le=2160,
+                              description="Shift the window back: the previous period of a 24h window is offset_hours=24"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Scalar SNMP metrics (CPU, memory, temperature...) from ClickHouse.
 
     Returns a dict keyed by metric_key with an array of {ts, value} points.
-    Uses 5m rollups for windows > 6h, raw otherwise.
+    Uses 5m rollups for windows > 6h, raw otherwise. ``offset_hours`` moves
+    the window back (``now - offset - hours`` to ``now - offset``) for the
+    Performance tab's previous-period comparison; the bucket follows ``hours``.
     """
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
@@ -1176,7 +1180,7 @@ async def get_device_snmp_metrics(
                    any(unit) AS unit
             FROM zenplus.snmp_metrics
             WHERE device_id = %(id)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+              AND timestamp >= now() - INTERVAL %(start_hours)s HOUR{upper}
             GROUP BY metric_key, timestamp, val
             ORDER BY metric_key, timestamp
         """]
@@ -1188,7 +1192,7 @@ async def get_device_snmp_metrics(
                    '' AS unit
             FROM zenplus.snmp_metrics_5m
             WHERE device_id = %(id)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+              AND timestamp >= now() - INTERVAL %(start_hours)s HOUR{upper}
             GROUP BY metric_key, timestamp
             ORDER BY metric_key, timestamp
         """, """
@@ -1198,7 +1202,7 @@ async def get_device_snmp_metrics(
                    any(unit) AS unit
             FROM zenplus.snmp_metrics
             WHERE device_id = %(id)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+              AND timestamp >= now() - INTERVAL %(start_hours)s HOUR{upper}
             GROUP BY metric_key, ts_ms
             ORDER BY metric_key, ts_ms
         """]
@@ -1210,7 +1214,7 @@ async def get_device_snmp_metrics(
                    '' AS unit
             FROM zenplus.snmp_metrics_5m
             WHERE device_id = %(id)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+              AND timestamp >= now() - INTERVAL %(start_hours)s HOUR{upper}
             GROUP BY metric_key, ts_ms
             ORDER BY metric_key, ts_ms
         """, """
@@ -1220,14 +1224,17 @@ async def get_device_snmp_metrics(
                    any(unit) AS unit
             FROM zenplus.snmp_metrics
             WHERE device_id = %(id)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+              AND timestamp >= now() - INTERVAL %(start_hours)s HOUR{upper}
             GROUP BY metric_key, ts_ms
             ORDER BY metric_key, ts_ms
         """]
 
     res = None
     last_error = None
-    params = {"id": str(device_id), "hours": hours}
+    upper = " AND timestamp < now() - INTERVAL %(offset_hours)s HOUR" if offset_hours else ""
+    sql_candidates = [sql.replace("{upper}", upper) for sql in sql_candidates]
+    params = {"id": str(device_id), "hours": hours, "start_hours": hours + offset_hours,
+              "offset_hours": offset_hours}
     for sql in sql_candidates:
         try:
             candidate = client.query(sql, parameters=params)
@@ -1988,6 +1995,7 @@ async def device_template_insights(
         },
         "updated_at": latest_ts.isoformat() if latest_ts else None,
         "groups": groups_out,
+        "tabs": _insights.template_tabs(groups_out),
         "children_capable": children_capable,
         "promote_managed": bool(dev["promote_managed"]),
     }
@@ -2144,9 +2152,13 @@ async def get_device_page_summary(
 
     # Open alerts (incidents, not notices), only for callers who may read alerts.
     alerts = None
+    # Alert titles on the device's own page drop its repeated hostname and IP.
+    host = getattr(device, "hostname", None)
+    host_ip = str(device.ip_address) if getattr(device, "ip_address", None) else None
     if await user_has_permission(db, user, "alerts.view"):
         rows = (await db.execute(text(f"""
-            SELECT a.id, a.severity, a.status, a.message, a.triggered_at
+            SELECT a.id, a.severity, a.status, a.message, a.triggered_at,
+                   a.metadata->>'condition' AS condition
             FROM alerts a
             WHERE a.device_id = :id AND a.status IN ('pending', 'active', 'acknowledged')
               AND NOT {wf.notice_sql('a')}
@@ -2158,6 +2170,7 @@ async def get_device_page_summary(
             "acknowledged": sum(1 for r in rows if r["status"] == "acknowledged"),
             "items": [{"id": str(r["id"]), "severity": r["severity"], "status": r["status"],
                        "message": re.sub(r"^\[ZenPlus\s+[A-Z]+\]\s*", "", r["message"] or "Alert"),
+                       "title": _insights.alert_title(r["message"], r.get("condition"), host, host_ip),
                        "triggered_at": _iso(r["triggered_at"])} for r in rows[:10]],
         }
 
@@ -2213,7 +2226,7 @@ async def get_device_page_summary(
     if alerts:
         for a in [r for r in alerts["items"] if r["status"] in ("active", "pending")][:5]:
             issues.append({"source": "alert", "severity": _SUMMARY_ALERT_SEVERITY.get(a["severity"], "info"),
-                           "title": a["message"], "detail": None, "since": a["triggered_at"], "tab": "events",
+                           "title": a["title"], "detail": None, "since": a["triggered_at"], "tab": "events",
                            "alert_id": a["id"]})
     if interfaces and interfaces["unexpected_down"]:
         names = [i["name"] for i in interfaces["unexpected"]]
@@ -2238,7 +2251,8 @@ async def get_device_page_summary(
         "flapping": bool(device.is_flapping),
         "identity": identity,
         "template": {"name": profile["name"], "vendor": profile["vendor"],
-                     "updated_at": _iso(template_updated)} if profile else None,
+                     "updated_at": _iso(template_updated),
+                     "tabs": _insights.template_tabs(shown_groups)} if profile else None,
         "health": {**_insights.health_rollup(issues), "groups": [_insights.group_digest(g) for g in shown_groups]},
         "kpis": _insights.template_kpis(shown_groups),
         "issues": issues,
@@ -2282,6 +2296,8 @@ def _device_to_response(
         flap_kind=device.flap_kind,
         status_changed_at=device.status_changed_at,
         description=device.description,
+        owner=getattr(device, "owner", None),
+        notes=getattr(device, "notes", None),
         created_at=device.created_at,
         updated_at=device.updated_at,
         # SNMP — passphrases never exposed; presence signalled by *_configured flags.
@@ -2565,3 +2581,190 @@ async def get_device_maintenance(
         "active": [o for o in out if o.active],
         "upcoming": [o for o in out if not o.active],
     }
+
+
+# ── Related panel (device page, Phase 3) ──────────────────────────────────
+
+from app.services import device_related as _related
+
+
+@router.get("/{device_id}/related", dependencies=[Depends(_device_in_scope)])
+async def get_device_related(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """What this device depends on, what depends on it, the maps that show it
+    with the devices linked to it there, and devices whose confirmed status
+    changed within ±2 minutes of this device's last confirmed transitions.
+
+    Reads device_status_log, never writes it. Every listed device is filtered
+    by the caller's tag scope; maps need maps.view. A section whose source is
+    unavailable is ``null`` and named in ``unavailable``."""
+    from app.core.security import user_has_permission
+
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    scope = await scoping.visible_tags(db, user)
+    visible = lambda tags: scoping.entity_visible(tags, scope)  # noqa: E731
+    unavailable: list[str] = []
+    cols = "d.id, d.hostname, d.ip_address, d.device_type, d.status, d.tags"
+
+    parent = None
+    if device.managed_by_device_id:
+        row = (await db.execute(text(f"SELECT {cols} FROM devices d WHERE d.id = :id"),
+                                {"id": device.managed_by_device_id})).mappings().first()
+        if row and visible(row["tags"]):
+            parent = _related.device_brief(row)
+
+    child_rows = [r for r in (await db.execute(text(f"""
+        SELECT {cols} FROM devices d WHERE d.managed_by_device_id = :id
+    """), {"id": device_id})).mappings().all() if visible(r["tags"])]
+    children_by_status: dict[str, int] = {}
+    for r in child_rows:
+        children_by_status[r["status"] or "unknown"] = children_by_status.get(r["status"] or "unknown", 0) + 1
+    children = {"total": len(child_rows), "by_status": children_by_status,
+                "items": _related.by_status_then_name([_related.device_brief(r) for r in child_rows])[:_related.MAX_LISTED]}
+
+    dep_rows = (await db.execute(text(f"""
+        SELECT 'upstream' AS direction, td.dependency_type, td.suppress_alerts, td.enabled, {cols}
+        FROM topology_dependencies td JOIN devices d ON d.id = td.parent_device_id
+        WHERE td.child_device_id = :id
+        UNION ALL
+        SELECT 'downstream' AS direction, td.dependency_type, td.suppress_alerts, td.enabled, {cols}
+        FROM topology_dependencies td JOIN devices d ON d.id = td.child_device_id
+        WHERE td.parent_device_id = :id
+    """), {"id": device_id})).mappings().all()
+    dependencies = {"upstream": [], "downstream": []}
+    for r in dep_rows:
+        if visible(r["tags"]):
+            dependencies[r["direction"]].append({**_related.device_brief(r), "dependency_type": r["dependency_type"],
+                                                 "suppress_alerts": bool(r["suppress_alerts"]), "enabled": bool(r["enabled"])})
+    for k in dependencies:
+        dependencies[k] = _related.by_status_then_name(dependencies[k])[:_related.MAX_LISTED]
+
+    maps = None
+    if await user_has_permission(db, user, "maps.view"):
+        map_rows = (await db.execute(text("""
+            SELECT DISTINCT m.id, m.name FROM manual_map_nodes n JOIN manual_maps m ON m.id = n.map_id
+            WHERE n.device_id = :id ORDER BY m.name
+        """), {"id": device_id})).mappings().all()
+        neighbour_rows = (await db.execute(text(f"""
+            SELECT DISTINCT {cols}
+            FROM manual_map_nodes me
+            JOIN manual_map_links l ON me.id IN (l.source_node_id, l.target_node_id)
+            JOIN manual_map_nodes other ON other.id = CASE WHEN l.source_node_id = me.id
+                                                          THEN l.target_node_id ELSE l.source_node_id END
+            JOIN devices d ON d.id = other.device_id
+            WHERE me.device_id = :id AND other.device_id <> :id
+        """), {"id": device_id})).mappings().all()
+        maps = {"maps": [{"id": str(r["id"]), "name": r["name"]} for r in map_rows],
+                "neighbours": _related.by_status_then_name(
+                    [_related.device_brief(r) for r in neighbour_rows if visible(r["tags"])])[:_related.MAX_LISTED]}
+
+    same_time = None
+    try:
+        own = await asyncio.to_thread(_related.own_transitions, str(device_id))
+        near = await asyncio.to_thread(_related.transitions_near, str(device_id), own)
+        matches = _related.same_time_matches(own, near)
+        ids = [m["device_id"] for m in matches]
+        rows = {str(r["id"]): r for r in (await db.execute(text(f"""
+            SELECT {cols} FROM devices d WHERE d.id = ANY(CAST(:ids AS uuid[]))
+        """), {"ids": ids})).mappings().all()} if ids else {}
+        devices_out = []
+        for m in matches:
+            r = rows.get(m["device_id"])
+            if r is None or not visible(r["tags"]):
+                continue
+            devices_out.append({**_related.device_brief(r), "matches": m["matches"][:5],
+                                "shared_transitions": m["shared_transitions"], "closest_s": m["closest_s"]})
+            if len(devices_out) >= _related.MAX_SAME_TIME:
+                break
+        same_time = {
+            "window_s": _related.SAME_TIME_WINDOW_S,
+            "transitions": [{"at": _related._iso_ms(t["ts"]), "old_status": t["old_status"],
+                             "new_status": t["new_status"]} for t in own],
+            "devices": devices_out,
+        }
+    except Exception:
+        unavailable.append("status_log")
+
+    return {
+        "device_id": str(device_id),
+        "parent": parent,
+        "children": children,
+        "dependencies": dependencies,
+        "maps": maps,
+        "same_time": same_time,
+        "unavailable": unavailable,
+    }
+
+
+# ── Server-saved widget layouts (migrate-165) ─────────────────────────────
+# A user's own arrangement of the device page widgets. Reading or saving one's
+# own layout needs only devices.view (the explicit guard replaces the module's
+# devices.manage default for writes); the device itself is scope-checked.
+
+from app.services import device_layouts as _layouts
+
+
+def _layout_template(vendor: str | None, device_type: str | None, required: bool):
+    template = _layouts.template_identity(vendor, device_type)
+    if required and template is None:
+        raise HTTPException(status_code=400, detail="A vendor/type layout needs a known vendor and device type")
+    return template
+
+
+def _layout_section(section: str) -> str:
+    if not _layouts.valid_section(section):
+        raise HTTPException(status_code=400, detail="Invalid layout section")
+    return section
+
+
+@router.get("/{device_id}/widget-layouts", dependencies=[Depends(_device_in_scope)])
+async def get_device_widget_layouts(
+    device_id: UUID,
+    vendor: str | None = Query(default=None, max_length=200),
+    device_type: str | None = Query(default=None, max_length=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("devices.view")),
+):
+    """The caller's saved layouts for this device (every tab) and for its
+    vendor/type template (``vendor`` and ``device_type`` as the page uses
+    them). A device layout wins over the template on the page."""
+    return await _layouts.read_layouts(db, user.id, device_id, _layout_template(vendor, device_type, False))
+
+
+@router.put("/{device_id}/widget-layouts/{section}", dependencies=[Depends(_device_in_scope)])
+async def put_device_widget_layout(
+    device_id: UUID,
+    section: str,
+    data: _layouts.LayoutWrite,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("devices.view")),
+):
+    """Save the caller's layout for one tab, for this device or for every
+    device of the same vendor and device type."""
+    section = _layout_section(section)
+    template = _layout_template(data.vendor, data.device_type, data.scope == "template")
+    return await _layouts.save_layout(db, user.id, device_id, section, data.scope, template,
+                                      _layouts.clean_items(data.items))
+
+
+@router.delete("/{device_id}/widget-layouts/{section}", dependencies=[Depends(_device_in_scope)])
+async def delete_device_widget_layout(
+    device_id: UUID,
+    section: str,
+    scope: str = Query(default="device", pattern="^(device|template)$"),
+    vendor: str | None = Query(default=None, max_length=200),
+    device_type: str | None = Query(default=None, max_length=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("devices.view")),
+):
+    """Forget the caller's layout for one tab (the device one: the tab then
+    follows the vendor/type template, or the standard layout)."""
+    section = _layout_section(section)
+    template = _layout_template(vendor, device_type, scope == "template")
+    deleted = await _layouts.delete_layout(db, user.id, device_id, section, scope, template)
+    return {"deleted": deleted}

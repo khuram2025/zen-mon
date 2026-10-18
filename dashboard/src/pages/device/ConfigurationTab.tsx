@@ -17,11 +17,12 @@ import { tagColor, tagColorMap, useTags } from '@/hooks/useTags'
 import { inventoryApi } from '@/pages/inventory/api'
 import { Panel } from './charts'
 import { formatRelative, formatSpan } from './format'
+import { OwnerNotesCard } from './OwnerNotesCard'
 import type { DeviceRecord, DeviceSummary, IdentityField } from './types'
 
 /* How the device is monitored and what it is: identity (one resolved answer
  * per field, with its source), polling and credentials status (never the
- * values), monitoring sites, the status policy explained, tags, configuration
+ * values), owner and notes, monitoring sites, the status policy explained, tags, configuration
  * backups and connected endpoints. */
 
 const SOURCE: Record<string, string> = {
@@ -39,6 +40,8 @@ export function ConfigurationTab({ device, summary, onOpenHardware }: { device: 
   const widgets = [
     { id: 'inventory', title: 'Identity and monitoring', width: 6, height: 10, minWidth: 3, minHeight: 4,
       content: <InventoryConfigCard device={device} entities={entities || []} snmpHasData={undefined} identity={summary?.identity} onDetails={onOpenHardware} /> },
+    { id: 'owner-notes', title: 'Owner and notes', width: 6, height: 7, minWidth: 3, minHeight: 4,
+      content: <OwnerNotesCard device={device} /> },
     { id: 'monitoring-sites', title: 'Monitoring sites', width: 6, height: 7, minWidth: 2, minHeight: 3,
       content: <Panel title="Monitoring sites" meta="Where reachability is measured from"><MonitoringSites targetType="device" targetId={device.id} compact /></Panel> },
     { id: 'reachability', title: 'How status is decided', width: 12, height: 9, minWidth: 3, minHeight: 3,
