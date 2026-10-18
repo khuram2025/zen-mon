@@ -485,13 +485,19 @@ const view = (data) => { const v = S.explanationView(data, T0, utc); generated.p
     assert(card.includes(text), `MonitoringCard: ${text}`)
   }
 
-  const detail = fs.readFileSync('src/pages/DeviceDetailPage.tsx', 'utf8')
+  // The device page is a shell (DeviceDetailPage.tsx) with its header, activity model and tabs in pages/device/.
+  const DETAIL_FILES = ['src/pages/DeviceDetailPage.tsx', 'src/pages/device/DeviceHeader.tsx', 'src/pages/device/activity.ts',
+    'src/pages/device/SummaryTab.tsx', 'src/pages/device/EventsTab.tsx', 'src/pages/device/IssuesBar.tsx']
+  const detail = DETAIL_FILES.map((f) => fs.readFileSync(f, 'utf8')).join('\n')
+  const header = fs.readFileSync('src/pages/device/DeviceHeader.tsx', 'utf8')
   assert(!detail.includes('Last device check'), 'renamed to Last response')
-  assert(detail.includes('Last response:'))
+  assert(header.includes('Last response:'))
   assert(!detail.includes('Last reported reachability'), 'the pill is the confirmed status')
-  assert(detail.includes('statusForText(device.status_changed_at, now)') && detail.includes('pendingDownChip(') && detail.includes('<FlappingTag'))
-  assert(detail.includes('buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO, flapEpisodes || [])'), 'the widget collapses episodes')
-  assert(detail.includes('episodes || [], false)'), 'the full log keeps every change')
+  assert(header.includes('statusForText(device.status_changed_at, now)') && header.includes('pendingDownChip(') && header.includes('<FlappingTag'))
+  const summaryTab = fs.readFileSync('src/pages/device/SummaryTab.tsx', 'utf8')
+  const summaryCall = summaryTab.split('\n').find((line) => line.includes('buildActivityEvents(recent.traps || [], recent.status_changes || [], {}, from, to,')) || ''
+  assert(summaryCall && !summaryCall.includes('false)'), 'the Summary card collapses episodes')
+  assert(fs.readFileSync('src/pages/device/EventsTab.tsx', 'utf8').includes('episodes || [], false)'), 'the full log keeps every change')
 
   // A flap hold covers only the class that flaps: no surface claims every status notification of a flapping device.
   const UNQUALIFIED_HOLD = [
@@ -500,7 +506,7 @@ const view = (data) => { const v = S.explanationView(data, T0, utc); generated.p
     'While flapping, a status notifies only once', 'its status alerts are also held automatically', "'status notifications held while flapping'",
     'neither degrades nor counts towards recovery',
   ]
-  for (const file of ['src/pages/DeviceDetailPage.tsx', 'src/pages/DevicesPage.tsx', 'src/components/availability/views.tsx', 'src/pages/AlertDetailPage.tsx', 'src/pages/GeneralSettingsPage.tsx', 'src/components/forms/AlertRuleWizardDialog.tsx', 'src/components/devices/deviceStatus.ts']) {
+  for (const file of [...DETAIL_FILES, 'src/pages/DevicesPage.tsx', 'src/components/availability/views.tsx', 'src/pages/AlertDetailPage.tsx', 'src/pages/GeneralSettingsPage.tsx', 'src/components/forms/AlertRuleWizardDialog.tsx', 'src/components/devices/deviceStatus.ts']) {
     const text = fs.readFileSync(file, 'utf8')
     for (const sentence of UNQUALIFIED_HOLD) assert(!text.includes(sentence), `${file}: ${sentence}`)
   }

@@ -329,3 +329,24 @@ def test_template_kpis_pick_thresholds_and_vendor_highlights():
     groups, _ = di.shape_template_groups(poe, [_v("poe", "b", 740, instance="1"), _v("poe", "c", 54, instance="1")])
     assert di.template_kpis(groups)["highlights"] == [
         {"kind": "poe", "label": "PoE power", "value": 54, "unit": "W", "sub": "of 740 W budget (7%)", "series_key": None}]
+
+
+def test_uptime_stats_can_be_narrowed_to_one_device(client, as_admin, monkeypatch):
+    """The device page reads its headline with the same calculation, one device only."""
+    from app.core import database
+    calls = []
+
+    def query(sql, parameters=None):
+        calls.append((sql, parameters))
+        return NS(result_rows=[("dev-1", 99.0, 100.0)])
+    monkeypatch.setattr(database, "get_clickhouse_client", lambda: NS(query=query))
+    device = str(uuid4())
+    r = client.get("/api/v1/devices/dashboard/uptime-stats",
+                   params={"from": (NOW - timedelta(hours=1)).isoformat(), "to": NOW.isoformat(), "device_id": device})
+    assert r.status_code == 200
+    sql, params = calls[0]
+    assert "toString(device_id) = %(device)s" in sql and params["device"] == device
+    assert r.json()["devices"] == {"dev-1": 99.0}
+    r = client.get("/api/v1/devices/dashboard/uptime-stats",
+                   params={"from": (NOW - timedelta(hours=1)).isoformat(), "to": NOW.isoformat()})
+    assert "device" not in calls[-1][1]

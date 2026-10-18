@@ -943,6 +943,66 @@ async def get_device_interfaces(
     return [dict(r) for r in rows]
 
 
+# Declared before every /{device_id}/interfaces/{if_index}... route so the
+# literal "error-totals" is never parsed as an ifIndex.
+@router.get("/{device_id}/interfaces/error-totals", dependencies=[Depends(_device_in_scope)])
+async def get_device_interface_error_totals(
+    device_id: UUID,
+    hours: int = Query(default=1, ge=1, le=720),
+    user: User = Depends(get_current_user),
+):
+    """Errors and discards per interface over the last ``hours``.
+
+    The counters are cumulative, so each total is the sum of the positive steps
+    between consecutive polls of one interface (the get_interface_detail_metrics
+    approach): a counter wrap or an agent restart reads as a backwards step and
+    never counts. Returns ``{if_index: {in_errors, out_errors, in_discards,
+    out_discards}}``; an interface without two samples in the window is absent
+    (unknown, not zero). A ClickHouse failure is a 503, never zeros."""
+    import logging
+    from app.core.database import get_clickhouse_client
+
+    def _delta(col: str, prev: str) -> str:
+        return f"sum(if(rn > 1, greatest(toInt64({col}) - toInt64({prev}), 0), 0))"
+
+    sql = f"""
+        SELECT if_index,
+               {_delta('in_errors', 'p_ie')} AS in_errors,
+               {_delta('out_errors', 'p_oe')} AS out_errors,
+               {_delta('in_discards', 'p_id')} AS in_discards,
+               {_delta('out_discards', 'p_od')} AS out_discards,
+               count() AS samples
+        FROM (
+            SELECT if_index, in_errors, out_errors, in_discards, out_discards,
+                   lagInFrame(in_errors)    OVER w AS p_ie,
+                   lagInFrame(out_errors)   OVER w AS p_oe,
+                   lagInFrame(in_discards)  OVER w AS p_id,
+                   lagInFrame(out_discards) OVER w AS p_od,
+                   row_number() OVER w AS rn
+            FROM zenplus.snmp_if_metrics
+            WHERE device_id = %(id)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            WINDOW w AS (PARTITION BY if_index ORDER BY timestamp)
+        )
+        GROUP BY if_index
+        HAVING samples > 1
+    """
+    try:
+        res = get_clickhouse_client().query(sql, parameters={"id": str(device_id), "hours": hours})
+        rows = list(res.result_rows)
+    except Exception:
+        logging.getLogger(__name__).warning("interface error totals query failed for %s", device_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Interface error counters are unavailable right now.")
+
+    fields = ("in_errors", "out_errors", "in_discards", "out_discards")
+    out: dict[int, dict[str, int]] = {}
+    for r in rows:
+        totals = out.setdefault(int(r[0]), dict.fromkeys(fields, 0))
+        for n, field in enumerate(fields, start=1):
+            totals[field] += max(int(r[n] or 0), 0)
+    return out
+
+
 class InterfaceSpeedUpdate(BaseModel):
     """Set or clear manual speed override (bps). NULL clears override."""
     configured_speed_bps: Optional[int] = Field(

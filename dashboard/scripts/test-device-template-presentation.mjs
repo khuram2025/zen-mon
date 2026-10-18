@@ -18,6 +18,8 @@ console.log('Template presentation tests passed: attention ranking, search, empt
 
 const encoded = `3.17.${[...'management_module'].map(c=>c.charCodeAt(0)).join('.')}.3.49.47.49`
 assert.equal(readableInstanceLabel(encoded), '3 · management_module · 1/1')
+// One name behind a numeric index: the index is dropped (FortiAP rows keyed by VDOM).
+assert.equal(readableInstanceLabel('1.10.83.76.83.67.95.65.80.95.71.70'), 'SLSC_AP_GF')
 for (const raw of ['1.3.6.1.4.1.3375.2', '10.10.101.227', 'Ethernet1/1', encoded + '.255', '3.17.109.97.110.97.103.101']) assert.equal(readableInstanceLabel(raw), raw)
 
 const requested = {hours: 1, fromISO:'2026-09-17T19:00:00Z', toISO:'2026-09-17T20:00:00Z', isCustom:false}
