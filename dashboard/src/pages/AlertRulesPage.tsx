@@ -13,6 +13,8 @@ import { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 import { AlertMessagePreviewDialog } from '@/components/alerts/AlertMessagePreviewDialog'
 import { toast } from '@/components/ui/Toast'
 import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
+import { effectivePriority } from '@/features/escalation/model'
+import { PriorityBadge } from '@/features/escalation/ui'
 
 const TRIGGER_LABELS: Record<string, string> = {
   down: 'Goes down',
@@ -176,9 +178,14 @@ export function AlertRulesPage() {
                       <Badge variant="outline" className="text-[10px]">{scopeLabel(r)}</Badge>
                     </Td>
                     <Td>
-                      <Badge variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}>
-                        {r.severity}
-                      </Badge>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}>
+                          {r.severity}
+                        </Badge>
+                        <span title={r.priority ? 'Priority chosen on the rule' : 'Priority derived from severity'}>
+                          <PriorityBadge priority={effectivePriority(r.priority, r.severity)} compact className={r.priority ? undefined : 'opacity-70'} />
+                        </span>
+                      </div>
                     </Td>
                     <Td className="text-xs text-muted">
                       {['trap', 'syslog'].includes(r.metric) ? <span>Manual resolution</span> : r.recovery_alert ? (
@@ -186,7 +193,10 @@ export function AlertRulesPage() {
                       ) : (
                         <span>Silent</span>
                       )}
-                      {Array.isArray(r.escalation_levels) && r.escalation_levels.length > 0 && (
+                      {r.escalation_policy_id ? (
+                        <div className="mt-0.5 text-[10px] font-medium text-primary">Escalation policy</div>
+                      ) : null}
+                      {!r.escalation_policy_id && Array.isArray(r.escalation_levels) && r.escalation_levels.length > 0 && (
                         <div className="mt-0.5 text-[10px] font-medium text-amber-600">
                           {r.escalation_levels.length} escalation level{r.escalation_levels.length > 1 ? 's' : ''}
                         </div>

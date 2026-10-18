@@ -87,6 +87,8 @@ export interface AlertRow {
   channels: AlertChannelRef[]
   delivery: AlertDeliverySummary | null
   metadata: Record<string, unknown>
+  /** P1..P4, stamped when the incident was raised (servers before 1.24.17 omit it). */
+  priority?: string | null
 }
 
 export type AlertView = 'active' | 'suppressed' | 'pending' | 'acknowledged' | 'resolved' | 'open' | 'all'
@@ -264,6 +266,8 @@ export type AlertDetail = AlertRow & {
   related_alerts?: AlertRow[]
   events: AlertEvent[]
   deliveries: AlertDelivery[]
+  /** Notifications for this incident held in a digest (grouping / recipient budget), with why and when they go out. */
+  notification_holds?: Array<{ digest_id: string | null; reason: string; release_condition: string; release_at: string | null; status: string }>
 }
 
 /** Every action returns the updated row plus whether anything changed. */

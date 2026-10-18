@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.services import alert_funnel
 
 logger = logging.getLogger("zenplus.udt_alerts")
 
@@ -46,9 +47,11 @@ _EVENT_LABEL = {
 
 
 async def _udt_rules(db: AsyncSession) -> list:
+    prio = await alert_funnel.rule_priority_column(db)
     return (await db.execute(text(
-        """SELECT id, name, metric, operator, threshold, severity, enabled,
-                  device_id, group_id, device_type, location, notify_channels, cooldown
+        f"""SELECT id, name, metric, operator, threshold, severity, enabled,
+                  device_id, group_id, device_type, location, notify_channels, cooldown,
+                  schedule_start, schedule_end, schedule_days, {prio}
            FROM alert_rules
            WHERE enabled AND metric LIKE 'udt\\_%' ESCAPE '\\'"""
     ))).mappings().all()
@@ -75,13 +78,25 @@ async def _recent_alert_exists(db: AsyncSession, rule_id, dedupe_key: str, coold
     return row is not None
 
 
-async def _notify(db: AsyncSession, rule, message: str, device: dict | None) -> None:
+async def _notify(db: AsyncSession, rule, message: str, device: dict | None, *,
+                  alert_id=None, outbox: list | None = None) -> None:
+    """Announce one raised UDT alert.
+
+    With an ``outbox`` the send is queued and goes out after the batch commits
+    (:func:`_flush`): the shared dispatcher commits keyed sends, and the event
+    batch is row-locked until its transaction ends.
+    """
+    # Quiet hours: the rule's own schedule in the appliance time zone. (This
+    # used to call notifications_allowed(db), which raised and was swallowed,
+    # so quiet hours never applied here.)
     try:
-        from app.services.alert_schedule import notifications_allowed
-        if not await notifications_allowed(db):
+        from app.services.alert_schedule import get_configured_timezone, notifications_allowed
+        r = dict(rule)
+        if not notifications_allowed(r.get("schedule_start"), r.get("schedule_end"),
+                                                r.get("schedule_days"), await get_configured_timezone(db)):
             return
     except Exception:
-        pass
+        logger.warning("quiet-hours check failed; notifying anyway", exc_info=True)
     try:
         from app.services.host_alert_service import dispatch_to_channels
         from app.services import alert_phrasing as ap
@@ -107,25 +122,52 @@ async def _notify(db: AsyncSession, rule, message: str, device: dict | None) -> 
                 ("Switch", hostname),
             ],
             "triggered_at": datetime.now(timezone.utc).isoformat(),
+            "rule_id": str(rule["id"]),
+            # Keyed on the alert row: one page per incident, channel and
+            # recipient, linked to it in the delivery log.
+            "alert_id": str(alert_id) if alert_id else None,
+            "delivery_event": "trigger",
+            **alert_funnel.notification_fields(sev, rule.get("priority"), trigger=True),
         }
         channels = rule["notify_channels"] or []
         if isinstance(channels, str):
             channels = json.loads(channels)
+        if outbox is not None:
+            outbox.append((channels, ctx))
+            return
         await dispatch_to_channels(db, channels, ctx)
     except Exception:
         logger.exception("UDT alert notify failed")
 
 
-async def _raise_alert(db: AsyncSession, rule, device_id, message: str, meta: dict) -> None:
+async def _flush(db: AsyncSession, outbox: list) -> None:
+    """Send the notifications a committed batch queued."""
+    from app.services.host_alert_service import dispatch_to_channels
+    while outbox:
+        channels, ctx = outbox.pop(0)
+        try:
+            await dispatch_to_channels(db, channels, ctx)
+        except Exception:
+            logger.exception("UDT alert notify failed")
+            await db.rollback()
+
+
+async def _raise_alert(db: AsyncSession, rule, device_id, message: str, meta: dict):
+    """Insert the alert; returns its id."""
     meta = {"metric": rule["metric"], **meta}
-    await db.execute(text(
-        "INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata) "
-        "VALUES (:did, :rid, 'active', :sev, :msg, NOW(), CAST(:meta AS jsonb))"
+    # The incident's priority is fixed when it is raised (migrate-164).
+    p_col, p_val, p_params = alert_funnel.priority_insert(
+        await alert_funnel.priority_supported(db), rule.get("priority"), rule["severity"] or "warning")
+    row = (await db.execute(text(
+        f"INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata{p_col}) "
+        f"VALUES (:did, :rid, 'active', :sev, :msg, NOW(), CAST(:meta AS jsonb){p_val}) RETURNING id"
     ), {"did": str(device_id) if device_id else None, "rid": str(rule["id"]),
-        "sev": rule["severity"] or "warning", "msg": message, "meta": json.dumps(meta)})
+        "sev": rule["severity"] or "warning", "msg": message, "meta": json.dumps(meta),
+        **p_params})).first()
+    return row[0] if row else None
 
 
-async def _process_events(db: AsyncSession, rules) -> int:
+async def _process_events(db: AsyncSession, rules, outbox: list | None = None) -> int:
     events = (await db.execute(text(
         f"""SELECT id, event_type, endpoint_id, device_id, if_index, details
             FROM udt_events WHERE NOT alerted
@@ -175,18 +217,18 @@ async def _process_events(db: AsyncSession, rules) -> int:
                         details = ev["details"] or {}
                         if isinstance(details, str):
                             details = json.loads(details)
-                        await _raise_alert(db, rule, ev["device_id"], message, {
+                        alert_id = await _raise_alert(db, rule, ev["device_id"], message, {
                             "udt_dedupe": dedupe, "mac": ep["mac"],
                             "endpoint_id": str(ev["endpoint_id"]),
                             "event_type": ev["event_type"], **details,
                         })
-                        await _notify(db, rule, message, device)
+                        await _notify(db, rule, message, device, alert_id=alert_id, outbox=outbox)
                         raised += 1
         await db.execute(text("UPDATE udt_events SET alerted = TRUE WHERE id = :id"), {"id": ev["id"]})
     return raised
 
 
-async def _process_capacity(db: AsyncSession, rules) -> None:
+async def _process_capacity(db: AsyncSession, rules, outbox: list | None = None) -> None:
     cap_rules = [r for r in rules if r["metric"] == "udt_port_capacity_pct"]
     if not cap_rules:
         return
@@ -215,9 +257,9 @@ async def _process_capacity(db: AsyncSession, rules) -> None:
             if breach and not active:
                 msg = (f"Port capacity {pct:.0f}% on {dev['hostname']} "
                        f"({dev['used']}/{total} ports up, threshold {thr:.0f}%)")
-                await _raise_alert(db, rule, dev["id"], msg,
-                                   {"udt_dedupe": dedupe, "value": round(pct, 1)})
-                await _notify(db, rule, msg, dict(dev))
+                alert_id = await _raise_alert(db, rule, dev["id"], msg,
+                                              {"udt_dedupe": dedupe, "value": round(pct, 1)})
+                await _notify(db, rule, msg, dict(dev), alert_id=alert_id, outbox=outbox)
             elif not breach and active:
                 await db.execute(text(
                     "UPDATE alerts SET status = 'resolved', resolved_at = NOW() WHERE id = :id"
@@ -231,9 +273,11 @@ async def udt_alert_evaluator_loop() -> None:
         try:
             async with AsyncSessionLocal() as db:
                 rules = await _udt_rules(db)
-                raised = await _process_events(db, rules)
-                await _process_capacity(db, rules)
+                outbox: list = []
+                raised = await _process_events(db, rules, outbox)
+                await _process_capacity(db, rules, outbox)
                 await db.commit()
+                await _flush(db, outbox)
                 if raised:
                     logger.info("UDT evaluator raised %d alerts", raised)
         except asyncio.CancelledError:

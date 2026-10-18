@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services import alert_phrasing as ap
 from app.services import network_history as _nh
 from app.services.host_alert_service import dispatch_to_channels
+from app.services import alert_funnel as funnel
 from app.services.tag_service import tag_set as _tag_set
 from app.services import alert_notify_state as ns
 
@@ -405,12 +406,16 @@ async def _raise(db: AsyncSession, rule, device_id: str, message: str,
     if if_index is not None:
         meta["if_index"] = str(if_index)
     meta.update(extra)
+    # The incident's priority is fixed when it is raised (migrate-164).
+    p_col, p_val, p_params = funnel.priority_insert(
+        await funnel.priority_supported(db), getattr(rule, "priority", None),
+        rule.severity or "warning")
     row = (await db.execute(text(
-        "INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata) "
-        "VALUES (:did, :rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb)) "
+        f"INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata{p_col}) "
+        f"VALUES (:did, :rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb){p_val}) "
         "RETURNING id"
     ), {"did": device_id, "rid": str(rule.id), "sev": rule.severity or "warning",
-        "msg": message, "ts": now, "meta": json.dumps(meta)})).first()
+        "msg": message, "ts": now, "meta": json.dumps(meta), **p_params})).first()
     return row[0] if row else None
 
 
@@ -543,6 +548,7 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         "alert_id": str(alert_id) if alert_id else None,
         "delivery_event": event or ("recovery" if is_recovery else "trigger"),
         "is_recovery": is_recovery,
+        **funnel.notification_fields(sev, getattr(rule, "priority", None), trigger=not is_recovery),
         **incident,
     })
     return bool(sent)
@@ -563,6 +569,7 @@ async def _load_rules(db: AsyncSession) -> list:
     """Enabled network rules. Before migrate-162 the clear hold is the default."""
     global _warned_missing_clear_duration
     metric_list = ",".join(f"'{m}'" for m in sorted(NETWORK_METRICS))
+    prio = await funnel.rule_priority_column(db)
 
     def sql(clear: str):
         return text(
@@ -570,7 +577,7 @@ async def _load_rules(db: AsyncSession) -> list:
             f"notify_channels, cooldown, device_id, group_id, device_type, location, scope_tag, target, "
             f"recovery_alert, conditions, condition_logic, "
             f"email_subject, email_body, sms_template, recovery_email_subject, recovery_email_body, recovery_sms_template, "
-            f"schedule_start, schedule_end, schedule_days "
+            f"schedule_start, schedule_end, schedule_days, {prio} "
             f"FROM alert_rules WHERE enabled = true "
             f"AND (metric IN ({metric_list}) OR metric LIKE 'tpl\\_%')")
     try:

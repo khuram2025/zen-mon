@@ -16,6 +16,7 @@ import { LinkUtilizationPage } from '@/pages/LinkUtilizationPage'
 import { AlertsPage } from '@/pages/AlertsPage'
 import { AlertDetailPage } from '@/pages/AlertDetailPage'
 import { AlertRulesPage } from '@/pages/AlertRulesPage'
+import { EscalationPage } from '@/pages/escalation/EscalationPage'
 import { TrapsPage } from '@/pages/TrapsPage'
 import { NetworkEventsPage } from '@/pages/NetworkEventsPage'
 import { NcmPage } from '@/pages/NcmPage'
@@ -252,6 +253,7 @@ export default function App() {
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
+        <Route path="escalation" element={<EscalationPage />} />
         <Route path="traps" element={<TrapsPage />} />
         <Route path="network-events" element={<NetworkEventsPage />} />
         <Route path="ncm" element={<NcmPage />} />

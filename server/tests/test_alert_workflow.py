@@ -113,10 +113,27 @@ def test_ack_due_only_for_active_unsuppressed():
 
 
 def test_response_targets_cleaning():
+    """Targets are per priority; settings saved by earlier releases (severity
+    keys) keep their meaning through the priority derivation."""
     assert wf._clean_targets({"critical": 5, "warning": 0, "info": "x"}) == {
-        "critical": 5, "warning": None, "info": None}
-    assert wf._clean_targets('{"warning": 30}')["warning"] == 30
-    assert wf._clean_targets(None) == wf.DEFAULT_RESPONSE_TARGETS
+        "P1": 5, "P2": 5, "P3": None, "P4": None}
+    assert wf._clean_targets('{"warning": 30}')["P3"] == 30
+    assert wf._clean_targets({"P3": 45, "warning": 30})["P3"] == 45     # a P-key wins
+    assert wf._clean_targets(None) == wf.DEFAULT_RESPONSE_TARGETS == {
+        "P1": 5, "P2": 15, "P3": 60, "P4": None}
+    assert wf.legacy_target_view({"P1": 5, "P2": 15, "P3": 60, "P4": None}) == {
+        "P1": 5, "P2": 15, "P3": 60, "P4": None, "critical": 15, "warning": 60, "info": None}
+
+
+def test_ack_due_uses_the_alert_priority():
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=10)
+    targets = {"P1": 5, "P2": 15, "P3": 60, "P4": None}
+    # A critical-severity alert raised as P1 is overdue after 5 minutes ...
+    due, overdue = wf.ack_due("active", "critical", t0, targets, False, priority="P1")
+    assert overdue and due == t0 + timedelta(minutes=5)
+    # ... the same severity at the derived P2 is not yet.
+    assert wf.ack_due("active", "critical", t0, targets, False)[1] is False
+    assert wf.ack_due("active", "info", t0, targets, False, priority="P4") == (None, False)
 
 
 # ── filters (A01/A12/A16) ──────────────────────────────────────────────────

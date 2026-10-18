@@ -202,6 +202,26 @@ for (const [name, v] of Object.entries(teams)) {
   assert(!v.labels.has('administration:Settings:Users & Access'), `${name} team can open Users & Access`)
   assert(!v.labels.has('alerting:Gateways'), `${name} team can open Gateways`)
 }
+// Escalation & On-call (1.24.17): one Alerting row gated by alerts.view, so every team role sees the matrix, the
+// policies and who is on call read-only; changing them needs alerts.manage, which the page and the server enforce.
+{
+  const alerting = NAV_GROUPS.find((g) => g.id === 'alerting').items
+  const row = alerting.find((i) => i.to === '/escalation')
+  assert(row, 'Alerting has an Escalation & On-call row')
+  assert.equal(row.label, 'Escalation & On-call')
+  assert.deepEqual(gatePermissions(row), ['alerts.view'], 'the row needs alerts.view only (edit actions need alerts.manage on the page)')
+  assert(!row.children, 'tabs live on the page (?tab=), not in the sidebar')
+  assert.equal(alerting.indexOf(row), alerting.findIndex((i) => i.to === '/alert-rules') + 1, 'the row follows Alert Rules')
+  for (const [name, v] of Object.entries(teams)) assert(v.labels.has('alerting:Escalation & On-call'), `${name} team sees Escalation & On-call (read-only)`)
+  for (const name of ['_NETWORK_TEAM', '_SYSTEMS_TEAM', '_APPLICATION_TEAM', '_SECURITY_TEAM']) {
+    assert(pyList(name).includes('alerts.view'), `${name} holds alerts.view`)
+    assert(!pyList(name).includes('alerts.manage'), `${name} cannot change escalation (no alerts.manage)`)
+  }
+  assert(!visible(['dashboard.view', 'devices.view']).labels.has('alerting:Escalation & On-call'), 'a role without alerts.view does not see it')
+  assert(visible(['alerts.view']).labels.has('alerting:Escalation & On-call'))
+  assert(visible(pyList('_VIEWER')).labels.has('alerting:Escalation & On-call') && visible(pyList('_READ_ONLY')).labels.has('alerting:Escalation & On-call'))
+}
+
 // Landing pages: each team lands on its own dashboard.
 assert.equal(firstAllowedPath(NAV_GROUPS, canFromPermissions(pyList('_APPLICATION_TEAM'))), '/dashboards/apps')
 assert.equal(firstAllowedPath(NAV_GROUPS, canFromPermissions(pyList('_SYSTEMS_TEAM'))), '/dashboards/servers')
@@ -221,6 +241,18 @@ assert(!allows('/apm/settings', ['dashboard.view', 'apm.view']), 'APM settings n
 assert(allows('/reports/view/availability', ['reports.view']) && !allows('/reports/view/availability', ['devices.view']))
 assert(!allows('/reports/builder', ['reports.view']) && allows('/reports/builder?from=availability', ['reports.view', 'reports.manage']))
 assert(allows('/reports/schedules', ['reports.view']) && !allows('/reports/schedules', ['devices.view']))
+// Escalation & On-call: every tab address opens with alerts.view and is closed without it.
+for (const url of ['/escalation', '/escalation?tab=policies', '/escalation?tab=oncall&id=abc', '/escalation?tab=grouping', '/escalation?tab=coverage', '/Escalation']) {
+  assert(allows(url, ['alerts.view']), `${url} opens with alerts.view`)
+  assert(!allows(url, ['devices.view', 'servers.view']), `${url} is closed without alerts.view`)
+  assert(allows(url, pyList('_APPLICATION_TEAM')), `${url} opens for the application team (read-only)`)
+}
+{
+  const u = new URL('/escalation?tab=policies', 'http://x')
+  const trail = trailForLocation(u.pathname, u.searchParams)
+  assert.equal(trail.group.id, 'alerting')
+  assert.equal(trail.item.label, 'Escalation & On-call')
+}
 // Inventory: every page needs inventory.view, the product page included; the settings page opens read-only with view only.
 const inv = ['inventory.view']
 for (const url of ['/inventory', '/inventory/assets?os_family=windows', '/inventory/os', '/inventory/software', '/inventory/software/google-chrome?tab=versions', '/inventory/hardware', '/inventory/changes']) {
@@ -277,4 +309,4 @@ assert(allows('/sensors/abc', []))
   assert.equal(row.label, 'All Servers')
 }
 
-console.log('Navigation access: every entry gated by catalog permissions; children inherit; team roles (network, systems, application, security) see only their areas, Inventory included per D9; direct URLs follow the sidebar.')
+console.log('Navigation access: every entry gated by catalog permissions; children inherit; team roles (network, systems, application, security) see only their areas, Inventory included per D9, Escalation & On-call read-only; direct URLs follow the sidebar.')

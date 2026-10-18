@@ -57,6 +57,8 @@ async def ingest_syslog(db, event, dispatch=None):
         await db.commit()
         return {'suppressed': True, 'alerts_created': 0}
     rules = (await db.execute(text("SELECT * FROM alert_rules WHERE enabled = true AND metric = 'syslog'"))).mappings().all()
+    from app.services import alert_funnel as funnel
+    priority_ok = await funnel.priority_supported(db) if rules else False
     tz = await get_configured_timezone(db)
     created = 0
     for r in rules:
@@ -86,10 +88,13 @@ async def ingest_syslog(db, event, dispatch=None):
         if silenced or prior:
             continue
         meta = {'syslog_source': event['source_ip'], 'event_id': event['id'], 'notified': False}
-        alert = (await db.execute(text('''INSERT INTO alerts
-            (device_id, rule_id, status, severity, message, triggered_at, metadata)
-            VALUES (:did, :rid, 'active', :severity, :message, now(), CAST(:meta AS jsonb)) RETURNING id'''),
-            {'did': did, 'rid': r['id'], 'severity': r['severity'], 'message': event['message'], 'meta': json.dumps(meta)})).first()
+        # The incident's priority is fixed when it is raised (migrate-164).
+        p_col, p_val, p_params = funnel.priority_insert(priority_ok, r.get('priority'), r['severity'])
+        alert = (await db.execute(text(f'''INSERT INTO alerts
+            (device_id, rule_id, status, severity, message, triggered_at, metadata{p_col})
+            VALUES (:did, :rid, 'active', :severity, :message, now(), CAST(:meta AS jsonb){p_val}) RETURNING id'''),
+            {'did': did, 'rid': r['id'], 'severity': r['severity'], 'message': event['message'],
+             'meta': json.dumps(meta), **p_params})).first()
         created += 1
         await db.commit()
         if notifications_allowed(r['schedule_start'], r['schedule_end'], r['schedule_days'], tz):
@@ -105,7 +110,11 @@ async def ingest_syslog(db, event, dispatch=None):
             sent = await dispatch(db, r['notify_channels'] or [], {
                 'subject': render('email_subject'), 'message': render('sms_template'), 'body': render('email_body'),
                 'hostname': hostname, 'status': 'SYSLOG', 'severity': r['severity'], 'rule_name': r['name'],
-                'rule_id': str(r['id']), 'triggered_at': event['received_at'].isoformat()})
+                'rule_id': str(r['id']), 'triggered_at': event['received_at'].isoformat(),
+                # Keyed on the event's alert row (one page per incident, channel
+                # and recipient) and linked to it in the delivery log.
+                'alert_id': str(alert[0]), 'delivery_event': 'trigger',
+                **funnel.notification_fields(r['severity'], r.get('priority'), trigger=True)})
             from app.services.alert_notify_state import stamp
             await stamp(db, alert[0], bool(sent))
     await db.commit()

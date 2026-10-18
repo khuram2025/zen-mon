@@ -50,6 +50,7 @@ from types import SimpleNamespace
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import alert_funnel
 from app.services import alert_notify_state as ns
 from app.services import alert_phrasing as ap
 from app.services.alert_schedule import get_configured_timezone, notifications_allowed
@@ -65,7 +66,7 @@ _DUE_SQL = """
            r.notify_channels, r.metric, r.operator, r.threshold, r.trigger_on,
            r.conditions, r.condition_logic,
            r.email_subject, r.email_body, r.sms_template,
-           r.schedule_start, r.schedule_end, r.schedule_days,
+           r.schedule_start, r.schedule_end, r.schedule_days, r.priority AS rule_priority,
            d.status AS device_status, d.hostname AS device_hostname,
            host(d.ip_address) AS device_ip,
            sc.status AS check_status, sc.name AS check_name,
@@ -192,6 +193,9 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         # A confirmed hold is the incident's first page: label it New and
         # claim it once (alert_delivery_keys) however many workers sweep.
         "delivery_event": "trigger",
+        # Priority routes and may group a confirmed warning like any other
+        # first page (alert_funnel: P3/P4 warning/info triggers only).
+        **alert_funnel.notification_fields(sev, getattr(row, "rule_priority", None), trigger=True),
         **ap.incident_context(alert_id=row.id, first_seen=row.triggered_at, now=now,
                               lifecycle="new"),
     })

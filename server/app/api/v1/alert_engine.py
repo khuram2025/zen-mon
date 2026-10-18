@@ -24,6 +24,7 @@ from sqlalchemy import text
 from app.core.database import get_db
 from app.services.email_render import alert_subject, build_alert_email_html
 from app.services.tag_service import tag_set as _tag_set
+from app.services import alert_funnel as funnel
 from app.services import alert_notify_state as ns
 from app.services import device_status_machine as dsm
 from app.services.alert_schedule import notifications_allowed, get_configured_timezone
@@ -133,42 +134,6 @@ async def _dashboard_url(db: AsyncSession, path: str = "/alerts") -> str:
     return base.rstrip("/") + path
 
 
-async def _smtp_gateway(db: AsyncSession, gw_id) -> Optional[dict]:
-    """Resolve the SMTP gateway for a channel, honouring the `enabled` column.
-
-    `enabled` is a column on notification_gateways — the Gateways page toggles
-    it and never touches config.enabled — so reading the JSON blob meant a
-    gateway disabled in the UI kept sending alerts.
-    """
-    if gw_id:
-        row = (await db.execute(
-            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
-            {"id": gw_id})).first()
-    else:
-        row = (await db.execute(text(
-            "SELECT config, enabled FROM notification_gateways "
-            "WHERE type = 'smtp' AND is_default = true LIMIT 1"))).first()
-    if not row or not row.enabled:
-        return None
-    return decrypt_config(row.config)
-
-
-async def _sms_gateway(db: AsyncSession, gw_id) -> Optional[dict]:
-    """SMS twin of _smtp_gateway: a gateway disabled on the Gateways page must
-    stop delivery (the engine loops used to read the config blob regardless)."""
-    if gw_id:
-        row = (await db.execute(
-            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
-            {"id": gw_id})).first()
-    else:
-        row = (await db.execute(text(
-            "SELECT config, enabled FROM notification_gateways "
-            "WHERE type = 'sms' AND is_default = true LIMIT 1"))).first()
-    if not row or not row.enabled:
-        return None
-    return decrypt_config(row.config)
-
-
 def _clean_details(pairs: list) -> list:
     """Drop rows the alert had no value for.
 
@@ -207,10 +172,19 @@ def _sms_fill(template: str, values: dict, *, is_get: bool) -> str:
     return fill_template(template, values, is_get=is_get)
 
 
-async def _send_sms(gw_config: dict, phones: str, message: str) -> bool:
+async def _send_sms(gw_config: dict, phones: str, message: str,
+                    values: dict | None = None) -> bool:
+    """Send one SMS through a custom HTTP gateway.
+
+    ``values`` fills further {placeholders} of the gateway's request template
+    (the device path offers {hostname}, {ip_address} and {status}); they are
+    encoded per HTTP method like the message itself. {recipients}, {message}
+    and {sender} always come from this call.
+    """
     if gw_config.get('provider') != 'custom_http' or not gw_config.get('api_url'):
         return False
     await send_sms_request(gw_config, {
+        **{str(k): ("" if v is None else v) for k, v in (values or {}).items()},
         'recipients': phones, 'message': message,
         'sender': gw_config.get('sender_name') or 'ZenPlus',
     }, client_factory=NotificationHTTPClient)
@@ -450,13 +424,28 @@ async def _dispatch_channel(ch_type: str, ch_config: dict, ctx: dict) -> bool:
     return ok
 
 
-async def _log_delivery(db: AsyncSession, alert_id, rule, ch_id, ch, is_recovery: bool,
-                        outcome: str, error=None, latency_ms: int | None = None) -> None:
-    await dl.record(
-        db, alert_id=alert_id, rule_id=getattr(rule, "id", None), channel_id=ch_id,
-        channel_name=getattr(ch, "name", None), channel_type=getattr(ch, "type", None),
-        kind="recovery" if is_recovery else "trigger", outcome=outcome, error=error,
-        latency_ms=latency_ms if outcome != "skipped" else None)
+async def _dispatch_planned(db: AsyncSession, channel_ids: list, ctx: dict) -> int:
+    """Send one rule's notification through the shared dispatcher.
+
+    The status and service paths announce through
+    ``host_alert_service.dispatch_to_channels`` like every other source, so
+    recipient dedupe, the durable delivery keys (``alert_id`` +
+    ``delivery_event``), grouping and budgets apply to them too. The
+    dispatcher commits the session when the send is keyed, so callers run
+    this only after their own state changes are committed. Never raises:
+    one rule's failed send must not cost the next rule its page.
+    """
+    from app.services.host_alert_service import dispatch_to_channels
+
+    try:
+        return int(await dispatch_to_channels(db, channel_ids, ctx) or 0)
+    except Exception as exc:
+        print(f"ERROR sending notification for rule {ctx.get('rule_id')}: {exc}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return 0
 
 
 async def _find_suppressing_dependency(db: AsyncSession, device_id: str):
@@ -840,8 +829,9 @@ async def _load_device_rules(db: AsyncSession) -> list:
     """
     flap_col = ("notify_while_flapping" if await _notify_while_flapping_supported(db)
                 else "false AS notify_while_flapping")
+    prio_col = await funnel.rule_priority_column(db)
     return (await db.execute(text(f"""
-        SELECT {_DEVICE_RULE_COLUMNS}, {flap_col}
+        SELECT {_DEVICE_RULE_COLUMNS}, {flap_col}, {prio_col}
         FROM alert_rules
         WHERE enabled = true
           AND service_check_id IS NULL
@@ -961,6 +951,8 @@ async def evaluate_status_change(
         group_name = gr_row.name if gr_row else ""
 
     rules = await _load_device_rules(db)
+    # alerts.priority is stamped when the row is raised (migrate-164).
+    priority_ok = await funnel.priority_supported(db)
 
     # What the transition check measured. No reply means no latency: it reads
     # "unavailable (no reply)", never "0.0 ms" next to 100% loss.
@@ -1073,6 +1065,8 @@ async def evaluate_status_change(
     # loaded once per evaluation and only when a held trigger needs it.
     flap_hold_s: int | None = None
     flap_held_alerts = 0
+    # (channel ids, dispatch ctx) per notifying rule, sent after the commit.
+    planned: list[tuple[list, dict]] = []
 
     for rule in rules:
         trigger = rule.trigger_on or "any"
@@ -1124,13 +1118,17 @@ async def evaluate_status_change(
             value=rule_value, duration=variables.get("duration", ""),
         ))
 
+        p_col, p_val, p_params = funnel.priority_insert(
+            priority_ok, getattr(rule, "priority", None), rule.severity or "warning")
+
         if suppressing_dependency and not is_recovery:
             await db.execute(
-                text("""
-                    INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
-                    VALUES (:device_id, :rule_id, 'resolved', :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
+                text(f"""
+                    INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata{p_col})
+                    VALUES (:device_id, :rule_id, 'resolved', :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb){p_val})
                 """),
                 {
+                    **p_params,
                     "device_id": event.device_id,
                     "rule_id": str(rule.id),
                     "severity": rule.severity or "warning",
@@ -1253,12 +1251,13 @@ async def evaluate_status_change(
                 row_metadata["flap_kind"] = _transition_class(event.old_status, event.new_status)
                 flap_held_alerts += 1
         inserted = await db.execute(
-            text("""
-                INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
-                VALUES (:device_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
+            text(f"""
+                INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata{p_col})
+                VALUES (:device_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb){p_val})
                 RETURNING id
             """),
             {
+                **p_params,
                 "device_id": event.device_id,
                 "rule_id": str(rule.id),
                 "status": "resolved" if is_recovery else ("pending" if held else "active"),
@@ -1304,16 +1303,18 @@ async def evaluate_status_change(
 
         # Send notifications to channels. Every channel's outcome goes to the
         # delivery log against the incident it is about: the new row for a
-        # trigger, the closed incident for a recovery.
+        # trigger (an 'up' rule's trigger is its own row), the closed
+        # incident for a reset.
         channel_ids = rule.notify_channels or []
+        is_reset = is_recovery and trigger != "up"
         delivery_alert_id = (recovered.get(str(rule.id), {}).get("alert_id")
-                             if is_recovery else new_alert_id)
+                             if is_reset else new_alert_id)
 
         # Which incident this is and where it is in its life: a trigger opens
         # it ("New"); a reset closes the trigger's incident ("Recovered", with
         # the total duration since its first trigger). An 'up' rule's trigger
         # is the up transition itself, so it is a new event.
-        if is_recovery and trigger != "up":
+        if is_reset:
             closed_inc = recovered.get(str(rule.id), {})
             incident = incident_context(alert_id=closed_inc.get("alert_id"),
                                         first_seen=closed_inc.get("since"), now=now,
@@ -1344,130 +1345,65 @@ async def evaluate_status_change(
             thr_text = format_threshold(rule_metric, rule.threshold, rule.operator, rule_value)
             if lead["label"] == ("Round-trip time" if rule_metric == "rtt" else "Packet loss"):
                 headline["detail"] = f"Threshold {thr_text}"
-        for ch_id in channel_ids:
-            ch = None
-            timer = dl.Timer()
-            try:
-                ch_result = await db.execute(
-                    text("SELECT name, type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"),
-                    {"id": ch_id},
-                )
-                ch = ch_result.first()
-                if not ch or not ch.enabled:
-                    await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                        "skipped", "config: channel disabled or deleted")
-                    continue
-
-                ch_config = decrypt_config(ch.config)
-
-                if ch.type == "sms":
-                    phones = ch_config.get("phone_numbers", "")
-                    gw_cfg = await _sms_gateway(db, ch.gateway_id or ch_config.get("gateway_id")) if phones else None
-                    if not phones or not gw_cfg:
-                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery, "skipped",
-                                            "config: no phone numbers" if not phones else "config: no enabled SMS gateway")
-                        continue
-                    # Pre-fill device placeholders in the gateway template
-                    # (encoded per HTTP method); {message}/{recipients}/
-                    # {sender} are filled by _send_sms itself.
-                    gw_cfg["request_template"] = fill_template(
-                        gw_cfg.get("request_template", ""),
-                        {"hostname": event.hostname,
-                         "ip_address": event.ip_address,
-                         "status": event.new_status.upper()},
-                        is_get=gw_cfg.get("http_method", "GET").upper() != "POST",
-                        content_type=gw_cfg.get("content_type", ""),
-                    )
-                    if await _send_sms(gw_cfg, phones, sms_body):
-                        notifications_sent += 1
-                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                            "accepted", None, timer.ms)
-                    else:
-                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                            "skipped", "config: SMS gateway is not a usable HTTP gateway")
-
-                elif ch.type == "email":
-                    recipients = ch_config.get("recipients", "")
-                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id")) if recipients else None
-                    if not recipients or not gw_conf:
-                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery, "skipped",
-                                            "config: no recipients" if not recipients else "config: no enabled SMTP gateway")
-                        continue
-                    if gw_conf:
-                        email_html = build_alert_email_html({
-                            "severity": rule.severity or "warning",
-                            "resolved": is_recovery,
-                            "status": variables.get("status"),
-                            "title": rule.name or "Alert",
-                            "hostname": event.hostname,
-                            "ip_address": event.ip_address,
-                            "message": email_body,
-                            # Lead with what actually fired, then the context.
-                            "headline_metric": headline,
-                            "details": _clean_details([
-                                ("Alert rule", rule.name),
-                                # Reachability, the rule's condition and the
-                                # severity (status/severity pills) are three
-                                # separate facts.
-                                ("Reachability", variables.get("reachability")),
-                                ("Condition", variables.get("condition_label")),
-                                # An 'up' rule's trigger is the recovery itself:
-                                # how long the outage lasted. A reset's total
-                                # duration comes with its incident line.
-                                ("Active for", variables.get("duration")
-                                 if is_recovery and trigger == "up" else None),
-                                ("Round-trip time", rtt_shown),
-                                ("Packet loss", loss_shown),
-                                ("Group", variables.get("group")),
-                                ("Location", variables.get("location")),
-                                ("Device type", variables.get("device_type")),
-                            ]),
-                            "action_url": await _dashboard_url(db, "/alerts"),
-                            "timestamp": now.isoformat(),
-                            # Incident line, first seen, and active for (total
-                            # duration on a recovery).
-                            **incident,
-                        })
-                        if await _send_email(gw_conf, recipients, alert_subject(email_subject, incident),
-                                             email_body, html_body=email_html):
-                            notifications_sent += 1
-                            await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                                "accepted", None, timer.ms)
-                        else:
-                            await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                                "skipped", "config: SMTP gateway has no host")
-
-                elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
-                    # Shared context for every outbound provider.
-                    ctx = {
-                        "hostname":     event.hostname,
-                        "ip_address":   event.ip_address,
-                        "status":       (event.new_status or "").upper(),
-                        "severity":     rule.severity or "warning",
-                        "message":      sms_body,
-                        "triggered_at": now.isoformat(),
-                        "is_recovery":  is_recovery,
-                        "device_id":    event.device_id,
-                        "rule_id":      str(rule.id),
-                        "rule_name":    rule.name,
-                        "alert_id":     str(delivery_alert_id) if delivery_alert_id else None,
-                        "event_type":   "recovery" if is_recovery else "trigger",
-                    }
-                    ok, err = await _dispatch_channel_result(ch.type, ch_config, ctx)
-                    if ok:
-                        notifications_sent += 1
-                    await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                        "accepted" if ok else ("failed" if err else "skipped"),
-                                        err if err else (None if ok else "config: no URL or routing key"),
-                                        timer.ms)
-
-            except Exception as exc:
-                # Log but don't fail the whole evaluation
-                print(f"ERROR sending notification to channel {ch_id}: {exc}")
-                await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                    "failed", exc, timer.ms)
+        if not channel_ids:
+            continue
+        # Sent after the commit below (the dispatcher commits keyed sends, and
+        # every row this evaluation writes must be decided under the device
+        # lock first). One ctx serves every transport: the email fields
+        # render the same mail as before, the webhook family gets the same
+        # keys as before (device_id + rule_id keep PagerDuty's dedup key).
+        planned.append((channel_ids, {
+            "subject": email_subject,
+            "body": email_body,
+            "message": sms_body,
+            "hostname": event.hostname,
+            "ip_address": event.ip_address,
+            "status": (event.new_status or "").upper(),
+            "severity": rule.severity or "warning",
+            "resolved": is_recovery,
+            "is_recovery": is_recovery,
+            "triggered_at": now.isoformat(),
+            "device_id": event.device_id,
+            "rule_id": str(rule.id),
+            "rule_name": rule.name,
+            "alert_id": str(delivery_alert_id) if delivery_alert_id else None,
+            "delivery_event": "recovery" if is_reset else "trigger",
+            "event_type": "recovery" if is_recovery else "trigger",
+            # Lead with what actually fired, then the context.
+            "headline_metric": headline,
+            "details": [
+                ("Alert rule", rule.name),
+                # Reachability, the rule's condition and the severity
+                # (status/severity pills) are three separate facts.
+                ("Reachability", variables.get("reachability")),
+                ("Condition", variables.get("condition_label")),
+                # An 'up' rule's trigger is the recovery itself: how long the
+                # outage lasted. A reset's total duration comes with its
+                # incident line.
+                ("Active for", variables.get("duration")
+                 if is_recovery and trigger == "up" else None),
+                ("Round-trip time", rtt_shown),
+                ("Packet loss", loss_shown),
+                ("Group", variables.get("group")),
+                ("Location", variables.get("location")),
+                ("Device type", variables.get("device_type")),
+            ],
+            "action_url": await _dashboard_url(db, "/alerts"),
+            # Device placeholders an SMS gateway's request template may use.
+            "sms_template_values": {"hostname": event.hostname,
+                                    "ip_address": event.ip_address,
+                                    "status": (event.new_status or "").upper()},
+            **funnel.notification_fields(rule.severity or "warning",
+                                         getattr(rule, "priority", None),
+                                         trigger=not is_recovery),
+            # Incident line, first seen, and active for (total duration on a
+            # recovery).
+            **incident,
+        }))
 
     await db.commit()
+    for channel_ids, ctx in planned:
+        notifications_sent += await _dispatch_planned(db, channel_ids, ctx)
 
     # Per-map webhook fan-out: if the device sits on any manual map with a
     # webhook configured, POST a compact transition event. We do this OUT
@@ -1540,14 +1476,16 @@ async def evaluate_service_status_change(
     is_recovery = into_up and event.old_status in ("down", "degraded", "warning")
     is_down = event.new_status in ("down", "degraded", "warning")
 
+    prio_col = await funnel.rule_priority_column(db)
+    priority_ok = await funnel.priority_supported(db)
     rules_result = await db.execute(
-        text("""
+        text(f"""
             SELECT id, name, trigger_on, recovery_alert, severity,
                    service_check_id, service_check_group_id, metric,
                    notify_channels, cooldown, min_duration,
                    email_subject, email_body, sms_template,
                    recovery_email_subject, recovery_email_body, recovery_sms_template,
-                   schedule_start, schedule_end, schedule_days
+                   schedule_start, schedule_end, schedule_days, {prio_col}
             FROM alert_rules
             WHERE enabled = true
               AND (service_check_id IS NOT NULL OR service_check_group_id IS NOT NULL OR metric = 'service_status')
@@ -1587,6 +1525,8 @@ async def evaluate_service_status_change(
     suppressed_alerts = 0
     _tz = await get_configured_timezone(db)
     suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if (is_down and event.device_id) else None
+    # (channel ids, dispatch ctx) per notifying rule, sent after the commit.
+    planned: list[tuple[list, dict]] = []
 
     # Recovery closes every open alert on this check up front — this used to
     # run per-rule after the trigger_on gate, so a 'down' rule's alerts (the
@@ -1659,19 +1599,23 @@ async def evaluate_service_status_change(
         variables["severity"] = (rule.severity or "warning").upper()
         variables["rule_name"] = rule.name or "Alert"
 
+        p_col, p_val, p_params = funnel.priority_insert(
+            priority_ok, getattr(rule, "priority", None), rule.severity or "warning")
+
         if suppressing_dependency and not is_recovery:
             await db.execute(
-                text("""
+                text(f"""
                     INSERT INTO alerts (
                         device_id, service_check_id, rule_id, status, severity,
-                        message, triggered_at, resolved_at, metadata
+                        message, triggered_at, resolved_at, metadata{p_col}
                     )
                     VALUES (
                         :device_id, :service_check_id, :rule_id, 'resolved', :severity,
-                        :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb)
+                        :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb){p_val}
                     )
                 """),
                 {
+                    **p_params,
                     "device_id": event.device_id,
                     "service_check_id": event.service_check_id,
                     "rule_id": str(rule.id),
@@ -1732,12 +1676,13 @@ async def evaluate_service_status_change(
             row_metadata["notified"] = False
             row_metadata["hold_until"] = (now + timedelta(seconds=hold_s)).isoformat()
         inserted = await db.execute(
-            text("""
-                INSERT INTO alerts (device_id, service_check_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
-                VALUES (:device_id, :service_check_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
+            text(f"""
+                INSERT INTO alerts (device_id, service_check_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata{p_col})
+                VALUES (:device_id, :service_check_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb){p_val})
                 RETURNING id
             """),
             {
+                **p_params,
                 "device_id": event.device_id,
                 "service_check_id": event.service_check_id,
                 "rule_id": str(rule.id),
@@ -1779,111 +1724,58 @@ async def evaluate_service_status_change(
             continue
 
         channel_ids = rule.notify_channels or []
+        if not channel_ids:
+            continue
+        is_reset = is_recovery and trigger != "up"
         delivery_alert_id = (recovered.get(str(rule.id), {}).get("alert_id")
-                             if is_recovery else svc_alert_id)
-        for ch_id in channel_ids:
-            ch = None
-            timer = dl.Timer()
-            try:
-                ch_result = await db.execute(
-                    text("SELECT name, type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"),
-                    {"id": ch_id},
-                )
-                ch = ch_result.first()
-                if not ch or not ch.enabled:
-                    await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                        "skipped", "config: channel disabled or deleted")
-                    continue
-
-                ch_config = decrypt_config(ch.config)
-
-                if ch.type == "sms":
-                    phones = ch_config.get("phone_numbers", "")
-                    gw_cfg = await _sms_gateway(db, ch.gateway_id or ch_config.get("gateway_id")) if phones else None
-                    if not phones or not gw_cfg:
-                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery, "skipped",
-                                            "config: no phone numbers" if not phones else "config: no enabled SMS gateway")
-                        continue
-                    if await _send_sms(gw_cfg, phones, sms_body):
-                        notifications_sent += 1
-                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                            "accepted", None, timer.ms)
-                    else:
-                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                            "skipped", "config: SMS gateway is not a usable HTTP gateway")
-
-                elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
-                    # Service alerts never reached webhook-family channels:
-                    # only SMS and email were implemented on this path.
-                    ctx = {
-                        "hostname":     variables.get("check_name") or variables.get("hostname"),
-                        "ip_address":   variables.get("target") or "",
-                        "status":       (event.new_status or "").upper(),
-                        "severity":     rule.severity or "warning",
-                        "message":      sms_body,
-                        "triggered_at": now.isoformat(),
-                        "is_recovery":  is_recovery,
-                        "service_check_id": event.service_check_id,
-                        "rule_id":      str(rule.id),
-                        "rule_name":    rule.name,
-                        "alert_id":     str(delivery_alert_id) if delivery_alert_id else None,
-                        "event_type":   "recovery" if is_recovery else "trigger",
-                    }
-                    ok, err = await _dispatch_channel_result(ch.type, ch_config, ctx)
-                    if ok:
-                        notifications_sent += 1
-                    await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                        "accepted" if ok else ("failed" if err else "skipped"),
-                                        err if err else (None if ok else "config: no URL or routing key"),
-                                        timer.ms)
-
-                elif ch.type == "email":
-                    recipients = ch_config.get("recipients", "")
-                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id")) if recipients else None
-                    if not recipients or not gw_conf:
-                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery, "skipped",
-                                            "config: no recipients" if not recipients else "config: no enabled SMTP gateway")
-                        continue
-                    if gw_conf:
-                        email_html = build_alert_email_html({
-                            "severity": rule.severity or "warning",
-                            "resolved": is_recovery,
-                            "status": variables.get("status"),
-                            "title": rule.name or "Service alert",
-                            "hostname": variables.get("check_name") or variables.get("hostname"),
-                            "message": email_body,
-                            "headline_metric": {
-                                "label": (variables.get("check_type") or "Check").upper(),
-                                "value": variables.get("status"),
-                                "secondary_label": "Target",
-                                "secondary_value": variables.get("target"),
-                            },
-                            "details": _clean_details([
-                                ("Alert rule", rule.name),
-                                ("Check", variables.get("check_name")),
-                                ("Type", variables.get("check_type")),
-                                ("Target", variables.get("target")),
-                                ("Failing for", variables.get("duration") if is_recovery else None),
-                                ("Error", variables.get("error")),
-                            ]),
-                            "action_url": await _dashboard_url(db, "/services"),
-                            "timestamp": now.isoformat(),
-                        })
-                        if await _send_email(gw_conf, recipients, email_subject,
-                                             email_body, html_body=email_html):
-                            notifications_sent += 1
-                            await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                                "accepted", None, timer.ms)
-                        else:
-                            await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                                "skipped", "config: SMTP gateway has no host")
-
-            except Exception as exc:
-                print(f"ERROR sending service notification to channel {ch_id}: {exc}")
-                await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
-                                    "failed", exc, timer.ms)
+                             if is_reset else svc_alert_id)
+        # Sent after the commit below, through the shared dispatcher (see the
+        # device path). The webhook family keeps its keys (service_check_id,
+        # not device_id, so PagerDuty's dedup key is unchanged); the email
+        # renders as before — check name, no IP line, the check headline.
+        planned.append((channel_ids, {
+            "subject": email_subject,
+            "body": email_body,
+            "message": sms_body,
+            "hostname": variables.get("check_name") or variables.get("hostname"),
+            "ip_address": variables.get("target") or "",
+            "status": (event.new_status or "").upper(),
+            "severity": rule.severity or "warning",
+            "resolved": is_recovery,
+            "is_recovery": is_recovery,
+            "triggered_at": now.isoformat(),
+            "service_check_id": event.service_check_id,
+            "rule_id": str(rule.id),
+            "rule_name": rule.name,
+            "alert_id": str(delivery_alert_id) if delivery_alert_id else None,
+            "delivery_event": "recovery" if is_reset else "trigger",
+            "event_type": "recovery" if is_recovery else "trigger",
+            "headline_metric": {
+                "label": (variables.get("check_type") or "Check").upper(),
+                "value": variables.get("status"),
+                "secondary_label": "Target",
+                "secondary_value": variables.get("target"),
+            },
+            "details": [
+                ("Alert rule", rule.name),
+                ("Check", variables.get("check_name")),
+                ("Type", variables.get("check_type")),
+                ("Target", variables.get("target")),
+                ("Failing for", variables.get("duration") if is_recovery else None),
+                ("Error", variables.get("error")),
+            ],
+            "action_url": await _dashboard_url(db, "/services"),
+            # The target is shown in its own row; the mail's host line never
+            # carried it.
+            "email_overrides": {"ip_address": "", "title": rule.name or "Service alert"},
+            **funnel.notification_fields(rule.severity or "warning",
+                                         getattr(rule, "priority", None),
+                                         trigger=not is_recovery),
+        }))
 
     await db.commit()
+    for channel_ids, ctx in planned:
+        notifications_sent += await _dispatch_planned(db, channel_ids, ctx)
 
     return {
         "evaluated_rules": len(rules),
@@ -1956,13 +1848,15 @@ async def evaluate_trap(
         if await _find_suppressing_dependency(db, did):
             return {"alerts_created": 0, "suppressed": "dependency"}
 
+    prio_col = await funnel.rule_priority_column(db)
+    priority_ok = await funnel.priority_supported(db)
     rules = (await db.execute(
-        text("""
+        text(f"""
             SELECT id, name, severity, device_id, group_id, scope_tag, trap_oid,
                    notify_channels, cooldown, metric, operator, threshold,
                    conditions, condition_logic,
                    email_subject, email_body, sms_template,
-                   schedule_start, schedule_end, schedule_days
+                   schedule_start, schedule_end, schedule_days, {prio_col}
             FROM alert_rules
             WHERE enabled = true AND metric = 'trap'
         """)
@@ -2004,13 +1898,16 @@ async def evaluate_trap(
 
         label = event.trap_name or event.trap_oid
         message = event.message or f"SNMP trap {label} from {event.source_ip}"
+        p_col, p_val, p_params = funnel.priority_insert(
+            priority_ok, getattr(rule, "priority", None), rule.severity or event.severity or "warning")
         inserted = await db.execute(
-            text("""
-                INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata)
-                VALUES (:device_id, :rule_id, 'active', :severity, :message, :triggered_at, CAST(:metadata AS jsonb))
+            text(f"""
+                INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata{p_col})
+                VALUES (:device_id, :rule_id, 'active', :severity, :message, :triggered_at, CAST(:metadata AS jsonb){p_val})
                 RETURNING id
             """),
             {
+                **p_params,
                 "device_id": did,
                 "rule_id": str(rule.id),
                 "severity": rule.severity or event.severity or "warning",
@@ -2100,6 +1997,11 @@ async def evaluate_trap(
                 "triggered_at": now.isoformat(),
                 "rule_id": str(rule.id),
                 "is_recovery": False,
+                # Keyed on the trap's own alert row: a retried dispatch of
+                # this trap never pages twice, and the log links the incident.
+                "alert_id": str(alert_id) if alert_id else None,
+                "delivery_event": "trigger",
+                **funnel.notification_fields(sev, getattr(rule, "priority", None), trigger=True),
             })
             await ns.stamp(db, alert_id, bool(sent))
         except Exception as exc:

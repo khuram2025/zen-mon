@@ -45,6 +45,8 @@ class UserResponse(BaseModel):
     # scope_tags plus these, unless the role carries system.admin.
     role_scope_tags: list[str] = []
     last_login: Optional[datetime]
+    # Personal IANA time zone (None = the appliance zone).
+    timezone: Optional[str] = None
     must_change_password: bool = False
     mfa_enabled: bool = False
     mfa_required: bool = False

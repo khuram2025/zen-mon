@@ -10,6 +10,8 @@ import {
   AlertTriangle, BellOff, BellRing, Check, CheckCheck, Plus, Search, Settings2, ShieldAlert, Trash2,
 } from 'lucide-react'
 import { api } from '@/lib/api'
+import { usePolicies } from '@/features/escalation/api'
+import { PRIORITIES, PRIORITY_META, derivePriority, effectivePriority, policyForPriority } from '@/features/escalation/model'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -614,13 +616,17 @@ export function CreateHostRuleDialog({
   const [target, setTarget] = useState('')
   const [allServers, setAllServers] = useState(false)
   const [channels, setChannels] = useState<string[]>([])
+  // 'auto' = derived from severity; 'default' = the priority's default escalation policy.
+  const [priority, setPriority] = useState('auto')
+  const [policyId, setPolicyId] = useState('default')
+  const policies = usePolicies(open)
 
   const kind = HOST_METRICS.find((m) => m.value === metric)?.kind || 'pct'
 
   const reset = () => {
     setName(''); setMetric('host_cpu_pct'); setOperator('gt'); setThreshold('90')
     setSeverity('warning'); setMinutes('5'); setTarget(''); setAllServers(false); setChannels([])
-    setClearMinutes(''); setResetLevel(''); setRecovery(true)
+    setClearMinutes(''); setResetLevel(''); setRecovery(true); setPriority('auto'); setPolicyId('default')
   }
 
   // Apply the prefill (e.g. from a service row) each time the dialog opens.
@@ -660,6 +666,8 @@ export function CreateHostRuleDialog({
         target: (kind === 'svc' || kind === 'proc') ? target.trim() : null,
         server_id: allServers ? null : serverId,
         notify_channels: channels,
+        priority: priority === 'auto' ? null : priority,
+        escalation_policy_id: policyId === 'default' ? null : policyId,
       })).data
     },
     onSuccess: () => { toast.success('Alert rule created'); onCreated(); onOpenChange(false); reset() },
@@ -714,6 +722,35 @@ export function CreateHostRuleDialog({
                   <SelectItem value="info">Info</SelectItem>
                   <SelectItem value="warning">Warning</SelectItem>
                   <SelectItem value="critical">Critical</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Priority</Label>
+              <Select value={priority} onValueChange={setPriority}>
+                <SelectTrigger aria-label="Incident priority"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Auto from severity ({derivePriority(severity)})</SelectItem>
+                  {PRIORITIES.map((p) => <SelectItem key={p} value={p}>{PRIORITY_META[p].label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Escalation</Label>
+              <Select value={policyId} onValueChange={setPolicyId}>
+                <SelectTrigger aria-label="Escalation policy"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">
+                    {(() => {
+                      const eff = effectivePriority(priority === 'auto' ? null : priority, severity)
+                      const d = policyForPriority(policies.data ?? [], eff)
+                      return d ? `${eff} default (${d.name})` : `${eff} default (none set)`
+                    })()}
+                  </SelectItem>
+                  {(policies.data ?? []).map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.enabled ? '' : ' (disabled)'}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>

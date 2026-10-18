@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_permission
 from app.services import alert_rule_scope as rs
+from app.services.alert_priority import priority_for
 from app.services.audit_service import write_audit_log
 
 require_rule_manager = require_permission("alerts.manage")
@@ -41,7 +42,7 @@ _OPERATOR = "^(gt|gte|lt|lte|eq|neq|>|<|>=|<=|==|!=)$"
 _COLUMNS = (
     "id, name, description, enabled, metric, operator, threshold, "
     "severity, min_duration, clear_duration, cooldown, notify_channels, server_id, target, "
-    "recovery_alert, conditions, created_at, updated_at"
+    "recovery_alert, conditions, priority, escalation_policy_id, created_at, updated_at"
 )
 # Threshold metrics: the ones a reset threshold and clear hold apply to.
 _PCT_METRICS = ("host_cpu_pct", "host_memory_pct", "host_filesystem_pct", "host_disk_util_pct")
@@ -65,6 +66,10 @@ class HostRuleCreate(BaseModel):
     notify_channels: list[str] = Field(default_factory=list)
     server_id: Optional[UUID] = None
     target: Optional[str] = None
+    # None = derived from severity (critical -> P2, warning -> P3, info -> P4).
+    priority: Optional[str] = Field(None, pattern="^P[1-4]$")
+    # None = the priority's default escalation policy.
+    escalation_policy_id: Optional[UUID] = None
 
 
 class HostRuleUpdate(BaseModel):
@@ -82,6 +87,17 @@ class HostRuleUpdate(BaseModel):
     cooldown: Optional[int] = Field(None, ge=0, le=86400)
     notify_channels: Optional[list[str]] = None
     target: Optional[str] = None
+    priority: Optional[str] = Field(None, pattern="^P[1-4]$")
+    escalation_policy_id: Optional[UUID] = None
+
+
+async def _policy_or_422(db: AsyncSession, policy_id) -> Optional[UUID]:
+    if policy_id is None:
+        return None
+    if not (await db.execute(text("SELECT 1 FROM escalation_policies WHERE id = :id"),
+                             {"id": policy_id})).first():
+        raise HTTPException(422, "Escalation policy not found")
+    return policy_id
 
 
 def _channels(ids) -> str:
@@ -148,6 +164,9 @@ def _row(r) -> dict:
         "notify_channels": r.notify_channels or [],
         "server_id": str(r.server_id) if r.server_id else None,
         "target": r.target,
+        "priority": r.priority,
+        "effective_priority": priority_for(r.priority, r.severity),
+        "escalation_policy_id": str(r.escalation_policy_id) if r.escalation_policy_id else None,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
     }
@@ -188,10 +207,10 @@ async def create_host_rule(
         "INSERT INTO alert_rules "
         "(name, description, enabled, metric, operator, threshold, severity, "
         " min_duration, clear_duration, cooldown, notify_channels, server_id, target, "
-        " recovery_alert, conditions, created_by) "
+        " recovery_alert, conditions, priority, escalation_policy_id, created_by) "
         "VALUES (:name, :description, :enabled, :metric, :operator, :threshold, :severity, "
         " :min_duration, :clear_duration, :cooldown, CAST(:notify_channels AS jsonb), :server_id, :target, "
-        " :recovery_alert, CAST(:conditions AS jsonb), :created_by) "
+        " :recovery_alert, CAST(:conditions AS jsonb), :priority, :escalation_policy_id, :created_by) "
         f"RETURNING {_COLUMNS}"
     ), {
         "name": data.name, "description": data.description, "enabled": data.enabled,
@@ -201,6 +220,8 @@ async def create_host_rule(
         "notify_channels": _channels(data.notify_channels),
         "server_id": data.server_id, "target": data.target,
         "recovery_alert": data.recovery_alert, "conditions": conditions,
+        "priority": data.priority,
+        "escalation_policy_id": await _policy_or_422(db, data.escalation_policy_id),
         "created_by": user.id,
     })).first()
     await write_audit_log(db, actor=user, action="alert_rule.create", resource_type="alert_rule",
@@ -252,6 +273,9 @@ async def update_host_rule(
         elif k == "conditions":
             sets.append("conditions = CAST(:conditions AS jsonb)")
             params["conditions"] = v
+        elif k == "escalation_policy_id":
+            sets.append("escalation_policy_id = :escalation_policy_id")
+            params[k] = await _policy_or_422(db, v)
         else:
             sets.append(f"{k} = :{k}")
             params[k] = v

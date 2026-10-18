@@ -9,6 +9,7 @@ import {
   Bug,
   Building2,
   CalendarClock,
+  ChevronsUp,
   ClipboardCheck,
   Cpu,
   CreditCard,
@@ -296,6 +297,8 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/alerts', label: 'Active Alerts', icon: AlertTriangle, badge: 'alerts', hint: 'Everything firing right now', permission: 'alerts.view' },
       { to: '/alert-rules', label: 'Alert Rules', icon: Bell, hint: 'Thresholds and escalation', permission: 'alerts.view' },
+      // Read-only with alerts.view (team roles see who is on call); every change needs alerts.manage.
+      { to: '/escalation', label: 'Escalation & On-call', icon: ChevronsUp, hint: 'Priority matrix, escalation policies, on-call, grouping', permission: 'alerts.view' },
       { to: '/traps', label: 'SNMP Traps', icon: Inbox, hint: 'Unsolicited device events', permission: ['alerts.view', 'devices.view'] },
       { to: '/network-events', label: 'Network Syslog', icon: Inbox, hint: 'Device log events and alert rules', permission: ['alerts.view', 'devices.view'] },
       { to: '/channels', label: 'Channels', icon: BellRing, hint: 'Where notifications are delivered', permission: ['alerts.manage', 'settings.manage'] },

@@ -189,13 +189,17 @@ def mail(monkeypatch):
     monkeypatch.setattr(alert_engine, "_find_suppressing_dependency", AsyncMock(return_value=None))
     monkeypatch.setattr(alert_engine, "get_configured_timezone", AsyncMock(return_value="UTC"))
     monkeypatch.setattr(alert_engine, "_PENDING_STATUS_SUPPORTED", True)
-    monkeypatch.setattr(alert_engine, "_smtp_gateway", AsyncMock(return_value={"host": "smtp.invalid"}))
+    # The status path sends through the shared dispatcher (1.24.17), which
+    # resolves the gateway and renders the mail itself.
+    from app.services import email_render, host_alert_service
+    monkeypatch.setattr(host_alert_service, "_gateway_config", AsyncMock(return_value={"host": "smtp.invalid"}))
+    monkeypatch.setattr(host_alert_service, "decrypt_config", lambda cfg: cfg)
     monkeypatch.setattr(alert_engine, "_dashboard_url", AsyncMock(return_value=""))
     monkeypatch.setattr(alert_engine, "decrypt_config", lambda cfg: cfg)
     monkeypatch.setattr(alert_engine.dl, "record", AsyncMock())
     sent: list[dict] = []
     contexts: list[dict] = []
-    real_build = alert_engine.build_alert_email_html
+    real_build = email_render.build_alert_email_html
 
     def build(ctx):
         contexts.append(ctx)
@@ -205,7 +209,7 @@ def mail(monkeypatch):
         sent.append({"subject": subject, "body": body, "html": html_body, "ctx": contexts[-1]})
         return True
 
-    monkeypatch.setattr(alert_engine, "build_alert_email_html", build)
+    monkeypatch.setattr(email_render, "build_alert_email_html", build)
     monkeypatch.setattr(alert_engine, "_send_email", send)
 
     def world(*rules):
@@ -282,7 +286,8 @@ async def test_complete_loss_never_shows_as_excellent_latency(mail):
     # Lifecycle and incident in subject and body.
     [row] = db.alerts
     ref = ap.incident_ref(row["id"])
-    assert m["subject"] == f"[WARNING] [New] DOWN: Packet Loss — edge-1 (10.0.0.1) [{ref}]"
+    # The priority follows the severity (1.24.17: a warning rule derives P3).
+    assert m["subject"] == f"[WARNING] [P3] [New] DOWN: Packet Loss — edge-1 (10.0.0.1) [{ref}]"
     assert f"Incident {ref} · New" in m["html"]
     assert ctx["incident_ref"] == ref and ctx["lifecycle"] == "new"
 
@@ -320,7 +325,7 @@ async def test_device_recovery_mail_is_labelled_recovered_with_total_duration(ma
     await mail.run(db, "down", "up", rtt_ms=1.5, packet_loss=0.0)
     [m] = mail.sent
     ref = ap.incident_ref(opened["id"])
-    assert m["subject"] == f"[CRITICAL] [Recovered] Device Down — edge-1 (10.0.0.1) [{ref}]"
+    assert m["subject"] == f"[CRITICAL] [P2] [Recovered] Device Down — edge-1 (10.0.0.1) [{ref}]"
     assert f"Incident {ref} · Recovered after 2 hours 14 minutes" in m["html"]
     assert "Total duration" in m["html"]
     ctx = m["ctx"]

@@ -89,11 +89,71 @@ Report emails group headline figures by section, with the section's scope and
 name an action instead of repeating methodology notes. Database engine names are
 not shown in customer report text.
 
-## Not in this release
+## Priorities and the escalation matrix (1.24.18)
 
-* Grouping related warnings into digests, and an escalation matrix with
-  on-call rotations (proposed in the field review), are follow-up work.
-  Escalation levels and repeats configured on a rule keep working and are now
-  labelled as reminders and escalations.
-* Device status alerts (ping) already have confirmation and flap holds; see
-  `docs/device-status-policy.md`.
+Every incident carries a priority: **P1 Critical**, **P2 High**, **P3 Warning** or
+**P4 Information**. A rule may set it. Otherwise it follows severity: critical is
+P2, warning is P3 and info is P4. P1 is reserved for rules that say so, because
+a critical CPU reading is not a major outage. Acknowledgement targets are set per
+priority (*Escalation & On-call → Response targets*). The defaults are P1 5 min,
+P2 15, P3 60 and P4 none. Older severity-keyed settings are still read.
+
+An **escalation policy** is a reusable list of steps. Each step has a delay after
+the first page and its targets: an on-call schedule, a person or a channel. A policy
+can also set:
+
+* a repeat interval and repeat count for the current step;
+* an unresolved-review interval, which keeps sending updates after acknowledgement;
+* an acknowledgement expiry, after which an old acknowledgement re-opens escalation;
+* a fallback route.
+
+Routing order: the rule's own policy, then the rule's own legacy escalation tiers
+(unchanged), then the policy that is the default for the incident's priority. A
+priority default, including one created by *Create recommended matrix*, never takes
+over a rule that already escalates.
+
+* Acknowledgement stops step escalation and assigns an owner. It does not stop the
+  unresolved-review updates.
+* Resolution cancels pending steps, and everyone who was paged gets the all-clear.
+* A step that reaches nobody (an empty schedule, a user without contacts), or whose
+  deliveries all failed, goes to the fallback route. The incident timeline records
+  a *coverage gap* or *route failed* event.
+* Recipients are de-duplicated across the targets of a step.
+* *Create recommended matrix* builds the four policies proposed in the field review,
+  from your schedules and channels. *Preview* (dry run) shows who each step would
+  reach without sending anything. *Coverage* lists unrouted priorities, schedule
+  gaps and people without contact methods.
+
+**On-call schedules** rotate an ordered list of people every N hours from a handoff
+time, in the schedule's own time zone, so a 09:00 handoff stays at 09:00 across
+DST. Layers can be limited to days and hours, and the higher layer wins when two
+are on duty. Time-boxed overrides win over every layer. People manage their own
+contact methods (email, SMS) and time zone under *My profile*.
+
+Every alert email has **View incident** and **Acknowledge** buttons. Acknowledge
+opens the incident after sign-in and asks for confirmation. A link alone never
+changes anything, because mail scanners follow links.
+
+## Grouping and delivery budgets (1.24.18)
+
+Grouping is off after the upgrade. *Escalation & On-call → Grouping* has *Enable
+recommended*.
+
+* When grouping is on, **P3/P4 warning and information triggers** wait a short
+  *group wait* (default 60 s). Related ones are then sent as **one summary** per
+  group and channel. Groups are formed by the chosen keys: appliance, site,
+  device group, scope tag, event family. The summary lists every child incident,
+  with its reference, asset, condition, value, first-seen time and link.
+* P1/P2 or critical incidents, recoveries, escalations and reviews are **never held**.
+* A **per-recipient budget** (default 30 non-critical messages an hour) sends any
+  overflow into a digest instead of dropping it. P1/P2 traffic is not counted when
+  *critical reserve* is on.
+* Every held message records its reason and release condition on the incident
+  timeline and in the digest list. *Release now* sends a digest at once.
+* A recovery for an incident whose warning is still waiting is not mailed on its
+  own: the summary lists it as already recovered. A digest whose incidents all
+  recovered is cancelled, and the reason is recorded.
+
+Every notification source now goes through one dispatcher: device status, service
+checks, metrics, traps, syslog, APM, NetFlow, Device Tracker and NetPath. Grouping,
+budgets, recipient de-duplication and delivery keys therefore apply to all of them.

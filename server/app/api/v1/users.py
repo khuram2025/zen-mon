@@ -129,6 +129,16 @@ def _clean_email(value: str) -> str:
     return v
 
 
+def _clean_timezone(value: Optional[str]) -> Optional[str]:
+    from app.services.oncall_service import valid_timezone
+    v = (value or "").strip()
+    if not v:
+        return None
+    if not valid_timezone(v):
+        raise ValueError("Enter an IANA time zone such as Asia/Riyadh")
+    return v
+
+
 class UserCreate(BaseModel):
     username: str = Field(..., max_length=100)
     email: str = Field(..., max_length=255)
@@ -169,11 +179,18 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
     scope_tags: Optional[list[str]] = None
     must_change_password: Optional[bool] = None
+    # Personal IANA time zone; explicit null / "" = the appliance zone.
+    timezone: Optional[str] = Field(None, max_length=64)
 
     @field_validator("email")
     @classmethod
     def _v_email(cls, v: Optional[str]) -> Optional[str]:
         return None if v is None else _clean_email(v)
+
+    @field_validator("timezone")
+    @classmethod
+    def _v_timezone(cls, v: Optional[str]) -> Optional[str]:
+        return _clean_timezone(v)
 
 
 class ResetPasswordRequest(BaseModel):
@@ -200,6 +217,7 @@ class UserOut(BaseModel):
     # endpoints. The effective scope is scope_tags plus these.
     role_scope_tags: list[str] = []
     last_login: Optional[datetime]
+    timezone: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     must_change_password: bool = False
@@ -464,6 +482,115 @@ async def change_own_password(
     return {"message": "Password changed successfully"}
 
 
+# ── Contact methods (escalation targets, migrate-164) ───────────────────────
+#
+# How an on-call responder is reached: email and SMS addresses. The account
+# email is the implicit email contact while a user has no email method of
+# their own. A user edits their own (``/users/me/contact-methods``);
+# alerts.manage or users.manage edit anyone's.
+
+MAX_CONTACT_METHODS = 10
+
+
+class ContactMethodIn(BaseModel):
+    kind: str = Field(..., pattern="^(email|sms)$")
+    address: str = Field(..., min_length=3, max_length=255)
+    label: Optional[str] = Field(None, max_length=100)
+    enabled: bool = True
+
+
+class ContactMethodsBody(BaseModel):
+    methods: list[ContactMethodIn] = Field(default_factory=list, max_length=MAX_CONTACT_METHODS)
+    # Present = set (null / "" = the appliance zone); absent = unchanged.
+    timezone: Optional[str] = Field(None, max_length=64)
+
+    @field_validator("timezone")
+    @classmethod
+    def _v_timezone(cls, v: Optional[str]) -> Optional[str]:
+        return _clean_timezone(v)
+
+
+async def _contact_payload(db: AsyncSession, user_id) -> dict:
+    row = (await db.execute(text("SELECT id, email, timezone FROM users WHERE id = :id"),
+                            {"id": user_id})).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    methods = [{"id": str(m.id), "kind": m.kind, "address": m.address, "label": m.label,
+                "enabled": bool(m.enabled)}
+               for m in (await db.execute(text(
+                   "SELECT id, kind, address, label, enabled FROM user_contact_methods"
+                   " WHERE user_id = :id ORDER BY created_at, id"), {"id": user_id})).fetchall()]
+    return {"user_id": str(row.id), "timezone": row.timezone, "account_email": row.email,
+            "methods": methods,
+            # The account email is used while no enabled email method exists.
+            "implicit_email": not any(m["kind"] == "email" and m["enabled"] for m in methods)}
+
+
+async def _save_contacts(db: AsyncSession, actor: User, user_id, body: ContactMethodsBody) -> dict:
+    from app.services.oncall_service import normalize_address, valid_address
+
+    clean, seen = [], set()
+    for m in body.methods:
+        addr = m.address.strip()
+        if not valid_address(m.kind, addr):
+            raise HTTPException(status_code=422, detail=(
+                f"{addr!r} is not a valid email address" if m.kind == "email"
+                else f"{addr!r} is not a valid phone number (digits, optional leading +)"))
+        key = (m.kind, normalize_address(m.kind, addr))
+        if key in seen:
+            raise HTTPException(status_code=422, detail=f"{addr} is listed twice")
+        seen.add(key)
+        clean.append({"kind": m.kind, "address": addr, "label": (m.label or "").strip() or None,
+                      "enabled": m.enabled})
+    exists = (await db.execute(text("SELECT 1 FROM users WHERE id = :id"), {"id": user_id})).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    before = await _contact_payload(db, user_id)
+    await db.execute(text("DELETE FROM user_contact_methods WHERE user_id = :id"), {"id": user_id})
+    for m in clean:
+        await db.execute(text(
+            "INSERT INTO user_contact_methods (user_id, kind, address, label, enabled)"
+            " VALUES (:uid, :kind, :address, :label, :enabled)"), {"uid": user_id, **m})
+    changes = {"methods": {"from": len(before["methods"]), "to": len(clean)}}
+    if "timezone" in body.model_fields_set:
+        await db.execute(text("UPDATE users SET timezone = :tz, updated_at = NOW() WHERE id = :id"),
+                         {"tz": body.timezone, "id": user_id})
+        changes["timezone"] = {"from": before["timezone"], "to": body.timezone}
+    await write_audit_log(db, actor=actor, action="user.contact_methods.update", resource_type="user",
+                          resource_id=str(user_id),
+                          metadata={"changes": changes,
+                                    "kinds": sorted({m["kind"] for m in clean})})
+    await db.commit()
+    return await _contact_payload(db, user_id)
+
+
+@router.get("/me/contact-methods")
+async def my_contact_methods(current_user: User = Depends(get_current_user),
+                             db: AsyncSession = Depends(get_db)):
+    return await _contact_payload(db, current_user.id)
+
+
+@router.put("/me/contact-methods")
+async def update_my_contact_methods(body: ContactMethodsBody,
+                                    current_user: User = Depends(get_current_user),
+                                    db: AsyncSession = Depends(get_db)):
+    return await _save_contacts(db, current_user, current_user.id, body)
+
+
+@router.get("/{user_id}/contact-methods")
+async def user_contact_methods(user_id: UUID, db: AsyncSession = Depends(get_db),
+                               current_user: User = Depends(require_permission("alerts.manage", "users.manage"))):
+    return await _contact_payload(db, user_id)
+
+
+@router.put("/{user_id}/contact-methods")
+async def update_user_contact_methods(user_id: UUID, body: ContactMethodsBody,
+                                      db: AsyncSession = Depends(get_db),
+                                      current_user: User = Depends(
+                                          require_permission("alerts.manage", "users.manage"))):
+    return await _save_contacts(db, current_user, user_id, body)
+
+
 @router.get("/me/sessions")
 async def my_sessions(
     db: AsyncSession = Depends(get_db),
@@ -605,6 +732,10 @@ async def update_user(
         if new_name != user.full_name:
             changes["full_name"] = {"from": user.full_name, "to": new_name}
             user.full_name = new_name
+
+    if "timezone" in fields and data.timezone != user.timezone:
+        changes["timezone"] = {"from": user.timezone, "to": data.timezone}
+        user.timezone = data.timezone
 
     if "scope_tags" in fields and data.scope_tags is not None:
         canonical = await tag_service.canonicalize_tags(db, data.scope_tags)

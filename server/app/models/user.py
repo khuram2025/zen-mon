@@ -35,6 +35,9 @@ class User(Base):
     mfa_enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     mfa_last_counter: Mapped[int] = mapped_column(BigInteger, nullable=True)
     external_id: Mapped[str] = mapped_column(Text, nullable=True)
+    # Personal IANA time zone for on-call views and notices (migrate-164);
+    # NULL = the appliance zone.
+    timezone: Mapped[str] = mapped_column(String(64), nullable=True)
     last_login: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

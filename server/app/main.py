@@ -16,6 +16,9 @@ from app.api.v1.probe_trust import router as probe_trust_router
 from app.api.v1.ssh_terminal import router as ssh_terminal_router
 from app.api.v1 import management_access
 from app.api.v1 import network_events
+from app.api.v1 import notification_grouping as notification_grouping_api
+from app.api.v1 import escalation_policies as escalation_policies_api
+from app.api.v1 import oncall as oncall_api
 from app.api.v1 import sensors as sensors_admin_api
 from app.api.v1 import sensor_api, monitoring_sites
 from app.api.v1 import agents as agents_runtime_api
@@ -114,6 +117,9 @@ def create_app() -> FastAPI:
     app.include_router(devices.router, prefix="/api/v1", dependencies=[policy("devices")])
     app.include_router(devices.maintenance_router, prefix="/api/v1", dependencies=[policy("devices")])
     app.include_router(tags.router, prefix="/api/v1", dependencies=[policy("tags")])
+    app.include_router(notification_grouping_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
+    app.include_router(escalation_policies_api.router, prefix="/api/v1", dependencies=[policy("escalation")])
+    app.include_router(oncall_api.router, prefix="/api/v1", dependencies=[policy("oncall")])
     app.include_router(alerts.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(settings_api.router, prefix="/api/v1", dependencies=[policy("settings", allow_public=True)])
     app.include_router(alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])

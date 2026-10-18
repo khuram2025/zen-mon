@@ -33,6 +33,7 @@ HOST_ALERT_PASS = "zenplus:host_alert_pass"
 APM_ALERT_PASS = "zenplus:apm_alert_pass"
 APM_SLO_PASS = "zenplus:apm_slo_pass"
 ESCALATION_PASS = "zenplus:escalation_pass"
+NOTIFICATION_DIGEST_PASS = "zenplus:notification_digest_pass"
 
 
 @contextlib.asynccontextmanager

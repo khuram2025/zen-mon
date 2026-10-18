@@ -50,6 +50,7 @@ from app.services import alert_phrasing as ap
 from app.services import alert_notify_state as ns
 from app.services.apm_rollup import rollup_window
 from app.services.host_alert_service import dispatch_to_channels
+from app.services import alert_funnel
 
 logger = logging.getLogger("zenplus.apm_alerts")
 
@@ -336,8 +337,11 @@ def _render(template: str, variables: dict) -> str:
 
 
 async def _notify(db: AsyncSession, rule, service: str, value: float, *,
-                  is_recovery: bool = False, duration: str = "") -> bool:
-    """Send an APM threshold alert, or its all-clear. True when dispatched."""
+                  is_recovery: bool = False, duration: str = "", alert_id=None) -> bool:
+    """Send an APM threshold alert, or its all-clear. True when dispatched.
+
+    ``alert_id`` keys the delivery (one send per incident event, channel and
+    recipient) and links it to the incident in the delivery log."""
     # Quiet hours: the alert row is already recorded; only the outbound
     # notification is gated by the rule's schedule window. Recovery notices go
     # out regardless — silence after a page reads as "still broken".
@@ -377,6 +381,11 @@ async def _notify(db: AsyncSession, rule, service: str, value: float, *,
                     ("Active for", duration if is_recovery else None)],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "rule_id": str(rule.id), "rule_name": rule.name,
+        "alert_id": str(alert_id) if alert_id else None,
+        "delivery_event": "recovery" if is_recovery else "trigger",
+        "is_recovery": is_recovery,
+        **alert_funnel.notification_fields(sev, getattr(rule, "priority", None),
+                                           trigger=not is_recovery),
     })
     return True
 
@@ -452,13 +461,13 @@ async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
                     alert_id = await _raise(db, rule, service, msg, value)
                     raised += 1
                     await db.commit()
-                    sent = await _notify(db, rule, service, value)
+                    sent = await _notify(db, rule, service, value, alert_id=alert_id)
                     await ns.stamp(db, alert_id, sent)
                     await db.commit()
                 elif await ns.is_pending(db, existing[0]):
                     # Quiet hours suppressed the trigger; the window is open
                     # now and the service is still breaching.
-                    if await _notify(db, rule, service, value):
+                    if await _notify(db, rule, service, value, alert_id=existing[0]):
                         await ns.stamp(db, existing[0], True)
                         await db.commit()
             elif existing is not None:
@@ -468,7 +477,7 @@ async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
                 if notified and getattr(rule, "recovery_alert", True):
                     await db.commit()
                     await _notify(db, rule, service, value, is_recovery=True,
-                                  duration=ap.duration_between(started_at))
+                                  duration=ap.duration_between(started_at), alert_id=alert_id)
         await db.commit()
 
     if raised or resolved:

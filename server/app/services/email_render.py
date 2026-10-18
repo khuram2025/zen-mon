@@ -26,7 +26,12 @@ Alert ctx keys (all optional):
   message       the human-readable alert sentence
   details       list of (label, value) pairs rendered as a table
   timestamp     ISO string or display string
-  action_url    optional "View in dashboard" button target
+  action_url    optional dashboard link; with ``incident_id`` it also yields the
+                "View incident" (/alerts/<id>) and "Acknowledge" (/alerts/<id>?ack=1)
+                buttons — ``incident_url`` / ``ack_url`` override them. The
+                acknowledge page asks a signed-in user to confirm; a GET never
+                changes the incident.
+  priority      'P1'..'P4' — a "Priority" row, and the subject tag
   product_name  defaults to 'ZenPlus'
   headline_metric  {label, value, secondary_label, secondary_value, detail}
   incident_ref, first_seen, active_for, lifecycle, lifecycle_label
@@ -50,7 +55,7 @@ import html
 from datetime import datetime, timezone
 
 from app.services.alert_phrasing import (  # re-exported for senders
-    INCIDENT_KEYS, incident_context, incident_subject,
+    INCIDENT_KEYS, incident_context, incident_links, incident_subject, priority_subject,
 )
 
 # ── Palette (kept in sync with report_html.py and the dashboard) ─────────────
@@ -295,10 +300,42 @@ def _footer(product: str, reason: str) -> str:
 # ── Alert emails ─────────────────────────────────────────────────────────────
 
 def alert_subject(subject: str, ctx: dict | None) -> str:
-    """The subject an alert email is sent with: ``subject`` plus the lifecycle
-    tag and incident ref when ``ctx`` carries incident_context keys
-    ("[WARNING] [New] Memory high — srv-a [INC-3f2a9c1d]")."""
-    return incident_subject(subject, ctx)
+    """The subject an alert email is sent with: ``subject`` plus the priority,
+    the lifecycle tag and the incident ref when ``ctx`` carries them
+    ("[WARNING] [P3] [New] Memory high — srv-a [INC-3f2a9c1d]")."""
+    from app.services.alert_priority import subject_tag
+    tag = subject_tag((ctx or {}).get("priority"))
+    if tag and f" {tag} " in f" {subject or ''} ":
+        # Already tagged (a re-render): take it out so the lifecycle tag is
+        # recognised in its usual place, then put it back.
+        subject = " ".join(w for w in (subject or "").split(" ") if w != tag)
+    out = incident_subject(subject, ctx)
+    return priority_subject(out, (ctx or {}).get("priority"))
+
+
+def _priority_row(ctx: dict, existing_labels) -> list[tuple[str, str]]:
+    from app.services.alert_priority import priority_label
+    label = priority_label(ctx.get("priority"))
+    if not label or "priority" in {str(x).strip().lower() for x in existing_labels}:
+        return []
+    return [("Priority", label)]
+
+
+def _action_buttons(ctx: dict, *, color: str) -> str:
+    """"View incident" + "Acknowledge" (open incidents), else the plain
+    dashboard button."""
+    view, ack = incident_links(ctx)
+    product = ctx.get("product_name", "ZenPlus")
+    if not view:
+        return _button(ctx.get("action_url") or "", f"View in {product}", color=color)
+    resolved = bool(ctx.get("resolved"))
+    ack_html = "" if resolved else (
+        f'&nbsp;&nbsp;<a href="{_esc(ack)}" style="display:inline-block;background:#ffffff;color:{_INK};'
+        f'text-decoration:none;font-size:14px;font-weight:600;padding:11px 24px;border-radius:8px;'
+        f'border:1px solid {_BORDER};">Acknowledge</a>')
+    return f"""  <tr><td style="padding:20px 28px 0;">
+    <a href="{_esc(view)}" style="display:inline-block;background:{color};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:12px 26px;border-radius:8px;">View incident &rarr;</a>{ack_html}
+  </td></tr>"""
 
 
 def _incident_summary(ctx: dict) -> str:
@@ -362,6 +399,7 @@ def build_alert_email_text(ctx: dict) -> str:
     rows.append(("Severity", sev))
     rows += [(str(label), str(value)) for label, value in (ctx.get("details") or [])
              if value not in (None, "")]
+    rows += _priority_row(ctx, {label for label, _ in rows})
     rows += _incident_rows(ctx, {label for label, _ in rows})
     rows.append(("Time", _fmt_ts(ctx.get("timestamp"))))
 
@@ -369,7 +407,12 @@ def build_alert_email_text(ctx: dict) -> str:
     # ran "Alert rule:" straight into its value.
     width = max(len(label) for label, _ in rows) + 2
     lines += [f"{label + ':':<{width}}{value}" for label, value in rows]
-    if ctx.get("action_url"):
+    view, ack = incident_links(ctx)
+    if view:
+        lines += ["", f"View incident: {view}"]
+        if not ctx.get("resolved"):
+            lines.append(f"Acknowledge:   {ack}")
+    elif ctx.get("action_url"):
         lines += ["", f"View in dashboard: {ctx['action_url']}"]
     lines += ["", f"— {ctx.get('product_name', 'ZenPlus')} automated alert"]
     return "\n".join(lines)
@@ -414,6 +457,7 @@ def build_alert_email_html(ctx: dict) -> str:
         if str(label).strip().lower() in shown_above:
             continue
         detail_pairs.append((label, value))
+    detail_pairs += _priority_row(ctx, {str(label) for label, _ in detail_pairs})
     detail_pairs += _incident_rows(ctx, {str(label) for label, _ in detail_pairs})
     # Severity and time already appear in the status pill and the hero subtitle.
     if not headline:
@@ -436,7 +480,7 @@ def build_alert_email_html(ctx: dict) -> str:
         + _callout(message, accent=accent, tint=tint)
         + _metric_block(ctx.get("headline_metric") or {}, accent=accent, tint=tint)
         + _details_panel(detail_pairs, raw_labels=frozenset({"Host"}))
-        + _button(ctx.get("action_url") or "", f"View in {ctx.get('product_name', 'ZenPlus')}", color=accent)
+        + _action_buttons(ctx, color=accent)
         + _footer(product,
                   "This is an automated alert from " + product + ". You received it because "
                   "a notification channel is linked to the triggering alert rule.")

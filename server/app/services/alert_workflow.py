@@ -38,6 +38,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import alert_priority as prio
 from app.services.audit_service import write_audit_log
 
 logger = logging.getLogger("zenplus.alert_workflow")
@@ -263,6 +264,29 @@ async def acknowledge(db: AsyncSession, alert_id, user, *, note: str | None = No
                           metadata={"severity": row.severity, "source": source,
                                     "device_id": str(row.device_id) if row.device_id else None,
                                     "server_id": str(row.server_id) if row.server_id else None})
+    return True
+
+
+async def expire_acknowledgement(db: AsyncSession, alert_id, *, acknowledged_at,
+                                 expiry_minutes: int | None = None) -> bool:
+    """acknowledged -> active when an escalation policy's acknowledgement
+    expiry passed (system transition, no actor). Compare-and-set on the
+    acknowledgement it read, so a fresh acknowledgement taken meanwhile is
+    never undone; the acknowledger, time and owner are kept for the record
+    (a new acknowledgement overwrites them). Returns True when it re-opened."""
+    row = (await db.execute(text(
+        "UPDATE alerts SET status = 'active' WHERE id = :id AND status = 'acknowledged'"
+        " AND acknowledged_at = :ack RETURNING acknowledged_by"
+    ), {"id": alert_id, "ack": acknowledged_at})).first()
+    if not row:
+        return False
+    await record_event(db, alert_id, "ack_expired", source="system",
+                       reason=(f"Acknowledgement older than {expiry_minutes} minutes"
+                               if expiry_minutes else "Acknowledgement expired"),
+                       old_status="acknowledged", new_status="active",
+                       detail={"acknowledged_at": acknowledged_at,
+                               "acknowledged_by": str(row.acknowledged_by) if row.acknowledged_by else None,
+                               "expiry_minutes": expiry_minutes})
     return True
 
 
@@ -525,27 +549,36 @@ async def remove_silence(db: AsyncSession, silence_id, user) -> int:
 
 
 # ── Response targets ─────────────────────────────────────────────────────────
+#
+# Acknowledgement targets are per priority (P1..P4, alert_priority). Settings
+# saved before 1.24.17 were keyed by severity (critical/warning/info); they
+# are still read, mapped through the priority derivation (critical -> P2,
+# warning -> P3, info -> P4), so an upgrade keeps every configured target.
 
 RESPONSE_TARGETS_KEY = "alert_response_targets"
-DEFAULT_RESPONSE_TARGETS = {"critical": 15, "warning": 60, "info": None}
+DEFAULT_RESPONSE_TARGETS = dict(prio.DEFAULT_RESPONSE_TARGETS)
 
 
 def _clean_targets(raw: Any) -> dict:
-    out = dict(DEFAULT_RESPONSE_TARGETS)
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
         except ValueError:
             raw = {}
-    if isinstance(raw, dict):
-        for sev in out:
-            if sev in raw:
-                v = raw[sev]
-                out[sev] = int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+    return prio.clean_response_targets(raw)
+
+
+def legacy_target_view(targets: dict) -> dict:
+    """P-keyed targets plus the severity keys older clients read
+    (critical = P2, warning = P3, info = P4)."""
+    out = dict(targets)
+    for sev, p in prio.SEVERITY_PRIORITY.items():
+        out[sev] = targets.get(p)
     return out
 
 
 async def response_targets(db: AsyncSession) -> dict:
+    """{"P1": minutes|None, ..., "P4": ...}."""
     try:
         row = (await db.execute(text("SELECT value FROM system_settings WHERE key = :k"),
                                 {"k": RESPONSE_TARGETS_KEY})).first()
@@ -556,12 +589,30 @@ async def response_targets(db: AsyncSession) -> dict:
 
 
 async def save_response_targets(db: AsyncSession, targets: dict) -> dict:
-    clean = _clean_targets(targets)
+    """Apply the given keys (P1..P4, or legacy severity keys) over the stored
+    targets and store P-keys only. A key that is absent keeps its value."""
+    current = await response_targets(db)
+    given = {k: v for k, v in (targets or {}).items()}
+    legacy = {k: given.pop(k) for k in list(given) if k in prio.LEGACY_TARGET_KEYS}
+    merged = dict(current)
+    for sev, v in legacy.items():
+        merged[prio.SEVERITY_PRIORITY[sev]] = v
+    for k, v in given.items():
+        p = prio.normalize_priority(k)
+        if p:
+            merged[p] = v
+    clean = prio.clean_response_targets(merged)
     await db.execute(text(
         "INSERT INTO system_settings (key, value) VALUES (:k, CAST(:v AS jsonb))"
         " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
     ), {"k": RESPONSE_TARGETS_KEY, "v": json.dumps(clean)})
     return clean
+
+
+async def priority_supported(db: AsyncSession) -> bool:
+    """Whether migration 164 (priority columns, escalation policies) has run."""
+    from app.services.escalation_policy_service import supported as _eps_supported
+    return await _eps_supported(db)
 
 
 def ack_anchor_sql(a: str = "a") -> str:
@@ -586,12 +637,16 @@ def ack_anchor(triggered_at, meta: dict | None):
     return triggered_at
 
 
-def ack_due(status: str, severity: str, triggered_at, targets: dict, suppressed: bool):
+def ack_due(status: str, severity: str, triggered_at, targets: dict, suppressed: bool,
+            priority: str | None = None):
     """(due_at, overdue) for an open, unacknowledged, unsuppressed alert.
-    ``triggered_at`` is the acknowledgement anchor (see :func:`ack_anchor`)."""
+    ``triggered_at`` is the acknowledgement anchor (see :func:`ack_anchor`);
+    the target is the one for the alert's ``priority`` (derived from
+    ``severity`` when the row has none)."""
     if status != "active" or suppressed or not triggered_at:
         return None, False
-    minutes = targets.get(severity)
+    minutes = prio.response_target_minutes(
+        targets, prio.normalize_priority(priority) or prio.severity_priority(severity))
     if not minutes:
         return None, False
     if triggered_at.tzinfo is None:

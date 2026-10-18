@@ -321,7 +321,9 @@ async def alert_response_metrics(ctx: SectionCtx) -> dict:
     sev_key = ctx.opt("severity") or "all"
     title = "Alert Response Performance" + (
         f" — {SEVERITY_TITLES[sev_key]}" if sev_key in SEVERITY_TITLES else "")
-    targets = await wf.response_targets(ctx.db)
+    # Severity-keyed view of the per-priority targets (critical = P2,
+    # warning = P3, info = P4): this pack reports by severity.
+    targets = wf.legacy_target_view(await wf.response_targets(ctx.db))
     workflow = await _workflow(ctx)
 
     rows = await _response_stats(ctx, ctx.frm, ctx.to, targets, by_severity=True)
@@ -452,7 +454,9 @@ async def alert_backlog_aging(ctx: SectionCtx) -> dict:
     from app.services import alert_workflow as wf
 
     sid, title = "alert_backlog_aging", "Open Alert Backlog"
-    targets = await wf.response_targets(ctx.db)
+    # Severity-keyed view of the per-priority targets (critical = P2,
+    # warning = P3, info = P4): this pack reports by severity.
+    targets = wf.legacy_target_view(await wf.response_targets(ctx.db))
     workflow = await _workflow(ctx)
     params: dict[str, Any] = _target_params(targets)
     sev_sql, _ = _sev_clause(ctx, params)
