@@ -127,7 +127,8 @@ export function Sparkline({
 /* ── Time-series panel ──────────────────────────────────────────────────── */
 
 export type Threshold = { value: number; label: string; tone: 'warning' | 'danger' }
-export type SeriesDef = { key: string; name: string; color: string; points: Point[] }
+/** `dashed`: a comparison series (the previous period), drawn lighter and dashed. */
+export type SeriesDef = { key: string; name: string; color: string; points: Point[]; dashed?: boolean }
 
 function axisTimeFormatter(rangeHours: number): (ts: number) => string {
   if (rangeHours <= 12) return (ts) => new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
@@ -211,7 +212,8 @@ export function TimeSeriesPanel({
               label={{ value: t.label, position: t.tone === 'danger' ? 'insideTopRight' : 'insideBottomRight', fontSize: 12, fill: 'rgb(var(--muted))' }} />
           ))}
           {series.map((s) => (
-            <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={1.8}
+            <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={s.dashed ? 1.4 : 1.8}
+              strokeDasharray={s.dashed ? '5 4' : undefined} strokeOpacity={s.dashed ? 0.65 : 1}
               dot={s.points.length === 1} connectNulls={false} isAnimationActive={false} />
           ))}
         </LineChart>
@@ -220,12 +222,12 @@ export function TimeSeriesPanel({
   )
 }
 
-export function Legend({ items }: { items: Array<{ name: string; color: string }> }) {
+export function Legend({ items }: { items: Array<{ name: string; color: string; dashed?: boolean }> }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
       {items.map((i) => (
         <span key={i.name} className="inline-flex items-center gap-1.5">
-          <span className="h-0.5 w-3 rounded" style={{ background: i.color }} aria-hidden="true" />{i.name}
+          <span className="h-0.5 w-3 rounded" style={i.dashed ? { borderTop: `2px dashed ${i.color}`, opacity: 0.7 } : { background: i.color }} aria-hidden="true" />{i.name}
         </span>
       ))}
     </div>

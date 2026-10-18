@@ -2152,6 +2152,9 @@ async def get_device_page_summary(
 
     # Open alerts (incidents, not notices), only for callers who may read alerts.
     alerts = None
+    # Alert titles on the device's own page drop its repeated hostname and IP.
+    host = getattr(device, "hostname", None)
+    host_ip = str(device.ip_address) if getattr(device, "ip_address", None) else None
     if await user_has_permission(db, user, "alerts.view"):
         rows = (await db.execute(text(f"""
             SELECT a.id, a.severity, a.status, a.message, a.triggered_at,
@@ -2167,8 +2170,7 @@ async def get_device_page_summary(
             "acknowledged": sum(1 for r in rows if r["status"] == "acknowledged"),
             "items": [{"id": str(r["id"]), "severity": r["severity"], "status": r["status"],
                        "message": re.sub(r"^\[ZenPlus\s+[A-Z]+\]\s*", "", r["message"] or "Alert"),
-                       "title": _insights.alert_title(r["message"], r["condition"], device.hostname,
-                                                      str(device.ip_address) if device.ip_address else None),
+                       "title": _insights.alert_title(r["message"], r.get("condition"), host, host_ip),
                        "triggered_at": _iso(r["triggered_at"])} for r in rows[:10]],
         }
 

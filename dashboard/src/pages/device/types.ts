@@ -40,6 +40,8 @@ export type HealthGroupDigest = {
   summary: string
   attention: number
   total: number
+  /** The template-declared vendor tab that shows this group (null = default vendor tab or Hardware). */
+  tab?: string | null
 }
 
 export type InterfaceCounts = {
@@ -67,7 +69,8 @@ export type BusyInterface = {
   sampled_at: number
 }
 
-export type SummaryAlert = { id: string; severity: string; status: string; message: string; triggered_at: string | null }
+/** ``title`` is the triggering condition without the repeated hostname and IP ("Packet loss 33% (limit 10%)"). */
+export type SummaryAlert = { id: string; severity: string; status: string; message: string; title?: string; triggered_at: string | null }
 
 export type TemplateHighlight = { kind: 'sessions' | 'clients' | 'poe'; label: string; value: number; unit: string | null; sub: string | null; series_key: string | null }
 
@@ -90,7 +93,7 @@ export type DeviceSummary = {
   status_changed_at: string | null
   flapping: boolean
   identity: { model: IdentityField; os_version: IdentityField; firmware: IdentityField; serial_number: IdentityField }
-  template: { name: string; vendor: string | null; updated_at: string | null } | null
+  template: { name: string; vendor: string | null; updated_at: string | null; tabs?: Array<{ id: string; label: string; groups: string[] }> } | null
   health: { state: 'ok' | 'warning' | 'critical'; issue_count: number; critical: number; warning: number; groups: HealthGroupDigest[] }
   kpis: { cpu_thresholds: Thresholds | null; memory_thresholds: Thresholds | null; highlights: TemplateHighlight[] }
   issues: DeviceIssue[]
@@ -141,5 +144,9 @@ export type DeviceRecord = {
   flapping_since?: string | null
   flap_kind?: string | null
   updated_at?: string | null
+  /** Who looks after the device and operational notes (free text; null = none recorded). */
+  owner?: string | null
+  notes?: string | null
+  description?: string | null
   [key: string]: unknown
 }

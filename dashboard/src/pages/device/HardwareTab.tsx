@@ -5,7 +5,7 @@ import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Panel } from './charts'
 import { MISSING } from './format'
-import { isHardwareGroup } from './tabs'
+import { placeGroup } from './tabs'
 import type { DeviceRecord, DeviceRange } from './types'
 
 /* Physical health: the template's hardware groups (sensors with units and
@@ -17,7 +17,7 @@ type Entity = {
   model_name?: string | null; serial_number?: string | null; hw_revision?: string | null; fw_revision?: string | null
 }
 
-const hardwareOnly = (g: InsightGroup) => isHardwareGroup(g)
+const hardwareOnly = (g: InsightGroup) => placeGroup(g) === 'hardware'
 
 export function HardwareTab({ device, range, onChart, initialGroup }: {
   device: DeviceRecord; range: DeviceRange; onChart: (r: ChartRequest) => void; initialGroup?: string

@@ -46,6 +46,8 @@ export type InsightGroup = {
   description?: string | null; no_data_reason?: string; status: string
   applicable?: boolean; not_applicable_reason?: string | null
   children_capable?: boolean
+  /** The template-declared vendor tab that shows the group (null = default vendor tab or Hardware). */
+  tab?: string | null
   metrics?: InsightMetric[]
   columns?: InsightColumn[]
   rows?: InsightRow[]
@@ -54,6 +56,7 @@ export type Insights = {
   template: { id: string; name: string; vendor?: string | null } | null
   updated_at: string | null
   groups: InsightGroup[]
+  tabs?: Array<{ id: string; label: string; groups: string[] }>
   // True when the template declares managed-device tables (APs, switches)
   // that can be promoted to child devices of this controller.
   children_capable?: boolean

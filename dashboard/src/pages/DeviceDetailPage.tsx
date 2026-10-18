@@ -26,7 +26,7 @@ import { InterfacesTab } from './device/InterfacesTab'
 import { IssuesBar } from './device/IssuesBar'
 import { PerformanceTab, type PinnedMetric } from './device/PerformanceTab'
 import { SummaryTab } from './device/SummaryTab'
-import { deviceTabs, isHardwareGroup, issueTab, resolveTab, type DeviceTabId } from './device/tabs'
+import { deviceTabs, issueTab, placeGroup, resolveTab, type DeviceTabId } from './device/tabs'
 import type { DeviceIssue } from './device/types'
 
 /* The device page answers three questions in order: is this device healthy,
@@ -38,7 +38,8 @@ import type { DeviceIssue } from './device/types'
  *   3. Tabs with the range picker (hidden where time does not apply).
  *   4. Tab content; a tab fetches its own data only while it is open. */
 
-const vendorGroups = (g: InsightGroup) => !isHardwareGroup(g)
+// The default vendor tab: every template group without a declared tab that is not hardware.
+const vendorGroups = (g: InsightGroup) => placeGroup(g) === 'metrics'
 
 export function DeviceDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -80,7 +81,10 @@ export function DeviceDetailPage() {
     onError: (e: unknown) => toast.error('Delete failed', apiErrorMessage(e)),
   })
 
-  const tabs = useMemo(() => (device ? deviceTabs(device, summary?.template?.vendor) : []), [device, summary?.template?.vendor])
+  const tabs = useMemo(() => (device ? deviceTabs(device, {
+    vendor: summary?.template?.vendor, tabs: summary?.template?.tabs, groups: summary?.health.groups,
+  }) : []), [device, summary?.template?.vendor, summary?.template?.tabs, summary?.health.groups])
+  const templateTabs = useMemo(() => tabs.filter((t) => t.groups), [tabs])
   const tab = resolveTab(searchParams.get('tab'), tabs)
   const group = searchParams.get('group') || undefined
   const pinned: PinnedMetric | null = searchParams.get('pin') ? {
@@ -96,8 +100,8 @@ export function DeviceDetailPage() {
       const p = new URLSearchParams(previous)
       let target = next
       if (opts.group) {
-        const kind = summary?.health.groups.find((g) => g.key === opts.group)?.kind
-        target = isHardwareGroup({ key: opts.group, kind }) ? 'hardware' : 'metrics'
+        const digest = summary?.health.groups.find((g) => g.key === opts.group)
+        target = issueTab({ tab: 'metrics', group: opts.group }, tabs, () => digest)
       }
       if (!tabs.some((t) => t.id === target)) target = 'summary'
       p.set('tab', target)
@@ -118,8 +122,8 @@ export function DeviceDetailPage() {
 
   const openIssue = useCallback((issue: DeviceIssue) => {
     if (issue.source === 'alert' && issue.alert_id) { navigate(`/alerts/${issue.alert_id}`); return }
-    const kindOf = (key: string) => summary?.health.groups.find((g) => g.key === key)?.kind
-    openTab(issueTab(issue, tabs, kindOf), { group: issue.group })
+    const groupOf = (key: string) => summary?.health.groups.find((g) => g.key === key)
+    openTab(issueTab(issue, tabs, groupOf), { group: issue.group })
   }, [navigate, openTab, summary?.health.groups, tabs])
 
   const chart = useCallback((request: ChartRequest) => openTab('performance', { pin: request }), [openTab])
@@ -189,6 +193,13 @@ export function DeviceDetailPage() {
               title={activeTab?.label || 'Device metrics'} onChart={chart} showPromote />
           </TabsContent>
         )}
+        {templateTabs.map((t) => (
+          <TabsContent key={t.id} value={t.id}>
+            <TemplateTabSection deviceId={device.id} vendor={device.vendor || undefined} deviceType={device.device_type}
+              tab={t.label} section={t.id} rangeHours={range.hours} initialGroup={tab === t.id ? group : undefined}
+              groupKey={group} onChart={chart} />
+          </TabsContent>
+        ))}
         {tabs.some((t) => t.id === 'hardware') && <TabsContent value="hardware"><HardwareTab key={`hardware-${group || 'all'}`} device={device} range={range} onChart={chart} initialGroup={tab === 'hardware' ? group : undefined} /></TabsContent>}
         <TabsContent value="events"><EventsTab device={device} summary={summary} range={range} /></TabsContent>
         <TabsContent value="configuration"><ConfigurationTab device={device} summary={summary} onOpenHardware={() => openTab('hardware')} /></TabsContent>
@@ -207,6 +218,19 @@ export function DeviceDetailPage() {
         onConfirm={() => del.mutate()}
       />
     </div>
+  )
+}
+
+/** One template-declared vendor tab ("VPN & SD-WAN"): the groups the template puts in it. */
+function TemplateTabSection({ deviceId, vendor, deviceType, tab, section, rangeHours, initialGroup, groupKey, onChart }: {
+  deviceId: string; vendor?: string; deviceType: string; tab: string; section: string; rangeHours: number
+  initialGroup?: string; groupKey?: string; onChart: (request: ChartRequest) => void
+}) {
+  const filter = useCallback((g: InsightGroup) => g.tab === tab, [tab])
+  return (
+    <TemplateInsightsSection key={`${section}-${groupKey || 'all'}`} deviceId={deviceId} vendor={vendor} deviceType={deviceType}
+      rangeHours={rangeHours} initialGroup={initialGroup} groupFilter={filter} section={section} title={tab} onChart={onChart}
+      showPromote={false} />
   )
 }
 

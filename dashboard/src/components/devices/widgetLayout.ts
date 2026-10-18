@@ -78,3 +78,42 @@ export function widgetTemplateKey(userId: string, vendor: string | undefined, de
 export function effectiveWidgetLayout(own: WidgetPosition[] | null, template: WidgetPosition[] | null): WidgetPosition[] | null {
   return own ?? template
 }
+
+/* ── Server-saved layouts (migrate-165) ───────────────────────────────────
+ * The server keeps each user's layouts (GET/PUT/DELETE /devices/{id}/widget-layouts/{section}), so they follow
+ * the user to another browser. Browser storage stays as a cache that renders at once; an entry marked
+ * `synced` mirrors the server, an unmarked one was saved only in this browser (before this release, or while
+ * the server was unreachable) and is uploaded the first time the server has nothing for that slot. */
+
+export type StoredLayout = { items: WidgetPosition[]; synced: boolean }
+
+export function readStoredLayout(raw: string | null): StoredLayout | null {
+  const items = readWidgetLayout(raw)
+  if (!items) return null
+  try { return { items, synced: JSON.parse(raw as string).synced === true } } catch { return null }
+}
+
+export function storedLayoutValue(items: WidgetPosition[], synced: boolean): string {
+  return JSON.stringify({ version: 1, items, ...(synced ? { synced: true } : {}) })
+}
+
+/** Vendor and device type as the server keys a vendor/type template (null: no shared template). */
+export function layoutTemplateIdentity(vendor: string | undefined, deviceType: string | undefined): { vendor: string; device_type: string } | null {
+  const normalize = (value?: string) => (value || '').trim().toLowerCase().replace(/\s+/g, ' ')
+  const maker = normalize(vendor), type = normalize(deviceType)
+  if (!maker || !type || ['unknown', 'not reported', 'n/a'].includes(maker)) return null
+  return { vendor: maker, device_type: type }
+}
+
+export type LayoutReconcile = { items: WidgetPosition[] | null; local: 'keep' | 'write' | 'remove'; upload: boolean }
+
+/** What one layout slot (this device's tab, or the vendor/type template's tab) shows once the server answered.
+ *  `server` undefined: not answered or unavailable, so the browser copy is used as is. */
+export function reconcileLayout(local: StoredLayout | null, server: WidgetPosition[] | null | undefined): LayoutReconcile {
+  if (server === undefined) return { items: local?.items ?? null, local: 'keep', upload: false }
+  if (server !== null) return { items: server, local: 'write', upload: false }
+  if (local && !local.synced) return { items: local.items, local: 'keep', upload: true }
+  // A synced copy the server no longer has was reset on another browser.
+  if (local) return { items: null, local: 'remove', upload: false }
+  return { items: null, local: 'keep', upload: false }
+}

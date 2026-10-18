@@ -345,6 +345,7 @@ export function MapEditorV2() {
                 animate={livePrefs.animate}
                 showProblems={livePrefs.problems}
                 insertRef={insertRef}
+                focusDeviceId={params.get('focus')}
               />
             </ReactFlowProvider>
           ) : mapQuery.isError ? (
