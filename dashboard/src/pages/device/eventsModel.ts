@@ -44,6 +44,8 @@ export type TimelineEvent = {
   /** Maintenance windows: their end. */
   endsAt?: string
   icon?: ComponentType<{ className?: string }>
+  /** Alerts: what makes two alerts repeats of one condition (see alertGroupKey). */
+  group?: { key: string; ruleId?: string; ruleName?: string; metadata?: AlertGroupMeta | null }
 }
 
 /** Backend timestamps are UTC; a naive value (no offset) is UTC, not local time (same rule as format.parseTime). */
@@ -97,7 +99,8 @@ export type AlertRow = {
   triggered_at?: string | null
   acknowledged_at?: string | null
   resolved_at?: string | null
-  metadata?: { condition?: string | null } | null
+  rule_id?: string | null
+  metadata?: ({ condition?: string | null } & AlertGroupMeta) | null
 }
 
 export function alertEvents(alerts: AlertRow[], device?: { hostname?: string | null; ip_address?: string | null }): TimelineEvent[] {
@@ -117,8 +120,149 @@ export function alertEvents(alerts: AlertRow[], device?: { hostname?: string | n
       subtitle: a.rule_name && a.rule_name !== title ? `Rule: ${a.rule_name}` : undefined,
       href: `/alerts/${a.id}`,
       status,
+      ...groupOf(a),
     }]
   })
+}
+
+function groupOf(a: AlertRow): Pick<TimelineEvent, 'group'> {
+  const key = alertGroupKey(a.rule_id, a.rule_name, a.metadata)
+  return key == null ? {} : { group: { key, ruleId: a.rule_id || undefined, ruleName: a.rule_name || undefined, metadata: a.metadata } }
+}
+
+/* ── Repeated alerts (field review D-09) ────────────────────────────────── *
+ * Presentation only: repeats of one condition from one rule show as one row
+ * ("Degraded (packet loss) ×5 in 3 days") that expands to every alert. Alert
+ * rows, rules and the confirmed status are untouched. The key and label rules
+ * match app.services.device_insights; both replay
+ * scripts/dev/device-alert-groups/vectors.json. */
+
+export type AlertGroupMeta = { condition_metric?: string | null; new_status?: string | null; if_index?: string | number | null }
+
+const GROUP_STATUS_LABEL: Record<string, string> = { down: 'Down', degraded: 'Degraded', up: 'Recovered' }
+const GROUP_METRIC_LABEL: Record<string, string> = { packet_loss: 'packet loss', rtt: 'latency' }
+
+/** The rule (id, else name), the condition metric (absent on legacy rows), the new status and, for per-interface
+ *  rules, the interface. An alert without a rule is never grouped (null). */
+export function alertGroupKey(ruleId: string | null | undefined, ruleName: string | null | undefined, metadata: AlertGroupMeta | null | undefined): string | null {
+  const meta = metadata && typeof metadata === 'object' ? metadata : {}
+  const rule = ruleId ? String(ruleId) : (ruleName || '').trim()
+  if (!rule) return null
+  const ifIndex = meta.if_index
+  return [rule, String(meta.condition_metric || ''), String(meta.new_status || '').toLowerCase(), ifIndex == null ? '' : String(ifIndex)].join('|')
+}
+
+/** A group's name without the count: one shared title; differing readings name the status and what was measured
+ *  ("Degraded (packet loss)"); otherwise the rule, then the newest title. `titles` are newest first. */
+export function alertGroupLabel(titles: string[], ruleName: string | null | undefined, metadata: AlertGroupMeta | null | undefined): string {
+  const present = titles.filter(Boolean)
+  if (new Set(present).size === 1) return present[0]
+  const meta = metadata && typeof metadata === 'object' ? metadata : {}
+  const status = GROUP_STATUS_LABEL[String(meta.new_status || '').toLowerCase()]
+  if (status) {
+    const measured = GROUP_METRIC_LABEL[String(meta.condition_metric || '')]
+    return measured ? `${status} (${measured})` : status
+  }
+  return (ruleName || '').trim() || present[0] || 'Alert'
+}
+
+const HOUR = 3_600_000
+const DAY = 24 * HOUR
+
+/** How long a group of repeats spans, rounded up: "12 min", "5 hours", "3 days". */
+export function spanPhrase(ms: number): string {
+  const span = Math.max(0, ms)
+  if (span < HOUR) return `${Math.max(1, Math.ceil(span / 60_000))} min`
+  if (span < 2 * DAY) { const h = Math.ceil(span / HOUR); return `${h} hour${h === 1 ? '' : 's'}` }
+  return `${Math.ceil(span / DAY)} days`
+}
+
+/** "×5 in 3 days" */
+export function repeatPhrase(count: number, firstMs: number, lastMs: number): string {
+  return `×${count} in ${spanPhrase(lastMs - firstMs)}`
+}
+
+/** A timeline row standing for two or more repeated alerts. */
+export type EventGroup = TimelineEvent & {
+  /** The alerts, newest first. */
+  members: TimelineEvent[]
+  label: string
+  firstTs: number
+  /** Members still active or acknowledged. */
+  open: number
+}
+
+export type TimelineItem = TimelineEvent | EventGroup
+
+export function isGroup(item: TimelineItem): item is EventGroup {
+  return Array.isArray((item as EventGroup).members)
+}
+
+const SEVERITY_RANK: Record<EventSeverity, number> = { critical: 0, warning: 1, info: 2, success: 3 }
+
+/** Collapse repeated alerts in a newest-first list. A group takes its newest member's place, the worst member's
+ *  severity and the most urgent workflow state; a "group" of one stays a plain row. Group after filtering, so a
+ *  group holds only the alerts the filters show, and page over the result. `grouped: false` returns the list. */
+export function groupEvents(events: TimelineEvent[], grouped = true): TimelineItem[] {
+  if (!grouped) return events
+  const byKey = new Map<string, TimelineEvent[]>()
+  for (const e of events) {
+    if (e.kind !== 'alert' || !e.group) continue
+    const list = byKey.get(e.group.key)
+    if (list) list.push(e)
+    else byKey.set(e.group.key, [e])
+  }
+  const out: TimelineItem[] = []
+  for (const e of events) {
+    const members = e.kind === 'alert' && e.group ? byKey.get(e.group.key) : undefined
+    if (!members || members.length < 2) { out.push(e); continue }
+    if (members[0] !== e) continue
+    const sorted = [...members].sort((a, b) => b.ts - a.ts || a.id.localeCompare(b.id))
+    const newest = sorted[0]
+    const firstTs = sorted[sorted.length - 1].ts
+    const label = alertGroupLabel(sorted.map((m) => m.title), e.group!.ruleName, e.group!.metadata)
+    const open = sorted.filter((m) => m.status === 'active' || m.status === 'acknowledged').length
+    const status = sorted.some((m) => m.status === 'active') ? 'active'
+      : sorted.some((m) => m.status === 'acknowledged') ? 'acknowledged'
+        : sorted.every((m) => m.status === 'resolved') ? 'resolved' : undefined
+    const severity = sorted.reduce<EventSeverity>((w, m) => (SEVERITY_RANK[m.severity] < SEVERITY_RANK[w] ? m.severity : w), newest.severity)
+    out.push({
+      id: `group-${e.group!.key}`,
+      kind: 'alert',
+      severity,
+      timestamp: newest.timestamp,
+      ts: newest.ts,
+      title: `${label} ${repeatPhrase(sorted.length, firstTs, newest.ts)}`,
+      subtitle: [
+        newest.title !== label ? `Latest: ${newest.title}` : '',
+        e.group!.ruleName && e.group!.ruleName !== label ? `Rule: ${e.group!.ruleName}` : '',
+        open ? `${open} open` : '',
+      ].filter(Boolean).join(' · ') || undefined,
+      status,
+      members: sorted,
+      label,
+      firstTs,
+      open,
+    })
+  }
+  return out
+}
+
+/** Grouping is on unless the URL says `egroup=off`. */
+export function groupingEnabled(params: { get(name: string): string | null }): boolean {
+  return params.get('egroup') !== 'off'
+}
+
+export function writeGrouping(params: URLSearchParams, on: boolean): URLSearchParams {
+  const next = new URLSearchParams(params)
+  if (on) next.delete('egroup')
+  else next.set('egroup', 'off')
+  return next
+}
+
+/** The device's open alerts from one rule: where an open group of repeats is worked in full. */
+export function ruleOpenAlertsHref(deviceId: string, ruleId: string): string {
+  return `/alerts?device_id=${encodeURIComponent(deviceId)}&rule_id=${encodeURIComponent(ruleId)}&view=open`
 }
 
 export type MaintenanceWindow = { id: string; starts_at: string; ends_at: string; reason?: string | null; scope_label?: string | null; active?: boolean }

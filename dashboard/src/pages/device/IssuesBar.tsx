@@ -1,14 +1,16 @@
 import { forwardRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, ChevronRight, CircleSlash, Info, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { repeatPhrase } from './eventsModel'
 import { formatAbsolute, formatRelative } from './format'
 import type { DeviceIssue, DeviceSummary } from './types'
 
 /* What is wrong right now, worst first then oldest: the confirmed status when
  * it is not Up, open alerts, template groups needing attention (tunnel down,
  * APs offline, PSU, fans, temperature), unexpectedly down interfaces, flapping
- * and maintenance. Each item opens the tab that shows it. When nothing is open
- * the bar collapses to one line. */
+ * and maintenance. Each item opens the tab that shows it. Repeats of one alert
+ * condition from one rule are one item ("Degraded (packet loss) ×5 in 3 days").
+ * When nothing is open the bar collapses to one line. */
 
 const ICON = { critical: XCircle, warning: AlertTriangle, info: Info } as const
 const TONE = {
@@ -67,11 +69,14 @@ export const IssuesBar = forwardRef<HTMLElement, {
 
 function IssueButton({ issue, onOpen }: { issue: DeviceIssue; onOpen: (issue: DeviceIssue) => void }) {
   const Icon = ICON[issue.severity] || Info
+  const first = issue.since ? Date.parse(issue.since) : NaN
+  const last = issue.last_at ? Date.parse(issue.last_at) : NaN
+  const repeated = (issue.count ?? 1) > 1 && Number.isFinite(first) && Number.isFinite(last) ? repeatPhrase(issue.count!, first, last) : ''
   return (
     <button type="button" onClick={() => onOpen(issue)}
       className="group inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md py-0.5 text-left text-sm hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
       <Icon className={cn('h-4 w-4 shrink-0', TONE[issue.severity])} aria-label={issue.severity} />
-      <span className="min-w-0 break-words font-medium">{issue.title}</span>
+      <span className="min-w-0 break-words font-medium">{issue.title}{repeated ? ` ${repeated}` : ''}</span>
       {issue.detail && <span className="min-w-0 break-words text-muted">· {issue.detail}</span>}
       {issue.since && <span className="shrink-0 text-muted" title={formatAbsolute(issue.since)}>· {formatRelative(issue.since)}</span>}
       {issue.until && <span className="shrink-0 text-muted">· until {formatAbsolute(issue.until)}</span>}

@@ -28,6 +28,10 @@ export type DeviceIssue = {
   tab: string
   group?: string
   alert_id?: string
+  /** Alert issues standing for repeats of one condition: how many, the newest, and the rule. */
+  count?: number
+  last_at?: string | null
+  rule_id?: string | null
 }
 
 export type IdentityField = { value: string | null; source: 'inventory' | 'device' | 'template' | 'entity' | null }
@@ -70,7 +74,17 @@ export type BusyInterface = {
 }
 
 /** ``title`` is the triggering condition without the repeated hostname and IP ("Packet loss 33% (limit 10%)"). */
-export type SummaryAlert = { id: string; severity: string; status: string; message: string; title?: string; triggered_at: string | null }
+export type SummaryAlert = {
+  id: string; severity: string; status: string; message: string; title?: string; triggered_at: string | null
+  rule_id?: string | null; rule_name?: string | null; group_key?: string | null
+}
+
+/** Open alerts that repeat one condition from one rule (D-09); count 1 is a single alert. Members newest first. */
+export type SummaryAlertGroup = {
+  key: string; label: string; count: number; severity: string; rule_id: string | null; rule_name: string | null
+  latest_title: string; first_at: string | null; last_at: string | null; active: number; acknowledged: number
+  members: Array<{ id: string; title: string; status: string; severity: string; triggered_at: string | null }>
+}
 
 export type TemplateHighlight = { kind: 'sessions' | 'clients' | 'poe'; label: string; value: number; unit: string | null; sub: string | null; series_key: string | null }
 
@@ -100,7 +114,7 @@ export type DeviceSummary = {
   not_applicable: Array<{ key: string; name: string; reason: string | null }>
   interfaces: InterfaceCounts | null
   busiest_interfaces: BusyInterface[] | null
-  alerts: { active: number; acknowledged: number; items: SummaryAlert[] } | null
+  alerts: { active: number; acknowledged: number; items: SummaryAlert[]; groups?: SummaryAlertGroup[] } | null
   maintenance: { active: boolean; ends_at?: string | null; reason?: string | null }
   recent: { status_changes: StatusHistoryEvent[] | null; traps: TrapRow[] | null; flap_episodes: FlapEpisodeLite[] | null }
   polling: { ping_interval_s: number | null; snmp_interval_s: number | null; last_response: string | null }

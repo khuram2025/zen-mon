@@ -652,3 +652,86 @@ def alert_title(message: str | None, condition: str | None = None, hostname: str
             return text[: -len(suffix)]
     return text or "Alert"
 
+
+
+# ── Repeated alerts on the device's own page ───────────────────────────────
+#
+# Presentation only (field review D-09): the device page shows repeats of one
+# condition from one rule as a single row ("Degraded (packet loss) ×5 in 3
+# days") that expands to the individual alerts. Alert rows, rules and the
+# confirmed status are untouched. The same key and label rules are in the
+# dashboard's pages/device/eventsModel.ts; both replay
+# scripts/dev/device-alert-groups/vectors.json.
+
+_GROUP_STATUS_LABEL = {"down": "Down", "degraded": "Degraded", "up": "Recovered"}
+_GROUP_METRIC_LABEL = {"packet_loss": "packet loss", "rtt": "latency"}
+_GROUP_SEVERITY_RANK = {"critical": 0, "warning": 1}
+
+
+def alert_group_key(rule_id: Any, rule_name: str | None, metadata: dict | None) -> str | None:
+    """Alerts with the same key are repeats of one condition: the rule, the
+    condition metric (packet_loss, rtt, reachability; absent on legacy rows),
+    the new status and, for per-interface rules, the interface. An alert with
+    no rule is never grouped (None)."""
+    meta = metadata if isinstance(metadata, dict) else {}
+    rule = str(rule_id) if rule_id else (rule_name or "").strip()
+    if not rule:
+        return None
+    if_index = meta.get("if_index")
+    return "|".join([rule, str(meta.get("condition_metric") or ""), str(meta.get("new_status") or "").lower(),
+                     "" if if_index is None else str(if_index)])
+
+
+def alert_group_label(titles: list[str], rule_name: str | None, metadata: dict | None) -> str:
+    """A group's name without the count. One shared title is the label ("No
+    response"); differing readings name the status and what was measured
+    ("Degraded (packet loss)"); otherwise the rule, then the newest title.
+    ``titles`` are newest first."""
+    present = [t for t in titles if t]
+    if len(set(present)) == 1:
+        return present[0]
+    meta = metadata if isinstance(metadata, dict) else {}
+    status = _GROUP_STATUS_LABEL.get(str(meta.get("new_status") or "").lower())
+    if status:
+        measured = _GROUP_METRIC_LABEL.get(str(meta.get("condition_metric") or ""))
+        return f"{status} ({measured})" if measured else status
+    return (rule_name or "").strip() or (present[0] if present else "Alert")
+
+
+def group_device_alerts(rows: list[dict]) -> list[dict]:
+    """Open alerts of one device grouped by ``alert_group_key``; worst severity
+    first, then the oldest. Each row needs id, severity, status, title,
+    triggered_at (ISO text), rule_id, rule_name and metadata. A group of one is
+    still a group (count 1) so callers treat every row the same."""
+    groups: dict[str, dict] = {}
+    for r in sorted(rows, key=lambda r: r.get("triggered_at") or "", reverse=True):
+        key = alert_group_key(r.get("rule_id"), r.get("rule_name"), r.get("metadata")) or f"alert:{r['id']}"
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {"key": key, "rule_id": str(r["rule_id"]) if r.get("rule_id") else None,
+                               "rule_name": r.get("rule_name"), "metadata": r.get("metadata"),
+                               "severity": r.get("severity"), "rows": []}
+        g["rows"].append(r)
+        if _GROUP_SEVERITY_RANK.get(r.get("severity"), 2) < _GROUP_SEVERITY_RANK.get(g["severity"], 2):
+            g["severity"] = r.get("severity")
+    out = []
+    for g in groups.values():
+        members = g["rows"]
+        titles = [m.get("title") or "" for m in members]
+        out.append({
+            "key": g["key"],
+            "label": alert_group_label(titles, g["rule_name"], g["metadata"]),
+            "count": len(members),
+            "severity": g["severity"],
+            "rule_id": g["rule_id"],
+            "rule_name": g["rule_name"],
+            "latest_title": titles[0] or "Alert",
+            "first_at": members[-1].get("triggered_at"),
+            "last_at": members[0].get("triggered_at"),
+            "active": sum(1 for m in members if m.get("status") in ("active", "pending")),
+            "acknowledged": sum(1 for m in members if m.get("status") == "acknowledged"),
+            "members": [{"id": str(m["id"]), "title": m.get("title") or "Alert", "status": m.get("status"),
+                         "severity": m.get("severity"), "triggered_at": m.get("triggered_at")} for m in members],
+        })
+    out.sort(key=lambda g: (_GROUP_SEVERITY_RANK.get(g["severity"], 2), g["first_at"] or ""))
+    return out

@@ -1,5 +1,6 @@
-import { useMemo } from 'react'
-import { ArrowRight, CircleSlash } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { ArrowRight, ChevronDown, ChevronRight, CircleSlash } from 'lucide-react'
 import { DeviceWidgetGrid, type DeviceWidget } from '@/components/devices/DeviceWidgetGrid'
 import { useDeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
 import { averageDevicePacketLoss, deviceAvailabilityBuckets, formatDeviceAvailability, packetLossPercent } from '@/components/devices/availability'
@@ -7,6 +8,7 @@ import type { FlapEpisode } from '@/components/devices/deviceStatus'
 import { serverNow } from '@/lib/serverClock'
 import { cn } from '@/lib/utils'
 import { buildActivityEvents, normalizeSeverity, type ActivityEvent } from './activity'
+import { repeatPhrase } from './eventsModel'
 import { axisWidth, niceTicks, Panel, SERIES_COLORS, Sparkline, TimeSeriesPanel } from './charts'
 import {
   formatAbsolute, formatBitRate, formatLinkSpeed, formatLossPct, formatMs, formatRelative, formatUsagePct, parseTime,
@@ -17,7 +19,7 @@ import { KpiTile, UsageBar } from './KpiTile'
 import { DeviceNetflowCard, useDeviceNetflow } from './NetflowCard'
 import { RelatedPanel } from './RelatedPanel'
 import type { DeviceTabId } from './tabs'
-import type { DeviceRange, DeviceRecord, DeviceSummary, HealthGroupDigest, Thresholds } from './types'
+import type { DeviceRange, DeviceRecord, DeviceSummary, HealthGroupDigest, SummaryAlertGroup, Thresholds } from './types'
 
 const STATUS_DOT: Record<string, string> = {
   crit: 'bg-danger', warn: 'bg-warning', ok: 'bg-success', info: 'bg-info', none: 'bg-muted/40', na: 'bg-transparent border border-border',
@@ -199,17 +201,45 @@ const EVENT_TONE: Record<ActivityEvent['severity'], string> = {
   critical: 'text-danger', warning: 'text-warning', success: 'text-success', info: 'text-info',
 }
 
-export function summaryEvents(summary: DeviceSummary): ActivityEvent[] {
+/** A Summary event row; open alerts link to their page, and repeats of one condition list their alerts. */
+export type SummaryEvent = ActivityEvent & { href?: string; members?: SummaryAlertGroup['members'] }
+
+/** Open alerts as Summary rows: repeats of one condition from one rule (the API's groups) are one row,
+ *  "Degraded (packet loss) ×5 in 3 days", placed at the newest alert. Without groups (older API), one row each. */
+export function summaryAlertEvents(summary: DeviceSummary): SummaryEvent[] {
+  const groups = summary.alerts?.groups
+  if (!groups) {
+    return (summary.alerts?.items || []).filter((a) => a.triggered_at).map((a) => ({
+      id: `alert-${a.id}`, timestamp: a.triggered_at!, severity: normalizeSeverity(a.severity), icon: ArrowRight,
+      kind: 'alert', title: a.title || a.message, subtitle: `Alert · ${a.status}`, href: `/alerts/${a.id}`,
+    }))
+  }
+  return groups.flatMap((g): SummaryEvent[] => {
+    const newest = g.members[0]
+    if (!newest || !g.last_at) return []
+    if (g.count < 2) {
+      return [{ id: `alert-${newest.id}`, timestamp: g.last_at, severity: normalizeSeverity(g.severity), icon: ArrowRight,
+        kind: 'alert', title: newest.title, subtitle: `Alert · ${newest.status}`, href: `/alerts/${newest.id}` }]
+    }
+    const first = g.first_at ? Date.parse(g.first_at) : NaN
+    const last = Date.parse(g.last_at)
+    const open = g.active + g.acknowledged
+    return [{
+      id: `alert-group-${g.key}`, timestamp: g.last_at, severity: normalizeSeverity(g.severity), icon: ArrowRight, kind: 'alert',
+      title: Number.isFinite(first) && Number.isFinite(last) ? `${g.label} ${repeatPhrase(g.count, first, last)}` : `${g.label} ×${g.count}`,
+      subtitle: [`${open} open alert${open === 1 ? '' : 's'}`, g.latest_title !== g.label ? `latest: ${g.latest_title}` : ''].filter(Boolean).join(' · '),
+      members: g.members,
+    }]
+  })
+}
+
+export function summaryEvents(summary: DeviceSummary): SummaryEvent[] {
   const now = serverNow()
   const from = new Date(now - 30 * 86400_000).toISOString()
   const to = new Date(now).toISOString()
   const recent = summary.recent
   const events = buildActivityEvents(recent.traps || [], recent.status_changes || [], {}, from, to, (recent.flap_episodes || []) as unknown as FlapEpisode[])
-  const alerts: ActivityEvent[] = (summary.alerts?.items || []).filter((a) => a.triggered_at).map((a) => ({
-    id: `alert-${a.id}`, timestamp: a.triggered_at!, severity: normalizeSeverity(a.severity), icon: ArrowRight,
-    kind: 'alert', title: a.message, subtitle: `Alert · ${a.status}`,
-  }))
-  return [...alerts, ...events].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+  return [...summaryAlertEvents(summary), ...events].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
 }
 
 function RecentEventsPanel({ summary, onOpen }: { summary?: DeviceSummary; onOpen: () => void }) {
@@ -220,22 +250,44 @@ function RecentEventsPanel({ summary, onOpen }: { summary?: DeviceSummary; onOpe
         <p className="text-sm text-muted">No status changes, traps or alerts in the last 30 days.</p>
       ) : (
         <ol className="space-y-2.5">
-          {events.map((e) => {
-            const Icon = e.icon
-            return (
-              <li key={e.id} className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 text-sm">
-                <Icon className={cn('mt-0.5 h-4 w-4', EVENT_TONE[e.severity])} aria-label={e.severity} />
-                <div className="min-w-0">
-                  <div className="break-words font-medium">{e.title}</div>
-                  {e.subtitle && <div className="break-words text-xs text-muted">{e.subtitle}</div>}
-                </div>
-                <time className="shrink-0 text-xs text-muted" dateTime={e.timestamp} title={formatAbsolute(e.timestamp, { seconds: true })}>{formatRelative(e.timestamp)}</time>
-              </li>
-            )
-          })}
+          {events.map((e) => <RecentEventRow key={e.id} event={e} />)}
         </ol>
       )}
     </Panel>
+  )
+}
+
+function RecentEventRow({ event: e }: { event: SummaryEvent }) {
+  const [open, setOpen] = useState(false)
+  const Icon = e.icon
+  const listId = `${e.id}-alerts`
+  return (
+    <li className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 text-sm">
+      <Icon className={cn('mt-0.5 h-4 w-4', EVENT_TONE[e.severity])} aria-label={e.severity} />
+      <div className="min-w-0">
+        {e.members ? (
+          <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-controls={listId}
+            className="inline-flex max-w-full items-start gap-1 text-left font-medium hover:text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+            {open ? <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /> : <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />}
+            <span className="break-words">{e.title}</span>
+          </button>
+        ) : e.href ? (
+          <Link to={e.href} className="break-words font-medium hover:text-primary hover:underline">{e.title}</Link>
+        ) : <div className="break-words font-medium">{e.title}</div>}
+        {e.subtitle && <div className="break-words text-xs text-muted">{e.subtitle}</div>}
+        {e.members && open && (
+          <ol id={listId} className="mt-1 space-y-0.5 border-l border-border pl-2 text-xs">
+            {e.members.map((m) => (
+              <li key={m.id} className="flex flex-wrap items-center gap-x-2">
+                <Link to={`/alerts/${m.id}`} className="min-w-0 break-words text-text hover:text-primary hover:underline">{m.title}</Link>
+                <span className="text-muted">{m.status}{m.triggered_at ? ` · ${formatRelative(m.triggered_at)}` : ''}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+      <time className="shrink-0 text-xs text-muted" dateTime={e.timestamp} title={formatAbsolute(e.timestamp, { seconds: true })}>{formatRelative(e.timestamp)}</time>
+    </li>
   )
 }
 

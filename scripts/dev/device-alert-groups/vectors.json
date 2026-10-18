@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "about": "Device-page alert grouping (field review D-09): which alerts collapse into one row and what the row is called. Replayed by server/tests/test_device_alert_groups.py (app.services.device_insights) and dashboard/scripts/test-device-events.mjs (pages/device/eventsModel.ts). Hand-written; change both implementations with the cases.",
+  "key_cases": [
+    {"name": "condition metric, status and rule", "rule_id": "r-1", "rule_name": "High Latency",
+     "metadata": {"new_status": "degraded", "condition_metric": "packet_loss", "condition": "Packet loss 33% (limit 10%)"},
+     "expect": "r-1|packet_loss|degraded|"},
+    {"name": "latency and loss degrade separately", "rule_id": "r-1", "rule_name": "High Latency",
+     "metadata": {"new_status": "degraded", "condition_metric": "rtt"}, "expect": "r-1|rtt|degraded|"},
+    {"name": "down and its recovery share the reachability metric but not the status", "rule_id": "r-2", "rule_name": "Device Down",
+     "metadata": {"new_status": "up", "old_status": "down", "condition_metric": "reachability", "is_recovery": true},
+     "expect": "r-2|reachability|up|"},
+    {"name": "legacy status row: rule and new status", "rule_id": "r-1", "rule_name": "High Latency",
+     "metadata": {"new_status": "DEGRADED", "old_status": "up"}, "expect": "r-1||degraded|"},
+    {"name": "no rule id: the rule name", "rule_id": null, "rule_name": " High Latency ",
+     "metadata": {"new_status": "degraded"}, "expect": "High Latency||degraded|"},
+    {"name": "metric alert: one incident per interface", "rule_id": "r-3", "rule_name": "Interface down",
+     "metadata": {"if_index": 7}, "expect": "r-3|||7"},
+    {"name": "metric alert with a string interface index", "rule_id": "r-3", "rule_name": "Interface down",
+     "metadata": {"if_index": "7"}, "expect": "r-3|||7"},
+    {"name": "no metadata", "rule_id": "r-4", "rule_name": "CPU", "metadata": null, "expect": "r-4|||"},
+    {"name": "no rule at all is never grouped", "rule_id": null, "rule_name": "", "metadata": {"new_status": "down"}, "expect": null},
+    {"name": "no rule and no metadata", "rule_id": null, "rule_name": null, "metadata": null, "expect": null}
+  ],
+  "label_cases": [
+    {"name": "one shared title is the label", "titles": ["No response", "No response"], "rule_name": "Device Down",
+     "metadata": {"new_status": "down", "condition_metric": "reachability"}, "expect": "No response"},
+    {"name": "readings differ: the status and what was measured", "titles": ["Packet loss 41% (limit 10%)", "Packet loss 33% (limit 10%)"],
+     "rule_name": "High Latency", "metadata": {"new_status": "degraded", "condition_metric": "packet_loss"}, "expect": "Degraded (packet loss)"},
+    {"name": "latency readings", "titles": ["Latency 412 ms (limit 100 ms)", "Latency 150 ms (limit 100 ms)"],
+     "rule_name": "High Latency", "metadata": {"new_status": "degraded", "condition_metric": "rtt"}, "expect": "Degraded (latency)"},
+    {"name": "status without a named metric", "titles": ["A", "B"], "rule_name": "R",
+     "metadata": {"new_status": "down"}, "expect": "Down"},
+    {"name": "recoveries", "titles": ["A", "B"], "rule_name": "R", "metadata": {"new_status": "up"}, "expect": "Recovered"},
+    {"name": "legacy titles repeat", "titles": ["High Latency · Degraded", "High Latency · Degraded"], "rule_name": "High Latency",
+     "metadata": {"new_status": "degraded"}, "expect": "High Latency · Degraded"},
+    {"name": "metric alerts with differing messages: the rule", "titles": ["CPU 91%", "CPU 95%"], "rule_name": " High CPU ",
+     "metadata": {}, "expect": "High CPU"},
+    {"name": "nothing better: the newest title", "titles": ["CPU 95%", "CPU 91%"], "rule_name": null, "metadata": null, "expect": "CPU 95%"},
+    {"name": "blank titles are ignored", "titles": ["", "No response"], "rule_name": "R", "metadata": {"new_status": "down"}, "expect": "No response"}
+  ]
+}

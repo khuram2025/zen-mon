@@ -27,7 +27,7 @@ is wrong right now, and where do I go next.
 | *Vendor* metrics | The template's groups that no declared vendor tab and not Hardware takes. Left out once the declared tabs cover every group. |
 | *Template tabs* | Tabs the template declares, e.g. *VPN & SD-WAN*, *Wireless*, *Pools & virtual servers* (see below). |
 | Hardware | Template hardware groups (sensors, PSU, fans, temperature, stack, PoE, memory pools, disks, optics) and the ENTITY-MIB component inventory. |
-| Events | One range-bound timeline of alerts, status changes, flapping, traps, reboots and maintenance. |
+| Events | One range-bound timeline of alerts, status changes, flapping, traps, reboots and maintenance; repeated alerts are grouped (see below). |
 | Configuration | Identity and monitoring, owner and notes, monitoring sites, the status policy, configuration backups and connected endpoints. |
 
 Old links keep working: `?tab=overview` opens Summary and `?tab=inventory`
@@ -189,6 +189,52 @@ predicate; which rules match, thresholds and the device-status contract are
 unchanged. On the device's own page the title drops the repeated host and IP;
 alerts raised before this read "<rule> · Degraded". The rule stays visible
 beside the title.
+
+## Repeated alerts
+
+On the device's own page, repeats of one condition from one rule are one row
+instead of one row per alert (field review D-09): `Degraded (packet loss) ×5
+in 3 days`, `No response ×2 in 5 hours`. This is presentation only. Alert rows,
+rules, thresholds, notifications and the confirmed status are unchanged, and
+every alert stays reachable at `/alerts/{id}`.
+
+* **Key**: the rule (`rule_id`, else its name), `metadata.condition_metric`
+  (`packet_loss`, `rtt`, `reachability`, `performance`), `metadata.new_status`
+  and, for per-interface rules, `metadata.if_index`. Legacy rows without a
+  condition metric group by rule and new status. A recovery (new status Up) is
+  never grouped with its outage. Latency and packet loss are separate groups.
+  An alert without a rule is never grouped.
+* **Label**: one title shared by every alert in the group is the label (`No
+  response`). Differing readings use the status and what was measured
+  (`Degraded (packet loss)`). Otherwise the label is the rule name, or failing
+  that the newest title. Then `×<count> in <span>`, where the span runs from
+  the first alert to the newest, rounded up to minutes, hours (under 2 days) or
+  days.
+* The key and label rules are in `app.services.device_insights` (summary API)
+  and `pages/device/eventsModel.ts` (Events tab). Both replay
+  `scripts/dev/device-alert-groups/vectors.json`, so change both
+  implementations and the vectors together.
+
+Where it applies:
+
+* **Events tab**: the type, severity and text filters apply to each alert first,
+  so a group holds only the alerts the filters show (a lone match is a plain
+  row). A group takes its newest alert's place in the timeline, the worst
+  severity among its alerts and the most urgent workflow state (active, then
+  acknowledged, then resolved), and shows the latest reading, the rule and how
+  many alerts are still open. Expanding a group lists every alert with its
+  link: the first 10 are shown, then *Show all*. Paging (*Show 50 more*) counts
+  rows. The events chart and the chip counts still count every alert. *Group
+  repeats* turns grouping off (`?egroup=off`).
+* **Issues bar**: the summary API groups the open (active or pending) alerts,
+  so the issue count counts conditions, not alerts. A repeated condition reads
+  `Degraded (packet loss) ×3 in 2 days · latest: Packet loss 38% (limit 10%)`
+  and opens the device's open alerts from that rule (`/alerts?device_id=…&rule_id=…&view=open`).
+  A single alert still opens its own page. The active-alert count beside the
+  bar still counts alerts.
+* **Summary "Recent events"**: `alerts.groups` in the summary groups every open
+  alert the API reads (at most 50). A repeated condition is one row that
+  expands to its alerts with their links. A single alert links to its page.
 
 ## Performance comparison and export
 

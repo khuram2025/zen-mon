@@ -153,3 +153,43 @@ def test_summary_alert_titles_name_the_condition(world):
         body = c.get(f"/api/v1/devices/{FG}/summary").json()
     titles = [i["title"] for i in body["issues"] if i["source"] == "alert"]
     assert titles == ["High Latency · Degraded", "Packet loss 33% (limit 10%)"]
+
+
+def test_summary_groups_repeated_alerts(world):
+    """D-09: repeats of one condition from one rule are one issue with a count, and one summary group
+    listing every alert; another condition, and an alert without a rule, stay separate."""
+    db = world
+    dev = uuid.uuid4()
+    db.execute("INSERT INTO devices (id, hostname, ip_address, tags, status, ping_enabled, ping_interval,"
+               " snmp_enabled, device_type, vendor, poll_mode)"
+               " VALUES ($1, 'rpt-fw', '10.30.0.9'::inet, '[\"team-a\"]'::jsonb, 'degraded', true, 60, false,"
+               " 'firewall', 'Fortinet', 'direct')", dev)
+    rule = db.scalar("INSERT INTO alert_rules (name, metric, operator, threshold, trigger_on)"
+                     " VALUES ('rpt High Latency', 'ping_status', 'eq', 0, 'any') RETURNING id")
+    ids = []
+    for hours, loss, metric in ((70, 33, "packet_loss"), (40, 41, "packet_loss"), (2, 38, "packet_loss"),
+                                (1, None, "rtt")):
+        title = f"Packet loss {loss}% (limit 10%)" if loss else "Latency 412 ms (limit 100 ms)"
+        ids.append(db.scalar(
+            "INSERT INTO alerts (rule_id, device_id, status, severity, message, triggered_at, metadata)"
+            " VALUES ($1, $2, 'active', 'warning', $3, $4, $5::jsonb) RETURNING id",
+            rule, dev, f"{title} — rpt-fw (10.30.0.9)", NOW - timedelta(hours=hours),
+            {"new_status": "degraded", "condition": title, "condition_metric": metric}))
+    db.execute("INSERT INTO alerts (device_id, status, severity, message, triggered_at)"
+               " VALUES ($1, 'active', 'warning', 'Unruled', $2)", dev, NOW - timedelta(hours=3))
+    with api_client(world, role="t_p3_grp", permissions=["devices.view", "alerts.view"]) as c:
+        body = c.get(f"/api/v1/devices/{dev}/summary").json()
+    alert_issues = [i for i in body["issues"] if i["source"] == "alert"]
+    assert [(i["title"], i.get("count")) for i in alert_issues] == [
+        ("Degraded (packet loss)", 3), ("Unruled", None), ("Latency 412 ms (limit 100 ms)", None)]
+    loss = alert_issues[0]
+    assert loss["detail"] == "latest: Packet loss 38% (limit 10%)"
+    assert loss["alert_id"] == str(ids[2]), "the newest member"
+    assert loss["rule_id"] == str(rule)
+    assert loss["since"] < loss["last_at"]
+    groups = body["alerts"]["groups"]
+    assert [g["count"] for g in groups] == [3, 1, 1]
+    assert [m["id"] for m in groups[0]["members"]] == [str(ids[2]), str(ids[1]), str(ids[0])]
+    assert body["alerts"]["active"] == 5, "counts are per alert, not per group"
+    keys = {a["group_key"] for a in body["alerts"]["items"]}
+    assert f"{rule}|packet_loss|degraded|" in keys and None in keys
