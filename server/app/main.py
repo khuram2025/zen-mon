@@ -3,11 +3,13 @@ import logging
 import time
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from app.core.route_policy import policy
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.gzip_request import GzipRequestMiddleware
+from app.core.validation_errors import request_validation_handler
 from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, roles, auth_settings, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, ncm_compliance, host_alert_rules, link_utilization, udt, netpath, tags
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
@@ -93,6 +95,10 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
+
+    # 422 bodies keep FastAPI's shape and every loc, with pattern mismatches
+    # named by field and value instead of the raw regex (validation_errors).
+    app.add_exception_handler(RequestValidationError, request_validation_handler)
 
     # Agents compress uploads once the heartbeat advertises accepts_gzip.
     app.add_middleware(GzipRequestMiddleware)

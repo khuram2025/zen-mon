@@ -109,6 +109,138 @@ def validate_conditions(conditions):
         raise ValueError('Interface and template-table conditions require separate rules (different entity identities)')
 
 
+# ── Value domains (authoring checks) ─────────────────────────────────────────
+#
+# The values each metric can actually take. A condition that no reading can
+# ever satisfy ("ping_status > 5", "cpu > 150") or that every reading
+# satisfies ("packet_loss >= 0") is rejected when the rule is saved: the first
+# never fires and the second fires on every sample. Metrics not listed here
+# (temperature, template series, event toggles, NetFlow, trap, syslog) are not
+# range-checked.
+
+@dataclass(frozen=True)
+class Domain:
+    # Human description used in messages, e.g. "ping_status is 0 (down) or 1 (up)".
+    text: str
+    values: tuple = ()           # discrete domain (non-empty) ...
+    lo: float | None = None      # ... or a continuous range [lo, hi]
+    hi: float | None = None
+
+
+_PERCENT = ('cpu', 'memory', 'packet_loss', 'if_util_pct', 'host_cpu_pct', 'host_memory_pct',
+            'host_filesystem_pct', 'host_disk_util_pct', 'udt_port_capacity_pct', 'netpath_loss')
+_FRACTION = ('apm_error_rate', 'apm_apdex', 'apm_rum_error_session_rate', 'apm_rum_resource_failure_rate')
+_NON_NEGATIVE = ('rtt', 'jitter', 'if_in_bps', 'if_out_bps', 'if_errors', 'if_discards', 'session_count',
+                 'apm_latency_p50', 'apm_latency_p95', 'apm_latency_p99', 'apm_throughput',
+                 'apm_rum_lcp_p75', 'apm_rum_inp_p75', 'apm_rum_cls_p75', 'apm_rum_new_error_groups',
+                 'apm_slo_burn', 'netpath_rtt', 'netpath_hop_count')
+
+VALUE_DOMAINS: dict[str, Domain] = {
+    'ping_status': Domain('ping_status is 0 (down) or 1 (up)', values=(0, 1)),
+    'uptime_reset': Domain('uptime_reset is 1 after a reboot, otherwise 0', values=(0, 1)),
+    'if_oper_status': Domain('if_oper_status is an IF-MIB code from 1 (up) to 7 (lowerLayerDown); 2 is down',
+                             values=(1, 2, 3, 4, 5, 6, 7)),
+    **{m: Domain(f'{m} is a percentage from 0 to 100', lo=0.0, hi=100.0) for m in _PERCENT},
+    **{m: Domain(f'{m} is a fraction from 0 to 1', lo=0.0, hi=1.0) for m in _FRACTION},
+    **{m: Domain(f'{m} is never negative', lo=0.0) for m in _NON_NEGATIVE},
+}
+
+_OP_SYMBOL = {'gt': '>', 'gte': '>=', 'lt': '<', 'lte': '<=', 'eq': '==', 'neq': '!='}
+
+
+def op_symbol(operator):
+    op = str(operator or '').strip()
+    return _OP_SYMBOL.get(op.lower(), op)
+
+
+def _num(v):
+    return int(v) if float(v).is_integer() else v
+
+
+def domain_problem(metric, operator, threshold):
+    """Why ``metric operator threshold`` is unusable, or None.
+
+    Returns a message when the comparison can never be true or is always true
+    for the values the metric can take; None when it is satisfiable, or when
+    the metric/operator is unknown here (other validation owns those).
+    """
+    dom = VALUE_DOMAINS.get(metric)
+    op = op_symbol(operator)
+    fn = OPS.get(op)
+    if dom is None or fn is None:
+        return None
+    try:
+        thr = float(threshold)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(thr):
+        return f'{metric}: the threshold must be a finite number'
+    shown = f"'{op} {_num(thr)}'"
+    if dom.values:
+        hits = [v for v in dom.values if fn(v, thr)]
+        if not hits:
+            return f'{dom.text}; {shown} can never be true'
+        if len(hits) == len(dom.values):
+            return f'{dom.text}; {shown} is always true'
+        return None
+    lo = -math.inf if dom.lo is None else dom.lo
+    hi = math.inf if dom.hi is None else dom.hi
+    never = {'>': thr >= hi, '>=': thr > hi, '<': thr <= lo, '<=': thr < lo,
+             '==': not lo <= thr <= hi, '!=': False}[op]
+    always = {'>': thr < lo, '>=': thr <= lo, '<': thr > hi, '<=': thr >= hi,
+              '==': lo == hi == thr, '!=': not lo <= thr <= hi}[op]
+    if never:
+        return f'{dom.text}; {shown} can never be true'
+    if always:
+        return f'{dom.text}; {shown} is always true'
+    return None
+
+
+def reset_problem(metric, reset_threshold):
+    """Why an explicit reset level is outside the metric's range, or None."""
+    dom = VALUE_DOMAINS.get(metric)
+    if dom is None or reset_threshold is None or dom.values:
+        return None
+    try:
+        reset = float(reset_threshold)
+    except (TypeError, ValueError):
+        return None
+    lo = -math.inf if dom.lo is None else dom.lo
+    hi = math.inf if dom.hi is None else dom.hi
+    if not lo <= reset <= hi:
+        return f'{dom.text}; a reset level of {_num(reset)} can never be reached'
+    return None
+
+
+# Device status triggers name the ping_status they fire on.
+TRIGGER_PING_STATUS = {'down': 0, 'up': 1, 'degraded': 1}
+
+
+def trigger_problem(trigger_on, metric, operator, threshold):
+    """Why a ping_status condition contradicts the rule's ``trigger_on``, or None.
+
+    A "down" rule fires on ping_status 0 and an "up"/"degraded" rule on 1; a
+    ping_status condition that selects anything else contradicts the trigger
+    (the evaluator follows the trigger, so the stored condition would lie).
+    """
+    want = TRIGGER_PING_STATUS.get(str(trigger_on or 'any'))
+    if want is None or metric != 'ping_status':
+        return None
+    fn = OPS.get(op_symbol(operator))
+    try:
+        thr = float(threshold)
+    except (TypeError, ValueError):
+        return None
+    if fn is None:
+        return None
+    hits = {v for v in (0, 1) if fn(v, thr)}
+    if hits == {want}:
+        return None
+    return (f"trigger_on '{trigger_on}' fires on ping_status {want} "
+            f"({'down' if want == 0 else 'up'}); the condition "
+            f"'ping_status {op_symbol(operator)} {_num(thr)}' contradicts it, use 'ping_status == {want}'")
+
+
 def combine(values, logic):
     if logic == 'AND':
         return False if False in values else (None if None in values else True)

@@ -585,6 +585,62 @@ async def put_response_targets(body: ResponseTargets, db: AsyncSession = Depends
     return wf.legacy_target_view(after)
 
 
+# ── Built-in alert routing (1.24.21) ─────────────────────────────────────────
+
+class BuiltinRoutingBody(BaseModel):
+    """Either the full list of enabled families, or ``families`` mapping a
+    family key to on/off (only the keys sent change)."""
+    enabled_families: Optional[list[str]] = Field(default=None, max_length=50)
+    families: Optional[dict[str, bool]] = None
+
+
+def _builtin_routing_view(enabled: list[str]) -> dict:
+    from app.services import builtin_alert_sources as bas
+    return {"enabled_families": enabled, "families": bas.describe(enabled),
+            "health_min_age_minutes": bas.HEALTH_MIN_AGE_S // 60}
+
+
+@router.get("/builtin-routing")
+async def get_builtin_routing(db: AsyncSession = Depends(get_db), user: User = Depends(can_view)):
+    """Which built-in (rule-less) alert families the escalation sweep routes
+    by their priority's default policy."""
+    from app.services import builtin_alert_sources as bas
+    return _builtin_routing_view(await bas.enabled_families(db))
+
+
+@router.put("/builtin-routing")
+async def put_builtin_routing(body: BuiltinRoutingBody, db: AsyncSession = Depends(get_db),
+                              user: User = Depends(can_manage)):
+    from app.services import builtin_alert_sources as bas
+    if body.enabled_families is None and body.families is None:
+        raise HTTPException(422, [{"loc": ["body", "enabled_families"], "type": "value_error",
+                                   "msg": "Send enabled_families (a list of family keys) or families"
+                                          " ({key: true|false})."}])
+    errors = []
+    for i, key in enumerate(body.enabled_families or []):
+        if key not in bas.BY_KEY:
+            errors.append({"loc": ["body", "enabled_families", i], "type": "value_error",
+                           "msg": f"enabled_families: '{key}' is not a built-in alert family"
+                                  f" (expected one of {', '.join(bas.KEYS)})."})
+    for key in (body.families or {}):
+        if key not in bas.BY_KEY:
+            errors.append({"loc": ["body", "families", key], "type": "value_error",
+                           "msg": f"families: '{key}' is not a built-in alert family"
+                                  f" (expected one of {', '.join(bas.KEYS)})."})
+    if errors:
+        raise HTTPException(422, errors)
+    before = await bas.enabled_families(db)
+    wanted = set(body.enabled_families if body.enabled_families is not None else before)
+    for key, on in (body.families or {}).items():
+        (wanted.add if on else wanted.discard)(key)
+    after = await bas.save_enabled_families(db, wanted)
+    await write_audit_log(db, actor=user, action="alert.builtin_routing.update",
+                          resource_type="settings", resource_id=bas.SETTING_KEY,
+                          metadata={"before": before, "after": after})
+    await db.commit()
+    return _builtin_routing_view(after)
+
+
 # ── Silences (suppression workspace) ─────────────────────────────────────────
 
 @router.get("/silences")

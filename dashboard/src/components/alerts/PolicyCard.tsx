@@ -28,6 +28,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/Textarea'
 import { toast } from '@/components/ui/Toast'
 import { SeverityBadge, focusRing } from './AlertBits'
+import { HostRuleDialog } from './HostRuleDialog'
+import { isHostRule } from './hostRuleModel'
 import { fmtDurExact, fmtMinutes } from './format'
 import type { AlertRuleDetail, RuleCondition, RuleImpact } from './types'
 
@@ -120,6 +122,7 @@ export function PolicyCard({
   snapshot: Partial<AlertRuleDetail> | null
 }) {
   const can = useCan()
+  const qc = useQueryClient()
   const [editOpen, setEditOpen] = useState(false)
   const [toggleOpen, setToggleOpen] = useState(false)
   const diff = useMemo(() => snapshotDiff(snapshot, rule), [snapshot, rule])
@@ -140,6 +143,7 @@ export function PolicyCard({
   const canEdit = rule.editable && can('alerts.manage')
   const conditions = rule.conditions?.length ? rule.conditions : [{ metric: rule.metric, operator: rule.operator, threshold: rule.threshold } as RuleCondition]
   const compound = (rule.conditions?.length ?? 0) > 1
+  const hostRule = isHostRule(rule)
   const affected = rule.affected
   const trigger = triggerText(rule.trigger_on)
   // Device status rules (evaluated on confirmed status changes) wait out a flapping device unless they opt out; an 'up'
@@ -160,7 +164,7 @@ export function PolicyCard({
               <Button size="sm" variant="outline" className={cn('h-8', focusRing)} onClick={() => setToggleOpen(true)} aria-label={`${rule.enabled ? 'Disable' : 'Enable'} rule ${rule.name}`}>
                 <Power className={cn('h-3.5 w-3.5', rule.enabled ? 'text-success' : 'text-muted')} /> {rule.enabled ? 'Disable' : 'Enable'}
               </Button>
-              {compound ? (
+              {compound && !hostRule ? (
                 <Button size="sm" variant="outline" className={cn('h-8', focusRing)} asChild>
                   <Link to="/alert-rules" aria-label={`Edit compound rule ${rule.name} in Alert Rules`}><Pencil className="h-3.5 w-3.5" /> Edit</Link>
                 </Button>
@@ -262,7 +266,18 @@ export function PolicyCard({
       </CardContent>
 
       {canEdit && <RuleToggleDialog open={toggleOpen} onOpenChange={setToggleOpen} rule={rule} />}
-      {canEdit && !compound && editOpen && (
+      {/* Server (host_*) rules are saved through /host-alert-rules (their reset level, target and
+          clear hold); the generic quick editor PUTs /alert-rules and cannot change their definition. */}
+      {canEdit && editOpen && hostRule && (
+        <HostRuleDialog
+          open
+          onOpenChange={(v) => { if (!v) setEditOpen(false) }}
+          onSaved={() => qc.invalidateQueries({ queryKey: ['alerts'] })}
+          rule={rule}
+          mode="edit"
+        />
+      )}
+      {canEdit && !compound && editOpen && !hostRule && (
         <RuleEditDialog key={rule.id} onClose={() => setEditOpen(false)} rule={rule} />
       )}
     </Card>

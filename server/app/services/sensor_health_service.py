@@ -40,7 +40,16 @@ async def create_sensor_alert(
     severity: str,
     message: str,
     source: str,
+    priority: str | None = None,
 ) -> bool:
+    """Raise a sensor_offline / sensor_degraded alert unless one is open.
+
+    The incident priority is stamped at insert: ``priority`` when given, else
+    the built-in family's (builtin_alert_sources: offline P2, degraded P3).
+    """
+    from app.services import alert_funnel
+    from app.services import builtin_alert_sources as builtin
+
     existing = (await db.execute(
         text("""SELECT 1 FROM alerts
                  WHERE sensor_id = :sid
@@ -51,11 +60,15 @@ async def create_sensor_alert(
     )).first()
     if existing:
         return False
+    cols, vals, extra = alert_funnel.priority_insert(
+        await alert_funnel.priority_supported(db),
+        priority or builtin.priority_for(source, severity), severity)
     result = await db.execute(
-        text("""INSERT INTO alerts (sensor_id, status, severity, message, metadata)
-                VALUES (:sid, 'active', :severity, :message, CAST(:metadata AS jsonb))
+        text(f"""INSERT INTO alerts (sensor_id, status, severity, message, metadata{cols})
+                VALUES (:sid, 'active', :severity, :message, CAST(:metadata AS jsonb){vals})
                 ON CONFLICT DO NOTHING"""),
         {
+            **extra,
             "sid": sensor_id,
             "severity": severity,
             "message": message,

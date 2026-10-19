@@ -25,6 +25,7 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import builtin_alert_sources as builtin
 from app.services.server_health_service import create_server_alert, resolve_server_alerts
 
 logger = logging.getLogger("zenplus.baselines")
@@ -252,6 +253,7 @@ async def evaluate_server(db: AsyncSession, server_id: str, commit: bool = True)
                     "rule_id": str(rule["id"]),
                     "status": outcome["status"],
                 },
+                priority=builtin.priority_for("baseline_drift", rule["severity"]),
             )
 
     # Drop results (and resolve alerts) for rules that no longer apply.

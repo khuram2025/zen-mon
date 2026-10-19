@@ -155,7 +155,40 @@ export type Shift = {
 
 export type OnCallNow = { users: Array<{ id: string; name: string }>; until: string | null }
 
-export type CoverageEntry = { policy_id: string | null; policy_name: string | null; steps_ok: boolean; gaps: string[] }
+/**
+ * Coverage of one priority. `paging` (1.24.21 servers): 'none' = nobody is paged by design (no default policy, or
+ * one without steps, and no response target) — no gap; null = an older server that does not say.
+ */
+export type CoverageEntry = {
+  policy_id: string | null
+  policy_name: string | null
+  steps_ok: boolean
+  gaps: string[]
+  paging: 'steps' | 'none' | null
+  reason: 'no_policy' | 'no_steps' | null
+  /** Paging steps in the default policy; null = unknown. */
+  steps: number | null
+}
+
+/** A built-in, rule-less alert family (agent offline, sensor offline …) routed by its priority's default policy. */
+export type BuiltinSource = {
+  key: string
+  label: string
+  priority: Priority
+  enabled: boolean
+  policy_id: string | null
+  policy_name: string | null
+  /** Enabled and the priority has a default policy. */
+  routed: boolean
+  /** Routed and that policy has at least one step. */
+  paged: boolean
+  /** The server's sentence about this family's routing (e.g. "Routed to …; its steps page on-call"). */
+  note: string | null
+  description: string | null
+}
+
+/** GET /alerts/builtin-routing: the registry with enabled flags. */
+export type BuiltinRouting = { families: Array<Pick<BuiltinSource, 'key' | 'label' | 'priority' | 'enabled' | 'note' | 'description'>>; enabled_families: string[] }
 
 export type NamedRef = { id: string | null; name: string; reason?: string | null }
 
@@ -165,6 +198,8 @@ export type Coverage = {
   users_without_contacts: NamedRef[]
   unrouted_priorities: Priority[]
   schedule_gaps: Array<{ schedule_id: string | null; schedule_name: string; start: string; end: string }>
+  /** Built-in event families; null = an older server without the list. */
+  builtin_sources: BuiltinSource[] | null
 }
 
 export type RouteSource = 'rule' | 'priority_default' | 'legacy_levels' | 'none'

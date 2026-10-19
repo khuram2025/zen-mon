@@ -66,8 +66,11 @@ CLOSURE_LABELS = {
 
 def effective_rule_sql(a: str = "a") -> str:
     """The alert's rule id. Server (host) alerts historically stored the rule
-    only in metadata.rule_id with the FK column empty (A10)."""
+    only in metadata.rule_id with the FK column empty (A10). A software
+    baseline alert's metadata.rule_id is a software_baseline_rules id, never
+    an alert rule, so it is not read."""
     return (f"COALESCE({a}.rule_id, CASE WHEN ({a}.metadata->>'rule_id') ~* '{_UUID_RE}' "
+            f"AND COALESCE({a}.metadata->>'source', '') <> 'baseline' "
             f"THEN ({a}.metadata->>'rule_id')::uuid END)")
 
 

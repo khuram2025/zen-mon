@@ -16,7 +16,7 @@
  *    escalations and reviews are never held.
  */
 import type {
-  ContactKind, ContactMethod, Coverage, CoverageEntry, Digest, DigestDetail, DigestItem, EscalationPolicy, GroupBy,
+  BuiltinRouting, BuiltinSource, ContactKind, ContactMethod, Coverage, CoverageEntry, Digest, DigestDetail, DigestItem, EscalationPolicy, GroupBy,
   GroupingSettings, NamedRef, NotificationHold, OnCallNow, OncallLayer, OncallOverride, OncallSchedule, PolicyDraft,
   PolicyPreview, PolicyStep, PreviewRecipient, PreviewStep, Priority, ResponseTargets, Restriction, RotationPreset,
   RouteExplanation, RouteSource, ScheduleDraft, Shift, Target, TargetType,
@@ -1258,11 +1258,15 @@ export function coverageFromApi(raw: unknown): Coverage {
   for (const p of PRIORITIES) {
     const e = pr[p]
     if (!isObj(e)) continue
+    const steps = typeof e.steps === 'number' && Number.isFinite(e.steps) ? e.steps : Array.isArray(e.steps) ? e.steps.length : null
     priorities[p] = {
       policy_id: strOrNull(e.policy_id),
       policy_name: strOrNull(e.policy_name),
       steps_ok: e.steps_ok === true,
       gaps: asList(e.gaps).map(str).filter(Boolean),
+      paging: e.paging === 'none' || e.paging === 'steps' ? e.paging : null,
+      reason: e.reason === 'no_policy' || e.reason === 'no_steps' ? e.reason : null,
+      steps,
     } as CoverageEntry
   }
   return {
@@ -1273,7 +1277,98 @@ export function coverageFromApi(raw: unknown): Coverage {
     schedule_gaps: asList(r.schedule_gaps).filter(isObj).map((g) => ({
       schedule_id: strOrNull(g.schedule_id), schedule_name: str(g.schedule_name) || 'Schedule', start: str(g.start), end: str(g.end),
     })),
+    builtin_sources: Array.isArray(r.builtin_sources) ? r.builtin_sources.map(builtinSourceFromApi).filter(Boolean) as BuiltinSource[] : null,
   }
+}
+
+/** One built-in family from /oncall/coverage (or the routing registry); null when unusable. */
+export function builtinSourceFromApi(raw: unknown): BuiltinSource | null {
+  if (!isObj(raw)) return null
+  const key = strOrNull(raw.key)
+  const priority = normalizePriority(raw.priority)
+  if (!key || !priority) return null
+  const enabled = raw.enabled !== false
+  const routed = raw.routed === true
+  return {
+    key,
+    label: str(raw.label) || key.replace(/_/g, ' '),
+    priority,
+    enabled,
+    policy_id: strOrNull(raw.policy_id),
+    policy_name: strOrNull(raw.policy_name),
+    routed,
+    paged: routed && raw.paged === true,
+    note: strOrNull(raw.note),
+    description: strOrNull(raw.description),
+  }
+}
+
+/** GET /alerts/builtin-routing in the shapes a server may use: {families|items|sources: [...], enabled_families}. */
+export function builtinRoutingFromApi(raw: unknown): BuiltinRouting {
+  const r = isObj(raw) ? raw : {}
+  const list = Array.isArray(raw) ? raw : asList(r, Array.isArray(r.families) ? 'families' : Array.isArray(r.sources) ? 'sources' : undefined)
+  const enabledList = Array.isArray(r.enabled_families) ? r.enabled_families.map(str).filter(Boolean) : null
+  const families = list.filter(isObj).map((f) => {
+    const key = strOrNull(f.key)
+    const priority = normalizePriority(f.priority)
+    if (!key) return null
+    return {
+      key,
+      label: str(f.label) || key.replace(/_/g, ' '),
+      priority: (priority ?? 'P4') as Priority,
+      enabled: enabledList ? enabledList.includes(key) : f.enabled !== false,
+      note: strOrNull(f.note),
+      description: strOrNull(f.description),
+    }
+  }).filter(Boolean) as BuiltinRouting['families']
+  return { families, enabled_families: enabledList ?? families.filter((f) => f.enabled).map((f) => f.key) }
+}
+
+/** PUT /alerts/builtin-routing body with one family switched on or off. */
+export function builtinRoutingPayload(enabled: string[], key: string, on: boolean): { enabled_families: string[] } {
+  const next = enabled.filter((k) => k !== key)
+  if (on) next.push(key)
+  return { enabled_families: next }
+}
+
+/** The built-in families of one priority (for the matrix "+N built-in event types" line). */
+export function builtinForPriority(c: Coverage | null | undefined, p: Priority): { enabled: BuiltinSource[]; disabled: BuiltinSource[] } {
+  const all = (c?.builtin_sources ?? []).filter((b) => b.priority === p)
+  return { enabled: all.filter((b) => b.enabled), disabled: all.filter((b) => !b.enabled) }
+}
+
+/**
+ * An enabled, routed built-in family whose policy pages nobody, where that is a problem rather than a design: its
+ * priority is P1/P2, or the priority itself has coverage gaps (e.g. an acknowledgement target but no steps).
+ */
+export function builtinNobodyPaged(b: BuiltinSource, c?: Coverage | null): boolean {
+  if (!b.enabled || !b.routed || b.paged) return false
+  return isUrgent(b.priority) || (c?.priorities[b.priority]?.gaps.length ?? 0) > 0
+}
+
+/** What a built-in family's row says: routed and paged, routed without paging, unrouted, or off. */
+export function builtinSourceState(b: BuiltinSource, c?: Coverage | null): { tone: 'success' | 'warning' | 'danger' | 'muted'; label: string } {
+  if (!b.enabled) return { tone: 'muted', label: 'Routing off' }
+  if (b.paged) return { tone: 'success', label: `Paged by ${b.policy_name ?? 'the default policy'}` }
+  if (builtinNobodyPaged(b, c)) return { tone: isUrgent(b.priority) ? 'danger' : 'warning', label: 'Nobody paged' }
+  if (b.routed) return { tone: 'muted', label: 'Not paged (by design)' }
+  return isUrgent(b.priority) || b.priority === 'P3' ? { tone: isUrgent(b.priority) ? 'danger' : 'warning', label: 'No routing policy' } : { tone: 'muted', label: 'Not paged (by design)' }
+}
+
+/**
+ * Whether a priority is intentionally not paged: the server says paging "none"; an older server is read as
+ * P4 unrouted, or a default policy with zero steps and no acknowledgement target (never P1/P2).
+ */
+export function notPagedByDesign(p: Priority, c: Coverage | null | undefined, policy: EscalationPolicy | null, ackTarget?: number | null): boolean {
+  const e = c?.priorities[p]
+  // A priority with an acknowledgement target but no paging steps keeps its gap (the server lists it).
+  if (e?.paging) return e.paging === 'none' && !e.gaps.length && !c?.unrouted_priorities.includes(p)
+  const unrouted = !!c?.unrouted_priorities.includes(p) || (!policy && !e?.policy_id)
+  if (unrouted) return p === 'P4'
+  if (isUrgent(p)) return false
+  const steps = policy ? policy.steps.length : e?.steps
+  const responseTarget = ackTarget !== undefined ? ackTarget : null
+  return steps === 0 && responseTarget == null && (policy?.ack_target_minutes ?? null) == null
 }
 
 export type CoverageIssue = { key: string; severity: 'danger' | 'warning'; text: string; fix: { label: string; tab: string; id?: string | null } }
@@ -1282,15 +1377,25 @@ export type CoverageIssue = { key: string; severity: 'danger' | 'warning'; text:
 export function coverageIssues(c: Coverage, fmt: (iso: string) => string = (x) => x): CoverageIssue[] {
   const out: CoverageIssue[] = []
   for (const p of c.unrouted_priorities) {
-    // P4 is information only: no paging escalation is the recommended design.
-    if (p === 'P4') continue
+    // P4 is information only: no paging escalation is the recommended design (older servers list it as unrouted).
+    if (p === 'P4' || (c.priorities[p]?.paging === 'none' && !c.priorities[p]?.gaps.length)) continue
     out.push({ key: `unrouted-${p}`, severity: isUrgent(p) ? 'danger' : 'warning', text: `${PRIORITY_META[p].label} incidents have no escalation policy: a rule without its own policy or tiers notifies only its channels.`, fix: { label: 'Assign a policy', tab: 'policies' } })
   }
   for (const p of PRIORITIES) {
     const e = c.priorities[p]
-    // An unrouted priority's only "gap" is that it is unrouted (listed above).
+    // An unrouted priority's only "gap" is that it is unrouted (listed above); a priority that is not paged by
+    // design has none.
     if (!e || c.unrouted_priorities.includes(p)) continue
     for (const g of e.gaps) out.push({ key: `gap-${p}-${g}`, severity: isUrgent(p) ? 'danger' : 'warning', text: `${PRIORITY_META[p].label} · ${e.policy_name ?? 'policy'}: ${g}`, fix: { label: 'Edit policy', tab: 'policies', id: e.policy_id } })
+  }
+  // Built-in events (agent offline, sensor offline …) of P1–P3 that are switched on but reach no policy.
+  for (const b of c.builtin_sources ?? []) {
+    if (builtinNobodyPaged(b, c)) {
+      out.push({ key: `builtin-${b.key}`, severity: isUrgent(b.priority) ? 'danger' : 'warning', text: `Built-in “${b.label}” events (${b.priority}) are routed to ${b.policy_name ?? 'the default policy'}, which has no steps: nobody is paged.`, fix: { label: 'Edit policy', tab: 'policies', id: b.policy_id } })
+      continue
+    }
+    if (!b.enabled || b.routed || b.priority === 'P4') continue
+    out.push({ key: `builtin-${b.key}`, severity: isUrgent(b.priority) ? 'danger' : 'warning', text: `Built-in “${b.label}” events (${b.priority}) are routed by the ${PRIORITY_META[b.priority].label} default policy, but there is none: they notify nobody.`, fix: { label: 'Assign a policy', tab: 'policies' } })
   }
   for (const s of c.schedules_without_members) {
     out.push({ key: `sched-${s.id ?? s.name}`, severity: 'warning', text: `On-call schedule “${s.name}” has no members, so it resolves to nobody.`, fix: { label: 'Add members', tab: 'oncall', id: s.id } })
@@ -1307,14 +1412,23 @@ export function coverageIssues(c: Coverage, fmt: (iso: string) => string = (x) =
 
 export type CoverageStatus = { tone: 'success' | 'warning' | 'danger' | 'muted'; label: string }
 
-/** One status for a priority card. */
-export function priorityCoverageStatus(p: Priority, c: Coverage | null | undefined, policy: EscalationPolicy | null): CoverageStatus {
-  if (c?.unrouted_priorities.includes(p) || (!policy && !c?.priorities[p]?.policy_id)) {
-    return p === 'P4' ? { tone: 'muted', label: 'No paging (by design)' } : { tone: isUrgent(p) ? 'danger' : 'warning', label: 'Unrouted' }
-  }
+export const NOT_PAGED_LABEL = 'Not paged (by design)'
+
+/**
+ * One status for a priority card. `ackTarget` is the priority's response target when known (undefined = unknown;
+ * the policy's own target is used).
+ */
+export function priorityCoverageStatus(p: Priority, c: Coverage | null | undefined, policy: EscalationPolicy | null, ackTarget?: number | null): CoverageStatus {
+  if (notPagedByDesign(p, c, policy, ackTarget)) return { tone: 'muted', label: NOT_PAGED_LABEL }
   const e = c?.priorities[p]
+  if (c?.unrouted_priorities.includes(p) || (!policy && !e?.policy_id)) {
+    return { tone: isUrgent(p) ? 'danger' : 'warning', label: 'Unrouted' }
+  }
   if (!e) return { tone: 'muted', label: 'Coverage not checked' }
   if (e.gaps.length || !e.steps_ok) return { tone: isUrgent(p) ? 'danger' : 'warning', label: `${e.gaps.length || 1} gap${e.gaps.length > 1 ? 's' : ''}` }
+  // An older server reports a zero-step policy as covered; nobody is paged by it.
+  const steps = policy ? policy.steps.length : e.steps
+  if (steps === 0 && e.paging !== 'steps') return { tone: isUrgent(p) ? 'danger' : 'warning', label: 'Nobody paged' }
   return { tone: 'success', label: 'Covered' }
 }
 

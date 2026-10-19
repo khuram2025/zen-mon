@@ -11,6 +11,9 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 import { AlertMessagePreviewDialog } from '@/components/alerts/AlertMessagePreviewDialog'
+import { HostRuleDialog } from '@/components/alerts/HostRuleDialog'
+import { isHostRule, type HostRuleMode } from '@/components/alerts/hostRuleModel'
+import { duplicateRulePayload } from '@/components/forms/alertRuleChecks'
 import { toast } from '@/components/ui/Toast'
 import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
 import { effectivePriority, policyForPriority, ruleEscalationSummary, ruleRouteSource } from '@/features/escalation/model'
@@ -33,6 +36,7 @@ function scopeLabel(r: any): string {
     if (exporter) return others ? `NetFlow ${exporter} +${others}` : `NetFlow ${exporter}`
     return others ? `NetFlow · ${others} filter${others === 1 ? '' : 's'}` : 'NetFlow (all)'
   }
+  if (isHostRule(r)) return r.server_id ? 'Server' : r.server_id === null ? 'All servers' : 'Servers'
   if (r.service_check_id) return 'Service'
   if (r.service_check_group_id) return 'Svc group'
   if (r.group_id) return 'Group'
@@ -78,6 +82,16 @@ export function AlertRulesPage() {
   const [editing, setEditing] = useState<any>(null)
   const [deleting, setDeleting] = useState<any>(null)
   const [previewing, setPreviewing] = useState<any>(null)
+  // Server (host_*) rules open in the server-rule editor; /alert-rules refuses their metrics.
+  const [hostEditing, setHostEditing] = useState<{ rule: any; mode: HostRuleMode } | null>(null)
+  const openEdit = (r: any) => {
+    if (isHostRule(r)) setHostEditing({ rule: r, mode: 'edit' })
+    else { setEditing(r); setFormOpen(true) }
+  }
+  const openDuplicate = (r: any) => {
+    if (isHostRule(r)) setHostEditing({ rule: r, mode: 'duplicate' })
+    else duplicate.mutate(r)
+  }
 
   const policiesQ = usePolicies()
   const { data: rules, isError, error } = useQuery<any[]>({
@@ -105,14 +119,9 @@ export function AlertRulesPage() {
   })
 
   const duplicate = useMutation({
-    mutationFn: async (rule: any) => {
-      const { id, created_at, updated_at, created_by, ...rest } = rule
-      return api.post('/alert-rules', {
-        ...rest,
-        name: `${rule.name} (copy)`,
-        enabled: false,
-      })
-    },
+    // Create accepts symbol operators only (seeded rules store gt/eq), and a ping_status condition follows
+    // the rule's trigger_on (syncPingConditions) — see duplicateRulePayload.
+    mutationFn: async (rule: any) => api.post('/alert-rules', duplicateRulePayload(rule)),
     onSuccess: () => {
       toast.success('Rule duplicated')
       qc.invalidateQueries({ queryKey: ['alert-rules'] })
@@ -240,11 +249,11 @@ export function AlertRulesPage() {
                           <Zap className="h-3.5 w-3.5 text-amber-500" />
                         </Button>
                         <Button variant="ghost" size="icon" className="h-7 w-7" title="Duplicate"
-                          onClick={() => duplicate.mutate(r)}>
+                          onClick={() => openDuplicate(r)}>
                           <Copy className="h-3.5 w-3.5" />
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" title="Edit"
-                          onClick={() => { setEditing(r); setFormOpen(true) }}>
+                        <Button variant="ghost" size="icon" className="h-7 w-7" title={isHostRule(r) ? 'Edit server rule' : 'Edit'}
+                          onClick={() => openEdit(r)}>
                           <Pencil className="h-3.5 w-3.5" />
                         </Button>
                         <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger" title="Delete"
@@ -269,6 +278,12 @@ export function AlertRulesPage() {
       </Card>
 
       <AlertRuleWizardDialog open={formOpen} onOpenChange={setFormOpen} rule={editing} />
+      <HostRuleDialog
+        open={!!hostEditing}
+        onOpenChange={(o) => { if (!o) setHostEditing(null) }}
+        rule={hostEditing?.rule ?? null}
+        mode={hostEditing?.mode ?? 'edit'}
+      />
       <AlertMessagePreviewDialog
         open={!!previewing}
         onOpenChange={(o) => !o && setPreviewing(null)}

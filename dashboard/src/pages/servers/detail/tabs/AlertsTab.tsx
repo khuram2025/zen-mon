@@ -1,25 +1,19 @@
 /** Alerts tab — this server's alerts, silences and host alert rules.
  *
  *  Alerts can be acknowledged, snoozed/muted and resolved; silences can be
- *  lifted; rules (global and server-specific) can be toggled, and
+ *  lifted; rules (global and server-specific) can be toggled and edited, and
  *  server-specific ones created and deleted. */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, BellOff, BellRing, Check, CheckCheck, Plus, Search, Settings2, ShieldAlert, Trash2,
+  AlertTriangle, BellOff, BellRing, Check, CheckCheck, Pencil, Plus, Search, Settings2, ShieldAlert, Trash2,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { usePolicies } from '@/features/escalation/api'
-import { PRIORITIES, PRIORITY_META, derivePriority, effectivePriority, policyForPriority } from '@/features/escalation/model'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
-} from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
-import { Label } from '@/components/ui/Label'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/Select'
@@ -28,6 +22,8 @@ import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import { QueryError, TableStateRow } from '@/components/servers/tables'
+import { HostRuleDialog } from '@/components/alerts/HostRuleDialog'
+import { HOST_METRICS, fmtDuration, ruleClearing, ruleCondition, type HostRule } from '@/components/alerts/hostRuleModel'
 import type { ServerItem } from '@/types/servers'
 import { EmptyState, Panel, Pill, Segmented, StatTile, type Tone } from '../ui'
 
@@ -44,63 +40,11 @@ interface ServerAlert {
   resolved_at: string | null
 }
 
-export interface HostRule {
-  id: string
-  name: string
-  enabled: boolean
-  metric: string
-  operator: string
-  threshold: number | null
-  severity: string
-  min_duration: number
-  /** Seconds the cleared condition must hold before the alert resolves; null = default (300 s). */
-  clear_duration?: number | null
-  /** Explicit clear level; null = automatic (see auto_reset_threshold). */
-  reset_threshold?: number | null
-  /** The automatic clear level the evaluator uses when reset_threshold is null. */
-  auto_reset_threshold?: number | null
-  recovery_alert?: boolean
-  server_id: string | null
-  target: string | null
-}
-
-/** Default clear hold the evaluator applies when a rule leaves clear_duration empty. */
-const DEFAULT_CLEAR_SECONDS = 300
-
-/** Pre-fills the new-rule dialog, e.g. from a service or process row. */
-export type HostRulePrefill = {
-  metric?: string
-  target?: string
-  name?: string
-  severity?: string
-}
+// Server rule labels, the form and its requests live in components/alerts/hostRuleModel (shared with the Alert Manager).
+export type { HostRule, HostRulePrefill } from '@/components/alerts/hostRuleModel'
+export { HOST_METRICS, metricLabel, ruleCondition, ruleClearing } from '@/components/alerts/hostRuleModel'
 
 interface Silence { id: string; dedupe: string; until: string | null; forever: boolean }
-
-export const HOST_METRICS = [
-  { value: 'host_cpu_pct', label: 'CPU usage', kind: 'pct' },
-  { value: 'host_memory_pct', label: 'Memory usage', kind: 'pct' },
-  { value: 'host_filesystem_pct', label: 'Filesystem usage', kind: 'pct' },
-  { value: 'host_disk_util_pct', label: 'Disk I/O utilization', kind: 'pct' },
-  { value: 'host_service_down', label: 'Service stopped', kind: 'svc' },
-  { value: 'host_process_down', label: 'Process not running', kind: 'proc' },
-] as const
-
-const OP_SYMBOL: Record<string, string> = {
-  gt: '>', gte: '≥', lt: '<', lte: '≤', eq: '=', neq: '≠',
-  '>': '>', '>=': '≥', '<': '<', '<=': '≤', '==': '=', '!=': '≠',
-}
-
-export function metricLabel(metric: string): string {
-  return HOST_METRICS.find((m) => m.value === metric)?.label || metric
-}
-
-export function ruleCondition(r: HostRule): string {
-  const m = HOST_METRICS.find((x) => x.value === r.metric)
-  if (m?.kind === 'svc') return `Service ${r.target || '?'} stopped`
-  if (m?.kind === 'proc') return `Process ${r.target || '?'} not running`
-  return `${metricLabel(r.metric)} ${OP_SYMBOL[r.operator] || r.operator} ${r.threshold}%`
-}
 
 function sevTone(sev: string): Tone {
   return sev === 'critical' ? 'danger' : sev === 'warning' ? 'warning' : 'info'
@@ -115,32 +59,6 @@ function StatePill({ status }: { status: string }) {
   if (status === 'active') return <Pill tone="danger" pulse>Active</Pill>
   if (status === 'acknowledged') return <Pill tone="muted">Acknowledged</Pill>
   return <Pill tone="success">Resolved</Pill>
-}
-
-function fmtDuration(seconds: number): string {
-  if (!seconds) return 'immediately'
-  if (seconds < 60) return `for ${seconds}s`
-  const m = Math.round(seconds / 60)
-  return m >= 60 && m % 60 === 0 ? `for ${m / 60}h` : `for ${m} min`
-}
-
-/** The automatic clear level: 2 points on the healthy side of the trigger. */
-function autoReset(operator: string, threshold: number): number | null {
-  if (!Number.isFinite(threshold)) return null
-  if ((operator === 'gt' || operator === 'gte') && threshold - 2 >= 0) return threshold - 2
-  if ((operator === 'lt' || operator === 'lte') && threshold + 2 <= 100) return threshold + 2
-  return null
-}
-
-/** "clears below 88% for 5 min" — when an open alert resolves. */
-export function ruleClearing(
-  r: Pick<HostRule, 'operator' | 'threshold' | 'reset_threshold' | 'auto_reset_threshold' | 'clear_duration'>,
-): string {
-  const level = r.reset_threshold ?? r.auto_reset_threshold ?? autoReset(r.operator, Number(r.threshold))
-  const below = r.operator === 'gt' || r.operator === 'gte' || r.operator === '>' || r.operator === '>='
-  const hold = r.clear_duration ?? DEFAULT_CLEAR_SECONDS
-  const where = level != null ? `clears ${below ? 'below' : 'above'} ${level}%` : 'clears'
-  return hold ? `${where} ${fmtDuration(hold)}` : `${where} at once`
 }
 
 type StatusFilter = 'active' | 'acknowledged' | 'resolved' | 'all'
@@ -162,6 +80,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
   const [status, setStatus] = useState<StatusFilter>('active')
   const [search, setSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
+  const [editing, setEditing] = useState<HostRule | null>(null)
   const [deleting, setDeleting] = useState<HostRule | null>(null)
 
   const alertsQ = useQuery<{ data: ServerAlert[]; meta: { total: number } }>({
@@ -509,7 +428,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
               <Th className="h-9">Condition</Th>
               <Th className="h-9 w-[110px]">Severity</Th>
               <Th className="h-9 w-[120px]">Scope</Th>
-              <Th className="h-9 w-[90px] pr-4 text-right">Actions</Th>
+              <Th className="h-9 w-[100px] pr-4 text-right">Actions</Th>
             </Tr>
           </THead>
           <TBody>
@@ -553,17 +472,26 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                 <Td className="py-2"><SevPill sev={r.severity} /></Td>
                 <Td className="py-2 text-xs text-muted">{r.server_id ? 'This server' : 'All servers'}</Td>
                 <Td className="py-2 pr-4 text-right">
-                  {r.server_id ? (
+                  <div className="flex items-center justify-end gap-0.5">
                     <Button
-                      size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted hover:text-danger"
-                      aria-label={`Delete ${r.name}`} title="Delete rule"
-                      onClick={() => setDeleting(r)}
+                      size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted hover:text-text"
+                      aria-label={`Edit ${r.name}`} title={r.server_id ? 'Edit rule' : 'Edit rule (applies to all servers)'}
+                      onClick={() => setEditing(r)}
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Pencil className="h-3.5 w-3.5" />
                     </Button>
-                  ) : (
-                    <span className="text-xs text-muted" title="Global rules are managed on the Alerts page">global</span>
-                  )}
+                    {r.server_id ? (
+                      <Button
+                        size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted hover:text-danger"
+                        aria-label={`Delete ${r.name}`} title="Delete rule"
+                        onClick={() => setDeleting(r)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : (
+                      <span className="w-7 text-center text-[10px] text-muted" title="Global rules are deleted on the Alerts page">global</span>
+                    )}
+                  </div>
                 </Td>
               </Tr>
             ))}
@@ -571,11 +499,13 @@ export function AlertsTab({ server }: { server: ServerItem }) {
         </Table>
       </Panel>
 
-      <CreateHostRuleDialog
+      <HostRuleDialog
         serverId={serverId}
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        onCreated={invalidate}
+        open={createOpen || !!editing}
+        onOpenChange={(o) => { if (!o) { setCreateOpen(false); setEditing(null) } }}
+        rule={editing}
+        mode={editing ? 'edit' : 'create'}
+        onSaved={invalidate}
       />
 
       <ConfirmDialog
@@ -589,274 +519,5 @@ export function AlertsTab({ server }: { server: ServerItem }) {
         onConfirm={() => { if (deleting) delRule.mutate(deleting.id) }}
       />
     </div>
-  )
-}
-
-/* ── New rule dialog ─────────────────────────────────────────────── */
-
-/** Exported so other tabs (services, processes) can open it pre-filled. */
-export function CreateHostRuleDialog({
-  serverId, open, onOpenChange, onCreated, initial,
-}: {
-  serverId: string
-  open: boolean
-  onOpenChange: (v: boolean) => void
-  onCreated: () => void
-  initial?: HostRulePrefill
-}) {
-  const [name, setName] = useState('')
-  const [metric, setMetric] = useState<string>('host_cpu_pct')
-  const [operator, setOperator] = useState('gt')
-  const [threshold, setThreshold] = useState('90')
-  const [severity, setSeverity] = useState('warning')
-  const [minutes, setMinutes] = useState('5')
-  const [clearMinutes, setClearMinutes] = useState('')
-  const [resetLevel, setResetLevel] = useState('')
-  const [recovery, setRecovery] = useState(true)
-  const [target, setTarget] = useState('')
-  const [allServers, setAllServers] = useState(false)
-  const [channels, setChannels] = useState<string[]>([])
-  // 'auto' = derived from severity; 'default' = the priority's default escalation policy.
-  const [priority, setPriority] = useState('auto')
-  const [policyId, setPolicyId] = useState('default')
-  const policies = usePolicies(open)
-
-  const kind = HOST_METRICS.find((m) => m.value === metric)?.kind || 'pct'
-
-  const reset = () => {
-    setName(''); setMetric('host_cpu_pct'); setOperator('gt'); setThreshold('90')
-    setSeverity('warning'); setMinutes('5'); setTarget(''); setAllServers(false); setChannels([])
-    setClearMinutes(''); setResetLevel(''); setRecovery(true); setPriority('auto'); setPolicyId('default')
-  }
-
-  // Apply the prefill (e.g. from a service row) each time the dialog opens.
-  useEffect(() => {
-    if (!open) return
-    reset()
-    if (initial) {
-      setName(initial.name || '')
-      setMetric(initial.metric || 'host_cpu_pct')
-      setTarget(initial.target || '')
-      setSeverity(initial.severity || 'warning')
-    }
-  }, [open, initial])
-
-  const { data: chResp } = useQuery<{ data: { id: string; name: string; type: string }[] }>({
-    queryKey: ['notification-channels'],
-    queryFn: async () => (await api.get('/settings/channels')).data,
-    enabled: open,
-  })
-  const allChannels = chResp?.data || []
-
-  const create = useMutation({
-    mutationFn: async () => {
-      if ((kind === 'svc' || kind === 'proc') && !target.trim()) {
-        throw new Error(kind === 'svc' ? 'Service name is required' : 'Process name is required')
-      }
-      return (await api.post('/host-alert-rules', {
-        name: name || `${metricLabel(metric)} alert`,
-        metric, operator,
-        threshold: kind === 'pct' ? Number(threshold) : 0,
-        severity,
-        min_duration: kind === 'pct' ? Math.round(Number(minutes) * 60) : 0,
-        // Empty = the evaluator defaults: clear after 5 minutes, 2 points on the healthy side.
-        clear_duration: kind === 'pct' && clearMinutes.trim() !== '' ? Math.round(Number(clearMinutes) * 60) : null,
-        reset_threshold: kind === 'pct' && resetLevel.trim() !== '' ? Number(resetLevel) : null,
-        recovery_alert: recovery,
-        target: (kind === 'svc' || kind === 'proc') ? target.trim() : null,
-        server_id: allServers ? null : serverId,
-        notify_channels: channels,
-        priority: priority === 'auto' ? null : priority,
-        escalation_policy_id: policyId === 'default' ? null : policyId,
-      })).data
-    },
-    onSuccess: () => { toast.success('Alert rule created'); onCreated(); onOpenChange(false); reset() },
-    onError: (e) => toast.error(apiErrorMessage(e)),
-  })
-
-  const toggleChannel = (id: string) =>
-    setChannels((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]))
-
-  const autoLevel = autoReset(operator, Number(threshold))
-  const preview = kind === 'svc'
-    ? `Service ${target.trim() || '…'} stopped`
-    : kind === 'proc'
-      ? `Process ${target.trim() || '…'} not running`
-      : `${metricLabel(metric)} ${OP_SYMBOL[operator]} ${threshold || '…'}% ${fmtDuration(Math.round(Number(minutes || 0) * 60))}`
-  const clearPreview = kind === 'pct'
-    ? ruleClearing({
-        operator, threshold: Number(threshold),
-        reset_threshold: resetLevel.trim() !== '' ? Number(resetLevel) : null,
-        auto_reset_threshold: autoLevel,
-        clear_duration: clearMinutes.trim() !== '' ? Math.round(Number(clearMinutes) * 60) : null,
-      })
-    : ''
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader><DialogTitle>New alert rule</DialogTitle></DialogHeader>
-        <form
-          className="space-y-3"
-          onSubmit={(e) => { e.preventDefault(); create.mutate() }}
-        >
-          <div className="space-y-1.5">
-            <Label>Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={`e.g. ${metricLabel(metric)} alert`} />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Metric</Label>
-              <Select value={metric} onValueChange={(v) => { setMetric(v); if (v === 'host_filesystem_pct') setThreshold('85') }}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {HOST_METRICS.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Severity</Label>
-              <Select value={severity} onValueChange={setSeverity}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="info">Info</SelectItem>
-                  <SelectItem value="warning">Warning</SelectItem>
-                  <SelectItem value="critical">Critical</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Priority</Label>
-              <Select value={priority} onValueChange={setPriority}>
-                <SelectTrigger aria-label="Incident priority"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="auto">Auto from severity ({derivePriority(severity)})</SelectItem>
-                  {PRIORITIES.map((p) => <SelectItem key={p} value={p}>{PRIORITY_META[p].label}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Escalation</Label>
-              <Select value={policyId} onValueChange={setPolicyId}>
-                <SelectTrigger aria-label="Escalation policy"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="default">
-                    {(() => {
-                      const eff = effectivePriority(priority === 'auto' ? null : priority, severity)
-                      const d = policyForPriority(policies.data ?? [], eff)
-                      return d ? `${eff} default (${d.name})` : `${eff} default (none set)`
-                    })()}
-                  </SelectItem>
-                  {(policies.data ?? []).map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.enabled ? '' : ' (disabled)'}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          {kind === 'pct' ? (
-            <div className="grid grid-cols-3 gap-3">
-              <div className="space-y-1.5">
-                <Label>Condition</Label>
-                <Select value={operator} onValueChange={setOperator}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="gt">Above (&gt;)</SelectItem>
-                    <SelectItem value="gte">At least (≥)</SelectItem>
-                    <SelectItem value="lt">Below (&lt;)</SelectItem>
-                    <SelectItem value="lte">At most (≤)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label>Threshold %</Label>
-                <Input type="number" min={0} max={100} value={threshold} onChange={(e) => setThreshold(e.target.value)} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>For (min)</Label>
-                <Input type="number" min={0} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Clear level %</Label>
-                <Input
-                  type="number" min={0} max={100} step="any" value={resetLevel}
-                  onChange={(e) => setResetLevel(e.target.value)}
-                  placeholder={autoLevel != null ? `auto (${autoLevel}%)` : 'same as threshold'}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Clear after (min)</Label>
-                <Input
-                  type="number" min={0} value={clearMinutes}
-                  onChange={(e) => setClearMinutes(e.target.value)}
-                  placeholder={String(DEFAULT_CLEAR_SECONDS / 60)}
-                />
-              </div>
-              <label className="flex cursor-pointer items-end gap-2 pb-2">
-                <Switch checked={recovery} onCheckedChange={setRecovery} />
-                <span className="text-[13px]">Recovery notice</span>
-              </label>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <Label>{kind === 'svc' ? 'Service name' : 'Process name'}</Label>
-              <Input
-                value={target}
-                onChange={(e) => setTarget(e.target.value)}
-                placeholder={kind === 'svc' ? 'e.g. MSSQLSERVER' : 'e.g. nginx.exe'}
-                required
-              />
-            </div>
-          )}
-
-          <div className="rounded-md border border-border bg-surface2/40 px-3 py-2 text-xs text-muted">
-            Alerts when <span className="font-medium text-text">{preview}</span> on{' '}
-            <span className="font-medium text-text">{allServers ? 'any server' : 'this server'}</span>.
-            {clearPreview && (
-              <> One alert per {metric === 'host_filesystem_pct' ? 'filesystem' : 'server'} until it{' '}
-                <span className="font-medium text-text">{clearPreview}</span>; missing data never clears it.</>
-            )}
-          </div>
-
-          <label className="flex cursor-pointer items-center gap-2">
-            <Switch checked={allServers} onCheckedChange={setAllServers} />
-            <span className="text-[13px]">Apply to all servers (not just this one)</span>
-          </label>
-
-          {allChannels.length > 0 && (
-            <div className="space-y-1.5">
-              <Label>Notify channels</Label>
-              <div className="flex flex-wrap gap-1.5">
-                {allChannels.map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    onClick={() => toggleChannel(c.id)}
-                    aria-pressed={channels.includes(c.id)}
-                    className={cn(
-                      'rounded-md border px-2 py-1 text-xs transition-colors',
-                      channels.includes(c.id)
-                        ? 'border-primary bg-primary/10 text-primary'
-                        : 'border-border text-muted hover:text-text',
-                    )}
-                  >
-                    {c.name} <span className="opacity-60">({c.type})</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={create.isPending}>
-              {create.isPending ? 'Creating…' : 'Create rule'}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   )
 }

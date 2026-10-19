@@ -134,6 +134,128 @@ Every alert email has **View incident** and **Acknowledge** buttons. Acknowledge
 opens the incident after sign-in and asks for confirmation. A link alone never
 changes anything, because mail scanners follow links.
 
+## Built-in events (1.24.21)
+
+Some alerts are raised by ZenPlus itself, without an alert rule. Before 1.24.21
+none of them could escalate, because escalation followed the rule, yet *Coverage*
+still showed their priority as covered. Each built-in family now has a fixed
+priority, stamped when the alert is raised:
+
+| Family | Raised when | Priority | Routed by default |
+|---|---|---|---|
+| Agent offline | a server agent sends no heartbeat for 10 minutes | P2 | yes |
+| Remote sensor offline | a remote sensor stops sending heartbeats | P2 | yes |
+| Remote sensor degraded | a sensor's heartbeat is late or degraded | P3 | yes |
+| Configuration backup failed | an NCM backup fails (one incident per device) | P3 | yes |
+| Configuration changed | an NCM device's configuration changes | P4 | **no** |
+| Software baseline drift | required software missing, outdated, or prohibited software present | P4 | yes |
+| Server health threshold | the fixed health levels (CPU 90/98%, memory 90/97%, filesystem 85/95%) | critical P3, warning P4 | **no** |
+
+* A built-in incident is routed only by the **default policy for its priority**.
+  It has no rule, so there is no rule policy and no legacy tiers. The step-0 page
+  is its first notification. Its subject and details name the family, for
+  example *Built-in event: Agent offline*, and the server, device or sensor.
+* Routing per family is the `builtin_alert_routing` setting
+  (`GET/PUT /api/v1/alerts/builtin-routing`, read with `alerts.view`, changed with
+  `alerts.manage`, audited). Health thresholds are off by default. They duplicate
+  the server alert rules, which have breach holds, and they are recomputed on
+  every metric upload. When enabled, a health incident is routed only after it
+  has been open for 5 minutes. They also rank below their severity: a critical
+  health threshold is P3, not P2.
+* *Configuration changed* is off by default too. Each change opens its own
+  incident and nothing resolves it, so a routed change would keep escalating
+  until someone acknowledges it. The device's NCM channels are notified of
+  every change whether or not the family is routed.
+* NCM events already notify the device's own NCM channels through the NCM outbox.
+  Step 0 does not page those channels again, but they are recorded. The backup
+  incident sends its own *backup recovered*, so the all-clear leaves those
+  channels out.
+* *Route* on an incident (`GET /alerts/{id}/route`) explains a built-in incident:
+  the family, whether its routing is enabled, and the priority-default policy, or
+  why it does not escalate.
+* Upgrading stamps the priority on built-in incidents that are open and not yet
+  stamped (migration 166). History and already-stamped incidents are unchanged.
+* **Only new incidents are routed.** Each family records when its routing was
+  enabled: on the first escalation sweep after the upgrade for the families
+  that are on by default, or when an operator switches a family on. Incidents
+  raised before that time are never escalated, so an agent that has been
+  offline for weeks does not page anyone after the upgrade. *Route* explains
+  this for such an incident.
+
+APM synthetic and SLO alerts already carry a priority and their own channels, and
+are not routed by policy. Device flap notices are information only and never
+escalate.
+
+## Coverage: paged, or not paged by design (1.24.21)
+
+`GET /api/v1/oncall/coverage` reports per priority `paging` (`"steps"` or
+`"none"`), `reason` (`null`, `"no_policy"` or `"no_steps"`) and
+`response_target_minutes`. The target is the policy's acknowledgement target,
+else the global response target.
+
+* A **P3/P4 priority without a response target** that pages nobody, because it
+  has no default policy or its policy has no steps, is **not paged by design**:
+  no gap, `steps_ok` true, and not listed in `unrouted_priorities`. The
+  recommended P4 *audit only* policy is shown this way, not as "Covered".
+* **P1/P2, or any priority with a response target**, that pages nobody keeps a
+  gap ("has an acknowledgement target but nobody is paged"). P1/P2 without a
+  default policy stay in `unrouted_priorities`.
+* `builtin_sources` lists each built-in family with `enabled`, `priority`,
+  `policy_id`/`policy_name`, `routed` (enabled and its priority has a default
+  policy), `paged` (that policy has a step) and a `note`. Health thresholds list
+  both priorities in `variants`. `issues` warns about every enabled P1–P3 family
+  that is not routed.
+
+## Rule validation (1.24.21)
+
+Saving a rule (`/alert-rules` and `/host-alert-rules`, create and update) checks
+the condition against the values its metric can take. A failure is a 422 in
+FastAPI's `detail` list shape with a `loc` path such as `body.threshold` or
+`body.conditions[0].threshold`:
+
+* `ping_status` is 0 (down) or 1 (up). `uptime_reset` is 0/1. `if_oper_status` is
+  an IF-MIB code from 1 to 7. CPU, memory, packet loss, interface utilisation and
+  the server `host_*_pct` metrics are percentages from 0 to 100. APM rates and
+  Apdex are fractions from 0 to 1. Latency, rates and counts are never negative.
+  A condition that can never be true is rejected, for example
+  *"ping_status is 0 (down) or 1 (up); '> 5' can never be true"*. So is one that
+  is always true, such as `packet_loss >= 0`, and an explicit reset level outside
+  the range.
+* A device status rule with `trigger_on` down, up or degraded carries the
+  matching `ping_status` condition: down is `== 0`, up and degraded are `== 1`.
+  The evaluator follows the trigger and ignores that condition, so a save that
+  disagrees is not refused: the server rewrites the condition (and the flat
+  operator/threshold) to the value the trigger implies. Rules the old wizard
+  saved with trigger up and `ping_status == 0` therefore duplicate and update
+  normally and are stored as `== 1`. With `trigger_on` any, the value checks
+  above still apply to `ping_status`.
+* Server (`host_*`) rules are edited through `/host-alert-rules`. The generic
+  endpoint answers `422 [{"loc": ["body", "metric"], "msg": "Server rules are
+  edited under Servers → Alerts (host-alert-rules)"}]`, and refuses changes to a
+  server rule's metric, operator, threshold, conditions or trigger.
+  Name, channel, priority, policy and target/scope edits still work there.
+* Server service and process rules need their `target` (422 at `body.target`)
+  on create and on any update that would remove it. Thresholds must be finite.
+* Any other field restricted to a list of values answers
+  `<field>: '<value>' is not an accepted value`, with the accepted values when
+  the list is short, instead of the regular expression. The `loc` is kept. Word
+  operators (`gt`, `eq`, …), as the seeded rules store them, are accepted on
+  create and stored as symbols.
+
+Mismatches between a rule's name or description and its condition are
+**warnings**, not errors. Create and update responses carry
+`warnings: [{field, message}]`, and `POST /api/v1/alert-rules/preview-warnings`
+(any rule payload, `alerts.view`) returns `warnings` and the blocking `errors`
+without saving. Warnings cover:
+
+* metric words that match no condition, such as *High CPU* on a memory rule;
+* direction words against the comparison, such as *High latency* with `<`;
+* *down* or *up* wording against what a status rule fires on;
+* a percentage in the text that differs from the threshold, such as
+  *above 90%* with a threshold of 80.
+
+Every seeded rule passes validation without warnings.
+
 ## Grouping and delivery budgets (1.24.18)
 
 Grouping is off after the upgrade. *Escalation & On-call → Grouping* has *Enable

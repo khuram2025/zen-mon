@@ -10,6 +10,7 @@ assert(start >= 0 && end > start)
 // The extracted slice calls the NetFlow rule helpers the wizard imports, so the
 // slice is bundled together with the real module rather than evaluated alone.
 const code = `import { defaultNetflowForm, formFromRule, isNetflowMetric, netflowPayload } from './src/components/forms/netflowAlertRule';
+import { normalizeOperator, syncPingConditions } from './src/components/forms/alertRuleChecks';
 const INTERFACE_METRICS = new Set(['if_util_pct','if_in_bps','if_out_bps','if_errors','if_discards','if_oper_status']);
 ${source.slice(start, end)}
 export {ruleToState,stateToPayload,autoResetThreshold};`

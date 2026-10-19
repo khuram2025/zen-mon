@@ -41,16 +41,27 @@ async def _outbox(db, device_id, row, key, payload):
             {'id':device_id,'key':key,'channel':channel,'payload':json.dumps(payload)})
 
 
+# NCM event kind -> built-in alert family (builtin_alert_sources), which
+# fixes the incident priority stamped at insert.
+_FAMILY={'backup.failed':'ncm_backup_failed','config.changed':'ncm_config_changed'}
+
+
 async def event(db, device_id, kind, key, *, metadata=None, message=None, severity='warning'):
+    from app.services import alert_funnel
+    from app.services import builtin_alert_sources as builtin
     row=await _device(db,device_id)
     if not row:
         return None
     summary=message or kind.replace('.',' ').capitalize()
     payload=_payload(row,device_id,key,kind,summary,metadata=metadata,severity=severity)
-    alert=(await db.execute(text('''INSERT INTO alerts(device_id,rule_id,status,severity,message,triggered_at,metadata)
-        VALUES (:id,NULL,'active',:severity,:message,now(),CAST(:metadata AS jsonb)) RETURNING id'''),
+    family=_FAMILY.get(kind)
+    cols,vals,extra=alert_funnel.priority_insert(
+        await alert_funnel.priority_supported(db),
+        builtin.priority_for(family,severity) if family else None, severity)
+    alert=(await db.execute(text(f'''INSERT INTO alerts(device_id,rule_id,status,severity,message,triggered_at,metadata{cols})
+        VALUES (:id,NULL,'active',:severity,:message,now(),CAST(:metadata AS jsonb){vals}) RETURNING id'''),
         {'id':device_id,'severity':severity,'message':payload['subject'],
-         'metadata':json.dumps({'ncm':True,'ncm_event':kind,**payload['metadata'],'event_id':key})})).scalar()
+         'metadata':json.dumps({'ncm':True,'ncm_event':kind,**payload['metadata'],'event_id':key}),**extra})).scalar()
     await _outbox(db,device_id,row,key,payload)
     return alert
 
