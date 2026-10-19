@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_permission
+from app.services import alert_rule_checks as checks
 from app.services import alert_rule_scope as rs
 from app.services.audit_service import write_audit_log
 
@@ -28,9 +29,13 @@ from app.services import netflow_alert_service as nfa
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
 
 
-def _validate_network_contract(metric, conditions):
+def _validate_network_contract(metric, conditions, *, operator=None, threshold=None):
+    """The network evaluator contract for a rule's conditions (or its flat
+    metric/operator/threshold when it has none)."""
     from app.services.network_conditions import supported, UNMAPPED_METRICS, validate_conditions
-    items = conditions or [dict(metric=metric, operator='>', threshold=0)]
+    flat = dict(metric=metric, operator=operator if operator is not None else '>',
+                threshold=threshold if threshold is not None else 0)
+    items = conditions or [flat]
     if any(c.get('reset_threshold') is not None and not supported(c.get('metric')) for c in items):
         raise HTTPException(status_code=422, detail='Reset thresholds require a network metric')
     if any(supported(c.get('metric')) or c.get('metric') in UNMAPPED_METRICS for c in items):
@@ -55,7 +60,9 @@ def _merge_condition_update(current, fields):
         merged.update({key: conditions[0][key] for key in ('metric', 'operator', 'threshold')})
         merged['conditions'] = conditions
     metric = merged.get('metric', current.get('metric'))
-    _validate_network_contract(metric, conditions)
+    _validate_network_contract(metric, conditions,
+                               operator=merged.get('operator', current.get('operator')),
+                               threshold=merged.get('threshold', current.get('threshold')))
     if metric == 'syslog':
         threshold = merged.get('threshold', current.get('threshold', 0))
         if threshold is None or not 0 <= threshold <= 7 or int(threshold) != threshold:
@@ -144,13 +151,28 @@ _TPL_METRICS = r"tpl_[a-z0-9_]{1,60}"
 # = alert_rules.flow_params. One condition per rule (no compound conditions).
 _NETFLOW_METRICS = nfa.METRIC_PATTERN
 _CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}|{_NETPATH_METRICS}|{_TPL_METRICS}|{_NETFLOW_METRICS}"
+# Server (agent) metrics are matched only to answer with a clear 422 — server
+# rules are edited through /host-alert-rules (alert_rule_checks).
+_HOST_METRICS = r"host_[a-z0-9_]{1,60}"
+_OPERATORS = "^(>|<|>=|<=|==|!=|eq|neq|gt|lt|gte|lte)$"
+
+
+def _symbol_operator(value):
+    """Word operators (gt, eq, ... as the seeded rules store them) as symbols."""
+    from app.services.network_conditions import op_symbol
+    return op_symbol(value) if value is not None else value
 
 
 class ConditionItem(BaseModel):
-    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS})$")
-    operator: str = Field(..., pattern="^(>|<|>=|<=|==|!=)$")
+    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS}|{_HOST_METRICS})$")
+    operator: str = Field(..., pattern=_OPERATORS)
     threshold: float = Field(..., allow_inf_nan=False)
     reset_threshold: Optional[float] = Field(None, allow_inf_nan=False)
+
+    @field_validator("operator")
+    @classmethod
+    def _operator_symbol(cls, v):
+        return _symbol_operator(v)
 
 
 class EscalationLevel(BaseModel):
@@ -200,9 +222,15 @@ class AlertRuleCreate(BaseModel):
     description: Optional[str] = None
     enabled: bool = True
 
-    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS}|trap|syslog)$")
-    operator: str = Field(..., pattern="^(>|<|>=|<=|==|!=)$")
+    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS}|trap|syslog|{_HOST_METRICS})$")
+    # Word forms (gt, eq, ...) are accepted, as on update, and stored as symbols.
+    operator: str = Field(..., pattern=_OPERATORS)
     threshold: float = Field(..., allow_inf_nan=False)
+
+    @field_validator("operator")
+    @classmethod
+    def _operator_symbol(cls, v):
+        return _symbol_operator(v)
 
     # E2: optional trap-OID filter for metric='trap' rules (empty = any trap).
     trap_oid: Optional[str] = None
@@ -271,8 +299,8 @@ class AlertRuleUpdate(BaseModel):
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
-    metric: Optional[str] = Field(None, pattern=f"^({_CONDITION_METRICS}|trap|syslog)$")
-    operator: Optional[str] = Field(None, pattern="^(>|<|>=|<=|==|!=|eq|neq|gt|lt|gte|lte)$")
+    metric: Optional[str] = Field(None, pattern=f"^({_CONDITION_METRICS}|trap|syslog|{_HOST_METRICS})$")
+    operator: Optional[str] = Field(None, pattern=_OPERATORS)
     threshold: Optional[float] = Field(None, allow_inf_nan=False)
     trap_oid: Optional[str] = None
     target: Optional[str] = None
@@ -465,6 +493,19 @@ def _normalized_templates(submitted: dict, kind: str) -> dict:
     }
 
 
+# Fields that define what a rule checks (validated together on update).
+# ``target`` is scope, not definition: a plain target/scope edit of a server
+# rule must not be refused as a definition change.
+_DEFINITION_FIELDS = ("metric", "operator", "threshold", "conditions", "trigger_on")
+
+
+def _with_warnings(rule: dict) -> dict:
+    """Attach the non-blocking name/description mismatch warnings
+    (alert_rule_checks.name_warnings) to a create/update response."""
+    rule["warnings"] = checks.name_warnings(rule)
+    return rule
+
+
 def _with_templates(rule: dict) -> dict:
     """Attach the message text this rule actually sends.
 
@@ -596,19 +637,32 @@ async def create_alert_rule(
     user: User = Depends(require_rule_manager),
 ):
     now = datetime.now(timezone.utc)
+    conditions = [c.model_dump() for c in data.conditions] if data.conditions else None
+    checks.raise_errors(checks.host_metric_errors(data.metric, conditions))
     await rs.guard_rule_change(db, user, data.model_dump())
 
     # E1: when compound conditions are supplied, they are authoritative and the
     # flat metric/operator/threshold columns mirror conditions[0] (those columns
     # are NOT NULL and keep older clients / the legacy engine path working).
-    conditions = [c.model_dump() for c in data.conditions] if data.conditions else None
     metric, operator, threshold = data.metric, data.operator, data.threshold
+    # A device-status trigger decides what the rule fires on: store the
+    # ping_status condition it implies (an old-wizard "up" rule duplicated
+    # with ping_status == 0 is saved as == 1, not refused).
+    if conditions:
+        conditions, _ = checks.normalize_trigger_conditions(conditions, data.trigger_on)
+    else:
+        (flat_c,), _ = checks.normalize_trigger_conditions(
+            [{"metric": metric, "operator": operator, "threshold": threshold}], data.trigger_on)
+        operator, threshold = flat_c["operator"], flat_c["threshold"]
     if conditions:
         metric = conditions[0]["metric"]
         operator = conditions[0]["operator"]
         threshold = conditions[0]["threshold"]
 
-    _validate_network_contract(metric, conditions)
+    _validate_network_contract(metric, conditions, operator=operator, threshold=threshold)
+    checks.raise_errors(checks.condition_errors(
+        conditions or [{"metric": metric, "operator": operator, "threshold": threshold}],
+        trigger_on=data.trigger_on, flat=not conditions))
     if metric == 'syslog':
         _merge_condition_update({'metric': metric, 'threshold': threshold}, {})
 
@@ -721,7 +775,7 @@ async def create_alert_rule(
                                     "scope": rs.describe_scope(created)["label"],
                                     "fields": rs.rule_changes({}, created)})
     await db.commit()
-    return _with_templates(created)
+    return _with_warnings(_with_templates(created))
 
 
 @router.get("/{rule_id}")
@@ -753,10 +807,25 @@ async def update_alert_rule(
         del fields["notify_while_flapping"]
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+    checks.raise_errors(checks.host_metric_errors(fields.get("metric"), fields.get("conditions")))
     before = await rs.rule_row(db, rule_id)
     if not before:
         raise HTTPException(status_code=404, detail="Alert rule not found")
+    if checks.is_host_metric(before.get("metric")):
+        # A server rule's definition belongs to /host-alert-rules (its target,
+        # reset level and operators); switching its metric here used to turn
+        # it silently into a device rule.
+        touched = [k for k in _DEFINITION_FIELDS if k in fields]
+        if touched:
+            checks.raise_errors([checks.error(("body", touched[0]), checks.HOST_RULES_MESSAGE)])
+        # A target edit is allowed here, but a service/process rule keeps one.
+        if ("target" in fields and before.get("metric") in ("host_service_down", "host_process_down")
+                and not (fields["target"] or "").strip()):
+            what = "service" if before.get("metric") == "host_service_down" else "process"
+            checks.raise_errors([checks.error(
+                ("body", "target"), f"target is required for {before.get('metric')}: the {what} name to watch")])
     await rs.guard_rule_change(db, user, before, {**before, **fields})
+    definition_changed = any(k in fields for k in _DEFINITION_FIELDS)
 
     # E1: keep flat metric/operator/threshold mirrored to conditions[0] when a
     # non-empty conditions array is supplied (empty array reverts to legacy).
@@ -773,6 +842,26 @@ async def update_alert_rule(
         if not current_rule:
             raise HTTPException(status_code=404, detail='Alert rule not found')
         fields = _merge_condition_update(current_rule, fields)
+
+    if definition_changed:
+        merged_conditions = (fields["conditions"] if "conditions" in fields
+                             else _json_value(before.get("conditions")))
+        merged_conditions = [c for c in (merged_conditions or []) if isinstance(c, dict)]
+        flat = {k: fields.get(k, before.get(k)) for k in ("metric", "operator", "threshold")}
+        merged_trigger = fields.get("trigger_on", before.get("trigger_on"))
+        # Store the ping_status condition the trigger implies (see create).
+        if merged_conditions:
+            merged_conditions, rewritten = checks.normalize_trigger_conditions(
+                merged_conditions, merged_trigger)
+            if rewritten:
+                fields["conditions"] = merged_conditions
+                fields.update({k: merged_conditions[0][k] for k in ("metric", "operator", "threshold")})
+        else:
+            (flat,), rewritten = checks.normalize_trigger_conditions([flat], merged_trigger)
+            if rewritten:
+                fields.update({k: flat[k] for k in ("operator", "threshold")})
+        checks.raise_errors(checks.condition_errors(
+            merged_conditions or [flat], trigger_on=merged_trigger, flat=not merged_conditions))
 
     # NetFlow rules: validate the merged definition; a changed definition
     # makes the old subjects meaningless, so their state and open alerts go.
@@ -905,7 +994,7 @@ async def update_alert_rule(
                                     "affected": await rs.affected(db, after or before),
                                     **({"netflow_alerts_closed": closed} if netflow_reset else {})})
     await db.commit()
-    return _with_templates(_row_to_dict(row))
+    return _with_warnings(_with_templates(_row_to_dict(row)))
 
 
 @router.delete("/{rule_id}", status_code=204)
@@ -1251,6 +1340,40 @@ async def preview_alert_rule_draft(
     """
     rule = draft.model_dump()
     return await _preview_payload(db, rule, {k: rule.get(k) for k in _TEMPLATE_FIELDS})
+
+
+class RuleChecksDraft(BaseModel):
+    """A rule payload to check before saving (unknown keys are ignored, so
+    the wizard and the server-rule dialog can post what they would save)."""
+    model_config = ConfigDict(extra="ignore")
+
+    name: Optional[str] = None
+    description: Optional[str] = None
+    metric: Optional[str] = None
+    operator: Optional[str] = None
+    threshold: Optional[float] = None
+    reset_threshold: Optional[float] = None
+    conditions: Optional[list[dict]] = None
+    trigger_on: Optional[str] = None
+
+
+@router.post("/preview-warnings")
+async def preview_rule_warnings(
+    draft: RuleChecksDraft,
+    user: User = Depends(require_permission("alerts.view")),
+):
+    """What saving this rule would say, without saving it: ``warnings``
+    (the name or description does not match the condition; advisory) and
+    ``errors`` (value-range / trigger contradictions the save would reject
+    with 422, same ``loc`` paths). Works for device and server rules."""
+    rule = draft.model_dump()
+    conditions = [c for c in (rule.get("conditions") or []) if isinstance(c, dict) and c.get("metric")]
+    items = conditions or ([{"metric": rule["metric"], "operator": rule.get("operator"),
+                             "threshold": rule.get("threshold"),
+                             "reset_threshold": rule.get("reset_threshold")}] if rule.get("metric") else [])
+    return {"warnings": checks.name_warnings(rule),
+            "errors": checks.condition_errors(items, trigger_on=rule.get("trigger_on"),
+                                              flat=not conditions)}
 
 
 @router.post("/{rule_id}/preview")

@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services import alert_phrasing as ap
 from app.services import alert_notify_state as ns
 from app.services import alert_priority as prio
+from app.services import builtin_alert_sources as bas
 from app.services import escalation_policy_service as eps
 from app.services import oncall_service as oc
 from app.services.alert_workflow import (
@@ -203,8 +204,15 @@ def _legacy_sweep_sql(policies: bool) -> str:
 
 def _subject_noun(row) -> tuple[str, str]:
     """(display name, ip) for the thing the alert is about."""
-    name = row.device_hostname or row.server_hostname or row.check_name or "monitored object"
+    name = (row.device_hostname or row.server_hostname or row.check_name
+            or getattr(row, "sensor_name", None) or "monitored object")
     return name, (row.device_ip or "")
+
+
+def _rule_id_text(rule_id) -> str | None:
+    """A rule id for the notification context; None (never "None") for a
+    built-in incident, which has no rule."""
+    return str(rule_id) if rule_id else None
 
 
 async def _store_state(db: AsyncSession, alert_id, state: dict, expected=None) -> bool:
@@ -342,7 +350,7 @@ async def _dispatch_all_clear(db: AsyncSession, row, channels: list[str],
         ],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "action_url": action_url,
-        "rule_id": str(row.rule_id),
+        "rule_id": _rule_id_text(row.rule_id),
         "is_recovery": True,
         "alert_id": str(row.id),
         "delivery_kind": "closure" if manual else "all_clear",
@@ -486,26 +494,42 @@ async def sweep_legacy_escalations(db: AsyncSession) -> dict[str, int]:
 # acknowledgement), "review:<n>", "ack_expired:<n>" and
 # "fallback:S<step>[:r<repeat>][:x<n>]". The policy takes an incident over
 # with a state anchored at that moment, so step 0 is always next.
+#
+# Built-in incidents (builtin_alert_sources: agent offline, sensor offline,
+# NCM backup failures, ...) have no rule: they are routed by the priority
+# default policy alone, and only while their family is enabled in the
+# builtin_alert_routing setting (health thresholds additionally once open for
+# 5 minutes). Their "rule name" is the family label, and channels the source
+# already notified itself (an NCM event's device channels) count as the
+# rule's own channels: step 0 does not page them again.
 
 POLICY_SWEEP_BATCH = 1000
 
 
-def _policy_sweep_sql(*, ids_only: bool = False) -> str:
+def _policy_sweep_sql(*, ids_only: bool = False, builtin_families=(), builtin_since=None) -> str:
     """The policy sweep's candidates. ``ids_only``: every candidate id, most
     urgent work first — closures of resolved incidents (their all-clear),
     then by priority (P1 first), then the newest incident — so a backlog
     never starves today's P1 behind old warnings. Otherwise: the full rows
-    of the ids in ``:ids`` that are still candidates."""
+    of the ids in ``:ids`` that are still candidates.
+
+    An open incident is a candidate when its rule is enabled, or — with no
+    rule — when it is a built-in incident of an enabled family in
+    ``builtin_families`` (route_policy_sql then resolves the priority
+    default, the only route a rule-less incident has)."""
     route = eps.route_policy_sql("a", "r")
+    builtin = bas.routable_sql("a", builtin_families, builtin_since)
     where = f"""
     FROM alerts a
-    JOIN alert_rules r ON r.id = {effective_rule_sql('a')}
+    LEFT JOIN alert_rules r ON r.id = {effective_rule_sql('a')}
     LEFT JOIN devices d ON d.id = a.device_id
     LEFT JOIN servers s ON s.id = a.server_id
     LEFT JOIN service_checks sc ON sc.id = a.service_check_id
+    LEFT JOIN sensors sen ON sen.id = a.sensor_id
     WHERE NOT {notice_sql('a')}
       AND (
-            (a.status IN ('active', 'acknowledged') AND r.enabled = true
+            (a.status IN ('active', 'acknowledged')
+             AND (r.enabled = true OR (r.id IS NULL AND {builtin}))
              AND NOT {suppressed_sql('a')} AND {route} IS NOT NULL)
          OR (a.status = 'resolved'
              AND a.metadata->'escalation'->>'mode' = 'policy'
@@ -523,11 +547,15 @@ def _policy_sweep_sql(*, ids_only: bool = False) -> str:
            a.status, a.severity AS alert_severity, a.priority AS alert_priority, a.message,
            a.triggered_at, a.resolved_at, a.acknowledged_at, a.acknowledged_by, a.assigned_to,
            a.metadata, {suppressed_sql('a')} AS suppressed,
-           r.id AS eff_rule_id, r.name AS rule_name, r.metric, r.operator, r.threshold,
+           r.id AS eff_rule_id, COALESCE(r.name, {bas.label_sql('a')}) AS rule_name,
+           r.metric, r.operator, r.threshold,
            r.conditions, r.condition_logic, r.severity AS rule_severity, r.priority AS rule_priority,
-           r.notify_channels, r.recovery_alert, r.escalation_policy_id,
+           COALESCE(r.notify_channels, {bas.base_channels_sql('a')}) AS notify_channels,
+           COALESCE(r.recovery_alert, {bas.notifies_own_recovery_sql('a')}) AS recovery_alert,
+           r.escalation_policy_id,
+           CASE WHEN r.id IS NULL THEN {bas.family_sql('a')} END AS builtin_key,
            d.hostname AS device_hostname, host(d.ip_address) AS device_ip,
-           s.hostname AS server_hostname, sc.name AS check_name,
+           s.hostname AS server_hostname, sc.name AS check_name, sen.name AS sensor_name,
            {route} AS route_policy_id
     {where}
       AND a.id = ANY(CAST(:ids AS uuid[]))
@@ -596,6 +624,10 @@ async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Po
     duration = ap.duration_between(row.triggered_at, now)
     condition = ap.conditions_label(row.conditions, row.condition_logic or "AND",
                                     metric=row.metric, operator=row.operator, threshold=row.threshold)
+    builtin = bas.source(getattr(row, "builtin_key", None))
+    if builtin is not None and not condition:
+        condition = builtin.description
+    rule_name = row.rule_name or (builtin.label if builtin else None) or "Alert"
     step_txt = _step_label(policy, plan.step) if plan.step >= 0 else ""
     acked = row.status == "acknowledged" and plan.kind != "ack_expired"
     if plan.kind == "review":
@@ -641,10 +673,11 @@ async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Po
                   f"{delay} minutes, so it has been escalated.")
     if fallback:
         notice += " The step's own route reached nobody, so the policy's fallback route is notified."
-    sms = (f"ZenPlus {priority} {head.upper()} {sev.upper()} — {row.rule_name}: {row.message} "
+    sms = (f"ZenPlus {priority} {head.upper()} {sev.upper()} — {rule_name}: {row.message} "
            f"Active {duration}" + (", acknowledged." if acked else ", unacknowledged.")
            + (f" {incident.get('incident_ref')}" if incident.get("incident_ref") else ""))
-    details = [("Alert rule", row.rule_name), ("Condition", condition),
+    details = [(("Built-in event", rule_name) if builtin is not None else ("Alert rule", rule_name)),
+               ("Condition", condition),
                ("Priority", prio.priority_label(priority)),
                ("Escalation policy", policy.name)]
     if step_txt:
@@ -653,15 +686,15 @@ async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Po
                 ("Acknowledged", f"Yes{' — owner ' + owner_name if owner_name else ''}" if acked else "No")]
     view_url, ack_url = links
     return await dispatch_to_channels(db, channels, {
-        "subject": f"[{sev.upper()}] {head}: {row.rule_name} — {hostname}",
+        "subject": f"[{sev.upper()}] {head}: {rule_name} — {hostname}",
         "body": body, "message": sms,
         "hostname": hostname, "ip_address": ip,
         "status": head.upper() if plan.kind != "escalate" or plan.step > 0 else "ALERT",
         "severity": sev, "priority": priority, "resolved": False,
-        "rule_name": row.rule_name, "notice": notice, "details": details,
+        "rule_name": rule_name, "notice": notice, "details": details,
         "triggered_at": now.isoformat(),
         "action_url": view_url, "incident_url": view_url, "ack_url": ack_url,
-        "rule_id": str(row.eff_rule_id), "is_recovery": False,
+        "rule_id": _rule_id_text(row.eff_rule_id), "is_recovery": False,
         "escalation_level": plan.step if plan.step >= 0 else None,
         "alert_id": str(row.id), "delivery_event": event,
         "recipients": [{"kind": r["kind"], "address": r["address"], "user_id": r.get("user_id"),
@@ -714,15 +747,17 @@ async def sweep_policy_escalations(db: AsyncSession, *, now: datetime | None = N
               "ack_expired": 0, "fallbacks": 0, "closed": 0}
     if not await eps.supported(db):
         return counts
-    ids = [str(r[0]) for r in (await db.execute(text(_policy_sweep_sql(ids_only=True)))).fetchall()]
+    families, since = await bas.routing_state(db)
+    ids = [str(r[0]) for r in (await db.execute(text(
+        _policy_sweep_sql(ids_only=True, builtin_families=families, builtin_since=since)))).fetchall()]
     await db.commit()
     directory = eps.Directory(db)
     from app.api.v1.alert_engine import _dashboard_url
     base_url = await _dashboard_url(db, "") if ids else ""
     for start in range(0, len(ids), POLICY_SWEEP_BATCH):
         chunk = ids[start:start + POLICY_SWEEP_BATCH]
-        found = {str(r.id): r for r in (await db.execute(text(_policy_sweep_sql()),
-                                                         {"ids": chunk})).fetchall()}
+        found = {str(r.id): r for r in (await db.execute(
+            text(_policy_sweep_sql(builtin_families=families, builtin_since=since)), {"ids": chunk})).fetchall()}
         rows = [found[i] for i in chunk if i in found]
         counts["checked"] += len(rows)
         await _sweep_policy_rows(db, rows, now, base_url, directory, counts)
@@ -966,7 +1001,8 @@ async def explain_route(db: AsyncSession, alert_id, *, now: datetime | None = No
         f"SELECT a.id, a.status, a.severity, a.triggered_at, a.acknowledged_at, a.resolved_at,"
         f" a.metadata, {suppressed_sql('a')} AS suppressed, {cols}"
         f" r.id AS eff_rule_id, r.name AS rule_name, r.enabled AS rule_enabled,"
-        f" r.escalation_levels, r.max_repeat"
+        f" r.escalation_levels, r.max_repeat,"
+        f" CASE WHEN r.id IS NULL THEN {bas.family_sql('a')} END AS builtin_key"
         f" FROM alerts a LEFT JOIN alert_rules r ON r.id = {effective_rule_sql('a')} WHERE a.id = :id"
     ), {"id": alert_id})).first()
     if not row:
@@ -985,7 +1021,47 @@ async def explain_route(db: AsyncSession, alert_id, *, now: datetime | None = No
             if rp:
                 rule_policy = {"id": str(rp.id), "name": rp.name, "enabled": rp.enabled}
     legacy = row.escalation_levels if row.eff_rule_id else None
-    if row.eff_rule_id is None:
+    builtin = bas.source(row.builtin_key) if row.eff_rule_id is None else None
+    builtin_info = None
+    if builtin is not None:
+        enabled = builtin.key in await bas.enabled_families(db)
+        # When routing for this family started (stamped by the escalation sweep
+        # or the settings PUT); read-only here, explain never stamps it.
+        since = bas._iso_or_none((await bas._stored_since(db)).get(builtin.key)) if enabled else None
+        builtin_info = {"key": builtin.key, "label": builtin.label, "enabled": enabled,
+                        "enabled_since": since,
+                        "min_age_minutes": builtin.min_age_s // 60 if builtin.min_age_s else 0}
+        if not enabled:
+            route = eps.Route("none", notes=[
+                f"Built-in event {builtin.label}: routing is disabled in settings,"
+                f" so it does not escalate."])
+        elif since is None:
+            # Enabled by default but not yet stamped: the next sweep records
+            # "now" as the start, so every incident that already exists
+            # (including this one) stays unescalated.
+            route = eps.Route("none", notes=[
+                f"Built-in event {builtin.label}: routing is enabled and starts with the next escalation"
+                f" sweep; only incidents raised after that sweep are escalated, so this one is not."])
+        elif _parse_ts(row.triggered_at) and _parse_ts(row.triggered_at) < _parse_ts(since):
+            route = eps.Route("none", notes=[
+                f"Built-in event {builtin.label}: raised before routing for this event type was"
+                f" enabled, so it is not escalated (only new incidents are)."])
+        else:
+            # No rule: the priority default policy is the only route.
+            route = eps.resolve_route(priority=priority, rule_policy=None, defaults=defaults,
+                                      legacy_levels=None)
+            if route.source == "none":
+                route.notes.append(f"Built-in event {builtin.label}: no escalation policy is the default"
+                                   f" for {prio.priority_label(priority)}, so it does not escalate.")
+            else:
+                route.notes.append(f"Built-in event {builtin.label} (no alert rule): routed by the"
+                                   f" {priority} default policy.")
+                trig = _parse_ts(row.triggered_at)
+                if (builtin.min_age_s and row.status in ("active", "acknowledged") and trig
+                        and (now - trig).total_seconds() < builtin.min_age_s):
+                    route.notes.append(f"It is escalated once it has been open for"
+                                       f" {builtin.min_age_s // 60} minutes.")
+    elif row.eff_rule_id is None:
         route = eps.Route("none", notes=["This incident has no alert rule, so it does not escalate."])
     else:
         route = eps.resolve_route(priority=priority, rule_policy=rule_policy, defaults=defaults,
@@ -1002,6 +1078,7 @@ async def explain_route(db: AsyncSession, alert_id, *, now: datetime | None = No
         "status": row.status, "at": now,
         "policy": {"id": route.policy_id, "name": route.policy_name, "source": route.source},
         "notes": route.notes, "state": None, "steps": [],
+        "builtin": builtin_info,
     }
     acknowledged = row.status == "acknowledged"
     if route.source in ("rule", "priority_default"):

@@ -7,6 +7,7 @@
  *   ['escalation', 'timeline', id, from, to]        GET /oncall/schedules/{id}/timeline
  *   ['escalation', 'now', id]                       GET /oncall/schedules/{id}/now
  *   ['escalation', 'coverage']                      GET /oncall/coverage
+ *   ['alerts', 'builtin-routing']                   GET/PUT /alerts/builtin-routing (built-in event families)
  *   ['alerts', 'response-targets']                  GET /alerts/response-targets
  *   ['alerts', 'notification-grouping']             GET /alerts/notification-grouping
  *   ['alerts', 'digests', status]                   GET /alerts/digests
@@ -17,13 +18,13 @@
  * Every response is normalized by ./model before a screen reads it.
  */
 import { useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useCan } from '@/stores/auth'
 import { useAssignees } from '@/components/alerts/AlertBits'
 import type { AlertChannelRef } from '@/components/alerts/types'
 import {
-  asList, contactsFromApi, coverageFromApi, digestDetailFromApi, digestsFromApi, groupingFromApi, memberCount,
+  asList, builtinRoutingFromApi, builtinRoutingPayload, contactsFromApi, coverageFromApi, digestDetailFromApi, digestsFromApi, groupingFromApi, memberCount,
   onCallNowFromApi, policyFromApi, previewFromApi, routeFromApi, scheduleFromApi, shiftsFromApi, targetsFromApi,
   type Directory,
 } from './model'
@@ -108,6 +109,31 @@ export function useCoverage(enabled = true) {
     queryFn: async () => coverageFromApi((await api.get('/oncall/coverage')).data),
     enabled,
     staleTime: 30_000,
+  })
+}
+
+/** Which built-in event families are routed by their priority's default policy (alerts.view to read). */
+export function useBuiltinRouting(enabled = true) {
+  return useQuery({
+    queryKey: ['alerts', 'builtin-routing'],
+    queryFn: async () => builtinRoutingFromApi((await api.get('/alerts/builtin-routing')).data),
+    enabled,
+    staleTime: 30_000,
+    retry: false,
+  })
+}
+
+/** Switch one family on or off (alerts.manage); coverage is refetched afterwards. */
+export function useSetBuiltinRouting() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ enabled, key, on }: { enabled: string[]; key: string; on: boolean }) =>
+      builtinRoutingFromApi((await api.put('/alerts/builtin-routing', builtinRoutingPayload(enabled, key, on))).data),
+    onSuccess: (data) => {
+      if (data.families.length) qc.setQueryData(['alerts', 'builtin-routing'], data)
+      qc.invalidateQueries({ queryKey: ['alerts', 'builtin-routing'] })
+      qc.invalidateQueries({ queryKey: ['escalation', 'coverage'] })
+    },
   })
 }
 

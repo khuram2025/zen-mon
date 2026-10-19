@@ -5,7 +5,7 @@
  */
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowRight, Loader2, ShieldCheck, Sparkles } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Cpu, Loader2, ShieldCheck, Sparkles } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
@@ -18,7 +18,8 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { toast } from '@/components/ui/Toast'
 import { useCoverage, useDirectory, usePolicies, useResponseTargets } from '@/features/escalation/api'
 import {
-  DEFAULT_CONFLICT_REFUSAL, PRIORITIES, PRIORITY_META, describeTarget, fmtMinutes, policyForPriority, priorityConflicts, priorityCoverageStatus,
+  DEFAULT_CONFLICT_REFUSAL, NOT_PAGED_LABEL, PRIORITIES, PRIORITY_META, builtinForPriority, describeTarget, fmtMinutes, notPagedByDesign,
+  policyForPriority, priorityConflicts, priorityCoverageStatus,
   recommendedPayload, recommendedPlan, validateRecommended, type Directory, type EscalationTab, type RecommendedForm,
 } from '@/features/escalation/model'
 import { PriorityBadge, StepTimeline, TargetChip } from '@/features/escalation/ui'
@@ -67,7 +68,9 @@ export function MatrixView({ policies, coverage, coverageError, targets, dir, ca
   wizard?: React.ReactNode
 }) {
   const conflicts = priorityConflicts(policies)
-  const unrouted = PRIORITIES.filter((p) => p !== 'P4' && !policyForPriority(policies, p))
+  // A priority that is not paged by design (P4, or no policy/steps and no response target) is not "unrouted".
+  const unrouted = PRIORITIES.filter((p) => !policyForPriority(policies, p)
+    && !(coverage ? notPagedByDesign(p, coverage, null, targets ? targets[p] : undefined) : p === 'P4'))
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface2/30 p-4 lg:flex-row lg:items-center lg:justify-between">
@@ -120,8 +123,10 @@ function PriorityCard({ priority: p, policy, coverage, coverageError, ack, dir, 
   go: (t: EscalationTab, id?: string | null) => void
 }) {
   const meta = PRIORITY_META[p]
-  const status = coverageError ? { tone: 'muted' as const, label: 'Coverage unavailable' } : priorityCoverageStatus(p, coverage, policy)
-  const gaps = coverage?.priorities[p]?.gaps ?? []
+  const status = coverageError ? { tone: 'muted' as const, label: 'Coverage unavailable' } : priorityCoverageStatus(p, coverage, policy, ack)
+  // Not paged by design: no gap text (an older server still lists "no default policy" as a gap).
+  const gaps = status.label === NOT_PAGED_LABEL ? [] : coverage?.priorities[p]?.gaps ?? []
+  const builtin = builtinForPriority(coverage, p)
   const steps = policy?.steps ?? []
   const first = steps[0]
   const ackText = ack === undefined ? '…' : ack == null ? 'No target' : `Within ${fmtMinutes(ack)}`
@@ -193,6 +198,14 @@ function PriorityCard({ priority: p, policy, coverage, coverageError, ack, dir, 
           </dd>
         </dl>
 
+        {(builtin.enabled.length > 0 || builtin.disabled.length > 0) && (
+          <p className="flex items-center gap-1 text-[11px] text-muted" title={[...builtin.enabled.map((b) => b.label), ...builtin.disabled.map((b) => `${b.label} (routing off)`)].join(', ')}>
+            <Cpu className="h-3 w-3 shrink-0" aria-hidden />
+            {builtin.enabled.length > 0 && <span>+{builtin.enabled.length} built-in event type{builtin.enabled.length === 1 ? '' : 's'}</span>}
+            {builtin.disabled.length > 0 && <span>{builtin.enabled.length ? ' · ' : ''}{builtin.disabled.length} built-in off</span>}
+            <button type="button" onClick={() => go('coverage')} className="ml-1 text-primary hover:underline">Details</button>
+          </p>
+        )}
         {gaps.length > 0 && (
           <ul className="space-y-0.5 rounded-md border border-warning/40 bg-warning/5 p-2">
             {gaps.map((g) => <li key={g} className="flex items-start gap-1 text-xs text-warning"><AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden />{g}</li>)}

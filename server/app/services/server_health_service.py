@@ -27,6 +27,7 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import builtin_alert_sources as builtin
 from app.services.filesystem_monitoring import pg_capacity_filter
 
 logger = logging.getLogger("zenplus.server_health")
@@ -58,12 +59,17 @@ async def create_server_alert(
     source: str,
     dedupe: str,
     metadata: Optional[dict[str, Any]] = None,
+    priority: Optional[str] = None,
 ) -> Any:
     """Insert an active alert for a server unless an identical one is open.
 
     ``dedupe`` identifies the condition instance (e.g. ``baseline:<rule_id>``
     or ``agent_offline``) so repeat evaluations don't stack duplicates.
     Returns the new alert's id (truthy) when a row was created, else None.
+
+    ``priority`` (P1..P4) is stamped on the new row when given — the built-in
+    families pass theirs (builtin_alert_sources); rule-based callers stamp the
+    rule's priority themselves.
 
     The check-then-insert is only atomic for callers that serialize the
     condition first (the host evaluator takes a per rule/server/dimension
@@ -98,16 +104,23 @@ async def create_server_alert(
     # Host-metric rules pass their rule id in metadata; link it on the row as
     # well (the FK is ON DELETE SET NULL). Without it the Alert Center showed
     # no rule and no routing for server alerts, and escalation never saw them.
-    rule_id = meta.get("rule_id")
+    # A baseline alert's metadata.rule_id is a software_baseline_rules id,
+    # not an alert rule.
+    rule_id = meta.get("rule_id") if source != "baseline" else None
     if not (isinstance(rule_id, str) and _UUID_RE.fullmatch(rule_id)):
         rule_id = None
+    cols, vals, extra = "", "", {}
+    if priority:
+        from app.services import alert_funnel
+        cols, vals, extra = alert_funnel.priority_insert(
+            await alert_funnel.priority_supported(db), priority, severity)
     return (await db.execute(
-        text("""INSERT INTO alerts (server_id, rule_id, severity, message, status, metadata)
+        text(f"""INSERT INTO alerts (server_id, rule_id, severity, message, status, metadata{cols})
                 VALUES (:sid, (SELECT id FROM alert_rules WHERE id = CAST(:rid AS uuid)),
-                        :sev, :msg, 'active', CAST(:meta AS jsonb))
+                        :sev, :msg, 'active', CAST(:meta AS jsonb){vals})
                 RETURNING id"""),
         {"sid": server_id, "rid": rule_id, "sev": severity, "msg": message,
-         "meta": json.dumps(meta)},
+         "meta": json.dumps(meta), **extra},
     )).scalar()
 
 
@@ -262,6 +275,7 @@ async def sync_health_alerts(
             message=issue["reason"],
             source="health_threshold",
             dedupe=issue["dedupe"],
+            priority=builtin.priority_for("health_threshold", issue["level"]),
         )
 
     open_rows = (await db.execute(
@@ -351,6 +365,7 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
             source="agent_offline",
             dedupe="agent_offline",
             metadata={"agent_id": str(agent_id)},
+            priority=builtin.priority_for("agent_offline", "critical"),
         )
 
     # Device maintenance fallback: ping-enabled devices leave 'maintenance'

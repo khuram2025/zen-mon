@@ -31,6 +31,8 @@ from app.core.database import get_db
 from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services import alert_priority as prio
+from app.services import alert_workflow as wf
+from app.services import builtin_alert_sources as bas
 from app.services import escalation_policy_service as eps
 from app.services import oncall_service as oc
 from app.services.audit_service import write_audit_log
@@ -326,12 +328,22 @@ async def coverage(days: int = Query(default=7, ge=1, le=31), db: AsyncSession =
                    user: User = Depends(get_current_user)):
     """Who covers each priority, and where the matrix has holes: unrouted
     priorities, steps that reach nobody now, schedules with nobody on call in
-    the next ``days`` days, members without a contact method."""
+    the next ``days`` days, members without a contact method.
+
+    Per priority, ``paging`` is ``"steps"`` when its default policy pages
+    someone, else ``"none"`` with ``reason`` ``"no_policy"`` / ``"no_steps"``.
+    Not paging is a design choice, not a gap, for a P3/P4 priority without an
+    acknowledgement target (its incidents are recorded and digested only);
+    P1/P2, or any priority with a response target, that pages nobody keeps a
+    gap. ``builtin_sources`` says whether each built-in (rule-less) alert
+    family reaches a policy (``routed``) and someone (``paged``); ``issues``
+    lists enabled P1–P3 families that are not routed."""
     await _require_supported(db)
     now = datetime.now(timezone.utc)
     defaults = await eps.default_policies(db)
     policies = await eps.load_policies(db)
     schedules = await oc.load_schedules(db)
+    targets_by_priority = await wf.response_targets(db)
     directory = eps.Directory(db)
     directory.schedules.update(schedules)
     all_targets = [t for p in policies.values() for st in p.steps for t in st.targets]
@@ -343,37 +355,65 @@ async def coverage(days: int = Query(default=7, ge=1, le=31), db: AsyncSession =
     unrouted = []
     for p in prio.PRIORITIES:
         d = defaults.get(p)
+        policy = policies.get(d["id"]) if d else None
+        target = (policy.ack_target_minutes if policy and policy.ack_target_minutes
+                  else targets_by_priority.get(p))
+        # Paging nobody is a gap for an urgent priority or one somebody must
+        # acknowledge within a target; otherwise it is the intended design.
+        must_page = prio.is_urgent(p) or target is not None
+        label = prio.priority_label(p)
         if not d:
-            unrouted.append(p)
-            out_prio[p] = {"policy_id": None, "policy_name": None, "steps_ok": False,
-                           "gaps": [f"No escalation policy is the default for {prio.priority_label(p)};"
-                                    f" only rules that name a policy or legacy levels escalate."]}
+            entry = {"policy_id": None, "policy_name": None, "steps": 0, "paging": "none",
+                     "reason": "no_policy", "response_target_minutes": target}
+            if must_page:
+                unrouted.append(p)
+                entry.update(steps_ok=False, gaps=[
+                    f"No escalation policy is the default for {label};"
+                    f" only rules that name a policy or legacy levels escalate."
+                    + (f" {label} has a {target}-minute acknowledgement target but nobody is paged."
+                       if target is not None else "")])
+            else:
+                entry.update(steps_ok=True, gaps=[])
+            out_prio[p] = entry
             continue
-        policy = policies.get(d["id"])
+        if policy is None or not policy.steps:
+            entry = {"policy_id": d["id"], "policy_name": d["name"], "steps": 0, "paging": "none",
+                     "reason": "no_steps", "response_target_minutes": target}
+            if must_page:
+                entry.update(steps_ok=False, gaps=[
+                    f"{label} has " + (f"a {target}-minute acknowledgement target" if target is not None
+                                       else "no response target set")
+                    + f" but its policy {d['name']} has no steps, so nobody is paged."])
+            else:
+                entry.update(steps_ok=True, gaps=[])
+            out_prio[p] = entry
+            continue
         gaps, ok = [], True
-        if policy:
-            fb = directory.resolve(policy.fallback_targets, now)
-            fb_ok = eps.deliverable(fb, usable)
-            kinds = {r.get("kind") for r in fb.recipients}
-            for i, st in enumerate(policy.steps):
-                res = directory.resolve(st.targets, now)
-                kinds |= {r.get("kind") for r in res.recipients}
-                gaps += [f"Step {i + 1}: {g}" for g in res.gaps]
-                if res.empty:
-                    ok = False if fb.empty else ok
-                    gaps.append(f"Step {i + 1} reaches nobody now"
-                                + ("; the fallback route would be used." if not fb.empty
-                                   else " and there is no working fallback."))
-                elif not eps.deliverable(res, usable):
-                    ok = ok if fb_ok else False
-                    gaps.append(f"Step {i + 1} only pages people and no gateway can deliver those pages"
-                                + ("; the fallback route would be used." if fb_ok
-                                   else " and there is no working fallback."))
-            targets = [t for st in policy.steps for t in st.targets] + list(policy.fallback_targets)
-            gaps += eps.direct_page_gaps(targets_people=eps.pages_people(targets),
-                                         recipient_kinds=kinds, usable=usable)
+        fb = directory.resolve(policy.fallback_targets, now)
+        fb_ok = eps.deliverable(fb, usable)
+        kinds = {r.get("kind") for r in fb.recipients}
+        for i, st in enumerate(policy.steps):
+            res = directory.resolve(st.targets, now)
+            kinds |= {r.get("kind") for r in res.recipients}
+            gaps += [f"Step {i + 1}: {g}" for g in res.gaps]
+            if res.empty:
+                ok = False if fb.empty else ok
+                gaps.append(f"Step {i + 1} reaches nobody now"
+                            + ("; the fallback route would be used." if not fb.empty
+                               else " and there is no working fallback."))
+            elif not eps.deliverable(res, usable):
+                ok = ok if fb_ok else False
+                gaps.append(f"Step {i + 1} only pages people and no gateway can deliver those pages"
+                            + ("; the fallback route would be used." if fb_ok
+                               else " and there is no working fallback."))
+        targets = [t for st in policy.steps for t in st.targets] + list(policy.fallback_targets)
+        gaps += eps.direct_page_gaps(targets_people=eps.pages_people(targets),
+                                     recipient_kinds=kinds, usable=usable)
         out_prio[p] = {"policy_id": d["id"], "policy_name": d["name"], "steps_ok": ok,
-                       "steps": len(policy.steps) if policy else 0, "gaps": gaps}
+                       "steps": len(policy.steps), "paging": "steps", "reason": None,
+                       "response_target_minutes": target, "gaps": gaps}
+
+    builtin_sources, issues = _builtin_coverage(await bas.enabled_families(db), out_prio)
 
     without_members = [{"id": s.id, "name": s.name} for s in schedules.values()
                        if not any(lv.members for lv in s.layers)]
@@ -397,6 +437,70 @@ async def coverage(days: int = Query(default=7, ge=1, le=31), db: AsyncSession =
         elif not person.recipients("coverage"):
             no_contacts.append({"id": uid, "name": person.name, "reason": "No email or SMS contact method"})
     return {"at": now, "priorities": out_prio, "unrouted_priorities": unrouted,
+            "builtin_sources": builtin_sources, "issues": issues,
             "schedules_without_members": without_members, "schedule_gaps": schedule_gaps,
             "users_without_contacts": no_contacts,
             "direct_page_gateways": {"email": "email" in usable, "sms": "sms" in usable}}
+
+
+def _builtin_coverage(enabled: list[str], out_prio: dict) -> tuple[list[dict], list[dict]]:
+    """(builtin_sources, issues) for /coverage. A family is ``routed`` when
+    it is enabled and its priority has a default policy, ``paged`` when that
+    policy also has a step. Routed but not paged is an issue for a P1/P2
+    family or when its priority has coverage gaps (e.g. an acknowledgement
+    target without steps); otherwise it is informational by design. Severity-ranked families (health thresholds)
+    report their most urgent priority and list each one in ``variants``."""
+    on = set(enabled)
+    sources, issues = [], []
+    for src in bas.SOURCES:
+        variants = []
+        for severity, p in src.variants():
+            e = out_prio.get(p) or {}
+            routed = src.key in on and bool(e.get("policy_id"))
+            variants.append({"severity": severity, "priority": p, "policy_id": e.get("policy_id"),
+                             "policy_name": e.get("policy_name"), "routed": routed,
+                             "paged": routed and e.get("paging") == "steps"})
+        head = variants[0]
+        enabled_ = src.key in on
+        # Routed to a policy that pages nobody: by design only for P3/P4 priorities
+        # without coverage gaps (no acknowledgement target); for P1/P2, or a
+        # priority with gaps, nobody is paged for an incident that should page.
+        nobody_paged = (head["routed"] and not head["paged"]
+                        and (prio.is_urgent(head["priority"])
+                             or bool((out_prio.get(head["priority"]) or {}).get("gaps"))))
+        if not enabled_:
+            note = "Routing is off in settings: these incidents are recorded but notify nobody."
+            if src.note:
+                note = src.note
+        elif not head["routed"]:
+            note = (f"No escalation policy is the default for {prio.priority_label(head['priority'])}:"
+                    f" these incidents notify nobody.")
+        elif not head["paged"]:
+            note = (f"Routed to {head['policy_name']}, which has no steps: recorded and digested only,"
+                    f" nobody is paged.")
+            if nobody_paged:
+                note += " That is a gap for this priority, not a design choice."
+        else:
+            note = f"Routed to {head['policy_name']}; its steps page on-call."
+        if src.base_channels == "ncm":
+            note += " The device's own NCM notification channels are also notified."
+        sources.append({"key": src.key, "label": src.label, "description": src.description,
+                        "priority": head["priority"], "priorities": src.priorities,
+                        "enabled": enabled_, "default_enabled": src.default_enabled,
+                        "policy_id": head["policy_id"], "policy_name": head["policy_name"],
+                        "routed": head["routed"], "paged": head["paged"], "note": note,
+                        "variants": variants})
+        if enabled_ and not head["routed"] and prio.priority_rank(head["priority"]) <= 3:
+            issues.append({"key": f"builtin-{src.key}",
+                           "severity": "danger" if prio.is_urgent(head["priority"]) else "warning",
+                           "source": src.key,
+                           "text": (f"Built-in {src.label} incidents ({head['priority']}) have no escalation"
+                                    f" policy: no default policy for"
+                                    f" {prio.priority_label(head['priority'])}, so they notify nobody.")})
+        elif enabled_ and nobody_paged:
+            issues.append({"key": f"builtin-{src.key}",
+                           "severity": "danger" if prio.is_urgent(head["priority"]) else "warning",
+                           "source": src.key, "policy_id": head["policy_id"],
+                           "text": (f"Built-in {src.label} incidents ({head['priority']}) are routed to"
+                                    f" {head['policy_name']}, which has no steps, so nobody is paged.")})
+    return sources, issues

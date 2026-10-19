@@ -24,7 +24,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn, copyText } from '@/lib/utils'
+import { apiErrorMessage, apiFieldErrors, cn, copyText, type ApiFieldError } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Textarea } from '@/components/ui/Textarea'
@@ -58,6 +58,11 @@ import {
 } from '@/features/escalation/model'
 import { PriorityBadge } from '@/features/escalation/ui'
 import type { Priority } from '@/features/escalation/types'
+import {
+  conditionDomainError, mergeWarnings, normalizeOperator, pingConditionFor, resetDomainError, ruleNameWarnings, syncPingConditions,
+  warningsFromApi, wizardStepForPath, type FieldIssue,
+} from './alertRuleChecks'
+import { FieldErrorBanner, RuleWarnings } from '@/components/alerts/RuleFeedback'
 
 type Cond = { metric: string; operator: string; threshold: number; reset_threshold?: number | null }
 
@@ -306,6 +311,17 @@ function ruleToState(rule: any): WizardState {
       : rule.service_check_id || rule.service_check_group_id || rule.metric === 'service_status'
       ? 'service'
       : 'device'
+  const loaded: Cond[] =
+    Array.isArray(rule.conditions) && rule.conditions.length
+      ? rule.conditions.map((c: any) => ({
+          metric: c.metric,
+          // Seeded rules store gt/eq; the editor and the create endpoint use symbols.
+          operator: normalizeOperator(c.operator),
+          threshold: c.threshold ?? 0,
+          reset_threshold: c.reset_threshold ?? null,
+        }))
+      : [{ metric: rule.metric || 'ping_status', operator: normalizeOperator(rule.operator || '=='), threshold: rule.threshold ?? 0 }]
+  const trigger = rule.trigger_on || 'down'
   return {
     ...DEFAULT_STATE,
     name: rule.name || '',
@@ -317,17 +333,10 @@ function ruleToState(rule: any): WizardState {
     escalation_mode: rule.escalation_policy_id ? 'policy' : Array.isArray(rule.escalation_levels) && rule.escalation_levels.length ? 'legacy' : 'default',
     escalation_policy_id: rule.escalation_policy_id || '',
     source,
-    conditions:
-      Array.isArray(rule.conditions) && rule.conditions.length
-        ? rule.conditions.map((c: any) => ({
-            metric: c.metric,
-            operator: c.operator,
-            threshold: c.threshold ?? 0,
-            reset_threshold: c.reset_threshold ?? null,
-          }))
-        : [{ metric: rule.metric || 'ping_status', operator: rule.operator || '==', threshold: rule.threshold ?? 0 }],
+    // A status transition decides the ping_status condition (down -> == 0, up/degraded -> == 1).
+    conditions: source === 'device' && loaded[0]?.metric === 'ping_status' ? syncPingConditions(loaded, trigger) : loaded,
     condition_logic: rule.condition_logic === 'OR' ? 'OR' : 'AND',
-    trigger_on: rule.trigger_on || 'down',
+    trigger_on: trigger,
     min_duration: rule.min_duration ?? rule.duration ?? 0,
     clear_duration: typeof rule.clear_duration === 'number' ? rule.clear_duration : null,
     recovery_alert: rule.recovery_alert ?? false,
@@ -377,8 +386,10 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
   const isSyslog = s.source === 'syslog'
   const isDevice = s.source === 'device'
   const isApm = s.source === 'apm'
-  const first = s.conditions[0]
-  const conditions = isDevice && (s.conditions.length > 1 || first.reset_threshold != null) ? s.conditions : null
+  // The status transition writes the matching ping_status condition, so a "comes up" rule never stores "== 0".
+  const conds = isDevice && s.conditions[0]?.metric === 'ping_status' ? syncPingConditions(s.conditions, s.trigger_on) : s.conditions
+  const first = conds[0]
+  const conditions = isDevice && (conds.length > 1 || first.reset_threshold != null) ? conds : null
   const recovery = !isTrap && !isSyslog && s.reset_mode === 'auto'
 
   const payload: Record<string, any> = {
@@ -476,6 +487,11 @@ export function AlertRuleWizardDialog({
   const [scopeMode, setScopeMode] = useState<'all' | 'device' | 'group' | 'type' | 'location' | 'tag'>('all')
   const [preview, setPreview] = useState<any>(null)
   const [livePreview, setLivePreview] = useState<any>(null)
+  // A failed save (server 422 or a local check) and the state it was made from: the banner stays, and the dialog
+  // stays open, until the user edits something.
+  const [saveFailure, setSaveFailure] = useState<{ errors: ApiFieldError[]; state: WizardState } | null>(null)
+  const bannerErrors = saveFailure && saveFailure.state === s ? saveFailure.errors : []
+  const errorSteps = new Set(bannerErrors.map((e) => wizardStepForPath(e.path, s.source)))
   const isRumMetric = s.source === 'apm' && s.conditions[0]?.metric.startsWith('apm_rum_')
   // A device rule evaluated on confirmed status changes (ping status, RTT, packet loss); unless it triggers on Up, its
   // alerts are held while the device flaps.
@@ -587,6 +603,7 @@ export function AlertRuleWizardDialog({
     if (!open) return
     setStep('properties')
     setPreview(null)
+    setSaveFailure(null)
     if (rule) {
       const st = ruleToState(rule)
       setS(st)
@@ -606,17 +623,45 @@ export function AlertRuleWizardDialog({
   }, [open, rule])
 
   const save = useMutation({
-    mutationFn: async (payload: any) => {
+    mutationFn: async ({ payload }: { payload: any; state: WizardState }) => {
       if (isEdit) return (await api.put(`/alert-rules/${rule.id}`, payload)).data
       return (await api.post('/alert-rules', payload)).data
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       toast.success(isEdit ? 'Alert rule updated' : 'Alert rule created')
+      const serverWarnings = warningsFromApi(data)
+      if (serverWarnings.length) toast.warning('Saved with warnings', serverWarnings.map((w) => w.message).join(' '))
       qc.invalidateQueries({ queryKey: ['alert-rules'] })
       onOpenChange(false)
     },
-    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
+    // The wizard stays open on the step that owns the first field error, with every error listed.
+    onError: (e: any, vars) => fail(apiFieldErrors(e), undefined, vars.state),
   })
+
+  /** Show a save failure inline and open the step that owns the first field with an error. */
+  function fail(errors: FieldIssue[], toStep?: StepId, state: WizardState = s) {
+    const list = errors.length ? errors : [{ path: '', msg: 'The rule could not be saved' }]
+    setSaveFailure({ errors: list, state })
+    const target = toStep ?? wizardStepForPath(list.find((x) => x.path)?.path ?? '', state.source)
+    if (target !== 'review') setStep(target)
+  }
+
+  /** Value-domain problems per condition (the same checks the server applies on save). */
+  const conditionErrors = useMemo(() => s.conditions.map((c) => {
+    if (s.source !== 'device' && s.source !== 'apm') return { threshold: null, reset: null }
+    return { threshold: conditionDomainError(c.metric, c.operator, c.threshold), reset: resetDomainError(c.metric, c.reset_threshold) }
+  }), [s.conditions, s.source])
+
+  /** Name/description vs condition: amber, never blocks saving. */
+  const nameWarnings = useMemo(() => {
+    if (s.source === 'netflow' || s.source === 'trap' || s.source === 'syslog') return []
+    const conds = s.source === 'service' ? [{ metric: 'service_status', operator: '==', threshold: 0 }] : s.conditions
+    const pingFirst = s.source === 'device' && s.conditions[0]?.metric === 'ping_status'
+    return mergeWarnings(ruleNameWarnings({
+      name: s.name, description: s.description, conditions: conds,
+      trigger_on: s.source === 'service' || pingFirst ? s.trigger_on : 'any',
+    }))
+  }, [s.name, s.description, s.conditions, s.source, s.trigger_on])
 
   const previewMut = useMutation({
     // Rendered from the draft itself — no id needed, nothing written. This
@@ -638,7 +683,11 @@ export function AlertRuleWizardDialog({
   })
 
   const updateCond = (i: number, patch: Partial<Cond>) =>
-    setS((st) => ({ ...st, conditions: st.conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) }))
+    setS((st) => {
+      const conditions = st.conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c))
+      // Picking ping status as the first condition takes the transition's value.
+      return { ...st, conditions: st.source === 'device' && conditions[0]?.metric === 'ping_status' ? syncPingConditions(conditions, st.trigger_on) : conditions }
+    })
   const addCond = () =>
     setS((st) => ({ ...st, conditions: [...st.conditions, { metric: 'rtt', operator: '>', threshold: 100 }] }))
   const removeCond = (i: number) =>
@@ -744,8 +793,7 @@ export function AlertRuleWizardDialog({
   function submit(e?: FormEvent) {
     e?.preventDefault()
     if (!s.name.trim()) {
-      toast.error('Name required')
-      setStep('properties')
+      fail([{ path: 'name', msg: 'Name the rule' }])
       return
     }
     // A scope mode was chosen but nothing selected — saving now would silently
@@ -764,46 +812,51 @@ export function AlertRuleWizardDialog({
           'not_src', 'not_dst', 'protocol', 'port', 'src_port', 'dst_port', 'dst_ports', 'service_port', 'app',
           'dscp', 'netclass', 'tcpflag', 'hour', 'dow', 'group', 'asn', 'ip_version', 'direction', 'min_bytes',
           'max_bytes', 'count'])
-        toast.error('NetFlow rule incomplete', errs[keys[0]])
-        setStep(keys.some((k) => scopeKeys.has(k)) && keys.every((k) => scopeKeys.has(k)) ? 'scope' : 'trigger')
+        fail(keys.map((k) => ({ path: `${scopeKeys.has(k) ? 'flow_scope' : 'flow_params'}.${k}`, msg: errs[k] })),
+          keys.some((k) => scopeKeys.has(k)) && keys.every((k) => scopeKeys.has(k)) ? 'scope' : 'trigger')
         return
       }
     }
+    // Value domains (ping_status 0/1, if_oper_status 1–7, percentages 0–100, rates 0–1, counts ≥ 0) and comparisons
+    // that can never be true or are always true — refused here as the server would.
+    const payload = stateToPayload(s, tplDefaults)
+    const domain: FieldIssue[] = []
+    conditionErrors.forEach((ce, i) => {
+      const flat = !payload.conditions && i === 0
+      if (ce.threshold) domain.push({ path: flat ? 'threshold' : `conditions[${i}].threshold`, msg: ce.threshold })
+      if (ce.reset) domain.push({ path: `conditions[${i}].reset_threshold`, msg: ce.reset })
+    })
+    if (domain.length) {
+      fail(domain, 'trigger')
+      return
+    }
     if (!isService && s.source !== 'apm' && s.source !== 'netflow' && scopeEmpty) {
-      toast.error('Scope incomplete', `Select a ${scopeMode === 'type' ? 'device type' : scopeMode}, or choose "All devices".`)
-      setStep('scope')
+      const field = scopeMode === 'device' ? 'device_id' : scopeMode === 'group' ? 'group_id' : scopeMode === 'type' ? 'device_type' : scopeMode === 'location' ? 'location' : 'scope_tag'
+      fail([{ path: field, msg: `Select a ${scopeMode === 'type' ? 'device type' : scopeMode}, or choose "All devices".` }])
       return
     }
     if (s.escalation_mode === 'policy' && !s.escalation_policy_id) {
-      toast.error('Choose an escalation policy', 'Or use the priority default.')
-      setStep('escalation')
+      fail([{ path: 'escalation_policy_id', msg: 'Choose an escalation policy, or use the priority default.' }])
       return
     }
     const legacyLevels = s.escalation_mode === 'legacy' ? s.escalation_levels : []
     if (legacyLevels.length > MAX_ESC_LEVELS) {
-      toast.error(`At most ${MAX_ESC_LEVELS} escalation levels`)
-      setStep('escalation')
+      fail([{ path: 'escalation_levels', msg: `At most ${MAX_ESC_LEVELS} escalation levels` }])
       return
     }
+    const levelErrors: FieldIssue[] = []
     for (let i = 0; i < legacyLevels.length; i++) {
       const lv = legacyLevels[i]
-      if (!lv.notify_channels.length) {
-        toast.error(`Escalation level ${i + 1} has no channels`, 'Pick at least one channel or remove the level.')
-        setStep('escalation')
-        return
-      }
-      if (!(lv.after_minutes >= 1)) {
-        toast.error(`Escalation level ${i + 1} needs a delay of at least 1 minute`)
-        setStep('escalation')
-        return
-      }
-      if (i > 0 && lv.after_minutes <= legacyLevels[i - 1].after_minutes) {
-        toast.error('Escalation delays must increase', `Level ${i + 1} must fire later than level ${i}.`)
-        setStep('escalation')
-        return
-      }
+      if (!lv.notify_channels.length) levelErrors.push({ path: `escalation_levels[${i}].notify_channels`, msg: `Level ${i + 1} has no channels: pick at least one or remove the level.` })
+      if (!(lv.after_minutes >= 1)) levelErrors.push({ path: `escalation_levels[${i}].after_minutes`, msg: `Level ${i + 1} needs a delay of at least 1 minute.` })
+      else if (i > 0 && lv.after_minutes <= legacyLevels[i - 1].after_minutes) levelErrors.push({ path: `escalation_levels[${i}].after_minutes`, msg: `Escalation delays must increase: level ${i + 1} must fire later than level ${i}.` })
     }
-    save.mutate(stateToPayload(s, tplDefaults))
+    if (levelErrors.length) {
+      fail(levelErrors)
+      return
+    }
+    setSaveFailure(null)
+    save.mutate({ payload, state: s })
   }
   const isService = s.source === 'service'
 
@@ -889,6 +942,7 @@ export function AlertRuleWizardDialog({
                 >
                   <Icon className="h-3.5 w-3.5" />
                   {st.label}
+                  {errorSteps.has(st.id) && <span className="h-1.5 w-1.5 rounded-full bg-danger" aria-label="has errors" />}
                 </button>
               )
             })}
@@ -898,6 +952,11 @@ export function AlertRuleWizardDialog({
         {/* Body */}
         <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
           <div className="flex-1 overflow-y-auto px-5 py-5">
+            {bannerErrors.length > 0 && (
+              <div className="mb-4">
+                <FieldErrorBanner errors={bannerErrors} onJump={(path) => setStep(wizardStepForPath(path, s.source))} />
+              </div>
+            )}
             {step === 'properties' && (
               <div className="space-y-4">
                 <SectionTitle title="Alert Properties" hint="Name, severity, and enable/disable — like SolarWinds alert definition properties." />
@@ -979,7 +1038,7 @@ export function AlertRuleWizardDialog({
                         } else if (src === 'netflow') {
                           setS({ ...s, source: src, target: '', reset_mode: 'auto', recovery_alert: true })
                         } else if (s.source === 'apm' || s.source === 'syslog' || s.source === 'netflow') {
-                          setS({ ...s, source: src, target: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
+                          setS({ ...s, source: src, target: '', conditions: syncPingConditions([{ metric: 'ping_status', operator: '==', threshold: 0 }], s.trigger_on) })
                         } else {
                           setS({ ...s, source: src })
                         }
@@ -1023,8 +1082,13 @@ export function AlertRuleWizardDialog({
                 {s.source === 'device' && (
                   <>
                     {s.conditions.some((c) => c.metric === 'ping_status') && (
-                      <FormField label="Status transition" hint="For ping/status rules — when device changes state">
-                        <Select value={s.trigger_on} onValueChange={(v: any) => setS({ ...s, trigger_on: v })}>
+                      <FormField label="Status transition" hint="For ping/status rules — when device changes state. Down writes ping_status == 0; up and degraded write ping_status == 1.">
+                        <Select value={s.trigger_on} onValueChange={(v: any) => setS({
+                          ...s,
+                          trigger_on: v,
+                          // The transition decides the ping_status condition, so the two never contradict.
+                          conditions: s.conditions[0]?.metric === 'ping_status' ? syncPingConditions(s.conditions, v) : s.conditions,
+                        })}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
                             <SelectItem value="down">Device goes down</SelectItem>
@@ -1048,8 +1112,13 @@ export function AlertRuleWizardDialog({
                         </div>
                       )}
                     </div>
-                    {s.conditions.map((c, i) => (
-                      <div key={i} className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
+                    {s.conditions.map((c, i) => {
+                      // A ping_status condition follows the status transition (read-only unless "any change").
+                      const pingLocked = c.metric === 'ping_status' && s.conditions[0]?.metric === 'ping_status' && !!pingConditionFor(s.trigger_on)
+                      const err = conditionErrors[i]
+                      return (
+                      <div key={i} className="rounded-lg border border-border/60 bg-surface2/30 p-3">
+                      <div className="flex items-end gap-2">
                         <div className="grid flex-1 grid-cols-3 gap-2">
                           <FormField label={i === 0 ? 'Field' : ' '}>
                             <Select value={c.metric} onValueChange={(v) => updateCond(i, { metric: v })}>
@@ -1066,8 +1135,8 @@ export function AlertRuleWizardDialog({
                             </Select>
                           </FormField>
                           <FormField label={i === 0 ? 'Operator' : ' '}>
-                            <Select value={c.operator} onValueChange={(v) => updateCond(i, { operator: v })}>
-                              <SelectTrigger><SelectValue /></SelectTrigger>
+                            <Select value={c.operator} onValueChange={(v) => updateCond(i, { operator: v })} disabled={pingLocked}>
+                              <SelectTrigger aria-label={`Condition ${i + 1} operator`}><SelectValue /></SelectTrigger>
                               <SelectContent>
                                 {['>', '>=', '<', '<=', '==', '!='].map((op) => (
                                   <SelectItem key={op} value={op}>{op}</SelectItem>
@@ -1076,7 +1145,9 @@ export function AlertRuleWizardDialog({
                             </Select>
                           </FormField>
                           <FormField label={i === 0 ? 'Value' : ' '}>
-                            <Input type="number" step="any" value={c.threshold} onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })} />
+                            <Input type="number" step="any" value={c.threshold} disabled={pingLocked} aria-invalid={!!err?.threshold}
+                              aria-label={`Condition ${i + 1} value`}
+                              onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })} />
                           </FormField>
                           {NETWORK_METRICS.some(m => m.value === c.metric) && ['>', '>=', '<', '<='].includes(c.operator) && (() => {
                             const auto = autoResetThreshold(c)
@@ -1091,7 +1162,12 @@ export function AlertRuleWizardDialog({
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
-                    ))}
+                      {pingLocked && <p className="mt-1.5 text-[11px] text-muted">Set by the status transition: ping_status {c.operator} {c.threshold} ({c.threshold === 0 ? 'down' : 'up'}).</p>}
+                      {err?.threshold && <p className="mt-1.5 text-[11px] text-danger" role="alert">{err.threshold}</p>}
+                      {err?.reset && <p className="mt-1.5 text-[11px] text-danger" role="alert">{err.reset}</p>}
+                      </div>
+                      )
+                    })}
                     <Button type="button" variant="outline" size="sm" onClick={addCond}><Plus className="h-3.5 w-3.5" />Add condition</Button>
                     {s.conditions.some((c) => INTERFACE_METRICS.has(c.metric)) && (
                       <FormField label="Interface filter" hint="Name substring or if_index. Empty = all interfaces.">
@@ -1131,8 +1207,8 @@ export function AlertRuleWizardDialog({
                           </SelectContent>
                         </Select>
                       </FormField>
-                      <FormField label="Threshold">
-                        <Input type="number" step="any" value={s.conditions[0]?.threshold} onChange={(e) => updateCond(0, { threshold: Number(e.target.value) })} />
+                      <FormField label="Threshold" error={conditionErrors[0]?.threshold}>
+                        <Input type="number" step="any" value={s.conditions[0]?.threshold} aria-invalid={!!conditionErrors[0]?.threshold} onChange={(e) => updateCond(0, { threshold: Number(e.target.value) })} />
                       </FormField>
                     </div>
                   </div>
@@ -1626,6 +1702,7 @@ export function AlertRuleWizardDialog({
                         })}
                 />
                 <ReviewRow label="Enabled" value={s.enabled ? 'Yes' : 'No'} />
+                <RuleWarnings warnings={nameWarnings} />
                 <div className="flex gap-2 pt-2">
                   <Button type="button" variant="outline" size="sm" onClick={() => previewMut.mutate()} disabled={previewMut.isPending}>
                     {previewMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}

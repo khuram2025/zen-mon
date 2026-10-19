@@ -124,13 +124,62 @@ export function timeTooltipLabelFormatter(ts: any): string {
   })
 }
 
-export function apiErrorMessage(e: any, fallback = 'Something went wrong'): string {
+/** One field error from an API response: `path` like `conditions[0].operator` ('' = the request as a whole). */
+export type ApiFieldError = { path: string; msg: string }
+
+/** A pydantic `loc` as a field path: ['body','conditions',0,'operator'] -> 'conditions[0].operator'. */
+function locPath(loc: unknown): string {
+  if (!Array.isArray(loc)) return typeof loc === 'string' ? loc : ''
+  const parts = loc[0] === 'body' || loc[0] === 'query' || loc[0] === 'path' ? loc.slice(1) : loc
+  let out = ''
+  for (const p of parts) {
+    if (typeof p === 'number' || /^\d+$/.test(String(p))) out += `[${p}]`
+    else out += out ? `.${p}` : String(p)
+  }
+  return out
+}
+
+/** A long regex ("String should match pattern '^(ping_status|rtt|…)$'") is never shown; the value is. */
+function readableMsg(msg: string, input?: unknown): string {
+  let m = String(msg || '').replace(/^Value error,\s*/i, '')
+  if (/should match pattern/i.test(m) || /'\^\(.{40,}/.test(m)) {
+    return input !== undefined && input !== null && typeof input !== 'object'
+      ? `'${String(input).slice(0, 80)}' is not an accepted value`
+      : 'is not an accepted value'
+  }
+  if (m.length > 300) m = `${m.slice(0, 297)}…`
+  return m
+}
+
+/** Every field error in an API failure: pydantic 422 arrays, {loc,msg} objects and plain detail strings. */
+export function apiFieldErrors(e: any): ApiFieldError[] {
   const d = e?.response?.data?.detail
-  if (typeof d === 'string') return d
-  if (Array.isArray(d)) return d.map((x: any) => x.msg || String(x)).join(', ')
-  if (d?.msg) return d.msg
-  if (d?.message) return String(d.message)
-  return e?.message || fallback
+  if (Array.isArray(d)) {
+    return d.map((x: any) => {
+      if (!x || typeof x !== 'object') return { path: '', msg: readableMsg(String(x)) }
+      const path = locPath(x.loc)
+      let msg = readableMsg(x.msg ?? x.message ?? '', x.input)
+      // A server that already names the field ("metric: 'x' is not an accepted value") is not prefixed twice.
+      const leaf = path.split(/[.[]/).pop()?.replace(/\]$/, '') ?? ''
+      for (const prefix of [path, leaf]) if (prefix && msg.startsWith(`${prefix}: `)) { msg = msg.slice(prefix.length + 2); break }
+      return { path, msg }
+    }).filter((x) => x.msg)
+  }
+  if (typeof d === 'string' && d) return [{ path: '', msg: readableMsg(d) }]
+  if (d && typeof d === 'object') {
+    if (Array.isArray(d.errors)) return apiFieldErrors({ response: { data: { detail: d.errors } } })
+    const msg = d.msg ?? d.message
+    if (msg) return [{ path: locPath(d.loc) || (typeof d.field === 'string' ? d.field : ''), msg: readableMsg(String(msg), d.input) }]
+  }
+  if (e?.message) return [{ path: '', msg: String(e.message) }]
+  return []
+}
+
+export function apiErrorMessage(e: any, fallback = 'Something went wrong'): string {
+  const errs = apiFieldErrors(e)
+  if (!errs.length) return fallback
+  // 'metric: ‘x’ is not an accepted value; conditions[0].operator: …' — the field path, never the regex.
+  return errs.map((x) => (x.path ? `${x.path}: ${x.msg}` : x.msg)).join('; ')
 }
 
 /**

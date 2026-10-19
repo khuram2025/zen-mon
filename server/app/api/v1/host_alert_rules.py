@@ -12,6 +12,13 @@ hold before the incident resolves (null = the 300 s default, 0 = at once);
 metrics: 2 points on the healthy side, returned as ``auto_reset_threshold``);
 ``recovery_alert`` whether a recovery notice is sent. The reset level is
 stored as the rule's single condition, like network rules.
+
+Validation (1.24.21): thresholds are finite, a percentage threshold or reset
+level must be satisfiable within 0..100 (``host_cpu_pct > 150`` is a 422 at
+``body.threshold``), and a service/process rule needs its ``target`` (422 at
+``body.target``) on create and whenever an update would leave it without
+one. Create/update responses carry non-blocking ``warnings`` when the name or
+description does not match the condition (alert_rule_checks).
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_permission
+from app.services import alert_rule_checks as checks
 from app.services import alert_rule_scope as rs
 from app.services.alert_priority import priority_for
 from app.services.audit_service import write_audit_log
@@ -54,7 +62,7 @@ class HostRuleCreate(BaseModel):
     enabled: bool = True
     metric: str = Field(..., pattern=_METRIC)
     operator: str = Field("gt", pattern=_OPERATOR)
-    threshold: float = 0
+    threshold: float = Field(0, allow_inf_nan=False)
     severity: str = Field("warning", pattern="^(info|warning|critical)$")
     min_duration: int = Field(0, ge=0, le=86400)
     # None = the evaluator default (300 s); 0 = resolve on the first healthy sample.
@@ -78,7 +86,7 @@ class HostRuleUpdate(BaseModel):
     enabled: Optional[bool] = None
     metric: Optional[str] = Field(None, pattern=_METRIC)
     operator: Optional[str] = Field(None, pattern=_OPERATOR)
-    threshold: Optional[float] = None
+    threshold: Optional[float] = Field(None, allow_inf_nan=False)
     severity: Optional[str] = Field(None, pattern="^(info|warning|critical)$")
     min_duration: Optional[int] = Field(None, ge=0, le=86400)
     clear_duration: Optional[int] = Field(None, ge=0, le=86400)
@@ -139,6 +147,23 @@ def _condition_json(metric, operator, threshold, reset) -> Optional[str]:
     return json.dumps([cond])
 
 
+_TARGET_METRICS = ("host_process_down", "host_service_down")
+
+
+def _definition_errors(metric, operator, threshold, reset, target) -> list[dict]:
+    """422 errors (with loc paths) for a host rule's merged definition."""
+    errors = []
+    if metric in _TARGET_METRICS and not (target or "").strip():
+        what = "service" if metric == "host_service_down" else "process"
+        errors.append(checks.error(("body", "target"),
+                                   f"target is required for {metric}: the {what} name to watch"))
+    if metric in _PCT_METRICS:
+        errors += checks.condition_errors(
+            [{"metric": metric, "operator": operator, "threshold": threshold, "reset_threshold": reset}],
+            flat=True)
+    return errors
+
+
 def _auto_reset(metric, operator, threshold) -> Optional[float]:
     from app.services.network_conditions import auto_reset_threshold
     return auto_reset_threshold({"metric": metric, "operator": operator, "threshold": threshold})
@@ -172,6 +197,11 @@ def _row(r) -> dict:
     }
 
 
+def _with_warnings(rule: dict) -> dict:
+    rule["warnings"] = checks.name_warnings(rule)
+    return rule
+
+
 @router.get("")
 async def list_host_rules(
     server_id: Optional[UUID] = None,
@@ -199,8 +229,8 @@ async def create_host_rule(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_rule_manager),
 ):
-    if data.metric in ("host_process_down", "host_service_down") and not data.target:
-        raise HTTPException(400, f"target is required for {data.metric}")
+    checks.raise_errors(_definition_errors(data.metric, data.operator, data.threshold,
+                                           data.reset_threshold, data.target))
     await rs.guard_rule_change(db, user, data.model_dump())
     conditions = _condition_json(data.metric, data.operator, data.threshold, data.reset_threshold)
     row = (await db.execute(text(
@@ -229,7 +259,7 @@ async def create_host_rule(
                           metadata={"name": data.name, "metric": data.metric,
                                     "server_id": str(data.server_id) if data.server_id else None})
     await db.commit()
-    return _row(row)
+    return _with_warnings(_row(row))
 
 
 @router.put("/{rule_id}")
@@ -251,6 +281,12 @@ async def update_host_rule(
                 "min_duration", "cooldown", "name", "severity"):
         if key in fields and fields[key] is None:
             del fields[key]
+    if any(k in fields for k in ("metric", "operator", "threshold", "reset_threshold", "target")):
+        merged = {**before, **fields}
+        reset = (fields["reset_threshold"] if "reset_threshold" in fields
+                 else _reset_of(before.get("conditions"), before.get("metric")))
+        checks.raise_errors(_definition_errors(merged.get("metric"), merged.get("operator"),
+                                               merged.get("threshold"), reset, merged.get("target")))
     # The reset level lives in the rule's condition; rebuild it whenever the
     # trigger or the reset changes (a reset left on the wrong side is a 422).
     if any(k in fields for k in ("metric", "operator", "threshold", "reset_threshold")):
@@ -290,7 +326,7 @@ async def update_host_rule(
                           resource_id=str(rule_id),
                           metadata={"changes": rs.rule_changes(before, await rs.rule_row(db, rule_id))})
     await db.commit()
-    return _row(row)
+    return _with_warnings(_row(row))
 
 
 @router.post("/{rule_id}/toggle")

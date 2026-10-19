@@ -26,7 +26,7 @@ import {
 } from '@/components/servers/tables'
 import type { ServerItem, ServerService } from '@/types/servers'
 import { useServices } from '../data'
-import { CreateHostRuleDialog } from './AlertsTab'
+import { HostRuleDialog } from '@/components/alerts/HostRuleDialog'
 import { EmptyState, Panel, Pill, StatTile, type Tone } from '../ui'
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
@@ -472,12 +472,12 @@ export function ServicesTab({ server }: { server: ServerItem }) {
         <TablePager {...pager} noun="services" />
       </Panel>
 
-      <CreateHostRuleDialog
+      <HostRuleDialog
         serverId={serverId}
         open={Boolean(alertFor)}
         onOpenChange={(o) => { if (!o) setAlertFor(null) }}
         initial={alertFor ? { metric: 'host_service_down', target: alertFor, name: `${alertFor} stopped` } : undefined}
-        onCreated={() => qc.invalidateQueries({ queryKey: ['servers', serverId, 'host-rules'] })}
+        onSaved={() => qc.invalidateQueries({ queryKey: ['servers', serverId, 'host-rules'] })}
       />
 
       <ConfirmDialog

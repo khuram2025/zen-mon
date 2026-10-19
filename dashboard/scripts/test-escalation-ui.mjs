@@ -444,8 +444,111 @@ const ROUTE = {
   assert(issues.some((i) => i.fix.tab === 'policies' && i.fix.id === 'pol-1'))
   assert.deepEqual(M.priorityCoverageStatus('P3', c, M.policyFromApi({ ...API_POLICY, id: 'pol-3' })), { tone: 'success', label: 'Covered' })
   assert.equal(M.priorityCoverageStatus('P2', c, null).label, 'Unrouted')
-  assert.equal(M.priorityCoverageStatus('P4', c, null).label, 'No paging (by design)')
+  assert.deepEqual(M.priorityCoverageStatus('P4', c, null), { tone: 'muted', label: 'Not paged (by design)' }, 'older server: P4 unrouted is not paged by design')
   assert.equal(M.priorityCoverageStatus('P1', c, M.policyFromApi(API_POLICY)).tone, 'danger')
+  assert.equal(c.builtin_sources, null, 'an older server has no built-in list')
+  assert.equal(c.priorities.P3.paging, null)
+}
+
+// Coverage (1.24.21 servers): paging "none" is by design (no gap, not unrouted); a zero-step policy is never a green
+// "Covered"; an acknowledgement target without paging keeps its gap; built-in event families.
+{
+  const ZERO = M.policyFromApi({ ...API_POLICY, id: 'pol-4', name: 'P4 Information — digest', default_priorities: ['P4'], ack_target_minutes: null, steps: [], fallback_targets: [] })
+  const c = M.coverageFromApi({
+    priorities: {
+      P1: { policy_id: 'pol-1', policy_name: 'P1 policy', steps_ok: false, steps: 0, paging: 'none', reason: 'no_steps', gaps: ['P1 Critical has an acknowledgement target but nobody is paged.'] },
+      P2: { policy_id: 'pol-2', policy_name: 'P2 policy', steps_ok: true, steps: 2, paging: 'steps', reason: null, gaps: [] },
+      P3: { policy_id: null, policy_name: null, steps_ok: true, steps: 0, paging: 'none', reason: 'no_policy', gaps: [] },
+      P4: { policy_id: 'pol-4', policy_name: 'P4 Information — digest', steps_ok: true, steps: 0, paging: 'none', reason: 'no_steps', gaps: [] },
+    },
+    unrouted_priorities: [],
+    builtin_sources: [
+      { key: 'agent_offline', label: 'Agent offline', priority: 'P2', enabled: true, policy_id: 'pol-2', policy_name: 'P2 policy', routed: true, paged: true, note: null },
+      { key: 'sensor_offline', label: 'Sensor offline', priority: 'P2', enabled: true, policy_id: null, policy_name: null, routed: false, paged: false, note: 'Routed by the P2 default policy' },
+      { key: 'ncm_backup_failed', label: 'Config backup failed', priority: 'p3', enabled: true, policy_id: null, policy_name: null, routed: false, paged: false, note: null },
+      { key: 'health_threshold', label: 'Server health thresholds', priority: 'P3', enabled: false, policy_id: null, policy_name: null, routed: false, paged: false, note: 'Duplicates rule-based server alerts' },
+      { key: 'baseline_drift', label: 'Software baseline drift', priority: 'P4', enabled: true, policy_id: 'pol-4', policy_name: 'P4 Information — digest', routed: true, paged: false, note: null },
+      { key: '', label: 'broken' }, { label: 'no key', priority: 'P2' },
+    ],
+  })
+  assert.equal(c.priorities.P4.paging, 'none')
+  assert.equal(c.priorities.P4.reason, 'no_steps')
+  assert.equal(c.priorities.P4.steps, 0)
+  assert.deepEqual(M.priorityCoverageStatus('P4', c, ZERO), { tone: 'muted', label: 'Not paged (by design)' }, 'a zero-step P4 policy is not "Covered"')
+  assert.deepEqual(M.priorityCoverageStatus('P3', c, null), { tone: 'muted', label: 'Not paged (by design)' }, 'no policy and no response target: by design')
+  assert.equal(M.priorityCoverageStatus('P1', c, null).label, '1 gap', 'an acknowledgement target without paging keeps its gap')
+  assert.equal(M.priorityCoverageStatus('P2', c, null).label, 'Covered')
+  const issues = M.coverageIssues(c)
+  assert(!issues.some((i) => /P3 Warning incidents|P4/.test(i.text) && !/built-in/i.test(i.text)), 'paging none is not an issue')
+  assert(issues.some((i) => /P1 Critical · P1 policy: P1 Critical has an acknowledgement target but nobody is paged/.test(i.text)))
+  assert.equal(c.builtin_sources.length, 5, 'unusable built-in rows are dropped')
+  assert.equal(c.builtin_sources[2].priority, 'P3', 'priority is normalised')
+  const builtinIssues = issues.filter((i) => i.key.startsWith('builtin-'))
+  assert.deepEqual(builtinIssues.map((i) => i.key), ['builtin-sensor_offline', 'builtin-ncm_backup_failed'], 'enabled P1–P3 families without a routing policy are flagged (not disabled or P4 ones)')
+  assert.equal(builtinIssues[0].severity, 'danger')
+  assert.match(builtinIssues[0].text, /Built-in “Sensor offline” events \(P2\)/)
+  assert.deepEqual(M.builtinSourceState(c.builtin_sources[0]), { tone: 'success', label: 'Paged by P2 policy' })
+  assert.equal(M.builtinSourceState(c.builtin_sources[1]).label, 'No routing policy')
+  assert.equal(M.builtinSourceState(c.builtin_sources[3]).label, 'Routing off')
+  assert.equal(M.builtinSourceState(c.builtin_sources[4]).label, 'Not paged (by design)', 'routed to a zero-step P4 policy')
+  assert.equal(M.builtinSourceState(c.builtin_sources[4], c).label, 'Not paged (by design)', 'P4 without gaps stays by design')
+
+  // Routed but not paged is "Nobody paged" (not by design) for P1/P2, or when the priority has coverage gaps.
+  {
+    const nc = M.coverageFromApi({
+      priorities: {
+        P1: { policy_id: 'pol-1', policy_name: 'P1 policy', steps_ok: false, steps: 0, paging: 'none', reason: 'no_steps', gaps: ['P1 Critical has a 15-minute acknowledgement target but its policy P1 policy has no steps, so nobody is paged.'] },
+        P2: { policy_id: 'pol-2', policy_name: 'P2 empty', steps_ok: true, steps: 0, paging: 'none', reason: 'no_steps', gaps: [] },
+        P3: { policy_id: 'pol-3', policy_name: 'P3 target only', steps_ok: false, steps: 0, paging: 'none', reason: 'no_steps', gaps: ['P3 Warning has a 60-minute acknowledgement target but its policy P3 target only has no steps, so nobody is paged.'] },
+        P4: { policy_id: 'pol-4', policy_name: 'P4 digest', steps_ok: true, steps: 0, paging: 'none', reason: 'no_steps', gaps: [] },
+      },
+      unrouted_priorities: [],
+      builtin_sources: [
+        { key: 'agent_offline', label: 'Agent offline', priority: 'P2', enabled: true, policy_id: 'pol-2', policy_name: 'P2 empty', routed: true, paged: false, note: null },
+        { key: 'sensor_degraded', label: 'Sensor degraded', priority: 'P3', enabled: true, policy_id: 'pol-3', policy_name: 'P3 target only', routed: true, paged: false, note: null },
+        { key: 'baseline_drift', label: 'Baseline drift', priority: 'P4', enabled: true, policy_id: 'pol-4', policy_name: 'P4 digest', routed: true, paged: false, note: null },
+        { key: 'sensor_offline', label: 'Sensor offline', priority: 'P2', enabled: false, policy_id: 'pol-2', policy_name: 'P2 empty', routed: false, paged: false, note: null },
+      ],
+    })
+    const [agent, degraded, drift, off] = nc.builtin_sources
+    assert.deepEqual(M.builtinSourceState(agent, nc), { tone: 'danger', label: 'Nobody paged' }, 'P2 routed to a zero-step policy')
+    assert.deepEqual(M.builtinSourceState(agent), { tone: 'danger', label: 'Nobody paged' }, 'P1/P2 even without the coverage entry')
+    assert.deepEqual(M.builtinSourceState(degraded, nc), { tone: 'warning', label: 'Nobody paged' }, 'P3 whose priority entry has gaps')
+    assert.deepEqual(M.builtinSourceState(drift, nc), { tone: 'muted', label: 'Not paged (by design)' })
+    assert.equal(M.builtinSourceState(off, nc).label, 'Routing off')
+    const bi = M.coverageIssues(nc).filter((i) => i.key.startsWith('builtin-'))
+    assert.deepEqual(bi.map((i) => [i.key, i.severity]), [['builtin-agent_offline', 'danger'], ['builtin-sensor_degraded', 'warning']])
+    assert.match(bi[0].text, /Built-in “Agent offline” events \(P2\) are routed to P2 empty, which has no steps: nobody is paged/)
+    assert.deepEqual(bi[0].fix, { label: 'Edit policy', tab: 'policies', id: 'pol-2' })
+    const tab = fs.readFileSync('src/pages/escalation/CoverageTab.tsx', 'utf8')
+    assert(tab.includes('builtinSourceState(b, coverage)') && tab.includes('<BuiltinEventsCard sources={c.builtin_sources} coverage={c}'), 'the coverage card passes the coverage entry')
+  }
+  const p2 = M.builtinForPriority(c, 'P2')
+  assert.equal(p2.enabled.length, 2)
+  assert.equal(M.builtinForPriority(c, 'P3').disabled.length, 1)
+  assert.equal(M.builtinForPriority(null, 'P1').enabled.length, 0)
+
+  // Older server fallback: a zero-step policy without an acknowledgement target is not paged by design; with a
+  // target (or for P1/P2) nobody is paged, which is not "Covered" either.
+  const old = M.coverageFromApi({ priorities: { P3: { policy_id: 'pol-3z', policy_name: 'Zero P3', steps_ok: true, gaps: [] }, P4: { policy_id: 'pol-4', policy_name: 'P4', steps_ok: true, gaps: [] } }, unrouted_priorities: [] })
+  assert.equal(M.priorityCoverageStatus('P4', old, ZERO).label, 'Not paged (by design)')
+  assert.equal(M.priorityCoverageStatus('P4', old, null, null).label, 'Covered', 'without the policy or a step count the old answer stands')
+  const ZERO3 = M.policyFromApi({ ...API_POLICY, id: 'pol-3z', name: 'Zero P3', default_priorities: ['P3'], ack_target_minutes: 60, steps: [] })
+  assert.deepEqual(M.priorityCoverageStatus('P3', old, ZERO3, 60), { tone: 'warning', label: 'Nobody paged' })
+  assert.equal(M.priorityCoverageStatus('P3', old, { ...ZERO3, ack_target_minutes: null }, null).label, 'Not paged (by design)')
+  const oldP2 = M.coverageFromApi({ priorities: { P2: { policy_id: 'pol-3z', policy_name: 'Zero', steps_ok: true, gaps: [] } }, unrouted_priorities: [] })
+  assert.deepEqual(M.priorityCoverageStatus('P2', oldP2, { ...ZERO3, ack_target_minutes: null }, null), { tone: 'danger', label: 'Nobody paged' }, 'P1/P2 are never paged-none by inference')
+
+  // GET/PUT /alerts/builtin-routing.
+  const r1 = M.builtinRoutingFromApi({ families: [{ key: 'agent_offline', label: 'Agent offline', priority: 'P2', enabled: true }, { key: 'health_threshold', label: 'Health', priority: 'P3', enabled: false }] })
+  assert.deepEqual(r1.enabled_families, ['agent_offline'])
+  const r2 = M.builtinRoutingFromApi({ items: [{ key: 'a', priority: 'P2' }, { key: 'b', priority: 'P3' }], enabled_families: ['b'] })
+  assert.deepEqual(r2.families.map((f) => [f.key, f.enabled]), [['a', false], ['b', true]], 'enabled_families wins over per-row flags')
+  assert.deepEqual(M.builtinRoutingFromApi([{ key: 'x', label: 'X', priority: 'P4' }]).enabled_families, ['x'])
+  assert.deepEqual(M.builtinRoutingFromApi(null), { families: [], enabled_families: [] })
+  assert.deepEqual(M.builtinRoutingPayload(['a', 'b'], 'b', false), { enabled_families: ['a'] })
+  assert.deepEqual(M.builtinRoutingPayload(['a'], 'c', true), { enabled_families: ['a', 'c'] })
+  assert.deepEqual(M.builtinRoutingPayload(['a'], 'a', true), { enabled_families: ['a'] }, 'never listed twice')
 }
 
 // Contact methods and the recommended matrix.
@@ -493,6 +596,7 @@ export { AlertDetailPage } from '@/pages/AlertDetailPage'
 export { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 export { EscalationPage } from '@/pages/escalation/EscalationPage'
 export { GroupingTab } from '@/pages/escalation/GroupingTab'
+export { CoverageTab } from '@/pages/escalation/CoverageTab'
 export { AlertRulesPage } from '@/pages/AlertRulesPage'
 export * as EM from '@/features/escalation/model'
 export { api } from '@/lib/api'
@@ -590,6 +694,81 @@ function seed(qc) {
   assert(text.includes('Create recommended matrix'), 'alerts.manage can create the recommended matrix')
   assert.deepEqual(calls, [], 'seeded queries: rendering sent no request')
 }
+// Matrix and Coverage with a 1.24.21 coverage: paging none is a muted "Not paged (by design)" without gap text,
+// a zero-step policy is not "Covered", built-in event types per priority, and the Built-in events section.
+const COVERAGE_NEW = M.coverageFromApi({
+  priorities: {
+    P1: { policy_id: 'pol-1', policy_name: API_POLICY.name, steps_ok: true, steps: 3, paging: 'steps', gaps: [] },
+    P2: { policy_id: null, policy_name: null, steps_ok: false, steps: 0, paging: 'steps', gaps: ['No escalation policy is the default for P2 High'] },
+    P3: { policy_id: 'pol-3', policy_name: 'P3 Warning — team queue', steps_ok: true, steps: 2, paging: 'steps', gaps: [] },
+    P4: { policy_id: 'pol-4', policy_name: 'P4 Information — digest', steps_ok: true, steps: 0, paging: 'none', reason: 'no_steps', gaps: [] },
+  },
+  unrouted_priorities: ['P2'],
+  builtin_sources: [
+    { key: 'agent_offline', label: 'Agent offline', priority: 'P2', enabled: true, policy_id: null, policy_name: null, routed: false, paged: false, note: null },
+    { key: 'sensor_offline', label: 'Sensor offline', priority: 'P2', enabled: true, policy_id: null, policy_name: null, routed: false, paged: false, note: null },
+    { key: 'sensor_degraded', label: 'Sensor degraded', priority: 'P3', enabled: true, policy_id: 'pol-3', policy_name: 'P3 Warning — team queue', routed: true, paged: true, note: null },
+    { key: 'health_threshold', label: 'Server health thresholds', priority: 'P3', enabled: false, policy_id: 'pol-3', policy_name: 'P3 Warning — team queue', routed: false, paged: false, note: 'Duplicates rule-based server alerts' },
+    { key: 'baseline_drift', label: 'Software baseline drift', priority: 'P4', enabled: true, policy_id: 'pol-4', policy_name: 'P4 Information — digest', routed: true, paged: false, note: null },
+  ],
+})
+const P4ZERO = M.policyFromApi({ ...API_POLICY, id: 'pol-4', name: 'P4 Information — digest', default_priorities: ['P4'], ack_target_minutes: null, repeat_minutes: null, review_minutes: null, ack_expiry_minutes: null, steps: [], fallback_targets: [] })
+{
+  setUser(USER(['alerts.view', 'alerts.manage']))
+  const qc = newClient()
+  seed(qc)
+  qc.setQueryData(['escalation', 'policies'], [...POLICIES, P4ZERO])
+  qc.setQueryData(['escalation', 'coverage'], COVERAGE_NEW)
+  calls.length = 0
+  const text = strip(renderAt(qc, '/escalation', h(m.MatrixTab, { canManage: true, go: () => {} })))
+  assert(text.includes('Not paged (by design)'), 'the zero-step P4 policy is not paged by design')
+  assert.equal((text.match(/Covered/g) ?? []).length, 2, 'only P1 and P3 are Covered')
+  assert(text.includes('+2 built-in event types'), 'P2 card: agent and sensor offline')
+  assert(text.includes('+1 built-in event type · 1 built-in off'), 'P3 card: one on, health thresholds off')
+  assert(text.includes('+1 built-in event type'), 'P4 card: baseline drift')
+  assert(text.includes('Unrouted priorities: P2.'))
+  assert.deepEqual(calls, [], 'seeded queries: rendering sent no request')
+
+  // An older server still lists "no default policy" as a P4 gap: the matrix hides it under "Not paged (by design)".
+  const qc2 = newClient()
+  seed(qc2)
+  qc2.setQueryData(['escalation', 'coverage'], M.coverageFromApi({ priorities: { P4: { policy_id: null, policy_name: null, steps_ok: false, gaps: ['No escalation policy is the default for P4 Information'] } }, unrouted_priorities: ['P4'] }))
+  const t2 = strip(renderAt(qc2, '/escalation', h(m.MatrixTab, { canManage: true, go: () => {} })))
+  assert(t2.includes('Not paged (by design)') && !t2.includes('No escalation policy is the default for P4 Information'), 'no gap text for a priority that is not paged by design')
+  assert(!t2.includes('built-in event type'), 'no built-in line without the server list')
+
+  // Coverage tab: priorityCoverageStatus on every card, and the Built-in events section with switches.
+  const qc3 = newClient()
+  seed(qc3)
+  qc3.setQueryData(['escalation', 'policies'], [...POLICIES, P4ZERO])
+  qc3.setQueryData(['escalation', 'coverage'], COVERAGE_NEW)
+  qc3.setQueryData(['alerts', 'builtin-routing'], M.builtinRoutingFromApi({ families: COVERAGE_NEW.builtin_sources, enabled_families: ['agent_offline', 'sensor_offline', 'sensor_degraded', 'baseline_drift'] }))
+  calls.length = 0
+  const html = renderAt(qc3, '/escalation?tab=coverage', h(m.CoverageTab, { go: () => {} }))
+  const ct = strip(html)
+  assert(ct.includes('Not paged (by design)') && ct.includes('Its policy has no paging steps'), 'P4 card: not paged, with the reason')
+  assert(!/P4[^.]*1 gap/.test(ct) && !ct.includes('Not fully covered'), 'no "1 gap" / "Not fully covered" for P4')
+  assert(ct.includes('Unrouted'), 'P2 card is unrouted')
+  assert(ct.includes('Built-in events') && ct.includes('Agent offline') && ct.includes('Server health thresholds'), 'built-in families listed')
+  assert(ct.includes('No routing policy: Agent offline (P2), Sensor offline (P2)'), 'enabled P1–P3 families without a policy are warned about')
+  assert(ct.includes('Paged by P3 Warning — team queue') && ct.includes('Routing off') && ct.includes('Duplicates rule-based server alerts'))
+  assert(html.includes('aria-label="Route Agent offline events"') && html.includes('aria-label="Route Server health thresholds events"'), 'a switch per family for alerts.manage')
+  assert(/aria-label="Route Server health thresholds events"[^>]*|role="switch"[^>]*aria-checked="false"/.test(html))
+  assert(ct.includes('Built-in “Agent offline” events (P2)'), 'coverage gaps list the unrouted built-in family')
+  assert.deepEqual(calls.filter(([verb]) => verb !== 'get'), [], 'rendering changes nothing')
+
+  // Read-only roles see the state, not the switches.
+  setUser(USER(['alerts.view']))
+  const ro = renderAt(qc3, '/escalation?tab=coverage', h(m.CoverageTab, { go: () => {} }))
+  assert(!ro.includes('aria-label="Route Agent offline events"') && strip(ro).includes('Changing built-in routing needs the alerts.manage permission'))
+  // An older server without the list says so instead of implying built-ins are covered.
+  const qc4 = newClient()
+  seed(qc4)
+  const t4 = strip(renderAt(qc4, '/escalation?tab=coverage', h(m.CoverageTab, { go: () => {} })))
+  assert(t4.includes('does not report how built-in events'))
+  setUser(USER(['alerts.view', 'alerts.manage']))
+}
+
 // Read-only (alerts.view): same matrix, no create button, channel names unknown without the directory.
 {
   setUser(USER(['alerts.view']))
@@ -793,6 +972,7 @@ function seed(qc) {
   const start = wiz.indexOf('const TEMPLATE_FIELDS =')
   const end = wiz.indexOf('export function AlertRuleWizardDialog(')
   const code = `import { defaultNetflowForm, formFromRule, isNetflowMetric, netflowPayload } from './src/components/forms/netflowAlertRule';
+import { normalizeOperator, syncPingConditions } from './src/components/forms/alertRuleChecks';
 const INTERFACE_METRICS = new Set(['if_util_pct','if_in_bps','if_out_bps','if_errors','if_discards','if_oper_status']);
 ${wiz.slice(start, end)}
 export { ruleToState, stateToPayload };`
@@ -822,8 +1002,8 @@ export { ruleToState, stateToPayload };`
   assert.equal(pl.escalation_levels, null, 'switching to the priority default clears the tiers')
   assert.equal(W.ruleToState({ name: 'x', metric: 'cpu', priority: 'P9' }).priority, '', 'an unknown priority is Auto')
 
-  const host = fs.readFileSync('src/pages/servers/detail/tabs/AlertsTab.tsx', 'utf8')
-  assert(host.includes("priority: priority === 'auto' ? null : priority") && host.includes("escalation_policy_id: policyId === 'default' ? null : policyId"), 'server rule dialog sends priority and policy')
+  const host = fs.readFileSync('src/components/alerts/hostRuleModel.ts', 'utf8')
+  assert(host.includes("priority: f.priority === 'auto' ? null : f.priority") && host.includes("escalation_policy_id: f.policyId === 'default' ? null : f.policyId"), 'server rule dialog sends priority and policy')
 }
 
-console.log('Escalation UI: Matrix (policies, ack targets, step timeline, review cadence, coverage, conflicts; read-only), policy editor with saved and draft dry runs, alert route panel and digest holds, ?ack=1 confirmation never acknowledges, rule wizard priority/escalation with the 5-tier cap.')
+console.log('Escalation UI: Matrix (policies, ack targets, step timeline, review cadence, coverage incl. "Not paged (by design)" and built-in event types, conflicts; read-only), Coverage tab (status per card, built-in events with per-family switches), policy editor with saved and draft dry runs, alert route panel and digest holds, ?ack=1 confirmation never acknowledges, rule wizard priority/escalation with the 5-tier cap.')
