@@ -32,7 +32,7 @@ from app.api.v1.apm import invalidate_ingest_key_cache
 from app.core import scoping
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.services import package_digest
+from app.services import license_capacity, package_digest
 from app.services.agent_package_names import (
     FLAVOR_FULL,
     FLAVOR_PATTERN,
@@ -609,6 +609,9 @@ async def create_server(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("servers.manage")),
 ):
+    # One license node, unless linked to a device that already holds one.
+    if await license_capacity.server_needs_node(db, data.device_id):
+        await license_capacity.ensure_can_add(db)
     row = (await db.execute(
         text("""INSERT INTO servers (display_name, hostname, fqdn, primary_ip, site_id, device_id,
                                       os_type, collection_mode, environment, owner, description,
@@ -1264,6 +1267,25 @@ class NetworkCaptureStart(BaseModel):
 
 
 async def _authorize_agents(ids: list[UUID], user_id: UUID, db: AsyncSession) -> int:
+    # An approved agent without a server row creates one on its next poll
+    # (agents._ensure_pending_server), unless an unowned row has its hostname.
+    # Refuse the approval here, where the admin sees why, rather than leaving
+    # an approved agent whose enrollment is refused.
+    new_servers = (await db.execute(
+        text("""SELECT COUNT(*) FROM agents a
+                WHERE a.id = ANY(:ids)
+                  AND a.server_id IS NULL
+                  AND a.authorized_at IS NULL
+                  AND a.pending_conflict_secret_hash IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM servers s
+                      WHERE s.hostname = a.hostname
+                        AND NOT EXISTS (SELECT 1 FROM agents o
+                                         WHERE o.server_id = s.id AND o.id <> a.id))"""),
+        {"ids": ids},
+    )).scalar() or 0
+    if new_servers:
+        await license_capacity.ensure_can_add(db, int(new_servers))
     result = await db.execute(
         text("""UPDATE agents SET
                   authorized_at = NOW(), authorized_by = :user,
@@ -3132,6 +3154,8 @@ async def resolve_registration_conflict(
             display_name = f"{candidate_hostname} (clone{f' {candidate_ip}' if candidate_ip else ''})"
         display_name = display_name[:255]
 
+        # The clone becomes a server of its own: one more license node.
+        await license_capacity.ensure_can_add(db)
         server_row = (await db.execute(
             text("""INSERT INTO servers
                       (display_name, hostname, primary_ip, site_id, os_type,

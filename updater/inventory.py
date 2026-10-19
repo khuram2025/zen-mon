@@ -106,13 +106,34 @@ def get_disk_usage() -> dict[str, int]:
     return {"total": total, "used": used, "free": free}
 
 
-def get_node_count() -> int:
-    """Local node count = devices + service_checks.
+# License node count. Kept textually identical to NODE_COUNT_SQL in
+# server/app/services/license_capacity.py (asserted by the server test suite):
+# devices + servers, a server linked to a counted device once, controller
+# children never. The appliance must report the count it enforces.
+NODE_COUNT_SQL = """
+SELECT
+  (SELECT COUNT(*) FROM devices d
+    WHERE d.poll_mode IS DISTINCT FROM 'via_controller') AS devices,
+  (SELECT COUNT(*) FROM servers s
+    WHERE s.device_id IS NULL
+       OR NOT EXISTS (SELECT 1 FROM devices d
+                       WHERE d.id = s.device_id
+                         AND d.poll_mode IS DISTINCT FROM 'via_controller')) AS servers,
+  (SELECT COUNT(*) FROM servers s
+    WHERE EXISTS (SELECT 1 FROM devices d
+                   WHERE d.id = s.device_id
+                     AND d.poll_mode IS DISTINCT FROM 'via_controller')) AS linked_servers,
+  (SELECT COUNT(*) FROM devices d
+    WHERE d.poll_mode = 'via_controller') AS controller_children
+"""
 
-    Reports 0 on any DB failure. The license panel on zentryc.com is purely
-    informational, so a transient query error must never abort the check-in.
-    DATABASE_URL is loaded from the same .env the API service uses; the
-    systemd unit imports it via EnvironmentFile.
+
+def get_node_count() -> int:
+    """Local license node count (see NODE_COUNT_SQL).
+
+    Reports 0 on any DB failure so a transient query error never aborts the
+    check-in. DATABASE_URL is loaded from the same .env the API service uses;
+    the systemd unit imports it via EnvironmentFile.
     """
     db_url = os.environ.get("DATABASE_URL", "")
     if not db_url:
@@ -124,11 +145,8 @@ def get_node_count() -> int:
         import asyncpg
         conn = await asyncpg.connect(asyncpg_url)
         try:
-            row = await conn.fetchval(
-                "SELECT (SELECT COUNT(*) FROM devices) "
-                "+ (SELECT COUNT(*) FROM service_checks)"
-            )
-            return int(row or 0)
+            row = await conn.fetchrow(NODE_COUNT_SQL)
+            return int(row["devices"] or 0) + int(row["servers"] or 0)
         finally:
             await conn.close()
 

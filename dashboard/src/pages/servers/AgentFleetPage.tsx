@@ -26,6 +26,7 @@ import { Switch } from '@/components/ui/Switch'
 import { toast } from '@/components/ui/Toast'
 import { AgentStatusBadge, AuthorizationBadge, KpiTile, TagList } from '@/components/servers/shared'
 import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
+import { LicenseCapacityNotice } from '@/components/license/LicenseCapacityNotice'
 import type { AgentItem, AgentPolicy, MonitoringProfile, UpdateRing } from '@/types/servers'
 
 interface AgentFleetSummary {
@@ -441,6 +442,9 @@ export function AgentFleetPage() {
           </Button>
         </div>
       </div>
+
+      {/* New machines enrolling or being authorized each need a license node. */}
+      <LicenseCapacityNotice />
 
       {/* KPIs */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">

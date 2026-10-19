@@ -1,9 +1,12 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, Loader2, RefreshCw } from 'lucide-react'
+import { Boxes, KeyRound, Loader2, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
 import { toast } from '@/components/ui/Toast'
+import {
+  invalidateLicenseCapacity, useLicenseCapacity, type LicenseCapacity,
+} from '@/hooks/useLicenseCapacity'
 
 interface NodeLicense {
   total_node_cap: number
@@ -60,6 +63,7 @@ export function LicensesTabContent() {
       toast.success('Appliance registered', `ID: ${data?.appliance_id || ''}`)
       setLicenseKey('')
       qc.invalidateQueries({ queryKey: ['system-update-status'] })
+      invalidateLicenseCapacity(qc)
     },
     onError: (e: any) => toast.error('Registration failed', apiErrorMessage(e)),
   })
@@ -69,6 +73,7 @@ export function LicensesTabContent() {
     onSuccess: () => {
       toast.success('Subscription refreshed from zentryc.com')
       qc.invalidateQueries({ queryKey: ['system-update-status'] })
+      invalidateLicenseCapacity(qc)
     },
     onError: (e: any) => toast.error('Refresh failed', apiErrorMessage(e)),
   })
@@ -94,6 +99,8 @@ export function LicensesTabContent() {
 
   return (
     <div className="space-y-5">
+      <NodeCapacityCard />
+
       {/* Registration */}
       {!isRegistered ? (
         <div className="rounded-xl border border-amber-500/30 bg-surface p-6">
@@ -189,7 +196,7 @@ export function LicensesTabContent() {
                 {sub.plan && <p className="text-[10px] text-muted">{sub.plan}</p>}
               </div>
               <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Nodes</p>
+                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Subscription nodes</p>
                 <p className="text-sm font-semibold">
                   {(sub.license?.used_node_count ?? 0)}/{(sub.license?.total_node_cap ?? 0)}
                 </p>
@@ -226,6 +233,139 @@ export function LicensesTabContent() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+const STATE_LABEL: Record<LicenseCapacity['state'], string> = {
+  ok: 'Within license',
+  near_limit: 'Nearly full',
+  full: 'Capacity reached',
+  over_limit: 'Over capacity',
+  expired: 'License expired',
+  inactive: 'License inactive',
+  unmetered: 'Not metered',
+}
+
+function stateTone(cap: LicenseCapacity) {
+  if (!cap.enforced) return 'muted'
+  if (!cap.can_add) return 'red'
+  return cap.state === 'near_limit' ? 'amber' : 'emerald'
+}
+
+const TONES = {
+  red: { badge: 'bg-red-500/10 text-red-400 border-red-500/30', bar: 'bg-red-500', box: 'border-red-500/30' },
+  amber: { badge: 'bg-amber-500/10 text-amber-400 border-amber-500/30', bar: 'bg-amber-500', box: 'border-amber-500/30' },
+  emerald: { badge: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30', bar: 'bg-emerald-500', box: 'border-border' },
+  muted: { badge: 'bg-surface2 text-muted border-border', bar: 'bg-primary', box: 'border-border' },
+} as const
+
+/** Local license usage: devices + servers against the licensed node count. */
+function NodeCapacityCard() {
+  const { data: cap, isLoading, isError, error } = useLicenseCapacity()
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center rounded-xl border border-border bg-surface p-6">
+        <Loader2 className="h-5 w-5 animate-spin text-primary" />
+      </div>
+    )
+  }
+  if (isError || !cap) {
+    return (
+      <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
+        Failed to load license capacity: {apiErrorMessage(error)}
+      </div>
+    )
+  }
+
+  const tone = TONES[stateTone(cap)]
+  const pct = cap.limit ? Math.min(100, Math.round((cap.used / Math.max(1, cap.limit)) * 100)) : 0
+
+  return (
+    <div className={cn('rounded-xl border bg-surface p-6', tone.box)} data-testid="license-capacity-card">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+            <Boxes className="h-4 w-4 text-primary" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold">Node capacity</h3>
+            <p className="text-xs text-muted">
+              {cap.source === 'evaluation'
+                ? 'Evaluation allowance. Register a license to raise it.'
+                : 'Devices and servers monitored by this appliance'}
+            </p>
+          </div>
+        </div>
+        <span className={cn('rounded-full border px-2.5 py-0.5 text-xs font-medium', tone.badge)}>
+          {STATE_LABEL[cap.state]}
+        </span>
+      </div>
+
+      {cap.limit != null ? (
+        <div className="mb-4">
+          <div className="mb-1.5 flex items-baseline justify-between gap-3">
+            <p className="text-2xl font-semibold tabular-nums">
+              {cap.used.toLocaleString()}
+              <span className="text-sm font-normal text-muted"> / {cap.limit.toLocaleString()} nodes</span>
+            </p>
+            <p className="text-xs text-muted tabular-nums">
+              {(cap.available ?? 0).toLocaleString()} available
+            </p>
+          </div>
+          <div
+            className="h-2 overflow-hidden rounded-full bg-surface2"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={cap.limit}
+            aria-valuenow={cap.used}
+            aria-label="Licensed nodes in use"
+          >
+            <div className={cn('h-full rounded-full transition-all', tone.bar)} style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+      ) : (
+        <p className="mb-4 text-2xl font-semibold tabular-nums">
+          {cap.used.toLocaleString()}
+          <span className="text-sm font-normal text-muted"> nodes in use</span>
+        </p>
+      )}
+
+      <p className={cn('mb-4 text-sm', cap.enforced && !cap.can_add ? 'text-red-300' : 'text-muted')}>
+        {cap.message}
+      </p>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <UsageTile label="Devices" value={cap.usage.devices} hint="one node each" />
+        <UsageTile label="Servers" value={cap.usage.servers} hint="one node each" />
+        <UsageTile label="Linked servers" value={cap.usage.linked_servers} hint="share their device's node" />
+        <UsageTile label="Controller-managed" value={cap.usage.controller_children} hint="not counted" />
+      </div>
+
+      {!!cap.pool_other_usage && cap.pool_total != null && (
+        <p className="mt-3 text-xs text-muted">
+          Shared subscription pool: {cap.pool_total.toLocaleString()} nodes, of which{' '}
+          {cap.pool_other_usage.toLocaleString()} are used by other appliances.
+        </p>
+      )}
+
+      <p className="mt-3 text-[11px] text-muted">
+        One node is one device or one server; a server linked to its device counts once. When the
+        license is full, adding devices or servers, discovery imports and new agent enrollments are
+        refused until the license is extended. Everything already monitored keeps running.
+        {cap.snapshot_at && <> License data from {new Date(cap.snapshot_at).toLocaleString()}.</>}
+      </p>
+    </div>
+  )
+}
+
+function UsageTile({ label, value, hint }: { label: string; value: number; hint: string }) {
+  return (
+    <div className="rounded-lg bg-surface2 p-3">
+      <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">{label}</p>
+      <p className="text-sm font-semibold tabular-nums">{value.toLocaleString()}</p>
+      <p className="text-[10px] text-muted">{hint}</p>
     </div>
   )
 }

@@ -44,6 +44,7 @@ from app.schemas.discovery_v2 import (
     ImportRequest,
     ImportResponse,
 )
+from app.services import license_capacity
 from app.services.audit_service import write_audit_log
 from app.services.device_service import apply_credential
 from app.services.discovery_executor import (
@@ -813,6 +814,9 @@ async def import_results(
     run = await db.get(DiscoveryRun, run_id)
     if not run:
         raise HTTPException(404, "Run not found")
+    # A new device is one license node; a new server is one unless it is linked
+    # to a device (the same machine). Imports stop at the license capacity.
+    budget = await license_capacity.reserve(db)
     profile = await db.get(DiscoveryProfile, run.profile_id) if run.profile_id else None
     # The dialog leaves location blank by default; the profile's location is
     # the operator's stated intent for everything this scan finds.
@@ -890,6 +894,8 @@ async def import_results(
                 report['updated_existing'] = True
             elif existing_dev:
                 conflict_types.append("ip_exists")
+            elif not budget.take(1):
+                error = budget.exhausted_message
             else:
                 try:
                     hostname = result.hostname or result.sys_name or str(result.ip_address)
@@ -940,6 +946,9 @@ async def import_results(
             ).first()
             if existing_srv and payload.conflict_strategy == "skip":
                 conflict_types.append("server_exists")
+            elif (await license_capacity.server_needs_node(db, linked_device_id)
+                  and not budget.take(1)):
+                error = budget.exhausted_message
             else:
                 try:
                     async with db.begin_nested():

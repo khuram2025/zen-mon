@@ -26,6 +26,8 @@
 - Storage: the data volume is whatever LV backs `/data` (often the root LV); never hardcode LV names. Disk/LVM changes go only through the root `scripts/zenplus-volume-helper`, which re-validates every request; tests fake its commands and never touch real disks. Pressure purging belongs to the independent watchdog (`storage_watchdog`/`storage_policy`, no PostgreSQL dependency); ClickHouse system logs stay bounded by `docker/clickhouse/zenplus_logging.xml`; host telemetry inserts go through `host_insert_batcher` (see `docs/storage-management.md`).
 - F5 overall RAM uses sysGlobalHostMemUsed / sysGlobalHostMemTotal, never the highest TMM/non-TMM percentage. Keep TMM, non-TMM and swap separate; use `f5_system_memory_pct` for corrected history. Missing sensors are not zero, and certificate inventory does not prove active TLS bindings.
 
+- License capacity: a node is one device or one server; a server linked to its device counts once, controller children and service checks never count. `license_capacity.NODE_COUNT_SQL` and `updater/inventory.py` `NODE_COUNT_SQL` stay identical (the reported count is the enforced count). Every path that creates a device or server checks the capacity under the `license-node-capacity` advisory lock and refuses with 402 `license_capacity_reached`; enforcement never disables or deletes existing nodes (see `docs/license-capacity.md`).
+
 ## Device Tracker
 
 - Sidebar groups and breadcrumb ownership are in `dashboard/src/components/layout/navigation.ts`. Device Tracker is separate from Monitoring.

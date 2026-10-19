@@ -41,6 +41,7 @@ import {
   AgentStatusBadge, OsIcon, ServerStatusBadge, TagList,
 } from '@/components/servers/shared'
 import { TagPicker } from '@/components/tags/TagPicker'
+import { LicenseCapacityNotice } from '@/components/license/LicenseCapacityNotice'
 import type {
   ServerFacets, ServerItem, ServerListResponse, ServerLiveMetrics, ServerStatus,
 } from '@/types/servers'
@@ -305,6 +306,8 @@ export function ServerInventoryPage() {
           </Button>
         </div>
       </div>
+
+      <LicenseCapacityNotice />
 
       {/* Status chips */}
       <div className="flex flex-wrap gap-1.5">

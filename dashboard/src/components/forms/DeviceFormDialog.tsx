@@ -18,6 +18,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
 import { TagPicker } from '@/components/tags/TagPicker'
+import { LicenseCapacityNotice } from '@/components/license/LicenseCapacityNotice'
+import {
+  invalidateLicenseCapacity, isBlocked, isLicenseCapacityError, useLicenseCapacity,
+} from '@/hooks/useLicenseCapacity'
 
 type Credential = {
   id: string; name: string; snmp_version: string;
@@ -86,6 +90,10 @@ export function DeviceFormDialog({
 
   const defaultCred = credentials?.find((c) => c.is_default)
 
+  // A new device takes one license node; editing never does.
+  const { data: capacity } = useLicenseCapacity(open && !isEdit)
+  const atCapacity = !isEdit && isBlocked(capacity)
+
   useEffect(() => {
     if (!open) return
     if (device) {
@@ -136,9 +144,13 @@ export function DeviceFormDialog({
       toast.success(isEdit ? 'Device updated' : 'Device created')
       qc.invalidateQueries({ queryKey: ['devices'] })
       if (isEdit) qc.invalidateQueries({ queryKey: ['device', device.id] })
+      else invalidateLicenseCapacity(qc)
       onOpenChange(false)
     },
-    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
+    onError: (e: any) => {
+      if (isLicenseCapacityError(e)) invalidateLicenseCapacity(qc)
+      toast.error(isLicenseCapacityError(e) ? 'License capacity reached' : 'Save failed', apiErrorMessage(e))
+    },
   })
 
   function submit(e: FormEvent) {
@@ -203,6 +215,7 @@ export function DeviceFormDialog({
         </DialogHeader>
 
         <form onSubmit={submit} className="space-y-4">
+          {!isEdit && <LicenseCapacityNotice capacity={capacity} />}
           <Tabs defaultValue="basic">
             <TabsList>
               <TabsTrigger value="basic">Basic</TabsTrigger>
@@ -423,7 +436,7 @@ export function DeviceFormDialog({
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={save.isPending}>
+            <Button type="submit" disabled={save.isPending || atCapacity} title={atCapacity ? capacity?.message : undefined}>
               {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               {isEdit ? 'Save changes' : 'Create device'}
             </Button>

@@ -46,6 +46,10 @@ import {
 import { FormField } from '@/components/ui/FormField'
 import { Switch } from '@/components/ui/Switch'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
+import { LicenseCapacityNotice } from '@/components/license/LicenseCapacityNotice'
+import {
+  invalidateLicenseCapacity, isBlocked, isLicenseCapacityError, useLicenseCapacity,
+} from '@/hooks/useLicenseCapacity'
 import {
   CredentialStatusBadge,
   PhaseLabel,
@@ -814,6 +818,15 @@ function ImportDrawer({
         ? selectedRows.length - serverClassCount + (enableMonitoring ? serverClassCount : 0)
         : 0
 
+  // Each new result is one license node (a server imported together with its
+  // device is the same machine); conflicts update or link existing rows.
+  const { data: capacity } = useLicenseCapacity(open)
+  // Blocked only when nothing selected could still go through (conflicts update or link).
+  const atCapacity = isBlocked(capacity) && newOnes > 0 && conflicts === 0
+  const overflow = capacity?.enforced && capacity.available != null && newOnes > capacity.available
+    ? newOnes - capacity.available
+    : 0
+
   const importMutation = useMutation({
     mutationFn: () =>
       discoveryApi.importResults(runId, {
@@ -835,6 +848,12 @@ function ImportDrawer({
       qc.invalidateQueries({ queryKey: ['discovery', 'profiles'] })
       qc.invalidateQueries({ queryKey: ['devices'] })
       qc.invalidateQueries({ queryKey: ['servers'] })
+      invalidateLicenseCapacity(qc)
+      const capped = resp.items.filter((i) => (i.error || '').includes('license capacity')
+        || (i.error || '').includes('license expired') || (i.error || '').includes('is not active'))
+      if (capped.length) {
+        toast.error('License capacity reached', `${capped.length} result${capped.length === 1 ? ' was' : 's were'} not imported. ${capped[0].error}`)
+      }
       const parts = []
       if (resp.devices_created) parts.push(`${resp.devices_created} device${resp.devices_created === 1 ? '' : 's'}`)
       if (resp.servers_created) parts.push(`${resp.servers_created} server${resp.servers_created === 1 ? '' : 's'}`)
@@ -844,7 +863,7 @@ function ImportDrawer({
       )
       onImported()
     },
-    onError: (e: any) => toast.error('Import failed', apiErrorMessage(e)),
+    onError: (e: any) => toast.error(isLicenseCapacityError(e) ? 'License capacity reached' : 'Import failed', apiErrorMessage(e)),
   })
 
   return (
@@ -857,6 +876,14 @@ function ImportDrawer({
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
+          <LicenseCapacityNotice capacity={capacity} />
+          {overflow > 0 && !isBlocked(capacity) && (
+            <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs" data-testid="license-capacity-overflow">
+              Only {capacity!.available} of the {newOnes} new results fit in your license
+              ({capacity!.used} of {capacity!.limit} nodes in use). The other {overflow} will not be
+              imported until the license is extended.
+            </p>
+          )}
           {/* Summary tiles */}
           <div className="grid grid-cols-5 gap-2">
             <Tile label="Total" value={selectedRows.length} />
@@ -988,7 +1015,8 @@ function ImportDrawer({
           </Button>
           <Button
             onClick={() => importMutation.mutate()}
-            disabled={selectedRows.length === 0 || importMutation.isPending}
+            disabled={selectedRows.length === 0 || importMutation.isPending || atCapacity}
+            title={atCapacity ? capacity?.message : undefined}
           >
             {importMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
             <Upload className="h-4 w-4" />

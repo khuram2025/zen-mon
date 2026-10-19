@@ -14,6 +14,7 @@ from app.models.user import User
 from app.models.device import Device
 from app.models.service_check import ServiceCheck
 from app.models.subscription import Subscription
+from app.services import license_capacity
 
 SUBSCRIPTION_JSON = Path("/opt/zenplus/updater/config/subscription.json")
 
@@ -236,6 +237,19 @@ async def get_subscription(
         },
         features=PLAN_FEATURES.get(sub.plan, []),
     )
+
+
+@router.get("/capacity")
+async def get_license_capacity(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """License node capacity: devices + servers against the licensed node count.
+
+    Any signed-in user may read it — the Add Device / Add Server flows use it to
+    explain why adding is disabled before the create request is refused.
+    """
+    return (await license_capacity.get_capacity(db)).as_dict()
 
 
 @router.get("/plans")

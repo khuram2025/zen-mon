@@ -18,7 +18,7 @@ from app.schemas.device import (
     DeviceMaintenanceCreate, DeviceMaintenanceResponse,
 )
 from app.schemas.metric import MetricResponse, StatusChangeEvent
-from app.services import device_service, metric_service
+from app.services import device_service, license_capacity, metric_service
 from app.services import device_status_explanation as explain
 from app.services import device_status_machine as dsm
 from app.services.audit_service import write_audit_log
@@ -561,6 +561,8 @@ async def create_device(
     # exporter: ownership follows the management IP (NF-04).
     await scoping.assert_tags_assignable(db, user, data.tags)
     await nf_access.authorize_device_address(db, user, data.ip_address)
+    # Each device is one license node; refused with 402 once the license is full.
+    await license_capacity.ensure_can_add(db)
     device = await device_service.create_device(db, data, user.id)
     return _device_to_response(device)
 
@@ -578,7 +580,11 @@ async def bulk_import_devices(
                 await nf_access.authorize_device_address(db, user, item.ip_address)
             except HTTPException as exc:
                 raise HTTPException(status_code=exc.status_code, detail=f"Row {i + 1}: {exc.detail}") from None
-    return await device_service.bulk_import_devices(db, data.devices, user.id)
+    # Imports up to the remaining license nodes; the rest are reported skipped.
+    budget = await license_capacity.reserve(db)
+    if data.devices and not budget.capacity.can_add:
+        raise license_capacity.capacity_error(budget.capacity)
+    return await device_service.bulk_import_devices(db, data.devices, user.id, budget=budget)
 
 
 @router.get("/export")
