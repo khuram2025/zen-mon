@@ -195,15 +195,7 @@ export function LicensesTabContent() {
                 <p className="text-sm font-semibold">{sub.name || sub.plan || '—'}</p>
                 {sub.plan && <p className="text-[10px] text-muted">{sub.plan}</p>}
               </div>
-              <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Subscription nodes</p>
-                <p className="text-sm font-semibold">
-                  {(sub.license?.used_node_count ?? 0)}/{(sub.license?.total_node_cap ?? 0)}
-                </p>
-                <p className="text-[10px] text-muted">
-                  {(sub.license?.available_nodes ?? 0)} available
-                </p>
-              </div>
+              <SubscriptionNodesTile sub={sub} />
               <div className="rounded-lg bg-surface2 p-4">
                 <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Status</p>
                 <div className="flex items-center gap-2">
@@ -366,6 +358,32 @@ function UsageTile({ label, value, hint }: { label: string; value: number; hint:
       <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">{label}</p>
       <p className="text-sm font-semibold tabular-nums">{value.toLocaleString()}</p>
       <p className="text-[10px] text-muted">{hint}</p>
+    </div>
+  )
+}
+
+/** Subscription-wide nodes, from the same calculation as Node capacity: this
+ * appliance's live devices + servers plus the other appliances' share from the
+ * last check-in. zentryc.com's own used_node_count only moves on a check-in,
+ * so it is the fallback while the capacity has not loaded. */
+function SubscriptionNodesTile({ sub }: { sub: RemoteSubscription }) {
+  const { data: cap } = useLicenseCapacity()
+  const live = cap && cap.pool_total != null && cap.pool_used != null
+  const used = live ? cap!.pool_used! : (sub.license?.used_node_count ?? 0)
+  const total = live ? cap!.pool_total! : (sub.license?.total_node_cap ?? 0)
+  const available = live ? (cap!.pool_available ?? 0) : (sub.license?.available_nodes ?? 0)
+  return (
+    <div className="rounded-lg bg-surface2 p-4" data-testid="subscription-nodes">
+      <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Subscription nodes</p>
+      <p className="text-sm font-semibold tabular-nums">{used}/{total}</p>
+      <p className="text-[10px] text-muted">{available} available</p>
+      {live && (
+        <p className="text-[10px] text-muted">
+          {cap!.pool_other_usage
+            ? `${cap!.used} here · ${cap!.pool_other_usage} on other appliances`
+            : `${cap!.usage.devices} devices + ${cap!.usage.servers} servers`}
+        </p>
+      )}
     </div>
   )
 }

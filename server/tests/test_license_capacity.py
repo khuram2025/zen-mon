@@ -87,6 +87,20 @@ def test_shared_pool_subtracts_the_other_appliances_usage():
     assert (cap.limit, cap.pool_total, cap.pool_other_usage, cap.available) == (60, 100, 40, 25)
 
 
+def test_pool_usage_is_live_not_the_last_check_in():
+    # zentryc.com said 58 used at the last check-in (reported 58 here); the
+    # appliance has added one since, so the subscription pool shows 59 now.
+    cap = lc.compute_capacity(snap(100, used=58, reported=58), usage(devices=52, servers=7), now=NOW)
+    body = cap.as_dict()
+    assert (body["pool_total"], body["pool_used"], body["pool_available"]) == (100, 59, 41)
+    shared = lc.compute_capacity(snap(100, used=70, reported=30), usage(devices=35), now=NOW).as_dict()
+    assert (shared["pool_used"], shared["pool_available"]) == (75, 25)
+    expired = lc.compute_capacity(snap(100, used=58, is_expired=True), usage(devices=59), now=NOW).as_dict()
+    assert (expired["pool_total"], expired["pool_used"]) == (100, 59)
+    assert lc.compute_capacity(None, usage(devices=3), now=NOW).as_dict()["pool_used"] is None
+    assert lc.compute_capacity(snap(0), usage(devices=3), now=NOW).as_dict()["pool_used"] is None
+
+
 def test_snapshot_without_a_reported_count_gives_this_appliance_the_whole_pool():
     cap = lc.compute_capacity(snap(100, used=70), usage(devices=35), now=NOW)
     assert (cap.limit, cap.pool_other_usage) == (100, 0)

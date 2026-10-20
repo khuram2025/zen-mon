@@ -24,6 +24,9 @@ export interface LicenseCapacity {
   }
   pool_total: number | null
   pool_other_usage: number | null
+  /** Subscription-wide usage now: other appliances (last check-in) + this one (live). */
+  pool_used: number | null
+  pool_available: number | null
   plan: string | null
   expires_at: string | null
   snapshot_at: string | null
