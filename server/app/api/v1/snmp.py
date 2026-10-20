@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionLocal, get_db
 from app.core.security import get_current_user, require_permission
 from app.core.snmp_oid import normalize_oid
+from app.services import license_capacity
 from app.models.user import User
 from app.schemas.snmp import (
     DiscoveryImportRequest,
@@ -662,9 +663,20 @@ async def import_discovery_results(
     skipped = 0
     errors: list[str] = []
 
+    # Every imported result is a new device, so one license node each.
+    budget = await license_capacity.reserve(db)
+    if not budget.capacity.can_add and any(
+        not (r["already_known"] or r["imported"]) for r in rows
+    ):
+        raise license_capacity.capacity_error(budget.capacity)
+
     for r in rows:
         if r["already_known"] or r["imported"]:
             skipped += 1
+            continue
+        if not budget.take(1):
+            skipped += 1
+            errors.append(f"{r['ip_address']}: {budget.exhausted_message}")
             continue
         try:
             dev = (await db.execute(

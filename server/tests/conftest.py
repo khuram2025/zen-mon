@@ -214,6 +214,23 @@ def _isolated_storage_watchdog_state(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _unmetered_license_for_fake_dbs(monkeypatch, tmp_path_factory):
+    """Never read the appliance's real subscription snapshot, and do not ask
+    minimal fake DBs the license node-count query: create routes see an
+    unmetered license. test_license_capacity restores the real count and
+    writes its own snapshot."""
+    from app.services import license_capacity
+
+    monkeypatch.setattr(license_capacity, "SUBSCRIPTION_PATH",
+                        tmp_path_factory.mktemp("zenplus-license") / "subscription.json")
+
+    async def unmetered(db, *, snapshot=None):
+        return license_capacity.compute_capacity({"plan": "test"}, license_capacity.NodeUsage())
+
+    monkeypatch.setattr(license_capacity, "get_capacity", unmetered)
+
+
+@pytest.fixture(autouse=True)
 def _builtin_roles_for_minimal_fake_dbs(monkeypatch):
     """Authorization now fails closed when the roles lookup yields nothing.
     Many tests drive routes with a minimal fake DB that cannot answer

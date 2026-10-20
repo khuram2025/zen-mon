@@ -7,7 +7,7 @@
  *         agentless path → reminder to assign sensor credentials.
  */
 import { useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
   AlertCircle,
@@ -30,6 +30,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/Badge'
 import { toast } from '@/components/ui/Toast'
 import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
+import { LicenseCapacityNotice } from '@/components/license/LicenseCapacityNotice'
+import {
+  invalidateLicenseCapacity, isBlocked, isLicenseCapacityError, useLicenseCapacity,
+} from '@/hooks/useLicenseCapacity'
 import type { Server } from '@/types/server'
 
 type Mode = 'agent_windows' | 'agentless_wmi' | 'agentless_winrm' | 'snmp' | 'agent_linux' | 'ssh'
@@ -109,7 +113,11 @@ const MODE_OPTIONS: Array<{
 
 export default function AddServer() {
   const navigate = useNavigate()
+  const qc = useQueryClient()
   const [step, setStep] = useState<1 | 2 | 3>(1)
+  // Every new server is one license node.
+  const { data: capacity } = useLicenseCapacity()
+  const atCapacity = isBlocked(capacity)
   const [mode, setMode] = useState<Mode | null>(null)
 
   // Step 2 state
@@ -146,8 +154,12 @@ export default function AddServer() {
     onSuccess: (server) => {
       setCreatedServerId(server.id)
       setStep(3)
+      invalidateLicenseCapacity(qc)
     },
-    onError: (err) => toast.error(apiErrorMessage(err)),
+    onError: (err) => {
+      if (isLicenseCapacityError(err)) invalidateLicenseCapacity(qc)
+      toast.error(apiErrorMessage(err))
+    },
   })
 
   return (
@@ -167,6 +179,8 @@ export default function AddServer() {
         </div>
         <Stepper step={step} />
       </div>
+
+      {step !== 3 && <LicenseCapacityNotice capacity={capacity} />}
 
       {step === 1 ? (
         <div className="grid gap-3 md:grid-cols-2">
@@ -204,7 +218,7 @@ export default function AddServer() {
             )
           })}
           <div className="md:col-span-2 flex justify-end">
-            <Button onClick={() => setStep(2)} disabled={!mode}>
+            <Button onClick={() => setStep(2)} disabled={!mode || atCapacity} title={atCapacity ? capacity?.message : undefined}>
               Continue
               <ArrowRight className="h-3.5 w-3.5" />
             </Button>
@@ -282,7 +296,11 @@ export default function AddServer() {
                 <ArrowLeft className="h-3.5 w-3.5" />
                 Back
               </Button>
-              <Button onClick={() => createServerM.mutate()} disabled={!displayName || createServerM.isPending}>
+              <Button
+                onClick={() => createServerM.mutate()}
+                disabled={!displayName || createServerM.isPending || atCapacity}
+                title={atCapacity ? capacity?.message : undefined}
+              >
                 {createServerM.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
                 Create server
                 <ArrowRight className="h-3.5 w-3.5" />

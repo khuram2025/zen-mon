@@ -101,6 +101,8 @@ SELF_ROUTES: frozenset[str] = frozenset({
     "/api/v1/system/time",
     "/api/v1/subscription",
     "/api/v1/subscription/plans",
+    # License node capacity: Add Device/Server flows explain a full license to anyone.
+    "/api/v1/subscription/capacity",
     "/api/v1/subscription/activate",
     "/api/v1/system/security/tls/certificate/download",
 })

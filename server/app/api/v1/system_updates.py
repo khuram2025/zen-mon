@@ -18,6 +18,7 @@ from app.core.database import get_db
 from app.core.security import require_admin_user
 from app.models.user import User
 from app.services.audit_service import write_audit_log
+from app.services.license_capacity import annotate_snapshot
 
 router = APIRouter(prefix="/system", tags=["System Updates"])
 
@@ -171,21 +172,18 @@ def _save_subscription(data: dict) -> None:
 
 
 async def _count_nodes() -> int:
-    """Local node count = devices + service_checks. One node per device or service.
+    """License node count: devices + servers, a linked device/server pair once.
 
-    Run inside a fresh session so the caller doesn't have to thread one in,
-    and silently degrade to 0 on DB failure — license sync should never block
-    on a transient query error.
+    The definition lives in app.services.license_capacity so the count
+    reported to zentryc.com is the count this appliance enforces. Runs in a
+    fresh session and degrades to 0 on DB failure — license sync should never
+    block on a transient query error.
     """
-    from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
+    from app.services.license_capacity import count_nodes
     try:
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text("SELECT (SELECT COUNT(*) FROM devices) "
-                     "+ (SELECT COUNT(*) FROM service_checks)")
-            )
-            return int(result.scalar_one() or 0)
+            return await count_nodes(session)
     except Exception:
         return 0
 
@@ -672,7 +670,9 @@ async def register_appliance(
             if ci.status_code == 200:
                 fresh = ci.json().get("subscription")
                 if fresh:
-                    _save_subscription(fresh)
+                    # Remember what was reported so the shared node pool can be
+                    # split into this appliance's and the others' usage.
+                    _save_subscription(annotate_snapshot(fresh, node_count))
                     subscription = fresh
     except Exception:
         pass  # best-effort — registration already succeeded
@@ -844,7 +844,7 @@ async def refresh_subscription(
         data = resp.json()
         subscription = data.get("subscription")
         if subscription:
-            _save_subscription(subscription)
+            _save_subscription(annotate_snapshot(subscription, node_count))
 
         await write_audit_log(
             db,

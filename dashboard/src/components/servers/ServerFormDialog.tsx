@@ -17,6 +17,10 @@ import {
 } from '@/components/ui/Select'
 import { Textarea } from '@/components/ui/Textarea'
 import { toast } from '@/components/ui/Toast'
+import { LicenseCapacityNotice } from '@/components/license/LicenseCapacityNotice'
+import {
+  invalidateLicenseCapacity, isBlocked, isLicenseCapacityError, useLicenseCapacity,
+} from '@/hooks/useLicenseCapacity'
 import type { CollectionMode, OsType, ServerItem } from '@/types/servers'
 
 const OS_OPTIONS: { value: OsType; label: string }[] = [
@@ -49,6 +53,9 @@ export function ServerFormDialog({
 }) {
   const qc = useQueryClient()
   const editing = Boolean(server)
+  // A new server takes one license node; editing never does.
+  const { data: capacity } = useLicenseCapacity(open && !editing)
+  const atCapacity = !editing && isBlocked(capacity)
 
   const [displayName, setDisplayName] = useState('')
   const [hostname, setHostname] = useState('')
@@ -121,9 +128,13 @@ export function ServerFormDialog({
     onSuccess: () => {
       toast.success(editing ? 'Server updated' : 'Server registered')
       qc.invalidateQueries({ queryKey: ['servers'] })
+      if (!editing) invalidateLicenseCapacity(qc)
       onOpenChange(false)
     },
-    onError: (e) => toast.error('Save failed', apiErrorMessage(e)),
+    onError: (e) => {
+      if (isLicenseCapacityError(e)) invalidateLicenseCapacity(qc)
+      toast.error(isLicenseCapacityError(e) ? 'License capacity reached' : 'Save failed', apiErrorMessage(e))
+    },
   })
 
   return (
@@ -140,6 +151,8 @@ export function ServerFormDialog({
               : 'Manually register a server (for agentless monitoring or pre-staging). Agent installs register automatically.'}
           </DialogDescription>
         </DialogHeader>
+
+        {!editing && <LicenseCapacityNotice capacity={capacity} />}
 
         <div className="grid grid-cols-2 gap-4">
           <div className="col-span-2 space-y-1.5">
@@ -272,7 +285,11 @@ export function ServerFormDialog({
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={() => save.mutate()} disabled={!displayName.trim() || save.isPending}>
+          <Button
+            onClick={() => save.mutate()}
+            disabled={!displayName.trim() || save.isPending || atCapacity}
+            title={atCapacity ? capacity?.message : undefined}
+          >
             {save.isPending ? 'Saving…' : editing ? 'Save changes' : 'Register server'}
           </Button>
         </DialogFooter>

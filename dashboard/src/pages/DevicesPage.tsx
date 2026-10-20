@@ -74,6 +74,7 @@ import {
   SelectItem,
 } from '@/components/ui/Select'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
+import { LicenseCapacityNotice } from '@/components/license/LicenseCapacityNotice'
 import { toast } from '@/components/ui/Toast'
 import { TagBadge } from '@/components/tags/TagBadge'
 import { TagPicker } from '@/components/tags/TagPicker'
@@ -816,6 +817,8 @@ export function DevicesPage() {
           </Button>
         </div>
       </div>
+
+      <LicenseCapacityNotice />
 
       {/* ───────────────────── KPI row ───────────────────── */}
       {scopeFilterActive && (

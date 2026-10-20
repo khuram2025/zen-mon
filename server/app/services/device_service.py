@@ -454,7 +454,10 @@ async def bulk_import_devices(
     db: AsyncSession,
     items: list[DeviceBulkImportItem],
     user_id: UUID | None = None,
+    budget=None,
 ) -> BulkImportResult:
+    """Create the rows that are not duplicates. ``budget`` (license_capacity.
+    NodeBudget) stops creating once the license is full; later rows are skipped."""
     created = 0
     skipped = 0
     errors = []
@@ -478,6 +481,11 @@ async def bulk_import_devices(
             if dup_result.scalar_one_or_none():
                 skipped += 1
                 errors.append(f"Row {i+1}: IP {item.ip_address} already exists (skipped)")
+                continue
+
+            if budget is not None and not budget.take(1):
+                skipped += 1
+                errors.append(f"Row {i+1}: {budget.exhausted_message} (skipped)")
                 continue
 
             device = Device(

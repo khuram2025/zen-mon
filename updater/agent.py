@@ -177,10 +177,15 @@ def checkin(cfg: AgentConfig) -> dict | None:
         logger.error("Check-in failed: %s", e)
         return None
 
-    # Persist subscription data from check-in response
+    # Persist subscription data from check-in response, with the node count
+    # it answers: the API splits the shared node pool into this appliance's
+    # usage and the other appliances' with it (license capacity).
+    # A count of 0 is also what a failed count query reports, so it is not
+    # recorded (the API then treats the whole pool as this appliance's).
     if data.get("subscription"):
-        save_subscription(data["subscription"])
         sub = data["subscription"]
+        reported = int(inventory.get("node_count") or 0)
+        save_subscription({**sub, "reported_node_count": reported} if reported > 0 else sub)
         if not sub.get("is_active") or sub.get("is_expired"):
             logger.warning(
                 "Subscription issue: active=%s, expired=%s, expires_at=%s",

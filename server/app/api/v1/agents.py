@@ -60,7 +60,7 @@ from app.schemas.agent import (
     AgentResultsResponse,
     NetworkCaptureUpload,
 )
-from app.services import package_digest
+from app.services import license_capacity, package_digest
 from app.services import storage_backpressure
 from app.services.agent_package_names import (
     FLAVOR_FULL,
@@ -462,6 +462,9 @@ async def _ensure_pending_server(data: AgentEnrollRequest, db: AsyncSession, age
     )).first()
     if existing:
         return existing[0]
+    # A new machine is a new license node; at capacity the agent's enrollment
+    # is refused (402) and it retries on its normal schedule.
+    await license_capacity.ensure_can_add(db)
     row = (await db.execute(
         text("""INSERT INTO servers
                   (display_name, hostname, fqdn, primary_ip, os_type, os_name,
@@ -734,6 +737,7 @@ async def enroll(
         if existing:
             server_id = existing[0]
         else:
+            await license_capacity.ensure_can_add(db)
             ins = (await db.execute(
                 text("""INSERT INTO servers (display_name, hostname, fqdn, primary_ip, site_id,
                                               os_type, os_name, os_version, kernel_or_build,
