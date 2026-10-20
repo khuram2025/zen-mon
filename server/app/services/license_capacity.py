@@ -101,9 +101,21 @@ class LicenseCapacity:
     snapshot_at: Optional[str] = None
     message: str = ""
 
+    @property
+    def pool_used(self) -> Optional[int]:
+        """Subscription-wide usage as of now: the other appliances' share from
+        the last check-in plus this appliance's live count. zentryc.com's own
+        ``used_node_count`` only moves on a check-in."""
+        if self.pool_total is None:
+            return None
+        return (self.pool_other_usage or 0) + self.used
+
     def as_dict(self) -> dict[str, Any]:
         out = asdict(self)
         out["usage"] = {**asdict(self.usage), "nodes": self.usage.nodes}
+        out["pool_used"] = self.pool_used
+        out["pool_available"] = (None if self.pool_total is None
+                                 else max(0, self.pool_total - self.pool_used))
         return out
 
 
@@ -185,15 +197,6 @@ def compute_capacity(
         expired = bool(snapshot.get("is_expired")) or (expiry is not None and expiry <= now)
         inactive = snapshot.get("is_active") is False
         meta = {"plan": plan, "expires_at": expires_at, "snapshot_at": snapshot_at}
-        if expired or inactive:
-            state = "expired" if expired else "inactive"
-            word = "expired" if expired else "is not active"
-            return LicenseCapacity(
-                state=state, source="license", enforced=True, can_add=False,
-                limit=None, available=0, **common, **meta,
-                message=(f"Your license {word}. Existing devices and servers are still "
-                         "monitored, but no new ones can be added until the license is renewed."),
-            )
         lic = snapshot.get("license") if isinstance(snapshot.get("license"), dict) else {}
         pool_total = _int(lic.get("total_node_cap"))
         pool_used = _int(lic.get("used_node_count"))
@@ -201,15 +204,27 @@ def compute_capacity(
             pool_total = _int(snapshot.get("max_devices"))
             pool_used = None
         if not pool_total or pool_total <= 0:
+            pool_total = None
+        reported = _int(snapshot.get("reported_node_count"))
+        other = 0
+        if pool_used is not None and reported is not None:
+            other = max(0, pool_used - reported)
+        pool = {"pool_total": pool_total, "pool_other_usage": other if pool_total else None}
+        if expired or inactive:
+            state = "expired" if expired else "inactive"
+            word = "expired" if expired else "is not active"
+            return LicenseCapacity(
+                state=state, source="license", enforced=True, can_add=False,
+                limit=None, available=0, **common, **meta, **pool,
+                message=(f"Your license {word}. Existing devices and servers are still "
+                         "monitored, but no new ones can be added until the license is renewed."),
+            )
+        if pool_total is None:
             return LicenseCapacity(
                 state="unmetered", source="unmetered", enforced=False, can_add=True,
                 limit=None, available=None, **common, **meta,
                 message="The license server does not set a node limit for this appliance.",
             )
-        reported = _int(snapshot.get("reported_node_count"))
-        other = 0
-        if pool_used is not None and reported is not None:
-            other = max(0, pool_used - reported)
         limit = max(0, pool_total - other)
         source = "license"
 

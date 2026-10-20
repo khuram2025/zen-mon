@@ -65,6 +65,11 @@ are deleted.
 
 * `GET /api/v1/subscription/capacity` (any signed-in user) returns the state, limit, usage
   breakdown and message. `dashboard/src/hooks/useLicenseCapacity.ts` reads it.
+* The capacity response also carries `pool_used` / `pool_available`: the other
+  appliances' share from the last check-in plus this appliance's live count. The
+  Subscription card's **Subscription nodes** tile uses them, so it always agrees with
+  Node capacity; zentryc.com's own `used_node_count` only moves on a check-in (Refresh
+  pushes one) and is shown only until the capacity has loaded.
 * Settings > General > Licenses shows the **Node capacity** card: used / limit meter,
   devices, servers, linked servers and controller-managed children, the shared-pool split,
   and the capacity message.
