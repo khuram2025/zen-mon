@@ -89,7 +89,7 @@ def test_api_stores_the_zone_and_an_organisation_change_does_not_move_it(pg_db):
     with api_client(pg_db, role="admin", persist_user=True) as client:
         r = client.post("/api/v1/report-schedules", json={
             "name": "NOC Daily Briefing 08:00", "report_type": "availability", "period": "yesterday",
-            "format": "none", "frequency": "daily", "hour": 8, "minute": 0})
+            "format": "pdf", "frequency": "daily", "hour": 8, "minute": 0})
         assert r.status_code == 201, r.text
         body = r.json()
         sid = body["id"]

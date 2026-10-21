@@ -1436,7 +1436,8 @@ async def simulate_alert_rule(
                     server = smtplib.SMTP_SSL(gw_cfg["host"], gw_cfg.get("port", 465), timeout=10, context=ssl.create_default_context())
                 else:
                     server = smtplib.SMTP(gw_cfg["host"], gw_cfg.get("port", 587), timeout=10)
-                    server.starttls(context=ssl.create_default_context())
+                    from app.core.smtp_tls import starttls_if_needed
+                    starttls_if_needed(server, enc)
                 if gw_cfg.get("username"):
                     server.login(gw_cfg["username"], gw_cfg.get("password", ""))
                 server.sendmail(gw_cfg.get("from_email", ""), recipient_list, msg.as_string())

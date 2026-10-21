@@ -350,15 +350,19 @@ async def availability_by_group(ctx: SectionCtx) -> dict:
          "accent": "warning" if unmeasured_nodes else "neutral",
          "subtitle": "No ping samples in the period"},
     ]
+    episodes = not na.get("outages_failed")
     rows = [[name, f"{g['nodes']:,}", f"{g['measured']:,}", _fmt_avail(g["avail"]),
              f"{g['down_min']:,.0f} min" if g["measured"] else "—",
-             f"{g['outages']:,}", f"{g['down_now']:,}",
+             f"{g['outages']:,}" if episodes else "—", f"{g['down_now']:,}",
              f"{g['worst'][0]} ({_fmt_avail(g['worst'][1])})" if g["worst"] else "—"]
             for name, g in shown]
     notes = ["Each row is weighted by ping samples (total up samples ÷ total samples), "
-             "not a mean of node percentages; planned maintenance is excluded."]
+             "not a mean of node percentages; planned maintenance is excluded. Unreachable time "
+             "counts every failed probe, isolated losses included; Outages are confirmed episodes."]
     if na.get("maint_excluded_min"):
         notes.append(f"Planned maintenance excluded: {na['maint_excluded_min']:,.0f} device-minutes.")
+    if not episodes:
+        notes.append("Outage episodes could not be loaded for this run; outage counts show —.")
     if group_by == "site":
         notes.append("Monitoring site is the site of each node's primary poller; "
                      "'Controller' means the central appliance polls it.")
@@ -378,7 +382,7 @@ async def availability_by_group(ctx: SectionCtx) -> dict:
                                        for k, g in measured[:top_n]]}}] if measured else [],
         tables=[{"title": _truncated(f"By {head.lower()}", len(shown), len(ordered),
                                      GROUP_PLURAL[group_by]),
-                 "headers": [head, "Nodes", "Measured", "Availability", "Downtime", "Outages",
+                 "headers": [head, "Nodes", "Measured", "Availability", "Unreachable", "Outages",
                              "Down now", "Lowest node"],
                  "styles": ["text", "num", "num", "pct-bar", "num", "num", "num", "text"],
                  "rows": rows}],
@@ -1229,9 +1233,9 @@ template(
     "Node availability rolled up by device group, location and monitoring site — weighted by ping "
     "samples, lowest first, with the configured target and the weakest node in each.",
     "availability",
-    [S("availability_kpis"), S("availability_by_group", None, group_by="group"),
-     S("availability_by_group", None, group_by="location"),
-     S("availability_by_group", None, group_by="site")],
+    [S("availability_kpis"), S("availability_by_group", GROUP_TITLES["group"], group_by="group"),
+     S("availability_by_group", GROUP_TITLES["location"], group_by="location"),
+     S("availability_by_group", GROUP_TITLES["site"], group_by="site")],
     audience=("IT manager", "Executive", "Network engineer"),
     tags=("availability", "sla", "sites", "groups"), default_period="previous_month",
     frequency="monthly", icon="Layers", featured=True,
@@ -1265,8 +1269,9 @@ template(
     "Round-trip time, packet loss and jitter per node: the worst p95 latency, the lossiest and the "
     "most jittery nodes, with trends and the change against the previous period.",
     "performance",
-    [S("device_latency_loss", None, metric="rtt"), S("device_latency_loss", None, metric="loss"),
-     S("device_latency_loss", None, metric="jitter")],
+    [S("device_latency_loss", "Top 10 Nodes by Latency (p95)", metric="rtt"),
+     S("device_latency_loss", "Top 10 Nodes by Packet Loss", metric="loss"),
+     S("device_latency_loss", "Top 10 Nodes by Jitter", metric="jitter")],
     audience=("Network engineer", "NOC operator"), tags=("latency", "packet loss", "jitter", "icmp"),
     default_period="last_7d", frequency="weekly", icon="Gauge", featured=True,
 )

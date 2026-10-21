@@ -16,7 +16,8 @@ concurrency:
 jobs:
   server:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # The suite alone takes ~14 min on hosted runners (7,100+ tests).
+    timeout-minutes: 25
     env:
       ZENPLUS_DIR: ${{ github.workspace }}
       ZENPLUS_API: http://127.0.0.1:1

@@ -1586,8 +1586,8 @@ template(
     "Where page-load time goes — DNS, connect, TLS, waiting, server, database, download and "
     "browser processing — for page loads and API calls, with the slowest pages and endpoints.",
     "experience",
-    [S("rum_load_breakdown", None, target="page_loads", top_n=15),
-     S("rum_load_breakdown", None, target="api", top_n=15)],
+    [S("rum_load_breakdown", "Page Load Breakdown", target="page_loads", top_n=15),
+     S("rum_load_breakdown", "API Call Breakdown", target="api", top_n=15)],
     audience=("Application owner", "Systems engineer", "Network engineer"),
     tags=("rum", "page load", "ttfb", "server timing"),
     default_period="last_7d", frequency="weekly", icon="BarChart3",

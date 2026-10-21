@@ -8,9 +8,11 @@
  * a later organisation change does not move it), day_of_week is
  * 1=Monday … 7=Sunday, and a monthly day beyond the month's length runs on
  * its last day. Unit-tested by scripts/test-report-schedules.mjs.
+ *
+ * Delivery, runs, links and retention follow docs/reports-delivery.md.
  */
 import { formatDate, formatDateTime, formatTime, isValidTimezone, zoneLabel, type Branding } from '@/lib/branding'
-import { PERIODS, PERIOD_LABEL, isPeriodId, periodRange, zonedToUtc } from '../periods'
+import { PERIODS, PERIOD_LABEL, WORK_WEEK_DAYS, isPeriodId, periodRange, zonedToUtc } from '../periods'
 import type { CatalogTemplate, CustomTemplate, PeriodId, ReportCatalog, ScheduleFormat } from '../types'
 
 /* ------------------------------------------------------------------ */
@@ -22,6 +24,10 @@ export type ScheduleFrequency = 'daily' | 'weekly' | 'monthly'
 export type ScheduleFilters = {
   netflow?: Record<string, unknown>
   device_ids?: string[]
+  /** Device groups, locations and device types (every chosen filter must match). */
+  group_ids?: string[]
+  locations?: string[]
+  device_types?: string[]
   application_id?: string | null
   /** List API: the stored NetFlow scope is hidden from this caller. */
   netflow_withheld?: boolean
@@ -74,6 +80,26 @@ export type ReportSchedule = {
   netflow_withheld?: boolean
   created_at?: string | null
   updated_at?: string | null
+  // Email options (docs/reports-delivery.md).
+  /** No email when the report has no data; the run is recorded as skipped. */
+  skip_when_empty?: boolean
+  /** Subject with {title}, {period} and {date}; null = the standard subject. */
+  subject_template?: string | null
+  reply_to?: string | null
+  /** One message to all direct recipients (they see each other); cc applies only then. */
+  group_send?: boolean
+  cc?: string[]
+  /** The time written in the name when it differs from the stored time. */
+  suggested_time?: { hour: number; minute: number } | null
+  /** Enabled, due more than 10 minutes ago and not running. */
+  overdue?: boolean
+  /** A classic (legacy engine) report type; it keeps running but can no longer be created. */
+  is_legacy?: boolean
+  /** The template key that replaces a classic report type. */
+  replacement?: string | null
+  /** Recipients and cc are hidden from this caller (not a report manager); recipient_count says how many. */
+  recipients_withheld?: boolean
+  recipient_count?: number | null
 }
 
 /** Body for POST /report-schedules and PUT /report-schedules/{id}. */
@@ -95,19 +121,75 @@ export type ScheduleBody = {
   /** null = the organisation time zone (the server stores it explicitly). */
   timezone: string | null
   notify_channels: string[]
-  recipients: string[]
+  /** Omitted on update when the stored recipients are withheld from the caller, so they are kept. */
+  recipients?: string[]
+  skip_when_empty: boolean
+  subject_template: string | null
+  reply_to: string | null
+  group_send: boolean
+  /** Omitted with recipients when they are withheld. */
+  cc?: string[]
 }
 
-/** One run in GET /report-schedules/{id}/runs. */
+export type RunKind = 'scheduled' | 'manual' | 'retry'
+
+/**
+ * One run in GET /reports/runs and GET /report-schedules/{id}/runs.
+ * A run starts as `running` and ends `success`, `partial`, `failed` or `skipped`.
+ */
 export type ScheduleRun = {
   id: string
   token: string | null
   token_withheld?: boolean
   title?: string | null
+  report_type?: string | null
+  period?: string | null
   status: string
+  /** Empty when the addresses are withheld from the caller; delivered_count still counts them. */
   delivered_to: string[]
+  delivered_count?: number
   error?: string | null
   generated_at: string | null
+  schedule_id?: string | null
+  schedule_name?: string | null
+  kind?: RunKind | string | null
+  /** Run notes: failed sections, a left-out attachment, failed targets (list or object). */
+  notes?: unknown
+  /** When the share link stops working; null = never. Revoking sets it to the revoke time. */
+  expires_at?: string | null
+  /** The link no longer works (expired or revoked: the server cannot tell them apart). */
+  revoked?: boolean
+  has_artifact?: boolean
+  artifact_name?: string | null
+  retry_count?: number | null
+  next_retry_at?: string | null
+  /** Channels and addresses still owed a delivery: [{kind, name, error}]. */
+  failed_targets?: unknown
+  /** The caller may retry the failed targets (a report manager and something to retry). */
+  can_retry?: boolean
+  window_from?: string | null
+  window_to?: string | null
+}
+
+/** GET /reports/runs. */
+export type RunsPage = { data: ScheduleRun[]; total: number; limit: number; offset: number }
+
+/** GET /report-schedules/status. */
+export type ScheduleStatus = {
+  scheduler_last_tick_at: string | null
+  scheduler_healthy: boolean
+  overdue_count: number
+  share_links_available: boolean
+  settings?: Partial<ReportSettings> | null
+}
+
+/** GET / PUT /reports/settings (system_settings['reports']). */
+export type ReportSettings = {
+  link_expiry_days: number
+  run_retention_days: number
+  artifact_retention_days: number
+  max_attachment_mb: number
+  retry_attempts: number
 }
 
 export type NotificationChannel = { id: string; name: string; type: string; enabled?: boolean }
@@ -131,6 +213,13 @@ export type ScheduleForm = {
   timezone: string
   notify_channels: string[]
   recipients: string[]
+  skip_when_empty: boolean
+  /** '' = the standard subject. */
+  subject_template: string
+  /** '' = no reply-to. */
+  reply_to: string
+  group_send: boolean
+  cc: string[]
 }
 
 /* ------------------------------------------------------------------ */
@@ -161,9 +250,13 @@ export function weekdaysFrom(weekStart: string | undefined): typeof WEEKDAYS {
   return [...WEEKDAYS.slice(i), ...WEEKDAYS.slice(0, i)]
 }
 
-/** Highest monthly day offered: every month has it, so no month is skipped. */
-export const MAX_MONTH_DAY = 28
+/** Highest monthly day; days beyond a month's length run on its last day (the server clamps the same way). */
+export const MAX_MONTH_DAY = 31
 export const MAX_RECIPIENTS = 50
+export const MAX_CC = 50
+export const MAX_SUBJECT = 255
+/** Placeholders a subject template may use. */
+export const SUBJECT_PLACEHOLDERS = ['title', 'period', 'date'] as const
 
 export const FORMAT_META: Record<ScheduleFormat, { label: string; hint: string }> = {
   pdf: { label: 'PDF', hint: 'Attached as a PDF document' },
@@ -175,8 +268,13 @@ export const FORMAT_META: Record<ScheduleFormat, { label: string; hint: string }
 
 /** Attachment formats a report engine can deliver. */
 export function formatsForEngine(engine: 'legacy' | 'sections'): ScheduleFormat[] {
-  return engine === 'legacy' ? ['pdf', 'excel', 'csv', 'none'] : ['pdf', 'excel', 'html', 'none']
+  return engine === 'legacy' ? ['pdf', 'excel', 'csv', 'none'] : ['pdf', 'excel', 'html', 'csv', 'none']
 }
+
+/** Settings → General → Company holds the Appliance URL that report links use. */
+export const BASE_URL_SETTINGS_PATH = '/settings/general?tab=company'
+export const NO_LINK_EXPLANATION =
+  'Report emails cannot include a link until the Appliance URL is set in Settings → General → Company.'
 
 export function formatLabel(format: string | null | undefined): string {
   return (format && FORMAT_META[format as ScheduleFormat]?.label) || (format ? format.toUpperCase() : '—')
@@ -186,11 +284,36 @@ export function periodLabel(period: string | null | undefined): string {
   return (period && PERIOD_LABEL[period]) || (period ? period.replace(/_/g, ' ') : '—')
 }
 
-/** Report period suggested for a frequency: each run covers the last complete interval. */
-export function suggestedPeriod(frequency: string): PeriodId {
-  if (frequency === 'weekly') return 'previous_week'
-  if (frequency === 'monthly') return 'previous_month'
-  return 'yesterday'
+/** ISO weekday (1 = Monday … 7 = Sunday) the organisation week starts on. */
+export function weekStartIso(weekStart: string | undefined | null): number {
+  return weekStart === 'sunday' ? 7 : weekStart === 'saturday' ? 6 : 1
+}
+
+/** ISO weekday after the organisation's work week ends (Sunday start → Friday). */
+export function dayAfterWorkWeek(weekStart: string | undefined | null): number {
+  return ((weekStartIso(weekStart) - 1 + WORK_WEEK_DAYS) % 7) + 1
+}
+
+type SuggestOpts = { dayOfWeek?: number | null; weekStart?: string | null }
+
+/**
+ * Periods suggested for a schedule, best first: each run covers the last
+ * complete interval. A weekly run on the organisation's first day of the
+ * week gets "Previous week"; on any other day "Previous week" would skip the
+ * days just completed, so "Last 7 days" is suggested instead. A weekly run on
+ * the day after the work week ends also gets "Previous work week".
+ */
+export function suggestedPeriods(frequency: string, opts: SuggestOpts = {}): PeriodId[] {
+  if (frequency === 'monthly') return ['previous_month']
+  if (frequency !== 'weekly') return ['yesterday']
+  const day = Number(opts.dayOfWeek) || 0
+  if (!(day >= 1 && day <= 7) || day === weekStartIso(opts.weekStart)) return ['previous_week']
+  return day === dayAfterWorkWeek(opts.weekStart) ? ['last_7d', 'previous_work_week'] : ['last_7d']
+}
+
+/** The best suggested period (see suggestedPeriods). */
+export function suggestedPeriod(frequency: string, opts: SuggestOpts = {}): PeriodId {
+  return suggestedPeriods(frequency, opts)[0]
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -221,8 +344,8 @@ type Timing = Pick<ReportSchedule, 'frequency' | 'hour' | 'minute' | 'day_of_wee
 export function frequencyText(s: Timing, timeFormat: string = '24h'): string {
   const at = clockLabel(s.hour ?? 0, s.minute ?? 0, timeFormat)
   if (s.frequency === 'weekly') {
-    const day = WEEKDAYS.find((d) => d.id === (s.day_of_week || 1))?.long ?? 'Monday'
-    return `Weekly on ${day} at ${at}`
+    const day = WEEKDAYS.find((d) => d.id === s.day_of_week)?.long
+    return day ? `Weekly on ${day} at ${at}` : `Weekly at ${at}, day not chosen`
   }
   if (s.frequency === 'monthly') return `Monthly on day ${s.day_of_month || 1} at ${at}`
   return `Daily at ${at}`
@@ -392,7 +515,7 @@ export function runLabel(value: Date, b: Fmt): string {
 }
 
 /** Periods that end before the run starts and cover whole days. */
-const COMPLETE_PERIODS = new Set<PeriodId>(['yesterday', 'previous_week', 'previous_month', 'previous_quarter'])
+const COMPLETE_PERIODS = new Set<PeriodId>(['yesterday', 'previous_week', 'previous_work_week', 'previous_month', 'previous_quarter'])
 
 /**
  * The data window a run at `runAt` covers: "2026-09-01 – 2026-09-30 (GMT+3)"
@@ -423,10 +546,33 @@ export function crossesClockChange(tz: string, at: Date, ref: Date): boolean {
 /*  Recipients                                                         */
 /* ------------------------------------------------------------------ */
 
-const EMAIL_RE = /^[^\s@,;<>()[\]"]+@[^\s@,;<>()[\]"]+\.[^\s@,;<>()[\]"]{2,}$/
+// report_scheduler._EMAIL_RE / is_email: a plain addr-spec, no display name.
+const EMAIL_RE =
+  /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/
 
 export function isEmail(value: string): boolean {
-  return value.length <= 254 && EMAIL_RE.test(value)
+  if (value.length > 254 || !EMAIL_RE.test(value)) return false
+  const local = value.split('@', 1)[0]
+  return !local.includes('..') && !local.startsWith('.') && !local.endsWith('.')
+}
+
+/* ------------------------------------------------------------------ */
+/*  Subject                                                            */
+/* ------------------------------------------------------------------ */
+
+/** Placeholders in a subject template other than {title}, {period} and {date}. */
+export function unknownPlaceholders(template: string): string[] {
+  const out: string[] = []
+  for (const m of template.matchAll(/\{([^{}]*)\}/g)) {
+    const name = m[1].trim()
+    if (!(SUBJECT_PLACEHOLDERS as readonly string[]).includes(name) && !out.includes(m[0])) out.push(m[0])
+  }
+  return out
+}
+
+/** The subject a template produces; unknown placeholders stay as written. */
+export function renderSubject(template: string, values: { title: string; period: string; date: string }): string {
+  return template.replace(/\{(title|period|date)\}/g, (_m, k: 'title' | 'period' | 'date') => values[k])
 }
 
 /** Split pasted text ("a@x.com, b@y.com; <c@z.com>") into candidate addresses. */
@@ -480,7 +626,23 @@ export type TemplateOption = {
   custom: boolean
   owner?: string | null
   available: boolean
+  /** A classic report type: existing schedules keep it, new ones cannot choose it. */
+  deprecated: boolean
+  /** The template that replaces a classic type. */
+  replacement: string | null
 }
+
+/** Classic report types and the templates that replace them (docs/reports-delivery.md). */
+export const LEGACY_REPLACEMENTS: Record<string, string> = {
+  executive_summary: 'executive_overview',
+  device_health: 'availability',
+  service_health: 'service_owner_sla',
+  alert_analysis: 'alerts',
+  full_report: 'network_operations',
+}
+
+/** Catalog fields the server adds for retired types (not in the shared catalog type yet). */
+type CatalogRetirement = { deprecated?: boolean; replacement?: string | null }
 
 export const templateValue = (reportType: string, customId?: string | null) =>
   reportType === 'custom' && customId ? `custom:${customId}` : reportType
@@ -489,7 +651,7 @@ export const templateValue = (reportType: string, customId?: string | null) =>
 export function templateOptions(catalog: ReportCatalog | undefined): TemplateOption[] {
   if (!catalog) return []
   const catTitle = new Map((catalog.categories ?? []).map((c) => [c.id, c.title]))
-  const builtIn = (catalog.types ?? []).map((t: CatalogTemplate): TemplateOption => ({
+  const builtIn = (catalog.types ?? []).map((t: CatalogTemplate & CatalogRetirement): TemplateOption => ({
     value: t.key,
     report_type: t.key,
     custom_report_id: null,
@@ -504,6 +666,8 @@ export function templateOptions(catalog: ReportCatalog | undefined): TemplateOpt
     frequency: t.frequency,
     custom: false,
     available: t.available !== false,
+    deprecated: t.deprecated === true || t.engine === 'legacy',
+    replacement: t.replacement ?? LEGACY_REPLACEMENTS[t.key] ?? null,
   }))
   const custom = (catalog.custom ?? []).map((c: CustomTemplate): TemplateOption => ({
     value: `custom:${c.id}`,
@@ -519,6 +683,8 @@ export function templateOptions(catalog: ReportCatalog | undefined): TemplateOpt
     custom: true,
     owner: c.owner_name,
     available: true,
+    deprecated: false,
+    replacement: null,
   }))
   return [...builtIn, ...custom]
 }
@@ -548,6 +714,25 @@ export function searchTemplateOptions(options: TemplateOption[], q: string): Tem
   })
 }
 
+/** True for a classic report type (the API's is_legacy, else the catalog). */
+export function isLegacySchedule(s: Pick<ReportSchedule, 'is_legacy' | 'report_type'>, catalog?: ReportCatalog): boolean {
+  if (typeof s.is_legacy === 'boolean') return s.is_legacy
+  if (s.report_type in LEGACY_REPLACEMENTS) return true
+  return catalog?.types?.find((t) => t.key === s.report_type)?.engine === 'legacy'
+}
+
+/** The template key that replaces a classic schedule's type, or null. */
+export function replacementOf(s: Pick<ReportSchedule, 'replacement' | 'report_type'>, catalog?: ReportCatalog): string | null {
+  if (s.replacement) return s.replacement
+  const t = catalog?.types?.find((x) => x.key === s.report_type) as (CatalogTemplate & CatalogRetirement) | undefined
+  return t?.replacement ?? LEGACY_REPLACEMENTS[s.report_type] ?? null
+}
+
+/** A catalog template's title by key ("availability" → "Availability & SLA"). */
+export function catalogTitle(key: string, catalog?: ReportCatalog): string {
+  return catalog?.types?.find((t) => t.key === key)?.title || key.replace(/_/g, ' ')
+}
+
 /** Title of a schedule's template: API title, then catalog, then the key. */
 export function templateTitle(s: Pick<ReportSchedule, 'report_type' | 'custom_report_id' | 'report_title'>, catalog?: ReportCatalog): string {
   if (s.report_title) return s.report_title
@@ -569,16 +754,27 @@ export function isNetflowWithheld(s: Pick<ReportSchedule, 'netflow_withheld' | '
 export type ScopeSummary = {
   netflow: Record<string, unknown> | null
   deviceIds: string[]
+  groupIds: string[]
+  locations: string[]
+  deviceTypes: string[]
   applicationId: string | null
   any: boolean
 }
 
+const strings = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && !!x) : []
+
 export function scopeOf(filters: ScheduleFilters | null | undefined): ScopeSummary {
   const f = filters ?? {}
   const netflow = f.netflow && typeof f.netflow === 'object' && Object.keys(f.netflow).length ? f.netflow : null
-  const deviceIds = Array.isArray(f.device_ids) ? f.device_ids.filter((x): x is string => typeof x === 'string' && !!x) : []
+  const deviceIds = strings(f.device_ids)
+  const groupIds = strings(f.group_ids)
+  const locations = strings(f.locations)
+  const deviceTypes = strings(f.device_types)
   const applicationId = typeof f.application_id === 'string' && f.application_id ? f.application_id : null
-  return { netflow, deviceIds, applicationId, any: !!netflow || deviceIds.length > 0 || !!applicationId }
+  const devices = deviceIds.length + groupIds.length + locations.length + deviceTypes.length > 0
+  return { netflow, deviceIds, groupIds, locations, deviceTypes, applicationId,
+           any: !!netflow || devices || !!applicationId }
 }
 
 /** Filters to send: no bookkeeping flags, no empty scopes. */
@@ -603,9 +799,11 @@ export function defaultForm(): ScheduleForm {
     name: '', description: '', enabled: true,
     report_type: '', custom_report_id: null,
     period: 'yesterday', format: 'pdf', filters: {},
-    frequency: 'daily', hour: 8, minute: 0, day_of_week: 1, day_of_month: 1,
+    // 0 = no day chosen yet: a weekly schedule needs one.
+    frequency: 'daily', hour: 8, minute: 0, day_of_week: 0, day_of_month: 1,
     timezone: '',
     notify_channels: [], recipients: [],
+    skip_when_empty: false, subject_template: '', reply_to: '', group_send: false, cc: [],
   }
 }
 
@@ -625,11 +823,16 @@ export function scheduleToForm(s: ReportSchedule): ScheduleForm {
     frequency: asFrequency(s.frequency),
     hour: s.hour ?? 8,
     minute: s.minute ?? 0,
-    day_of_week: s.day_of_week ?? 1,
+    day_of_week: s.day_of_week ?? 0,
     day_of_month: s.day_of_month ?? 1,
     timezone: (s.timezone ?? '').trim(),
     notify_channels: [...(s.notify_channels ?? [])],
     recipients: [...(s.recipients ?? [])],
+    skip_when_empty: s.skip_when_empty === true,
+    subject_template: s.subject_template ?? '',
+    reply_to: s.reply_to ?? '',
+    group_send: s.group_send === true,
+    cc: [...(s.cc ?? [])],
   }
 }
 
@@ -638,7 +841,10 @@ export function suggestedName(title: string, frequency: ScheduleFrequency): stri
   return title ? `${title} — ${frequency}` : ''
 }
 
-export function buildBody(form: ScheduleForm, opts: { keepStoredFilters?: boolean } = {}): ScheduleBody {
+export function buildBody(
+  form: ScheduleForm,
+  opts: { keepStoredFilters?: boolean; keepStoredRecipients?: boolean } = {},
+): ScheduleBody {
   const body: ScheduleBody = {
     name: form.name.trim(),
     description: form.description.trim() || null,
@@ -650,11 +856,20 @@ export function buildBody(form: ScheduleForm, opts: { keepStoredFilters?: boolea
     frequency: form.frequency,
     hour: form.hour,
     minute: form.minute,
-    day_of_week: form.frequency === 'weekly' ? form.day_of_week : null,
+    // 0 = not chosen: sent as null so the server names the missing day.
+    day_of_week: form.frequency === 'weekly' ? form.day_of_week || null : null,
     day_of_month: form.frequency === 'monthly' ? form.day_of_month : null,
     timezone: form.timezone.trim() || null,
     notify_channels: [...form.notify_channels],
-    recipients: [...form.recipients],
+    skip_when_empty: form.skip_when_empty,
+    subject_template: form.subject_template.trim() || null,
+    reply_to: form.reply_to.trim() || null,
+    group_send: form.group_send,
+  }
+  // Withheld recipients are not in the form: sending them would erase them.
+  if (!opts.keepStoredRecipients) {
+    body.recipients = [...form.recipients]
+    body.cc = form.group_send ? [...form.cc] : []
   }
   // A withheld NetFlow scope is not in the form: sending filters would erase it.
   if (!opts.keepStoredFilters) body.filters = cleanFilters(form.filters)
@@ -665,12 +880,20 @@ export type Issue = { field: string; message: string }
 
 export type ValidationContext = {
   template: TemplateOption | null
-  /** The schedule's stored day of month (an existing 29–31 stays allowed). */
-  originalDayOfMonth?: number | null
+  /** Creating a schedule (classic report types cannot be chosen). */
+  isNew?: boolean
+  /** The stored report type and format of the schedule being edited. */
+  original?: { report_type: string; format: string } | null
+  /** GET /report-schedules/status share_links_available; undefined while unknown. */
+  shareLinksAvailable?: boolean
+  /** The stored recipients are hidden from the caller (and kept on save). */
+  recipientsWithheld?: boolean
   /** The stored time (an existing off-step minute stays allowed). */
   originalTime?: { hour: number; minute: number } | null
   /** The zone the schedule runs in (for wording; the organisation zone when unset). */
   timezone?: string
+  /** The organisation week start (Branding week_start). */
+  weekStart?: string
 }
 
 export function validateSchedule(form: ScheduleForm, ctx: ValidationContext): { errors: Issue[]; warnings: Issue[] } {
@@ -680,6 +903,9 @@ export function validateSchedule(form: ScheduleForm, ctx: ValidationContext): { 
   else if (form.report_type === 'custom' && !form.custom_report_id) errors.push({ field: 'template', message: 'Choose an organisation template.' })
   else if (!ctx.template) errors.push({ field: 'template', message: 'The selected template no longer exists. Choose another one.' })
   else if (!ctx.template.available) errors.push({ field: 'template', message: 'Your role cannot run the selected template. Choose another one.' })
+  else if (ctx.template.deprecated && (ctx.isNew || (ctx.original && ctx.original.report_type !== form.report_type))) {
+    errors.push({ field: 'template', message: 'Classic report types can no longer be scheduled. Choose a template.' })
+  }
 
   if (!isPeriodId(form.period)) errors.push({ field: 'period', message: 'Choose the data period.' })
 
@@ -694,20 +920,40 @@ export function validateSchedule(form: ScheduleForm, ctx: ValidationContext): { 
   if (form.frequency === 'weekly' && !(form.day_of_week >= 1 && form.day_of_week <= 7)) {
     errors.push({ field: 'weekday', message: 'Choose the day of the week.' })
   }
-  if (form.frequency === 'monthly') {
-    const kept = ctx.originalDayOfMonth != null && ctx.originalDayOfMonth === form.day_of_month
-    if (!(form.day_of_month >= 1 && (form.day_of_month <= MAX_MONTH_DAY || (kept && form.day_of_month <= 31)))) {
-      errors.push({ field: 'monthday', message: `Choose a day of the month between 1 and ${MAX_MONTH_DAY}.` })
-    }
+  if (form.frequency === 'monthly' && !(form.day_of_month >= 1 && form.day_of_month <= MAX_MONTH_DAY)) {
+    errors.push({ field: 'monthday', message: `Choose a day of the month between 1 and ${MAX_MONTH_DAY}.` })
   }
 
   if (ctx.template && !formatsForEngine(ctx.template.engine).includes(form.format)) {
     errors.push({ field: 'format', message: `${formatLabel(form.format)} is not available for this template.` })
   }
+  if (form.format === 'none' && ctx.shareLinksAvailable === false) {
+    // The server refuses "Summary only" for new or changed schedules without a base URL.
+    const kept = !!ctx.original && ctx.original.format === 'none'
+    if (kept) warnings.push({ field: 'format', message: `“Summary only” emails carry no link and no attachment. ${NO_LINK_EXPLANATION}` })
+    else errors.push({ field: 'format', message: `“Summary only” needs a report link. ${NO_LINK_EXPLANATION}` })
+  }
 
   const badRecipients = form.recipients.filter((r) => !isEmail(r))
   if (badRecipients.length) errors.push({ field: 'recipients', message: `Fix ${badRecipients.length} invalid email address${badRecipients.length === 1 ? '' : 'es'}.` })
   if (form.recipients.length > MAX_RECIPIENTS) errors.push({ field: 'recipients', message: `Use at most ${MAX_RECIPIENTS} email recipients.` })
+  if (form.group_send) {
+    const badCc = form.cc.filter((r) => !isEmail(r))
+    if (badCc.length) errors.push({ field: 'cc', message: `Fix ${badCc.length} invalid CC address${badCc.length === 1 ? '' : 'es'}.` })
+    if (form.cc.length > MAX_CC) errors.push({ field: 'cc', message: `Use at most ${MAX_CC} CC addresses.` })
+    // The server refuses CC on a shared email with no direct recipient.
+    if (form.cc.length > 0 && form.recipients.length === 0 && !ctx.recipientsWithheld) {
+      errors.push({ field: 'cc', message: 'CC needs at least one direct recipient.' })
+    }
+  }
+  const replyTo = form.reply_to.trim()
+  if (replyTo && !isEmail(replyTo)) errors.push({ field: 'reply_to', message: 'Enter one valid reply-to address, or leave it empty.' })
+  const subject = form.subject_template.trim()
+  if (subject.length > MAX_SUBJECT) errors.push({ field: 'subject', message: `Keep the subject under ${MAX_SUBJECT} characters.` })
+  const unknown = unknownPlaceholders(subject)
+  if (unknown.length) {
+    warnings.push({ field: 'subject', message: `${unknown.join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not a placeholder and will appear as written. Use {title}, {period} or {date}.` })
+  }
 
   const name = form.name.trim()
   if (!name) errors.push({ field: 'name', message: 'Enter a schedule name.' })
@@ -735,6 +981,14 @@ export function validateSchedule(form: ScheduleForm, ctx: ValidationContext): { 
   if (ctx.template && scope.applicationId && !filterable.includes('applications')) {
     warnings.push({ field: 'scope', message: 'This template is not limited by application; the application scope is ignored.' })
   }
+  if (form.frequency === 'weekly' && form.period === 'previous_week' && form.day_of_week >= 1 && form.day_of_week <= 7
+      && form.day_of_week !== weekStartIso(ctx.weekStart)) {
+    const first = WEEKDAYS.find((d) => d.id === weekStartIso(ctx.weekStart))?.long ?? 'Monday'
+    warnings.push({
+      field: 'period',
+      message: `The organisation week starts on ${first}, so “Previous week” leaves out the days since then. “Last 7 days” covers the week up to each run.`,
+    })
+  }
   if (form.period === 'today' && form.hour < 6) {
     warnings.push({ field: 'period', message: '“Today” at this hour covers only a few hours of data. “Yesterday” covers the whole day.' })
   }
@@ -745,7 +999,7 @@ export function validateSchedule(form: ScheduleForm, ctx: ValidationContext): { 
 /*  List                                                               */
 /* ------------------------------------------------------------------ */
 
-export type RunHealth = 'success' | 'partial' | 'failed' | 'never' | 'other'
+export type RunHealth = 'success' | 'partial' | 'failed' | 'running' | 'skipped' | 'never' | 'other'
 
 export function runHealth(status: string | null | undefined): RunHealth {
   const s = (status || '').toLowerCase()
@@ -753,6 +1007,8 @@ export function runHealth(status: string | null | undefined): RunHealth {
   if (s === 'success' || s === 'ok' || s === 'delivered') return 'success'
   if (s === 'partial') return 'partial'
   if (s === 'failed' || s === 'failure' || s === 'error') return 'failed'
+  if (s === 'running') return 'running'
+  if (s === 'skipped') return 'skipped'
   return 'other'
 }
 
@@ -760,7 +1016,7 @@ export function isFailing(s: Pick<ReportSchedule, 'last_status'>): boolean {
   return runHealth(s.last_status) === 'failed'
 }
 
-export type StatusFilter = 'all' | 'active' | 'paused' | 'failing'
+export type StatusFilter = 'all' | 'active' | 'paused' | 'failing' | 'overdue' | 'retime'
 
 /** The caller owns the schedule: the server's flag, else the owner id. */
 export function isMine(s: Pick<ReportSchedule, 'is_owner' | 'owner_id'>, userId?: string): boolean {
@@ -777,6 +1033,8 @@ export function filterSchedules(
     if (opts.status === 'active' && !s.enabled) return false
     if (opts.status === 'paused' && s.enabled) return false
     if (opts.status === 'failing' && !isFailing(s)) return false
+    if (opts.status === 'overdue' && !s.overdue) return false
+    if (opts.status === 'retime' && !s.suggested_time) return false
     if (opts.mineOnly && !isMine(s, opts.userId)) return false
     if (!terms.length) return true
     const hay = [
@@ -814,3 +1072,200 @@ export function isVisibilityScoped(user: { permissions?: string[]; scope_tags?: 
 
 export const SCOPED_EXPLANATION =
   'Your account is limited to a visibility scope. Scheduled reports render data for the whole organisation and are emailed onward, so scoped accounts can view schedules but cannot create or change them.'
+
+/* ------------------------------------------------------------------ */
+/*  Runs                                                               */
+/* ------------------------------------------------------------------ */
+
+export type RunResultMessage = { tone: 'success' | 'warning' | 'error'; title: string; body?: string }
+
+/** Toast wording for a "Run now" result ({status, delivered, errors}); `name` prefixes the title. */
+export function runResultMessage(
+  r: { status?: string | null; delivered?: string[] | null; errors?: string[] | null } | null | undefined,
+  name?: string,
+): RunResultMessage {
+  const who = name ? `"${name}" ` : ''
+  const errs = (r?.errors ?? []).filter(Boolean).join('; ')
+  const n = r?.delivered?.length ?? 0
+  const st = runHealth(r?.status)
+  if (st === 'failed') return { tone: 'error', title: name ? `${who}failed` : 'Run failed', body: errs || 'Nothing was delivered.' }
+  if (st === 'skipped') {
+    return { tone: 'warning', title: name ? `${who}not sent` : 'Not sent', body: 'Not sent: the report had no data (the schedule skips empty reports).' }
+  }
+  if (st === 'partial') {
+    return {
+      tone: 'warning',
+      title: name ? `${who}delivered with problems` : 'Delivered with problems',
+      body: [n ? `Delivered to ${n} recipient${n === 1 ? '' : 's'}.` : 'Not delivered to anyone.', errs].filter(Boolean).join(' '),
+    }
+  }
+  return {
+    tone: 'success',
+    title: name ? `${who}generated` : 'Report generated',
+    body: n ? `Delivered to ${n} recipient${n === 1 ? '' : 's'}.` : 'Nobody is set to receive it; open it from the run history.',
+  }
+}
+
+/** Delays before each automatic retry, in minutes (report_settings.RETRY_DELAYS_MIN). */
+export const RETRY_DELAYS_MIN = [5, 15, 45, 120, 240]
+
+/** "Failed deliveries are retried 3 times: after 5, 15 and 45 minutes." */
+export function retryPlanText(attempts: number): string {
+  const n = Math.max(0, Math.min(RETRY_DELAYS_MIN.length, Math.floor(Number(attempts) || 0)))
+  if (!n) return 'Failed deliveries are not retried automatically; use Retry in the run history.'
+  const d = RETRY_DELAYS_MIN.slice(0, n)
+  const list = d.length === 1 ? `${d[0]}` : `${d.slice(0, -1).join(', ')} and ${d[d.length - 1]}`
+  return `Failed deliveries are retried ${n === 1 ? 'once' : `${n} times`}: after ${list} minutes.`
+}
+
+export const RUN_STATUSES: { id: string; label: string }[] = [
+  { id: 'success', label: 'Succeeded' },
+  { id: 'partial', label: 'Partial' },
+  { id: 'failed', label: 'Failed' },
+  { id: 'skipped', label: 'Skipped' },
+  { id: 'running', label: 'Running' },
+]
+
+export function runKindLabel(kind: string | null | undefined): string {
+  if (kind === 'manual') return 'Manual'
+  if (kind === 'retry') return 'Retry'
+  if (kind === 'scheduled') return 'Scheduled'
+  return ''
+}
+
+function textOf(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v.trim()
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  if (typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    for (const k of ['message', 'note', 'text', 'detail', 'error']) {
+      if (typeof o[k] === 'string' && (o[k] as string).trim()) {
+        const label = typeof o.section === 'string' ? `${o.section}: ` : ''
+        return `${label}${(o[k] as string).trim()}`
+      }
+    }
+  }
+  return ''
+}
+
+/**
+ * Run notes as lines. The column is jsonb: a list of strings or
+ * {message} objects, or an object of named notes ({failed_sections: [...]}).
+ */
+export function runNotes(notes: unknown): string[] {
+  if (notes == null) return []
+  if (typeof notes === 'string') return notes.trim() ? [notes.trim()] : []
+  if (Array.isArray(notes)) return notes.map(textOf).filter(Boolean)
+  if (typeof notes === 'object') {
+    const one = textOf(notes)
+    if (one) return [one]
+    const out: string[] = []
+    for (const [k, v] of Object.entries(notes as Record<string, unknown>)) {
+      const label = k.replace(/_/g, ' ')
+      if (Array.isArray(v)) {
+        const items = v.map(textOf).filter(Boolean)
+        if (items.length) out.push(`${label.charAt(0).toUpperCase()}${label.slice(1)}: ${items.join(', ')}`)
+      } else {
+        const t = textOf(v)
+        if (t && v !== true) out.push(`${label.charAt(0).toUpperCase()}${label.slice(1)}: ${t}`)
+        else if (v === true) out.push(`${label.charAt(0).toUpperCase()}${label.slice(1)}`)
+      }
+    }
+    return out
+  }
+  return []
+}
+
+/** Failed delivery targets as short labels ("noc@example.com", "Teams NOC"). */
+export function failedTargetLabels(targets: unknown, channels?: Map<string, { name: string }>): string[] {
+  if (!Array.isArray(targets)) return []
+  return targets.map((t) => {
+    if (typeof t === 'string') return channels?.get(t)?.name ?? t
+    if (t && typeof t === 'object') {
+      const o = t as Record<string, unknown>
+      const id = typeof o.channel_id === 'string' ? o.channel_id : typeof o.id === 'string' ? o.id : ''
+      const name = (typeof o.name === 'string' && o.name) || (id && channels?.get(id)?.name)
+        || (typeof o.address === 'string' && o.address) || (typeof o.email === 'string' && o.email)
+        || (typeof o.recipient === 'string' && o.recipient) || id
+      return String(name || 'Unknown target')
+    }
+    return ''
+  }).filter(Boolean)
+}
+
+/** 'ended' = expired or revoked (revoking sets expires_at to the revoke time). */
+export type LinkState = 'active' | 'ended' | 'never_expires' | 'none'
+
+/** The share link's state: ended at expires_at (expired or revoked), active, or none for this caller. */
+export function linkState(run: Pick<ScheduleRun, 'token' | 'revoked' | 'expires_at'>, now: number): LinkState {
+  const exp = toInstant(run.expires_at)
+  if (run.revoked || (exp && exp.getTime() <= now)) return 'ended'
+  if (!run.token) return 'none'
+  return exp ? 'active' : 'never_expires'
+}
+
+/** "Retrying at 08:20, attempt 2 of 3" while a retry is pending, else null. */
+export function retryText(
+  run: Pick<ScheduleRun, 'next_retry_at' | 'retry_count'>,
+  maxAttempts: number | null | undefined,
+  b: Fmt,
+): string | null {
+  const at = toInstant(run.next_retry_at)
+  if (!at) return null
+  const n = (Number(run.retry_count) || 0) + 1
+  const of = maxAttempts && maxAttempts > 0 ? ` of ${maxAttempts}` : ''
+  return `Retrying at ${formatTime(at, b)}, attempt ${n}${of}`
+}
+
+/** A run that still owes deliveries (the server's can_retry when present). */
+export function canRetryRun(run: Pick<ScheduleRun, 'failed_targets' | 'status' | 'can_retry'>): boolean {
+  if (runHealth(run.status) === 'running') return false
+  if (typeof run.can_retry === 'boolean') return run.can_retry
+  return Array.isArray(run.failed_targets) && run.failed_targets.length > 0
+}
+
+/** Client search over loaded runs: title, schedule, period, status. */
+export function searchRuns<T extends Pick<ScheduleRun, 'title' | 'schedule_name' | 'report_type' | 'status' | 'period'>>(runs: T[], q: string): T[] {
+  const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (!terms.length) return runs
+  return runs.filter((r) => {
+    const hay = [r.title, r.schedule_name, r.report_type, r.status, periodLabel(r.period)].filter(Boolean).join(' ').toLowerCase()
+    return terms.every((t) => hay.includes(t))
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/*  Report settings                                                    */
+/* ------------------------------------------------------------------ */
+
+export const REPORT_SETTING_DEFAULTS: ReportSettings = {
+  link_expiry_days: 30,
+  run_retention_days: 180,
+  artifact_retention_days: 30,
+  max_attachment_mb: 10,
+  retry_attempts: 3,
+}
+
+export const REPORT_SETTING_FIELDS: { key: keyof ReportSettings; label: string; unit: string; min: number; max: number; hint: string }[] = [
+  { key: 'link_expiry_days', label: 'Report links expire after', unit: 'days', min: 0, max: 365,
+    hint: 'Links in report emails stop working after this many days. 0 = links never expire.' },
+  { key: 'run_retention_days', label: 'Keep run history for', unit: 'days', min: 7, max: 730,
+    hint: 'Older runs, with their stored report and link, are deleted.' },
+  { key: 'artifact_retention_days', label: 'Keep attachments for', unit: 'days', min: 1, max: 365,
+    hint: 'The stored attachment and email copy are cleared after this; the run record stays.' },
+  { key: 'max_attachment_mb', label: 'Largest attachment', unit: 'MB', min: 1, max: 50,
+    hint: 'A larger attachment is left out and the email carries the link instead. Many mail servers refuse messages over 10–25 MB.' },
+  { key: 'retry_attempts', label: 'Delivery retries', unit: 'attempts', min: 0, max: 5,
+    hint: '0 = no automatic retry.' },
+]
+
+export function validateReportSettings(v: Record<keyof ReportSettings, string | number>): Partial<Record<keyof ReportSettings, string>> {
+  const out: Partial<Record<keyof ReportSettings, string>> = {}
+  for (const f of REPORT_SETTING_FIELDS) {
+    const raw = String(v[f.key] ?? '').trim()
+    const n = Number(raw)
+    if (!raw || !Number.isInteger(n) || n < f.min || n > f.max) out[f.key] = `Enter a whole number from ${f.min} to ${f.max}.`
+  }
+  return out
+}

@@ -236,12 +236,17 @@ def _health_payload(d: dict, window_seconds: float) -> dict:
 
     errors = in_err + out_err
     discards = in_disc + out_disc
-    # Errored/discarded frames never reached the ucast counter, so add them back
-    # to get the attempted-frame denominator.
-    in_total = in_pkts + in_err + in_disc
-    out_total = out_pkts + out_err + out_disc
-    err_ppm = _ppm(errors, in_total + out_total)
-    disc_ppm = _ppm(discards, in_total + out_total)
+    if in_pkts + out_pkts <= 0:
+        # No packet counters (or none that moved): the errors alone are no
+        # denominator -- errors / errors would read as 1,000,000 ppm. Leave
+        # the rate unknown so _link_health falls back to the absolute floor.
+        err_ppm = disc_ppm = None
+    else:
+        # Errored/discarded frames never reached the ucast counter, so add
+        # them back to get the attempted-frame denominator.
+        attempted = in_pkts + out_pkts + errors + discards
+        err_ppm = _ppm(errors, attempted)
+        disc_ppm = _ppm(discards, attempted)
     severity, issues = _link_health(errors, discards, err_ppm, disc_ppm, flaps)
 
     secs = max(window_seconds, 1.0)

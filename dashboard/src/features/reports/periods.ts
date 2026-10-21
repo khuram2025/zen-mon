@@ -14,6 +14,7 @@ export const PERIODS: { id: PeriodId; label: string; short: string; kind: 'rolli
   { id: 'yesterday', label: 'Yesterday', short: 'Yesterday', kind: 'calendar' },
   { id: 'week_to_date', label: 'This week', short: 'This week', kind: 'calendar' },
   { id: 'previous_week', label: 'Previous week', short: 'Last week', kind: 'calendar' },
+  { id: 'previous_work_week', label: 'Previous work week', short: 'Last work week', kind: 'calendar' },
   { id: 'month_to_date', label: 'This month', short: 'This month', kind: 'calendar' },
   { id: 'previous_month', label: 'Previous month', short: 'Last month', kind: 'calendar' },
   { id: 'quarter_to_date', label: 'This quarter', short: 'This quarter', kind: 'calendar' },
@@ -53,6 +54,13 @@ export function zonedToUtc(y: number, m: number, d: number, tz: string, h = 0, m
 
 const WEEK_START: Record<string, number> = { sunday: 0, monday: 1, saturday: 6 }
 
+/**
+ * A work week is the first five days of the organisation week:
+ * Sunday → Sun–Thu, Monday → Mon–Fri, Saturday → Sat–Wed
+ * (report_periods.WORK_WEEK_DAYS on the server).
+ */
+export const WORK_WEEK_DAYS = 5
+
 /** [from, to) for a period, in the organisation timezone. */
 export function periodRange(id: PeriodId, tz: string, weekStart = 'monday', now = new Date()): { from: Date; to: Date } {
   const H = 3600_000
@@ -76,11 +84,19 @@ export function periodRange(id: PeriodId, tz: string, weekStart = 'monday', now 
       return { from: dayStart(y, m, d), to: today }
     }
     case 'week_to_date':
-    case 'previous_week': {
+    case 'previous_week':
+    case 'previous_work_week': {
       const back = (w.dow - (WEEK_START[weekStart] ?? 1) + 7) % 7
       const [y, m, d] = addDays(w.y, w.m, w.d, -back)
       const weekStartAt = dayStart(y, m, d)
       if (id === 'week_to_date') return { from: weekStartAt, to: now }
+      if (id === 'previous_work_week') {
+        // The latest work week that has ended: this week's once its last
+        // work day is over (today is at least week start + 5 days), else last week's.
+        const first = back < WORK_WEEK_DAYS ? addDays(y, m, d, -7) : [y, m, d] as const
+        const [ey, em, ed] = addDays(first[0], first[1], first[2], WORK_WEEK_DAYS)
+        return { from: dayStart(first[0], first[1], first[2]), to: dayStart(ey, em, ed) }
+      }
       const [py, pm, pd] = addDays(y, m, d, -7)
       return { from: dayStart(py, pm, pd), to: weekStartAt }
     }

@@ -552,28 +552,49 @@ _HEALTH_SORTS = {
 
 def _health_cheap_sql(where: str) -> str:
     """Pass 1: max-min deltas (exact unless a counter went backwards) plus the
-    two flags that send an interface to the precise pass."""
+    two flags that send an interface to a precise pass: more than one read
+    status (status-change pass) and a counter reset (counter pass)."""
     deltas = ", ".join(f"max({c}) - min({c})" for c, _ in _COUNTERS)
     reset = " OR ".join(f"argMin({c}, timestamp) != min({c})" for c, _ in _COUNTERS)
-    return (f"SELECT device_id, if_index, {deltas}, uniqExact(oper_status) > 1, ({reset}), "
-            f"min(timestamp), max(timestamp) FROM {RAW_TABLE} WHERE {where} "
+    return (f"SELECT device_id, if_index, {deltas}, uniqExactIf(oper_status, oper_status != 0) > 1, "
+            f"({reset}), min(timestamp), max(timestamp) FROM {RAW_TABLE} WHERE {where} "
             "GROUP BY device_id, if_index")
 
 
 def _health_precise_sql(where: str, pairs: str) -> str:
-    """Pass 2 (flagged interfaces only): sum of positive steps between
-    consecutive polls, so a reset or wrap is never counted as new events."""
+    """Counter pass (interfaces with a reset only): sum of positive steps
+    between consecutive polls, so a reset or wrap is never counted as new
+    events."""
     lags = ", ".join(f"lagInFrame({c}) OVER w AS p_{a}" for c, a in _COUNTERS)
     deltas = ", ".join(f"sum(if(rn > 1, greatest(toInt64({c}) - toInt64(p_{a}), 0), 0))"
                        for c, a in _COUNTERS)
     cols = ", ".join(c for c, _ in _COUNTERS)
-    return (f"SELECT device_id, if_index, {deltas}, countIf(rn > 1 AND oper_status != p_os) "
-            f"FROM (SELECT device_id, if_index, timestamp, oper_status, {cols}, {lags}, "
-            "lagInFrame(oper_status) OVER w AS p_os, row_number() OVER w AS rn "
+    return (f"SELECT device_id, if_index, {deltas} "
+            f"FROM (SELECT device_id, if_index, timestamp, {cols}, {lags}, row_number() OVER w AS rn "
             f"FROM {RAW_TABLE} WHERE {where} AND (device_id, if_index) IN ({pairs}) "
             "WINDOW w AS (PARTITION BY device_id, if_index ORDER BY timestamp "
             "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) "
             "GROUP BY device_id, if_index")
+
+
+def _status_changes_sql(where: str, pairs: str, extra_cols: str = "") -> str:
+    """Status changes per interface: a different ifOperStatus between
+    consecutive polls that read a status (0 = not read is skipped). The one
+    definition behind both the "Flapping" KPI of interface_health and
+    interface_status_changes, so the two sections agree."""
+    return ("SELECT device_id, if_index, countIf(rn > 1 AND oper_status != p_os)"
+            f"{extra_cols} "
+            "FROM (SELECT device_id, if_index, timestamp, oper_status, "
+            "lagInFrame(oper_status) OVER w AS p_os, row_number() OVER w AS rn "
+            f"FROM {RAW_TABLE} WHERE {where} AND oper_status != 0 "
+            f"AND (device_id, if_index) IN ({pairs}) "
+            "WINDOW w AS (PARTITION BY device_id, if_index ORDER BY timestamp "
+            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) "
+            "GROUP BY device_id, if_index")
+
+
+def _admin_down(meta: Optional[dict]) -> bool:
+    return bool(meta) and meta.get("admin") in _ADMIN_DOWN
 
 
 @register_section(
@@ -609,7 +630,8 @@ async def interface_health(ctx: SectionCtx) -> dict:
 
     rows = await ctx.ch_rows(_health_cheap_sql(where), params)
     stats: dict[tuple[str, int], dict] = {}
-    flagged: list[tuple[str, int]] = []
+    changed: list[tuple[str, int]] = []
+    reset: list[tuple[str, int]] = []
     for r in rows:
         key = (str(r[0]), _i(r[1]))
         d = {f"d_{a}": _i(r[2 + n]) for n, (_, a) in enumerate(_COUNTERS)}
@@ -617,24 +639,36 @@ async def interface_health(ctx: SectionCtx) -> dict:
         first, last = r[10], r[11]
         d["span"] = (last - first).total_seconds() if first and last else 0.0
         stats[key] = d
-        if r[8] or r[9]:
-            flagged.append(key)
+        if r[8]:
+            changed.append(key)
+        if r[9]:
+            reset.append(key)
     inv = await _interfaces(ctx, (k[0] for k in stats))
-    flagged = [k for k in flagged if _links_filter(inv.get(k), links)]
+    reset = [k for k in reset if _links_filter(inv.get(k), links)]
+    # Administratively shut ports are not judged, so their status changes
+    # are not flaps either.
+    changed = [k for k in changed if _links_filter(inv.get(k), links) and not _admin_down(inv.get(k))]
     try:
-        for batch in _batches(flagged):
+        for batch in _batches(reset):
             for r in await ctx.ch_rows(_health_precise_sql(where, _pairs_sql(batch)), params):
                 d = stats.get((str(r[0]), _i(r[1])))
-                if d is None:
-                    continue
-                d.update({f"d_{a}": _i(r[2 + n]) for n, (_, a) in enumerate(_COUNTERS)})
-                d["flaps"] = _i(r[8])
+                if d is not None:
+                    d.update({f"d_{a}": _i(r[2 + n]) for n, (_, a) in enumerate(_COUNTERS)})
     except Exception:
-        # Pass-1 numbers are right for every interface without a counter
-        # reset; flap counts stay 0 rather than becoming wrong.
+        # Pass-1 numbers are right for every interface without a counter reset.
         logger.exception("precise interface health pass failed")
         notes.append("Reset-safe recount unavailable for this run; interfaces whose counters "
                      "reset may show inflated totals.")
+    try:
+        for batch in _batches(changed):
+            for r in await ctx.ch_rows(_status_changes_sql(where, _pairs_sql(batch)), params):
+                d = stats.get((str(r[0]), _i(r[1])))
+                if d is not None:
+                    d["flaps"] = _i(r[2])
+    except Exception:
+        # Flap counts stay 0 rather than becoming wrong.
+        logger.exception("interface status change pass failed")
+        notes.append("Status changes unavailable for this run; flap counts show 0.")
 
     items = []
     for key, d in stats.items():
@@ -642,9 +676,10 @@ async def interface_health(ctx: SectionCtx) -> dict:
         if not _links_filter(meta, links):
             continue
         h = _health_payload(d, d["span"])
-        if meta["admin"] in _ADMIN_DOWN:
-            # An administratively shut port isn't a fault.
-            h = {**h, "health": "ok", "issues": []}
+        if _admin_down(meta):
+            # An administratively shut port isn't a fault, and its status
+            # changes are not flaps.
+            h = {**h, "flaps": 0, "health": "ok", "issues": []}
         items.append({**h, "meta": meta})
 
     description = (f"Errors, discards and operational status flaps on {noun} over the period "
@@ -671,7 +706,7 @@ async def interface_health(ctx: SectionCtx) -> dict:
         {"label": "With discards", "value": _fmt_count(with_disc), "accent": "warning" if with_disc else "success",
          "subtitle": f"{sum(h['discards'] for h in items):,} discards in total"},
         {"label": "Flapping", "value": _fmt_count(flapping), "accent": "warning" if flapping else "success",
-         "subtitle": "Status changed at least once"},
+         "subtitle": "Status changed between polls (admin-down excluded)"},
         {"label": "Critical", "value": _fmt_count(counts.get("critical", 0)),
          "accent": "danger" if counts.get("critical") else "success",
          "subtitle": f"{counts.get('warning', 0):,} warning"},
@@ -698,6 +733,8 @@ async def interface_health(ctx: SectionCtx) -> dict:
     notes.append("Thresholds match Link Utilization: errors from 100 ppm warning and 1,000 ppm critical; "
                  "discards from 1,000 ppm warning and 10,000 ppm critical; any flap is a warning and 5 or "
                  "more critical. Administratively down ports are not judged.")
+    notes.append("A flap is a different ifOperStatus between consecutive polls that read a status, the "
+                 "count Interface Status Changes uses; “Flapping” counts the interfaces with at least one.")
     if links == "wan":
         notes.append(WAN_RULE)
     return _section(sid, title, description=description, kpis=kpis, charts=charts, tables=tables,
@@ -1213,7 +1250,9 @@ async def interface_status_changes(ctx: SectionCtx) -> dict:
             empty = _no_samples(links, states, noun, "status")
         return _section(sid, title, description=description, notes=[empty] + notes)
 
-    cand = [k for k in measured if states[k] > 1]
+    # Administratively shut ports are left out, as in interface_health's
+    # "Flapping" count.
+    cand = [k for k in measured if states[k] > 1 and not _admin_down(inv.get(k))]
     changed: list[dict] = []
     buckets: Counter = Counter()
     bucket, bparams = ctx.ch_bucket("timestamp")
@@ -1221,22 +1260,14 @@ async def interface_status_changes(ctx: SectionCtx) -> dict:
     for batch in _batches(cand):
         # Pass 2 (changed interfaces only): transitions between consecutive
         # polls that read a status (0 = not read is skipped).
-        precise += await ctx.ch_rows(
-            "SELECT device_id, if_index, "
-            "countIf(rn > 1 AND oper_status != p_os), "
-            "countIf(rn > 1 AND p_os = 1 AND oper_status != 1), "
+        precise += await ctx.ch_rows(_status_changes_sql(
+            where, _pairs_sql(batch),
+            ", countIf(rn > 1 AND p_os = 1 AND oper_status != 1), "
             "countIf(rn > 1 AND p_os != 1 AND oper_status = 1), "
             "maxIf(timestamp, rn > 1 AND oper_status != p_os), "
             "countIf(oper_status = 1) / count(), "
             "argMax(oper_status, timestamp), "
-            f"groupArrayIf({bucket}, rn > 1 AND oper_status != p_os) "
-            "FROM (SELECT device_id, if_index, timestamp, oper_status, "
-            "lagInFrame(oper_status) OVER w AS p_os, row_number() OVER w AS rn "
-            f"FROM {RAW_TABLE} WHERE {where} AND oper_status != 0 "
-            f"AND (device_id, if_index) IN ({_pairs_sql(batch)}) "
-            "WINDOW w AS (PARTITION BY device_id, if_index ORDER BY timestamp "
-            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) "
-            "GROUP BY device_id, if_index", {**params, **bparams})
+            f"groupArrayIf({bucket}, rn > 1 AND oper_status != p_os)"), {**params, **bparams})
     for r in precise:
         key = (str(r[0]), _i(r[1]))
         meta = inv.get(key)
@@ -1264,7 +1295,8 @@ async def interface_status_changes(ctx: SectionCtx) -> dict:
          **({"subtitle": _label(top["meta"])} if top else {})},
     ]
     notes.append("A change is a different ifOperStatus between consecutive polls that read a status. "
-                 "“Time up” is the share of those polls that found the interface up.")
+                 "“Time up” is the share of those polls that found the interface up. Administratively "
+                 "down ports are left out.")
     if links == "wan":
         notes.append(WAN_RULE)
     if not changed:

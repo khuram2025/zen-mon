@@ -164,3 +164,22 @@ def test_period_vocabulary_matches_the_dashboard_and_catalog():
         pytest.skip("dashboard sources not present")
     found = re.findall(r"\{ id: '([a-z0-9_]+)', label: '([^']+)'", ts.read_text())
     assert tuple(found) == tuple((pid, label) for pid, label, _kind in rp.PERIODS)
+
+
+# ── Previous work week (five days from the organisation week start) ─────────
+
+def test_previous_work_week():
+    # Wednesday 7 Oct: the current work week has not ended, so last week's.
+    assert win("previous_work_week", week_start="sunday") == \
+        ["2026-09-26T21:00:00.000Z", "2026-10-01T21:00:00.000Z"]            # Sun 27 Sep – Thu 1 Oct
+    assert win("previous_work_week", week_start="monday") == \
+        ["2026-09-27T21:00:00.000Z", "2026-10-02T21:00:00.000Z"]            # Mon 28 Sep – Fri 2 Oct
+    # From the day after the last work day, this week's.
+    friday = datetime(2026, 10, 9, 5, tzinfo=UTC)                         # Fri 08:00 Riyadh
+    assert win("previous_work_week", week_start="sunday", now=friday) == \
+        ["2026-10-03T21:00:00.000Z", "2026-10-08T21:00:00.000Z"]            # Sun 4 – Thu 8 Oct
+    thursday = datetime(2026, 10, 8, 5, tzinfo=UTC)
+    assert win("previous_work_week", week_start="sunday", now=thursday) == \
+        ["2026-09-26T21:00:00.000Z", "2026-10-01T21:00:00.000Z"]
+    _s, _e, label = rp.resolve_period("previous_work_week", "Asia/Riyadh", "sunday", NOW)
+    assert label == "Previous work week (27 Sep 2026 – 1 Oct 2026)"
