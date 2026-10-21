@@ -1,4 +1,4 @@
-# ZenPlus 1.24.23 — Reports: delivery you can rely on
+# ZenPlus 1.24.24 — Reports: delivery you can rely on
 
 This release fixes the problems found in a field assessment of report scheduling, and adds the delivery features that were missing. The design is described in `docs/reports-delivery.md`.
 
@@ -40,3 +40,9 @@ This release fixes the problems found in a field assessment of report scheduling
 - **API.** Weekly and monthly schedules created through the API must state their day. Notification channels must exist and be enabled.
 
 Schema: migrate-166 (report runs, schedule email options, the new period). Existing report links get a 30-day lifetime from when they were generated.
+
+## Security
+
+Dashboard dependencies updated for published advisories: follow-redirects 1.16.1 (credential headers on cross-origin redirects, GHSA-q3jh-wrc6-jgq8, GHSA-8r9p-f939-6h3c) and DOMPurify 3.4.17 (GHSA-p98j-92pf-mc4p, GHSA-6688-9rhm-gjv2).
+
+1.24.23 was tagged but never built or published; its changes ship in this release.
