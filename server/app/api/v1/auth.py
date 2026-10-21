@@ -459,6 +459,17 @@ async def mfa_status(user: User = Depends(get_current_user), db: AsyncSession = 
     }
 
 
+def _require_password_changed(user: User) -> None:
+    """MFA cannot be set up while the account still owes a password change:
+    whoever holds a temporary or seeded password must not be able to bind
+    their own authenticator before the owner sets a real password."""
+    if getattr(user, "must_change_password", False):
+        raise HTTPException(status_code=403, detail={
+            "code": "password_change_required",
+            "message": "You must change your password before continuing",
+        })
+
+
 @router.post("/mfa/setup")
 async def mfa_setup(
     data: MfaSetupRequest,
@@ -468,6 +479,7 @@ async def mfa_setup(
     """Start enrolment: returns a new secret and an otpauth:// URI for an
     authenticator app. MFA is not active until /mfa/enable confirms a code."""
     _require_local(user)
+    _require_password_changed(user)
     if user.mfa_enabled:
         raise HTTPException(status_code=409, detail="Multi-factor authentication is already enabled")
     if not verify_password(data.password, user.password_hash):
@@ -486,6 +498,7 @@ async def mfa_enable(
     db: AsyncSession = Depends(get_db),
 ):
     _require_local(user)
+    _require_password_changed(user)
     if user.mfa_enabled:
         raise HTTPException(status_code=409, detail="Multi-factor authentication is already enabled")
     secret = decrypt_secret(user.mfa_secret_enc) if user.mfa_secret_enc else None

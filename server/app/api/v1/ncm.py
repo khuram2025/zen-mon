@@ -9,6 +9,7 @@ under /ncm/...
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from uuid import UUID
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import require_permission, user_has_permission
 from app.core.scoping import visible_tags, jsonb_tags_visible
-from app.services import ncm_events
+from app.services import ncm_events, ssh_host_keys
 from app.services.ncm_content import normalize_config as _normalize_config, read_content, encrypt_content, checked_content, config_diff, redact_config, safe_pattern
 from app.services.ncm_collection import (PLATFORM_COMMANDS, STARTUP_COMMANDS, DRIVERS, UNSUPPORTED, platform_catalog,
                                          fetch_config as _netmiko_fetch, CaptureError, key_fingerprint,
@@ -31,6 +32,8 @@ from app.services.ncm_errors import classify, exception_chain, GUIDANCE, STAGES,
 from app.services import ncm_schedule
 from app.core import crypto
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ncm", tags=["NCM"])
 device_router = APIRouter(prefix="/devices", tags=["NCM"])
@@ -775,9 +778,11 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
                                     crypto.decrypt(row.key_passphrase_enc) if row.key_passphrase_enc else None)
         stage = 'collection'
         await db.execute(text("UPDATE ncm_backup_runs SET stage='collection' WHERE id=:id"), {'id': run.id})
+        observed_key: dict = {}
         platform, content = await asyncio.to_thread(_netmiko_fetch, row.ip, row.platform or 'autodetect',
                                                     row.username, password, enable, port, config_type,
-                                                    pkey=pkey, legacy_compat=row.ssh_legacy_compat)
+                                                    pkey=pkey, legacy_compat=row.ssh_legacy_compat,
+                                                    observed_key=observed_key)
         # The savepoint ensures a storage failure cannot publish an alert or
         # prune the last good snapshot while the attempt is recorded as failed.
         stage = 'archive'
@@ -800,6 +805,7 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
         await db.commit()
         raise _FetchError(failure.message, failure.category, failure.retryable, run.id) from None
     content = result.pop('content')
+    host_key = await _observe_host_key(db, device_id, row.ip, port, observed_key, actor=actor, run_id=run.id)
     await db.execute(text("""UPDATE ncm_backup_runs SET status='success',finished_at=now(),validated=true,stage='archive',
         is_change=:changed,version_id=:version,platform=:platform WHERE id=:id"""),
         {'id': run.id, 'changed': result['is_change'], 'version': UUID(result['version_id']), 'platform': platform})
@@ -818,7 +824,25 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
         except Exception:
             pass  # Compliance evaluation never fails a successful backup.
     await db.commit()
-    return {**result, 'platform': platform, 'run_id': str(run.id)}
+    return {**result, 'platform': platform, 'run_id': str(run.id), 'host_key': host_key}
+
+
+async def _observe_host_key(db, device_id, host, port, observed_key, *, actor, run_id):
+    """Warn-only SSH host trust: record the first key, audit a changed one.
+    Never fails a backup that already succeeded."""
+    try:
+        async with db.begin_nested():
+            outcome = await ssh_host_keys.observe_backup_key(db, device_id, host, port, observed_key)
+            if outcome and outcome['status'] == 'changed':
+                await ncm_events.audit(db, actor, 'backup.host_key_changed', device_id=device_id,
+                                       resource_id=run_id,
+                                       metadata={'host': host, 'port': port, 'key_type': outcome['key_type'],
+                                                 'fingerprint': outcome['fingerprint'],
+                                                 'previous_fingerprint': outcome['previous_fingerprint']})
+        return outcome
+    except Exception:
+        logger.warning('NCCM host key observation failed', exc_info=True)
+        return None
 
 
 @device_router.post("/{device_id}/config-fetch")

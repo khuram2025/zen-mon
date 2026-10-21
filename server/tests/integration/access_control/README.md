@@ -9,7 +9,9 @@ point it **only** at a disposable database.
 2. `scripts/run-migrations.py --scripts-dir scripts --include-init ...` against the scratch DB.
 3. `python server/tests/integration/access_control/seed.py` (same `DATABASE_URL`).
 4. Start the API (`uvicorn app.main:app --port 8191`) with that `DATABASE_URL`, `REDIS_URL`,
-   a `JWT_SECRET` and a 64-hex `SNMP_ENC_KEY`.
+   a `JWT_SECRET` of at least 32 characters and a 64-hex `SNMP_ENC_KEY`. The API refuses to
+   start on placeholder secrets (`changeme`); a scratch stack that uses them needs
+   `ZENPLUS_ALLOW_INSECURE_DEFAULTS=1`.
 5. `ZENPLUS_ACCESS_E2E_URL=http://127.0.0.1:8191 pytest server/tests/integration/test_access_control_e2e.py`
    (set `ZENPLUS_ACCESS_E2E_DSN` if the scratch Postgres is not `127.0.0.1:55432`).
 

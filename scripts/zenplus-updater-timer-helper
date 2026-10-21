@@ -1,0 +1,173 @@
+#!/usr/bin/python3 -I
+"""Root helper: set the OTA updater check interval from a validated number.
+
+Installed root-owned at /usr/local/sbin/zenplus-updater-timer-helper by
+scripts/setup-updater-privileges.sh. /etc/sudoers.d/zenplus-updater lets the
+zenplus service account run exactly:
+
+    zenplus-updater-timer-helper set-interval <hours>
+
+The caller supplies a number and nothing else. The helper writes a fixed
+[Timer] drop-in, so no caller-chosen systemd directive (Unit=, OnCalendar=,
+a [Service] section, ...) can ever reach the file. This replaces the old
+``sudo tee .../override.conf`` grant, which accepted arbitrary stdin.
+
+    reconcile   (root only, not granted through sudo) rewrites an existing
+                drop-in in the fixed form when it is a managed interval and
+                removes it otherwise. Run on every OTA by
+                setup-updater-privileges.sh.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+DROPIN_DIR = Path("/etc/systemd/system/zenplus-updater.timer.d")
+DROPIN_NAME = "override.conf"
+TIMER_UNIT = "zenplus-updater.timer"
+SYSTEMCTL = "/bin/systemctl"
+MIN_HOURS = 1
+MAX_HOURS = 168  # one week; the dashboard offers 1-24
+
+HEADER = "# Managed by zenplus-updater-timer-helper — do not edit by hand.\n"
+# Drop-ins written by this helper and by the API before it existed. Only these
+# exact shapes are carried forward by `reconcile`.
+MANAGED_FORMS = (
+    re.compile(
+        r"# Managed by zenplus-updater-timer-helper — do not edit by hand\.\n"
+        r"\[Timer\]\nOnUnitActiveSec=\nOnUnitActiveSec=([0-9]{1,3})h\n"),
+    re.compile(
+        r"# Managed by zenplus-api — do not edit by hand\.\n"
+        r"\[Timer\]\nOnUnitActiveSec=\nOnUnitActiveSec=([0-9]{1,3})h\n"),
+)
+
+
+class HelperError(Exception):
+    pass
+
+
+def parse_hours(value: str) -> int:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,3}", value):
+        raise HelperError(f"Interval must be {MIN_HOURS} through {MAX_HOURS} hours")
+    hours = int(value)
+    if not MIN_HOURS <= hours <= MAX_HOURS:
+        raise HelperError(f"Interval must be {MIN_HOURS} through {MAX_HOURS} hours")
+    return hours
+
+
+def render(hours: int) -> str:
+    return f"{HEADER}[Timer]\nOnUnitActiveSec=\nOnUnitActiveSec={hours}h\n"
+
+
+def _dropin_dir(dropin_dir: Path, *, create: bool) -> bool:
+    if dropin_dir.is_symlink():
+        raise HelperError(f"{dropin_dir} is a symlink; refusing to write through it")
+    if not dropin_dir.exists():
+        if not create:
+            return False
+        dropin_dir.mkdir(mode=0o755, parents=True)
+    if not dropin_dir.is_dir():
+        raise HelperError(f"{dropin_dir} is not a directory")
+    return True
+
+
+def write_dropin(dropin_dir: Path, hours: int) -> Path:
+    """Atomically replace the drop-in with the fixed template."""
+    _dropin_dir(dropin_dir, create=True)
+    target = dropin_dir / DROPIN_NAME
+    if target.is_symlink():
+        target.unlink()
+    elif target.exists() and not target.is_file():
+        raise HelperError(f"{target} is not a regular file")
+    temp = dropin_dir / f".{DROPIN_NAME}.{os.getpid()}.tmp"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(render(hours))
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(temp, 0o644)
+        os.replace(temp, target)
+    except BaseException:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return target
+
+
+def existing_hours(dropin_dir: Path) -> int | None:
+    """Interval of a managed drop-in; None when absent or not ours."""
+    target = dropin_dir / DROPIN_NAME
+    if target.is_symlink() or not target.is_file():
+        return None
+    text = target.read_text(encoding="utf-8", errors="replace")
+    for form in MANAGED_FORMS:
+        match = form.fullmatch(text)
+        if match:
+            try:
+                return parse_hours(match.group(1))
+            except HelperError:
+                return None
+    return None
+
+
+def reconcile(dropin_dir: Path) -> str:
+    """Keep a managed interval in the fixed form; drop anything else."""
+    if not _dropin_dir(dropin_dir, create=False):
+        return "unchanged"
+    target = dropin_dir / DROPIN_NAME
+    if not (target.exists() or target.is_symlink()):
+        return "unchanged"
+    hours = existing_hours(dropin_dir)
+    if hours is not None:
+        if target.read_text(encoding="utf-8") == render(hours):
+            return "unchanged"
+        write_dropin(dropin_dir, hours)
+        return f"rewritten ({hours}h)"
+    if target.is_dir() and not target.is_symlink():
+        raise HelperError(f"{target} is a directory")
+    target.unlink()
+    return "removed"
+
+
+def _systemctl(run, *args: str) -> None:
+    result = run([SYSTEMCTL, *args], capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise HelperError(f"systemctl {' '.join(args)} failed: {detail}")
+
+
+def main(argv: list[str], *, dropin_dir: Path = DROPIN_DIR, run=subprocess.run,
+         require_root: bool = True) -> int:
+    try:
+        if require_root and os.geteuid() != 0:
+            raise HelperError("must run as root")
+        if len(argv) == 2 and argv[0] == "set-interval":
+            hours = parse_hours(argv[1])
+            write_dropin(dropin_dir, hours)
+            _systemctl(run, "daemon-reload")
+            _systemctl(run, "restart", TIMER_UNIT)
+            print(f"updater check interval set to {hours}h")
+            return 0
+        if argv == ["reconcile"]:
+            outcome = reconcile(dropin_dir)
+            if outcome != "unchanged":
+                _systemctl(run, "daemon-reload")
+                _systemctl(run, "try-restart", TIMER_UNIT)
+            print(f"updater timer drop-in {outcome}")
+            return 0
+        raise HelperError("usage: zenplus-updater-timer-helper set-interval <hours>")
+    except HelperError as exc:
+        print(f"[updater-timer-helper] ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    os.environ.clear()
+    os.environ.update({"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"})
+    sys.exit(main(sys.argv[1:]))

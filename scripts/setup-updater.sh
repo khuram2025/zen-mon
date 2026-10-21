@@ -90,21 +90,12 @@ log "Installing systemd units ..."
 cp "${ZENPLUS_DIR}/updater/systemd/zenplus-updater.service" /etc/systemd/system/
 cp "${ZENPLUS_DIR}/updater/systemd/zenplus-updater.timer" /etc/systemd/system/
 
-# ─── 5. Install polkit rule (detect version) ─────────────────────────────────
-log "Installing polkit rule ..."
-POLKIT_VER=$(pkaction --version 2>/dev/null | grep -oP '[\d.]+' || echo "0.0")
-POLKIT_MINOR=$(echo "$POLKIT_VER" | cut -d. -f2)
-
-if [ "${POLKIT_MINOR:-0}" -ge 106 ] 2>/dev/null; then
-    mkdir -p /etc/polkit-1/rules.d
-    cp "${ZENPLUS_DIR}/updater/polkit/50-zenplus-updater.rules" /etc/polkit-1/rules.d/
-    log "Installed .rules (polkit >= 0.106)"
-else
-    mkdir -p /etc/polkit-1/localauthority/50-local.d
-    cp "${ZENPLUS_DIR}/updater/polkit/zenplus-updater.pkla" /etc/polkit-1/localauthority/50-local.d/
-    log "Installed .pkla (polkit < 0.106)"
-fi
-systemctl restart polkit 2>/dev/null || true
+# ─── 5. Updater privileges (sudo grant, timer helper, polkit) ────────────────
+# The API starts the updater and sets its check interval through sudo only:
+# a root helper writes a fixed timer drop-in. polkit < 0.106 (20.04/22.04)
+# gets no grant; the narrow .rules file is installed on polkit >= 0.106.
+log "Installing updater privileges ..."
+bash "${ZENPLUS_DIR}/scripts/setup-updater-privileges.sh"
 
 # ─── 6. Fix NoNewPrivileges on zenplus-api ────────────────────────────────────
 if grep -q "NoNewPrivileges=true" /etc/systemd/system/zenplus-api.service 2>/dev/null; then

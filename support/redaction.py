@@ -63,6 +63,32 @@ SECRET_KEY_NAMES = (
     "OTEL_EXPORTER_OTLP_HEADERS",
     "SENSOR_API_KEY",
     "AGENT_API_KEY",
+    "SMTP_PASS",
+    "ROUTING_KEY",
+    "INTEGRATION_KEY",
+    "AUTH_KEY",
+    "PRIV_KEY",
+    "AUTH_PASSWORD",
+    "PRIV_PASSWORD",
+    "CREDENTIAL",
+    "CREDENTIALS",
+)
+
+# Key names that are secret when they *end* the name (``pagerduty_routing_key``,
+# ``snmp_auth_key``, ``smtp_pass``, ``credentials``). They are deliberately
+# suffix-only so identifiers such as ``credential_id`` or ``auth_key_id`` keep
+# their debugging value.
+_SENSITIVE_KEY_SUFFIXES = (
+    "routingkey",
+    "integrationkey",
+    "authkey",
+    "privkey",
+    "licensekey",
+    "signingkey",
+    "encryptionkey",
+    "credential",
+    "credentials",
+    "webhookurl",
 )
 
 # Build one combined "<KEY> = <value>" / "<KEY>: <value>" / JSON "<key>": "<value>"
@@ -73,9 +99,45 @@ _generic_secret_key = (
     r"[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|"
     r"api[_-]?key|access[_-]?key|private[_-]?key|community)[A-Za-z0-9_.-]*"
 )
-_secret_key = rf"(?:{_secret_keys_alt}|{_generic_secret_key})"
+_suffix_secret_key = (
+    r"[A-Za-z0-9_.-]*(?:routing[_-]?key|integration[_-]?key|auth[_-]?key|"
+    r"priv[_-]?key|license[_-]?key|signing[_-]?key|encryption[_-]?key|"
+    r"credentials?|webhook[_-]?url|[_.-]pass)"
+)
+_secret_key = rf"(?:{_secret_keys_alt}|{_generic_secret_key}|{_suffix_secret_key})"
+
+# A URL path/query tail, stopping at whitespace, quotes and markup delimiters.
+_url_tail = r"[^\s\"'<>]+"
 
 PATTERNS: tuple[Pattern_, ...] = (
+    # Webhook URLs whose path *is* the credential (Slack, Microsoft Teams,
+    # Discord, Mattermost/Rocket.Chat/Zapier style ``/hooks/<secret>`` and
+    # PagerDuty integration URLs). The scheme, host and the fixed path prefix
+    # are kept so a support engineer can still see which provider is used.
+    Pattern_(
+        kind="webhook_url",
+        regex=re.compile(
+            r"\b(https?://(?:"
+            r"hooks\.slack(?:-gov)?\.com/|"
+            r"[A-Za-z0-9.-]+\.webhook\.office\.com/|"
+            r"outlook\.office(?:365)?\.com/webhook/|"
+            r"events\.(?:eu\.)?pagerduty\.com/integration/|"
+            r"[^\s/\"'<>@]+(?:/[^\s/\"'<>?#]+)*?/(?:webhooks?|hooks)/"
+            r"))(?!\[REDACTED:)" + _url_tail,
+            re.IGNORECASE,
+        ),
+        replacement_template=r"\1[REDACTED:webhook_url]",
+    ),
+    # Telegram bot API URLs carry the bot token as ``/bot<id>:<secret>/``.
+    Pattern_(
+        kind="telegram_url",
+        regex=re.compile(
+            r"\b(https?://api\.telegram\.org/(?:file/)?bot)"
+            r"(?!\[REDACTED:)[^/\s\"'<>]+",
+            re.IGNORECASE,
+        ),
+        replacement_template=r"\1[REDACTED:telegram_url]",
+    ),
     # URLs with userinfo. Handle these before whole-value config assignment so
     # DATABASE_URL retains the useful scheme/user/host while losing only its
     # password. The scheme is intentionally generic: support logs may contain
@@ -84,7 +146,7 @@ PATTERNS: tuple[Pattern_, ...] = (
         kind="url_password",
         regex=re.compile(
             r"\b([a-z][a-z0-9+.-]*://[^:/@\s]+):"
-            r"(?!\[REDACTED:url_password\])([^@\s/]+)@",
+            r"(?!\[REDACTED:url_password\])([^\s/?#]+)@",
             re.IGNORECASE,
         ),
         replacement_template=r"\1:[REDACTED:url_password]@",
@@ -108,7 +170,7 @@ PATTERNS: tuple[Pattern_, ...] = (
         kind="env_secret",
         regex=re.compile(
             rf"^(\s*(?:export\s+)?{_secret_key}\s*=\s*)"
-            rf"(?![\"']?\[REDACTED:)[^\r\n]*$",
+            rf"(?![\s\"']*\[REDACTED:)[^\r\n]*$",
             re.IGNORECASE | re.MULTILINE,
         ),
         replacement_template=r"\1[REDACTED:env_secret]",
@@ -119,8 +181,12 @@ PATTERNS: tuple[Pattern_, ...] = (
         kind="json_secret",
         regex=re.compile(
             rf'"({_secret_key})"\s*:\s*'
-            rf'(?![\"\']?\[REDACTED:)'
-            rf'(?:(?:"(?:\\.|[^"\\])*")|(?:\'(?:\\.|[^\'\\])*\')|[^,}}\r\n]+)',
+            rf'(?![\s\"\']*\[REDACTED:)'
+            # Nested objects/arrays (``"credentials": {"user": .., "pass": ..}``)
+            # are consumed whole, up to two levels deep, so no inner value
+            # survives a text-mode (non-JSON document) match.
+            rf'(?:\{{(?:[^{{}}]|\{{[^{{}}]*\}})*\}}|\[(?:[^\[\]]|\[[^\[\]]*\])*\]|'
+            rf'(?:"(?:\\.|[^"\\])*")|(?:\'(?:\\.|[^\'\\])*\')|[^,}}\r\n]+)',
             re.IGNORECASE,
         ),
         replacement_template=r'"\1": "[REDACTED:json_secret]"',
@@ -131,7 +197,7 @@ PATTERNS: tuple[Pattern_, ...] = (
         kind="yaml_secret",
         regex=re.compile(
             rf"^(\s*{_secret_key}\s*:\s*)"
-            rf"(?![\"']?\[REDACTED:)[^\r\n]*$",
+            rf"(?![\s\"']*\[REDACTED:)[^\r\n]*$",
             re.IGNORECASE | re.MULTILINE,
         ),
         replacement_template=r"\1[REDACTED:yaml_secret]",
@@ -140,9 +206,11 @@ PATTERNS: tuple[Pattern_, ...] = (
     Pattern_(
         kind="cli_secret",
         regex=re.compile(
-            r"\b(--(?:password|passwd|passphrase|secret|token|api[-_]key|"
-            r"access[-_]key|private[-_]key|community))(\s*=\s*|\s+)"
-            r"(?![\"']?\[REDACTED:)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s;|]+)",
+            r"(?<![\w-])(--[A-Za-z0-9-]*(?:password|passwd|passphrase|secret|"
+            r"token|api[-_]key|access[-_]key|private[-_]key|community|"
+            r"auth[-_]key|priv[-_]key|routing[-_]key|integration[-_]key|"
+            r"credentials?))(\s*=\s*|\s+(?!-))"
+            r"(?![\s\"']*\[REDACTED:)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s;|]+)",
             re.IGNORECASE,
         ),
         replacement_template=r"\1\2[REDACTED:cli_secret]",
@@ -153,7 +221,7 @@ PATTERNS: tuple[Pattern_, ...] = (
         kind="inline_secret",
         regex=re.compile(
             rf"\b({_secret_key})\s*=\s*"
-            rf"(?![\"']?\[REDACTED:)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^;\s,}}]+)",
+            rf"(?![\s\"']*\[REDACTED:)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^;\s,}}]+)",
             re.IGNORECASE,
         ),
         replacement_template=r"\1=[REDACTED:inline_secret]",
@@ -165,7 +233,7 @@ PATTERNS: tuple[Pattern_, ...] = (
         regex=re.compile(
             r"\b((?:Proxy-)?Authorization\s*[:=]\s*)"
             r"(Bearer|Token|Basic|JWT)\s+"
-            r"(?!\[REDACTED:)[A-Za-z0-9._\-+/=:%]+",
+            r"(?!\s*\[REDACTED:)[A-Za-z0-9._\-+/=:%]+",
             re.IGNORECASE,
         ),
         replacement_template=r"\1\2 [REDACTED:auth_header]",
@@ -182,12 +250,18 @@ PATTERNS: tuple[Pattern_, ...] = (
         ),
         replacement_template=r"\1 [REDACTED:opaque_auth_header]",
     ),
+    # Credential-bearing custom headers: X-Api-Key, X-Agent-Key, X-Sensor-Key,
+    # X-Auth-Token, X-Amz-Security-Token, X-Hub-Signature, ... Identifier
+    # headers (X-Agent-Id, X-Sensor-Id, X-Appliance-ID) are kept: they only
+    # name the caller and are needed to correlate support logs.
     Pattern_(
         kind="secret_header",
         regex=re.compile(
-            r"\b((?:X-API-Key|X-Auth-Token|X-Amz-Security-Token|"
-            r"Grpc-Metadata-Authorization)\s*:\s*)"
-            r"(?!\[REDACTED:)[^\r\n\"]*",
+            r"\b((?:X-[A-Za-z0-9-]*?(?:Key|Token|Secret|Password|Passwd|"
+            r"Signature(?:-256)?|Credentials?)|Api-Key|Private-Token|"
+            r"Grpc-Metadata-Authorization)[\"']?\s*[:=]\s*([\"']?))"
+            r"(?![\s\"']*\[REDACTED:)"
+            r"(?:(?<=\")[^\"\r\n]*|(?<=')[^'\r\n]*|[^\r\n\"']*)",
             re.IGNORECASE,
         ),
         replacement_template=r"\1[REDACTED:secret_header]",
@@ -198,7 +272,7 @@ PATTERNS: tuple[Pattern_, ...] = (
         kind="cookie_header",
         regex=re.compile(
             r"\b((?:Cookie|Set-Cookie)\s*:\s*)"
-            r"(?!\[REDACTED:)[^\r\n\"]*",
+            r"(?!\s*\[REDACTED:)[^\r\n\"]*",
             re.IGNORECASE,
         ),
         replacement_template=r"\1[REDACTED:cookie_header]",
@@ -209,8 +283,9 @@ PATTERNS: tuple[Pattern_, ...] = (
         regex=re.compile(
             r"([?&](?:access[_-]?token|refresh[_-]?token|api[_-]?key|"
             r"auth[_-]?token|password|passwd|passphrase|client[_-]?secret|"
-            r"signature)\s*=\s*)"
-            r"(?!\[REDACTED:)[^&#\s\"']+",
+            r"signature|sig|token|key|secret|routing[_-]?key|"
+            r"integration[_-]?key)\s*=\s*)"
+            r"(?!\s*\[REDACTED:)[^&#\s\"']+",
             re.IGNORECASE,
         ),
         replacement_template=r"\1[REDACTED:query_secret]",
@@ -237,6 +312,60 @@ PATTERNS: tuple[Pattern_, ...] = (
         ),
         replacement_template=r"\1\2\3:[REDACTED:cli_userinfo]",
     ),
+    # A bare ``Bearer <token>`` outside an Authorization header (log lines,
+    # exception text, curl -H fragments that were split). The lookahead needs a
+    # digit or token punctuation so prose such as "Bearer authentication" is
+    # left alone.
+    Pattern_(
+        kind="bearer_token",
+        regex=re.compile(
+            r"\b(Bearer)(\s+)(?!\[REDACTED:)"
+            r"(?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{12,}",
+            re.IGNORECASE,
+        ),
+        replacement_template=r"\1\2[REDACTED:bearer_token]",
+    ),
+    # Provider credential shapes that are unambiguous on their own.
+    Pattern_(
+        kind="aws_access_key",
+        regex=re.compile(r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])"),
+        replacement_template="[REDACTED:aws_access_key]",
+    ),
+    Pattern_(
+        kind="github_token",
+        regex=re.compile(
+            r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{36,255}|"
+            r"github_pat_[A-Za-z0-9_]{22,255})(?![A-Za-z0-9_])"
+        ),
+        replacement_template="[REDACTED:github_token]",
+    ),
+    # ZenPlus-issued keys: zpa_ (agent), zps_ (sensor), zpi_ (APM ingest),
+    # zpr_ (RUM) followed by a token_urlsafe body. Short display prefixes
+    # (``zpa_AbCd``) stay readable.
+    Pattern_(
+        kind="zenplus_key",
+        regex=re.compile(r"(?<![A-Za-z0-9_])zp[asir]_[A-Za-z0-9_-]{20,}"),
+        replacement_template="[REDACTED:zenplus_key]",
+    ),
+    # Bare Telegram bot token (``<bot id>:AA<secret>``).
+    Pattern_(
+        kind="telegram_token",
+        regex=re.compile(
+            r"(?<![A-Za-z0-9_:])\d{6,12}:AA[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])"
+        ),
+        replacement_template="[REDACTED:telegram_token]",
+    ),
+    # ``mysql -p<password>`` (the password is glued to -p; ``-p`` followed by
+    # a space prompts and the next word is the database name).
+    Pattern_(
+        kind="mysql_password",
+        regex=re.compile(
+            r"(\b(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlcheck|mysqlshow|"
+            r"mariadb|mariadb-dump)\b[^\r\n]*?\s-p)"
+            r"(?![\s\"']*\[REDACTED:)(\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s;|]+)"
+        ),
+        replacement_template=r"\1[REDACTED:mysql_password]",
+    ),
     # A JWT is usable even when it appears outside an Authorization header.
     Pattern_(
         kind="jwt",
@@ -253,7 +382,7 @@ PATTERNS: tuple[Pattern_, ...] = (
         regex=re.compile(
             r"\b(password|passwd|passphrase|api\s+key|access\s+token|secret)"
             r"(\s+(?:is|was)\s+|\s*:\s*)"
-            r"(?!\[REDACTED:)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\"']+)",
+            r"(?!\s*\[REDACTED:)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\"']+)",
             re.IGNORECASE,
         ),
         replacement_template=r"\1\2[REDACTED:prose_secret]",
@@ -353,9 +482,17 @@ def redact_kv_pairs(pairs: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
 
 
 def _is_sensitive_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
+    normalized = key.lower().replace("-", "_").replace(".", "_")
     known = {name.lower() for name in SECRET_KEY_NAMES}
     if normalized in known:
+        return True
+    compact = normalized.replace("_", "")
+    if compact.endswith(_SENSITIVE_KEY_SUFFIXES) or normalized.endswith("_pass"):
+        return True
+    # Credential-bearing HTTP header names used as dict keys (X-Agent-Key).
+    if normalized.startswith("x_") and normalized.endswith(
+        ("_key", "_token", "_secret", "_password", "_signature", "_credentials")
+    ):
         return True
     return any(
         token in normalized

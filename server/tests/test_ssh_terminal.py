@@ -45,6 +45,16 @@ async def redis_server(monkeypatch):
     proc.wait(5)
 
 
+# Host keys the tests have already confirmed, per fixture port.
+TRUSTED: dict = {}
+
+
+async def open_trusted(user, host, port, username, password, cols, rows):
+    session_id, _accepted = await term.open_session(user, host, port, username, password, cols, rows,
+                                                    known_keys=TRUSTED.get(port, ()))
+    return session_id
+
+
 @pytest.fixture
 def ssh_server():
     """Echo shell: prints 'ready$ ' then each line back as 'got:<line>'. 'exit' ends it."""
@@ -54,6 +64,7 @@ def ssh_server():
     port = listener.getsockname()[1]
     stop = threading.Event()
     seen = {'resizes': [], 'logins': []}
+    TRUSTED[port] = [(key.get_name(), key.get_base64())]
 
     class Server(paramiko.ServerInterface):
         def check_auth_password(self, username, password):
@@ -133,7 +144,7 @@ def b64(s):
 async def test_open_type_resize_and_close(redis_server, ssh_server):
     port, seen = ssh_server
     user = NS(id=uuid4())
-    sid = await term.open_session(user, '127.0.0.1', port, 'lab', 'labpw', 100, 30)   # no host key setup needed
+    sid = await open_trusted(user, '127.0.0.1', port, 'lab', 'labpw', 100, 30)   # host key already confirmed
     text, _ = await collect(sid, user, 'ready$ ')
     assert 'ready$ ' in text
     await term.send_input(sid, user, {'t': 'd', 'd': b64('hello\n')})
@@ -152,7 +163,7 @@ async def test_open_type_resize_and_close(redis_server, ssh_server):
 async def test_remote_exit_ends_the_stream(redis_server, ssh_server):
     port, _ = ssh_server
     user = NS(id=uuid4())
-    sid = await term.open_session(user, '127.0.0.1', port, 'lab', 'labpw', 80, 24)
+    sid = await open_trusted(user, '127.0.0.1', port, 'lab', 'labpw', 80, 24)
     await term.send_input(sid, user, {'t': 'd', 'd': b64('exit\n')})
     text, closed = await collect(sid, user, 'never')
     assert 'bye' in text and closed == 'remote_closed'
@@ -163,10 +174,10 @@ async def test_wrong_password_and_unreachable_have_safe_messages(redis_server, s
     port, _ = ssh_server
     user = NS(id=uuid4())
     with pytest.raises(term.TerminalError) as bad:
-        await term.open_session(user, '127.0.0.1', port, 'lab', 'wrong', 80, 24)
+        await open_trusted(user, '127.0.0.1', port, 'lab', 'wrong', 80, 24)
     assert bad.value.status == 422 and 'wrong' not in str(bad.value)
     with pytest.raises(term.TerminalError) as down:
-        await term.open_session(user, '127.0.0.1', _free_port(), 'lab', 'labpw', 80, 24)
+        await open_trusted(user, '127.0.0.1', _free_port(), 'lab', 'labpw', 80, 24)
     assert down.value.status == 502
 
 
@@ -174,9 +185,9 @@ async def test_wrong_password_and_unreachable_have_safe_messages(redis_server, s
 async def test_sessions_are_private_and_limited(redis_server, ssh_server):
     port, _ = ssh_server
     owner, other = NS(id=uuid4()), NS(id=uuid4())
-    ids = [await term.open_session(owner, '127.0.0.1', port, 'lab', 'labpw', 80, 24) for _ in range(term.MAX_PER_USER)]
+    ids = [await open_trusted(owner, '127.0.0.1', port, 'lab', 'labpw', 80, 24) for _ in range(term.MAX_PER_USER)]
     with pytest.raises(term.TerminalError) as limited:
-        await term.open_session(owner, '127.0.0.1', port, 'lab', 'labpw', 80, 24)
+        await open_trusted(owner, '127.0.0.1', port, 'lab', 'labpw', 80, 24)
     assert limited.value.status == 429
     for call in (term.send_input(ids[0], other, {'t': 'd', 'd': b64('x')}), term.close_session(ids[0], other)):
         with pytest.raises(term.TerminalError) as denied:
@@ -191,7 +202,7 @@ async def test_sessions_are_private_and_limited(redis_server, ssh_server):
 async def test_password_is_not_stored_in_redis(redis_server, ssh_server):
     port, _ = ssh_server
     user = NS(id=uuid4())
-    sid = await term.open_session(user, '127.0.0.1', port, 'lab', 'labpw', 80, 24)
+    sid = await open_trusted(user, '127.0.0.1', port, 'lab', 'labpw', 80, 24)
     dump = ''
     for key in await redis_server.keys('zp:sshterm:*'):
         kind = await redis_server.type(key)

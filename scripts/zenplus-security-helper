@@ -28,6 +28,10 @@ set -euo pipefail
 STAGING_DIR="/opt/zenplus/data/tls-staging"
 TLS_DIR="/etc/zenplus/tls"
 STATE_FILE="${TLS_DIR}/state.json"
+# Root-only scratch space for install-cert (a fresh mktemp -d per run).
+CERT_WORK_PARENT="/tmp"
+# Largest certificate, key or chain file accepted from the staging directory.
+STAGED_MAX_BYTES=1048576
 
 err() { echo "[security-helper] ERROR: $*" >&2; exit 1; }
 
@@ -47,12 +51,130 @@ validate_pair() {
     local crt="$1" key="$2"
     openssl x509 -noout -in "$crt" >/dev/null 2>&1 \
         || err "staged certificate is not a valid PEM X.509 certificate"
-    openssl pkey -noout -in "$key" >/dev/null 2>&1 \
+    openssl pkey -noout -passin pass: -in "$key" >/dev/null 2>&1 \
         || err "staged private key is not a valid PEM key"
     local crt_pub key_pub
     crt_pub=$(openssl x509 -pubkey -noout -in "$crt" | sha256sum | cut -d' ' -f1)
-    key_pub=$(openssl pkey -pubout -in "$key" 2>/dev/null | sha256sum | cut -d' ' -f1)
+    key_pub=$(openssl pkey -pubout -passin pass: -in "$key" 2>/dev/null | sha256sum | cut -d' ' -f1)
     [ "$crt_pub" = "$key_pub" ] || err "private key does not match the certificate"
+}
+
+# Copy one staged file into the root-only work directory: $1 staging dir,
+# $2 file name, $3 destination. The staging directory belongs to the service
+# account, so its last component and the file are opened with O_NOFOLLOW (a
+# symlink to /etc/shadow or another root-only file is refused), FIFOs and
+# devices are refused, and the size is capped. Everything after this works on
+# the root-owned copy, so the staged file cannot be swapped between validation
+# and installation. Exit status: 0 copied, 3 absent, 2 refused.
+snapshot_staged() {
+    python3 -I - "$1" "$2" "$3" "$STAGED_MAX_BYTES" <<'PY'
+import os, stat, sys
+
+staging, name, destination, limit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+parent, leaf = os.path.split(staging.rstrip("/"))
+flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+try:
+    parent_fd = os.open(parent or "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    dir_fd = os.open(leaf, flags | os.O_DIRECTORY, dir_fd=parent_fd)
+    fd = os.open(name, flags | os.O_NONBLOCK, dir_fd=dir_fd)
+except FileNotFoundError:
+    sys.exit(3)
+except OSError as exc:
+    print(f"{name}: {exc.strerror}", file=sys.stderr)
+    sys.exit(2)
+info = os.fstat(fd)
+if not stat.S_ISREG(info.st_mode):
+    print(f"{name}: not a regular file", file=sys.stderr)
+    sys.exit(2)
+chunks, size = [], 0
+while True:
+    chunk = os.read(fd, 65536)
+    if not chunk:
+        break
+    size += len(chunk)
+    if size > limit:
+        print(f"{name}: larger than {limit} bytes", file=sys.stderr)
+        sys.exit(2)
+    chunks.append(chunk)
+out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+with os.fdopen(out, "wb") as handle:
+    handle.write(b"".join(chunks))
+PY
+}
+
+# Only parsed and re-encoded material is ever installed: whatever else a staged
+# file contains (other PEM blocks, text, a key appended to a certificate) is
+# dropped, so no file the service account points at is copied verbatim.
+reencode_cert() {   # <in> <out>: the first X.509 certificate
+    openssl x509 -in "$1" -out "$2" >/dev/null 2>&1 \
+        || err "staged certificate is not a valid PEM X.509 certificate"
+}
+
+reencode_key() {    # <in> <out>: the private key, as unencrypted PKCS#8 PEM
+    ( umask 077; openssl pkey -passin pass: -in "$1" -out "$2" >/dev/null 2>&1 ) \
+        || err "staged private key is not a valid PEM key"
+}
+
+reencode_chain() {  # <in> <out>: every certificate, in order, PEM blocks only
+    local blocks
+    openssl crl2pkcs7 -nocrl -certfile "$1" 2>/dev/null \
+        | openssl pkcs7 -print_certs 2>/dev/null \
+        | awk '/^-----BEGIN CERTIFICATE-----$/ {p=1} p {print} /^-----END CERTIFICATE-----$/ {p=0}' \
+        > "$2" || err "staged chain is not valid PEM"
+    blocks=$(grep -c '^-----BEGIN CERTIFICATE-----$' "$2" || true)
+    [ "${blocks:-0}" -ge 1 ] || err "staged chain is not valid PEM"
+}
+
+install_cert() {
+    local work rc have_chain=0
+    work=$(mktemp -d "${CERT_WORK_PARENT}/zenplus-cert.XXXXXXXX") \
+        || err "cannot create a private work directory"
+    chmod 0700 "$work"
+    # shellcheck disable=SC2064  # expand $work now; it is local to this function
+    trap "rm -rf -- '$work'" EXIT
+
+    rc=0; snapshot_staged "$STAGING_DIR" server.crt "$work/crt.in" || rc=$?
+    [ "$rc" -ne 3 ] || err "no staged certificate at ${STAGING_DIR}/server.crt"
+    [ "$rc" -eq 0 ] || err "staged certificate is not a regular file (refused)"
+    rc=0; snapshot_staged "$STAGING_DIR" server.key "$work/key.in" || rc=$?
+    [ "$rc" -ne 3 ] || err "no staged private key at ${STAGING_DIR}/server.key"
+    [ "$rc" -eq 0 ] || err "staged private key is not a regular file (refused)"
+    rc=0; snapshot_staged "$STAGING_DIR" chain.crt "$work/chain.in" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        have_chain=1
+    elif [ "$rc" -ne 3 ]; then
+        err "staged chain is not a regular file (refused)"
+    fi
+
+    reencode_cert "$work/crt.in" "$work/server.crt"
+    reencode_key "$work/key.in" "$work/server.key"
+    validate_pair "$work/server.crt" "$work/server.key"
+    if [ "$have_chain" -eq 1 ]; then
+        reencode_chain "$work/chain.in" "$work/chain.crt"
+        cat "$work/server.crt" "$work/chain.crt" > "$work/fullchain.pem"
+    else
+        cat "$work/server.crt" > "$work/fullchain.pem"
+    fi
+
+    install -o root -g root -m 0755 -d "$(dirname "$TLS_DIR")" "$TLS_DIR"
+    install -o root -g root -m 0600 "$work/server.key" "${TLS_DIR}/server.key"
+    install -o root -g root -m 0644 "$work/server.crt" "${TLS_DIR}/server.crt"
+    if [ "$have_chain" -eq 1 ]; then
+        install -o root -g root -m 0644 "$work/chain.crt" "${TLS_DIR}/chain.crt"
+    else
+        rm -f "${TLS_DIR}/chain.crt"
+    fi
+    install -o root -g root -m 0644 "$work/fullchain.pem" "${TLS_DIR}/fullchain.pem"
+
+    # The staged private key has served its purpose. rm never follows a link.
+    rm -f "${STAGING_DIR}/server.key"
+
+    # If HTTPS is already live, reload nginx so it picks up the new cert.
+    if [ -f "$STATE_FILE" ] && grep -q '"https": *"on"' "$STATE_FILE"; then
+        nginx -t >/dev/null 2>&1 || err "nginx config test failed after cert install"
+        systemctl reload nginx
+    fi
+    echo "certificate installed"
 }
 
 # ── Nginx config template ───────────────────────────────────────────────────
@@ -173,6 +295,13 @@ generate_config() {
         ipv6="[::1]"
     fi
     write_security_headers "$hsts"
+    # Log without query strings (stream tickets, legacy ?token=). The format is
+    # defined in nginx.conf's http block by setup-management-hardening.py; use
+    # it only when present so `nginx -t` never fails on an unknown format.
+    local access_log=""
+    if grep -q 'log_format zenplus_safe ' /etc/nginx/nginx.conf 2>/dev/null; then
+        access_log="    access_log /var/log/nginx/access.log zenplus_safe;"
+    fi
 
     cat > "$out" <<'EOF'
 # Generated by zenplus-security-helper — do not edit by hand.
@@ -185,6 +314,7 @@ EOF
         echo "    listen ${ipv4}80 default_server;"
         echo "    listen ${ipv6}:80 default_server;"
         echo "    server_name _;"
+        [ -z "$access_log" ] || echo "$access_log"
     } >> "$out"
 
     if [ "$https" = "on" ] && [ "$redirect" = "on" ]; then
@@ -220,6 +350,7 @@ EOF
                 echo "    http2 on;"
             fi
             echo "    server_name _;"
+            [ -z "$access_log" ] || echo "$access_log"
             echo ""
             echo "    ssl_certificate ${TLS_DIR}/fullchain.pem;"
             echo "    ssl_certificate_key ${TLS_DIR}/server.key;"
@@ -242,41 +373,11 @@ EOF
 
 # ── Subcommands ─────────────────────────────────────────────────────────────
 
+main() {
 case "${1:-}" in
     install-cert)
         [ $# -eq 1 ] || err "usage: install-cert (reads ${STAGING_DIR})"
-        crt="${STAGING_DIR}/server.crt"
-        key="${STAGING_DIR}/server.key"
-        chain="${STAGING_DIR}/chain.crt"
-        [ -f "$crt" ] || err "no staged certificate at $crt"
-        [ -f "$key" ] || err "no staged private key at $key"
-        validate_pair "$crt" "$key"
-        if [ -f "$chain" ]; then
-            openssl x509 -noout -in "$chain" >/dev/null 2>&1 \
-                || err "staged chain is not valid PEM"
-        fi
-
-        install -o root -g root -m 0755 -d /etc/zenplus "$TLS_DIR"
-        install -o root -g root -m 0600 "$key" "${TLS_DIR}/server.key"
-        install -o root -g root -m 0644 "$crt" "${TLS_DIR}/server.crt"
-        if [ -f "$chain" ]; then
-            install -o root -g root -m 0644 "$chain" "${TLS_DIR}/chain.crt"
-            cat "$crt" "$chain" > "${TLS_DIR}/fullchain.pem"
-        else
-            rm -f "${TLS_DIR}/chain.crt"
-            cat "$crt" > "${TLS_DIR}/fullchain.pem"
-        fi
-        chmod 0644 "${TLS_DIR}/fullchain.pem"
-
-        # The staged private key has served its purpose.
-        rm -f "$key"
-
-        # If HTTPS is already live, reload nginx so it picks up the new cert.
-        if [ -f "$STATE_FILE" ] && grep -q '"https": *"on"' "$STATE_FILE"; then
-            nginx -t >/dev/null 2>&1 || err "nginx config test failed after cert install"
-            systemctl reload nginx
-        fi
-        echo "certificate installed"
+        install_cert
         ;;
 
     apply)
@@ -341,3 +442,9 @@ EOF
         err "unknown subcommand: ${1:-<none>} (see script header for usage)"
         ;;
 esac
+}
+
+# Sourcing the helper (the test suite does) only defines its functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

@@ -233,7 +233,23 @@ def ssh_algorithms(*, legacy_compat=False):
             'kex': [] if legacy_compat else list(LEGACY_KEX)}
 
 
-def fetch_config(host, platform, username, password, enable, port, config_type='running', *, pkey=None, legacy_compat=False):
+def presented_host_key(conn):
+    """(key type, base64) of the host key the device presented, or None."""
+    try:
+        channel = getattr(conn, 'remote_conn', None)
+        transport = channel.get_transport() if channel is not None else None
+        if transport is None and getattr(conn, 'remote_conn_pre', None) is not None:
+            transport = conn.remote_conn_pre.get_transport()
+        key = transport.get_remote_server_key() if transport is not None else None
+        return (key.get_name(), key.get_base64()) if key is not None else None
+    except Exception:
+        return None
+
+
+def fetch_config(host, platform, username, password, enable, port, config_type='running', *, pkey=None,
+                 legacy_compat=False, observed_key=None):
+    """``observed_key``: optional dict filled with the presented host key
+    (``type``/``base64``) so the caller can apply warn-only trust."""
     from netmiko import ConnectHandler, SSHDetect
     if platform not in (None, '', 'autodetect') and platform not in DRIVERS:
         raise CaptureError('Unsupported device platform', 'driver')
@@ -278,6 +294,10 @@ def fetch_config(host, platform, username, password, enable, port, config_type='
         conn = ReadOnlyFortinet(**base, device_type=resolved)
     else:
         conn = ConnectHandler(**base, device_type=resolved)
+    if observed_key is not None:
+        presented = presented_host_key(conn)
+        if presented:
+            observed_key.update(type=presented[0], base64=presented[1])
     try:
         if enable:
             try:

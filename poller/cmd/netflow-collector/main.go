@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/zenplus/poller/internal/config"
 	"github.com/zenplus/poller/internal/netflow"
 )
 
@@ -114,6 +115,15 @@ type socketDropSample struct {
 }
 
 func main() {
+	// Refuse an unset/empty or placeholder ClickHouse password before
+	// anything listens (ZENPLUS_ALLOW_INSECURE_DEFAULTS=1 for development).
+	warnings, err := config.CheckSecrets("CLICKHOUSE_PASSWORD")
+	if err != nil {
+		fatalf("netflow collector: %v", err)
+	}
+	for _, w := range warnings {
+		fmt.Println("WARN: " + w)
+	}
 	cfg := loadConfig()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -588,7 +598,7 @@ func loadConfig() collectorConfig {
 			Auth: clickhouse.Auth{
 				Database: env("CLICKHOUSE_DB", "zenplus"),
 				Username: env("CLICKHOUSE_USER", "default"),
-				Password: env("CLICKHOUSE_PASSWORD", "clickhouse_dev"),
+				Password: env("CLICKHOUSE_PASSWORD", config.DevClickHousePassword),
 			},
 			Settings:    clickhouse.Settings{"max_execution_time": 60},
 			Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},

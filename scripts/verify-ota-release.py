@@ -152,7 +152,9 @@ def main() -> None:
         if installed_version != args.version:
             raise RuntimeError("code/.version does not match release version")
         if tuple(map(int, args.version.split('.'))) >= (1, 23, 32):
-            for helper in ('zenplus-cli', 'zenplus-management', 'zenplus-apply-network.sh', 'zenplus-apply-ntp.sh'):
+            # zenplus-cli and zenplus-apply-network.sh were retired (ZP-07); the
+            # signed inventory lists them as managed files so upgrades remove them.
+            for helper in ('zenplus-management', 'zenplus-apply-ntp.sh'):
                 if f'code/bin/{helper}' not in members:
                     raise RuntimeError(f'required management CLI/helper missing: {helper}')
 

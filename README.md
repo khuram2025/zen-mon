@@ -25,7 +25,8 @@ The installer automatically handles everything:
 - Sets up systemd services + Nginx reverse proxy
 - Creates `zenplus` management CLI
 
-After install, open `http://<your-server-ip>` and login with `admin` / `admin123`.
+After install, open `http://<your-server-ip>` and sign in as `admin` with the one-time password the installer
+writes to `/var/lib/zenplus/initial-admin-password` (root only: `sudo cat` it). You choose a new password at first sign-in.
 
 ---
 
@@ -141,7 +142,7 @@ Go Poller → ICMP Ping → ClickHouse (write metrics)
 
 | Service | Username | Password |
 |---------|----------|----------|
-| Dashboard | `admin` | `admin123` |
+| Dashboard | `admin` | One-time password in `/var/lib/zenplus/initial-admin-password` (changed at first sign-in) |
 | PostgreSQL | `zenplus` | Auto-generated (in `/opt/zenplus/.env`) |
 | ClickHouse | `default` | Auto-generated (in `/opt/zenplus/.env`) |
 
@@ -200,8 +201,12 @@ sudo setcap cap_net_raw+ep /opt/zenplus/bin/zenplus-poller
 ### Reset admin password
 ```bash
 cd /opt/zenplus && source venv/bin/activate
-HASH=$(python3 -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('admin123'))")
-docker compose exec -T postgres psql -U zenplus -c "UPDATE users SET password_hash = '$HASH' WHERE username = 'admin';"
+NEW=$(python3 -c 'import secrets; print(secrets.token_urlsafe(15))')
+HASH=$(python3 -c "import sys; from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash(sys.argv[1]))" "$NEW")
+sudo -u postgres psql -d zenplus -v ON_ERROR_STOP=1 -v h="$HASH" <<'SQL'
+UPDATE users SET password_hash = :'h', must_change_password = TRUE WHERE username = 'admin';
+SQL
+echo "One-time admin password: $NEW   (a new one must be chosen at sign-in)"
 ```
 
 ### Complete reinstall

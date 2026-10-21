@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.client_ip import client_ip
 from app.core.crypto import decrypt, encrypt
 from app.core.database import get_db
 from app.core.security import get_current_user, require_permission
@@ -57,10 +58,7 @@ def _strip_bearer(value: Optional[str]) -> str:
 
 
 def _client_ip(request: Request) -> Optional[str]:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
+    return client_ip(request)
 
 
 # ── shared ingest-key authentication (read-through cache, 30s TTL) ───────────

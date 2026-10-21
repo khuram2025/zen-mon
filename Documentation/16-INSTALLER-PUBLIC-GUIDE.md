@@ -60,7 +60,8 @@ sudo zenplus logs api   # Tail API logs (also: poller, updater)
 
 ### What the customer enters in the dashboard
 
-After login (`admin` / `admin123`, prompt to change), they paste
+After login (`admin` with the one-time password from
+`/var/lib/zenplus/initial-admin-password`, prompt to change), they paste
 exactly **one** value: the license key issued by the zentryc.com admin.
 Settings → Subscription → "Enter license key". From that moment the
 appliance is registered with zentryc.com and OTA updates flow.
@@ -211,7 +212,7 @@ maintenance and is not exposed to SSH.
 
 | Where | Username | Password | Notes |
 |---|---|---|---|
-| Dashboard | `admin` | `admin123` | Forced rotation on first login. |
+| Dashboard | `admin` | Random, in `/var/lib/zenplus/initial-admin-password` (root, 0600) | Forced rotation on first login. Never printed. |
 | Postgres | `zenplus` | (random, in `/opt/zenplus/.env`) | Loopback only; no remote auth. |
 | ClickHouse | `default` | (random, in `/opt/zenplus/.env`) | Loopback only via Docker port-bind to `127.0.0.1`. |
 | Redis | (no user) | (random, in `/opt/zenplus/.env`) | `requirepass` only; loopback only. |
@@ -262,10 +263,7 @@ validated by `visudo -cf` before being kept:
 ```
 zenplus ALL=(root) NOPASSWD: /bin/systemctl --no-block start zenplus-updater.service
 zenplus ALL=(root) NOPASSWD: /bin/systemctl start zenplus-updater.service
-zenplus ALL=(root) NOPASSWD: /bin/systemctl restart zenplus-updater.timer
-zenplus ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
-zenplus ALL=(root) NOPASSWD: /bin/mkdir -p /etc/systemd/system/zenplus-updater.timer.d
-zenplus ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/zenplus-updater.timer.d/override.conf
+zenplus ALL=(root) NOPASSWD: /usr/local/sbin/zenplus-updater-timer-helper set-interval *
 ```
 
 Each line corresponds 1:1 with a `subprocess.run()` call in
@@ -506,8 +504,9 @@ Use this as the body of the `https://docs.zentryc.com/install` page:
 >
 > The installer takes 5–10 minutes. When it finishes you'll see the
 > dashboard URL printed to the terminal. Open it in your browser and
-> log in with `admin` / `admin123` — you'll be prompted to change
-> the password on first login.
+> sign in as `admin` with the one-time password in
+> `/var/lib/zenplus/initial-admin-password` (`sudo cat` it) — you'll be
+> prompted to choose a new password on first login.
 >
 > To enable automatic updates, go to **Settings → Subscription** and
 > paste the license key your account manager provided. From that
@@ -613,8 +612,12 @@ sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
 
 ```bash
 cd /opt/zenplus && source venv/bin/activate
-HASH=$(python3 -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('admin123'))")
-sudo -u postgres psql -d zenplus -c "UPDATE users SET password_hash = '$HASH' WHERE username = 'admin';"
+NEW=$(python3 -c 'import secrets; print(secrets.token_urlsafe(15))')
+HASH=$(python3 -c "import sys; from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash(sys.argv[1]))" "$NEW")
+sudo -u postgres psql -d zenplus -v ON_ERROR_STOP=1 -v h="$HASH" <<'SQL'
+UPDATE users SET password_hash = :'h', must_change_password = TRUE WHERE username = 'admin';
+SQL
+echo "One-time admin password: $NEW   (a new one must be chosen at sign-in)"
 ```
 
 ### 11.8 "Disk filled up"
