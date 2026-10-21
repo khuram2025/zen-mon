@@ -1,12 +1,9 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '@/lib/api'
+import { useEffect, useState } from 'react'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { NetworkIcon } from '@/components/network-icons'
-import { iconForNode, type LinkKind, type LinkShape, type ManualMapNode } from '../core'
-
-type DeviceInterface = { if_index: number; if_name: string | null; if_descr: string | null; if_alias: string | null }
+import { iconForNode, nodeKindOf, type LinkKind, type LinkShape, type ManualMapNode } from '../core'
+import { Field, IfaceSelect, PortText, SPEEDS, findIface, inputCls, speedLabel, useInterfaces } from './IfacePicker'
 
 const KINDS: LinkKind[] = ['ethernet', 'fiber', 'trunk', 'wireless', 'vpn', 'serial']
 const SHAPES: { value: LinkShape; label: string }[] = [
@@ -15,20 +12,12 @@ const SHAPES: { value: LinkShape; label: string }[] = [
   { value: 'orthogonal', label: 'Orthogonal' },
 ]
 
-function useInterfaces(deviceId: string | undefined) {
-  return useQuery<DeviceInterface[]>({
-    queryKey: ['device-interfaces', deviceId],
-    enabled: !!deviceId,
-    queryFn: async () => (await api.get(`/devices/${deviceId}/interfaces`)).data,
-  })
-}
-
 export type NewLink = {
   source_node_id: string
   target_node_id: string
   label?: string | null
   link_type: string
-  metadata: { kind: LinkKind; shape: LinkShape; src_interface?: string | null; dst_interface?: string | null }
+  metadata: { kind: LinkKind; shape: LinkShape; src_interface?: string | null; dst_interface?: string | null; speed?: string | null; notes?: string | null }
 }
 
 export function LinkDialog({ source, target, onCancel, onCreate, saving }: {
@@ -41,18 +30,36 @@ export function LinkDialog({ source, target, onCancel, onCreate, saving }: {
   const [srcIf, setSrcIf] = useState('')
   const [dstIf, setDstIf] = useState('')
   const [kind, setKind] = useState<LinkKind>('ethernet')
-  const [shape, setShape] = useState<LinkShape>('curve')
+  // Straight by default: a curve between distant devices can sweep behind
+  // other tiles and read as a connection to them.
+  const [shape, setShape] = useState<LinkShape>('straight')
   const [label, setLabel] = useState('')
+  const [speed, setSpeed] = useState('')
+  const [notes, setNotes] = useState('')
 
-  const srcIfaces = useInterfaces(source.device_id)
-  const dstIfaces = useInterfaces(target.device_id)
+  const srcIfaces = useInterfaces(nodeKindOf(source) === 'device' ? source.device_id : null)
+  const dstIfaces = useInterfaces(nodeKindOf(target) === 'device' ? target.device_id : null)
+
+  // Suggest speed and type from the chosen ports (the operator can override).
+  const srcMatch = findIface(srcIfaces.data, srcIf)
+  const dstMatch = findIface(dstIfaces.data, dstIf)
+  useEffect(() => {
+    const bps = Math.max(srcMatch?.if_speed || 0, dstMatch?.if_speed || 0)
+    if (bps) setSpeed((cur) => cur || speedLabel(bps))
+  }, [srcMatch?.if_speed, dstMatch?.if_speed])
 
   const submit = () => onCreate({
     source_node_id: source.id,
     target_node_id: target.id,
     label: label || null,
     link_type: kind,
-    metadata: { kind, shape, src_interface: srcIf || null, dst_interface: dstIf || null },
+    metadata: {
+      kind, shape,
+      src_interface: (srcMatch?.if_name || srcIf) || null,
+      dst_interface: (dstMatch?.if_name || dstIf) || null,
+      speed: speed || null,
+      notes: notes.trim() || null,
+    },
   })
 
   return (
@@ -67,25 +74,37 @@ export function LinkDialog({ source, target, onCancel, onCreate, saving }: {
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <IfaceSelect label={`${source.hostname} interface`} loading={srcIfaces.isLoading} ifaces={srcIfaces.data} value={srcIf} onChange={setSrcIf} />
-          <IfaceSelect label={`${target.hostname} interface`} loading={dstIfaces.isLoading} ifaces={dstIfaces.data} value={dstIf} onChange={setDstIf} />
+          {nodeKindOf(source) === 'device'
+            ? <IfaceSelect label={`${source.hostname} interface`} loading={srcIfaces.isLoading} ifaces={srcIfaces.data} value={srcIf} onChange={setSrcIf} />
+            : <PortText label={`${source.hostname} port`} value={srcIf} onChange={setSrcIf} />}
+          {nodeKindOf(target) === 'device'
+            ? <IfaceSelect label={`${target.hostname} interface`} loading={dstIfaces.isLoading} ifaces={dstIfaces.data} value={dstIf} onChange={setDstIf} />
+            : <PortText label={`${target.hostname} port`} value={dstIf} onChange={setDstIf} />}
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-3 gap-3">
           <Field label="Type">
-            <select className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-xs text-text outline-none focus:border-primary/60" value={kind} onChange={(e) => setKind(e.target.value as LinkKind)}>
+            <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as LinkKind)}>
               {KINDS.map((k) => <option key={k} value={k}>{k[0].toUpperCase() + k.slice(1)}</option>)}
             </select>
           </Field>
+          <Field label="Speed">
+            <select className={inputCls} value={speed} onChange={(e) => setSpeed(e.target.value)}>
+              {SPEEDS.map((v) => <option key={v} value={v}>{v || '—'}</option>)}
+            </select>
+          </Field>
           <Field label="Shape">
-            <select className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-xs text-text outline-none focus:border-primary/60" value={shape} onChange={(e) => setShape(e.target.value as LinkShape)}>
+            <select className={inputCls} value={shape} onChange={(e) => setShape(e.target.value as LinkShape)}>
               {SHAPES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
             </select>
           </Field>
         </div>
 
         <Field label="Label (optional)">
-          <input className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-xs text-text outline-none focus:border-primary/60" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. uplink" />
+          <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. uplink" />
+        </Field>
+        <Field label="Notes (optional)">
+          <input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. circuit ID, patch panel, how this link was verified" />
         </Field>
 
         <DialogFooter>
@@ -103,30 +122,5 @@ function Endpoint({ node }: { node: ManualMapNode }) {
       <NetworkIcon name={iconForNode(node)} className="h-5 w-5 shrink-0" />
       <span className="truncate font-semibold text-text">{node.label || node.hostname}</span>
     </div>
-  )
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1 text-xs">
-      <span className="font-medium text-muted">{label}</span>
-      {children}
-    </label>
-  )
-}
-
-function IfaceSelect({ label, loading, ifaces, value, onChange }: {
-  label: string; loading: boolean; ifaces?: DeviceInterface[]; value: string; onChange: (v: string) => void
-}) {
-  return (
-    <Field label={label}>
-      <select className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-xs text-text outline-none focus:border-primary/60" value={value} onChange={(e) => onChange(e.target.value)} disabled={loading}>
-        <option value="">{loading ? 'Loading…' : '— none —'}</option>
-        {(ifaces || []).map((i) => {
-          const name = i.if_name || i.if_descr || `if${i.if_index}`
-          return <option key={i.if_index} value={name}>{name}{i.if_alias ? ` · ${i.if_alias}` : ''}</option>
-        })}
-      </select>
-    </Field>
   )
 }

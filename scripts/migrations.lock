@@ -163,3 +163,4 @@ c373d2ca70e62cd7899d626ff0853b1468d2d823313e611669bab5a49f18530c  migrate-162-al
 ec1c52e31ea28874a3b5b7c0f94bd7e37e311b23f00270f29402862c44e8e71f  migrate-164-escalation-matrix-grouping.sql
 0cb79f9c6725348a296cfe84639acd9aebceb5ad8377a7f4950733dca5df2c91  migrate-165-device-notes-and-layouts.sql
 252c972893eec3aaa947983ebd0dc4e58d439ac0239b1ae267a7ba478a86ea79  migrate-166-report-delivery.sql
+51dc92eee495a07a040b537832de01d618213a733082b0e9e4546377609b9e31  migrate-167-map-entity-nodes-and-versions.sql

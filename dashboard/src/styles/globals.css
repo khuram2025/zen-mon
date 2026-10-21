@@ -206,6 +206,8 @@ body {
   50% { stroke-opacity: 0.42; }
 }
 .nm-hot { animation: nm-hot 1.8s ease-in-out infinite; }
+/* Map image export: html-to-image renders backdrop blur as grey halos. */
+.zp-map-exporting * { backdrop-filter: none !important; }
 
 /* Down-interface ✕ marker blinks gently. */
 @keyframes nm-fault {

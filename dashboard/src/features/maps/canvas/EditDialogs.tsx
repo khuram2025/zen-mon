@@ -1,6 +1,4 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '@/lib/api'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { NetworkIcon, iconLabel } from '@/components/network-icons'
@@ -10,6 +8,7 @@ import {
   DEFAULT_ICON_FILL,
   iconForNode,
   linkKindOf,
+  nodeKindOf,
   linkShapeOf,
   type LinkArrows,
   type LinkDash,
@@ -20,8 +19,7 @@ import {
 } from '../core'
 import { ColorInput } from './Annotations'
 import { useDevices } from '../useMapData'
-
-type DeviceInterface = { if_index: number; if_name: string | null; if_descr: string | null; if_alias: string | null }
+import { IfaceSelect, PortText, SPEEDS, findIface, useInterfaces } from './IfacePicker'
 
 const KINDS: LinkKind[] = ['ethernet', 'fiber', 'trunk', 'wireless', 'vpn', 'serial']
 const SHAPES: { value: LinkShape; label: string }[] = [
@@ -31,14 +29,6 @@ const SHAPES: { value: LinkShape; label: string }[] = [
 ]
 
 const inputCls = 'w-full rounded-md border border-border bg-surface px-2 py-1.5 text-xs text-text outline-none focus:border-primary/60'
-
-function useInterfaces(deviceId: string | undefined) {
-  return useQuery<DeviceInterface[]>({
-    queryKey: ['device-interfaces', deviceId],
-    enabled: !!deviceId,
-    queryFn: async () => (await api.get(`/devices/${deviceId}/interfaces`)).data,
-  })
-}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -71,11 +61,12 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   const [iconFill, setIconFill] = useState(md.icon_fill ?? DEFAULT_ICON_FILL)
   const [frame, setFrame] = useState<'circle' | 'rounded'>(md.frame === 'rounded' ? 'rounded' : 'circle')
   const [hideIp, setHideIp] = useState(!!md.hide_ip)
-  const [deviceId, setDeviceId] = useState(node.device_id)
+  const [deviceId, setDeviceId] = useState<string>(node.device_id || '')
   const devices = useDevices()
   const deviceList = (devices.data?.data || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname))
   const selectedDev = deviceList.find((d) => d.id === deviceId)
-  const profileChanged = deviceId !== node.device_id
+  const isDevice = nodeKindOf(node) === 'device'
+  const profileChanged = isDevice && deviceId !== (node.device_id || '')
 
   // On a profile swap, a "label" that merely mirrors the old hostname is not a
   // real override — clear it so the node shows the new device's hostname.
@@ -106,16 +97,16 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
           </div>
         </div>
 
-        <Field label="Device profile — swap which device this node represents">
+        {isDevice && <Field label="Device profile — swap which device this node represents">
           <select className={inputCls} value={deviceId} onChange={(e) => setDeviceId(e.target.value)} disabled={devices.isLoading}>
             {!deviceList.some((d) => d.id === node.device_id) && (
-              <option value={node.device_id}>{node.hostname}{node.ip_address ? ` · ${node.ip_address}` : ''}</option>
+              <option value={node.device_id || ''}>{node.hostname}{node.ip_address ? ` · ${node.ip_address}` : ''}</option>
             )}
             {deviceList.map((d) => (
               <option key={d.id} value={d.id}>{d.hostname} · {d.ip_address}</option>
             ))}
           </select>
-        </Field>
+        </Field>}
         {profileChanged && (
           <div className="rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
             Links to this node are kept. Their interface labels still reference the old device —
@@ -246,17 +237,25 @@ export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel,
   const [dash, setDash] = useState<LinkDash>(((meta as any).dash as LinkDash) || 'solid')
   const [arrows, setArrows] = useState<LinkArrows>(((meta as any).arrows as LinkArrows) || 'none')
   const [hideLabels, setHideLabels] = useState(!!(meta as any).hide_iface_labels)
+  const [speed, setSpeed] = useState<string>((meta as any).speed || '')
+  const [notes, setNotes] = useState<string>((meta as any).notes || '')
 
-  const srcIfaces = useInterfaces(source?.device_id)
-  const dstIfaces = useInterfaces(target?.device_id)
+  const srcIsDevice = !!source && nodeKindOf(source) === 'device'
+  const dstIsDevice = !!target && nodeKindOf(target) === 'device'
+  const srcIfaces = useInterfaces(srcIsDevice ? source!.device_id : null)
+  const dstIfaces = useInterfaces(dstIsDevice ? target!.device_id : null)
 
   // Backend REPLACES link metadata, so send the full object (preserving any
-  // waypoints / extra keys we don't edit here).
+  // waypoints / extra keys we don't edit here). A port that matches the
+  // device is saved in the device's own spelling; an unmatched one is kept.
   const submit = () => onSave({
     label: label.trim() || null,
     link_type: kind,
     metadata: {
-      ...meta, kind, shape, width_scale: widthScale, src_interface: srcIf || null, dst_interface: dstIf || null,
+      ...meta, kind, shape, width_scale: widthScale,
+      src_interface: (findIface(srcIfaces.data, srcIf)?.if_name || srcIf) || null,
+      dst_interface: (findIface(dstIfaces.data, dstIf)?.if_name || dstIf) || null,
+      speed: speed || null, notes: notes.trim() || null,
       color: color || null, dash: dash === 'solid' ? null : dash, arrows: arrows === 'none' ? null : arrows, hide_iface_labels: hideLabels || null,
     },
   })
@@ -273,22 +272,30 @@ export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel,
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          {source ? (
-            <IfaceSelect label={`${source.hostname} interface`} loading={srcIfaces.isLoading} ifaces={srcIfaces.data} value={srcIf} onChange={setSrcIf} />
+          {source ? (srcIsDevice
+            ? <IfaceSelect label={`${source.hostname} interface`} loading={srcIfaces.isLoading} ifaces={srcIfaces.data} value={srcIf} onChange={setSrcIf} />
+            : <PortText label={`${source.hostname} port`} value={srcIf} onChange={setSrcIf} />
           ) : (
             <Field label="Source interface"><div className="rounded-md border border-border bg-surface2/40 px-2 py-1.5 text-xs text-muted">Annotation end</div></Field>
           )}
-          {target ? (
-            <IfaceSelect label={`${target.hostname} interface`} loading={dstIfaces.isLoading} ifaces={dstIfaces.data} value={dstIf} onChange={setDstIf} />
+          {target ? (dstIsDevice
+            ? <IfaceSelect label={`${target.hostname} interface`} loading={dstIfaces.isLoading} ifaces={dstIfaces.data} value={dstIf} onChange={setDstIf} />
+            : <PortText label={`${target.hostname} port`} value={dstIf} onChange={setDstIf} />
           ) : (
             <Field label="Target interface"><div className="rounded-md border border-border bg-surface2/40 px-2 py-1.5 text-xs text-muted">Annotation end</div></Field>
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-3 gap-3">
           <Field label="Type">
             <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as LinkKind)}>
               {KINDS.map((k) => <option key={k} value={k}>{k[0].toUpperCase() + k.slice(1)}</option>)}
+            </select>
+          </Field>
+          <Field label="Speed">
+            <select className={inputCls} value={speed} onChange={(e) => setSpeed(e.target.value)}>
+              {SPEEDS.map((v) => <option key={v} value={v}>{v || '—'}</option>)}
+              {speed && !(SPEEDS as readonly string[]).includes(speed) && <option value={speed}>{speed}</option>}
             </select>
           </Field>
           <Field label="Shape">
@@ -336,6 +343,9 @@ export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel,
         <Field label="Label (optional)">
           <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. uplink" />
         </Field>
+        <Field label="Notes (optional)">
+          <input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. circuit ID, patch panel, how this link was verified" />
+        </Field>
         <label className="flex items-center gap-1.5 text-xs text-muted"><input type="checkbox" checked={hideLabels} onChange={(e) => setHideLabels(e.target.checked)} className="accent-primary" /> Hide port labels on this link</label>
 
         <DialogFooter>
@@ -344,21 +354,5 @@ export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel,
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function IfaceSelect({ label, loading, ifaces, value, onChange }: {
-  label: string; loading: boolean; ifaces?: DeviceInterface[]; value: string; onChange: (v: string) => void
-}) {
-  return (
-    <Field label={label}>
-      <select className={inputCls} value={value} onChange={(e) => onChange(e.target.value)} disabled={loading}>
-        <option value="">{loading ? 'Loading…' : '— none —'}</option>
-        {(ifaces || []).map((i) => {
-          const name = i.if_name || i.if_descr || `if${i.if_index}`
-          return <option key={i.if_index} value={name}>{name}{i.if_alias ? ` · ${i.if_alias}` : ''}</option>
-        })}
-      </select>
-    </Field>
   )
 }

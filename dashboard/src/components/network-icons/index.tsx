@@ -306,10 +306,142 @@ export function GenericIcon(p: Props) {
   )
 }
 
+export function L3SwitchIcon(p: Props) {
+  return (
+    <svg {...base(p)}>
+      {/* Chassis (multilayer / core switch) */}
+      <rect x="4" y="30" width="56" height="20" rx="2" />
+      <path d="M4 40h56" opacity="0.5" />
+      <g fill="currentColor" stroke="none" opacity="0.85">
+        {Array.from({ length: 10 }).map((_, i) => (
+          <rect key={`u${i}`} x={7 + i * 4.4} y={33} width="2.6" height="2.4" rx="0.4" />
+        ))}
+        {Array.from({ length: 10 }).map((_, i) => (
+          <rect key={`l${i}`} x={7 + i * 4.4} y={43} width="2.6" height="2.4" rx="0.4" />
+        ))}
+      </g>
+      <circle cx="54" cy="35" r="1" fill="currentColor" stroke="none" />
+      <circle cx="54" cy="45" r="1" fill="currentColor" stroke="none" opacity="0.6" />
+      {/* Routing engine: crossed arrows in a disc */}
+      <circle cx="32" cy="15" r="11" />
+      <path d="M25 11h12M33 7.5l4 3.5-4 3.5" />
+      <path d="M39 19H27M31 15.5L27 19l4 3.5" />
+      <path d="M32 26v4" opacity="0.6" />
+    </svg>
+  )
+}
+
+export function WirelessControllerIcon(p: Props) {
+  return (
+    <svg {...base(p)}>
+      {/* 1U appliance */}
+      <rect x="6" y="34" width="52" height="16" rx="2" />
+      <g fill="currentColor" stroke="none" opacity="0.85">
+        <rect x="10" y="40" width="3" height="2.4" rx="0.4" />
+        <rect x="15" y="40" width="3" height="2.4" rx="0.4" />
+        <rect x="20" y="40" width="3" height="2.4" rx="0.4" />
+        <rect x="25" y="40" width="3" height="2.4" rx="0.4" />
+      </g>
+      <path d="M34 42h14" opacity="0.6" />
+      <circle cx="52.5" cy="42" r="1.2" fill="currentColor" stroke="none" />
+      {/* Managed APs: waves fanning out */}
+      <path d="M16 26a22 22 0 0132 0" />
+      <path d="M22 22a14 14 0 0120 0" opacity="0.8" />
+      <path d="M28 18a6 6 0 018 0" opacity="0.7" />
+      <path d="M32 34v-6" />
+      <circle cx="32" cy="27" r="1.6" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+export function HypervisorIcon(p: Props) {
+  return (
+    <svg {...base(p)}>
+      {/* Host */}
+      <rect x="6" y="8" width="52" height="40" rx="2.5" />
+      {/* Guest VMs */}
+      <rect x="11" y="13" width="12" height="16" rx="1.2" />
+      <rect x="26" y="13" width="12" height="16" rx="1.2" />
+      <rect x="41" y="13" width="12" height="16" rx="1.2" />
+      <g opacity="0.7">
+        <path d="M14 18h6M14 21h6M29 18h6M29 21h6M44 18h6M44 21h6" />
+      </g>
+      {/* Hypervisor layer */}
+      <rect x="11" y="33" width="42" height="9" rx="1.2" fill="currentColor" stroke="none" opacity="0.15" />
+      <rect x="11" y="33" width="42" height="9" rx="1.2" />
+      <circle cx="16" cy="37.5" r="1" fill="currentColor" stroke="none" />
+      {/* Base */}
+      <path d="M18 54h28M24 48v6M40 48v6" />
+    </svg>
+  )
+}
+
+export function UpsIcon(p: Props) {
+  return (
+    <svg {...base(p)}>
+      {/* Tower UPS */}
+      <rect x="14" y="6" width="36" height="52" rx="3" />
+      {/* Display */}
+      <rect x="19" y="11" width="26" height="9" rx="1" />
+      <path d="M22 15.5h12" opacity="0.6" />
+      <circle cx="40" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
+      {/* Lightning bolt */}
+      <path d="M34 25l-8 13h7l-3 12 9-15h-7l2-10z" fill="currentColor" fillOpacity="0.2" />
+      {/* Vent / outlets */}
+      <g opacity="0.6">
+        <path d="M19 53h26" />
+      </g>
+    </svg>
+  )
+}
+
+export function PhoneIcon(p: Props) {
+  return (
+    <svg {...base(p)}>
+      {/* Desk IP phone base */}
+      <path d="M10 30h44l4 24H6z" />
+      {/* Handset */}
+      <path d="M8 22c0-6 10-10 24-10s24 4 24 10v3c0 1.5-1.2 2.5-2.6 2.2l-7-1.6c-1.4-.3-2.4-1.5-2.4-3V21c-3.6-1-8-1.4-12-1.4S23.6 20 20 21v1.6c0 1.5-1 2.7-2.4 3l-7 1.6C9.2 27.5 8 26.5 8 25z" />
+      {/* Screen */}
+      <rect x="14" y="34" width="14" height="8" rx="1" opacity="0.8" />
+      {/* Keypad */}
+      <g fill="currentColor" stroke="none" opacity="0.85">
+        {[0, 1, 2].map((r) => [0, 1, 2].map((c) => (
+          <rect key={`${r}${c}`} x={34 + c * 5.5} y={34 + r * 5.2} width="3.4" height="3" rx="0.6" />
+        )))}
+      </g>
+      <path d="M14 47h14" opacity="0.6" />
+    </svg>
+  )
+}
+
+export function NvrIcon(p: Props) {
+  return (
+    <svg {...base(p)}>
+      {/* Recorder chassis */}
+      <rect x="4" y="30" width="56" height="22" rx="2" />
+      {/* Drive bays */}
+      <rect x="8" y="34" width="20" height="5" rx="0.8" />
+      <rect x="8" y="42" width="20" height="5" rx="0.8" />
+      {/* Record indicator */}
+      <circle cx="48" cy="41" r="4.5" />
+      <circle cx="48" cy="41" r="2" fill="currentColor" stroke="none" />
+      <path d="M33 37h8M33 41h8M33 45h8" opacity="0.6" />
+      {/* Camera feeding the recorder */}
+      <rect x="18" y="8" width="22" height="12" rx="2" />
+      <circle cx="26" cy="14" r="3.5" />
+      <circle cx="26" cy="14" r="1.2" fill="currentColor" stroke="none" />
+      <path d="M40 11l7-3v12l-7-3z" />
+      <path d="M29 20v10" strokeDasharray="2 2.5" opacity="0.7" />
+    </svg>
+  )
+}
+
 export type IconKey =
   | 'router' | 'switch' | 'firewall' | 'server' | 'database'
   | 'load_balancer' | 'access_point' | 'printer' | 'storage'
   | 'cloud' | 'internet' | 'workstation' | 'camera' | 'other'
+  | 'l3_switch' | 'wireless_controller' | 'hypervisor' | 'ups' | 'phone' | 'nvr'
 
 export const networkIcons: Record<IconKey, (p: Props) => JSX.Element> = {
   router: RouterIcon,
@@ -326,6 +458,12 @@ export const networkIcons: Record<IconKey, (p: Props) => JSX.Element> = {
   workstation: WorkstationIcon,
   camera: CameraIcon,
   other: GenericIcon,
+  l3_switch: L3SwitchIcon,
+  wireless_controller: WirelessControllerIcon,
+  hypervisor: HypervisorIcon,
+  ups: UpsIcon,
+  phone: PhoneIcon,
+  nvr: NvrIcon,
 }
 
 export const iconLabel: Record<IconKey, string> = {
@@ -343,6 +481,12 @@ export const iconLabel: Record<IconKey, string> = {
   workstation: 'Workstation',
   camera: 'Camera',
   other: 'Generic',
+  l3_switch: 'L3 / Core Switch',
+  wireless_controller: 'Wireless Controller',
+  hypervisor: 'Hypervisor',
+  ups: 'UPS',
+  phone: 'IP Phone',
+  nvr: 'NVR',
 }
 
 export function NetworkIcon({ name, ...rest }: { name: string } & Props) {

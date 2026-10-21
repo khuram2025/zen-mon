@@ -75,6 +75,7 @@ jobs:
       - run: node scripts/test-device-interfaces.mjs
       - run: node scripts/test-device-page-phase3.mjs
       - run: node scripts/test-nav-access.mjs
+      - run: node scripts/test-map-export.mjs
       - run: node scripts/test-escalation-ui.mjs
       - run: node scripts/test-role-model.mjs
       - run: node scripts/test-inventory-ui.mjs

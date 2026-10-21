@@ -4,6 +4,7 @@ import {
   Square, Sticker, Trash2, Type as TypeIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useManualMaps } from '../useMapData'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { NetworkIcon, iconLabel, networkIcons, type IconKey } from '@/components/network-icons'
@@ -207,6 +208,8 @@ export function ShapeInspector({ shape, devices, onChange, onDelete, onZ, onLock
   const isGeo = !isWidget && !isText && !isImage && !isLine
   const setMeta = (patch: Partial<ShapeStyle>, commit = true) => onChange({ metadata: { ...m, ...patch } }, commit)
   const title = isWidget ? 'Live conversations' : isIcon ? 'Icon' : shape.kind === 'circle' ? 'Ellipse' : shape.kind
+  const mapsQ = useManualMaps()
+  const otherMaps = (mapsQ.data?.data || []).filter((mp) => mp.id !== shape.map_id)
 
   return (
     <div className="flex w-64 flex-col gap-2.5 rounded-lg border border-border bg-surface/95 p-3 text-xs shadow-xl backdrop-blur">
@@ -300,8 +303,28 @@ export function ShapeInspector({ shape, devices, onChange, onDelete, onZ, onLock
       )}
 
       {isIcon && (
-        <Field label="Icon colour">
-          <ColorInput value={m.color || '#e5e7eb'} onChange={(c, commit) => setMeta({ color: c }, commit)} />
+        <>
+          <Field label="Caption">
+            <textarea value={shape.text || ''} rows={2} onChange={(e) => onChange({ text: e.target.value }, false)} onBlur={(e) => onChange({ text: e.target.value }, true)}
+              placeholder="e.g. Internet · Zain DIA" className="w-36 resize-none rounded border border-border bg-surface px-2 py-1 text-text outline-none focus:border-primary/60" />
+          </Field>
+          <Field label="Caption size">
+            <input type="number" min={8} max={48} value={m.fontSize || 11}
+              onChange={(e) => setMeta({ fontSize: Number(e.target.value) || 11 })}
+              className="w-20 rounded border border-border bg-surface px-2 py-1 text-text outline-none focus:border-primary/60" />
+          </Field>
+          <Field label="Icon colour">
+            <ColorInput value={m.color || '#e5e7eb'} onChange={(c, commit) => setMeta({ color: c }, commit)} />
+          </Field>
+        </>
+      )}
+
+      {(isGeo || isIcon) && (
+        <Field label="Opens map">
+          <select value={(m.link_map_id as string) || ''} onChange={(e) => setMeta({ link_map_id: e.target.value || null })} className={cn(selCls, 'max-w-[8.5rem]')} title="Drill-down: show an Open map button on this shape">
+            <option value="">— none —</option>
+            {otherMaps.map((mp) => <option key={mp.id} value={mp.id}>{mp.name}</option>)}
+          </select>
         </Field>
       )}
 

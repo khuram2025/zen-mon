@@ -170,8 +170,7 @@ export function computeSmartSnap(drag: GuideBox, others: GuideBox[], tol: number
 const CLUSTER_TOL = 36 // px: "roughly aligned" threshold
 const FINE_GRID = 20   // px: snap row/column coordinates to this
 
-export function tidyLayout(nodes: Node[]): Map<string, { x: number; y: number }> {
-  const boxes = nodes.filter((n) => n.type !== 'shape').map(nodeToGuideBox)
+function tidyGroup(boxes: GuideBox[]): Map<string, { x: number; y: number }> {
   const pos = new Map(boxes.map((b) => [b.id, { x: b.x, y: b.y }]))
   if (boxes.length < 2) return new Map()
 
@@ -220,6 +219,56 @@ export function tidyLayout(nodes: Node[]): Map<string, { x: number; y: number }>
   for (const b of boxes) {
     const p = pos.get(b.id)!
     if (Math.abs(p.x - b.x) > 0.5 || Math.abs(p.y - b.y) > 0.5) out.set(b.id, { x: Math.round(p.x), y: Math.round(p.y) })
+  }
+  return out
+}
+
+const ZONE_KINDS = new Set(['rectangle', 'circle', 'diamond', 'hexagon'])
+
+type ZoneRect = { id: string; x: number; y: number; w: number; h: number }
+
+function zoneRectOf(n: Node): ZoneRect | null {
+  if (n.type !== 'shape') return null
+  const kind = (n.data as any)?.shape?.kind
+  if (!ZONE_KINDS.has(kind)) return null
+  const w = n.measured?.width ?? (typeof n.width === 'number' ? n.width : 0)
+  const h = n.measured?.height ?? (typeof n.height === 'number' ? n.height : 0)
+  if (w < 160 || h < 120) return null // a small marker shape, not a zone
+  return { id: n.id, x: n.position.x, y: n.position.y, w, h }
+}
+
+/** Zone-aware tidy: each device is tidied with the others inside the same
+ *  (smallest containing) zone and never leaves it; devices outside every
+ *  zone are tidied together. Shapes never move. */
+export function tidyLayout(nodes: Node[]): Map<string, { x: number; y: number }> {
+  const zones = nodes.map(zoneRectOf).filter((z): z is ZoneRect => !!z)
+  const groups = new Map<string, GuideBox[]>()
+  const zoneOf = new Map<string, ZoneRect | null>()
+  for (const n of nodes) {
+    if (n.type === 'shape') continue
+    const b = nodeToGuideBox(n)
+    const c = { x: cx(b), y: cy(b) }
+    const inside = zones
+      .filter((z) => c.x >= z.x && c.x <= z.x + z.w && c.y >= z.y && c.y <= z.y + z.h)
+      .sort((a, b2) => a.w * a.h - b2.w * b2.h)[0] || null
+    const key = inside?.id || '__none__'
+    zoneOf.set(key, inside)
+    const arr = groups.get(key) || []
+    arr.push(b)
+    groups.set(key, arr)
+  }
+  const out = new Map<string, { x: number; y: number }>()
+  for (const [key, boxes] of groups) {
+    const moves = tidyGroup(boxes)
+    const z = zoneOf.get(key)
+    for (const [id, p] of moves) {
+      if (!z) { out.set(id, p); continue }
+      // Keep the disc (and its label below) inside the zone with some padding.
+      const pad = 24
+      const x = Math.min(Math.max(p.x + DISC_CX, z.x + pad + DISC_CX), z.x + z.w - pad - DISC_CX) - DISC_CX
+      const y = Math.min(Math.max(p.y + DISC_CY, z.y + 56 + DISC_CY), z.y + z.h - 70) - DISC_CY
+      out.set(id, { x: Math.round(x), y: Math.round(y) })
+    }
   }
   return out
 }

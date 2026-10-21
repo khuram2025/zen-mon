@@ -2,18 +2,35 @@ import { useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight, Image as ImageIcon, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { NetworkIcon, iconLabel, networkIcons, type IconKey } from '@/components/network-icons'
-import { useDevices } from '../useMapData'
+import { useDevices, useMapServers, useMapServiceChecks } from '../useMapData'
 import {
   STATUS_COLOR,
   STATUS_ORDER,
   TYPE_TO_ICON,
   statusKey,
+  type NodeKind,
   type NodeStatus,
 } from '../core'
 import { ImageDialog, SHAPE_PRESETS, iconSpec, type ShapeSpec } from './Annotations'
 
-/** DnD payload types — matched by the canvas drop handler. */
+/** DnD payload types — matched by the canvas drop handler. The device payload
+ *  is JSON {kind, id} (a bare id from older palettes means a device). */
 export const DEVICE_DND_TYPE = 'application/x-zenplus-device'
+
+export function parseEntityDrop(raw: string): { kind: NodeKind; id: string } | null {
+  if (!raw) return null
+  try {
+    const v = JSON.parse(raw)
+    if (v && typeof v.id === 'string') return { kind: v.kind === 'server' || v.kind === 'service_check' ? v.kind : 'device', id: v.id }
+  } catch { /* bare device id */ }
+  return { kind: 'device', id: raw }
+}
+
+const ENTITY_TABS: { key: NodeKind; label: string; noun: string }[] = [
+  { key: 'device', label: 'Devices', noun: 'devices' },
+  { key: 'server', label: 'Servers', noun: 'servers' },
+  { key: 'service_check', label: 'Checks', noun: 'service checks' },
+]
 export const SHAPE_DND_TYPE = 'application/x-zenplus-shape'
 
 type Tab = 'devices' | 'shapes'
@@ -43,8 +60,13 @@ export function DevicePalette({
   const [status, setStatus] = useState<'all' | NodeStatus>('all')
   const [hideUsed, setHideUsed] = useState(false)
   const [imgOpen, setImgOpen] = useState(false)
-  const devicesQuery = useDevices()
+  const [entity, setEntity] = useState<NodeKind>('device')
+  const devicesQ = useDevices()
+  const serversQ = useMapServers(open && tab === 'devices' && entity === 'server')
+  const checksQ = useMapServiceChecks(open && tab === 'devices' && entity === 'service_check')
+  const devicesQuery = entity === 'server' ? serversQ : entity === 'service_check' ? checksQ : devicesQ
   const allDevices = devicesQuery.data?.data || []
+  const noun = ENTITY_TABS.find((t) => t.key === entity)!.noun
 
   const devices = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -101,6 +123,13 @@ export function DevicePalette({
       {tab === 'devices' ? (
         <>
           <div className="space-y-2 border-b border-border p-3">
+            <div className="flex items-center rounded-md border border-border bg-surface2/40 p-0.5 text-[10.5px] font-semibold">
+              {ENTITY_TABS.map((t) => (
+                <button key={t.key} type="button" onClick={() => setEntity(t.key)} className={cn('flex-1 rounded px-2 py-0.5 transition', entity === t.key ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text')}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
             <div className="relative">
               <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
               <input
@@ -137,7 +166,7 @@ export function DevicePalette({
                 <input type="checkbox" checked={hideUsed} onChange={(e) => setHideUsed(e.target.checked)} className="accent-primary" /> hide placed
               </label>
             </div>
-            <div className="text-[10px] text-muted">Drag a device onto the canvas to place it</div>
+            <div className="text-[10px] text-muted">Drag {entity === 'device' ? 'a device' : entity === 'server' ? 'a server' : 'a check'} onto the canvas to place it as a live node</div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-2">
@@ -149,13 +178,13 @@ export function DevicePalette({
               </div>
             ) : devices.length === 0 ? (
               <div className="rounded-md border border-dashed border-border p-4 text-center text-[11px] text-muted">
-                No devices match these filters
+                No {noun} match these filters
               </div>
             ) : (
               <div className="space-y-1.5">
                 {devices.map((d) => {
                   const used = usedIds.has(d.id)
-                  const iconKey = TYPE_TO_ICON[d.device_type] || 'other'
+                  const iconKey = TYPE_TO_ICON[d.device_type] || (entity === 'server' ? 'server' : 'other')
                   const sk = statusKey(d.status)
                   const color = STATUS_COLOR[sk]
                   const grabbable = !disabled
@@ -166,7 +195,7 @@ export function DevicePalette({
                       data-testid="palette-device"
                       draggable={grabbable}
                       onDragStart={(e) => {
-                        e.dataTransfer.setData(DEVICE_DND_TYPE, d.id)
+                        e.dataTransfer.setData(DEVICE_DND_TYPE, JSON.stringify({ kind: entity, id: d.id }))
                         e.dataTransfer.effectAllowed = 'copy'
                       }}
                       className={cn(
@@ -190,7 +219,7 @@ export function DevicePalette({
                           <span className={cn('h-1.5 w-1.5 rounded-full', color.dot)} />
                           <span className="truncate">{d.ip_address}</span>
                           <span className="text-muted/70">·</span>
-                          <span className="capitalize">{d.device_type?.replace('_', ' ')}</span>
+                          <span className="capitalize">{entity === 'device' ? d.device_type?.replace('_', ' ') : (d.model || noun.replace(/s$/, ''))}</span>
                         </div>
                       </div>
                     </div>

@@ -48,10 +48,20 @@ export type NodeMetadata = {
   [k: string]: unknown
 }
 
+/** What a map node represents: a monitored device, a server (Servers module)
+ *  or a service check. Older backends omit `kind` — treat that as 'device'. */
+export type NodeKind = 'device' | 'server' | 'service_check'
+
 export type ManualMapNode = {
   id: string
   map_id: string
-  device_id: string
+  kind?: NodeKind
+  /** Set for device nodes; null for server / service-check nodes. */
+  device_id: string | null
+  server_id?: string | null
+  service_check_id?: string | null
+  /** Whichever entity id is set (device, server or check). */
+  entity_id?: string
   label: string
   icon: string
   x_pct: number
@@ -100,6 +110,12 @@ export type LinkMetadata = {
   arrows?: LinkArrows | null
   /** Hide this link's port chips (global toggle also exists in live mode). */
   hide_iface_labels?: boolean | null
+  /** Every physical member of a bundle (LAG / parallel links) — drawn as one
+   *  cable with a ×N badge. Absent or one entry = a single link. */
+  members?: { src_interface?: string | null; dst_interface?: string | null }[] | null
+  /** Set by Quick connect / populate when the cable came from CDP/LLDP. */
+  discovered?: boolean | null
+  protocol?: string | null
 }
 
 export type LiveInterface = {
@@ -158,6 +174,14 @@ export type SuggestedLink = {
   protocol: string | null
   confidence: number | null
   physical_links: number
+  members?: { src_interface: string | null; dst_interface: string | null }[]
+  last_seen_at?: string | null
+  /** Evidence is old or a port was never up — excluded from Quick connect by default. */
+  stale?: boolean
+  reasons?: string[]
+  src_oper?: string | null
+  dst_oper?: string | null
+  speed_bps?: number | null
 }
 
 /* ── Annotation shapes (standalone canvas objects, not tied to a device) ──────
@@ -188,6 +212,10 @@ export type ShapeStyle = {
   locked?: boolean
   /** Group membership (shared with device nodes). */
   group_id?: string | null
+  /** Drill-down: clicking the shape's map badge opens this map (sub-map). */
+  link_map_id?: string | null
+  /** A neighbour seen over CDP/LLDP that ZenPlus does not monitor. */
+  unmanaged?: { hostname?: string | null; chassis_id?: string | null; port_id?: string | null } | null
   [k: string]: unknown
 }
 
@@ -236,6 +264,7 @@ export type ManualMapDetail = ManualMapListItem & {
 
 export type Device = {
   id: string
+  kind?: NodeKind
   hostname: string
   ip_address: string
   device_type: string
@@ -356,9 +385,9 @@ export const STATUS_COLOR: Record<
 export const STATUS_ORDER: NodeStatus[] = ['down', 'degraded', 'maintenance', 'unknown', 'up']
 
 export const PALETTE_ICONS: IconKey[] = [
-  'router', 'switch', 'firewall', 'server', 'database',
-  'load_balancer', 'access_point', 'storage', 'workstation',
-  'printer', 'cloud', 'internet', 'camera', 'other',
+  'router', 'l3_switch', 'switch', 'firewall', 'server', 'hypervisor', 'database',
+  'load_balancer', 'access_point', 'wireless_controller', 'storage', 'workstation',
+  'phone', 'printer', 'camera', 'nvr', 'ups', 'cloud', 'internet', 'other',
 ]
 
 export const TYPE_TO_ICON: Record<string, IconKey> = {
@@ -366,6 +395,9 @@ export const TYPE_TO_ICON: Record<string, IconKey> = {
   database: 'database', load_balancer: 'load_balancer', access_point: 'access_point',
   storage: 'storage', workstation: 'workstation', printer: 'printer',
   cloud: 'cloud', internet: 'internet', camera: 'camera', other: 'other',
+  l3_switch: 'l3_switch', core_switch: 'l3_switch', wireless_controller: 'wireless_controller', wlc: 'wireless_controller',
+  hypervisor: 'hypervisor', ups: 'ups', phone: 'phone', ip_phone: 'phone', nvr: 'nvr',
+  service_check: 'cloud',
 }
 
 export const LINK_DASH_PATTERN: Record<LinkDash, string | undefined> = { solid: undefined, dashed: '8 5', dotted: '2 4' }
@@ -412,6 +444,22 @@ export function formatBps(bps: number | null | undefined): string {
   let v = bps
   while (v >= 1000 && i < units.length - 1) { v /= 1000; i++ }
   return `${v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${units[i]}`
+}
+
+export function nodeKindOf(node: { kind?: NodeKind | null }): NodeKind {
+  return node.kind === 'server' || node.kind === 'service_check' ? node.kind : 'device'
+}
+
+/** The id of whatever the node represents (device, server or service check). */
+export function entityIdOf(node: Pick<ManualMapNode, 'kind' | 'device_id' | 'server_id' | 'service_check_id' | 'entity_id'>): string {
+  return node.entity_id || node.device_id || node.server_id || node.service_check_id || ''
+}
+
+/** Detail page for a node's entity. */
+export function entityHref(node: Pick<ManualMapNode, 'kind' | 'device_id' | 'server_id' | 'service_check_id' | 'entity_id'>): string {
+  const id = entityIdOf(node)
+  const kind = nodeKindOf(node)
+  return kind === 'server' ? `/servers/${id}` : kind === 'service_check' ? `/services/${id}` : `/devices/${id}`
 }
 
 export function iconForNode(node: { icon?: string; device_type?: string }): IconKey {
@@ -465,6 +513,11 @@ function pointOnQuadratic(ax: number, ay: number, cx: number, cy: number, bx: nu
     x: it * it * ax + 2 * it * t * cx + t * t * bx,
     y: it * it * ay + 2 * it * t * cy + t * t * by,
   }
+}
+
+/** Point at fraction t (0–1) along a routed cable. */
+export function pointOnPath(path: Pick<EdgePathResult, 'segments' | 'mid'>, t: number): Pt {
+  return path.segments.length ? pointAtT(path.segments, Math.max(0, Math.min(1, t))) : path.mid
 }
 
 function pointAtT(segments: Segment[], t: number): Pt {
