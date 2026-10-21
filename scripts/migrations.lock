@@ -162,3 +162,4 @@ c373d2ca70e62cd7899d626ff0853b1468d2d823313e611669bab5a49f18530c  migrate-162-al
 48bec80a55151ec5609f037f374c6b0e18da12c504b7bbb518cf1cec44b64be6  migrate-163-report-schedule-timezone.sql
 ec1c52e31ea28874a3b5b7c0f94bd7e37e311b23f00270f29402862c44e8e71f  migrate-164-escalation-matrix-grouping.sql
 0cb79f9c6725348a296cfe84639acd9aebceb5ad8377a7f4950733dca5df2c91  migrate-165-device-notes-and-layouts.sql
+51dc92eee495a07a040b537832de01d618213a733082b0e9e4546377609b9e31  migrate-167-map-entity-nodes-and-versions.sql

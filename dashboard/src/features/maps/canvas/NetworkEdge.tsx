@@ -26,6 +26,7 @@ import {
   utilHex,
   utilizationColor,
   particleSpec,
+  pointOnPath,
   type EdgePathResult,
   type EndGeom,
   type LiveLinkData,
@@ -52,7 +53,23 @@ export type NetworkEdgeData = {
   setIfacePos?: (which: 'src' | 'dst', pos: { dx?: number; dy?: number; rot?: number }, commit: boolean) => void
   /** Drop a detached cable end at pt — MapCanvas hit-tests and reconnects. */
   reconnectEnd?: (which: 'src' | 'dst', pt: Pt) => void
+  /** Endpoint names for the live hover card title. */
+  sourceName?: string
+  targetName?: string
+  /** Where the throughput pill sits along the cable (0–1). MapCanvas slides
+   *  pills off each other on dense maps; default is the midpoint. */
+  pillT?: number
+  /** Cable touches an annotation (icon / shape) rather than two devices. */
+  annotation?: boolean
 }
+
+/* Below this zoom the live port chips are counter-scaled so far that they
+ * pile onto each other near busy devices — hide them unless the cable is
+ * hovered or selected. */
+const LIVE_CHIP_MIN_ZOOM = 0.45
+/* Below this zoom the throughput pill shrinks to its utilisation figure: the
+ * full ▲/▼ rates are unreadable at wall scale and three times as wide. */
+export const COMPACT_PILL_ZOOM = 0.55
 
 /** Centre + shape info for an endpoint — devices are discs (radius follows the
  *  user's size scale), annotations are boxes (anchor on the rectangle border). */
@@ -100,6 +117,7 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   const {
     link, sourceStatus, targetStatus, live, liveMode, showThroughput,
     showIfaceLabels = true, animate = true, parallelOffset = 0, setWaypoints, setIfacePos, reconnectEnd,
+    sourceName, targetName, pillT = 0.5,
   } = d
   const rf = useReactFlow()
   const zoom = useStore((s) => s.transform[2])
@@ -168,8 +186,11 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
 
   const flow = liveMode ? linkFlow(live) : null
   const utilPct = flow?.utilPct ?? null
+  // A cable to an annotation with no port typed on either end is drawn for
+  // context (an iLO, a cloud): it never has live data, by design.
+  const contextCable = !!d.annotation && !link.metadata?.src_interface && !link.metadata?.dst_interface
   // Both ends unbound → we know nothing about this cable in live mode.
-  const unbound = liveMode && !!live && !live.source.matched && !live.target.matched
+  const unbound = liveMode && !!live && !live.source.matched && !live.target.matched && !contextCable
   const halfBound = liveMode && !!live && !unbound && (!live.source.matched || !live.target.matched)
   const hasTraffic = !!flow && flow.total >= 1000
   // A matched-but-down interface overrides everything: the cable is in fault.
@@ -181,6 +202,10 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   const srcIf = link.metadata?.src_interface || live?.source.if_name
   const dstIf = link.metadata?.dst_interface || live?.target.if_name
   const chipsVisible = showIfaceLabels && !link.metadata?.hide_iface_labels
+    && (!liveMode || zoom >= LIVE_CHIP_MIN_ZOOM || hover || !!selected)
+  const members = Array.isArray(link.metadata?.members) ? link.metadata!.members! : []
+  const bundle = members.length > 1 ? members.length : 0
+  const isFiber = kind === 'fiber'
 
   // Particle streams: forward (src→tgt) rides source-out, reverse rides source-in.
   const fwdSpec = flow && !faulted && animate ? particleSpec(flow.fwd, utilPct) : { count: 0, dur: 0 }
@@ -384,8 +409,13 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   const markerEnd = arrows === 'forward' || arrows === 'both' ? `url(#${markerId}-e)` : undefined
   const markerCls = markerColor ? undefined : strokeClass?.replace('stroke-', 'fill-')
 
-  // The traffic pill sits on the cable midpoint; a design label stacks above it.
-  const labelOffsetY = showThroughput && liveMode && flow && (hasTraffic || faulted) ? -22 * ts : 0
+  // The traffic pill sits at pillT along the cable (MapCanvas slides it off
+  // neighbouring pills); a design label stacks above the midpoint.
+  const pillAt = pillT === 0.5 ? path.mid : pointOnPath(path, pillT)
+  const pillOnMid = Math.hypot(pillAt.x - path.mid.x, pillAt.y - path.mid.y) < 4
+  const labelOffsetY = showThroughput && liveMode && flow && (hasTraffic || faulted) && pillOnMid ? -22 * ts : 0
+  // Bundle badge sits just off the midpoint, perpendicular to the cable.
+  const badgeAt = { x: path.mid.x + perp.x * 14 * ts, y: path.mid.y + perp.y * 14 * ts }
 
   return (
     <>
@@ -418,8 +448,8 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
         {editable && <title>{isOrtho ? 'Drag a segment to slide it · drag a corner to move it · right-click corner to remove' : 'Drag to bend · drag a mid-point handle to add a bend · drag onto line to remove'}</title>}
       </path>
 
-      {/* Selection / kind accent halo */}
-      {(kindStyle.accent || selected) && (
+      {/* Selection / kind accent halo (fiber draws a centre stripe instead, below) */}
+      {((kindStyle.accent && !isFiber) || selected) && (
         <path d={path.d} fill="none" stroke={selected ? 'rgb(var(--primary))' : (kindStyle.accent as string)} strokeOpacity={selected ? 0.6 : 0.45} strokeWidth={selected ? baseWidth + 3 : baseWidth + 1.5} vectorEffect="non-scaling-stroke" style={{ pointerEvents: 'none' }} />
       )}
 
@@ -445,6 +475,12 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
         className={cn(strokeClass, unbound && 'nm-ants', 'transition-opacity')}
         style={{ pointerEvents: 'none' }}
       />
+
+      {/* Fiber: a solid amber core stripe on top of the status / utilisation
+          colour, so the cable type stays readable at any zoom and in live mode. */}
+      {isFiber && !(liveMode && faulted) && (
+        <path d={path.d} fill="none" stroke={LINK_KIND_STYLE.fiber.accent} strokeOpacity={0.95} strokeWidth={Math.max(1, baseWidth * 0.34)} strokeDasharray={dashArray} strokeLinecap="round" vectorEffect="non-scaling-stroke" style={{ pointerEvents: 'none' }} />
+      )}
 
       {/* Directional traffic particles (live mode) */}
       {liveMode && fwdSpec.count > 0 && (
@@ -504,8 +540,13 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
             <span className="rounded-md border border-border bg-surface/95 px-1.5 py-px text-[10px] font-semibold leading-tight text-text2 shadow-sm backdrop-blur" style={customColor ? { borderColor: customColor, color: customColor } : undefined}>{link.label}</span>
           </div>
         )}
+        {bundle > 0 && (
+          <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${badgeAt.x}px, ${badgeAt.y}px) scale(${ts})` }}>
+            <span className="rounded-full border border-border bg-surface px-1.5 py-px font-mono text-[9px] font-bold leading-none text-text2 shadow-sm" title={`${bundle} physical links: ${members.map((m) => `${m.src_interface || '?'} ⇄ ${m.dst_interface || '?'}`).join(', ')}`}>×{bundle}</span>
+          </div>
+        )}
         {showThroughput && liveMode && flow && (hasTraffic || faulted) && (
-          <TrafficChip x={path.mid.x} y={path.mid.y} flow={flow} faulted={faulted} ts={ts} />
+          <TrafficChip x={pillAt.x} y={pillAt.y} flow={flow} faulted={faulted} ts={ts} compact={zoom < COMPACT_PILL_ZOOM && !hover && !selected} />
         )}
         {liveMode && unbound && (
           <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${path.mid.x}px, ${path.mid.y}px) scale(${ts})` }}>
@@ -513,7 +554,7 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
           </div>
         )}
         {liveMode && hover && live && (
-          <LinkHoverCard x={path.mid.x} y={path.mid.y} link={link} live={live} flow={flow} unbound={unbound} halfBound={halfBound} />
+          <LinkHoverCard x={path.mid.x} y={path.mid.y} zoom={zoom} link={link} live={live} flow={flow} unbound={unbound} halfBound={halfBound} sourceName={sourceName} targetName={targetName} />
         )}
       </EdgeLabelRenderer>
     </>
@@ -609,11 +650,19 @@ function FaultMark({ x, y, zoom }: { x: number; y: number; zoom: number }) {
 
 /* Directional throughput pill: ▲ fwd ▼ rev with a utilisation bar underneath.
  * This is the at-a-glance "weathermap" reading for NOC walls. */
-function TrafficChip({ x, y, flow, faulted, ts }: { x: number; y: number; flow: ReturnType<typeof linkFlow>; faulted: boolean; ts: number }) {
+function TrafficChip({ x, y, flow, faulted, ts, compact }: { x: number; y: number; flow: ReturnType<typeof linkFlow>; faulted: boolean; ts: number; compact?: boolean }) {
   if (!flow) return null
   const u = flow.utilPct
   const tone = faulted ? 'danger' : u != null && u >= 85 ? 'danger' : u != null && u >= 60 ? 'warning' : 'success'
   const cls = tone === 'danger' ? 'border-danger/50 text-danger' : tone === 'warning' ? 'border-warning/50 text-warning' : 'border-success/40 text-success'
+  if (compact) {
+    const text = faulted ? 'DOWN' : u != null ? `${u >= 10 ? u.toFixed(0) : u.toFixed(1)}%` : formatBps(flow.total).replace(' ', '')
+    return (
+      <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${ts})` }}>
+        <span className={cn('rounded border bg-surface/95 px-1 py-px font-mono text-[9.5px] font-bold leading-none shadow-sm', cls)}>{text}</span>
+      </div>
+    )
+  }
   return (
     <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${ts})` }}>
       <div className={cn('overflow-hidden rounded-md border bg-surface/95 shadow-md backdrop-blur', cls)}>
@@ -638,15 +687,21 @@ function TrafficChip({ x, y, flow, faulted, ts }: { x: number; y: number; flow: 
   )
 }
 
-/* Full link inspection card shown while hovering a cable in live mode. */
-function LinkHoverCard({ x, y, link, live, flow, unbound, halfBound }: {
-  x: number; y: number; link: ManualMapLink; live: LiveLinkData; flow: ReturnType<typeof linkFlow>; unbound: boolean; halfBound: boolean
+/* Full link inspection card shown while hovering a cable in live mode.
+ * Counter-scaled like the device hover card so it stays readable on a wall
+ * display zoomed out to fit. */
+function LinkHoverCard({ x, y, zoom, link, live, flow, unbound, halfBound, sourceName, targetName }: {
+  x: number; y: number; zoom: number; link: ManualMapLink; live: LiveLinkData; flow: ReturnType<typeof linkFlow>; unbound: boolean; halfBound: boolean
+  sourceName?: string; targetName?: string
 }) {
+  const scale = 1 / Math.max(0.5, Math.min(1.6, zoom))
+  const title = link.label || (sourceName || targetName ? `${sourceName || '?'} ⇄ ${targetName || '?'}` : 'Link')
+  const members = Array.isArray(link.metadata?.members) ? link.metadata!.members! : []
   return (
-    <div className="nodrag nopan pointer-events-none absolute z-50" style={{ transform: `translate(-50%, -110%) translate(${x}px, ${y - 14}px)` }}>
+    <div className="nodrag nopan pointer-events-none absolute z-50" style={{ transform: `translate(-50%, -100%) translate(${x}px, ${y - 14 * scale}px) scale(${scale})`, transformOrigin: 'bottom center' }}>
       <div className="w-64 rounded-lg border border-border bg-surface/95 p-2.5 shadow-xl backdrop-blur animate-fade-in">
         <div className="mb-1.5 flex items-center justify-between gap-2">
-          <span className="truncate text-[11px] font-semibold text-text">{link.label || 'Link'}</span>
+          <span className="truncate text-[11px] font-semibold text-text" title={title}>{title}</span>
           <span className="rounded bg-surface2 px-1 py-px font-mono text-[9px] uppercase text-muted">{link.metadata?.kind || link.link_type}{link.metadata?.speed ? ` · ${link.metadata.speed}` : ''}</span>
         </div>
         {unbound && (
@@ -668,9 +723,15 @@ function LinkHoverCard({ x, y, link, live, flow, unbound, halfBound }: {
           </div>
         )}
         <div className="grid grid-cols-2 gap-2">
-          <HoverIface title="A-END" iface={live.source} typed={link.metadata?.src_interface} />
-          <HoverIface title="B-END" iface={live.target} typed={link.metadata?.dst_interface} />
+          <HoverIface title={sourceName ? sourceName.slice(0, 16) : 'A-END'} iface={live.source} typed={link.metadata?.src_interface} />
+          <HoverIface title={targetName ? targetName.slice(0, 16) : 'B-END'} iface={live.target} typed={link.metadata?.dst_interface} />
         </div>
+        {members.length > 1 && (
+          <div className="mt-1.5 rounded-md border border-border/70 bg-surface2/50 px-1.5 py-1 font-mono text-[9px] leading-snug text-text2">
+            <div className="mb-0.5 font-sans text-[8.5px] font-bold tracking-wider text-muted">BUNDLE · {members.length} LINKS</div>
+            {members.map((m, i) => <div key={i} className="truncate">{m.src_interface || '?'} ⇄ {m.dst_interface || '?'}</div>)}
+          </div>
+        )}
         <div className="mt-1.5 text-right text-[9px] text-muted">window {Math.round(live.window_seconds / 60)}m</div>
       </div>
     </div>

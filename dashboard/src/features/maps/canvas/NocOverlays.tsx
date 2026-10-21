@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Activity, AlertTriangle, ChevronDown, ChevronUp, Flame, Link2Off, ServerCrash, ShieldCheck, Unplug } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { iconLabel } from '@/components/network-icons'
 import {
   STATUS_ORDER,
   formatBps,
@@ -24,7 +25,19 @@ function endpointLabel(detail: ManualMapDetail, id: string, kind: 'node' | 'shap
     return (n?.label || n?.hostname || '?').slice(0, 18)
   }
   const s = (detail.shapes || []).find((shape) => shape.id === id)
-  return (s?.text || s?.kind || '?').slice(0, 18)
+  return shapeName(s).slice(0, 18)
+}
+
+/** Human name for an annotation: its caption/text, an unmanaged neighbour's
+ *  hostname, the icon's name ("Cloud"), else its kind. */
+export function shapeName(s: { text?: string | null; kind?: string; metadata?: Record<string, any> | null } | undefined): string {
+  if (!s) return '?'
+  const text = (s.text || '').trim().split('\n')[0]
+  if (text) return text
+  const md = s.metadata || {}
+  if (md.unmanaged?.hostname) return String(md.unmanaged.hostname)
+  if (md.icon) return (iconLabel as Record<string, string>)[md.icon] || String(md.icon)
+  return s.kind || 'Annotation'
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -60,7 +73,9 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
     let totalBps = 0
     const hottest: { value: { bps: number; util: number | null; label: string } | null } = { value: null }
     const nodeById = new Map(detail.nodes.map((n) => [n.id, n]))
-    const annLinks = annotationLinksOf(detail)
+    // Context cables (annotation cables with no port on either end) never carry
+    // live data by design, so they don't count against "links bound".
+    const annLinks = annotationLinksOf(detail).filter((al) => al.metadata?.src_interface || al.metadata?.dst_interface)
     const linkCount = detail.links.length + annLinks.length
     let bound = 0
 
@@ -216,9 +231,12 @@ export function computeProblems(detail: ManualMapDetail, nodesLive: Record<strin
   const annLinks = annotationLinksOf(detail)
   const linkLabel = (sId: string, tId: string, sKind: 'node' | 'shape' = 'node', tKind: 'node' | 'shape' = 'node') =>
     `${sKind === 'node' ? (nodeById.get(sId)?.label || nodeById.get(sId)?.hostname || '?') : endpointLabel(detail, sId, 'shape')} ⇄ ${tKind === 'node' ? (nodeById.get(tId)?.label || nodeById.get(tId)?.hostname || '?') : endpointLabel(detail, tId, 'shape')}`
-  const consider = (id: string, label: string) => {
+  const consider = (id: string, label: string, intentionallyUnbound = false) => {
     const ld = liveData[id]
     if (!ld) return
+    // A cable to an annotation with no port typed on either end is drawn for
+    // context (an iLO, a cloud) — it has no live data by design, not a problem.
+    if (intentionallyUnbound && !ld.source.matched && !ld.target.matched) return
     const f = linkFlow(ld)
     if (f?.ifaceDown) out.push({ id: `lnk-${id}`, kind: 'link', severity: 'critical', title: label, detail: `Interface down (${f.srcDown ? ld.source.if_name || 'A-end' : ld.target.if_name || 'B-end'})`, targetId: id })
     else if (f?.utilPct != null && f.utilPct >= 85) out.push({ id: `hot-${id}`, kind: 'link', severity: 'critical', title: label, detail: `Saturated · ${f.utilPct.toFixed(0)}% · ${formatBps(f.total)}`, targetId: id })
@@ -226,7 +244,13 @@ export function computeProblems(detail: ManualMapDetail, nodesLive: Record<strin
     else if (!ld.source.matched && !ld.target.matched) out.push({ id: `unb-${id}`, kind: 'link', severity: 'info', title: label, detail: 'No interface bound — no live data', targetId: id })
   }
   for (const l of detail.links) consider(l.id, linkLabel(l.source_node_id, l.target_node_id))
-  for (const al of annLinks) consider(al.id, linkLabel(al.source, al.target, al.source_type, al.target_type))
+  const shapeIds = new Set((detail.shapes || []).map((sh) => sh.id))
+  for (const al of annLinks) {
+    // Skip cables whose endpoint was deleted (older maps kept them in metadata).
+    if (!(nodeById.has(al.source) || shapeIds.has(al.source)) || !(nodeById.has(al.target) || shapeIds.has(al.target))) continue
+    const noPorts = !al.metadata?.src_interface && !al.metadata?.dst_interface
+    consider(al.id, linkLabel(al.source, al.target, al.source_type, al.target_type), noPorts)
+  }
   const rank = { critical: 0, warning: 1, info: 2 }
   return out.sort((a, b) => rank[a.severity] - rank[b.severity])
 }

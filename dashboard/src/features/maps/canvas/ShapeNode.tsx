@@ -1,9 +1,10 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
-import { Lock } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Handle, NodeResizer, Position, useStore, type NodeProps } from '@xyflow/react'
+import { ExternalLink, Lock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { NetworkIcon } from '@/components/network-icons'
-import { LINK_DASH_PATTERN, type MapShape } from '../core'
+import { LINK_DASH_PATTERN, textScaleFor, type MapShape } from '../core'
 import { useMapMode } from './MapModeContext'
 import { ConversationsWidget } from './ConversationsWidget'
 
@@ -18,6 +19,13 @@ export type ShapeNodeData = {
 
 const GEOMETRIC = new Set(['rectangle', 'circle', 'diamond', 'hexagon'])
 
+/** A locked geometric shape acts as a background zone: its interior lets
+ *  clicks and box-selection through to the canvas; only its caption and lock
+ *  badge stay grabbable. MapCanvas sets pointer-events:none on the RF node. */
+export function isBackgroundZone(shape: MapShape, live: boolean): boolean {
+  return !live && !!shape.metadata?.locked && GEOMETRIC.has(shape.kind)
+}
+
 /* Standalone canvas annotation: a built-in icon, an image, rich text / sticky
  * note, or a basic geometric shape. Sized by the RF node's width/height (the
  * NodeResizer persists changes); positioned by its top-left like a box.
@@ -26,8 +34,13 @@ const GEOMETRIC = new Set(['rectangle', 'circle', 'diamond', 'hexagon'])
 function ShapeNodeImpl({ data, selected }: NodeProps) {
   const { shape, live, onEditText, onResizeEnd } = data as ShapeNodeData
   const { connectMode } = useMapMode()
+  const navigate = useNavigate()
+  const zoom = useStore((s) => s.transform[2])
+  const ts = textScaleFor(zoom)
   const m = shape.metadata || {}
   const locked = !!m.locked
+  const zone = isBackgroundZone(shape, live)
+  const linkMapId = typeof m.link_map_id === 'string' && m.link_map_id ? m.link_map_id : null
   const editable = !live && !!onEditText && !locked
   const textRef = useRef<HTMLDivElement>(null)
   const [editing, setEditing] = useState(false)
@@ -122,12 +135,34 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
       </div>
     )
   } else if (shape.kind === 'image' && m.icon) {
+    // Built-in icon + an optional caption under it (double-click to edit), so a
+    // WAN cloud or an unmonitored switch carries its own name.
+    const hasCaption = !!(shape.text || '').trim() || editing
     content = (
       <div
-        className={cn('flex h-full w-full items-center justify-center', selected && 'rounded ring-2 ring-primary/70')}
+        className={cn('relative flex h-full w-full items-center justify-center', selected && 'rounded ring-2 ring-primary/70')}
         style={{ color: m.color || 'rgb(var(--text))' }}
+        onDoubleClick={beginEdit}
+        title={editable && !hasCaption ? 'Double-click to add a caption' : undefined}
       >
         <NetworkIcon name={m.icon} className="h-full w-full" />
+        {m.unmanaged && (
+          <span
+            className="pointer-events-none absolute -top-1 left-1/2 whitespace-nowrap rounded-full border border-surface bg-surface2 px-1 font-mono text-[7.5px] font-bold uppercase leading-[12px] text-muted shadow"
+            style={{ transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'bottom center' }}
+            title="Seen over CDP/LLDP — not monitored by ZenPlus"
+          >
+            not monitored
+          </span>
+        )}
+        {hasCaption && (
+          <div
+            className="absolute left-1/2 top-full mt-1 w-max max-w-[14rem] rounded-md border border-border bg-surface/90 px-2 py-0.5 shadow-sm backdrop-blur"
+            style={{ transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'top center' }}
+          >
+            {textLayer({ justifyContent: 'center', textAlign: 'center', fontSize: m.fontSize ? `${m.fontSize}px` : '11px', fontWeight: m.bold === false ? 400 : 600 })}
+          </div>
+        )}
       </div>
     )
   } else if (shape.kind === 'image') {
@@ -190,7 +225,7 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
           // Left-aligned captions sit in the top-left corner like a zone/group
           // title; centred ones float in the middle of the shape.
           <div className={cn('pointer-events-none absolute inset-0 flex p-2', m.align === 'left' ? 'items-start justify-start px-3 pt-2' : m.align === 'right' ? 'items-start justify-end px-3 pt-2' : 'items-center justify-center')}>
-            {textLayer({ pointerEvents: editing ? 'auto' : 'none', maxWidth: '100%' })}
+            {textLayer({ pointerEvents: editing || zone ? 'auto' : 'none', maxWidth: '100%', cursor: zone ? 'pointer' : undefined })}
           </div>
         )}
       </div>
@@ -229,9 +264,23 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
         {content}
       </div>
       {locked && !live && (
-        <span className="pointer-events-none absolute -right-2 -top-2 flex h-4 w-4 items-center justify-center rounded-full border border-surface bg-surface2 text-muted shadow" title="Locked">
+        <span
+          className={cn('absolute -right-2 -top-2 flex h-4 w-4 items-center justify-center rounded-full border border-surface bg-surface2 text-muted shadow', zone ? 'pointer-events-auto cursor-pointer hover:text-text' : 'pointer-events-none')}
+          title={zone ? 'Locked background zone — click to select, then unlock (L)' : 'Locked'}
+        >
           <Lock className="h-2.5 w-2.5" />
         </span>
+      )}
+      {linkMapId && (
+        <button
+          type="button"
+          className="nodrag pointer-events-auto absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-border bg-surface/95 px-1.5 py-0.5 text-[10px] font-semibold text-text2 shadow-sm hover:border-primary/60 hover:text-text"
+          style={{ transform: `scale(${ts})`, transformOrigin: 'top right' }}
+          title="Open the linked map"
+          onClick={(e) => { e.stopPropagation(); navigate(`/maps/manual?map=${encodeURIComponent(linkMapId)}${live ? '&mode=live' : ''}`) }}
+        >
+          Open map <ExternalLink className="h-3 w-3" />
+        </button>
       )}
     </div>
   )

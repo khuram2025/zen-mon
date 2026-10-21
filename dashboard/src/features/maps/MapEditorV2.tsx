@@ -3,8 +3,8 @@ import { useSearchParams } from 'react-router-dom'
 import { ReactFlowProvider } from '@xyflow/react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, AlertTriangle, Check, ChevronDown, Copy, Keyboard, Loader2, Map as MapIcon, Maximize2, Minimize2,
-  MoreHorizontal, Pencil, Play, Plus, Radio, Rows3, Settings2, Tag, Trash2,
+  Activity, AlertTriangle, Check, ChevronDown, Copy, FileUp, History, Keyboard, Loader2, Map as MapIcon, Maximize2, Minimize2,
+  MoreHorizontal, Pencil, Play, Plus, Radio, Rows3, Settings2, ShieldCheck, Tag, Trash2, Wand2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
@@ -12,11 +12,15 @@ import { toast } from '@/components/ui/Toast'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { MapCanvas } from './canvas/MapCanvas'
+import { MapCanvas, type MapCanvasActions } from './canvas/MapCanvas'
+import { exportMenuItems } from './canvas/exportMenu'
+import { VersionsDialog } from './canvas/VersionsDialog'
+import { BuildMapDialog } from './canvas/BuildMapDialog'
+import { parseMapJson, pickTextFile, toBulkPayload, type MapBackup } from './export/exportMap'
 import { DevicePalette } from './canvas/DevicePalette'
 import { ContextMenu, type ContextMenuState, type MenuItem } from './canvas/ContextMenu'
 import type { ShapeSpec } from './canvas/Annotations'
-import { useLiveLinks, useManualMap, useManualMaps, useNodesLive } from './useMapData'
+import { fetchMapServers, fetchMapServiceChecks, useDevices, useLiveLinks, useManualMap, useManualMaps, useNodesLive } from './useMapData'
 import type { ManualMapDetail, ManualMapListItem } from './core'
 
 type Mode = 'design' | 'live'
@@ -60,6 +64,10 @@ export function MapEditorV2() {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const insertRef = useRef<((spec: ShapeSpec) => void) | null>(null)
+  const canvasRef = useRef<MapCanvasActions | null>(null)
+  const [versionsOpen, setVersionsOpen] = useState(false)
+  const [buildOpen, setBuildOpen] = useState(false)
+  const devicesQ = useDevices()
   const qc = useQueryClient()
 
   const mapsQuery = useManualMaps()
@@ -113,7 +121,10 @@ export function MapEditorV2() {
 
   const counts = useMemo(() => {
     const ann = Array.isArray(detail?.metadata?.annotation_links) ? detail!.metadata!.annotation_links!.length : 0
-    return { nodes: detail?.nodes.length || 0, links: (detail?.links.length || 0) + ann, shapes: detail?.shapes?.length || 0 }
+    const nodes = detail?.nodes || []
+    const servers = nodes.filter((n) => n.kind === 'server').length
+    const checks = nodes.filter((n) => n.kind === 'service_check').length
+    return { devices: nodes.length - servers - checks, servers, checks, links: (detail?.links.length || 0) + ann, shapes: detail?.shapes?.length || 0 }
   }, [detail])
 
   const goToMap = (id: string, nextMode: Mode = 'design') => {
@@ -193,19 +204,80 @@ export function MapEditorV2() {
     setMapMenu({ x: r.left, y: r.bottom + 4, items })
   }
 
+  /* Import a JSON backup as a NEW map. Device/server/check ids differ between
+   * appliances, so an id that is not known here is re-matched by IP, then by
+   * hostname; nodes that still match nothing are skipped and reported. */
+  const importJson = async () => {
+    const file = await pickTextFile()
+    if (!file) return
+    let backup: MapBackup
+    try { backup = parseMapJson(file.text) } catch (e) { toast.error('Import failed', (e as Error).message); return }
+    setBusy(true)
+    try {
+      const [servers, checks] = await Promise.all([
+        qc.fetchQuery({ queryKey: ['servers', 'manual-map-picker'], queryFn: fetchMapServers }),
+        qc.fetchQuery({ queryKey: ['service-checks', 'manual-map-picker'], queryFn: fetchMapServiceChecks }),
+      ])
+      const devs = devicesQ.data?.data || []
+      const byKey = (list: { id: string; ip_address?: string; hostname?: string }[]) => ({
+        ids: new Set(list.map((d) => d.id)),
+        ip: new Map(list.filter((d) => d.ip_address).map((d) => [String(d.ip_address), d.id])),
+        host: new Map(list.filter((d) => d.hostname).map((d) => [String(d.hostname).toLowerCase(), d.id])),
+      })
+      const idx = { device: byKey(devs), server: byKey(servers.data || []), service_check: byKey(checks.data || []) }
+      let rematched = 0
+      const nodes = backup.nodes.map((n) => {
+        const k = idx[n.kind] || idx.device
+        const field = n.kind === 'server' ? 'server_id' : n.kind === 'service_check' ? 'service_check_id' : 'device_id'
+        const cur = (n as any)[field] as string | null
+        if (cur && k.ids.has(cur)) return n
+        const match = (n.ip_address && k.ip.get(String(n.ip_address))) || (n.hostname && k.host.get(String(n.hostname).toLowerCase()))
+        if (!match) return n
+        rematched++
+        return { ...n, [field]: match }
+      })
+      const conv = toBulkPayload({ ...backup, nodes }, { devices: idx.device.ids, servers: idx.server.ids, service_checks: idx.service_check.ids })
+      const { data: created } = await api.post('/maps', { name: `${backup.map.name} (imported)`, description: backup.map.description ?? null, metadata: conv.mapMetadata })
+      try {
+        await api.post(`/maps/${created.id}/bulk`, conv.payload)
+      } catch (e) {
+        // Don't leave an empty "(imported)" map behind.
+        await api.delete(`/maps/${created.id}`).catch(() => {})
+        throw e
+      }
+      await qc.invalidateQueries({ queryKey: ['manual-maps'] })
+      goToMap(created.id)
+      const notes = [rematched ? `${rematched} matched by IP/hostname` : '', conv.dropped.length ? `${conv.dropped.length} node${conv.dropped.length > 1 ? 's' : ''} skipped (not on this appliance)` : ''].filter(Boolean).join(' · ')
+      toast.success('Map imported', notes || undefined)
+    } catch (e: any) {
+      toast.error('Import failed', e?.response?.data?.detail || e?.message || String(e))
+    } finally { setBusy(false) }
+  }
+
   const openActionsMenu = (el: HTMLElement) => {
     const r = el.getBoundingClientRect()
     const items: MenuItem[] = [
       { type: 'header', label: current?.name || 'Map' },
       { type: 'item', label: 'Rename / description…', icon: <Tag className="h-4 w-4" />, disabled: !detail, onClick: () => setNameDialog({ kind: 'rename', name: current?.name || '', description: current?.description || '' }) },
       { type: 'item', label: 'Duplicate as new map…', icon: <Copy className="h-4 w-4" />, disabled: !detail, onClick: () => setNameDialog({ kind: 'duplicate', name: `${current?.name || 'Map'} (copy)`, description: current?.description || '' }) },
+      { type: 'item', label: 'Build from site / subnet…', icon: <Wand2 className="h-4 w-4" />, disabled: !detail, onClick: () => setBuildOpen(true) },
+      { type: 'item', label: 'Verify topology', icon: <ShieldCheck className="h-4 w-4" />, disabled: !detail || mode !== 'design', onClick: () => canvasRef.current?.openVerify() },
+      { type: 'item', label: 'Version history…', icon: <History className="h-4 w-4" />, disabled: !detail, onClick: () => setVersionsOpen(true) },
       { type: 'item', label: 'Open live view in new tab', icon: <Play className="h-4 w-4" />, disabled: !selectedMapId, onClick: () => window.open(`/maps/manual?map=${selectedMapId}&mode=live`, '_blank') },
+      { type: 'divider' },
+      ...exportMenuItems({
+        detail,
+        getNodes: () => canvasRef.current?.getNodes() || [],
+        getViewportEl: () => canvasRef.current?.getViewportEl() || null,
+        prepare: async () => (await canvasRef.current?.prepareExport()) || (() => {}),
+      }),
+      { type: 'item', label: 'Import JSON backup as new map…', icon: <FileUp className="h-4 w-4" />, onClick: () => void importJson() },
       { type: 'divider' },
       { type: 'item', label: 'Keyboard shortcuts', icon: <Keyboard className="h-4 w-4" />, onClick: () => setHelpOpen(true) },
       { type: 'divider' },
       { type: 'item', label: 'Delete map…', icon: <Trash2 className="h-4 w-4" />, danger: true, disabled: !detail, onClick: () => setDeleteOpen(true) },
     ]
-    setMapMenu({ x: r.right - 220, y: r.bottom + 4, items })
+    setMapMenu({ x: r.right - 240, y: Math.max(8, Math.min(r.bottom + 4, window.innerHeight - 40 - items.length * 30)), items })
   }
 
   const toggleFullscreen = useCallback(() => {
@@ -215,7 +287,8 @@ export function MapEditorV2() {
     else void el.requestFullscreen().catch(() => toast.error('Fullscreen is not available in this browser'))
   }, [])
 
-  const usedIds = useMemo(() => new Set((detail?.nodes || []).map((n) => n.device_id)), [detail])
+  // Placed entity ids (device, server or check) — the palette marks them "on map".
+  const usedIds = useMemo(() => new Set((detail?.nodes || []).map((n) => n.device_id || n.server_id || n.service_check_id || '').filter(Boolean)), [detail])
   const noMaps = !mapsQuery.isLoading && maps.length === 0
 
   return (
@@ -242,7 +315,7 @@ export function MapEditorV2() {
 
         {detail && (
           <span className="text-xs text-muted" title={current?.description || undefined}>
-            {counts.nodes} devices · {counts.links} links{counts.shapes ? ` · ${counts.shapes} shapes` : ''}
+            {counts.devices} devices{counts.servers ? ` · ${counts.servers} server${counts.servers > 1 ? 's' : ''}` : ''}{counts.checks ? ` · ${counts.checks} check${counts.checks > 1 ? 's' : ''}` : ''} · {counts.links} links{counts.shapes ? ` · ${counts.shapes} shapes` : ''}
           </span>
         )}
 
@@ -341,11 +414,14 @@ export function MapEditorV2() {
                 liveUpdatedAt={Math.max(liveLinksQuery.dataUpdatedAt, nodesLiveQuery.dataUpdatedAt)}
                 liveMode={mode === 'live'}
                 showThroughput={livePrefs.throughput}
-                showIfaceLabels={livePrefs.ifaceLabels}
+                // The Ports toggle only exists in Live; Design always shows port
+                // labels so a toggle set on the wall never hides them while editing.
+                showIfaceLabels={mode === 'live' ? livePrefs.ifaceLabels : true}
                 animate={livePrefs.animate}
                 showProblems={livePrefs.problems}
                 insertRef={insertRef}
                 focusDeviceId={params.get('focus')}
+                actionsRef={canvasRef}
               />
             </ReactFlowProvider>
           ) : mapQuery.isError ? (
@@ -403,6 +479,19 @@ export function MapEditorV2() {
       />
 
       {helpOpen && <ShortcutsDialog onClose={() => setHelpOpen(false)} />}
+
+      {versionsOpen && selectedMapId && (
+        <VersionsDialog mapId={selectedMapId} onClose={() => setVersionsOpen(false)} onRestored={() => { setVersionsOpen(false); canvasRef.current?.resetHistory(); void qc.invalidateQueries({ queryKey: ['manual-maps'] }) }} />
+      )}
+
+      {buildOpen && selectedMapId && (
+        <BuildMapDialog
+          mapId={selectedMapId}
+          devices={(devicesQ.data?.data || []).map((d) => ({ id: d.id, hostname: d.hostname, ip_address: d.ip_address }))}
+          onClose={() => setBuildOpen(false)}
+          onBuilt={() => { setBuildOpen(false); canvasRef.current?.resetHistory(); void qc.invalidateQueries({ queryKey: ['manual-maps'] }) }}
+        />
+      )}
     </div>
   )
 }
@@ -473,44 +562,42 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-/* Deep-copy a map into a brand-new one using the existing endpoints (no backend
- * change needed). Node/shape ids are server-generated, so links + annotation
- * links are remapped from old ids to new ones. */
+/* Deep-copy a map into a brand-new one: one bulk request creates every node
+ * (devices, servers, checks), shape and cable, using the source ids as client
+ * ids so cables and annotation cables are remapped server-side. */
 async function cloneMap(detail: ManualMapDetail, name: string, description: string | null): Promise<string> {
-  const { data: created } = await api.post('/maps', { name, description })
-  const newId: string = created.id
-
-  const nodeMap: Record<string, string> = {}
-  for (const n of detail.nodes) {
-    const { data: cn } = await api.post(`/maps/${newId}/nodes`, { device_id: n.device_id, icon: n.icon || 'auto', x_pct: n.x_pct, y_pct: n.y_pct })
-    nodeMap[n.id] = cn.id
-    await api.put(`/maps/${newId}/nodes/${cn.id}`, { label: n.label, icon: n.icon || 'auto', metadata: n.metadata || {} })
-  }
-  for (const l of detail.links) {
-    const s = nodeMap[l.source_node_id], t = nodeMap[l.target_node_id]
-    if (!s || !t) continue
-    await api.post(`/maps/${newId}/links`, { source_node_id: s, target_node_id: t, label: l.label, link_type: l.link_type, metadata: l.metadata || {} })
-  }
-  const shapeMap: Record<string, string> = {}
-  for (const sh of detail.shapes || []) {
-    const { data: cs } = await api.post(`/maps/${newId}/shapes`, {
-      kind: sh.kind, x_pct: sh.x_pct, y_pct: sh.y_pct, w_pct: sh.w_pct, h_pct: sh.h_pct,
-      text: sh.text, fill: sh.fill, stroke: sh.stroke, z_index: sh.z_index, metadata: sh.metadata || {},
-    })
-    shapeMap[sh.id] = cs.id
-  }
   const srcMeta = (detail.metadata as any) || {}
-  const annLinks = (srcMeta.annotation_links || []) as any[]
-  const remapId = (id: string, type: string) => (type === 'shape' ? shapeMap[id] : nodeMap[id])
-  const remapped = annLinks
-    .map((al) => {
-      const s = remapId(al.source, al.source_type), t = remapId(al.target, al.target_type)
-      if (!s || !t) return null
-      return { ...al, id: `al-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, source: s, target: t }
-    })
-    .filter(Boolean)
-  if (remapped.length) await api.put(`/maps/${newId}`, { metadata: { ...srcMeta, annotation_links: remapped } })
+  const { annotation_links: annLinks = [], ...uiMeta } = srcMeta
+  const { data: created } = await api.post('/maps', { name, description, metadata: uiMeta })
+  const newId: string = created.id
+  try {
+    await cloneContent(detail, newId, annLinks as any[])
+  } catch (e) {
+    // Don't leave an empty "(copy)" map behind.
+    await api.delete(`/maps/${newId}`).catch(() => {})
+    throw e
+  }
   return newId
+}
+
+async function cloneContent(detail: ManualMapDetail, newId: string, annLinks: any[]) {
+  const nodeIds = new Set(detail.nodes.map((n) => n.id))
+  const shapeIds = new Set((detail.shapes || []).map((sh) => sh.id))
+  await api.post(`/maps/${newId}/bulk`, {
+    nodes: detail.nodes.map((n) => ({
+      client_id: n.id, device_id: n.device_id, server_id: n.server_id ?? null, service_check_id: n.service_check_id ?? null,
+      label: n.label && n.label !== n.hostname ? n.label : null, icon: n.icon || 'auto', x_pct: n.x_pct, y_pct: n.y_pct, metadata: n.metadata || {},
+    })),
+    shapes: (detail.shapes || []).map((sh) => ({
+      client_id: sh.id, kind: sh.kind, x_pct: sh.x_pct, y_pct: sh.y_pct, w_pct: sh.w_pct, h_pct: sh.h_pct,
+      text: sh.text, fill: sh.fill, stroke: sh.stroke, z_index: sh.z_index, metadata: sh.metadata || {},
+    })),
+    links: detail.links.map((l) => ({ source: l.source_node_id, target: l.target_node_id, label: l.label, link_type: l.link_type, metadata: l.metadata || {} })),
+    // Drop cables whose endpoint no longer exists on the source map.
+    annotation_links: (annLinks as any[])
+      .filter((al) => (nodeIds.has(al.source) || shapeIds.has(al.source)) && (nodeIds.has(al.target) || shapeIds.has(al.target)))
+      .map((al) => ({ ...al, id: undefined })),
+  })
 }
 
 export type { ManualMapListItem }

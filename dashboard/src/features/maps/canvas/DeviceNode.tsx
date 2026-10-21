@@ -6,7 +6,7 @@ import { NetworkIcon } from '@/components/network-icons'
 import {
   DISC, DISC_CX, DISC_CY, NODE_W, STATUS_COLOR,
   iconFillFor,
-  formatAgo, formatUptime, iconForNode, statusKey, textScaleFor, utilHex,
+  formatAgo, formatUptime, iconForNode, nodeKindOf, statusKey, textScaleFor, utilHex,
   type ManualMapNode, type NodeLiveData,
 } from '../core'
 import { useMapMode } from './MapModeContext'
@@ -46,6 +46,7 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
   const zoom = useStore((s) => s.transform[2])
   const ts = textScaleFor(zoom)
   const iconKey = iconForNode(node)
+  const kind = nodeKindOf(node)
   // Live status feed (15s poll) wins over the map snapshot when present.
   const sk = statusKey(live ? (nodeLive?.status ?? node.status) : node.status)
   const color = STATUS_COLOR[sk]
@@ -167,6 +168,17 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
             </span>
           )}
 
+          {/* Kind badge: server / service-check nodes are not network devices */}
+          {kind !== 'device' && (
+            <span
+              className="absolute -bottom-1.5 left-1/2 rounded-full border border-surface bg-surface2 px-1 font-mono text-[7.5px] font-bold uppercase leading-[12px] text-muted shadow"
+              style={{ transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'top center' }}
+              title={kind === 'server' ? 'Server (Servers module)' : 'Service check'}
+            >
+              {kind === 'server' ? 'SRV' : 'CHK'}
+            </span>
+          )}
+
           {/* Lock badge (design mode) */}
           {locked && !live && (
             <span className="absolute -bottom-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full border border-surface bg-surface2 text-muted shadow" title="Locked — unlock from the right-click menu">
@@ -248,9 +260,9 @@ export function DeviceHoverCard({ node, nodeLive, sk }: { node: ManualMapNode; n
         <span className={cn('rounded px-1.5 py-0.5 text-[9px] font-bold uppercase leading-none', badge)}>{sk}</span>
       </div>
       <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 border-t border-border/60 pt-1.5 text-[9.5px] leading-snug">
-        <Field k="Type" v={node.device_type} />
+        <Field k="Type" v={nodeKindOf(node) === 'service_check' ? `check · ${node.model || ''}` : node.device_type} />
         {node.vendor ? <Field k="Vendor" v={node.vendor} /> : null}
-        {node.model ? <Field k="Model" v={node.model} /> : null}
+        {node.model && nodeKindOf(node) !== 'service_check' ? <Field k={nodeKindOf(node) === 'server' ? 'OS' : 'Model'} v={node.model} /> : null}
         {node.location ? <Field k="Location" v={node.location} /> : null}
         {nodeLive?.rtt_ms != null && <Field k="RTT" v={`${nodeLive.rtt_ms.toFixed(1)} ms`} mono />}
         {nodeLive?.uptime_seconds != null && <Field k="Uptime" v={formatUptime(nodeLive.uptime_seconds)} mono />}
