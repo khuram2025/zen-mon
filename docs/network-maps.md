@@ -2,7 +2,7 @@
 
 `/maps/manual` is the hand-built topology editor (React Flow, `dashboard/src/features/maps/`) backed by
 `/api/v1/maps` (`server/app/api/v1/manual_maps.py`, topology logic in `server/app/services/map_topology.py`).
-This page records the rules the map follows since 1.24.23, which came out of building the Al Aridh branch
+This page records the rules the map follows since 1.24.25, which came out of building the Al Aridh branch
 map on a customer appliance (assessment D1–D15, F1–F12).
 
 ## Nodes
