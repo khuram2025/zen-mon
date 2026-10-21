@@ -19,7 +19,8 @@ Three renderers consume that model:
   (chart PNGs become base64 data URIs);
 - :func:`render_html` — a self-contained, print-ready branded HTML document
   (also the artifact stored in ``report_runs`` for share links);
-- :func:`render_pdf` — fpdf2 via the existing ``ZenPlusReport`` primitives.
+- :func:`render_pdf` — fpdf2 via the ``ZenPlusReport`` primitives
+  (``SectionReportPDF`` wraps table and KPI text instead of truncating it).
 
 Report *types* are named presets of section ids (``REPORT_PRESETS``); custom
 reports are user-picked section lists stored in ``custom_reports``. Legacy
@@ -587,6 +588,7 @@ async def _node_availability(ctx: SectionCtx) -> dict:
     # Outage episodes pair each down transition with its recovery; the log's
     # duration_sec column is always 0, so it cannot supply durations.
     outages: list[dict] = []
+    outages_failed = False
     try:
         if names:
             episodes = await asyncio.to_thread(
@@ -603,7 +605,13 @@ async def _node_availability(ctx: SectionCtx) -> dict:
                     "ongoing": e["ongoing"],
                 })
     except Exception:
+        # Fail visibly: sections show "—" and say so, never "no outages".
         logger.exception("node outage episodes query failed")
+        outages_failed = True
+        outages = []
+        for s in stats.values():
+            s.pop("outages", None)
+            s.pop("logged_down_s", None)
 
     from app.services.availability_policy import load_default_target
     sla_target, _source = await load_default_target(ctx.db)
@@ -624,7 +632,12 @@ async def _node_availability(ctx: SectionCtx) -> dict:
             "avail": avail,
             "up_samples": s.get("up"),
             "samples": s.get("samples"),
+            # Unreachable time: every failed probe, isolated losses included
+            # (the sample basis of the availability figure).
             "downtime_min": round((100 - avail) / 100 * sla_min, 1) if avail is not None else None,
+            # Confirmed outage time: the outage episodes of device_status_log
+            # clipped to the window (the same episodes as "outages").
+            "confirmed_down_min": round(s.get("logged_down_s", 0) / 60, 1),
             "outages": s.get("outages", 0),
             "rtt": s.get("rtt"),
             "p95_rtt": s.get("p95_rtt"),
@@ -649,8 +662,10 @@ async def _node_availability(ctx: SectionCtx) -> dict:
         "below_sla": sum(1 for n in reporting if n["avail"] < sla_target),
         "sla_target": sla_target,
         "downtime_min": round(sum(n["downtime_min"] or 0 for n in nodes), 1),
+        "confirmed_down_min": round(sum(n["confirmed_down_min"] for n in nodes), 1),
         "outage_events": sum(n["outages"] for n in nodes),
         "outage_list": outages,
+        "outages_failed": outages_failed,
         "filtered": bool(ids),
         "maint_excluded_min": round(sum(n["maintenance_min"] for n in nodes), 1),
         "measured": len(reporting),
@@ -671,18 +686,41 @@ def _ping_method_note(na: dict) -> list[str]:
     return []
 
 
+OUTAGES_FAILED_NOTE = ("Outage episodes could not be loaded for this run, so confirmed outage time and "
+                       "outage counts are not shown. Generate the report again shortly.")
+
+UNREACHABLE_NOTE = ("Unreachable time counts every failed probe, including isolated losses that never "
+                    "became an outage; availability uses the same samples, as on the Availability page. "
+                    "Confirmed outage time adds up the confirmed outage episodes (the episodes behind "
+                    "Outage events and Longest outages), clipped to the reporting window.")
+
+
+def _fmt_minutes_total(m: Optional[float]) -> str:
+    return "—" if m is None else f"{m:,.0f} min"
+
+
 async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
     na = await _node_availability(ctx)
     avail = na["overall"]
     target = na.get("sla_target", SLA_TARGET_PCT)
     scope = f"{len(na['nodes'])} selected node(s)" if na["filtered"] else "all monitored nodes"
-    maint_note = ([f"Planned maintenance excluded: {na['maint_excluded_min']:,.0f} "
-                   "device-minutes fell inside maintenance windows and do not "
-                   "count against availability."]
-                  if na.get("maint_excluded_min") else [])
+    # No ping samples in the window: "not measured", never a green zero.
+    measured = bool(na.get("measured"))
+    confirmed = na.get("confirmed_down_min") or 0.0
+    # Outage episodes failed to load: unknown, never "0".
+    episodes = not na.get("outages_failed")
+    notes = ([f"Planned maintenance excluded: {na['maint_excluded_min']:,.0f} "
+              "device-minutes fell inside maintenance windows and do not "
+              "count against availability."]
+             if na.get("maint_excluded_min") else [])
+    notes.append(UNREACHABLE_NOTE)
+    if not measured:
+        notes.insert(0, "No ping samples in this window (not measured).")
+    if not episodes:
+        notes.insert(0, OUTAGES_FAILED_NOTE)
     return _section(
         "availability_kpis", "Availability Summary",
-        notes=maint_note,
+        notes=notes,
         description=f"Computed over {scope} for the reporting window.",
         kpis=[
             {"label": "Availability", "value": _fmt_avail(avail),
@@ -691,12 +729,24 @@ async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
             # Current status, not the period: say so next to the period figures.
             {"label": f"Nodes up now (of {len(na['nodes'])})", "value": str(na["up"]),
              "accent": "success" if na["up"] == len(na["nodes"]) else "warning",
-             "subtitle": "Current status, at generation"},
-            {"label": f"Below configured target ({target:g}%)", "value": str(na["below_sla"]),
-             "accent": "danger" if na["below_sla"] else "success"},
-            {"label": "Total downtime", "value": f"{na['downtime_min']:,.0f} min",
-             "accent": "warning" if na["downtime_min"] else "success"},
-            {"label": "Outage events", "value": str(na["outage_events"]), "accent": "info"},
+             "subtitle": "Current status, at generation", "current": True},
+            {"label": f"Below configured target ({target:g}%)",
+             "value": str(na["below_sla"]) if measured else "—",
+             "accent": ("neutral" if not measured else "danger" if na["below_sla"] else "success"),
+             **({"subtitle": f"of {na['measured']:,} measured node(s)"} if measured
+                else {"subtitle": "Not measured"})},
+            {"label": "Unreachable time",
+             "value": _fmt_minutes_total(na["downtime_min"] if measured else None),
+             "accent": ("neutral" if not measured else "warning" if na["downtime_min"] else "success"),
+             "subtitle": "failed probes, incl. isolated"},
+            {"label": "Confirmed outage time",
+             "value": _fmt_minutes_total(confirmed if episodes and (measured or confirmed) else None),
+             "accent": ("neutral" if not episodes or not (measured or confirmed) else
+                        "warning" if confirmed else "success"),
+             "subtitle": "confirmed outage episodes" if episodes else "could not be loaded"},
+            {"label": "Outage events",
+             "value": (str(na["outage_events"]) if episodes and (measured or na["outage_events"]) else "—"),
+             "accent": "info" if episodes and (measured or na["outage_events"]) else "neutral"},
         ],
     )
 
@@ -719,23 +769,27 @@ async def _sec_device_availability(ctx: SectionCtx) -> dict:
     na = await _node_availability(ctx)
     top = _top_n(ctx, 200)
     nodes = na["nodes"]
+    episodes = not na.get("outages_failed")
     rows = [
         [n["hostname"], n["ip"], n["location"] or "—", n["status"],
          _fmt_avail(n["avail"]),
-         f"{n['downtime_min']:,.0f} min" if n["downtime_min"] is not None else "—",
-         str(n["outages"]),
+         _fmt_minutes_total(n["downtime_min"]),
+         _fmt_minutes_total((n.get("confirmed_down_min") or 0.0)
+                            if episodes and (n["avail"] is not None or n.get("outages")) else None),
+         str(n["outages"]) if episodes else "—",
          _fmt_ms(n["rtt"]) if n["rtt"] else "—"]
         for n in nodes[:top]
     ]
     scope = "the selected nodes" if na["filtered"] else "every monitored node"
     return _section(
         "device_availability", "Node Availability",
-        description=f"Availability, downtime and outages for {scope} — worst first.",
+        description=f"Availability, unreachable time and confirmed outages for {scope} — worst first.",
         tables=[{"headers": ["Node", "IP address", "Location", "Status",
-                             "Availability", "Downtime", "Outages", "Avg RTT"],
-                 "styles": ["text", "mono", "text", "status", "pct-bar", "num", "num", "num"],
+                             "Availability", "Unreachable", "Confirmed outage", "Outages", "Avg RTT"],
+                 "styles": ["text", "mono", "text", "status", "pct-bar", "num", "num", "num", "num"],
                  "rows": rows}],
-        notes=_shown_note(len(rows), len(nodes), "nodes (worst first)"),
+        notes=(_shown_note(len(rows), len(nodes), "nodes (worst first)") + [UNREACHABLE_NOTE]
+               + ([] if episodes else [OUTAGES_FAILED_NOTE])),
     )
 
 
@@ -746,7 +800,8 @@ async def _sec_device_uptime(ctx: SectionCtx) -> dict:
     measured = sorted((n for n in na["nodes"] if n["avail"] is not None), key=lambda n: n["avail"])
     top = _top_n(ctx, 10)
     rows = [
-        [n["hostname"] or "—", n["ip"] or "—", _fmt_avail(n["avail"]), str(n["outages"]),
+        [n["hostname"] or "—", n["ip"] or "—", _fmt_avail(n["avail"]),
+         "—" if na.get("outages_failed") else str(n["outages"]),
          _fmt_ms(n["rtt"]), _fmt_ms(n["p95_rtt"])]
         for n in measured[:top]
     ]
@@ -772,6 +827,11 @@ async def _sec_top_outages(ctx: SectionCtx) -> dict:
 
     rows = [[o.get("hostname") or "—", ctx.fmt_short(o.get("started_at")), _duration(o)]
             for o in outages[:top]]
+    if na.get("outages_failed"):
+        return _section("top_outages", "Longest Outages", half=True, notes=[OUTAGES_FAILED_NOTE])
+    if not rows:
+        return _section("top_outages", "Longest Outages", half=True,
+                        notes=["No outages in this period."])
     return _section(
         "top_outages", "Longest Outages", half=True,
         tables=[{"headers": ["Device", "Started", "Duration"],
@@ -1986,22 +2046,27 @@ def _fmt_minutes(m: Optional[float]) -> str:
 async def _sec_alert_kpis(ctx: SectionCtx) -> dict:
     """Alert incidents raised in the window by severity, and MTTR, with the
     Alert Center's semantics: recovery notices, dependency-suppressed and
-    hold-cancelled rows are notices, not alerts (alert_workflow.notice_sql),
-    and MTTR is the mean time to recover of incidents that recovered in the
-    window (alert_service.summary)."""
+    hold-cancelled rows are notices, not alerts (alert_workflow.notice_sql).
+
+    MTTR is the mean time to recover of the incidents RAISED in the window
+    that recovered (closure reason "recovered", alert_workflow.
+    closure_reason_sql) by the end of the window -- not of the incidents that
+    recovered in the window wherever they started, which let a backlog from
+    before the period push MTTR past the length of the window."""
     from app.services import alert_workflow as wf
 
     counts = {"critical": 0, "warning": 0, "info": 0}
     total = notices = 0
     mttr_min: Optional[float] = None
     recovered = 0
+    notice = wf.notice_sql("a")
+    params = {"f": ctx.frm, "t": ctx.to}
     try:
-        notice = wf.notice_sql("a")
         rows = (await ctx.db.execute(text(
             f"SELECT a.severity, count(*) FILTER (WHERE NOT {notice}) AS incidents, "
             f"count(*) FILTER (WHERE {notice}) AS notices "
             "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at < :t "
-            "GROUP BY a.severity"), {"f": ctx.frm, "t": ctx.to})).fetchall()
+            "GROUP BY a.severity"), params)).fetchall()
         for sev, n_incidents, n_notices in rows:
             key = str(sev or "info").lower()
             counts[key] = counts.get(key, 0) + int(n_incidents or 0)
@@ -2010,17 +2075,24 @@ async def _sec_alert_kpis(ctx: SectionCtx) -> dict:
     except Exception:
         logger.debug("alert kpis unavailable", exc_info=True)
     try:
-        from app.services import alert_service
-        summ = await alert_service.summary(ctx.db, alert_service.AlertFilters(
-            from_time=_aware_utc(ctx.frm), to_time=_aware_utc(ctx.to)))
-        ttr = (summ.get("window") or {}).get("time_to_recover") or {}
-        if ttr.get("mean_s") is not None:
-            mttr_min = float(ttr["mean_s"]) / 60
-        recovered = int(ttr.get("count") or 0)
+        row = (await ctx.db.execute(text(
+            "SELECT count(*) AS recovered, "
+            "avg(EXTRACT(EPOCH FROM (a.resolved_at - a.triggered_at))) AS mean_s "
+            "FROM alerts a WHERE a.triggered_at >= :f AND a.triggered_at < :t "
+            f"AND NOT {notice} AND {wf.closure_reason_sql('a')} = 'recovered' "
+            "AND a.resolved_at IS NOT NULL AND a.resolved_at < :t "
+            "AND a.resolved_at >= a.triggered_at"), params)).first()
+        if row is not None:
+            recovered = int(row[0] or 0)
+            if recovered and row[1] is not None:
+                mttr_min = float(row[1]) / 60
     except Exception:
         logger.debug("alert MTTR unavailable", exc_info=True)
     notes = ([f"{notices:,} recovery or suppression notice(s) are not counted as alerts."]
              if notices else [])
+    if total:
+        notes.append("MTTR covers the incidents raised in this period that recovered by its end; "
+                     "incidents still open, or closed by hand, are not part of it.")
     return _section(
         "alert_kpis", "Alert Summary",
         kpis=[
@@ -2029,8 +2101,8 @@ async def _sec_alert_kpis(ctx: SectionCtx) -> dict:
              "accent": "danger" if counts.get("critical") else "success"},
             {"label": "Warning", "value": str(counts.get("warning", 0)), "accent": "warning"},
             {"label": "MTTR", "value": _fmt_minutes(mttr_min), "accent": "info",
-             "subtitle": (f"mean time to recover · {recovered:,} incident(s)" if recovered
-                          else "no incident recovered in this period")},
+             "subtitle": (f"mean time to recover · {recovered:,} of {total:,} incident(s) recovered"
+                          if recovered else "no incident raised in this period recovered")},
         ],
         notes=notes,
     )
@@ -2893,6 +2965,10 @@ async def build_sections(db: AsyncSession, section_ids: list,
             sec["error"] = True
         if item["title"]:
             sec["title"] = item["title"]
+        tables = sec.get("tables") or []
+        if tables and not any(t.get("rows") for t in tables) and not sec.get("notes"):
+            # Never an empty table without a word: say there was nothing.
+            sec["notes"] = ["No records in this period."]
         sec.setdefault("category", entry.get("category"))
         # What the figures cover (device / netflow / fleet) and when (window =
         # the report period, snapshot = at generation): the email labels each
@@ -3466,6 +3542,312 @@ def render_html(meta: dict, sections: list[dict]) -> str:
 
 _COL_GAP = 8
 
+from app.services.report_service import (  # noqa: E402
+    ACCENT_RGB_CARD,
+    COLOR_BODY,
+    COLOR_HAIRLINE_SOFT,
+    _NEUTRAL_CELL,
+)
+
+# Wrapped table cells: line height (mm) per font size, the most lines one
+# cell shows (the last is ellipsized beyond that), and the font floor wide
+# tables shrink to before wrapping.
+_CELL_LINE_MM = 3.3
+_HEAD_LINE_MM = 3.0
+_CELL_MAX_LINES = 4
+_CELL_CLIP = 1_000
+_WIDE_TABLE_COLS = 8
+_WIDE_FONT = 6.9
+
+
+class SectionReportPDF(ZenPlusReport):
+    """The section engine's PDF document: tables wrap header and cell text
+    onto several lines (and wide tables use a slightly smaller font) instead
+    of truncating with an ellipsis, and KPI card labels and subtitles wrap
+    to two lines (assessment L1: "Raho …", "CRITICALI…", "BELOW
+    CONFIGURED…")."""
+
+    _cell_size = 7.6
+
+    def _fit_prefix(self, txt: str, w: float) -> int:
+        """Length of the longest prefix of ``txt`` no wider than ``w`` (at
+        least 1): a binary search, so a huge token costs log(n) measurements."""
+        lo, hi = 1, len(txt)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.get_string_width(txt[:mid]) <= w:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
+    def _fit(self, txt: str, max_w: float) -> str:
+        """Ellipsize ``txt`` to ``max_w`` (binary search: the base class
+        drops one character per measurement, quadratic on long text)."""
+        if self.get_string_width(txt) <= max_w:
+            return txt
+        ell = _safe("…")
+        keep = self._fit_prefix(txt + ell, max_w) - len(ell)
+        while keep > 0 and self.get_string_width(txt[:keep] + ell) > max_w:
+            keep -= 1
+        return txt[:max(keep, 0)] + ell
+
+    def _wrap(self, txt: str, w: float, max_lines: int = _CELL_MAX_LINES) -> list[str]:
+        """``txt`` broken into lines no wider than ``w`` with the current
+        font: at spaces, else inside a word too long for a line. The last
+        allowed line is ellipsized when text remains.
+
+        Bounded work whatever the input: the text is first clipped to what
+        ``max_lines`` lines could hold even in the narrowest glyphs, wrapping
+        stops once a line beyond ``max_lines`` exists, and an over-long word
+        is split by binary search."""
+        txt = " ".join(str(txt or "").split())
+        if not txt:
+            return [""]
+        w = max(w, 2.0)
+        narrowest = max(min(self.get_string_width(c) for c in "il.|' "), 0.05)
+        budget = int((max_lines + 1) * (w / narrowest + 1))
+        clipped = len(txt) > budget
+        if clipped:
+            txt = txt[:budget]
+        lines: list[str] = []
+        line = ""
+        words = txt.split(" ")
+        i = 0
+        while i < len(words) and len(lines) <= max_lines:
+            word = words[i]
+            cand = f"{line} {word}" if line else word
+            if self.get_string_width(cand) <= w:
+                line = cand
+                i += 1
+                continue
+            if line:
+                lines.append(line)
+                line = ""
+                continue
+            # A single word wider than the line: split it.
+            cut = self._fit_prefix(word, w)
+            lines.append(word[:cut])
+            words[i] = word[cut:]
+        if line and len(lines) <= max_lines:
+            lines.append(line)
+        if len(lines) > max_lines or (clipped and len(lines) == max_lines):
+            rest = " ".join(lines[max_lines - 1:max_lines + 1])
+            ell = _safe("…")
+            cut = self._fit_prefix(rest + ell, w)
+            last = rest[:max(cut - len(ell), 0)] if cut < len(rest) + len(ell) else rest
+            lines = lines[:max_lines - 1] + [last.rstrip() + ell]
+        return lines
+
+    # ----- KPI cards -----
+
+    def kpi_row(self, kpis: list, per_row: int | None = None):
+        items = []
+        for k in kpis:
+            if isinstance(k, dict):
+                acc = k.get("accent") or "primary"
+                rgb = self.accent if acc == "primary" else \
+                    ACCENT_RGB_CARD.get(acc, acc if isinstance(acc, tuple) else self.accent)
+                items.append((str(k.get("label") or ""), str(k.get("value") or "—"),
+                              rgb, str(k.get("subtitle") or "")))
+            else:
+                label, value, rgb = k[0], k[1], (k[2] if len(k) > 2 else self.accent)
+                items.append((str(label), str(value), rgb, ""))
+        if not items:
+            return
+        n = len(items)
+        cols = per_row or (n if n <= 5 else 4)
+        gap = 3.6
+        cw = self.content_w
+        for start in range(0, n, cols):
+            chunk = items[start:start + cols]
+            row_cols = cols if n > cols else len(chunk)
+            card_w = (cw - gap * (row_cols - 1)) / row_cols
+            if not self._in_column:
+                card_w = min(card_w, 48.0)
+            inner = card_w - 8
+            laid = []
+            for label, value, rgb, sub in chunk:
+                lbl = _safe(label.upper())
+                lbl_size = 6.1
+                self._sans("B", lbl_size)
+                while lbl_size > 5.2 and self.get_string_width(lbl) > inner:
+                    lbl_size -= 0.3
+                    self._sans("B", lbl_size)
+                lbl_lines = self._wrap(lbl, inner, 2)
+                self._sans("", 6.2)
+                sub_lines = self._wrap(_safe(sub), inner, 2) if sub else []
+                laid.append((lbl_lines, lbl_size, value, rgb, sub_lines))
+            lbl_extra = 2.7 if any(len(x[0]) > 1 for x in laid) else 0.0
+            sub_n = max((len(x[4]) for x in laid), default=0)
+            card_h = 19.6 + lbl_extra + (3.4 + 2.9 * (sub_n - 1) if sub_n else 0.0)
+            self._check_page_space(card_h + 4)
+            y = self.get_y()
+            for i, (lbl_lines, lbl_size, value, rgb, sub_lines) in enumerate(laid):
+                x = self.l_margin + i * (card_w + gap)
+                self.set_draw_color(*COLOR_HAIRLINE)
+                self.set_line_width(0.3)
+                self.rect(x, y, card_w, card_h, "D", round_corners=True, corner_radius=2.2)
+                self._sans("B", lbl_size)
+                self.set_text_color(*COLOR_MUTED)
+                for li, line in enumerate(lbl_lines):
+                    self.set_xy(x + 4, y + 3.1 + li * 2.7)
+                    self.cell(inner, 3.2, line)
+                vy = y + 7.4 + lbl_extra
+                size = 14.5
+                self._sans("B", size)
+                vtxt = _safe(value)
+                while size > 9 and self.get_string_width(vtxt) > inner:
+                    size -= 0.5
+                    self._sans("B", size)
+                self.set_text_color(*COLOR_TEXT)
+                self.set_xy(x + 4, vy)
+                self.cell(inner, 6.6, self._fit(vtxt, inner))
+                self.set_fill_color(*rgb)
+                self.rect(x + 4, vy + 7.7, 7, 1.05, "F", round_corners=True, corner_radius=0.5)
+                if sub_lines:
+                    self._sans("", 6.2)
+                    self.set_text_color(*COLOR_MUTED)
+                    for li, line in enumerate(sub_lines):
+                        self.set_xy(x + 4, vy + 10.2 + li * 2.9)
+                        self.cell(inner, 3.4, line)
+            self.set_y(y + card_h + 3.6)
+
+    # ----- tables -----
+
+    def _cell_font(self, style: str):
+        if style == "mono":
+            self._mono("", min(7.0, self._cell_size - 0.6))
+        elif style in ("status", "severity"):
+            self._sans("B", 6.0)
+        else:
+            self._sans("", self._cell_size)
+
+    def _auto_widths(self, headers, rows, styles) -> list[float]:
+        # Headers wrap, so a column needs only its longest header word.
+        words = [max(str(h).upper().split() or [""], key=len) for h in headers]
+        return super()._auto_widths(words, rows, styles)
+
+    def _pct_cell(self, x: float, y: float, w: float, row_h: float, raw: str):
+        # Too narrow for the value and its bar (a wide table): the value wins.
+        self._sans("", self._cell_size)
+        if self.get_string_width(_safe(raw)) > w - 13.5 - 4.6:
+            self.set_text_color(*COLOR_BODY)
+            self.set_xy(x, y)
+            self.cell(w - 2.2, row_h, self._fit(_safe(raw), w - 3.4), align="R")
+            return
+        super()._pct_cell(x, y, w, row_h, raw)
+
+    def _cell_lines(self, style: str, val: str, w: float) -> list[str]:
+        if style in ("status", "severity", "pct-bar"):
+            return [val]
+        self._cell_font(style)
+        pad = 3.4 if style in ("num", "pct") else 2.6
+        return self._wrap(val, w - pad)
+
+    def data_table(self, headers: list[str], rows: list[list[str]],
+                   col_widths: list[float] | None = None,
+                   max_rows: int = 200,
+                   col_styles: list | None = None):
+        """Document-grade table like ZenPlusReport.data_table, with header and
+        cell text wrapped onto several lines instead of truncated."""
+        # A cell shows at most _CELL_MAX_LINES lines: longer text is clipped
+        # up front so measuring it stays cheap (pills and percentage cells
+        # ellipsize character by character).
+        headers = [_safe(str(h)[:_CELL_CLIP]) for h in headers]
+        rows = [["" if c is None else _safe(str(c)[:_CELL_CLIP]) for c in r] for r in rows]
+        if not rows:
+            self.empty_state("No records in this window.")
+            return
+        self._cell_size = _WIDE_FONT if len(headers) >= _WIDE_TABLE_COLS else 7.6
+        try:
+            self._draw_wrapped_table(headers, rows, col_widths, max_rows, col_styles)
+        finally:
+            self._cell_size = 7.6
+
+    def _draw_wrapped_table(self, headers, rows, col_widths, max_rows, col_styles):
+        styles = self._infer_styles(headers, rows, col_styles)
+        if col_widths:
+            k = self.content_w / sum(col_widths)
+            widths = [w * k for w in col_widths]
+        else:
+            widths = self._auto_widths(headers, rows, styles)
+        x0 = self.l_margin
+        shown = rows[:max_rows]
+        aligns = ["R" if st in ("num", "pct", "pct-bar") else "L" for st in styles]
+
+        self._sans("B", 6.8)
+        head_lines = [self._wrap(h.upper(), widths[ci] - 2.6, 3) for ci, h in enumerate(headers)]
+        header_h = max(6.2, max(len(x) for x in head_lines) * _HEAD_LINE_MM + 2.4)
+
+        def draw_header():
+            y = self.get_y()
+            self._sans("B", 6.8)
+            self.set_text_color(71, 85, 105)
+            cx = x0
+            for ci, lines in enumerate(head_lines):
+                pad_r = 2.2 if aligns[ci] == "R" and styles[ci] == "num" else 0
+                top = y + header_h - len(lines) * _HEAD_LINE_MM - 1.2
+                for li, line in enumerate(lines):
+                    self.set_xy(cx, top + li * _HEAD_LINE_MM)
+                    self.cell(widths[ci] - pad_r, _HEAD_LINE_MM, line, align=aligns[ci])
+                cx += widths[ci]
+            self._hairline(x0, y + header_h, x0 + sum(widths), (71, 85, 105), 0.45)
+            self.set_y(y + header_h + 0.9)
+
+        laid = []
+        for row in shown:
+            cells = [row[ci] if ci < len(row) else "" for ci in range(len(headers))]
+            lines = [self._cell_lines(styles[ci], v, widths[ci]) for ci, v in enumerate(cells)]
+            row_h = max(6.0, max(len(x) for x in lines) * _CELL_LINE_MM + 2.6)
+            laid.append((cells, lines, row_h))
+
+        first = sum(r[2] for r in laid[:3])
+        self._check_page_space(header_h + first + 6)
+        draw_header()
+        for cells, lines, row_h in laid:
+            if self.get_y() + row_h > self.page_break_trigger:
+                self.add_page()
+                draw_header()
+            y = self.get_y()
+            cx = x0
+            for ci, val in enumerate(cells):
+                st, w = styles[ci], widths[ci]
+                if st in ("status", "severity"):
+                    if val.strip() and val.strip().lower() not in _NEUTRAL_CELL:
+                        self._pill(cx + 0.4, y, w, row_h, val)
+                    else:
+                        self._sans("", self._cell_size)
+                        self.set_text_color(*COLOR_FAINT)
+                        self.set_xy(cx, y)
+                        self.cell(w, row_h, _safe("—"))
+                elif st == "pct-bar":
+                    self._pct_cell(cx, y, w, row_h, val)
+                else:
+                    self._cell_font(st)
+                    self.set_text_color(*COLOR_BODY)
+                    cl = lines[ci]
+                    top = y + (row_h - len(cl) * _CELL_LINE_MM) / 2
+                    for li, line in enumerate(cl):
+                        if aligns[ci] == "R":
+                            self.set_xy(cx, top + li * _CELL_LINE_MM)
+                            self.cell(w - 2.2, _CELL_LINE_MM, line, align="R")
+                        else:
+                            self.set_xy(cx + 0.4, top + li * _CELL_LINE_MM)
+                            self.cell(w - 0.4, _CELL_LINE_MM, line)
+                cx += w
+            self._hairline(x0, y + row_h, x0 + sum(widths), COLOR_HAIRLINE_SOFT, 0.18)
+            self.set_y(y + row_h + 0.35)
+        if len(rows) > max_rows:
+            self._sans("I", 6.8)
+            self.set_text_color(*COLOR_FAINT)
+            self.set_x(x0)
+            self.cell(self.content_w, 4.4,
+                      _safe(f"Showing the first {max_rows:,} of {len(rows):,} rows; "
+                            "the Excel (XLSX) export lists every row."))
+            self.ln(4.6)
+        self.ln(2.6)
+
 
 def _pdf_section_body(pdf: ZenPlusReport, s: dict, half: bool = False) -> None:
     """Render a section's KPIs, charts, tables and notes with the current
@@ -3571,7 +3953,7 @@ def _measure_half(s: dict, col_w: float, pdf: Optional[ZenPlusReport] = None) ->
     try:
         probe = getattr(pdf, "_half_probe", None)
         if probe is None:
-            probe = ZenPlusReport(title="probe",
+            probe = SectionReportPDF(title="probe",
                                   paper_size=getattr(pdf, "paper_size", "A4"),
                                   accent=getattr(pdf, "brand", COLOR_PRIMARY),
                                   branding=getattr(pdf, "branding", None))
@@ -3601,7 +3983,7 @@ def render_pdf(meta: dict, sections: list[dict]) -> bytes:
     half-width sections, running header/footer, closing disclaimer.
     Paper size (A4/Letter), accent, logos, timezone and labels come from
     ``meta`` (build_report_meta)."""
-    pdf = ZenPlusReport.from_meta(meta)
+    pdf = SectionReportPDF.from_meta(meta)
     if pdf.branding is None:
         pdf.branding = _meta_branding(meta)
     pdf._toc_muted = {n for n, s in enumerate(sections, 1) if s.get("restricted")}
@@ -3689,6 +4071,7 @@ async def build_report_meta(db: AsyncSession, title: str, frm: datetime, to: dat
     now = datetime.now(timezone.utc)
     logo = branding.logo
     cover_logo = branding.cover_logo()
+    to_utc = to if to.tzinfo else to.replace(tzinfo=timezone.utc)
     return {
         "title": title,
         "company_name": branding.display_name,
@@ -3703,6 +4086,10 @@ async def build_report_meta(db: AsyncSession, title: str, frm: datetime, to: dat
         "period_to_label": branding.fmt_datetime(to),
         "generated_label": branding.fmt_datetime(now, with_tz=True),
         "generated_at": now,
+        # The window ended well before generation (yesterday, previous week,
+        # a past month): figures that describe the current state are not
+        # facts of that period and are labelled "as of" generation.
+        "period_closed": to_utc <= now - PERIOD_CLOSED_GRACE,
         "timezone": branding.timezone,
         "tz_label": branding.tz_label(to),
         "brand_color": branding.brand_color,
@@ -3717,6 +4104,72 @@ async def build_report_meta(db: AsyncSession, title: str, frm: datetime, to: dat
         "category": category or "",
         "scope_label": scope_label or "",
     }
+
+
+# A window that ended at least this long before generation is a closed past
+# period (see build_report_meta "period_closed").
+PERIOD_CLOSED_GRACE = timedelta(minutes=15)
+
+
+# ─── Run outcome helpers (scheduler) ────────────────────────────────────────
+
+def section_failed(sec: dict) -> bool:
+    """A section that could not be generated (its query failed or timed
+    out): build_sections replaced it with an error note. Restricted sections
+    are withheld by permission, not failed."""
+    return bool(sec.get("error")) and not sec.get("restricted")
+
+
+def _points_have_data(points: Any) -> bool:
+    for p in points or ():
+        if isinstance(p, dict) and p.get("v", p.get("value")) is not None:
+            return True
+    return False
+
+
+def chart_has_data(chart: dict) -> bool:
+    """Whether a chart plots anything: a pre-rendered PNG, or a native series
+    with at least one valued point (``points``, or the ``points`` of each
+    line of a multi-line/stacked ``series``)."""
+    if chart.get("png") or chart.get("data_uri"):
+        return True
+    series = chart.get("series") or {}
+    if not isinstance(series, dict):
+        return False
+    if _points_have_data(series.get("points")):
+        return True
+    return any(isinstance(line, dict) and _points_have_data(line.get("points"))
+               for line in series.get("series") or ())
+
+
+_NOT_MEASURED = ("", "—", "-", "–", "n/a")
+
+
+def kpi_has_value(kpi: Any) -> bool:
+    """A headline figure that reports something: zeros count (0 incidents is
+    a result); blank or "—" means not measured. A figure flagged
+    ``current`` (state at generation, e.g. "Nodes up now") says nothing
+    about the period and does not count."""
+    if not isinstance(kpi, dict) or kpi.get("current"):
+        return False
+    return str(kpi.get("value") if kpi.get("value") is not None else "").strip().lower() not in _NOT_MEASURED
+
+
+def is_empty_report(sections: list[dict]) -> bool:
+    """No data for the period: no section that was generated (neither
+    restricted nor failed) has a table row, a chart with data points, or a
+    headline figure with a value (kpi_has_value: zeros count, "—" does
+    not)."""
+    for s in sections:
+        if s.get("restricted") or s.get("error"):
+            continue
+        if any(t.get("rows") for t in s.get("tables") or ()):
+            return False
+        if any(chart_has_data(c) for c in s.get("charts") or ()):
+            return False
+        if any(kpi_has_value(k) for k in s.get("kpis") or ()):
+            return False
+    return True
 
 
 # ─── Email summary ──────────────────────────────────────────────────────────
@@ -3920,14 +4373,32 @@ def _finding_number(value: Any) -> float:
         return 0.0
 
 
-def _email_findings(sections: list[dict]) -> list[dict]:
+_NOW_WORDS = re.compile(r"\bnow\b|\bat generation\b|\bcurrent(ly)?\b", re.IGNORECASE)
+
+
+def _describes_now(s: dict, *texts: Any) -> bool:
+    """Whether a figure states the current state rather than the period: a
+    snapshot section, or wording such as "Open now" / "Current status, at
+    generation"."""
+    return s.get("semantics") == "snapshot" or any(_NOW_WORDS.search(str(t or "")) for t in texts)
+
+
+def _email_findings(sections: list[dict], meta: Optional[dict] = None) -> list[dict]:
     """Action findings, most severe first, larger first within a severity,
     then report order: ``[{severity, section, text, action, path}]``.
 
     A section states its own (``findings``: ``{severity, text, action?,
-    path?, weight?}``); otherwise each flagged headline figure is one, worded
-    as the figure plus where it is acted on (by section category). Notes are
-    never findings: they explain method, not what to do."""
+    path?, weight?, current?}``); otherwise each flagged headline figure is
+    one, worded as the figure plus where it is acted on (by section
+    category). Notes are never findings: they explain method, not what to
+    do. In a closed past period (``meta["period_closed"]``) a finding that
+    describes the current state is suffixed "(as of <generated>)" so it does
+    not read as a fact of that period."""
+    meta = meta or {}
+    as_of = ""
+    if meta.get("period_closed"):
+        at = meta.get("generated_label")
+        as_of = f" (as of {at})" if at else " (at generation)"
     found: list[tuple[int, float, int, int, dict]] = []
     for i, s in enumerate(sections):
         if not _email_usable(s):
@@ -3940,7 +4411,8 @@ def _email_findings(sections: list[dict]) -> list[dict]:
             items = [{"severity": f["severity"], "text": _email_clip(f["text"], 280),
                       "action": _email_clip(f.get("action") or default_action, 80),
                       "path": f.get("path") if "path" in f else default_path,
-                      "weight": _finding_number(f.get("weight", 0))} for f in explicit]
+                      "weight": _finding_number(f.get("weight", 0)),
+                      "now": bool(f.get("current")) or _describes_now(s, f["text"])} for f in explicit]
         elif "findings" in s:
             # The section judged its figures and found nothing to act on.
             items = []
@@ -3953,10 +4425,15 @@ def _email_findings(sections: list[dict]) -> list[dict]:
                 items.append({"severity": k["accent"],
                               "text": _email_clip(f"{k.get('label')}: {k.get('value')}{sub}", 280),
                               "action": default_action, "path": default_path,
-                              "weight": _finding_number(k.get("value"))})
+                              "weight": _finding_number(k.get("value")),
+                              "now": bool(k.get("current")) or _describes_now(s, k.get("label"),
+                                                                             k.get("subtitle"))})
         for j, it in enumerate(items):
+            text_ = it["text"].rstrip(" .")
+            if as_of and it["now"]:
+                text_ += as_of
             found.append((_SEVERITY_RANK[it["severity"]], -it["weight"], i, j,
-                          {"severity": it["severity"], "section": title, "text": it["text"].rstrip(" ."),
+                          {"severity": it["severity"], "section": title, "text": text_,
                            "action": it["action"], "path": it["path"]}))
     found.sort(key=lambda f: f[:4])
     return [f[4] for f in found[:EMAIL_MAX_FINDINGS]]
@@ -4011,7 +4488,7 @@ def email_summary_html(meta: dict, sections: list[dict], view_url: Optional[str]
     font = f"font-family:{_EMAIL_FONT}"
     groups = email_kpi_groups(sections, meta)
     kpis = [k for g in groups for k in g["kpis"]]
-    findings = _email_findings(sections)
+    findings = _email_findings(sections, meta)
     url = _email_safe_url(view_url)
     base = _email_base_url(meta, view_url)
     rows: list[str] = []
@@ -4132,6 +4609,10 @@ def email_summary_html(meta: dict, sections: list[dict], view_url: Optional[str]
     if attached:
         body.append(f'<tr><td style="padding:10px 28px 0;{font};font-size:12px;color:#4B5563">'
                     f'The full report is attached to this email.</td></tr>')
+    if meta.get("delivery_note"):
+        # Set by the scheduler: why there is no link or no attachment.
+        body.append(f'<tr><td style="padding:10px 28px 0;{font};font-size:12px;color:#4B5563">'
+                    f'{esc(_email_clip(meta.get("delivery_note"), 400))}</td></tr>')
     if not body:
         body.append(f'<tr><td style="padding:18px 28px;{font};font-size:13px;color:#4B5563">'
                     f'This report has no headline figures for the period.</td></tr>')
@@ -4201,7 +4682,7 @@ def email_summary_text(meta: dict, sections: list[dict], view_url: Optional[str]
             for k in g["kpis"]:
                 sub = f" ({_email_clip(k.get('subtitle'), 80)})" if k.get("subtitle") else ""
                 lines.append(f"- {_email_clip(k.get('label'), 60)}: {_email_clip(k.get('value'), 40)}{sub}")
-    findings = _email_findings(sections)
+    findings = _email_findings(sections, meta)
     if findings:
         base = _email_base_url(meta, view_url)
         lines += ["", "Top findings"]
@@ -4215,6 +4696,8 @@ def email_summary_text(meta: dict, sections: list[dict], view_url: Optional[str]
     url = _email_safe_url(view_url)
     if url:
         lines += ["", f"Open the full report: {url}"]
+    if meta.get("delivery_note"):
+        lines += ["", str(meta["delivery_note"])]
     footer = [p for p in (meta.get("footer_text"), meta.get("contact_line")) if p]
     lines += ["", "--"]
     if footer:

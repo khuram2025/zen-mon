@@ -66,7 +66,8 @@ def smtp_send(config, recipients, payload):
     kwargs = {'context': context} if implicit else {}
     with cls(config['host'], int(config.get('port') or (465 if implicit else 587)), timeout=15, **kwargs) as client:
         if not implicit:
-            client.starttls(context=context)
+            from app.core.smtp_tls import starttls_if_needed
+            starttls_if_needed(client, config.get('encryption'), context)
         if config.get('username'):
             client.login(config['username'], config.get('password', ''))
         if client.send_message(msg):

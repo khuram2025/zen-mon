@@ -409,12 +409,66 @@ def test_email_findings_are_explicit_actions_ranked_by_severity_and_size():
     assert 'href="https://nms.acme.example/alerts?severity=critical"' in html
     assert ">Triage in Alert Center</a>" in html
     # Without an appliance address the action is plain text.
-    text = rs.email_summary_text(make_meta(), _noc_sections(), None)
+    text = rs.email_summary_text(make_meta(period_closed=False), _noc_sections(), None)
     assert "- [!] Open Alert Backlog — 285 critical open incidents. Triage in Alert Center." in text
     # An unsafe path is never linked.
     evil = [{**_noc_sections()[1], "findings": [{"severity": "danger", "text": "x", "path": "//evil.example"}]}]
     assert "evil.example" not in rs.email_summary_html(make_meta(), evil, "https://nms.acme.example/api/v1/"
                                                        "reports/shared/t", attached=False)
+
+
+def test_closed_period_labels_current_state_findings_as_of_generation():
+    # Assessment M7: a September report listed "now" backlog figures as if
+    # they were September facts.
+    meta = make_meta()
+    assert meta["period_closed"] is True          # FRM..TO ended before generation
+    at = meta["generated_label"]
+    window_now = {"id": "availability_kpis", "title": "Availability Summary", "category": "Availability",
+                  "scope": "device", "semantics": "window",
+                  "kpis": [{"label": "Availability", "value": "99.1%", "accent": "danger"},
+                           {"label": "Nodes up now (of 34)", "value": "30", "accent": "warning",
+                            "subtitle": "Current status, at generation", "current": True}]}
+    found = {f["text"] for f in rs._email_findings(_noc_sections() + [window_now], meta)}
+    assert f"285 critical open incidents (as of {at})" in found              # snapshot section
+    assert f"Nodes up now (of 34): 30 (Current status, at generation) (as of {at})" in found
+    assert "Availability: 99.1%" in found                                    # a period figure
+    assert "Telemetry samples received: 66.14%" in found
+    # A window that runs up to generation is not a closed period.
+    live = {f["text"] for f in rs._email_findings(_noc_sections(), make_meta(period_closed=False))}
+    assert "285 critical open incidents" in live
+    text = rs.email_summary_text(meta, _noc_sections(), None)
+    assert f"285 critical open incidents (as of {at}). Triage in Alert Center." in text
+
+
+def test_email_delivery_note_follows_the_report_link():
+    note = "The PDF attachment (14.2 MB) is over the 10 MB limit and was left out."
+    meta = make_meta(delivery_note=note)
+    html = rs.email_summary_html(meta, sections(), "https://zen.example.com/r/x", attached=False)
+    assert html.index("Open full report") < html.index(note)
+    text = rs.email_summary_text(meta, sections(), "https://zen.example.com/r/x")
+    assert f"Open the full report: https://zen.example.com/r/x\n\n{note}" in text
+    assert note not in rs.email_summary_text(make_meta(), sections(), None)
+
+
+def test_run_outcome_helpers():
+    ok = {"id": "a", "tables": [{"rows": []}], "charts": [{"series": {"kind": "line", "series": [
+        {"name": "x", "points": [{"t": "2026-10-01T00:00:00Z", "v": None}]}]}}],
+          "kpis": [{"label": "n"}, {"label": "Availability", "value": "—"},
+                   {"label": "Nodes up now", "value": "30", "current": True}]}
+    failed = {"id": "b", "error": True, "tables": [{"rows": [["x"]]}]}
+    restricted = {"id": "c", "restricted": True, "error": False, "tables": [{"rows": [["x"]]}]}
+    assert rs.section_failed(failed) and not rs.section_failed(ok) and not rs.section_failed(restricted)
+    assert rs.is_empty_report([ok, failed, restricted])
+    assert not rs.is_empty_report([{**ok, "tables": [{"rows": [["1"]]}]}])
+    stacked = {"charts": [{"series": {"kind": "stacked", "points": [], "series": [
+        {"name": "x", "points": [{"t": "2026-10-01", "v": 3}]}]}}]}
+    assert not rs.is_empty_report([stacked])
+    assert not rs.is_empty_report([{"charts": [{"series": {"kind": "donut", "points": [
+        {"label": "ok", "value": 2}]}}]}])
+    assert rs.is_empty_report([])
+    # A KPI-only section with a value (zeros included) is data; "—" is not.
+    assert not rs.is_empty_report([{"kpis": [{"label": "Availability", "value": "99.95%"}]}])
+    assert not rs.is_empty_report([{"kpis": [{"label": "Incidents", "value": "0"}]}])
 
 
 def test_email_labels_manual_runs_and_the_schedule_time():

@@ -540,3 +540,71 @@ def test_html_header_less_table_still_shows_its_rows():
     html = rs.render_html(_meta(), [sec])
     assert "C9300" in html and "<thead>" not in html
     assert rs.render_pdf(_meta(), [sec]).startswith(b"%PDF")
+
+
+def test_render_pdf_wraps_wide_tables_and_kpi_labels_instead_of_truncating(monkeypatch):
+    # Assessment L1: a 9-column table cut "Rahoma Branch Internet Uplink" to
+    # "Raho …" and headers to "CRITICALI…"; KPI cards cut "BELOW CONFIGURED…".
+    drawn: list[str] = []
+    orig = rs.SectionReportPDF.cell
+
+    def spy(self, w=None, h=None, text="", *a, **kw):
+        drawn.append(str(text))
+        return orig(self, w, h, text, *a, **kw)
+    monkeypatch.setattr(rs.SectionReportPDF, "cell", spy)
+    service = "Rahoma Branch Internet Uplink (Primary MPLS circuit)"
+    headers = ["Service", "Owner", "Criticality", "Target (source)", "Availability", "Coverage",
+               "Downtime", "Error budget used", "SLA status"]
+    rows = [[service, "SMASCO Network Operations Team", "critical", "99.9% (policy default)",
+             "99.95%", "100.00%", "12 min", "41%", "met"]]
+    sec = {"id": "service_owner_sla", "title": "Service SLA compliance",
+           "kpis": [{"label": "Below configured target (99.9%)", "value": "3", "accent": "danger",
+                     "subtitle": "Current status, at generation — every node in scope"}],
+           "charts": [], "notes": [],
+           "tables": [{"headers": headers,
+                       "styles": ["text", "text", "severity", "text", "pct-bar", "num", "num", "num",
+                                  "status"], "rows": rows}]}
+    pdf = rs.render_pdf(_meta(), [sec])
+    assert pdf.startswith(b"%PDF")
+    text = " ".join(drawn)
+    assert service in text                                   # wrapped, rejoined by the spaces
+    assert "SMASCO Network Operations Team" in text
+    assert "CRITICALITY" in text and "TARGET (SOURCE)" in text
+    assert "BELOW CONFIGURED TARGET (99.9%)" in text
+    assert "Current status, at generation" in text
+    assert not any(t.endswith("…") for t in drawn if t), [t for t in drawn if t.endswith("…")]
+
+
+def test_wrap_splits_words_too_long_for_a_line():
+    doc = rs.SectionReportPDF(title="t")
+    doc.add_page()
+    doc._sans("", 7.6)
+    lines = doc._wrap("x" * 200, 20, max_lines=50)
+    assert "".join(lines) == "x" * 200 and all(doc.get_string_width(ln) <= 20 for ln in lines)
+    capped = doc._wrap("word " * 100, 20, max_lines=2)
+    assert len(capped) == 2 and capped[-1].endswith("…")
+
+
+def test_render_pdf_long_cells_stay_fast():
+    # Review: a 20,000-character token took minutes to wrap, and 500 rows of
+    # 1,000-word cells about 50 s.
+    import time
+    token = "x" * 20_000
+    words = " ".join(f"word{i}" for i in range(1_000))
+    sec = {"id": "t", "title": "Long cells", "kpis": [{"label": token, "value": "1", "subtitle": words}],
+           "charts": [], "notes": [],
+           "tables": [{"headers": ["Name", "Detail", "Status", "Share"],
+                       "styles": ["text", "text", "status", "pct-bar"],
+                       "rows": [[token, words, words, f"{i % 100}% {words}"] for i in range(500)]}]}
+    t0 = time.monotonic()
+    pdf = rs.render_pdf(_meta(), [sec])
+    assert pdf.startswith(b"%PDF")
+    assert time.monotonic() - t0 < 3.0  # the whole document, 500 rows (about 0.6 s)
+    doc = rs.SectionReportPDF(title="t")
+    doc.add_page()
+    doc._sans("", 7.6)
+    t0 = time.monotonic()
+    lines = doc._wrap(token, 30)
+    many = [doc._wrap(words, 30) for _ in range(500)]
+    assert time.monotonic() - t0 < 2.0
+    assert len(lines) == 4 and lines[-1].endswith("…") and all(len(m) == 4 for m in many)

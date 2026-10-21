@@ -56,6 +56,16 @@ def test_builtin_catalog_is_valid_and_published():
         assert preset["title"] == t.title
 
 
+def test_no_template_repeats_a_section_title():
+    # Assessment L2: a template listing one section several times (with
+    # different options) must title each one, or the catalog, the table of
+    # contents and restricted/failed stubs all read the same title.
+    for key, t in rt.TEMPLATES.items():
+        titles = [e.get("title") or rs.SECTION_REGISTRY[e["id"]]["title"] for e in t.sections]
+        dupes = sorted({x for x in titles if titles.count(x) > 1})
+        assert not dupes, (key, dupes)
+
+
 def test_option_normalisation_clamps_and_defaults():
     for sid, e in rs.SECTION_REGISTRY.items():
         for o in e["options"]:

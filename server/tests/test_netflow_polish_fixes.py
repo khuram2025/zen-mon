@@ -353,9 +353,9 @@ def test_share_links_go_to_the_owner_and_report_managers_only(monkeypatch):
 
 
 def test_run_listings_need_the_reports_view_permission():
-    from app.api.v1 import reports
+    from app.api.v1 import report_runs
 
-    for router, path in ((RS.router, "/report-schedules/{schedule_id}/runs"), (reports.router, "/reports/runs")):
+    for router, path in ((RS.router, "/report-schedules/{schedule_id}/runs"), (report_runs.router, "/reports/runs")):
         route = next(r for r in router.routes if r.path == path)
         names = [getattr(d.call, "__qualname__", "") for d in route.dependant.dependencies]
         assert any("require_permission" in n for n in names), (path, names)

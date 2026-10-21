@@ -4,7 +4,8 @@
  *
  * URL contract (shared with the library, designer and schedules):
  *   range=<PeriodId|1h|24h|7d|1M|month|last_month|quarter|custom> &from &to
- *   custom_id=<uuid>  nodes=<device id,…>  app=<application id>  nf=<NetFlow scope>
+ *   custom_id=<uuid>  nodes=<device id,…>  groups=<group id,…>  loc=<location> (repeated)
+ *   type=<device type> (repeated)  app=<application id>  nf=<NetFlow scope>
  * No range → the template's default period, else the last 24 hours. Calendar
  * periods and custom ranges are in the organisation timezone.
  */
@@ -34,7 +35,7 @@ import { ReportDocument, ReportDocumentSkeleton } from '@/features/reports/rende
 import { ContentsRail, ContentsSelect, useScrollSpy } from '@/features/reports/render/ContentsRail'
 import { sectionAnchorId } from '@/features/reports/render/format'
 import { PeriodPicker } from '@/features/reports/viewer/PeriodPicker'
-import { DeviceScopePicker } from '@/features/reports/viewer/DeviceScopePicker'
+import { DeviceScopePicker, type DeviceScopeExtra } from '@/features/reports/viewer/DeviceScopePicker'
 import { ApplicationScopePicker } from '@/features/reports/viewer/ApplicationScopePicker'
 import { ExportMenu } from '@/features/reports/viewer/ExportMenu'
 import { ShareMenu } from '@/features/reports/viewer/ShareMenu'
@@ -49,36 +50,45 @@ import type { FlowFilter } from '@/lib/netflow/filters'
 const ID_PREFIX = 'rpt'
 const CALENDAR = new Set<string>(PERIODS.filter((p) => p.kind === 'calendar').map((p) => p.id))
 
-/** Classic report types that have their own page (the rest are export-only). */
-const LEGACY_PAGES: Record<string, string> = {
-  executive_summary: '/reports/executive',
-  device_health: '/reports/technical',
-  service_health: '/reports/business',
+/** A retired report type and the built-in template that replaces it (catalog `replacement`). */
+interface RetiredType {
+  title: string
+  replacement?: { key: string; title: string } | null
 }
 
-function NotFoundState({ legacyKey }: { legacyKey?: string | null }) {
-  const page = legacyKey ? LEGACY_PAGES[legacyKey] : undefined
+function NotFoundState({ retired }: { retired?: RetiredType | null }) {
+  const next = retired?.replacement
   return (
     <div className="mx-auto mt-6 max-w-lg rounded-xl border border-border bg-surface px-6 py-12 text-center shadow-card dark:shadow-card-dark">
       <FileQuestion className="mx-auto h-9 w-9 text-muted" aria-hidden />
-      <h1 className="mt-3 text-lg font-semibold text-text">{legacyKey ? 'This report opens elsewhere' : 'Report not found'}</h1>
+      <h1 className="mt-3 text-lg font-semibold text-text">{retired ? `${retired.title} is retired` : 'Report not found'}</h1>
       <p className="mt-1.5 text-sm text-muted">
-        {legacyKey
-          ? 'This is a classic report type that the document viewer does not render.'
+        {retired
+          ? next
+            ? `This report type is no longer available. ${next.title} replaces it and covers the same ground; existing schedules of the old type keep running until they are converted.`
+            : 'This report type is no longer available. Existing schedules of this type keep running until they are converted.'
           : 'The link is not valid, or the template was deleted or is private to its owner.'}
       </p>
       <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
-        {page && (
+        {next && (
           <Button asChild>
-            <Link to={page}>Open the classic report</Link>
+            <Link to={`/reports/view/${encodeURIComponent(next.key)}`}>{`Open ${next.title}`}</Link>
           </Button>
         )}
-        <Button asChild variant={page ? 'outline' : 'default'}>
+        <Button asChild variant={next ? 'outline' : 'default'}>
           <Link to="/reports"><ArrowLeft aria-hidden /> Back to the report library</Link>
         </Button>
       </div>
     </div>
   )
+}
+
+/** The device part of the server's scope label ("Dammam, FortiGate-101F",
+ * "Group: Core Network · Location: Jeddah"); application and NetFlow have their own chips. */
+function deviceScopeText(label: string | null | undefined): string {
+  return (label || '').split(' · ')
+    .filter((b) => b && b !== 'All monitored infrastructure' && !b.startsWith('application ') && !b.startsWith('NetFlow: '))
+    .join(' · ')
 }
 
 function ScopeChip({ icon: Icon, children }: { icon: typeof Server; children: string }) {
@@ -160,18 +170,37 @@ export function SectionReportViewer() {
 
   /* ── Scope ────────────────────────────────────────────────────────── */
   const nodeIds = useMemo(() => parseNodes(sp.get('nodes')), [sp])
+  const deviceScope = useMemo<DeviceScopeExtra>(() => ({
+    groupIds: parseNodes(sp.get('groups')),
+    // One parameter per value: a location may contain a comma.
+    locations: [...new Set(sp.getAll('loc').map((v) => v.trim()).filter(Boolean))],
+    deviceTypes: [...new Set(sp.getAll('type').map((v) => v.trim()).filter(Boolean))],
+  }), [sp])
+  const hasDeviceScope = deviceScope.groupIds.length + deviceScope.locations.length + deviceScope.deviceTypes.length > 0
   const appId = sp.get('app') || null
   const nfScope = useMemo(() => parseReportScope(sp.get('nf')), [sp])
   const nfParam = reportScopeParam(nfScope.filter)
-  const hasScopeParams = nodeIds.length > 0 || !!appId || !!nfParam
+  const hasScopeParams = nodeIds.length > 0 || hasDeviceScope || !!appId || !!nfParam
   // Send a scope only to reports whose sections honour it; if the catalog is
   // unavailable, send what the link carries (the server ignores the rest).
   const allows = (f: ScopeFilter) => (template ? filterable.includes(f) : catalogQ.isError)
   const sentNodes = allows('devices') ? nodeIds : []
+  const sentScope: DeviceScopeExtra = allows('devices') ? deviceScope : { groupIds: [], locations: [], deviceTypes: [] }
+  const sentDeviceScope = sentNodes.length > 0 || sentScope.groupIds.length + sentScope.locations.length
+    + sentScope.deviceTypes.length > 0
   const sentApp = allows('applications') ? appId : null
   const sentNf = allows('netflow') ? nfParam : ''
 
-  const setNodeIds = (ids: string[]) => update((n) => (ids.length ? n.set('nodes', ids.join(',')) : n.delete('nodes')))
+  const setDeviceScope = (ids: string[], scope: DeviceScopeExtra) => update((n) => {
+    for (const [k, v] of [['nodes', ids], ['groups', scope.groupIds]] as const) {
+      if (v.length) n.set(k, v.join(','))
+      else n.delete(k)
+    }
+    for (const [k, v] of [['loc', scope.locations], ['type', scope.deviceTypes]] as const) {
+      n.delete(k)
+      for (const x of v) n.append(k, x)
+    }
+  })
   const setAppId = (id: string | null) => update((n) => (id ? n.set('app', id) : n.delete('app')))
   const setNf = (f: FlowFilter) => {
     const q = reportScopeParam(f)
@@ -179,6 +208,9 @@ export function SectionReportViewer() {
   }
   const clearScope = () => update((n) => {
     n.delete('nodes')
+    n.delete('groups')
+    n.delete('loc')
+    n.delete('type')
     n.delete('app')
     n.delete('nf')
   })
@@ -196,6 +228,9 @@ export function SectionReportViewer() {
         from: win.from.toISOString(),
         to: win.to.toISOString(),
         deviceIds: sentNodes,
+        groupIds: sentScope.groupIds,
+        locations: sentScope.locations,
+        deviceTypes: sentScope.deviceTypes,
         applicationId: sentApp,
         netflow: sentNf || null,
       }
@@ -304,6 +339,9 @@ export function SectionReportViewer() {
 
   const scheduleFilters: Record<string, unknown> = {}
   if (sentNodes.length) scheduleFilters.device_ids = sentNodes
+  if (sentScope.groupIds.length) scheduleFilters.group_ids = sentScope.groupIds
+  if (sentScope.locations.length) scheduleFilters.locations = sentScope.locations
+  if (sentScope.deviceTypes.length) scheduleFilters.device_types = sentScope.deviceTypes
   if (sentApp) scheduleFilters.application_id = sentApp
   if (sentNf) scheduleFilters.netflow = reportScopeObject(nfScope.filter)
   // Built as a variable: the dialog's prefill type grows over time (name, format).
@@ -318,18 +356,29 @@ export function SectionReportViewer() {
   const [scheduleOpen, setScheduleOpen] = useState(false)
 
   if (notFound || legacy) {
-    return <NotFoundState legacyKey={legacy && !notFound ? key : null} />
+    const replacementKey = legacy && !notFound ? (builtin as { replacement?: string | null } | null)?.replacement : null
+    const replacement = replacementKey ? catalog?.types.find((t) => t.key === replacementKey) : undefined
+    return (
+      <NotFoundState
+        retired={legacy && !notFound && builtin
+          ? { title: builtin.title, replacement: replacement ? { key: replacement.key, title: replacement.title } : null }
+          : null}
+      />
+    )
   }
 
   const scopeSlot = (
     <div className="flex flex-wrap items-center gap-1.5">
       <ul role="list" className="flex flex-wrap items-center gap-1.5">
         {report?.scoped && report.scope_label && <ScopeChip icon={SlidersHorizontal}>{report.scope_label}</ScopeChip>}
-        {sentNodes.length > 0 && (
-          <ScopeChip icon={Server}>{`${sentNodes.length} selected device${sentNodes.length === 1 ? '' : 's'}`}</ScopeChip>
+        {sentDeviceScope && !report?.scoped && (
+          <ScopeChip icon={Server}>
+            {deviceScopeText(report?.scope_label)
+              || `${sentNodes.length} selected device${sentNodes.length === 1 ? '' : 's'}`}
+          </ScopeChip>
         )}
         {sentApp && <ScopeChip icon={AppWindow}>{`Application ${sentApp}`}</ScopeChip>}
-        {!report?.scoped && !sentNodes.length && !sentApp && !sentNf && (
+        {!report?.scoped && !sentDeviceScope && !sentApp && !sentNf && (
           <ScopeChip icon={SlidersHorizontal}>All monitored infrastructure</ScopeChip>
         )}
       </ul>
@@ -349,7 +398,7 @@ export function SectionReportViewer() {
           }}
         />
       )}
-      {(sentNodes.length > 0 || sentApp || sentNf) && (
+      {(sentDeviceScope || sentApp || sentNf) && (
         <button
           type="button"
           onClick={clearScope}
@@ -402,7 +451,14 @@ export function SectionReportViewer() {
 
           <div role="group" aria-label="Report period and scope" className="flex flex-wrap items-center gap-2">
             <PeriodPicker value={selection} onChange={setSelection} window={win} branding={branding} defaultPeriod={template ? defaultPeriod : null} />
-            {filterable.includes('devices') && <DeviceScopePicker selected={nodeIds} onChange={setNodeIds} />}
+            {filterable.includes('devices') && (
+              <DeviceScopePicker
+                selected={nodeIds}
+                onChange={(ids) => setDeviceScope(ids, deviceScope)}
+                scope={deviceScope}
+                onScopeChange={setDeviceScope}
+              />
+            )}
             {filterable.includes('applications') && <ApplicationScopePicker selected={appId} onChange={setAppId} />}
             {filterable.includes('netflow') && <NetflowScopePicker value={nfScope.filter} onChange={setNf} />}
           </div>
@@ -491,7 +547,8 @@ export function SectionReportViewer() {
             <span className="font-semibold text-warning-fg">Not applied:</span> the link's NetFlow scope has invalid {nfScope.invalid.join(', ')}.
           </p>
         )}
-        {hasScopeParams && template && (nodeIds.length > sentNodes.length || (appId && !sentApp) || (nfParam && !sentNf)) && (
+        {hasScopeParams && template && (nodeIds.length > sentNodes.length || (hasDeviceScope && !allows('devices'))
+          || (appId && !sentApp) || (nfParam && !sentNf)) && (
           <p role="status" className="mt-2 text-[11px] text-muted">
             Part of the link's scope does not apply to this report's sections and was ignored.
           </p>

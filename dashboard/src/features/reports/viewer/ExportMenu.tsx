@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, Download, FileCode2, FileSpreadsheet, FileText, Loader2, Printer } from 'lucide-react'
+import { ChevronDown, Download, FileCode2, FileSpreadsheet, FileText, FileType2, Loader2, Printer } from 'lucide-react'
 import { apiErrorMessage } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import {
@@ -8,12 +8,13 @@ import {
 import { toast } from '@/components/ui/Toast'
 import { downloadReport, type RenderParams } from '../api'
 
-type FileFormat = 'pdf' | 'xlsx' | 'html'
+type FileFormat = 'pdf' | 'xlsx' | 'html' | 'csv'
 
 const FORMATS: { key: FileFormat; label: string; hint: string; icon: typeof FileText; aliases: string[] }[] = [
   { key: 'pdf', label: 'PDF document', hint: 'Branded and paginated', icon: FileText, aliases: ['pdf'] },
   { key: 'xlsx', label: 'Excel workbook', hint: 'Tables as worksheets', icon: FileSpreadsheet, aliases: ['xlsx', 'excel'] },
   { key: 'html', label: 'HTML page', hint: 'Self-contained web page', icon: FileCode2, aliases: ['html'] },
+  { key: 'csv', label: 'CSV file', hint: 'Figures and tables as plain text', icon: FileType2, aliases: ['csv'] },
 ]
 
 /** Server detail from a failed blob download (the body is a Blob, not JSON). */
@@ -34,12 +35,12 @@ export async function downloadErrorMessage(e: unknown): Promise<string> {
 export interface ExportMenuProps {
   /** Current render parameters (period and scope); null while they are not known. */
   params: RenderParams | null
-  /** Formats the template supports (catalog `formats`); defaults to PDF, Excel and HTML. */
+  /** Formats the template supports (catalog `formats`); defaults to every format. */
   formats?: string[]
   onPrint: () => void
 }
 
-/** Export: branded PDF / Excel / HTML of exactly this period and scope, or print. Callers gate it on reports.export. */
+/** Export: branded PDF / Excel / HTML / CSV of exactly this period and scope, or print. Callers gate it on reports.export. */
 export function ExportMenu({ params, formats, onPrint }: ExportMenuProps) {
   const [busy, setBusy] = useState<FileFormat | null>(null)
   const offered = FORMATS.filter((f) => !formats?.length || f.aliases.some((a) => formats.includes(a)))

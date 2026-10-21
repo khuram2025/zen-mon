@@ -1269,8 +1269,8 @@ template(
     "Round-trip time and packet loss over time for the slowest and lossiest monitored paths, with "
     "per-probe 95th-percentile latency.",
     "paths",
-    [S("netpath_latency_trend", None, top_n=10, rank="rtt"),
-     S("netpath_latency_trend", None, top_n=5, rank="loss"),
+    [S("netpath_latency_trend", "Path Latency Trend — Top 10 Probes by RTT", top_n=10, rank="rtt"),
+     S("netpath_latency_trend", "Path Latency Trend — Top 5 Probes by Packet Loss", top_n=5, rank="loss"),
      S("netpath_probe_health", "Latency by Probe (95th Percentile)", sort="rtt", top_n=50)],
     audience=("Network engineer", "Capacity planner"), tags=("netpath", "latency", "trend"),
     default_period="last_7d", frequency="weekly", icon="TrendingUp",

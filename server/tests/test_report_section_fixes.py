@@ -354,34 +354,36 @@ def test_lowest_availability_devices_share_the_node_computation(monkeypatch):
 
 # ── 3. alert summary ─────────────────────────────────────────────────────────
 
-def test_alert_kpis_exclude_notices_and_use_recovery_time(monkeypatch):
-    from app.services import alert_service
-
-    seen = {}
-
-    async def summary(db, f, **kw):
-        seen["f"] = f
-        return {"window": {"time_to_recover": {"count": 3, "mean_s": 1800.0, "p50_s": 900.0}}}
-    monkeypatch.setattr(alert_service, "summary", summary)
-    db = DB(("FROM alerts a WHERE", [("critical", 2, 1), ("warning", 3, 4)]))
+def test_alert_kpis_exclude_notices_and_use_recovery_time():
+    db = DB(("avg(EXTRACT(EPOCH", [(3, 1800.0)]),
+            ("FROM alerts a WHERE", [("critical", 2, 1), ("warning", 3, 4)]))
     sec = run(rs._sec_alert_kpis(make_ctx(db)))
     sql = db.calls[0][0]
     assert "FILTER (WHERE NOT" in sql and "is_recovery" in sql and "suppressed_by_dependency" in sql
     kpis = {k["label"]: k for k in sec["kpis"]}
     assert kpis["Total alerts"]["value"] == "5" and kpis["Critical"]["value"] == "2"
-    assert kpis["MTTR"]["value"] == "30 min" and "3 incident" in kpis["MTTR"]["subtitle"]
-    assert sec["notes"] == ["5 recovery or suppression notice(s) are not counted as alerts."]
-    assert seen["f"].from_time.tzinfo is not None and seen["f"].to_time == START + timedelta(hours=24)
+    assert kpis["MTTR"]["value"] == "30 min"
+    assert kpis["MTTR"]["subtitle"] == "mean time to recover · 3 of 5 incident(s) recovered"
+    assert sec["notes"][0] == "5 recovery or suppression notice(s) are not counted as alerts."
 
 
-def test_alert_kpis_without_recoveries_show_no_mttr(monkeypatch):
-    from app.services import alert_service
+def test_alert_mttr_covers_incidents_raised_in_the_window():
+    # Assessment M5: MTTR averaged incidents that recovered in the window
+    # wherever they started (928.7 h for a 744 h month).
+    db = DB(("avg(EXTRACT(EPOCH", [(1, 600.0)]), ("FROM alerts a WHERE", [("critical", 4, 0)]))
+    ctx = make_ctx(db)
+    run(rs._sec_alert_kpis(ctx))
+    sql, params = [c for c in db.calls if "avg(EXTRACT(EPOCH" in c[0]][0]
+    # Raised in the window, recovered (not closed by hand, not a notice) by its end.
+    assert "a.triggered_at >= :f AND a.triggered_at < :t" in sql
+    assert "a.resolved_at < :t" in sql and "'recovered'" in sql and "is_recovery" in sql
+    assert params == {"f": ctx.frm, "t": ctx.to}
 
-    async def summary(db, f, **kw):
-        return {"window": {"time_to_recover": {"count": 0, "mean_s": None}}}
-    monkeypatch.setattr(alert_service, "summary", summary)
-    sec = run(rs._sec_alert_kpis(make_ctx(DB())))
-    assert {k["label"]: k["value"] for k in sec["kpis"]}["MTTR"] == "—"
+
+def test_alert_kpis_without_recoveries_show_no_mttr():
+    sec = run(rs._sec_alert_kpis(make_ctx(DB(("avg(EXTRACT(EPOCH", [(0, None)])))))
+    mttr = {k["label"]: k for k in sec["kpis"]}["MTTR"]
+    assert mttr["value"] == "—" and mttr["subtitle"] == "no incident raised in this period recovered"
 
 
 # ── 4. server performance ────────────────────────────────────────────────────
@@ -817,3 +819,109 @@ def test_rewritten_sections_emit_series_without_png(ch, monkeypatch):
     sec = run(rs._sec_usage_kpis(make_ctx(frm=now - timedelta(days=1), to=now)))
     assert sec["charts"] and all("png" not in c and c["series"]["points"] for c in sec["charts"])
     assert all(p["t"].endswith("Z") for p in sec["charts"][0]["series"]["points"])
+
+
+# ── assessment fixes: availability KPIs, empty tables ────────────────────────
+
+def _na(**over):
+    base = {"nodes": [{"id": D1}], "trend": [], "overall": 99.5, "up": 1, "below_sla": 1,
+            "sla_target": 99.9, "downtime_min": 978.0, "confirmed_down_min": 21.4,
+            "outage_events": 3, "outage_list": [], "filtered": False, "maint_excluded_min": 0,
+            "measured": 1, "table": "ping_metrics_5m"}
+    base.update(over)
+    return base
+
+
+def test_availability_kpis_separate_unreachable_and_confirmed_outage_time(monkeypatch):
+    # Assessment H4: "Total downtime" counted every failed probe while
+    # "Outage events" counted confirmed episodes.
+    async def node_avail(ctx):
+        return _na()
+    monkeypatch.setattr(rs, "_node_availability", node_avail)
+    sec = run(rs._sec_availability_kpis(make_ctx(DB())))
+    k = {x["label"]: x for x in sec["kpis"]}
+    assert "Total downtime" not in k
+    assert k["Unreachable time"]["value"] == "978 min"
+    assert k["Unreachable time"]["subtitle"] == "failed probes, incl. isolated"
+    assert k["Confirmed outage time"]["value"] == "21 min" and k["Confirmed outage time"]["accent"] == "warning"
+    assert k["Below configured target (99.9%)"]["value"] == "1"
+    assert k["Nodes up now (of 1)"]["current"] is True
+    assert any("Confirmed outage time adds up the confirmed outage episodes" in n for n in sec["notes"])
+
+
+def test_availability_kpis_without_samples_are_not_measured(monkeypatch):
+    # Assessment M7: no ping data read "Below target 0" and "0 min" in green.
+    async def node_avail(ctx):
+        return _na(overall=None, below_sla=0, downtime_min=0.0, confirmed_down_min=0.0,
+                   outage_events=0, measured=0)
+    monkeypatch.setattr(rs, "_node_availability", node_avail)
+    sec = run(rs._sec_availability_kpis(make_ctx(DB())))
+    k = {x["label"]: x for x in sec["kpis"]}
+    for label in ("Availability", "Below configured target (99.9%)", "Unreachable time",
+                  "Confirmed outage time", "Outage events"):
+        assert k[label]["value"] == "—" and k[label]["accent"] == "neutral", label
+    assert sec["notes"][0] == "No ping samples in this window (not measured)."
+
+
+def test_node_table_has_unreachable_and_confirmed_outage_columns(monkeypatch):
+    async def node_avail(ctx):
+        return _na(nodes=[
+            {"id": D1, "hostname": "core-1", "ip": "10.0.0.1", "location": "", "status": "up",
+             "avail": 99.1, "downtime_min": 90.0, "confirmed_down_min": 12.0, "outages": 2, "rtt": 4.0},
+            {"id": D2, "hostname": "new-1", "ip": "10.0.0.2", "location": "", "status": "unknown",
+             "avail": None, "downtime_min": None, "confirmed_down_min": 0.0, "outages": 0, "rtt": None}])
+    monkeypatch.setattr(rs, "_node_availability", node_avail)
+    t = run(rs._sec_device_availability(make_ctx(DB(), sid="device_availability")))["tables"][0]
+    assert t["headers"][5:7] == ["Unreachable", "Confirmed outage"]
+    assert t["rows"][0][5:8] == ["90 min", "12 min", "2"]
+    assert t["rows"][1][5:7] == ["—", "—"]
+
+
+def test_longest_outages_says_when_there_were_none(monkeypatch):
+    async def node_avail(ctx):
+        return _na(outage_list=[])
+    monkeypatch.setattr(rs, "_node_availability", node_avail)
+    sec = run(rs._sec_top_outages(make_ctx(DB(), sid="top_outages")))
+    assert sec["tables"] == [] and sec["notes"] == ["No outages in this period."]
+
+
+def test_build_sections_explains_an_empty_table(monkeypatch):
+    async def empty(ctx):
+        return rs._section("x_empty", "Empty", tables=[{"headers": ["A"], "rows": []}])
+    monkeypatch.setitem(rs.SECTION_REGISTRY, "x_empty",
+                        {**rs.SECTION_REGISTRY["top_outages"], "fn": empty, "title": "Empty"})
+    out = run(rs.build_sections(DB(), ["x_empty"], START, START + timedelta(hours=1)))
+    assert out[0]["notes"] == ["No records in this period."]
+
+
+def test_confirmed_outage_time_sums_episodes_clipped_to_the_window(monkeypatch):
+    db, _client = _availability_world(monkeypatch, {D1: (50, 100), D2: (1000, 1000)})
+    episodes = [{"entity_id": D1, "started_at": START, "clipped_start": START, "duration_s": 900,
+                 "in_window_s": 600, "ongoing": False},
+                {"entity_id": D1, "started_at": None, "clipped_start": START, "duration_s": None,
+                 "in_window_s": 300, "ongoing": True}]
+    monkeypatch.setattr(rs, "device_outage_episodes", lambda *a, **k: episodes)
+    na = run(rs._node_availability(make_ctx(db)))
+    core = next(n for n in na["nodes"] if n["id"] == D1)
+    assert core["confirmed_down_min"] == 15.0 and core["outages"] == 2
+    assert na["confirmed_down_min"] == 15.0 and na["outage_events"] == 2
+
+
+def test_outage_episode_failure_is_shown_not_reported_as_zero(monkeypatch):
+    # Review: a failed device_status_log read made every section say "No
+    # outages" / "0 min".
+    db, _client = _availability_world(monkeypatch, {D1: (50, 100), D2: (1000, 1000)})
+
+    def broken(*a, **k):
+        raise RuntimeError("status log unavailable")
+    monkeypatch.setattr(rs, "device_outage_episodes", broken)
+    ctx = make_ctx(db, sid="device_availability")
+    kpis = {k["label"]: k for k in run(rs._sec_availability_kpis(ctx))["kpis"]}
+    assert kpis["Confirmed outage time"]["value"] == "—" and kpis["Confirmed outage time"]["accent"] == "neutral"
+    assert kpis["Outage events"]["value"] == "—"
+    assert kpis["Unreachable time"]["value"] != "—"           # the sample figures still stand
+    t = run(rs._sec_device_availability(ctx))
+    assert {r[6] for r in t["tables"][0]["rows"]} == {"—"} and {r[7] for r in t["tables"][0]["rows"]} == {"—"}
+    assert rs.OUTAGES_FAILED_NOTE in t["notes"]
+    top = run(rs._sec_top_outages(make_ctx(db, sid="top_outages")))
+    assert top["notes"] == [rs.OUTAGES_FAILED_NOTE] and "No outages in this period." not in top["notes"]

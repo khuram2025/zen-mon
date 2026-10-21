@@ -4,12 +4,18 @@
  * run now, edit, duplicate, pause and delete for report managers; and each
  * schedule's run history. The list is shared with Channels → Routing
  * (query key ['report-schedules']).
+ *
+ * Banners come from GET /report-schedules/status (scheduler heartbeat,
+ * overdue schedules, whether report emails can carry a link) and from the
+ * schedules themselves (a time in the name that differs from the stored time,
+ * with a one-click fix). Classic report types can be converted to their
+ * replacement templates. See docs/reports-delivery.md.
  */
 import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  AlertOctagon, CalendarClock, ChevronDown, ChevronRight, Copy, History, Info, Loader2, Lock, MoreHorizontal,
-  Pencil, Play, Plus, Search, Trash2, TriangleAlert, X,
+  AlertOctagon, ArrowRightLeft, CalendarClock, ChevronDown, ChevronRight, Clock, Copy, History, Info, Link2Off, Loader2,
+  Lock, MoreHorizontal, Pencil, Play, Plus, Search, Settings2, Trash2, TriangleAlert, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatDateTime, zoneLabel, type Branding } from '@/lib/branding'
@@ -31,19 +37,22 @@ import { ReportScheduleFormDialog } from '@/components/forms/ReportScheduleFormD
 import { useReportBranding, useReportCatalog } from '@/features/reports/api'
 import type { ReportCatalog } from '@/features/reports/types'
 import {
-  useDeleteSchedule, useNotificationChannels, useReportSchedules, useRunScheduleNow, useSaveSchedule,
-  useToggleSchedule,
+  useConvertSchedule, useDeleteSchedule, useNotificationChannels, usePatchSchedule, useReportSchedules,
+  useRunScheduleNow, useSaveSchedule, useScheduleStatus, useToggleSchedule,
 } from '@/features/reports/schedules/api'
 import {
-  SCOPED_EXPLANATION, buildBody, clockLabel, filterSchedules, frequencyText, isFailing, isMine, isNetflowWithheld,
-  isVisibilityScoped, localTimeLabel, nameTimeMismatch, periodLabel, relativeTo, runHealth, runLabel, scheduleToForm,
-  scheduleZone, scopeOf, soonestRun, templateTitle, toInstant, utcClock, zoneName,
+  BASE_URL_SETTINGS_PATH, SCOPED_EXPLANATION, buildBody, catalogTitle, clockLabel, filterSchedules, frequencyText,
+  isFailing, isLegacySchedule, isMine, isNetflowWithheld, isVisibilityScoped, localTimeLabel, nameTimeMismatch,
+  periodLabel, relativeTo, replacementOf, runLabel, runResultMessage, scheduleToForm, scheduleZone, scopeOf, soonestRun,
+  templateTitle, toInstant, utcClock, zoneName,
   type NotificationChannel, type ReportSchedule, type StatusFilter,
 } from '@/features/reports/schedules/model'
 import {
-  FormatBadge, RecipientChips, RecipientsSummary, RunHistory, RunStatusBadge, ScopeChips, Tip, scheduleErrorText,
-  useNow,
+  FormatBadge, RecipientChips, RecipientsSummary, RunStatusBadge, ScopeChips, Tip, WithheldRecipients,
+  scheduleErrorText, useNow,
 } from '@/features/reports/schedules/ui'
+import { RunHistory } from '@/features/reports/schedules/runs'
+import { ReportSettingsDialog } from '@/features/reports/schedules/ReportSettingsDialog'
 
 type Ctx = {
   branding: Branding
@@ -53,7 +62,10 @@ type Ctx = {
   userId: string | undefined
   canManage: boolean
   running: Set<string>
+  retiming: Set<string>
   onRun: (s: ReportSchedule) => void
+  onRetime: (s: ReportSchedule) => void
+  onConvert: (s: ReportSchedule) => void
   onToggle: (s: ReportSchedule) => void
   onEdit: (s: ReportSchedule) => void
   onDuplicate: (s: ReportSchedule) => void
@@ -65,7 +77,12 @@ const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
   { id: 'active', label: 'Active' },
   { id: 'paused', label: 'Paused' },
   { id: 'failing', label: 'Failing' },
+  { id: 'overdue', label: 'Overdue' },
+  { id: 'retime', label: 'Time differs from name' },
 ]
+
+/** Filters shown only while something matches them. */
+const CONDITIONAL_FILTERS = new Set<StatusFilter>(['overdue', 'retime'])
 
 /** Enabled schedules by next run, then paused ones by name. */
 function byNextRun(a: ReportSchedule, b: ReportSchedule): number {
@@ -87,6 +104,9 @@ export default function SchedulesPage() {
   const runNow = useRunScheduleNow()
   const save = useSaveSchedule()
   const del = useDeleteSchedule()
+  const patch = usePatchSchedule()
+  const convert = useConvertSchedule()
+  const statusQ = useScheduleStatus()
   const now = useNow(30_000)
 
   const canManage = can('reports.manage') && !scoped && catalog.data?.can?.manage !== false
@@ -98,18 +118,29 @@ export default function SchedulesPage() {
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<ReportSchedule | null>(null)
   const [deleting, setDeleting] = useState<ReportSchedule | null>(null)
+  const [converting, setConverting] = useState<ReportSchedule | null>(null)
+  const [retiming, setRetiming] = useState<Set<string>>(new Set())
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const list = useMemo(() => [...(schedules.data ?? [])].sort(byNextRun), [schedules.data])
   const channels = useMemo(() => new Map((channelsQ.data ?? []).map((c) => [c.id, c])), [channelsQ.data])
   const titleOf = (s: ReportSchedule) => templateTitle(s, catalog.data)
   const shown = filterSchedules(list, { q, status, mineOnly: mine, userId: user?.id, titleOf })
   const failing = list.filter(isFailing)
+  const overdue = list.filter((s) => s.overdue)
+  const retime = list.filter((s) => s.suggested_time)
   const counts: Record<StatusFilter, number> = {
     all: list.length,
     active: list.filter((s) => s.enabled).length,
     paused: list.filter((s) => !s.enabled).length,
     failing: failing.length,
+    overdue: overdue.length,
+    retime: retime.length,
   }
+  const st = statusQ.data
+  const schedulerDown = st?.scheduler_healthy === false
+  const overdueCount = Math.max(st?.overdue_count ?? 0, overdue.length)
+  const lastTick = toInstant(st?.scheduler_last_tick_at)
   const soonest = soonestRun(list, now)
   const hasOwners = list.some((s) => s.owner_id)
   const filtered = q.trim() !== '' || status !== 'all' || mine
@@ -132,7 +163,25 @@ export default function SchedulesPage() {
     userId: user?.id,
     canManage,
     running,
+    retiming,
     onEdit: (s) => { setEditing(s); setFormOpen(true) },
+    onConvert: (s) => setConverting(s),
+    onRetime: (s) => {
+      const t = s.suggested_time
+      if (!t) return
+      setRetiming((cur) => new Set(cur).add(s.id))
+      const tz = zoneName(scheduleZone(s, branding.timezone))
+      patch.mutateAsync({ id: s.id, body: { hour: t.hour, minute: t.minute } })
+        .then(
+          () => toast.success('Time changed', `"${s.name}" now runs at ${clockLabel(t.hour, t.minute, branding.time_format)} ${tz}.`),
+          (e) => toast.error('The time was not changed', scheduleErrorText(e)),
+        )
+        .finally(() => setRetiming((cur) => {
+          const next = new Set(cur)
+          next.delete(s.id)
+          return next
+        }))
+    },
     onDelete: (s) => setDeleting(s),
     onToggle: (s) => {
       toggle.mutateAsync(s.id).then(
@@ -144,11 +193,8 @@ export default function SchedulesPage() {
       setRunning((cur) => new Set(cur).add(s.id))
       runNow.mutateAsync(s.id)
         .then((r) => {
-          const st = runHealth(r?.status)
-          const n = r?.delivered?.length ?? 0
-          if (st === 'failed') toast.error(`"${s.name}" failed`, r?.errors?.join('; ') || 'The report could not be generated.')
-          else if (st === 'partial') toast.warning(`"${s.name}" delivered with problems`, r?.errors?.join('; ') || undefined)
-          else toast.success(`"${s.name}" generated`, n ? `Delivered to ${n} recipient${n === 1 ? '' : 's'}.` : 'Nobody is set to receive it; open it from the run history.')
+          const msg = runResultMessage(r, s.name)
+          toast[msg.tone](msg.title, msg.body)
         })
         .catch((e) => toast.error(`"${s.name}" did not run`, scheduleErrorText(e)))
         .finally(() => setRunning((cur) => {
@@ -185,12 +231,78 @@ export default function SchedulesPage() {
             {brandingLoaded && <> Each schedule runs in its own time zone, shown with UTC; new schedules use the organisation time zone, {tzLabel}.</>}
           </p>
         </div>
-        {canManage && (
-          <Button onClick={openNew} className="shrink-0">
-            <Plus className="h-4 w-4" aria-hidden /> New schedule
-          </Button>
-        )}
+        <div className="flex shrink-0 flex-wrap gap-2">
+          {catalog.data?.can?.manage && (
+            <Button variant="outline" onClick={() => setSettingsOpen(true)}>
+              <Settings2 className="h-4 w-4" aria-hidden /> Report settings
+            </Button>
+          )}
+          {canManage && (
+            <Button onClick={openNew}>
+              <Plus className="h-4 w-4" aria-hidden /> New schedule
+            </Button>
+          )}
+        </div>
       </div>
+
+      {(schedulerDown || overdueCount > 0) && (
+        <div role="alert" className="flex flex-col gap-3 rounded-lg border border-danger/30 bg-danger/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2 text-sm text-danger-fg">
+            <Clock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <div className="min-w-0">
+              <div className="font-medium">
+                {schedulerDown
+                  ? lastTick
+                    ? `The report scheduler has not run since ${formatDateTime(lastTick, branding, { zone: true })} (${relativeTo(lastTick, now)}).`
+                    : 'The report scheduler has not run yet.'
+                  : `${overdueCount === 1 ? `1 ${scoped ? 'of your schedules is' : 'schedule is'}` : `${overdueCount} ${scoped ? 'of your schedules are' : 'schedules are'}`} overdue: due more than 10 minutes ago and not started.`}
+              </div>
+              <div className="text-xs text-text2">
+                {schedulerDown
+                  ? `Scheduled reports are not being generated${overdueCount ? `; ${overdueCount} ${scoped ? `of your schedule${overdueCount === 1 ? ' is' : 's are'}` : `schedule${overdueCount === 1 ? ' is' : 's are'}`} overdue` : ''}. Check that the ZenPlus services are running, or ask an administrator.`
+                  : 'The scheduler is running; these runs may be stuck behind a slow report. They start on the next pass, or use Run now.'}
+              </div>
+            </div>
+          </div>
+          {overdue.length > 0 && status !== 'overdue' && (
+            <Button size="sm" variant="outline" className="shrink-0" onClick={() => setStatus('overdue')}>Show overdue</Button>
+          )}
+        </div>
+      )}
+
+      {st?.share_links_available === false && (
+        <div role="note" className="flex flex-col gap-3 rounded-lg border border-warning/35 bg-warning/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2 text-sm text-text2">
+            <Link2Off className="mt-0.5 h-4 w-4 shrink-0 text-warning-fg" aria-hidden />
+            <div className="min-w-0">
+              <div className="font-medium text-text">Report emails can&apos;t include a link: set the Appliance URL in Settings → General → Company.</div>
+              <div className="text-xs">
+                Until then emails say where to find the report in ZenPlus, and “Summary only” cannot be chosen for new or changed schedules.
+              </div>
+            </div>
+          </div>
+          {can('settings.manage') && (
+            <Button asChild size="sm" variant="outline" className="shrink-0"><Link to={BASE_URL_SETTINGS_PATH}>Open settings</Link></Button>
+          )}
+        </div>
+      )}
+
+      {retime.length > 0 && status !== 'retime' && (
+        <div role="note" className="flex flex-col gap-3 rounded-lg border border-warning/35 bg-warning/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2 text-sm text-text2">
+            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning-fg" aria-hidden />
+            <div className="min-w-0">
+              <div className="font-medium text-text">
+                {retime.length === 1 ? '1 schedule runs' : `${retime.length} schedules run`} at a different time than {retime.length === 1 ? 'its' : 'their'} name says
+              </div>
+              <div className="truncate text-xs">
+                {retime.slice(0, 3).map((s) => s.name).join(', ')}{retime.length > 3 ? ` and ${retime.length - 3} more` : ''}
+              </div>
+            </div>
+          </div>
+          <Button size="sm" variant="outline" className="shrink-0" onClick={() => setStatus('retime')}>Review</Button>
+        </div>
+      )}
 
       {scoped && can('reports.manage') && (
         <div role="note" className="flex items-start gap-2 rounded-lg border border-info/30 bg-info/5 px-4 py-3 text-sm text-info-fg">
@@ -245,7 +357,7 @@ export default function SchedulesPage() {
             />
           </div>
           <div role="group" aria-label="Filter by status" className="flex flex-wrap gap-1">
-            {STATUS_FILTERS.map((f) => (
+            {STATUS_FILTERS.filter((f) => !CONDITIONAL_FILTERS.has(f.id) || counts[f.id] > 0 || status === f.id).map((f) => (
               <button
                 key={f.id}
                 type="button"
@@ -258,7 +370,7 @@ export default function SchedulesPage() {
                 )}
               >
                 {f.label}
-                <span className={cn('tabular-nums', f.id === 'failing' && counts.failing ? 'text-danger-fg' : 'text-muted')}>{counts[f.id]}</span>
+                <span className={cn('tabular-nums', (f.id === 'failing' || f.id === 'overdue') && counts[f.id] ? 'text-danger-fg' : f.id === 'retime' && counts.retime ? 'text-warning-fg' : 'text-muted')}>{counts[f.id]}</span>
               </button>
             ))}
           </div>
@@ -339,6 +451,30 @@ export default function SchedulesPage() {
       </Card>
 
       <ReportScheduleFormDialog open={formOpen} onOpenChange={setFormOpen} schedule={editing} />
+      <ReportSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} canEdit={canManage} />
+
+      <ConfirmDialog
+        open={!!converting}
+        onOpenChange={(o) => !o && setConverting(null)}
+        title="Convert to a template"
+        description={converting && (
+          <>
+            Switch <span className="font-semibold text-text">{converting.name}</span> from the retired classic report to the{' '}
+            <span className="font-semibold text-text">{catalogTitle(replacementOf(converting, catalog.data) ?? '', catalog.data)}</span> template?
+            Recipients, timing, period and format stay the same; the content and figures come from the template from the next run on.
+          </>
+        )}
+        confirmText="Convert"
+        loading={convert.isPending}
+        onConfirm={() => {
+          if (!converting) return
+          const s = converting
+          convert.mutateAsync(s.id).then(
+            (r) => { toast.success('Schedule converted', `"${s.name}" now uses ${templateTitle(r ?? s, catalog.data)}.`); setConverting(null) },
+            (e) => toast.error('The schedule was not converted', scheduleErrorText(e)),
+          )
+        }}
+      />
 
       <ConfirmDialog
         open={!!deleting}
@@ -432,17 +568,99 @@ function ScheduleTime({ s, ctx, className }: { s: ReportSchedule; ctx: Ctx; clas
   )
 }
 
-/** A time written in the schedule's name that disagrees with when it runs. */
+/** A time written in the schedule's name that disagrees with when it runs, with a one-click fix. */
 function NameTimeWarning({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
   const named = s.name_time_mismatch ?? nameTimeMismatch(s.name, s.hour, s.minute)
   if (!named) return null
-  const tz = scheduleZone(s, ctx.branding.timezone)
+  const tz = zoneName(scheduleZone(s, ctx.branding.timezone))
+  const fmt = ctx.branding.time_format
+  const t = s.suggested_time
+  const editable = ctx.canManage && s.can_edit !== false
+  const busy = ctx.retiming.has(s.id)
   return (
-    <div role="note" className="mt-1 flex items-start gap-1 text-[11px] text-warning-fg">
-      <TriangleAlert className="mt-px h-3 w-3 shrink-0" aria-hidden />
-      <span>
-        The name says {named}; it runs at {clockLabel(s.hour, s.minute, ctx.branding.time_format)} {zoneName(tz)}. Check the time or the name.
-      </span>
+    <div role="note" className="mt-1 space-y-1 text-[11px] text-warning-fg">
+      <div className="flex items-start gap-1">
+        <TriangleAlert className="mt-px h-3 w-3 shrink-0" aria-hidden />
+        <span>
+          The name says {named}; it runs at {clockLabel(s.hour, s.minute, fmt)} {tz}. Check the time or the name.
+        </span>
+      </div>
+      {t && editable && (
+        <Tip content={`Changes the stored time from ${clockLabel(s.hour, s.minute, fmt)} to ${clockLabel(t.hour, t.minute, fmt)} ${tz}. Nothing else changes; the next run moves accordingly.`}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-4 h-6 px-2 text-[11px]"
+            disabled={busy}
+            onClick={() => ctx.onRetime(s)}
+          >
+            {busy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Clock className="h-3 w-3" aria-hidden />}
+            Run at {clockLabel(t.hour, t.minute, fmt)} {tz} instead
+          </Button>
+        </Tip>
+      )}
+    </div>
+  )
+}
+
+/** "Classic" and "Overdue" markers next to the name. */
+function ScheduleBadges({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
+  const legacy = isLegacySchedule(s, ctx.catalog)
+  if (!legacy && !s.overdue) return null
+  const replacement = legacy ? replacementOf(s, ctx.catalog) : null
+  return (
+    <span className="ml-1.5 inline-flex flex-wrap items-center gap-1 align-middle">
+      {s.overdue && (
+        <span
+          className="inline-flex items-center gap-1 rounded border border-danger/30 bg-danger/10 px-1 py-px text-[10px] font-medium text-danger-fg"
+          title="Due more than 10 minutes ago and not started"
+        >
+          <Clock className="h-2.5 w-2.5" aria-hidden /> Overdue
+        </span>
+      )}
+      {legacy && (
+        <span
+          className="rounded border border-border px-1 py-px text-[10px] font-medium text-muted"
+          title={`A retired classic report type. It keeps running${replacement ? `; convert it to ${catalogTitle(replacement, ctx.catalog)}` : ''}.`}
+        >
+          Classic
+        </span>
+      )}
+    </span>
+  )
+}
+
+/** Recipients, or only their number when the addresses are withheld from the caller. */
+function Recipients({ s, ctx, summary }: { s: ReportSchedule; ctx: Ctx; summary?: boolean }) {
+  const channelIds = s.notify_channels ?? []
+  if (s.recipients_withheld) {
+    if (summary) return <WithheldRecipients count={s.recipient_count} channelCount={channelIds.length} />
+    return (
+      <div className="space-y-1.5">
+        {channelIds.length > 0 && <RecipientChips channelIds={channelIds} recipients={[]} channels={ctx.channels} />}
+        <WithheldRecipients count={s.recipient_count} />
+      </div>
+    )
+  }
+  const cc = s.group_send ? s.cc ?? [] : []
+  return summary
+    ? <RecipientsSummary channelIds={channelIds} recipients={s.recipients ?? []} channels={ctx.channels} cc={cc} />
+    : <RecipientChips channelIds={channelIds} recipients={s.recipients ?? []} channels={ctx.channels} cc={cc} />
+}
+
+/** Email options that differ from the defaults. */
+function EmailOptionsSummary({ s }: { s: ReportSchedule }) {
+  const items = [
+    s.group_send ? 'One email to all recipients' : '',
+    s.subject_template ? `Subject: ${s.subject_template}` : '',
+    s.reply_to ? `Replies to ${s.reply_to}` : '',
+    s.skip_when_empty ? 'Not sent when the report has no data' : '',
+  ].filter(Boolean)
+  if (!items.length) return null
+  return (
+    <div>
+      <dt className="text-[11px] uppercase tracking-wide text-muted">Email options</dt>
+      <dd className="space-y-0.5 break-words text-text2">{items.map((t) => <div key={t}>{t}</div>)}</dd>
     </div>
   )
 }
@@ -451,7 +669,7 @@ function NextRun({ s, ctx, compact }: { s: ReportSchedule; ctx: Ctx; compact?: b
   if (!s.enabled) return <span className="text-sm text-muted">Paused</span>
   const at = toInstant(s.next_run_at)
   if (!at) return <span className="text-sm text-muted">Not scheduled</span>
-  const overdue = at.getTime() < ctx.now - 5 * 60_000
+  const overdue = s.overdue ?? at.getTime() < ctx.now - 5 * 60_000
   const b = zoned(s, ctx)
   const zone = zoneLabel(b.timezone, at)
   return (
@@ -486,6 +704,8 @@ function RowActions({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx; o
   const editable = ctx.canManage && s.can_edit !== false
   const busy = ctx.running.has(s.id)
   const withheld = isNetflowWithheld(s)
+  const legacy = isLegacySchedule(s, ctx.catalog)
+  const replacement = legacy ? replacementOf(s, ctx.catalog) : null
   return (
     <div className="flex items-center justify-end gap-1">
       {editable && (
@@ -512,9 +732,14 @@ function RowActions({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx; o
           {editable && (
             <DropdownMenuItem onSelect={() => ctx.onEdit(s)}><Pencil aria-hidden /> Edit</DropdownMenuItem>
           )}
+          {editable && legacy && replacement && (
+            <DropdownMenuItem onSelect={() => ctx.onConvert(s)}>
+              <ArrowRightLeft aria-hidden /> Convert to {catalogTitle(replacement, ctx.catalog)}
+            </DropdownMenuItem>
+          )}
           {editable && (
-            <DropdownMenuItem onSelect={() => ctx.onDuplicate(s)} disabled={withheld}>
-              <Copy aria-hidden /> {withheld ? 'Duplicate (NetFlow scope hidden)' : 'Duplicate'}
+            <DropdownMenuItem onSelect={() => ctx.onDuplicate(s)} disabled={withheld || legacy}>
+              <Copy aria-hidden /> {withheld ? 'Duplicate (NetFlow scope hidden)' : legacy ? 'Duplicate (classic type retired)' : 'Duplicate'}
             </DropdownMenuItem>
           )}
           <DropdownMenuItem onSelect={onExpand}>
@@ -569,7 +794,7 @@ function ScheduleRow({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx; 
               {open ? <ChevronDown className="h-4 w-4" aria-hidden /> : <ChevronRight className="h-4 w-4" aria-hidden />}
             </button>
             <div className="min-w-0 break-words">
-              <div className="font-medium text-text">{s.name}</div>
+              <div className="font-medium text-text">{s.name}<ScheduleBadges s={s} ctx={ctx} /></div>
               <div className="text-xs text-muted">
                 {templateTitle(s, ctx.catalog)} · {periodLabel(s.period)}
               </div>
@@ -585,7 +810,7 @@ function ScheduleRow({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx; 
         <Td className="hidden text-sm text-text2 xl:table-cell"><ScheduleTime s={s} ctx={ctx} /></Td>
         <Td>
           <div className="space-y-1">
-            <RecipientsSummary channelIds={s.notify_channels ?? []} recipients={s.recipients ?? []} channels={ctx.channels} />
+            <Recipients s={s} ctx={ctx} summary />
             <div className="xl:hidden"><FormatBadge format={s.format} /></div>
           </div>
         </Td>
@@ -616,7 +841,7 @@ function ScheduleCard({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx;
     <li className="space-y-3 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="font-medium text-text">{s.name}</div>
+          <div className="font-medium text-text">{s.name}<ScheduleBadges s={s} ctx={ctx} /></div>
           <div className="text-xs text-muted">{templateTitle(s, ctx.catalog)} · {periodLabel(s.period)}</div>
           <NameTimeWarning s={s} ctx={ctx} />
         </div>
@@ -639,7 +864,7 @@ function ScheduleCard({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx;
           <dt className="text-[11px] uppercase tracking-wide text-muted">Delivery</dt>
           <dd className="mt-1 space-y-1.5">
             <div><FormatBadge format={s.format} /></div>
-            <RecipientChips channelIds={s.notify_channels ?? []} recipients={s.recipients ?? []} channels={ctx.channels} />
+            <Recipients s={s} ctx={ctx} />
           </dd>
         </div>
       </dl>
@@ -669,9 +894,10 @@ function ScheduleDetails({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
         <div>
           <dt className="text-[11px] uppercase tracking-wide text-muted">Recipients</dt>
           <dd className="mt-1">
-            <RecipientChips channelIds={s.notify_channels ?? []} recipients={s.recipients ?? []} channels={ctx.channels} />
+            <Recipients s={s} ctx={ctx} />
           </dd>
         </div>
+        <EmailOptionsSummary s={s} />
         {(scope.any || withheld) && (
           <div>
             <dt className="text-[11px] uppercase tracking-wide text-muted">Scope</dt>

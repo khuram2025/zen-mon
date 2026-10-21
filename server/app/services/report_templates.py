@@ -77,7 +77,7 @@ CATEGORY_TITLES = {c["id"]: c["title"] for c in CATEGORIES}
 
 PERIODS = (
     "last_24h", "last_7d", "last_30d", "last_90d",
-    "today", "yesterday", "week_to_date", "previous_week",
+    "today", "yesterday", "week_to_date", "previous_week", "previous_work_week",
     "month_to_date", "previous_month", "quarter_to_date", "previous_quarter",
 )
 FREQUENCIES = ("daily", "weekly", "monthly")
@@ -210,7 +210,7 @@ def catalog_entry(t: Template, perms: Optional[frozenset[str]] = None) -> dict[s
     return {
         "key": t.key, "title": t.title, "description": t.description,
         "category": t.category, "category_title": CATEGORY_TITLES.get(t.category, t.category),
-        "engine": "sections", "formats": ["pdf", "html", "xlsx"],
+        "engine": "sections", "formats": ["pdf", "html", "xlsx", "csv"],
         "sections": t.section_ids, "entries": secs,
         "audience": list(t.audience), "tags": list(t.tags),
         "default_period": t.default_period, "frequency": t.frequency,

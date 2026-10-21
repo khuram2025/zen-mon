@@ -15,6 +15,7 @@ import csv
 import io
 import ipaddress
 import logging
+import math
 import uuid as _uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -77,6 +78,17 @@ from app.services.report_service import (
     _fmt_pct,
     _fmt_duration,
 )
+
+
+def _fmt_uptime(val: float | None) -> str:
+    """Uptime with two decimals, truncated like the availability headlines of
+    the Availability page and the device uptime stats: any downtime never
+    reads 100.00%."""
+    if val is None:
+        return _fmt_pct(None)
+    if val >= 100:
+        return "100.00%"
+    return f"{min(math.floor(val * 100 + 1e-7) / 100, 99.99):.2f}%"
 
 # ---------------------------------------------------------------------------
 # Styling
@@ -412,7 +424,7 @@ def _build_device_rows(devices: list[dict], ping_rows: list[dict], *, full: bool
             row.append(d.get("location", ""))
         row += [
             d.get("status", ""),
-            _fmt_pct(uptime),
+            _fmt_uptime(uptime),
             _fmt_ms(stats["avg"]),
         ]
         if full:
@@ -449,7 +461,7 @@ def _build_service_rows(services: list[dict], svc_rows: list[dict]) -> list[list
             s.get("check_type", ""),
             s.get("target_url") or s.get("target_host", ""),
             s.get("status", ""),
-            _fmt_pct(uptime),
+            _fmt_uptime(uptime),
             _fmt_ms(avg_resp),
             s.get("tls_days_remaining", ""),
         ])

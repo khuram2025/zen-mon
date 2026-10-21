@@ -11,7 +11,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { DEFAULT_BRANDING, type Branding } from '@/lib/branding'
 import type {
-  CustomTemplate, RenderReport, ReportCatalog, ReportRun, TemplateBody, TemplateEntry,
+  CustomTemplate, RenderReport, ReportCatalog, TemplateBody, TemplateEntry,
 } from './types'
 
 export function useReportCatalog(opts?: { enabled?: boolean }) {
@@ -58,6 +58,10 @@ export interface RenderParams {
   deviceIds?: string[]
   applicationId?: string | null
   netflow?: string | null
+  /** Group / location / device-type scope (server: report_render.resolve_device_scope). */
+  groupIds?: string[]
+  locations?: string[]
+  deviceTypes?: string[]
 }
 
 export function renderQueryString(p: RenderParams, format = 'json'): string {
@@ -66,13 +70,18 @@ export function renderQueryString(p: RenderParams, format = 'json'): string {
   if (p.deviceIds?.length) q.set('device_ids', p.deviceIds.join(','))
   if (p.applicationId) q.set('application_id', p.applicationId)
   if (p.netflow) q.set('netflow', p.netflow)
+  // One parameter per value: a location may contain a comma.
+  for (const g of p.groupIds ?? []) q.append('group_ids', g)
+  for (const l of p.locations ?? []) q.append('locations', l)
+  for (const t of p.deviceTypes ?? []) q.append('device_types', t)
   return q.toString()
 }
 
 export function useRenderReport(p: RenderParams | null) {
   return useQuery<RenderReport>({
     queryKey: ['reports', 'render', p?.key, p?.customId ?? null, p?.from, p?.to,
-      p?.deviceIds?.join(',') ?? '', p?.applicationId ?? '', p?.netflow ?? ''],
+      p?.deviceIds?.join(',') ?? '', p?.applicationId ?? '', p?.netflow ?? '',
+      p?.groupIds ?? [], p?.locations ?? [], p?.deviceTypes ?? []],
     queryFn: async () => (await api.get(`/reports/render/${encodeURIComponent(p!.key)}?${renderQueryString(p!)}`,
       { timeout: 180_000 })).data,
     enabled: !!p,
@@ -81,8 +90,8 @@ export function useRenderReport(p: RenderParams | null) {
   })
 }
 
-/** Download a rendered report (pdf | html | xlsx); returns the file name used. */
-export async function downloadReport(p: RenderParams, format: 'pdf' | 'html' | 'xlsx'): Promise<string> {
+/** Download a rendered report (pdf | html | xlsx | csv); returns the file name used. */
+export async function downloadReport(p: RenderParams, format: 'pdf' | 'html' | 'xlsx' | 'csv'): Promise<string> {
   const res = await api.get(`/reports/render/${encodeURIComponent(p.key)}?${renderQueryString(p, format)}`,
     { responseType: 'blob', timeout: 300_000 })
   const cd = String(res.headers['content-disposition'] || '')
@@ -110,6 +119,9 @@ export interface PreviewBody {
   device_ids?: string[]
   application_id?: string | null
   netflow?: string | null
+  group_ids?: string[]
+  locations?: string[]
+  device_types?: string[]
 }
 
 export function usePreviewReport() {
@@ -156,12 +168,5 @@ export function useDeleteTemplate() {
   return useMutation<{ message: string }, unknown, { id: string; force?: boolean }>({
     mutationFn: async ({ id, force }) => (await api.delete(`/reports/custom/${id}${force ? '?force=true' : ''}`)).data,
     onSuccess: invalidate,
-  })
-}
-
-export function useReportRuns(limit = 20) {
-  return useQuery<ReportRun[]>({
-    queryKey: ['reports', 'runs', limit],
-    queryFn: async () => (await api.get(`/reports/runs?limit=${limit}`)).data,
   })
 }

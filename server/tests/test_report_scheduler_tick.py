@@ -159,6 +159,7 @@ class GenDB:
         self.template = template
         self.runs: list[dict] = []
         self.updates: list[dict] = []
+        self.report_settings: dict | None = None
         self.channels = {"ch1": SimpleNamespace(id="ch1", name="NOC email", type="email", enabled=True,
                                                 gateway_id=None,
                                                 config={"recipients": "noc@example.com, cio@example.com"})}
@@ -183,11 +184,13 @@ class GenDB:
         params = dict(params or {})
         if "FROM system_settings WHERE key = ANY" in sql:
             return _GenResult([("company", self.company)])
+        if "FROM system_settings WHERE key = :k" in sql:
+            return _GenResult([(self.report_settings,)] if self.report_settings else [])
         if sql.startswith("INSERT INTO report_runs"):
             self.runs.append(params)
             return _GenResult([SimpleNamespace(id="run-1")])
         if sql.startswith("UPDATE report_runs"):
-            self.updates.append({**params, "d": _json.loads(params["d"])})
+            self.updates.append({**params, "d": _json.loads(params["d"]) if "d" in params else None})
             return _GenResult()
         if "FROM notification_channels" in sql:
             ch = self.channels.get(params["id"])
@@ -223,13 +226,14 @@ def gen(monkeypatch):
         seen["pdf_meta"] = meta
         return b"%PDF-1.7 fake"
 
-    def fake_send(gw, recipients, subject, text_body, html_body, attachment=None, inline_images=None):
+    def fake_send(gw, recipients, subject, text_body, html_body, attachment=None, inline_images=None, **kw):
         seen["sent"].append(dict(recipients=recipients, subject=subject, attachment=attachment,
-                                 inline=list(inline_images or []), html=html_body, text=text_body))
+                                 inline=list(inline_images or []), html=html_body, text=text_body, **kw))
 
-    def fake_individually(gw, recipients, subject, text_body, html_body, attachment=None, inline_images=None):
+    def fake_individually(gw, recipients, subject, text_body, html_body, attachment=None, inline_images=None,
+                          **kw):
         seen["individual"].append(dict(recipients=list(recipients), subject=subject, attachment=attachment,
-                                       inline=list(inline_images or [])))
+                                       inline=list(inline_images or []), **kw))
         return list(recipients), []
 
     async def gateway(db, gateway_id=None):
@@ -278,7 +282,7 @@ def test_template_schedule_renders_like_the_viewer_and_emails_everyone(gen):
     assert isinstance(b["branding"], Branding) and b["branding"].display_name == "Acme Ops"
     meta = gen["pdf_meta"]
     assert meta["title"] == "Monthly SLA" and meta["company_name"] == "Acme Ops"
-    assert meta["scope_label"] == "1 selected device(s)"
+    assert meta["scope_label"] == "1 selected device"
 
     subject = "[Confidential] Monthly SLA — Previous month (1 Sep 2026 – 30 Sep 2026)"
     channel, = gen["sent"]
@@ -817,3 +821,329 @@ def test_a_restarted_scheduler_runs_a_missed_schedule_once(monkeypatch):
     asyncio.run(rs.run_scheduler_tick(db))           # a second worker / the next tick
     assert fired == ["s1"]
     assert _iso(rows["s1"]["next_run_at"]) == "2026-10-08T05:00:00Z"
+
+
+# ── Delivery after the SMASCO assessment (docs/reports-delivery.md) ──────────
+
+def _no_data_build(gen, monkeypatch):
+    async def empty_build(db, entries, frm, to, filters=None, requester=None, branding=None):
+        gen["build"] = dict(entries=entries, filters=filters)
+        return [{"id": "availability_kpis", "title": "Availability",
+                 "kpis": [{"label": "Availability", "value": "—"}], "charts": [], "tables": [], "notes": []}]
+
+    monkeypatch.setattr(_sections, "build_sections", empty_build)
+
+
+def test_a_run_starts_as_running_and_expires_its_link(gen):
+    db = GenDB()
+    db.report_settings = {"link_expiry_days": 7}
+    asyncio.run(rs.generate_and_deliver(db, _sched()))
+    run, = db.runs
+    assert run["exp"] == 7 and run["kind"] == "scheduled"
+    assert run["wf"] < run["wt"]
+    upd, = db.updates
+    assert upd["subj"].startswith("[Confidential] Monthly SLA") and upd["eh"] == "<html>email</html>"
+    assert upd["art"] == b"%PDF-1.7 fake" and upd["am"] == "application/pdf"
+
+
+def test_no_base_url_says_how_to_find_the_report(gen):
+    asyncio.run(rs.generate_and_deliver(GenDB(company={**COMPANY, "base_url": ""}), _sched()))
+    assert gen["email_html"]["view_url"] is None
+    assert gen["email_html"]["meta"]["delivery_note"] == rs.NO_LINK_NOTE
+
+
+def test_an_attachment_over_the_limit_is_left_out(gen, monkeypatch):
+    monkeypatch.setattr(_sections, "render_pdf", lambda meta, secs: b"x" * (2 * 1024 * 1024))
+    db = GenDB()
+    db.report_settings = {"max_attachment_mb": 1}
+    out = asyncio.run(rs.generate_and_deliver(db, _sched()))
+    assert out["status"] == "partial"
+    assert gen["sent"][0]["attachment"] is None and gen["email_html"]["attached"] is False
+    assert "over the 1 MB limit" in gen["email_html"]["meta"]["delivery_note"]
+
+
+def test_an_empty_report_is_marked_or_skipped(gen, monkeypatch):
+    _no_data_build(gen, monkeypatch)
+    out = asyncio.run(rs.generate_and_deliver(GenDB(), _sched(recipients=[])))
+    assert out["status"] == "success" and gen["sent"][0]["subject"].startswith("[Confidential] [No data] ")
+    assert rs.NO_DATA_NOTE in out["notes"] and rs.NO_DATA_NOTE not in out["errors"]
+    gen["sent"].clear()
+    db = GenDB()
+    out = asyncio.run(rs.generate_and_deliver(db, _sched(skip_when_empty=True)))
+    assert out["status"] == "skipped" and not gen["sent"] and not gen["individual"]
+    assert db.updates[-1]["n"] and "not sent" in db.updates[-1]["n"]
+
+
+def test_a_failed_section_makes_the_run_partial(gen, monkeypatch):
+    async def build(db, entries, frm, to, filters=None, requester=None, branding=None):
+        return [{"id": "availability_kpis", "title": "Availability", "kpis": [{"label": "A", "value": "99%"}],
+                 "charts": [], "tables": [], "notes": []},
+                {"id": "server_top_processes", "title": "Top Processes", "error": True,
+                 "notes": ["Metrics for this section are temporarily unavailable"]}]
+
+    monkeypatch.setattr(_sections, "build_sections", build)
+    out = asyncio.run(rs.generate_and_deliver(GenDB(), _sched()))
+    assert out["status"] == "partial"
+    assert any("Top Processes" in e for e in out["errors"])
+
+
+def test_subject_template_ignores_format_specs():
+    now = datetime(2026, 10, 7, 5, tzinfo=timezone.utc)
+    out = rs.render_subject_template("{title:>999999999} {title} {period!r} {date}", title="T",
+                                     period_label="P", generated=now, tz="Asia/Riyadh")
+    assert out == "{title:>999999999} T {period!r} 2026-10-07"
+
+
+def test_subject_template_reply_to_and_group_send(gen):
+    out = asyncio.run(rs.generate_and_deliver(GenDB(), _sched(
+        notify_channels=[], subject_template="{title} | {period} | {date} | {unknown}",
+        reply_to="noc@example.com", group_send=True, cc=["boss@example.com"])))
+    assert out["status"] == "success"
+    sent, = gen["sent"]
+    assert sent["subject"].startswith("[Confidential] Monthly SLA | Previous month (1 Sep 2026 – 30 Sep 2026) | ")
+    assert sent["subject"].endswith(" | {unknown}")
+    assert sent["recipients"] == ["ops@example.com", "cto@example.org"] and sent["cc"] == ["boss@example.com"]
+    assert sent["reply_to"] == "noc@example.com" and not gen["individual"]
+    assert out["delivered"] == ["ops@example.com", "cto@example.org", "boss@example.com"]
+
+
+def test_temporary_failures_are_retried_and_permanent_ones_are_not(gen, monkeypatch):
+    def flaky(gw, recipients, *a, **k):
+        return [], [("ops@example.com", "451 4.7.1 try again later"), ("cto@example.org", "550 5.1.1 no user")]
+
+    monkeypatch.setattr(rs, "_send_individually", flaky)
+    db = GenDB()
+    out = asyncio.run(rs.generate_and_deliver(db, _sched(notify_channels=[])))
+    assert out["status"] == "failed" and out["retry_at"]
+    ft = _json.loads(db.updates[-1]["ft"])
+    assert [t["id"] for t in ft] == ["ops@example.com"]
+    assert db.updates[-1]["nr"] is not None
+
+
+def test_csv_attachment_for_templates(gen, monkeypatch):
+    import types
+    import app.services as services_pkg
+    fake = types.ModuleType("app.services.report_csv")
+    fake.render_csv = lambda meta, secs: b"\xef\xbb\xbfReport,x"
+    monkeypatch.setitem(_sys.modules, "app.services.report_csv", fake)
+    monkeypatch.setattr(services_pkg, "report_csv", fake, raising=False)
+    asyncio.run(rs.generate_and_deliver(GenDB(), _sched(format="csv")))
+    fname, payload, mime = gen["sent"][0]["attachment"]
+    assert fname.endswith(".csv") and mime == "text/csv" and payload.startswith(b"\xef\xbb\xbf")
+
+
+def test_short_error_hides_sql_and_unknown_messages():
+    from sqlalchemy.exc import DBAPIError
+
+    class Orig(Exception):
+        pass
+
+    exc = DBAPIError("SELECT 1", {"id": "x"}, Orig("invalid input for query argument $1: 'x'"))
+    msg = rs.short_error(exc)
+    assert "SELECT" not in msg and "sqlalche.me" not in msg and "invalid input" in msg
+    assert rs.short_error(RuntimeError("password=secret")) == "RuntimeError"
+    assert rs._retryable("451 4.7.1 later") and not rs._retryable("refused: 550 5.1.1 no user")
+    assert rs._retryable("TimeoutError: timed out")
+
+
+def test_suggested_time_from_the_name():
+    assert rs.suggested_time("Daily NOC - 08:00 Riyadh", 5, 0) == {"hour": 8, "minute": 0}
+    assert rs.suggested_time("Daily NOC - 08:00 Riyadh", 8, 0) is None
+    assert rs.suggested_time("Digest 7:30 PM", 7, 30) == {"hour": 19, "minute": 30}
+    assert rs.suggested_time(None, 8, 0) is None
+
+
+@pytest.mark.parametrize("enc,offers,expect_tls", [
+    ("none", False, False),     # a plain relay on port 25: never forced into STARTTLS
+    ("none", True, True),       # gateways saved before 'encryption' existed relied on STARTTLS (O365 on 587)
+    ("tls", True, True),
+    ("tls", False, True),       # required: the server's refusal surfaces as an error
+])
+def test_starttls_policy(monkeypatch, enc, offers, expect_tls):
+    calls = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            calls.append(("connect", port))
+
+        def ehlo_or_helo_if_needed(self):
+            calls.append("ehlo")
+
+        def has_extn(self, name):
+            return offers and name.lower() == "starttls"
+
+        def starttls(self, context=None):
+            calls.append("starttls")
+
+        def login(self, *a):
+            calls.append("login")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rs.smtplib, "SMTP", FakeSMTP)
+    rs._smtp_connect({"host": "relay", "port": 25, "encryption": enc})
+    assert ("starttls" in calls) is expect_tls
+
+
+def test_group_message_carries_cc_and_reply_to():
+    from email import message_from_string
+    msg = rs.build_email_message({"from_email": "r@acme.example"}, ["a@example.com"], "S", "t", "<p>h</p>",
+                                 cc=["b@example.com", "Bad <x@y>"], reply_to="noc@example.com")
+    parsed = message_from_string(msg.as_string())
+    assert parsed["Cc"] == "b@example.com" and parsed["Reply-To"] == "noc@example.com"
+
+
+class RetryDB:
+    """A stored run that still owes two targets."""
+
+    def __init__(self, failed, email_html="<html>stored</html>", locked=True):
+        self.locked = locked
+        self.run = SimpleNamespace(
+            id="r1", schedule_id="s1", title="Monthly SLA", token="tok", status="failed",
+            delivered_to=[], failed_targets=failed, retry_count=0, email_subject="[Confidential] Monthly SLA",
+            email_html=email_html, email_text="stored text", artifact=b"%PDF", artifact_name="a.pdf",
+            artifact_mime="application/pdf", window_from=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            window_to=datetime(2026, 10, 1, tzinfo=timezone.utc), notes=[], error="x",
+            reply_to=None, group_send=False, cc=[], schedule_name="Monthly SLA", timezone="Asia/Riyadh")
+        self.updates: list[dict] = []
+
+    async def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        params = dict(params or {})
+        if "FROM report_runs r LEFT JOIN report_schedules" in sql:
+            return _GenResult([self.run])
+        if "pg_try_advisory_xact_lock" in sql:
+            return _GenResult(scalar=self.locked)
+        if "FROM system_settings WHERE key = ANY" in sql:
+            return _GenResult([("company", COMPANY)])
+        if "FROM system_settings WHERE key = :k" in sql:
+            return _GenResult()
+        if sql.startswith("UPDATE report_runs") or sql.startswith("UPDATE report_schedules"):
+            self.updates.append({"sql": sql, **params})
+            return _GenResult()
+        raise AssertionError(f"unexpected SQL: {sql[:100]}")
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+
+def test_retry_resends_the_stored_email_to_the_owed_targets(gen):
+    db = RetryDB([{"kind": "email", "id": "ops@example.com", "name": "ops@example.com", "error": "451"}])
+    out = asyncio.run(rs.retry_run(db, "r1"))
+    assert out["status"] == "success" and out["remaining"] == 0
+    sent, = gen["individual"]
+    assert sent["recipients"] == ["ops@example.com"] and sent["subject"] == "[Confidential] Monthly SLA"
+    assert sent["attachment"] == ("a.pdf", b"%PDF", "application/pdf")
+    run_upd = next(u for u in db.updates if u["sql"].startswith("UPDATE report_runs"))
+    assert run_upd["rc"] == 1 and run_upd["nr"] is None and _json.loads(run_upd["ft"]) == []
+
+
+def test_retry_gives_up_after_the_configured_attempts(gen, monkeypatch):
+    def still_down(gw, recipients, *a, **k):
+        return [], [(r, "421 service not available") for r in recipients]
+
+    monkeypatch.setattr(rs, "_send_individually", still_down)
+    db = RetryDB([{"kind": "email", "id": "ops@example.com", "name": "ops@example.com", "error": "421"}])
+    db.run.retry_count = 2                               # the third (last default) attempt
+    out = asyncio.run(rs.retry_run(db, "r1"))
+    assert out["remaining"] == 1 and out["next_retry_at"] is None
+    run_upd = next(u for u in db.updates if u["sql"].startswith("UPDATE report_runs"))
+    assert any("gave up" in n for n in _json.loads(run_upd["n"]))
+
+
+def test_retry_without_a_stored_email_stops(gen):
+    db = RetryDB([{"kind": "email", "id": "ops@example.com", "name": "ops@example.com", "error": "451"}],
+                 email_html=None)
+    out = asyncio.run(rs.retry_run(db, "r1"))
+    assert out["remaining"] == 0 and "retention" in out["errors"][0]
+    assert not gen["individual"]
+
+
+def test_retry_is_refused_while_another_is_in_progress(gen):
+    db = RetryDB([{"kind": "email", "id": "ops@example.com", "name": "ops@example.com", "error": "451"}],
+                 locked=False)
+    out = asyncio.run(rs.retry_run(db, "r1"))
+    assert out["status"] == "busy" and not gen["individual"] and not db.updates
+
+
+def test_a_successful_retry_keeps_the_permanent_failures(gen, monkeypatch):
+    def first(gw, recipients, *a, **k):
+        return [], [("ops@example.com", "451 later"), ("cto@example.org", "550 5.1.1 no user")]
+
+    monkeypatch.setattr(rs, "_send_individually", first)
+    db = GenDB()
+    asyncio.run(rs.generate_and_deliver(db, _sched(notify_channels=[])))
+    notes = _json.loads(db.updates[-1]["notes"])
+    assert any(n.startswith(rs.NOT_DELIVERED_PREFIX) and "cto@example.org" in n for n in notes)
+    # The retry then delivers ops@: the run stays partial and still names cto@.
+    retry_db = RetryDB([{"kind": "email", "id": "ops@example.com", "name": "ops@example.com", "error": "451"}])
+    retry_db.run.notes = notes
+    monkeypatch.setattr(rs, "_send_individually", lambda gw, r, *a, **k: (list(r), []))
+    out = asyncio.run(rs.retry_run(retry_db, "r1"))
+    assert out["status"] == "partial" and out["remaining"] == 0
+    upd = next(u for u in retry_db.updates if u["sql"].startswith("UPDATE report_runs"))
+    assert "cto@example.org" in upd["err"]
+
+
+@pytest.mark.parametrize("code,retried", [(503, True), (429, True), (404, False), (401, False)])
+def test_webhook_failures_are_retried_by_http_status(gen, monkeypatch, code, retried):
+    from app.api.v1 import alert_engine
+
+    class HTTPError(Exception):
+        response = SimpleNamespace(status_code=code)
+
+    async def result(ch_type, cfg, ctx):
+        return False, HTTPError("boom")
+
+    monkeypatch.setattr(alert_engine, "_dispatch_channel_result", result)
+    db = GenDB()
+    db.channels["hook"] = SimpleNamespace(id="hook", name="Teams NOC", type="teams", enabled=True,
+                                          gateway_id=None, config={"url": "https://hooks.example/x"})
+    out = asyncio.run(rs.generate_and_deliver(db, _sched(notify_channels=["hook"], recipients=[])))
+    assert out["status"] == "failed" and f"Teams NOC: HTTP {code}" in out["errors"]
+    ft = _json.loads(db.updates[-1]["ft"])
+    assert bool(ft) is retried
+
+
+def test_a_scoped_owner_s_legacy_attachment_is_confined(gen, monkeypatch):
+    from app.core import scoping
+    gen["owner"] = SimpleNamespace(id="owner-1", role="rsx_team", is_active=True)
+    seen = {}
+
+    async def scoped(db, user, requested):
+        return True, ["11111111-1111-1111-1111-111111111111"]
+
+    async def tags(db, user):
+        return ["team-a"]
+
+    async def fake_executive(db, start, end, visible_tags=None):
+        seen["tags"] = visible_tags
+        return {"kpis": {}}
+
+    async def fake_pdf(**kw):
+        seen["pdf"] = kw
+        return b"%PDF"
+
+    async def flows(db, owner):
+        return SimpleNamespace(can=lambda perm: True)
+
+    from app.services import netflow_report
+    monkeypatch.setattr(netflow_report, "flow_visibility_for", flows)
+    monkeypatch.setattr(scoping, "scoped_device_filter", scoped)
+    monkeypatch.setattr(scoping, "visible_tags", tags)
+    monkeypatch.setattr(rs, "build_executive", fake_executive)
+    monkeypatch.setattr(rs, "generate_report", fake_pdf)
+    monkeypatch.setattr(rs.report_html, "build_report_html", lambda meta, data: "<html>legacy</html>")
+    monkeypatch.setattr(rs.report_html, "build_report_email_html", lambda *a, **k: "<html>m</html>")
+    monkeypatch.setattr(rs.report_html, "build_report_email_text", lambda *a, **k: "t")
+    out = asyncio.run(rs.generate_and_deliver(GenDB(), _sched(
+        report_type="executive_summary", recipients=[], filters={"locations": ["Jeddah"]})))
+    assert out["status"] == "success" and seen["tags"] == ["team-a"]
+    assert seen["pdf"]["device_ids"] == ["11111111-1111-1111-1111-111111111111"]
+    assert seen["pdf"]["locations"] is None
+    out = asyncio.run(rs.generate_and_deliver(GenDB(), _sched(report_type="full_report", recipients=[])))
+    assert out["status"] == "failed" and "visibility scope" in out["errors"][0]

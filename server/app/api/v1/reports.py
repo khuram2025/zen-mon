@@ -1,10 +1,10 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,15 +38,29 @@ REPORT_NAMES = {
 
 
 class ReportRequest(BaseModel):
-    report_type: str = "executive_summary"
-    period: str = "last_24h"
+    # Unknown values are refused (422) rather than silently becoming a 24 h
+    # PDF of the executive summary.
+    report_type: Literal["executive_summary", "device_health", "service_health",
+                         "alert_analysis", "full_report"] = "executive_summary"
+    period: Literal["last_24h", "last_7d", "last_30d", "last_90d", "custom"] = "last_24h"
     from_time: Optional[datetime] = None
     to_time: Optional[datetime] = None
     device_ids: Optional[list[str]] = None
     group_ids: Optional[list[str]] = None
     locations: Optional[list[str]] = None
     device_types: Optional[list[str]] = None
-    format: str = "pdf"  # pdf | excel | csv
+    format: Literal["pdf", "excel", "csv"] = "pdf"
+
+    @model_validator(mode="after")
+    def _custom_needs_a_window(self):
+        if self.period == "custom":
+            if not (self.from_time and self.to_time):
+                raise ValueError("A custom period needs from_time and to_time")
+            def utc(ts: datetime) -> datetime:
+                return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            if utc(self.from_time) >= utc(self.to_time):
+                raise ValueError("from_time must be before to_time")
+        return self
 
 
 # Legacy report types that read fleet-wide data the service layer cannot scope.
@@ -371,22 +385,29 @@ def _window_from_query(
     return start, end
 
 
+# Retired legacy report types (existing schedules keep running) and the
+# built-in template that replaces each (docs/reports-delivery.md).
 LEGACY_TYPES = [
     {"key": "executive_summary", "title": "Executive Summary",
      "description": "Leadership view: availability, SLA, incidents and MTTR.",
-     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"],
+     "deprecated": True, "replacement": "executive_overview"},
     {"key": "device_health", "title": "Device Health",
      "description": "Per-device uptime, latency and status changes.",
-     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"],
+     "deprecated": True, "replacement": "availability"},
     {"key": "service_health", "title": "Service Health",
      "description": "Service checks, response times and TLS expiry.",
-     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"],
+     "deprecated": True, "replacement": "service_owner_sla"},
     {"key": "alert_analysis", "title": "Alert Analysis",
      "description": "Alert volumes, severity mix and MTTR breakdown.",
-     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"],
+     "deprecated": True, "replacement": "alerts"},
     {"key": "full_report", "title": "Full Report",
      "description": "All legacy sections in a single document.",
-     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+     "category": "legacy", "engine": "legacy", "formats": ["pdf", "excel", "csv"],
+     "deprecated": True, "replacement": "network_operations"},
 ]
 
 PERIOD_LABELS = [
@@ -398,6 +419,7 @@ PERIOD_LABELS = [
     {"id": "yesterday", "label": "Yesterday", "kind": "calendar"},
     {"id": "week_to_date", "label": "This week", "kind": "calendar"},
     {"id": "previous_week", "label": "Previous week", "kind": "calendar"},
+    {"id": "previous_work_week", "label": "Previous work week", "kind": "calendar"},
     {"id": "month_to_date", "label": "This month", "kind": "calendar"},
     {"id": "previous_month", "label": "Previous month", "kind": "calendar"},
     {"id": "quarter_to_date", "label": "This quarter", "kind": "calendar"},
@@ -513,6 +535,22 @@ async def _resolve_for(db: AsyncSession, user: User, key: str,
     return preset["title"], preset["description"], preset.get("category") or "", entries
 
 
+async def _scope_filters(db: AsyncSession, device_ids, application_id: Optional[str],
+                         netflow: Optional[str], group_ids, locations, device_types) -> Optional[dict]:
+    """Section filters for the viewer and the designer preview: device ids,
+    RUM application, NetFlow scope, and a group / location / device-type
+    scope resolved to device ids. Ids may come comma-separated (UUIDs never
+    contain commas); locations and device types are taken whole, one per
+    value, so a location such as "Riyadh, HQ" survives."""
+    filters = await _render.build_filters(_render.parse_device_ids(_render.split_ids(device_ids)),
+                                          application_id, netflow)
+    return await _render.apply_device_scope(
+        db, filters,
+        group_ids=_render.parse_scope_values(_render.split_ids(group_ids), "group_ids", uuids=True),
+        locations=_render.parse_scope_values(locations, "locations"),
+        device_types=_render.parse_scope_values(device_types, "device_types"))
+
+
 def _file_response(out) -> Response:
     body, media, disposition = out
     return Response(content=body, media_type=media,
@@ -522,29 +560,39 @@ def _file_response(out) -> Response:
 @router.get("/render/{key}")
 async def render_section_report(
     key: str,
-    format: str = Query("json", pattern="^(json|html|pdf|xlsx)$"),
+    format: str = Query("json", pattern="^(json|html|pdf|xlsx|csv)$"),
     from_: Optional[datetime] = Query(None, alias="from"),
     to: Optional[datetime] = Query(None),
     hours: int = Query(24, ge=1, le=24 * 400),
     custom_id: Optional[str] = None,
-    device_ids: Optional[str] = Query(None, description="Comma-separated device UUIDs to scope node-aware sections"),
+    device_ids: Optional[list[str]] = Query(None, description="Device UUIDs to scope node-aware sections: "
+                                                              "repeat the parameter or separate with commas"),
     application_id: Optional[str] = Query(None, max_length=128,
                                           description="Scope browser RUM sections to one application; omit for all"),
     netflow: Optional[str] = Query(None, max_length=2000,
                                    description="NetFlow scope for traffic sections: a URL-encoded flow filter "
                                                "query string, e.g. exporter=10.0.0.1&app=DNS"),
+    group_ids: Optional[list[str]] = Query(None, description="Device group UUIDs to scope node-aware sections: "
+                                                             "repeat the parameter or separate with commas"),
+    locations: Optional[list[str]] = Query(None, description="Device locations to scope node-aware sections, one "
+                                                             "per parameter (a location may contain commas)"),
+    device_types: Optional[list[str]] = Query(None, description="Device types to scope node-aware sections, one "
+                                                                "per parameter"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Render a built-in template (key) or an organisation template
     (key='custom' + custom_id) for a window: JSON for the viewer, or a branded
-    PDF / HTML / Excel download (downloads need reports.export). Sections the
-    caller's role cannot see are replaced by a 'restricted' stub; NetFlow
-    sections are restricted to the exporters the caller may see."""
+    PDF / HTML / Excel / CSV download (downloads need reports.export). Sections
+    the caller's role cannot see are replaced by a 'restricted' stub; NetFlow
+    sections are restricted to the exporters the caller may see. A group,
+    location or device-type scope is resolved to its devices
+    (report_render.resolve_device_scope); every given filter must match."""
     if format != "json":
         await _require_export(db, current_user)
     title, description, category, entries = await _resolve_for(db, current_user, key, custom_id)
-    filters = await _render.build_filters(_render.parse_device_ids(device_ids), application_id, netflow)
+    filters = await _scope_filters(db, device_ids, application_id, netflow,
+                                   group_ids, locations, device_types)
     start, end = _window_from_query(from_, to, hours)
     out = await _render.render(db, user=current_user, key=key, title=title, description=description,
                                category=category, entries=entries, start=start, end=end,
@@ -569,6 +617,9 @@ class PreviewBody(BaseModel):
     device_ids: Optional[list[str]] = None
     application_id: Optional[str] = Field(None, max_length=128)
     netflow: Optional[str] = Field(None, max_length=2000)
+    group_ids: Optional[list[str]] = None
+    locations: Optional[list[str]] = None
+    device_types: Optional[list[str]] = None
 
     model_config = {"populate_by_name": True}
 
@@ -600,8 +651,8 @@ async def preview_report(
     """Render an unsaved template definition (the designer's live preview)."""
     entries = _validate_entries(body.sections)
     from app.services import report_templates as _rt
-    filters = await _render.build_filters(_render.parse_device_ids(body.device_ids),
-                                          body.application_id, body.netflow)
+    filters = await _scope_filters(db, body.device_ids, body.application_id, body.netflow,
+                                   body.group_ids, body.locations, body.device_types)
     start, end = _window_from_query(body.from_, body.to, body.hours)
     return await _render.render(
         db, user=current_user, key="preview", title=body.name.strip() or "Untitled report",
@@ -809,35 +860,3 @@ async def delete_custom_report(
         resource_id=row.id, metadata={"name": row.name, "schedules_removed": int(row.schedules or 0)})
     await db.commit()
     return {"message": "Report template deleted"}
-
-
-@router.get("/runs")
-async def recent_report_runs(
-    limit: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_permission("reports.view")),
-):
-    """Recent generated reports across all schedules (for the library page).
-    A run's share token only for its schedule's owner and report managers
-    (reports.manage holders not limited to a visibility scope; a run whose
-    schedule was deleted: report managers only)."""
-    from app.api.v1.report_schedules import is_report_manager
-
-    manager = await is_report_manager(db, current_user)
-    me = str(current_user.id)
-    rows = (await db.execute(text(
-        """SELECT r.id::text, r.title, r.report_type, r.period, r.token,
-                  r.status, r.delivered_to, r.generated_at, s.name AS schedule_name,
-                  s.created_by::text AS owner_id
-           FROM report_runs r
-           LEFT JOIN report_schedules s ON s.id = r.schedule_id
-           ORDER BY r.generated_at DESC LIMIT :lim"""), {"lim": limit})).fetchall()
-    out = []
-    for r in rows:
-        links = manager or (r[9] is not None and r[9] == me)
-        out.append({"id": r[0], "title": r[1], "report_type": r[2], "period": r[3],
-                    "token": r[4] if links else None, "token_withheld": not links,
-                    "status": r[5], "delivered_to": r[6] or [],
-                    "generated_at": r[7].isoformat() if r[7] else None,
-                    "schedule_name": r[8]})
-    return out

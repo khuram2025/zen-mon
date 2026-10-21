@@ -741,7 +741,8 @@ def _do_smtp_test(raw_config: dict, recipient: str) -> dict:
             server = smtplib.SMTP_SSL(config.host, config.port or 465, timeout=15, context=ssl.create_default_context())
         else:
             server = smtplib.SMTP(config.host, config.port or 587, timeout=15)
-            server.starttls(context=ssl.create_default_context())
+            from app.core.smtp_tls import starttls_if_needed
+            starttls_if_needed(server, config.encryption)
         try:
             if config.username:
                 server.login(config.username, config.password)
@@ -1315,7 +1316,8 @@ async def test_channel(
                 server = smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port, timeout=10, context=ssl.create_default_context())
             else:
                 server = smtplib.SMTP(smtp_cfg.host, smtp_cfg.port, timeout=10)
-                server.starttls(context=ssl.create_default_context())
+                from app.core.smtp_tls import starttls_if_needed
+                starttls_if_needed(server, smtp_cfg.encryption)
             if smtp_cfg.username:
                 server.login(smtp_cfg.username, smtp_cfg.password)
             server.sendmail(smtp_cfg.from_email, recipient_list, msg.as_string())

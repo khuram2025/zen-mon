@@ -61,8 +61,9 @@ class _Res:
         return self._scalar
 
 
-JSONB = ("filters", "notify_channels", "recipients")
-PARAM_COLUMNS = {"n": "next_run_at", "e": "enabled", "st": "last_status", "err": "last_error"}
+JSONB = ("filters", "notify_channels", "recipients", "cc")
+PARAM_COLUMNS = {"n": "next_run_at", "e": "enabled", "st": "last_status", "err": "last_error",
+                 "rt": "report_type", "fmt": "format", "owner": "created_by"}
 
 
 class ScheduleDB:
@@ -71,6 +72,7 @@ class ScheduleDB:
     def __init__(self):
         self.schedules: dict[str, dict] = {}
         self.templates: dict[str, SimpleNamespace] = {}
+        self.channels: dict[str, bool] = {}          # channel id -> enabled
         self.audits: list[dict] = []
         self.statements: list[str] = []
 
@@ -136,9 +138,20 @@ class ScheduleDB:
                 row = self.schedules.get(str(params["id"]))
                 return _Res([self._detail(row)] if row else [])
             return _Res([self._detail(r) for r in self.schedules.values()])
+        if sql.startswith("SELECT created_by FROM report_schedules WHERE id"):
+            row = self.schedules.get(str(params["id"]))
+            return _Res([SimpleNamespace(created_by=row["created_by"])] if row else [])
         if sql.startswith("SELECT * FROM report_schedules WHERE id"):
             row = self.schedules.get(str(params["id"]))
             return _Res([SimpleNamespace(**row)] if row else [])
+        if "FROM notification_channels" in sql:
+            return _Res([(c, self.channels[c]) for c in params["ids"] if c in self.channels])
+        if sql.startswith("UPDATE report_schedules SET last_status = 'running'"):
+            row = self.schedules.get(str(params["id"]))
+            if row is None or row.get("last_status") == "running":
+                return _Res()
+            row["last_status"] = "running"
+            return _Res([SimpleNamespace(id=row["id"])])
         if sql.startswith("UPDATE report_schedules SET"):
             row = self.schedules.get(str(params["id"]))
             if row is None:
@@ -200,6 +213,12 @@ def env(monkeypatch):
         return "Asia/Riyadh"
 
     monkeypatch.setattr(RS, "get_configured_timezone", tz)
+    state["links"] = True
+
+    async def links(_db):
+        return state["links"]
+
+    monkeypatch.setattr(RS, "_share_links_available", links)
 
     async def fake_db():
         yield db
@@ -225,16 +244,24 @@ def _put(env, sid, body):
 
 # ── Validation ───────────────────────────────────────────────────────────────
 
-def test_catalog_keys_legacy_types_and_calendar_periods_are_accepted(env):
+def test_catalog_keys_and_calendar_periods_are_accepted(env):
     for body in (
-        {"name": "Exec", "report_type": "executive_summary", "period": "last_24h", "format": "csv"},
+        {"name": "Exec", "report_type": "executive_overview", "period": "last_24h", "format": "csv"},
         {"name": "SLA", "report_type": "availability", "period": "previous_month", "format": "html"},
         {"name": "Ops", "report_type": "executive_overview", "period": "week_to_date", "format": "excel"},
         {"name": "Q", "report_type": "inventory", "period": "previous_quarter", "format": "none"},
+        {"name": "W", "report_type": "availability", "period": "previous_work_week", "format": "pdf"},
     ):
         r = _post(env, body)
         assert r.status_code == 201, (body, r.text)
         assert r.json()["period"] == body["period"] and r.json()["format"] == body["format"]
+
+
+@pytest.mark.parametrize("legacy,replacement", sorted(RS.LEGACY_REPLACEMENTS.items()))
+def test_retired_legacy_types_cannot_be_created(env, legacy, replacement):
+    r = _post(env, {"name": "Classic", "report_type": legacy, "format": "pdf"})
+    assert r.status_code == 400 and replacement in r.json()["detail"]
+    assert not env.db.schedules
 
 
 @pytest.mark.parametrize("body", [
@@ -253,13 +280,13 @@ def test_invalid_fields_are_rejected(env, body):
     assert not env.db.schedules
 
 
-@pytest.mark.parametrize("report_type,fmt", [
-    ("executive_summary", "html"),   # legacy: pdf | excel | csv | none
-    ("availability", "csv"),         # templates: pdf | excel | html | none
-])
-def test_format_must_suit_the_report_type(env, report_type, fmt):
-    r = _post(env, {"name": "Bad", "report_type": report_type, "format": fmt})
+def test_format_must_suit_the_report_type(env):
+    # Legacy: pdf | excel | csv | none (existing schedules keep running).
+    sid = env.db.add_schedule(report_type="executive_summary", format="pdf")
+    r = _put(env, sid, {"format": "html"})
     assert r.status_code == 400 and "delivered as" in r.json()["detail"]
+    # Templates: pdf | excel | html | csv | none.
+    assert _post(env, {"name": "CSV", "report_type": "availability", "format": "csv"}).status_code == 201
 
 
 def test_recipients_are_lowercased_deduplicated_and_stored(env):
@@ -303,7 +330,8 @@ def test_update_validates_the_merged_schedule(env):
     shared = env.db.add_template(owner=other, visibility="shared")
     sid = env.db.add_schedule(report_type="executive_summary", format="csv", created_by=me.id)
 
-    assert _put(env, sid, {"report_type": "availability"}).status_code == 400      # stored csv
+    assert _put(env, sid, {"report_type": "device_health"}).status_code == 400     # a retired type
+    assert _put(env, sid, {"report_type": "availability"}).status_code == 200      # templates take csv
     assert _put(env, sid, {"report_type": "availability", "format": "html"}).status_code == 200
     assert _put(env, sid, {"report_type": "custom", "custom_report_id": secret}).status_code == 404
     assert _put(env, sid, {"report_type": "custom"}).status_code == 400
@@ -430,7 +458,11 @@ def test_listing_fields(env):
     preset = rows[ids["preset"]]
     assert preset["report_title"] == "Availability & SLA Report"
     assert preset["owner_name"] == "Nadia Ops" and preset["owner_id"] == str(owner.id)
-    assert preset["recipients"] == ["ops@example.com"]
+    # Recipients are personal data: a viewer gets the count, not the addresses.
+    assert preset["recipients"] == [] and preset["recipients_withheld"] is True
+    assert preset["recipient_count"] == 1
+    assert rows[ids["legacy"]]["is_legacy"] is True and rows[ids["legacy"]]["replacement"] == "executive_overview"
+    assert preset["is_legacy"] is False and preset["replacement"] is None
     assert preset["next_run_at"] == "2026-10-12T05:00:00+00:00"
     assert preset["can_edit"] is False                      # a viewer cannot change schedules
     assert rows[ids["legacy"]]["report_title"] == "Executive Summary"
@@ -439,7 +471,9 @@ def test_listing_fields(env):
     assert rows[ids["gone"]]["report_title"] == "Deleted template"
 
     env.state["user"] = _user("rsx_manager")
-    assert all(r["can_edit"] for r in env.client.get("/api/v1/report-schedules").json()["data"])
+    managed = env.client.get("/api/v1/report-schedules").json()["data"]
+    assert all(r["can_edit"] for r in managed)
+    assert next(r for r in managed if r["id"] == ids["preset"])["recipients"] == ["ops@example.com"]
     env.state["user"] = someone
     rows = {r["id"]: r for r in env.client.get("/api/v1/report-schedules").json()["data"]}
     assert rows[ids["secret"]]["report_title"] == "Board pack"   # its owner sees the name
@@ -572,9 +606,10 @@ def test_a_time_in_the_name_that_differs_from_the_schedule_is_flagged(env):
                               timezone="Asia/Riyadh")
     row = env.client.get(f"/api/v1/report-schedules/{sid}").json()
     assert row["name_time_mismatch"] == "08:00"
+    assert row["suggested_time"] == {"hour": 8, "minute": 0}
     assert row["local_time_label"] == "05:00 Asia/Riyadh (02:00 UTC)"
     fixed = _put(env, sid, {"hour": 8}).json()           # the one-by-one correction
-    assert fixed["name_time_mismatch"] is None
+    assert fixed["name_time_mismatch"] is None and fixed["suggested_time"] is None
     assert datetime.fromisoformat(fixed["next_run_at"]).hour == 5
     assert env.db.audits[-1]["metadata"]["changed"] == ["hour"]
 
@@ -588,3 +623,137 @@ def test_audit_records_the_timing(env):
         meta = a["metadata"]
         assert (meta["frequency"], meta["hour"], meta["minute"], meta["timezone"], meta["day_of_week"]) == \
             ("weekly", hour, 30, "Europe/Berlin", 7)
+
+
+# ── Validation added after the SMASCO assessment (M1) ────────────────────────
+
+def test_a_blank_name_is_rejected(env):
+    assert _post(env, {"name": "   ", "report_type": "availability"}).status_code == 422
+    r = _post(env, {"name": "  Trimmed  ", "report_type": "availability"})
+    assert r.status_code == 201 and r.json()["name"] == "Trimmed"
+
+
+def test_weekly_and_monthly_need_their_day_and_unused_days_are_cleared(env):
+    assert _post(env, {"name": "w", "report_type": "availability", "frequency": "weekly"}).status_code == 400
+    assert _post(env, {"name": "m", "report_type": "availability", "frequency": "monthly"}).status_code == 400
+    r = _post(env, {"name": "m", "report_type": "availability", "frequency": "monthly", "day_of_month": 31})
+    assert r.status_code == 201 and r.json()["day_of_month"] == 31
+    r = _post(env, {"name": "d", "report_type": "availability", "frequency": "daily",
+                    "day_of_week": 3, "day_of_month": 15})
+    assert r.status_code == 201 and (r.json()["day_of_week"], r.json()["day_of_month"]) == (None, None)
+    sid = r.json()["id"]
+    assert _put(env, sid, {"frequency": "weekly"}).status_code == 400
+    r = _put(env, sid, {"frequency": "weekly", "day_of_week": 7})
+    assert r.status_code == 200 and r.json()["day_of_week"] == 7
+
+
+def test_notification_channels_must_exist_and_be_enabled(env):
+    good, off = str(uuid.uuid4()), str(uuid.uuid4())
+    env.db.channels.update({good: True, off: False})
+    base = {"name": "c", "report_type": "availability"}
+    r = _post(env, {**base, "notify_channels": ["not-a-uuid"]})
+    assert r.status_code == 400 and "not-a-uuid" in r.json()["detail"]
+    assert _post(env, {**base, "notify_channels": [str(uuid.uuid4())]}).status_code == 400
+    r = _post(env, {**base, "notify_channels": [off]})
+    assert r.status_code == 400 and "disabled" in r.json()["detail"]
+    r = _post(env, {**base, "notify_channels": [good.upper(), good]})
+    assert r.status_code == 201 and r.json()["notify_channels"] == [good]
+
+
+def test_scope_filters_are_limited_to_known_keys(env):
+    r = _post(env, {"name": "f", "report_type": "availability", "filters": {"foo": "bar"}})
+    assert r.status_code == 400 and "foo" in r.json()["detail"]
+    r = _post(env, {"name": "f", "report_type": "availability",
+                    "filters": {"group_ids": ["Core Network", " ", "Core Network"], "locations": "Jeddah;Dammam"}})
+    assert r.status_code == 201, r.text
+    assert r.json()["filters"] == {"group_ids": ["Core Network"], "locations": ["Jeddah", "Dammam"]}
+
+
+def test_email_options(env):
+    base = {"name": "e", "report_type": "availability", "recipients": ["a@example.com"]}
+    assert _post(env, {**base, "cc": ["b@example.com"]}).status_code == 400      # cc needs group_send
+    assert _post(env, {**base, "reply_to": "not-an-address"}).status_code == 422
+    r = _post(env, {**base, "group_send": True, "cc": ["B@example.com"], "reply_to": " NOC@Example.com ",
+                    "subject_template": "  {title}   for {period} ", "skip_when_empty": True})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["cc"] == ["b@example.com"] and body["reply_to"] == "noc@example.com"
+    assert body["subject_template"] == "{title} for {period}" and body["skip_when_empty"] is True
+    assert body["recipient_count"] == 2
+
+
+def test_summary_only_needs_a_report_link(env):
+    env.state["links"] = False
+    r = _post(env, {"name": "s", "report_type": "availability", "format": "none"})
+    assert r.status_code == 400 and "base URL" in r.json()["detail"]
+    sid = _post(env, {"name": "s", "report_type": "availability", "format": "pdf"}).json()["id"]
+    assert _put(env, sid, {"format": "none"}).status_code == 400
+    env.state["links"] = True
+    assert _put(env, sid, {"format": "none"}).status_code == 200
+
+
+def test_convert_a_legacy_schedule(env):
+    sid = env.db.add_schedule(report_type="executive_summary", format="csv", name="Classic exec")
+    r = env.client.post(f"/api/v1/report-schedules/{sid}/convert")
+    assert r.status_code == 200, r.text
+    assert r.json()["report_type"] == "executive_overview" and r.json()["format"] == "csv"
+    assert r.json()["is_legacy"] is False
+    assert env.db.audits[-1]["action"] == "reports.schedule.convert"
+    assert env.client.post(f"/api/v1/report-schedules/{sid}/convert").status_code == 400
+
+
+def test_run_now_refuses_while_the_schedule_is_running(env, monkeypatch):
+    async def never(db, sched, **kw):
+        raise AssertionError("must not run")
+
+    monkeypatch.setattr(RS, "generate_and_deliver", never)
+    sid = env.db.add_schedule(last_status="running")
+    assert env.client.post(f"/api/v1/report-schedules/{sid}/run-now").status_code == 409
+
+
+def test_a_scoped_account_only_sees_its_own_schedules(env, monkeypatch):
+    me = _user("rsx_viewer")
+    mine = env.db.add_schedule(created_by=me.id)
+    other = env.db.add_schedule(created_by=uuid.uuid4())
+    env.state["user"] = me
+
+    async def scoped(_db, user):
+        return ["team-a"]
+
+    monkeypatch.setattr(scoping, "visible_tags", scoped)
+    rows = env.client.get("/api/v1/report-schedules").json()["data"]
+    assert [r["id"] for r in rows] == [mine]
+    assert env.client.get(f"/api/v1/report-schedules/{other}").status_code == 404
+
+
+def test_overdue_flag(env):
+    late = env.db.add_schedule(next_run_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    soon = env.db.add_schedule(next_run_at=datetime.now(timezone.utc) + timedelta(hours=1))
+    rows = {r["id"]: r for r in env.client.get("/api/v1/report-schedules").json()["data"]}
+    assert rows[late]["overdue"] is True and rows[soon]["overdue"] is False
+
+
+def test_cc_needs_a_direct_recipient(env):
+    r = _post(env, {"name": "c", "report_type": "availability", "group_send": True, "cc": ["b@example.com"]})
+    assert r.status_code == 400 and "direct recipient" in r.json()["detail"]
+
+
+def test_converting_someone_elses_schedule_takes_it_over(env):
+    owner = uuid.uuid4()
+    sid = env.db.add_schedule(report_type="executive_summary", format="pdf", created_by=owner)
+    manager = env.state["user"] = _user("rsx_manager")
+    r = env.client.post(f"/api/v1/report-schedules/{sid}/convert")
+    assert r.status_code == 200, r.text
+    assert str(env.db.schedules[sid]["created_by"]) == str(manager.id)
+    assert env.db.audits[-1]["metadata"]["owner_changed_from"] == str(owner)
+
+
+def test_a_scoped_account_cannot_read_another_owners_run_history(env, monkeypatch):
+    sid = env.db.add_schedule(created_by=uuid.uuid4())
+    env.state["user"] = _user("rsx_viewer")
+
+    async def scoped(_db, user):
+        return ["team-a"]
+
+    monkeypatch.setattr(scoping, "visible_tags", scoped)
+    assert env.client.get(f"/api/v1/report-schedules/{sid}/runs").status_code == 404

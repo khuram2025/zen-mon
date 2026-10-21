@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -47,9 +47,11 @@ from app.services.report_scheduler import (
     generate_and_deliver,
     local_time_label,
     name_time_mismatch,
+    is_email,
     normalize_recipients,
     schedule_text,
     schedule_timezone,
+    suggested_time,
 )
 
 router = APIRouter(prefix="/report-schedules", tags=["Report Schedules"])
@@ -68,6 +70,19 @@ async def _refuse_scoped(db: AsyncSession, user: User) -> None:
 
 _FREQS = "daily|weekly|monthly"
 ALL_FORMATS = tuple(dict.fromkeys(LEGACY_FORMATS + TEMPLATE_FORMATS))
+# Retired legacy report types and the built-in template that replaces each
+# (docs/reports-delivery.md): existing schedules keep running and can be
+# converted; new ones cannot be created.
+LEGACY_REPLACEMENTS = {
+    "executive_summary": "executive_overview",
+    "device_health": "availability",
+    "service_health": "service_owner_sla",
+    "alert_analysis": "alerts",
+    "full_report": "network_operations",
+}
+# Scope keys a schedule may store (anything else is refused).
+FILTER_KEYS = frozenset({"device_ids", "group_ids", "locations", "device_types", "netflow", "application_id"})
+OVERDUE_AFTER_S = 600
 
 
 def _presets() -> dict:
@@ -115,6 +130,33 @@ def _check_recipients(value: Any) -> Any:
     return normalize_recipients(value)
 
 
+def _check_name(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return value
+    value = value.strip()
+    if not value:
+        raise ValueError("Name is required")
+    return value
+
+
+def _check_reply_to(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.strip().lower()
+    if not value:
+        return None
+    if not is_email(value):
+        raise ValueError(f"'{value[:80]}' is not a valid reply-to address")
+    return value
+
+
+def _check_subject(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = " ".join(value.split())
+    return value or None
+
+
 def _check_timezone(value: Optional[str]) -> Optional[str]:
     """An IANA zone name, trimmed; blank means "the organisation timezone"."""
     if value is None:
@@ -132,10 +174,13 @@ Period = Annotated[str, AfterValidator(_check_period)]
 Format = Annotated[str, AfterValidator(_check_format)]
 Recipients = Annotated[list[str], BeforeValidator(_check_recipients)]
 TimezoneName = Annotated[str, Field(max_length=100), AfterValidator(_check_timezone)]
+Name = Annotated[str, Field(min_length=1, max_length=255), AfterValidator(_check_name)]
+ReplyTo = Annotated[str, Field(max_length=254), AfterValidator(_check_reply_to)]
+SubjectTemplate = Annotated[str, Field(max_length=255), AfterValidator(_check_subject)]
 
 
 class ReportScheduleCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
+    name: Name
     description: Optional[str] = None
     enabled: bool = True
     report_type: ReportType = "executive_summary"
@@ -152,10 +197,15 @@ class ReportScheduleCreate(BaseModel):
     notify_channels: list[str] = Field(default_factory=list)
     custom_report_id: Optional[str] = None
     recipients: Recipients = Field(default_factory=list)
+    skip_when_empty: bool = False
+    subject_template: Optional[SubjectTemplate] = None
+    reply_to: Optional[ReplyTo] = None
+    group_send: bool = False
+    cc: Recipients = Field(default_factory=list)
 
 
 class ReportScheduleUpdate(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    name: Optional[Name] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
     report_type: Optional[ReportType] = None
@@ -172,6 +222,11 @@ class ReportScheduleUpdate(BaseModel):
     notify_channels: Optional[list[str]] = None
     custom_report_id: Optional[str] = None
     recipients: Optional[Recipients] = None
+    skip_when_empty: Optional[bool] = None
+    subject_template: Optional[SubjectTemplate] = None
+    reply_to: Optional[ReplyTo] = None
+    group_send: Optional[bool] = None
+    cc: Optional[Recipients] = None
 
 
 def _row_to_dict(row) -> dict:
@@ -192,6 +247,11 @@ def _row_to_dict(row) -> dict:
         "timezone": getattr(row, "timezone", None),
         "notify_channels": row.notify_channels or [],
         "recipients": list(getattr(row, "recipients", None) or []),
+        "skip_when_empty": bool(getattr(row, "skip_when_empty", False)),
+        "subject_template": getattr(row, "subject_template", None),
+        "reply_to": getattr(row, "reply_to", None),
+        "group_send": bool(getattr(row, "group_send", False)),
+        "cc": list(getattr(row, "cc", None) or []),
         "custom_report_id": str(row.custom_report_id) if getattr(row, "custom_report_id", None) else None,
         "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
         "last_status": row.last_status,
@@ -205,7 +265,7 @@ def _row_to_dict(row) -> dict:
 _SELECT = "SELECT * FROM report_schedules"
 # Fields that decide what a schedule delivers and to whom (see update).
 _DELIVERY_KEYS = frozenset({"report_type", "custom_report_id", "filters", "recipients",
-                            "notify_channels", "period", "format"})
+                            "notify_channels", "period", "format", "cc", "group_send"})
 # Schedules with their owner's name and their organisation template's name
 # and visibility, for listings.
 _SELECT_DETAIL = (
@@ -225,6 +285,30 @@ async def _validated_filters(filters: dict | None) -> dict:
     Device ids must be UUIDs; the listing's ``netflow_withheld`` marker is
     never stored."""
     out = {k: v for k, v in (filters or {}).items() if k != "netflow_withheld"}
+    unknown = sorted(k for k in out if k not in FILTER_KEYS)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown scope filter(s): {', '.join(unknown)[:200]}; "
+                                                    f"use {', '.join(sorted(FILTER_KEYS))}")
+    for key in ("group_ids", "locations", "device_types"):
+        if key in out:
+            vals = out[key]
+            if isinstance(vals, str):
+                vals = [v for v in re.split(r"[,;]", vals)]
+            if not isinstance(vals, list):
+                raise HTTPException(status_code=400, detail=f"{key} must be a list")
+            vals = list(dict.fromkeys(str(v).strip() for v in vals if str(v).strip()))[:200]
+            if any(len(v) > 128 for v in vals):
+                raise HTTPException(status_code=400, detail=f"{key} values are at most 128 characters")
+            if vals:
+                out[key] = vals
+            else:
+                out.pop(key)
+    if "application_id" in out:
+        app_id = str(out["application_id"] or "").strip()
+        if app_id and len(app_id) <= 128:
+            out["application_id"] = app_id
+        else:
+            out.pop("application_id")
     if "device_ids" in out:
         from app.services.report_render import parse_device_ids
         ids = parse_device_ids(out["device_ids"])
@@ -299,7 +383,78 @@ def _check_format_for_type(report_type: str, fmt: str) -> None:
         if fmt not in LEGACY_FORMATS:
             raise HTTPException(400, "Legacy reports are delivered as PDF, Excel or CSV (or no attachment)")
     elif fmt not in TEMPLATE_FORMATS:
-        raise HTTPException(400, "Template reports are delivered as PDF, Excel or HTML (or no attachment)")
+        raise HTTPException(400, "Template reports are delivered as PDF, Excel, CSV or HTML (or no attachment)")
+
+
+def _normalize_timing(fields: dict, frequency: str) -> None:
+    """Weekly needs its weekday and monthly its day of the month (they used
+    to fall back to Monday / the 1st silently); fields that do not apply to
+    the frequency are cleared."""
+    if frequency == "weekly":
+        if fields.get("day_of_week") is None:
+            raise HTTPException(400, "Weekly schedules need day_of_week (1 = Monday … 7 = Sunday)")
+        fields["day_of_month"] = None
+    elif frequency == "monthly":
+        if fields.get("day_of_month") is None:
+            raise HTTPException(400, "Monthly schedules need day_of_month (1–31; 29–31 run on the "
+                                     "month's last day in shorter months)")
+        fields["day_of_week"] = None
+    else:
+        fields["day_of_week"] = None
+        fields["day_of_month"] = None
+
+
+async def _check_channels(db: AsyncSession, channel_ids: list) -> list[str]:
+    """Canonical ids of existing, enabled notification channels; 400 naming
+    anything else (a bad id used to fail every run with a database error)."""
+    out: list[str] = []
+    bad: list[str] = []
+    for raw in channel_ids or []:
+        try:
+            cid = str(UUID(str(raw)))
+        except (ValueError, TypeError, AttributeError):
+            bad.append(str(raw)[:40])
+            continue
+        if cid not in out:
+            out.append(cid)
+    if bad:
+        raise HTTPException(400, f"Not a notification channel id: {', '.join(bad)}")
+    if out:
+        rows = (await db.execute(
+            text("SELECT id::text, enabled FROM notification_channels WHERE id::text = ANY(:ids)"),
+            {"ids": out})).fetchall()
+        found = {r[0]: r[1] for r in rows}
+        missing = [c for c in out if c not in found]
+        disabled = [c for c in out if found.get(c) is False]
+        if missing:
+            raise HTTPException(400, f"Notification channel(s) not found: {', '.join(missing)}")
+        if disabled:
+            raise HTTPException(400, f"Notification channel(s) are disabled: {', '.join(disabled)}")
+    return out
+
+
+def _check_email_options(fields: dict, current: Any = None) -> None:
+    group = fields.get("group_send", getattr(current, "group_send", False))
+    cc = fields.get("cc", list(getattr(current, "cc", None) or []))
+    recipients = fields.get("recipients", list(getattr(current, "recipients", None) or []))
+    if cc and not group:
+        raise HTTPException(400, "CC only applies when one email goes to all recipients (group_send)")
+    if cc and not recipients:
+        raise HTTPException(400, "CC needs at least one direct recipient")
+
+
+async def _share_links_available(db: AsyncSession) -> bool:
+    from app.services.branding import load_branding
+    from app.services.report_scheduler import _base_url
+    return bool(_base_url(await load_branding(db)))
+
+
+async def _check_summary_only(db: AsyncSession, fmt: Optional[str]) -> None:
+    """"Summary only" promises a link to the full report: refuse it while no
+    base URL is configured (the email would carry neither file nor link)."""
+    if fmt == "none" and not await _share_links_available(db):
+        raise HTTPException(400, "\"Summary only\" needs a link to the report, and no base URL is "
+                                 "configured: set it in Settings → Branding, or attach the report")
 
 
 async def _readable_template_id(db: AsyncSession, user: User, custom_id: Optional[str]) -> str:
@@ -365,11 +520,16 @@ def timing_fields(item: dict, org_tz: str) -> dict:
         "schedule_label": schedule_text(item, org_tz),
         "next_run_local": None,
         "name_time_mismatch": name_time_mismatch(item.get("name"), item.get("hour"), item.get("minute")),
+        "suggested_time": suggested_time(item.get("name"), item.get("hour"), item.get("minute")),
+        "overdue": False,
     }
     nxt = item.get("next_run_at")
     if nxt:
         try:
-            out["next_run_local"] = datetime.fromisoformat(nxt).astimezone(ZoneInfo(zone)).isoformat()
+            due = datetime.fromisoformat(nxt)
+            out["next_run_local"] = due.astimezone(ZoneInfo(zone)).isoformat()
+            out["overdue"] = bool(item.get("enabled")) and item.get("last_status") != "running" and \
+                (datetime.now(timezone.utc) - due).total_seconds() > OVERDUE_AFTER_S
         except (TypeError, ValueError):
             pass
     return out
@@ -405,6 +565,16 @@ class _Viewer:
         # manager); an owner without that cannot change its schedule either.
         item["can_edit"] = self.manager
         item["is_owner"] = owner_id is not None and str(owner_id) == str(getattr(self.user, "id", ""))
+        item["is_legacy"] = item.get("report_type") in LEGACY_REPORT_TYPES
+        item["replacement"] = LEGACY_REPLACEMENTS.get(item.get("report_type") or "")
+        item["recipient_count"] = len(item.get("recipients") or []) + len(item.get("cc") or [])
+        # Addresses are personal data: only report managers and the owner see
+        # them (reports.view alone used to list every schedule's recipients).
+        withheld = not (self.manager or item["is_owner"])
+        item["recipients_withheld"] = withheld
+        if withheld:
+            item["recipients"], item["cc"] = [], []
+            item["reply_to"] = None
         return item
 
 
@@ -419,7 +589,37 @@ async def list_report_schedules(
 ):
     rows = (await db.execute(text(f"{_SELECT_DETAIL} ORDER BY s.created_at DESC"))).fetchall()
     viewer = await _Viewer.load(db, user)
+    if await scoping.visible_tags(db, user) is not None:
+        # An account limited to a visibility scope only sees its own schedules.
+        rows = [r for r in rows if str(getattr(r, "created_by", "") or "") == str(user.id)]
     return {"data": [viewer.serialize(r) for r in rows]}
+
+
+@router.get("/status")
+async def report_schedules_status(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("reports.view")),
+):
+    """Scheduler health (last tick, overdue schedules), whether report emails
+    can carry a link, and the delivery settings."""
+    from app.services import report_settings
+    from app.services.report_scheduler import TICK_INTERVAL_S, scheduler_last_tick
+
+    last_tick = await scheduler_last_tick(db)
+    # A visibility-scoped account counts only the schedules it owns (the
+    # ones it can list).
+    own = await scoping.visible_tags(db, user) is not None
+    overdue = (await db.execute(text(
+        "SELECT count(*) FROM report_schedules WHERE enabled AND next_run_at < NOW() - make_interval(secs => :s) "
+        "AND last_status IS DISTINCT FROM 'running'"
+        + (" AND created_by = CAST(:me AS uuid)" if own else "")),
+        {"s": OVERDUE_AFTER_S, **({"me": str(user.id)} if own else {})})).scalar() or 0
+    healthy = last_tick is not None and \
+        (datetime.now(timezone.utc) - last_tick).total_seconds() < TICK_INTERVAL_S * 5
+    return {"scheduler_last_tick_at": last_tick.isoformat() if last_tick else None,
+            "scheduler_healthy": healthy, "overdue_count": int(overdue),
+            "share_links_available": await _share_links_available(db),
+            "settings": await report_settings.load(db)}
 
 
 @router.get("/{schedule_id}")
@@ -431,6 +631,9 @@ async def get_report_schedule(
     row = await _load_detail(db, schedule_id)
     if not row:
         raise HTTPException(status_code=404, detail="Report schedule not found")
+    if await scoping.visible_tags(db, user) is not None and \
+            str(getattr(row, "created_by", "") or "") != str(user.id):
+        raise HTTPException(status_code=404, detail="Report schedule not found")
     return (await _Viewer.load(db, user)).serialize(row)
 
 
@@ -441,7 +644,16 @@ async def create_report_schedule(
     user: User = Depends(require_permission("reports.manage")),
 ):
     await _refuse_scoped(db, user)
+    if data.report_type in LEGACY_REPORT_TYPES:
+        raise HTTPException(400, f"The classic '{data.report_type}' report is retired: schedule the "
+                                 f"'{LEGACY_REPLACEMENTS[data.report_type]}' template instead")
     _check_format_for_type(data.report_type, data.format)
+    await _check_summary_only(db, data.format)
+    timing = {"day_of_week": data.day_of_week, "day_of_month": data.day_of_month}
+    _normalize_timing(timing, data.frequency)
+    data.day_of_week, data.day_of_month = timing["day_of_week"], timing["day_of_month"]
+    data.notify_channels = await _check_channels(db, data.notify_channels)
+    _check_email_options({"group_send": data.group_send, "cc": data.cc, "recipients": data.recipients})
     if data.report_type == "custom":
         data.custom_report_id = await _readable_template_id(db, user, data.custom_report_id)
     else:
@@ -456,11 +668,13 @@ async def create_report_schedule(
         text("""INSERT INTO report_schedules
                 (name, description, enabled, report_type, period, format, filters,
                  frequency, hour, minute, day_of_week, day_of_month, timezone, notify_channels,
-                 recipients, custom_report_id, next_run_at, created_by, created_at, updated_at)
+                 recipients, custom_report_id, next_run_at, created_by, created_at, updated_at,
+                 skip_when_empty, subject_template, reply_to, group_send, cc)
                 VALUES (:name, :description, :enabled, :report_type, :period, :format,
                         CAST(:filters AS jsonb), :frequency, :hour, :minute,
                         :day_of_week, :day_of_month, :timezone, CAST(:notify_channels AS jsonb),
-                        CAST(:recipients AS jsonb), :custom_report_id, :next_run_at, :created_by, NOW(), NOW())
+                        CAST(:recipients AS jsonb), :custom_report_id, :next_run_at, :created_by, NOW(), NOW(),
+                        :skip_when_empty, :subject_template, :reply_to, :group_send, CAST(:cc AS jsonb))
                 RETURNING *"""),
         {
             "name": data.name, "description": data.description, "enabled": data.enabled,
@@ -472,6 +686,9 @@ async def create_report_schedule(
             "notify_channels": json.dumps(data.notify_channels or []),
             "recipients": json.dumps(data.recipients or []),
             "next_run_at": next_run, "created_by": getattr(user, "id", None),
+            "skip_when_empty": data.skip_when_empty, "subject_template": data.subject_template,
+            "reply_to": data.reply_to, "group_send": data.group_send,
+            "cc": json.dumps(data.cc or []),
         },
     )).first()
     await _audit(db, user, "create", row)
@@ -494,13 +711,29 @@ async def update_report_schedule(
     current = (await db.execute(text(f"{_SELECT} WHERE id = :id"), {"id": schedule_id})).first()
     if not current:
         raise HTTPException(status_code=404, detail="Report schedule not found")
-    for key in ("report_type", "period", "format", "name", "enabled", "frequency", "hour", "minute"):
+    for key in ("report_type", "period", "format", "name", "enabled", "frequency", "hour", "minute",
+                "skip_when_empty", "group_send"):
         if key in fields and fields[key] is None:
             raise HTTPException(status_code=400, detail=f"'{key}' cannot be empty")
 
     report_type = fields.get("report_type", current.report_type)
+    if "report_type" in fields and report_type in LEGACY_REPORT_TYPES and report_type != current.report_type:
+        raise HTTPException(400, f"The classic '{report_type}' report is retired: use the "
+                                 f"'{LEGACY_REPLACEMENTS[report_type]}' template instead")
     if "report_type" in fields or "format" in fields:
         _check_format_for_type(report_type, fields.get("format", current.format))
+    if "format" in fields and fields["format"] != current.format:
+        await _check_summary_only(db, fields["format"])
+    if {"frequency", "day_of_week", "day_of_month"} & set(fields):
+        timing = {"day_of_week": fields.get("day_of_week", current.day_of_week),
+                  "day_of_month": fields.get("day_of_month", current.day_of_month)}
+        _normalize_timing(timing, fields.get("frequency", current.frequency))
+        fields.update(timing)
+    if "notify_channels" in fields:
+        fields["notify_channels"] = await _check_channels(db, fields["notify_channels"] or [])
+    if "cc" in fields and fields["cc"] is None:
+        fields["cc"] = []
+    _check_email_options(fields, current)
     if report_type == "custom":
         if "report_type" in fields or "custom_report_id" in fields:
             requested = fields["custom_report_id"] if "custom_report_id" in fields \
@@ -533,7 +766,7 @@ async def update_report_schedule(
         if key == "filters":
             set_parts.append("filters = CAST(:filters AS jsonb)")
             params[key] = json.dumps(value or {})
-        elif key in ("notify_channels", "recipients"):
+        elif key in ("notify_channels", "recipients", "cc"):
             set_parts.append(f"{key} = CAST(:{key} AS jsonb)")
             params[key] = json.dumps(value or [])
         else:
@@ -621,8 +854,23 @@ async def run_report_schedule_now(
     )).first()
     if not row:
         raise HTTPException(status_code=404, detail="Report schedule not found")
+    # Claim the schedule so a second click or the timer cannot run it in
+    # parallel (the tick skips a schedule marked running in the last 30 min).
+    claimed = (await db.execute(text(
+        "UPDATE report_schedules SET last_status = 'running', updated_at = NOW() "
+        "WHERE id = :id AND (last_status IS DISTINCT FROM 'running' OR updated_at IS NULL "
+        "OR updated_at <= NOW() - INTERVAL '30 minutes') "
+        "RETURNING id"), {"id": schedule_id})).first()
+    await db.commit()
+    if claimed is None:
+        raise HTTPException(status_code=409, detail="This schedule is already running; wait for it to finish")
     sched = _row_to_dict(row)
-    result = await generate_and_deliver(db, sched, triggered_by="manual")
+    try:
+        result = await generate_and_deliver(db, sched, triggered_by="manual")
+    except Exception as exc:
+        from app.services.report_scheduler import short_error
+        await db.rollback()
+        result = {"status": "failed", "errors": [short_error(exc)], "delivered": [], "run_id": None}
     await db.execute(
         text("UPDATE report_schedules SET last_run_at = NOW(), last_status = :st, last_error = :err, "
              "updated_at = NOW() WHERE id = :id"),
@@ -630,9 +878,48 @@ async def run_report_schedule_now(
     )
     await _audit(db, user, "run_now", row, status=result["status"], delivered=len(result["delivered"]))
     await db.commit()
-    message = (f"Report generated ({result['status']})" if result.get("run_id")
-               else f"Report not generated: {'; '.join(result['errors'])}")
+    if result.get("status") == "skipped":
+        message = "Report not sent: it has no data for this period (the schedule skips empty reports)"
+    elif result.get("run_id"):
+        message = f"Report generated ({result['status']})"
+    else:
+        message = f"Report not generated: {'; '.join(result['errors'])}"
     return {"message": message, **result}
+
+
+@router.post("/{schedule_id}/convert")
+async def convert_legacy_schedule(
+    schedule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("reports.manage")),
+):
+    """Switch a schedule of a retired classic report type to the built-in
+    template that replaces it; timing, delivery and scope are kept (a CSV
+    attachment stays CSV, templates deliver CSV too)."""
+    await _refuse_scoped(db, user)
+    row = (await db.execute(text(f"{_SELECT} WHERE id = :id"), {"id": schedule_id})).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report schedule not found")
+    target = LEGACY_REPLACEMENTS.get(row.report_type)
+    if not target:
+        raise HTTPException(status_code=400, detail="This schedule already delivers a report template")
+    if target not in _presets():
+        raise HTTPException(status_code=409, detail=f"The replacement template '{target}' is not available")
+    fmt = row.format if row.format in TEMPLATE_FORMATS else "pdf"
+    # Converting changes what is delivered: like any delivery edit by someone
+    # other than the owner (and not a full admin), the editor takes it over.
+    takeover = (str(getattr(row, "created_by", "") or "") != str(user.id)
+                and not await _is_full_admin(db, user))
+    await db.execute(text(
+        "UPDATE report_schedules SET report_type = :rt, format = :fmt, custom_report_id = NULL, "
+        + ("created_by = CAST(:owner AS uuid), " if takeover else "")
+        + "updated_at = NOW() WHERE id = :id"),
+        {"rt": target, "fmt": fmt, "id": schedule_id, **({"owner": str(user.id)} if takeover else {})})
+    updated = await _load_detail(db, schedule_id)
+    await _audit(db, user, "convert", updated, converted_from=row.report_type,
+                 **({"owner_changed_from": str(row.created_by) if row.created_by else None} if takeover else {}))
+    await db.commit()
+    return (await _Viewer.load(db, user)).serialize(updated)
 
 
 REPORTS_VIEW_PERMISSION = "reports.view"
@@ -675,17 +962,17 @@ async def list_runs(
         text("SELECT created_by FROM report_schedules WHERE id = :id"), {"id": schedule_id})).first()
     if schedule is None:
         raise HTTPException(status_code=404, detail="Report schedule not found")
+    if await scoping.visible_tags(db, user) is not None and \
+            str(schedule.created_by or "") != str(user.id):
+        raise HTTPException(status_code=404, detail="Report schedule not found")
     links = await sees_share_links(db, user, schedule.created_by)
+    from app.api.v1.report_runs import RUN_COLUMNS, serialize_run
     rows = (await db.execute(
-        text("""SELECT id, token, title, status, delivered_to, error, generated_at
-                FROM report_runs WHERE schedule_id = :id ORDER BY generated_at DESC LIMIT 20"""),
+        text(f"""SELECT {RUN_COLUMNS} FROM report_runs r
+                 LEFT JOIN report_schedules s ON s.id = r.schedule_id
+                 WHERE r.schedule_id = :id ORDER BY r.generated_at DESC LIMIT 20"""),
         {"id": schedule_id},
     )).fetchall()
-    return {"data": [
-        {
-            "id": str(r.id), "token": r.token if links else None, "token_withheld": not links,
-            "title": r.title, "status": r.status,
-            "delivered_to": r.delivered_to or [], "error": r.error,
-            "generated_at": r.generated_at.isoformat() if r.generated_at else None,
-        } for r in rows
-    ], "can_view_links": links}
+    manager = await is_report_manager(db, user)
+    return {"data": [serialize_run(r, links=links, manager=manager) for r in rows],
+            "can_view_links": links}
