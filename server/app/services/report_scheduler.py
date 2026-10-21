@@ -69,7 +69,9 @@ TICK_INTERVAL_S = 60
 # type is a section-engine template: a built-in key or 'custom'.
 LEGACY_REPORT_TYPES = ("executive_summary", "device_health", "service_health", "alert_analysis", "full_report")
 LEGACY_FORMATS = ("pdf", "excel", "csv", "none")
-TEMPLATE_FORMATS = ("pdf", "excel", "html", "none")
+# Legacy types whose sections read fleet-wide data (reports._LEGACY_UNSCOPABLE).
+LEGACY_UNSCOPABLE = frozenset({"service_health", "full_report"})
+TEMPLATE_FORMATS = ("pdf", "excel", "html", "csv", "none")
 MAX_RECIPIENTS = 50
 
 # Attachment format -> (file extension, MIME type).
@@ -244,6 +246,13 @@ def name_time_mismatch(name: Any, hour: Any, minute: Any) -> Optional[str]:
         h, m = int(hour), int(minute)
     except (TypeError, ValueError):
         return None
+    found = _name_time(name, h, m)
+    return found[0] if found else None
+
+
+def _name_time(name: str, h: int, m: int) -> Optional[tuple[str, int, int]]:
+    """(text, hour, minute) of the first time in ``name`` that differs from
+    h:m, else None."""
     for match in _TIME_IN_NAME.finditer(name):
         nh, nm = int(match.group(1)), int(match.group(2))
         ampm = (match.group(3) or "").lower()
@@ -252,8 +261,22 @@ def name_time_mismatch(name: Any, hour: Any, minute: Any) -> Optional[str]:
                 continue
             nh = (nh % 12) + (12 if ampm == "p" else 0)
         if (nh, nm) != (h, m):
-            return match.group(0).strip()
+            return match.group(0).strip(), nh, nm
     return None
+
+
+def suggested_time(name: Any, hour: Any, minute: Any) -> Optional[dict]:
+    """{hour, minute} written in a schedule's name when it differs from the
+    stored time: the one-click correction the schedules page offers for
+    schedules whose hour was entered already converted to UTC."""
+    if not isinstance(name, str):
+        return None
+    try:
+        h, m = int(hour), int(minute)
+    except (TypeError, ValueError):
+        return None
+    found = _name_time(name, h, m)
+    return {"hour": found[1], "minute": found[2]} if found else None
 
 
 
@@ -321,15 +344,22 @@ def _msgid_domain(gw: dict) -> str:
 
 def build_email_message(gw: dict, recipients: list[str], subject: str, text_body: str, html_body: str,
                         attachment: tuple[str, bytes, str] | None = None,
-                        inline_images: Iterable[tuple[str, bytes, str]] | None = None) -> MIMEMultipart:
+                        inline_images: Iterable[tuple[str, bytes, str]] | None = None, *,
+                        cc: Iterable[str] | None = None, reply_to: str | None = None) -> MIMEMultipart:
     """multipart/mixed { alternative { text, related { html, inline images } }, attachment }.
 
     ``attachment`` = (filename, bytes, MIME type); ``inline_images`` =
-    (content id, bytes, MIME type) referenced from the HTML as ``cid:<id>``."""
+    (content id, bytes, MIME type) referenced from the HTML as ``cid:<id>``.
+    ``cc`` and ``reply_to`` only take plain addresses (``is_email``)."""
     outer = MIMEMultipart("mixed")
     outer["From"] = formataddr((_clean_header(str(gw.get("from_name") or "ZenPlus")),
                                 str(gw.get("from_email") or "")), charset="utf-8")
     outer["To"] = ", ".join(recipients)
+    cc_list = [c for c in (cc or ()) if is_email(c)]
+    if cc_list:
+        outer["Cc"] = ", ".join(cc_list)
+    if reply_to and is_email(reply_to):
+        outer["Reply-To"] = reply_to
     outer["Subject"] = _clean_header(subject)
     outer["Date"] = formatdate(usegmt=True)
     outer["Message-ID"] = make_msgid(domain=_msgid_domain(gw))
@@ -372,7 +402,8 @@ def _smtp_connect(gw: dict) -> smtplib.SMTP:
         server = smtplib.SMTP(gw["host"], int(gw.get("port", 587)), timeout=20)
     try:
         if enc != "ssl":
-            server.starttls(context=ssl.create_default_context())
+            from app.core.smtp_tls import starttls_if_needed
+            starttls_if_needed(server, enc)
         if gw.get("username"):
             server.login(gw["username"], gw.get("password", ""))
     except Exception:
@@ -402,20 +433,25 @@ def _smtp_error(exc: Exception) -> str:
 def _send_email_with_attachment(gw: dict, recipients: list[str], subject: str,
                                 text_body: str, html_body: str,
                                 attachment: tuple[str, bytes, str] | None = None,
-                                inline_images: Iterable[tuple[str, bytes, str]] | None = None) -> None:
-    """Send one multipart email to ``recipients`` (an email channel's list).
+                                inline_images: Iterable[tuple[str, bytes, str]] | None = None, *,
+                                cc: Iterable[str] | None = None, reply_to: str | None = None) -> None:
+    """Send one multipart email to ``recipients`` (an email channel's list, or
+    a group-send schedule's direct recipients with their CC list).
     attachment = (filename, bytes, MIME type or bare application subtype)."""
-    msg = build_email_message(gw, recipients, subject, text_body, html_body, attachment, inline_images)
+    cc_list = [c for c in (cc or ()) if is_email(c)]
+    msg = build_email_message(gw, recipients, subject, text_body, html_body, attachment, inline_images,
+                              cc=cc_list, reply_to=reply_to)
     server = _smtp_connect(gw)
     try:
-        server.sendmail(gw.get("from_email", ""), recipients, msg.as_string())
+        server.sendmail(gw.get("from_email", ""), list(recipients) + cc_list, msg.as_string())
     finally:
         _smtp_close(server)
 
 
 def _send_individually(gw: dict, recipients: list[str], subject: str, text_body: str, html_body: str,
                        attachment: tuple[str, bytes, str] | None = None,
-                       inline_images: Iterable[tuple[str, bytes, str]] | None = None,
+                       inline_images: Iterable[tuple[str, bytes, str]] | None = None, *,
+                       reply_to: str | None = None,
                        ) -> tuple[list[str], list[tuple[str, str]]]:
     """Send one message per direct recipient over a single SMTP session, so
     recipients (often external) never see each other's addresses. Returns
@@ -423,7 +459,8 @@ def _send_individually(gw: dict, recipients: list[str], subject: str, text_body:
     raise."""
     if not recipients:
         return [], []
-    msg = build_email_message(gw, recipients[:1], subject, text_body, html_body, attachment, inline_images)
+    msg = build_email_message(gw, recipients[:1], subject, text_body, html_body, attachment, inline_images,
+                              reply_to=reply_to)
     domain = _msgid_domain(gw)
     sent: list[str] = []
     failed: list[tuple[str, str]] = []
@@ -480,13 +517,26 @@ MANUAL_RUN_NOTE = ("Manual run: generated on request, not at the schedule's time
                    "Scheduled deliveries are not affected.")
 
 
-def email_subject(branding: Branding | None, title: str, period_label: str, *, manual: bool = False) -> str:
+NO_DATA_SUBJECT_TAG = "[No data]"
+
+
+def email_subject(branding: Branding | None, title: str, period_label: str, *, manual: bool = False,
+                  template: str | None = None, empty: bool = False, now: datetime | None = None) -> str:
     """'[Confidential] Monthly SLA — Previous month (1 Sep 2026 – 30 Sep 2026)';
-    a manual run carries '[Manual run]' after the classification."""
+    a manual run carries '[Manual run]' and a report without data '[No data]'
+    after the classification. A schedule's ``subject_template`` replaces the
+    title-and-period part."""
     prefix = f"[{branding.confidentiality}] " if branding is not None and branding.confidentiality else ""
     if manual:
         prefix += f"{MANUAL_SUBJECT_TAG} "
-    return _clean_header(f"{prefix}{title} — {period_label}")
+    if empty:
+        prefix += f"{NO_DATA_SUBJECT_TAG} "
+    body = f"{title} — {period_label}"
+    if template and template.strip():
+        tz = branding.timezone if branding is not None else "UTC"
+        body = render_subject_template(template.strip(), title=title, period_label=period_label,
+                                       generated=now or datetime.now(timezone.utc), tz=tz)
+    return _clean_header(f"{prefix}{body}")[:255]
 
 
 def _utc_clock(dt: datetime) -> str:
@@ -581,10 +631,10 @@ async def _owner_scope(db: AsyncSession, owner: Any, entries: list,
 
     entries = _sections.section_entries(entries)[:report_render.MAX_SECTIONS]
     if not _is_user(owner):
-        return entries, filters, report_render.scope_label_for(filters)
+        return entries, filters, await _scope_label(db, filters)
     scoped, ids = await scoping.scoped_device_filter(db, owner, filters.get("device_ids"))
     if not scoped:
-        return entries, filters, report_render.scope_label_for(filters)
+        return entries, filters, await _scope_label(db, filters)
     kept = [e for e in entries if e["id"] in _sections.SCOPE_SAFE_SECTIONS]
     if not kept:
         raise ReportUnavailable("The schedule's owner is limited to a visibility scope and this report has "
@@ -595,6 +645,16 @@ async def _owner_scope(db: AsyncSession, owner: Any, entries: list,
     label = "Limited to the owner's visibility scope" + (
         f" ({omitted} fleet-wide section(s) omitted)" if omitted else "")
     return kept, scoped_filters, label
+
+
+async def _scope_label(db: AsyncSession, filters: dict) -> str:
+    """The report's scope in words, naming up to five devices or the chosen
+    groups/locations (``report_render.scope_label``)."""
+    from app.services import report_render
+    label_fn = getattr(report_render, "scope_label", None)
+    if label_fn is None:
+        return report_render.scope_label_for(filters)
+    return await label_fn(db, filters)
 
 
 def _email_logo(sections_mod: Any, meta: dict) -> Optional[tuple[str, bytes, str]]:
@@ -621,20 +681,267 @@ def _not_generated(message: str) -> dict:
             "delivered": [], "errors": [message], "status": "failed"}
 
 
+def short_error(exc: BaseException) -> str:
+    """One readable line for a run or schedule error. SMTP and network errors
+    keep their message; database errors keep the driver's first line without
+    SQL text, parameter dumps or documentation links; anything else is only
+    its class name (an unexpected message may carry a DSN or a secret)."""
+    if isinstance(exc, (smtplib.SMTPException, OSError)):
+        return _smtp_error(exc)
+    from sqlalchemy.exc import SQLAlchemyError
+    if not isinstance(exc, SQLAlchemyError):
+        return type(exc).__name__
+    msg = str(getattr(exc, "orig", None) or exc).strip().splitlines()
+    first = (msg[0] if msg else "").split("[SQL:")[0].strip()
+    first = re.sub(r"^\(?[\w.]+\)?\s*", "", first) if first.startswith("(") else first
+    first = re.sub(r"<class '[^']+'>:\s*", "", first)
+    return f"{type(exc).__name__}: {first}"[:300] if first else type(exc).__name__
+
+
+def _retryable(error: str) -> bool:
+    """A delivery error worth retrying: connection and temporary (4xx) SMTP
+    failures, not a permanent refusal (5xx) of the address."""
+    m = re.search(r"\b([45])\d\d\b", error or "")
+    return not (m and m.group(1) == "5")
+
+
+def _http_failure(err: Any) -> tuple[str, bool]:
+    """(message, retryable) for a webhook-family channel error: a server error
+    (5xx), 429 or a network failure is retried; any other HTTP status (a
+    wrong URL, a revoked token) is not."""
+    response = getattr(err, "response", None)
+    code = getattr(response, "status_code", None)
+    if isinstance(code, int):
+        return f"HTTP {code}", code >= 500 or code == 429
+    return (short_error(err) if isinstance(err, BaseException) else str(err)[:300]), True
+
+
+def _section_failed(sections_mod: Any, s: dict) -> bool:
+    fn = getattr(sections_mod, "section_failed", None)
+    if fn is not None:
+        return bool(fn(s))
+    return bool(s.get("error"))
+
+
+def _report_is_empty(sections_mod: Any, secs: list[dict]) -> bool:
+    """No section of the report holds a figure, a table row or a chart (a
+    report over a period without data, e.g. a month before monitoring
+    started). A KPI of "—" is no figure; a 0 is one."""
+    fn = getattr(sections_mod, "is_empty_report", None)
+    if fn is not None:
+        return bool(fn(secs))
+    for s in secs:
+        if s.get("restricted") or s.get("error"):
+            continue
+        if any((t or {}).get("rows") for t in s.get("tables") or []):
+            return False
+        if s.get("charts"):
+            return False
+        if any(str(k.get("value") if k.get("value") is not None else "").strip() not in ("", "—", "-")
+               for k in s.get("kpis") or []):
+            return False
+    return True
+
+
+_SUBJECT_PLACEHOLDER = re.compile(r"\{(title|period|date)\}")
+
+
+def render_subject_template(template: str, *, title: str, period_label: str, generated: datetime,
+                            tz: str) -> str:
+    """A schedule's own subject: ``{title}``, ``{period}`` and ``{date}`` (the
+    local generation date) are replaced; anything else, format specs
+    included, is kept as written (never str.format: ``{title:>999999999}``
+    would allocate gigabytes)."""
+    values = {"title": title, "period": period_label,
+              "date": generated.astimezone(_tz(tz)).strftime("%Y-%m-%d")}
+    return _SUBJECT_PLACEHOLDER.sub(lambda m: values[m.group(1)], template)
+
+
+async def _resolve_scope(db: AsyncSession, filters: dict) -> dict:
+    """Group, location and device-type scope of a template schedule resolved
+    to device ids (``report_render.resolve_device_scope``). ReportUnavailable
+    when the scope matches no device: an empty id list would mean the whole
+    estate."""
+    keys = ("group_ids", "locations", "device_types")
+    if not any(filters.get(k) for k in keys):
+        return filters
+    from app.services import report_render
+    resolver = getattr(report_render, "resolve_device_scope", None)
+    if resolver is None:
+        raise ReportUnavailable("Group and location scopes are not supported by this version; "
+                                "nothing was generated")
+    ids = await resolver(db, device_ids=filters.get("device_ids") or None,
+                         group_ids=filters.get("group_ids") or None,
+                         locations=filters.get("locations") or None,
+                         device_types=filters.get("device_types") or None)
+    if ids is None:
+        return filters
+    if not ids:
+        raise ReportUnavailable("The schedule's group/location scope matches no device; nothing was generated")
+    return {**filters, "device_ids": list(ids)}
+
+
+async def _deliver(db: AsyncSession, schedule: dict, *, channel_ids: list, direct: list[str],
+                   subject: str, email_text: str, email_html: str,
+                   attachment: Optional[tuple[str, bytes, str]], inline_images: list,
+                   channel_message: str, ctx: dict) -> tuple[list[str], list[str], list[dict], list[str]]:
+    """Send to channels and direct recipients. Returns (delivered names or
+    addresses, error lines, retryable failed targets, permanent failures —
+    the error lines that will not be retried)."""
+    delivered: list[str] = []
+    errors: list[str] = []
+    failed: list[dict] = []
+    permanent: list[str] = []
+
+    def fail(name: str, err: str, target: Optional[dict] = None, retryable: Optional[bool] = None) -> None:
+        errors.append(f"{name}: {err}")
+        if target is not None and (_retryable(err) if retryable is None else retryable):
+            failed.append({**target, "error": err})
+        else:
+            permanent.append(f"{name}: {err}")
+
+    reply_to = schedule.get("reply_to") or None
+    for cid in channel_ids:
+        name = str(cid)
+        try:
+            ch = (await db.execute(
+                text("SELECT id, name, type, config, enabled, gateway_id "
+                     "FROM notification_channels WHERE id = CAST(:id AS uuid)"), {"id": str(cid)}
+            )).first()
+            if not ch or not ch.enabled:
+                fail(str(cid), "channel missing/disabled")
+                continue
+            name = ch.name
+            cfg = decrypt_config(ch.config)
+
+            if ch.type == "email":
+                recipients = [r.strip() for r in cfg.get("recipients", "").split(",") if r.strip()]
+                if not recipients:
+                    fail(ch.name, "no recipients")
+                    continue
+                gw = await _resolve_smtp(db, ch)
+                if not gw:
+                    fail(ch.name, "no SMTP gateway")
+                    continue
+                await asyncio.to_thread(_send_email_with_attachment, gw, recipients, subject, email_text,
+                                        email_html, attachment, inline_images, reply_to=reply_to)
+                delivered.append(ch.name)
+                continue
+
+            if ch.type == "sms":
+                from app.api.v1.alert_engine import _send_sms
+                from app.services.host_alert_service import _gateway_config
+                phones = cfg.get("phone_numbers", "")
+                gw = await _gateway_config(db, ch, "sms")
+                if phones and gw:
+                    await _send_sms(gw, phones, channel_message)
+                    delivered.append(ch.name)
+                else:
+                    fail(ch.name, "no phone numbers or SMS gateway")
+            else:
+                from app.api.v1.alert_engine import _dispatch_channel_result
+                ok, err = await _dispatch_channel_result(ch.type, cfg, ctx)
+                if ok:
+                    delivered.append(ch.name)
+                elif err is None:
+                    fail(ch.name, f"unsupported or unconfigured channel type '{ch.type}'")
+                else:
+                    msg, again = _http_failure(err)
+                    fail(ch.name, msg, {"kind": "channel", "id": str(cid), "name": ch.name}, retryable=again)
+        except Exception as exc:
+            logger.warning("report delivery to channel %s failed", cid, exc_info=True)
+            fail(name, short_error(exc), {"kind": "channel", "id": str(cid), "name": name})
+
+    if direct:
+        try:
+            gw = await _resolve_smtp_gateway(db)
+            if not gw:
+                fail(f"{len(direct)} direct recipient(s)", "no SMTP gateway is configured")
+            elif schedule.get("group_send"):
+                cc = [c for c in (schedule.get("cc") or []) if is_email(c) and c not in direct]
+                await asyncio.to_thread(_send_email_with_attachment, gw, direct, subject, email_text,
+                                        email_html, attachment, inline_images, cc=cc, reply_to=reply_to)
+                delivered.extend(direct + cc)
+            else:
+                sent, bad = await asyncio.to_thread(_send_individually, gw, direct, subject, email_text,
+                                                    email_html, attachment, inline_images, reply_to=reply_to)
+                delivered.extend(sent)
+                for addr, err in bad:
+                    fail(addr, err, {"kind": "email", "id": addr, "name": addr})
+        except Exception as exc:
+            logger.warning("report delivery to direct recipients failed (schedule %s)", schedule.get("id"),
+                           exc_info=True)
+            err = short_error(exc)
+            errors.append(f"{len(direct)} direct recipient(s): {err}")
+            targets = direct + ([c for c in (schedule.get("cc") or []) if is_email(c)]
+                                if schedule.get("group_send") else [])
+            if _retryable(err):
+                failed.extend({"kind": "email", "id": a, "name": a, "error": err} for a in targets)
+            else:
+                permanent.append(f"{len(direct)} direct recipient(s): {err}")
+    return delivered, errors, failed, permanent
+
+
+def _channel_message(title: str, plabel: str, kpi_pairs: list[tuple[str, str]], view_url: Optional[str],
+                     manual: bool) -> str:
+    body = f"{MANUAL_SUBJECT_TAG} " if manual else ""
+    body += f"{title} — {plabel}"
+    if kpi_pairs:
+        body += "\n" + " · ".join(f"{l}: {v}" for l, v in kpi_pairs[:4])
+    if view_url:
+        body += f"\n{view_url}"
+    return body
+
+
+def _channel_ctx(subject: str, message: str, branding_name: str, kpi_pairs: list, view_url: Optional[str],
+                 schedule_id: Any, title: str) -> dict:
+    return {
+        "subject": subject, "message": message, "body": message,
+        "hostname": branding_name, "ip_address": "",
+        "status": "REPORT", "severity": "info",
+        "details": list(kpi_pairs) + ([("View report", view_url)] if view_url else []),
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "rule_id": str(schedule_id or ""), "rule_name": title,
+    }
+
+
+def _final_status(*, targets: bool, delivered: list, errors: list, notes: list) -> str:
+    if not targets or (delivered and not errors):
+        status = "success"
+    elif delivered:
+        status = "partial"
+    else:
+        status = "failed"
+    if notes and status == "success":
+        status = "partial"
+    return status
+
+
+NO_DATA_NOTE = "The report has no data for this period."
+NOT_DELIVERED_PREFIX = "Not delivered (not retried): "
+NO_LINK_NOTE = ("This email has no link to the full report because no base URL is configured: "
+                "open ZenPlus → Reports → Delivered reports to view it.")
+
+
 async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by: str = "scheduled") -> dict:
     """Render a report for ``schedule`` and deliver it to its channels and
     direct recipients.
 
     Returns a summary dict {run_id, token, view_url, delivered, errors,
-    status}. Records a report_runs row (even on partial delivery) so the share
-    link works; a schedule whose template is gone records nothing and fails
-    with a clear error."""
+    status}. The report_runs row is written first as ``running`` and
+    finished with the outcome, the email as sent (for retries) and the
+    attachment (for the run history); retryable failures get a
+    ``next_retry_at``. A schedule whose template is gone records nothing and
+    fails with a clear error."""
+    from app.services import report_settings
+
     report_type = schedule["report_type"]
     period = schedule.get("period") or "last_24h"
     fmt = schedule.get("format") or "pdf"
     filters = {k: v for k, v in (schedule.get("filters") or {}).items() if k != "netflow_withheld"}
 
     manual = triggered_by == "manual"
+    settings = await report_settings.load(db)
     branding = _schedule_branding(await load_branding(db), schedule)
     start, end, plabel = report_periods.resolve_period(period, branding.timezone, branding.week_start)
 
@@ -658,15 +965,36 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
     # decided before the run row is committed (a commit may expire the owner's
     # loaded attributes).
     netflow_withheld = False
+    legacy_tags: Optional[list[str]] = None
     if not is_sections:
         from app.api.v1.netflow.access import VIEW_PERMISSION
+        from app.core import scoping
         from app.services.netflow_report import flow_visibility_for
 
+        from app.services.netflow_report import ORPHANED_OWNER
+        if owner is ORPHANED_OWNER:
+            return _not_generated("The schedule's owner is no longer active; nothing was generated. "
+                                  "Assign the schedule to an active user.")
         netflow_withheld = not (await flow_visibility_for(db, owner)).can(VIEW_PERMISSION)
+        if _is_user(owner):
+            tags = await scoping.visible_tags(db, owner)
+            legacy_tags = list(tags) if tags is not None else None
+            # The attachment too is confined to what the owner may see (as
+            # POST /reports/generate does); fleet-wide types are refused.
+            scoped, ids = await scoping.scoped_device_filter(db, owner, filters.get("device_ids"))
+            if scoped:
+                if report_type in LEGACY_UNSCOPABLE:
+                    return _not_generated("The schedule's owner is limited to a visibility scope and this classic "
+                                          "report has fleet-wide sections; nothing was generated. Convert the "
+                                          "schedule to its template.")
+                filters = {k: v for k, v in filters.items()
+                           if k not in ("group_ids", "locations", "device_types")}
+                filters["device_ids"] = ids
     if is_sections:
         try:
             default_title, description, category, entries = await _template_for(
                 db, report_type, schedule.get("custom_report_id"), owner)
+            filters = await _resolve_scope(db, filters)
             entries, filters, scope_label = await _owner_scope(db, owner, entries, filters)
         except ReportUnavailable as exc:
             logger.warning("report schedule %s not generated: %s", schedule.get("id"), exc)
@@ -690,11 +1018,16 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         sec_meta = await _sections.build_report_meta(
             db, title, frm, to, description=description, category=category,
             scope_label=scope_label, branding=branding)
+        failed_titles = [s.get("title") or s.get("id") for s in secs if _section_failed(_sections, s)]
+        if failed_titles:
+            run_notes.append("Section(s) could not be generated: " + ", ".join(map(str, failed_titles[:8])))
     else:
-        # Legacy types: executive dataset drives the universal HTML/email summary.
-        data = await build_executive(db, start, end)
+        # Legacy types: executive dataset drives the universal HTML/email summary,
+        # limited to the owner's visibility scope.
+        data = await build_executive(db, start, end, visible_tags=legacy_tags)
         title = schedule.get("name") or report_html.report_title(report_type)
 
+    empty = is_sections and _report_is_empty(_sections, secs)
     generated_at = datetime.now(timezone.utc)
     meta = {
         "title": title,
@@ -707,7 +1040,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
     }
     # Every label names the schedule's zone and, outside UTC, the UTC clock:
     # recipients compare the generated time with the receipt time.
-    run_facts: dict[str, Any] = {"run_kind": "manual" if manual else "scheduled"}
+    run_facts: dict[str, Any] = {"run_kind": "manual" if manual else "scheduled",
+                                 "schedule_name": schedule.get("name") or ""}
     if schedule.get("id") and schedule.get("hour") is not None:
         run_facts["schedule_label"] = schedule_text(schedule, branding.timezone, now=generated_at)
     if manual:
@@ -733,23 +1067,68 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         html_page = await asyncio.to_thread(_sections.render_html, sec_meta, secs)
     else:
         html_page = await asyncio.to_thread(report_html.build_report_html, meta, data)
+    expiry_days = settings["link_expiry_days"]
     run_row = (await db.execute(
         text("""INSERT INTO report_runs
-                (schedule_id, report_type, period, title, token, html, status, generated_at)
-                VALUES (:sid, :rt, :pd, :title, :token, :html, 'success', NOW())
+                (schedule_id, report_type, period, title, token, html, status, generated_at,
+                 expires_at, kind, window_from, window_to)
+                VALUES (:sid, :rt, :pd, :title, :token, :html, 'running', NOW(),
+                        CASE WHEN CAST(:exp AS int) > 0 THEN NOW() + make_interval(days => CAST(:exp AS int)) END,
+                        :kind, :wf, :wt)
                 RETURNING id"""),
         {"sid": schedule.get("id"), "rt": report_type, "pd": period,
          "title": (f"{meta['title']} (manual run)" if manual else meta["title"])[:255],
-         "token": token, "html": html_page},
+         "token": token, "html": html_page, "exp": expiry_days,
+         "kind": "manual" if manual else "scheduled", "wf": start, "wt": end},
     )).first()
     run_id = str(run_row.id)
     await db.commit()
 
+    try:
+        return await _finish_run(
+            db, schedule, run_id=run_id, token=token, manual=manual, settings=settings,
+            branding=branding, is_sections=is_sections, secs=secs, sec_meta=sec_meta, meta=meta,
+            data=data, html_page=html_page, fmt=fmt, period=period, start=start, end=end,
+            plabel=plabel, filters=filters, title=title, report_type=report_type,
+            netflow_withheld=netflow_withheld, run_notes=run_notes, empty=empty)
+    except Exception as exc:
+        # Never leave the run "running": record the failure, then let the
+        # caller record it on the schedule.
+        logger.exception("report run %s failed (schedule %s)", run_id, schedule.get("id"))
+        await db.rollback()
+        err = short_error(exc)
+        await db.execute(text("UPDATE report_runs SET status = 'failed', error = :e WHERE id = :id"),
+                         {"e": f"The run failed: {err}", "id": run_id})
+        await db.commit()
+        return {"run_id": run_id, "token": token, "view_url": None, "delivered": [],
+                "errors": [f"The run failed: {err}"], "status": "failed"}
+
+
+async def _finish_run(db: AsyncSession, schedule: dict, *, run_id: str, token: str, manual: bool,
+                      settings: dict, branding: Branding, is_sections: bool, secs: list, sec_meta: dict,
+                      meta: dict, data: Any, html_page: str, fmt: str, period: str, start: datetime,
+                      end: datetime, plabel: str, filters: dict, title: str, report_type: str,
+                      netflow_withheld: bool, run_notes: list[str], empty: bool) -> dict:
+    from app.services import report_render
+    from app.services import report_sections as _sections
+
     base = _base_url(branding)
     view_url = f"{base}/api/v1/reports/shared/{token}" if base else None
 
+    if empty and schedule.get("skip_when_empty"):
+        note = "The report has no data for this period; it was not sent (the schedule skips empty reports)."
+        await db.execute(
+            text("UPDATE report_runs SET status = 'skipped', error = NULL, notes = CAST(:n AS jsonb) "
+                 "WHERE id = :id"),
+            {"n": json.dumps([note]), "id": run_id})
+        await db.commit()
+        return {"run_id": run_id, "token": token, "view_url": view_url, "delivered": [],
+                "errors": [], "notes": [note], "status": "skipped"}
+    info_notes = [NO_DATA_NOTE] if empty else []
+
     # Build the formal attachment.
     attachment = None
+    delivery_notes: list[str] = []
     if fmt != "none":
         try:
             ext, mime = ATTACHMENT_TYPES.get(fmt) or ("", "")
@@ -763,10 +1142,15 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                 elif fmt == "excel":
                     from app.services import report_xlsx
                     payload = bytes(await asyncio.to_thread(report_xlsx.render_xlsx, sec_meta, secs))
+                elif fmt == "csv":
+                    try:
+                        from app.services import report_csv
+                    except ImportError:
+                        raise _AttachmentUnavailable("CSV attachments are not available in this version") from None
+                    payload = bytes(await asyncio.to_thread(report_csv.render_csv, sec_meta, secs))
                 else:
-                    raise _AttachmentUnavailable(
-                        f"{FORMAT_NAMES.get(fmt, fmt)} attachments are only available for legacy report "
-                        "types; choose PDF, Excel or HTML")
+                    raise _AttachmentUnavailable(f"{FORMAT_NAMES.get(fmt, fmt)} attachments are not available "
+                                                 "for template reports; choose PDF, Excel, CSV or HTML")
             else:
                 legacy_period, legacy_from, legacy_to = _legacy_window(period, start, end)
                 common = dict(db=db, report_type=report_type, period=legacy_period,
@@ -791,11 +1175,23 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             logger.exception("report attachment generation failed (schedule %s)", schedule.get("id"))
             run_notes.append(f"The {FORMAT_NAMES.get(fmt, fmt)} attachment could not be generated "
                              f"({type(exc).__name__}); the email was sent without it")
+    limit_mb = settings["max_attachment_mb"]
+    if attachment is not None and len(attachment[1]) > limit_mb * 1024 * 1024:
+        size_mb = len(attachment[1]) / (1024 * 1024)
+        note = (f"The {FORMAT_NAMES.get(fmt, fmt)} attachment ({size_mb:.1f} MB) is over the "
+                f"{limit_mb} MB limit and was left out.")
+        run_notes.append(note)
+        delivery_notes.append(note)
+        attachment = None
+    if not view_url:
+        delivery_notes.append(NO_LINK_NOTE)
 
     inline_images: list[tuple[str, bytes, str]] = []
     logo = _email_logo(_sections, sec_meta if is_sections else meta)
     if logo:
         inline_images.append(logo)
+    if delivery_notes:
+        (sec_meta if is_sections else meta)["delivery_note"] = " ".join(delivery_notes)
     if is_sections:
         extra: dict[str, Any] = {"logo_cid": logo[0]} if logo else {}
         email_html = await asyncio.to_thread(
@@ -807,7 +1203,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         email_html = report_html.build_report_email_html(email_meta, data, view_url,
                                                          attached=attachment is not None)
         email_text = report_html.build_report_email_text(meta, data, view_url)
-    subject = email_subject(branding, meta["title"], plabel, manual=manual)
+    subject = email_subject(branding, meta["title"], plabel, manual=manual,
+                            template=schedule.get("subject_template"), empty=empty)
 
     # Compact KPI pairs for non-email channel payloads: the same per-section
     # groups as the email, each figure prefixed with its section.
@@ -822,112 +1219,168 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             kpi_pairs.append(("Availability", f"{k['availability_pct']:.2f}%"))
         kpi_pairs.append(("Incidents", str(k.get("incidents_count") or 0)))
         kpi_pairs.append(("Devices monitored", str(k.get("devices_monitored") or 0)))
+    message = _channel_message(meta["title"], plabel, kpi_pairs, view_url, manual)
+    ctx = _channel_ctx(subject, message, branding.display_name, kpi_pairs, view_url,
+                       schedule.get("id"), meta["title"])
 
-    # Deliver to each linked channel.
     channel_ids = schedule.get("notify_channels") or []
-    delivered: list[str] = []
-    errors: list[str] = []
-    for cid in channel_ids:
-        try:
-            ch = (await db.execute(
-                text("SELECT id, name, type, config, enabled, gateway_id "
-                     "FROM notification_channels WHERE id = :id"), {"id": cid}
-            )).first()
-            if not ch or not ch.enabled:
-                errors.append(f"{cid}: channel missing/disabled")
-                continue
-            cfg = decrypt_config(ch.config)
-
-            if ch.type == "email":
-                # Email carries the full report as an attachment.
-                recipients = [r.strip() for r in cfg.get("recipients", "").split(",") if r.strip()]
-                if not recipients:
-                    errors.append(f"{ch.name}: no recipients")
-                    continue
-                gw = await _resolve_smtp(db, ch)
-                if not gw:
-                    errors.append(f"{ch.name}: no SMTP gateway")
-                    continue
-                await asyncio.to_thread(_send_email_with_attachment, gw, recipients, subject, email_text,
-                                        email_html, attachment, inline_images)
-                delivered.append(ch.name)
-                continue
-
-            # Every other channel gets a KPI summary plus the share link.
-            body_msg = f"{MANUAL_SUBJECT_TAG} " if manual else ""
-            body_msg += f"{meta['title']} — {plabel}"
-            if kpi_pairs:
-                body_msg += "\n" + " · ".join(f"{l}: {v}" for l, v in kpi_pairs[:4])
-            if view_url:
-                body_msg += f"\n{view_url}"
-            ctx = {
-                "subject": subject, "message": body_msg, "body": body_msg,
-                "hostname": branding.display_name, "ip_address": "",
-                "status": "REPORT", "severity": "info",
-                "details": kpi_pairs + ([("View report", view_url)] if view_url else []),
-                "triggered_at": datetime.now(timezone.utc).isoformat(),
-                "rule_id": str(schedule.get("id") or ""), "rule_name": meta["title"],
-            }
-            if ch.type == "sms":
-                from app.api.v1.alert_engine import _send_sms
-                from app.services.host_alert_service import _gateway_config
-                phones = cfg.get("phone_numbers", "")
-                gw = await _gateway_config(db, ch, "sms")
-                if phones and gw:
-                    await _send_sms(gw, phones, body_msg)
-                    delivered.append(ch.name)
-                else:
-                    errors.append(f"{ch.name}: no phone numbers or SMS gateway")
-            else:
-                from app.api.v1.alert_engine import _dispatch_channel
-                if await _dispatch_channel(ch.type, cfg, ctx):
-                    delivered.append(ch.name)
-                else:
-                    errors.append(f"{ch.name}: unsupported channel type '{ch.type}'")
-        except Exception as exc:
-            logger.exception("report delivery to channel %s failed", cid)
-            errors.append(f"{cid}: {exc}")
-
-    # Deliver to the schedule's direct recipients through the default SMTP gateway.
     direct = [r for r in (str(x).strip().lower() for x in (schedule.get("recipients") or [])) if is_email(r)]
     direct = list(dict.fromkeys(direct))[:MAX_RECIPIENTS]
-    if direct:
-        try:
-            gw = await _resolve_smtp_gateway(db)
-            if not gw:
-                errors.append(f"{len(direct)} direct recipient(s): no SMTP gateway is configured")
-            else:
-                sent, failed = await asyncio.to_thread(_send_individually, gw, direct, subject, email_text,
-                                                       email_html, attachment, inline_images)
-                delivered.extend(sent)
-                errors.extend(f"{addr}: {err}" for addr, err in failed)
-        except Exception as exc:
-            logger.exception("report delivery to direct recipients failed (schedule %s)", schedule.get("id"))
-            errors.append(f"{len(direct)} direct recipient(s): {_smtp_error(exc)}")
+    delivered, errors, failed, permanent = await _deliver(
+        db, schedule, channel_ids=channel_ids, direct=direct, subject=subject, email_text=email_text,
+        email_html=email_html, attachment=attachment, inline_images=inline_images,
+        channel_message=message, ctx=ctx)
+    # Kept with the run: a later successful retry of the other targets must
+    # not make these disappear from its history.
+    undelivered = [f"{NOT_DELIVERED_PREFIX}{p}" for p in permanent]
 
-    # No delivery targets just means the artifact was generated with nothing
-    # to deliver — that's a success, not a failure.
-    if not channel_ids and not direct:
-        status = "success"
-    elif delivered and not errors:
-        status = "success"
-    elif delivered:
-        status = "partial"
-    else:
-        status = "failed"
-    if run_notes:
-        errors.extend(run_notes)
-        if status == "success":
-            status = "partial"
+    status = _final_status(targets=bool(channel_ids or direct), delivered=delivered, errors=errors,
+                           notes=run_notes)
+    next_retry = None
+    if failed and settings["retry_attempts"] > 0:
+        from app.services.report_settings import retry_delay_minutes
+        next_retry = datetime.now(timezone.utc) + timedelta(minutes=retry_delay_minutes(1))
+    all_errors = errors + [n for n in run_notes if n not in errors]
     await db.execute(
-        text("UPDATE report_runs SET delivered_to = CAST(:d AS jsonb), status = :st, error = :err WHERE id = :id"),
+        text("""UPDATE report_runs
+                SET delivered_to = CAST(:d AS jsonb), status = :st, error = :err,
+                    notes = CAST(:notes AS jsonb), failed_targets = CAST(:ft AS jsonb),
+                    next_retry_at = :nr, email_subject = :subj, email_html = :eh, email_text = :et,
+                    artifact = :art, artifact_name = :an, artifact_mime = :am
+                WHERE id = :id"""),
         {"d": json.dumps(delivered), "st": status,
-         "err": "; ".join(errors) if errors else None, "id": run_id},
+         "err": "; ".join(errors) if errors else None,
+         "notes": json.dumps(run_notes + undelivered + info_notes), "ft": json.dumps(failed), "nr": next_retry,
+         "subj": subject, "eh": email_html, "et": email_text,
+         "art": attachment[1] if attachment else None,
+         "an": attachment[0] if attachment else None,
+         "am": attachment[2] if attachment else None, "id": run_id},
     )
     await db.commit()
 
     return {"run_id": run_id, "token": token, "view_url": view_url,
-            "delivered": delivered, "errors": errors, "status": status}
+            "delivered": delivered, "errors": all_errors, "notes": run_notes + info_notes,
+            "status": status, "retry_at": next_retry.isoformat() if next_retry else None}
+
+
+async def retry_run(db: AsyncSession, run_id: str, *, manual: bool = False) -> dict:
+    """Send a run's stored email again to the targets it still owes
+    (``failed_targets``). Counts as one attempt; schedules the next one with
+    backoff until ``retry_attempts`` is used up."""
+    from app.services import report_settings
+    from app.services import report_sections as _sections
+
+    row = (await db.execute(text(
+        """SELECT r.id, r.schedule_id, r.title, r.token, r.status, r.delivered_to, r.failed_targets,
+                  r.retry_count, r.email_subject, r.email_html, r.email_text, r.artifact,
+                  r.artifact_name, r.artifact_mime, r.window_from, r.window_to, r.notes, r.error,
+                  s.reply_to, s.group_send, s.cc, s.name AS schedule_name, s.timezone
+           FROM report_runs r LEFT JOIN report_schedules s ON s.id = r.schedule_id
+           WHERE r.id = CAST(:id AS uuid)"""), {"id": str(run_id)})).first()
+    if row is None:
+        return {"status": "missing", "delivered": [], "errors": ["Run not found"]}
+    # One retry of a run at a time (the tick on either worker, or a manual
+    # retry): held until this transaction's commit at the end.
+    locked = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext(:k))"),
+                               {"k": f"report_run_retry:{row.id}"})).scalar()
+    if locked is False:
+        return {"status": "busy", "delivered": [], "errors": ["A retry of this run is already in progress"],
+                "remaining": len(row.failed_targets or [])}
+    targets = list(row.failed_targets or [])
+    if not targets:
+        await db.execute(text("UPDATE report_runs SET next_retry_at = NULL WHERE id = :id"), {"id": row.id})
+        await db.commit()
+        return {"status": row.status, "delivered": [], "errors": [], "remaining": 0}
+    if not row.email_html:
+        await db.execute(text("UPDATE report_runs SET next_retry_at = NULL, failed_targets = '[]'::jsonb, "
+                              "error = concat_ws('; ', error, 'Retry not possible: the stored email was "
+                              "removed by the retention policy') WHERE id = :id"), {"id": row.id})
+        await db.commit()
+        return {"status": row.status, "delivered": [],
+                "errors": ["The stored email was removed by the retention policy"], "remaining": 0}
+
+    settings = await report_settings.load(db)
+    attempt = int(row.retry_count or 0) + 1
+    attachment = ((row.artifact_name, bytes(row.artifact), row.artifact_mime)
+                  if row.artifact is not None and row.artifact_name else None)
+    inline_images: list[tuple[str, bytes, str]] = []
+    try:
+        branding = await load_branding(db)
+        frm = _naive_utc(row.window_from or datetime.now(timezone.utc))
+        to = _naive_utc(row.window_to) if row.window_to else frm
+        logo_meta = await _sections.build_report_meta(db, row.title, frm, to, branding=branding)
+        logo = _email_logo(_sections, logo_meta)
+        if logo:
+            inline_images.append(logo)
+    except Exception:
+        logger.debug("logo for report retry unavailable", exc_info=True)
+        branding = None
+    sched = {"id": str(row.schedule_id) if row.schedule_id else None, "reply_to": row.reply_to,
+             "group_send": bool(row.group_send), "cc": list(row.cc or [])}
+    channel_ids = [t["id"] for t in targets if t.get("kind") == "channel"]
+    direct = [t["id"] for t in targets if t.get("kind") == "email"]
+    if sched["group_send"]:
+        # A group message failed as a whole: resend it to the owed addresses,
+        # keeping CC'd people on the CC line.
+        owed = set(direct)
+        cc_all = set(sched["cc"])
+        direct = [a for a in direct if a not in cc_all]
+        sched["cc"] = [a for a in sched["cc"] if a in owed]
+        if not direct and sched["cc"]:
+            direct, sched["cc"] = sched["cc"], []
+    base = _base_url(branding)
+    view_url = f"{base}/api/v1/reports/shared/{row.token}" if base else None
+    message = f"{row.email_subject}" + (f"\n{view_url}" if view_url else "")
+    ctx = _channel_ctx(row.email_subject, message, getattr(branding, "display_name", "ZenPlus"), [],
+                       view_url, row.schedule_id, row.title)
+    delivered, errors, failed, permanent = await _deliver(
+        db, sched, channel_ids=channel_ids, direct=direct, subject=row.email_subject,
+        email_text=row.email_text or "", email_html=row.email_html, attachment=attachment,
+        inline_images=inline_images, channel_message=message, ctx=ctx)
+
+    all_delivered = list(row.delivered_to or []) + [d for d in delivered if d not in (row.delivered_to or [])]
+    notes = list(row.notes or []) + [f"{NOT_DELIVERED_PREFIX}{p}" for p in permanent]
+    remaining = failed
+    next_retry = None
+    if remaining and attempt < settings["retry_attempts"]:
+        next_retry = datetime.now(timezone.utc) + timedelta(
+            minutes=report_settings.retry_delay_minutes(attempt + 1))
+    elif remaining:
+        notes.append(f"Delivery to {len(remaining)} target(s) gave up after {attempt} retr"
+                     f"{'y' if attempt == 1 else 'ies'}.")
+    blocking_notes = [n for n in notes if n != NO_DATA_NOTE and not n.startswith("Retry ")]
+    still_undelivered = [n[len(NOT_DELIVERED_PREFIX):] for n in notes if n.startswith(NOT_DELIVERED_PREFIX)]
+    if not remaining:
+        status = "partial" if blocking_notes or errors else "success"
+    else:
+        status = "partial" if all_delivered else "failed"
+    retry_line = (f"Retry {attempt}{' (manual)' if manual else ''}: "
+                  + ("delivered to " + ", ".join(delivered) if delivered else "nothing delivered")
+                  + (f"; {'; '.join(errors)}" if errors else ""))
+    await db.execute(
+        text("""UPDATE report_runs
+                SET delivered_to = CAST(:d AS jsonb), failed_targets = CAST(:ft AS jsonb),
+                    retry_count = :rc, next_retry_at = :nr, status = :st, notes = CAST(:n AS jsonb),
+                    error = :err
+                WHERE id = :id"""),
+        {"d": json.dumps(all_delivered), "ft": json.dumps(remaining), "rc": attempt, "nr": next_retry,
+         "st": status, "n": json.dumps(notes + [retry_line]),
+         "err": ("; ".join(errors) if remaining and errors else (row.error if remaining else
+                 ("; ".join(still_undelivered) or None))),
+         "id": row.id})
+    if row.schedule_id:
+        # The schedule's last status follows its latest run.
+        await db.execute(text(
+            """UPDATE report_schedules SET last_status = :st, last_error = :err
+               WHERE id = :sid AND NOT EXISTS (
+                   SELECT 1 FROM report_runs r2 WHERE r2.schedule_id = :sid
+                     AND r2.generated_at > (SELECT generated_at FROM report_runs WHERE id = :rid))"""),
+            {"st": status, "err": ("; ".join(errors) if remaining and errors
+                                   else ("; ".join(still_undelivered) or None)),
+             "sid": row.schedule_id, "rid": row.id})
+    await db.commit()
+    return {"status": status, "delivered": delivered, "errors": errors, "remaining": len(remaining),
+            "next_retry_at": next_retry.isoformat() if next_retry else None}
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +1409,12 @@ def _row_to_sched(row) -> dict:
         "custom_report_id": getattr(row, "custom_report_id", None),
         # Direct email recipients (migrate-156); absent before the migration.
         "recipients": list(getattr(row, "recipients", None) or []),
+        # Email options and empty-report handling (migrate-166).
+        "skip_when_empty": bool(getattr(row, "skip_when_empty", False)),
+        "subject_template": getattr(row, "subject_template", None),
+        "reply_to": getattr(row, "reply_to", None),
+        "group_send": bool(getattr(row, "group_send", False)),
+        "cc": list(getattr(row, "cc", None) or []),
     }
 
 
@@ -980,6 +1439,9 @@ async def run_scheduler_tick(db: AsyncSession) -> dict:
             text("""SELECT * FROM report_schedules
                     WHERE enabled = TRUE AND next_run_at IS NOT NULL AND next_run_at <= :now
                       AND NOT (id::text = ANY(:done))
+                      -- not while a "Run now" of the same schedule is in progress
+                      AND (last_status IS DISTINCT FROM 'running' OR updated_at IS NULL
+                           OR updated_at <= :now - INTERVAL '30 minutes')
                     ORDER BY next_run_at
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED"""),
@@ -1006,7 +1468,7 @@ async def run_scheduler_tick(db: AsyncSession) -> dict:
         except Exception as exc:
             logger.exception("report schedule %s failed", sched["id"])
             await db.rollback()
-            last_status, last_error = "failed", type(exc).__name__
+            last_status, last_error = "failed", short_error(exc)
         await db.execute(
             text("""UPDATE report_schedules
                     SET last_status = :st, last_error = :err, updated_at = NOW()
@@ -1018,7 +1480,90 @@ async def run_scheduler_tick(db: AsyncSession) -> dict:
 
     if fired:
         logger.info("report scheduler tick: fired %d schedule(s)", len(fired))
-    return {"fired": fired, "checked": len(done)}
+    retried = await run_due_retries(db, now)
+    await _housekeeping(db, now)
+    return {"fired": fired, "checked": len(done), "retried": retried}
+
+
+MAX_RETRIES_PER_TICK = 20
+STALE_RUN_MINUTES = 30
+HEARTBEAT_KEY = "report_scheduler"
+_last_retention_at: Optional[datetime] = None
+
+
+async def run_due_retries(db: AsyncSession, now: datetime) -> list[str]:
+    """Retry the runs whose ``next_retry_at`` has come, one at a time; each is
+    claimed (next_retry_at cleared, committed) first so the other API worker
+    never retries it in parallel."""
+    done: list[str] = []
+    while len(done) < MAX_RETRIES_PER_TICK:
+        row = (await db.execute(text(
+            """SELECT id FROM report_runs
+               WHERE next_retry_at IS NOT NULL AND next_retry_at <= :now
+               ORDER BY next_retry_at LIMIT 1 FOR UPDATE SKIP LOCKED"""), {"now": now})).first()
+        if row is None:
+            break
+        run_id = str(row.id)
+        await db.execute(text("UPDATE report_runs SET next_retry_at = NULL WHERE id = :id"), {"id": row.id})
+        await db.commit()
+        done.append(run_id)
+        try:
+            await retry_run(db, run_id)
+        except Exception:
+            logger.exception("report run %s retry failed", run_id)
+            await db.rollback()
+    return done
+
+
+async def _housekeeping(db: AsyncSession, now: datetime) -> None:
+    """Heartbeat, runs left "running" by a dead worker, and (hourly) the
+    run/artifact retention of the report settings."""
+    global _last_retention_at
+    from app.services import report_settings
+    try:
+        await db.execute(
+            text("INSERT INTO system_settings (key, value) VALUES (:k, CAST(:v AS jsonb)) "
+                 "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"),
+            {"k": HEARTBEAT_KEY, "v": json.dumps({"last_tick_at": now.isoformat()})})
+        stale = now - timedelta(minutes=STALE_RUN_MINUTES)
+        await db.execute(text(
+            "UPDATE report_runs SET status = 'failed', "
+            "error = concat_ws('; ', error, 'Generation did not finish (the worker stopped)') "
+            "WHERE status = 'running' AND generated_at < :stale"), {"stale": stale})
+        await db.execute(text(
+            "UPDATE report_schedules SET last_status = 'failed', "
+            "last_error = 'The last run did not finish (the worker stopped)' "
+            "WHERE last_status = 'running' AND updated_at < :stale"), {"stale": stale})
+        if _last_retention_at is None or now - _last_retention_at >= timedelta(hours=1):
+            settings = await report_settings.load(db)
+            await db.execute(text(
+                "DELETE FROM report_runs WHERE generated_at < :cut AND status <> 'running'"),
+                {"cut": now - timedelta(days=settings["run_retention_days"])})
+            await db.execute(text(
+                "UPDATE report_runs SET artifact = NULL, email_html = NULL, email_text = NULL, "
+                "failed_targets = '[]'::jsonb, next_retry_at = NULL "
+                "WHERE generated_at < :cut AND (artifact IS NOT NULL OR email_html IS NOT NULL)"),
+                {"cut": now - timedelta(days=settings["artifact_retention_days"])})
+            _last_retention_at = now
+        await db.commit()
+    except Exception:
+        logger.warning("report scheduler housekeeping failed", exc_info=True)
+        await db.rollback()
+
+
+async def scheduler_last_tick(db: AsyncSession) -> Optional[datetime]:
+    row = (await db.execute(
+        text("SELECT value FROM system_settings WHERE key = :k"), {"k": HEARTBEAT_KEY})).first()
+    value = row[0] if row else None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = None
+    try:
+        return datetime.fromisoformat(value["last_tick_at"]) if isinstance(value, dict) else None
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 async def report_scheduler_loop() -> None:

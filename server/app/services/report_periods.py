@@ -32,6 +32,7 @@ PERIODS: tuple[tuple[str, str, str], ...] = (
     ("yesterday", "Yesterday", "calendar"),
     ("week_to_date", "This week", "calendar"),
     ("previous_week", "Previous week", "calendar"),
+    ("previous_work_week", "Previous work week", "calendar"),
     ("month_to_date", "This month", "calendar"),
     ("previous_month", "Previous month", "calendar"),
     ("quarter_to_date", "This quarter", "calendar"),
@@ -41,7 +42,11 @@ PERIOD_IDS: tuple[str, ...] = tuple(p[0] for p in PERIODS)
 PERIOD_LABELS: dict[str, str] = {p[0]: p[1] for p in PERIODS}
 ROLLING_HOURS: dict[str, int] = {"last_24h": 24, "last_7d": 7 * 24, "last_30d": 30 * 24, "last_90d": 90 * 24}
 # Windows that close at a local midnight (the rest end "now").
-CLOSED_PERIODS = frozenset({"yesterday", "previous_week", "previous_month", "previous_quarter"})
+CLOSED_PERIODS = frozenset({"yesterday", "previous_week", "previous_work_week", "previous_month",
+                            "previous_quarter"})
+# A work week is the first WORK_WEEK_DAYS days of the organisation week:
+# Sunday -> Sun-Thu, Monday -> Mon-Fri, Saturday -> Sat-Wed.
+WORK_WEEK_DAYS = 5
 
 # JavaScript Date.getDay() numbering (Sunday = 0), as periods.ts uses.
 WEEK_START_DOW: dict[str, int] = {"sunday": 0, "monday": 1, "saturday": 6}
@@ -117,12 +122,18 @@ def period_range(period: str, tz: Optional[str], week_start: str = "monday",
         return start_of(today), now_utc
     if period == "yesterday":
         return start_of(today - timedelta(days=1)), start_of(today)
-    if period in ("week_to_date", "previous_week"):
+    if period in ("week_to_date", "previous_week", "previous_work_week"):
         dow = (today.weekday() + 1) % 7  # Sunday = 0
         first_dow = WEEK_START_DOW.get((week_start or "monday").strip().lower(), 1)
         week_first = today - timedelta(days=(dow - first_dow + 7) % 7)
         if period == "week_to_date":
             return start_of(week_first), now_utc
+        if period == "previous_work_week":
+            # The latest work week that has ended: this week's once its last
+            # work day is over, else last week's.
+            if today < week_first + timedelta(days=WORK_WEEK_DAYS):
+                week_first -= timedelta(days=7)
+            return start_of(week_first), start_of(week_first + timedelta(days=WORK_WEEK_DAYS))
         return start_of(week_first - timedelta(days=7)), start_of(week_first)
     if period == "month_to_date":
         return start_of(today.replace(day=1)), now_utc

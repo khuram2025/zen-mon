@@ -130,6 +130,19 @@ def test_health_payload_totals_and_rates():
     assert p["availability_pct"] == 100.0
 
 
+def test_health_payload_without_packet_counters_uses_the_absolute_floor():
+    # Errors but no unicast packets: errors / errors is not a rate. Before the
+    # fix this read 1,000,000 ppm and "critical" (assessment H3).
+    p = _health_payload({"d_ie": 198_946, "d_oe": 0, "d_id": 0, "d_od": 0,
+                         "d_ip": 0, "d_op": 0, "flaps": 0, "availability": 100}, 86_400)
+    assert p["error_ppm"] is None and p["discard_ppm"] is None
+    assert p["health"] == "warning"  # >= _ERR_ABS_FLOOR, never critical without a rate
+    assert p["issues"] == ["errors"]
+    small = _health_payload({"d_ie": 40, "d_id": 12, "d_ip": 0, "d_op": 0, "flaps": 0}, 60)
+    assert small["error_ppm"] is None
+    assert small["health"] == "ok" and small["issues"] == []
+
+
 def test_health_payload_survives_a_zero_length_window():
     p = _health_payload({"d_ip": 10, "d_op": 10, "flaps": 0, "availability": 0}, 0)
     assert p["in_pps"] >= 0  # no ZeroDivisionError

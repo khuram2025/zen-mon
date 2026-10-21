@@ -10,7 +10,7 @@ import type { Branding } from '@/lib/branding'
 
 export type PeriodId =
   | 'last_24h' | 'last_7d' | 'last_30d' | 'last_90d'
-  | 'today' | 'yesterday' | 'week_to_date' | 'previous_week'
+  | 'today' | 'yesterday' | 'week_to_date' | 'previous_week' | 'previous_work_week'
   | 'month_to_date' | 'previous_month' | 'quarter_to_date' | 'previous_quarter'
 
 export interface ReportCategory {

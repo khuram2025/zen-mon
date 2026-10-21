@@ -226,7 +226,8 @@ async def _send_email(gw_config: dict, recipients: str, subject: str, body: str,
             server = smtplib.SMTP_SSL(gw_config["host"], gw_config.get("port", 465), timeout=10, context=ssl.create_default_context())
         else:
             server = smtplib.SMTP(gw_config["host"], gw_config.get("port", 587), timeout=10)
-            server.starttls(context=ssl.create_default_context())
+            from app.core.smtp_tls import starttls_if_needed
+            starttls_if_needed(server, enc)
         if gw_config.get("username"):
             server.login(gw_config["username"], gw_config.get("password", ""))
     except smtplib.SMTPAuthenticationError:

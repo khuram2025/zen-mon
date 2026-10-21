@@ -242,17 +242,25 @@ def _cheap_rows(params):
     ]
 
 
-PRECISE = [(UUID(D1), 2, 3_393, 0, 10, 0, 1_000_000, 2_000_000, 2)]
+PRECISE = [(UUID(D1), 2, 3_393, 0, 10, 0, 1_000_000, 2_000_000)]
+# Status-change pass: device, idx, changes between polls that read a status.
+STATUS = [(UUID(D1), 2, 2)]
+CHEAP = "uniqExactIf(oper_status, oper_status != 0) > 1"
+
+
+def _health_ch(cheap=_cheap_rows, status=STATUS):
+    return FakeCH([("p_os", status), ("lagInFrame", PRECISE), (CHEAP, cheap)])
 
 
 def test_health_uses_reset_safe_deltas_for_flagged_interfaces(monkeypatch):
-    ch = FakeCH([("lagInFrame", PRECISE), ("uniqExact(oper_status) > 1", _cheap_rows)])
+    ch = _health_ch()
     sec = run("interface_health", monkeypatch, FakeDB(PG_RULES), ch)
 
-    cheap_sql, cheap_params = ch.sql("uniqExact(oper_status) > 1")[0]
+    cheap_sql, cheap_params = ch.sql(CHEAP)[0]
     assert "max(in_errors) - min(in_errors)" in cheap_sql and "sum(in_errors" not in cheap_sql
     assert cheap_params["dev_ids"] == [D1, D2]
-    precise_sql, precise_params = ch.sql("lagInFrame")[0]
+    precise_sql, precise_params = [c for c in ch.sql("lagInFrame") if "p_os" not in c[0]][0]
+    assert "oper_status" not in precise_sql
     assert f"(toUUID('{D1}'),2)" in precise_sql and f"'{D2}'" not in precise_sql.split("IN (")[-1]
     assert precise_params["dev_ids"] == [D1, D2] and "device_id IN %(dev_ids)s" in precise_sql
 
@@ -277,7 +285,7 @@ def test_health_uses_reset_safe_deltas_for_flagged_interfaces(monkeypatch):
 
 
 def test_health_sort_option_and_raw_retention_disclosure(monkeypatch):
-    ch = FakeCH([("lagInFrame", PRECISE), ("uniqExact(oper_status) > 1", _cheap_rows)])
+    ch = _health_ch()
     sec = run("interface_health", monkeypatch, FakeDB(PG_RULES), ch,
               options={"sort": "errors", "top_n": 1}, days=45)
     assert [r[1] for r in sec["tables"][0]["rows"]] == ["Te1/1"]  # 5,000 errors
@@ -295,6 +303,30 @@ def test_health_quiet_period_reports_no_issues(monkeypatch):
     assert sec["tables"] == []
     assert sec["notes"][0] == "No interface errors, discards or status flaps in this period."
     assert kpi(sec, "Critical")["value"] == "0"
+
+
+def test_health_flapping_excludes_admin_down_and_matches_status_changes(monkeypatch):
+    # Assessment M6: the "Flapping" KPI counted administratively shut ports
+    # and a different definition from Interface Status Changes.
+    def cheap(params):
+        return [r[:8] + (1, 0) + r[10:] for r in _cheap_rows(params)]
+    status = [(UUID(D1), 2, 2), (UUID(D2), 5, 1), (UUID(D2), 6, 9)]
+    ch = _health_ch(cheap, status)
+    sec = run("interface_health", monkeypatch, FakeDB(PG_RULES), ch)
+    status_sql = " ".join(s for s, _p in ch.sql("p_os"))
+    assert "oper_status != 0" in status_sql and "),6)" not in status_sql
+    flapping = kpi(sec, "Flapping")
+    assert flapping["value"] == "2"
+    assert "admin-down excluded" in flapping["subtitle"]
+    rows = {r[1]: r for r in sec["tables"][0]["rows"]}
+    assert rows["Te1/1"][6] == "0" and rows["Te1/1"][-1] == "ok"  # listed for its errors only
+
+    pass1 = [(UUID(D1), 2, 2), (UUID(D2), 5, 2), (UUID(D2), 6, 2)]
+    precise = [(UUID(D1), 2, 2, 1, 1, _now(), 0.9, 1, []), (UUID(D2), 5, 1, 1, 0, _now(), 0.5, 2, [])]
+    ch = FakeCH([("groupArrayIf", precise), ("uniqExactIf", pass1)])
+    sec = run("interface_status_changes", monkeypatch, FakeDB(PG_RULES), ch)
+    assert "),6)" not in " ".join(s for s, _p in ch.sql("groupArrayIf"))
+    assert kpi(sec, "Interfaces with changes")["value"] == flapping["value"]
 
 
 # ── interface_traffic_trend ─────────────────────────────────────────────────
@@ -528,10 +560,13 @@ def test_windowed_passes_batch_the_inlined_interface_pairs(monkeypatch):
     batches = ch.sql("groupArrayIf")
     assert len(batches) == 2 and all(s.count("toUUID(") == 1 for s, _p in batches)
 
-    ch = FakeCH([("lagInFrame", PRECISE), ("uniqExact(oper_status) > 1",
-                                          lambda p: [r[:8] + (1, 0) + r[10:] for r in _cheap_rows(p)])])
+    ch = _health_ch(lambda p: [r[:8] + (1, 1) + r[10:] for r in _cheap_rows(p)])
     run("interface_health", monkeypatch, FakeDB(PG_RULES), ch)
-    assert len(ch.sql("lagInFrame")) == 4  # every flagged interface, one per batch
+    status = ch.sql("p_os")
+    counters = [c for c in ch.sql("lagInFrame") if "p_os" not in c[0]]
+    assert len(counters) == 4  # every reset interface, one per batch
+    # Status changes for every changed interface except the admin-down Te1/1.
+    assert len(status) == 3 and not any("),6)" in s for s, _p in status)
 
 
 def test_status_changes_min_changes_and_quiet_period(monkeypatch):

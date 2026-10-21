@@ -3,19 +3,21 @@
  * each run covers, when it runs (in the schedule's own time zone, the
  * organisation's by default, with the next runs previewed in local time and
  * UTC), and how it is delivered (format, notification channels, direct
- * email recipients). Props are shared with the report viewer and the
- * Schedules page: {open, onOpenChange, schedule?, prefill?}.
+ * email recipients, email options). Props are shared with the report viewer
+ * and the Schedules page: {open, onOpenChange, schedule?, prefill?}.
+ * Validation mirrors server/app/api/v1/report_schedules.py; delivery options
+ * follow docs/reports-delivery.md.
  */
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import * as Popover from '@radix-ui/react-popover'
 import * as SelectPrimitive from '@radix-ui/react-select'
 import {
-  AlertCircle, Bell, CalendarClock, Check, CheckCircle2, ChevronsUpDown, Clock, FileText, Info, Loader2, Lock,
-  Mail, Play, Search, Send, TriangleAlert, X,
+  AlertCircle, ArrowRightLeft, Bell, CalendarClock, Check, CheckCircle2, ChevronDown, ChevronRight, ChevronsUpDown,
+  Clock, FileText, Info, Loader2, Lock, Mail, Play, Search, Send, TriangleAlert, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { formatDateTime, zoneLabel, type Branding } from '@/lib/branding'
+import { formatDate, formatDateTime, zoneLabel, type Branding } from '@/lib/branding'
 import { useAuth, useCan } from '@/stores/auth'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
@@ -32,17 +34,21 @@ import { useReportBranding, useReportCatalog } from '@/features/reports/api'
 import { reportIcon } from '@/features/reports/icons'
 import { isPeriodId, PERIOD_LABEL } from '@/features/reports/periods'
 import type { PeriodId, ReportCatalog, ScheduleFormat } from '@/features/reports/types'
-import { useNotificationChannels, useRunScheduleNow, useSaveSchedule } from '@/features/reports/schedules/api'
 import {
-  FORMAT_META, FREQUENCIES, MAX_MONTH_DAY, MAX_RECIPIENTS, PERIOD_GROUPS, SCOPED_EXPLANATION, TIME_STEPS,
-  addRecipients, buildBody, clockLabel, coverageText, crossesClockChange, defaultForm, formatsForEngine,
-  frequencyText, groupTemplateOptions, isNetflowWithheld, isVisibilityScoped, localTimeLabel, nameTimeMismatch,
-  nextRuns, ordinal, relativeTo, runLabel, runWithUtc, scheduleToForm, scheduleZone, scopeOf, searchTemplateOptions,
-  suggestedName, suggestedPeriod, templateOptions, templateTitle, templateValue, utcClock, validateSchedule,
-  weekdaysFrom, zoneName,
+  useConvertSchedule, useNotificationChannels, useRunScheduleNow, useSaveSchedule, useScheduleStatus,
+} from '@/features/reports/schedules/api'
+import {
+  BASE_URL_SETTINGS_PATH, FORMAT_META, FREQUENCIES, MAX_CC, MAX_MONTH_DAY, MAX_RECIPIENTS, MAX_SUBJECT,
+  NO_LINK_EXPLANATION, PERIOD_GROUPS, SCOPED_EXPLANATION, TIME_STEPS,
+  addRecipients, buildBody, catalogTitle, clockLabel, coverageText, crossesClockChange, defaultForm, formatsForEngine,
+  frequencyText, groupTemplateOptions, isLegacySchedule, isNetflowWithheld, isVisibilityScoped, localTimeLabel,
+  nameTimeMismatch, nextRuns, ordinal, relativeTo, renderSubject, replacementOf, runLabel, runResultMessage, runWithUtc,
+  scheduleToForm, scheduleZone, scopeOf, searchTemplateOptions, suggestedName, suggestedPeriods, templateOptions,
+  templateTitle, templateValue, utcClock, validateSchedule, weekdaysFrom, zoneName,
   type Issue, type ReportSchedule, type ScheduleForm, type ScheduleFrequency, type TemplateOption,
 } from '@/features/reports/schedules/model'
 import { ScopeChips, scheduleErrorText, useNow } from '@/features/reports/schedules/ui'
+import { DeviceScopePicker, type DeviceScopeExtra } from '@/features/reports/viewer/DeviceScopePicker'
 import { TimezoneSelect } from '@/features/reports/schedules/TimezoneSelect'
 
 export type { ReportSchedule } from '@/features/reports/schedules/model'
@@ -93,12 +99,25 @@ const FIELD_ID: Record<string, string> = {
   monthday: 'sched-monthday',
   format: 'sched-format',
   recipients: 'sched-recipients',
+  cc: 'sched-cc',
+  reply_to: 'sched-reply-to',
+  subject: 'sched-subject',
   name: 'sched-name',
   delivery: 'sched-channels',
   scope: 'sched-template',
 }
 
 const lowerFirst = (t: string) => t.charAt(0).toLowerCase() + t.slice(1)
+
+/** "weekly schedules", "weekly runs on Thursday" (the organisation week starts on Sunday). */
+function suggestionReason(form: ScheduleForm, weekStart: string | undefined): string {
+  if (form.frequency !== 'weekly' || !(form.day_of_week >= 1 && form.day_of_week <= 7)) return `${form.frequency} schedules`
+  const day = weekdaysFrom('monday').find((d) => d.id === form.day_of_week)?.long ?? ''
+  const first = weekdaysFrom(weekStart)[0]
+  return first.id === form.day_of_week
+    ? `weekly runs on ${day}, the first day of the organisation week`
+    : `weekly runs on ${day} (the organisation week starts on ${first.long})`
+}
 
 function initialForm(schedule: ReportSchedule | null, prefill?: ReportSchedulePrefill): ScheduleForm {
   if (schedule) return scheduleToForm(schedule)
@@ -125,11 +144,21 @@ function ScheduleEditor({
   const channels = useNotificationChannels()
   const save = useSaveSchedule()
   const runNow = useRunScheduleNow()
+  const convert = useConvertSchedule()
+  const status = useScheduleStatus()
   const now = useNow(30_000)
 
   const isEdit = !!schedule?.id
   const withheld = isEdit && isNetflowWithheld(schedule)
+  // Recipients hidden from this caller are not in the form; saving keeps them.
+  const recipientsWithheld = isEdit && schedule?.recipients_withheld === true
+  const shareLinks = status.data?.share_links_available
   const [form, setForm] = useState<ScheduleForm>(() => initialForm(schedule, prefill))
+  const [storedType, setStoredType] = useState(schedule?.report_type ?? '')
+  const [emailOpen, setEmailOpen] = useState(() => {
+    const f = initialForm(schedule, prefill)
+    return f.skip_when_empty || f.group_send || !!f.subject_template || !!f.reply_to
+  })
   const [nameTouched, setNameTouched] = useState(isEdit || !!prefill?.name)
   const [periodTouched, setPeriodTouched] = useState(isEdit || isPeriodId(prefill?.period))
   const [serverError, setServerError] = useState<string | null>(null)
@@ -156,37 +185,90 @@ function ScheduleEditor({
     if (template && !formats.includes(form.format)) setForm((f) => ({ ...f, format: 'pdf' }))
   }, [template?.engine]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Device / group / location / type scope (every chosen filter must match).
+  const scopeNow = scopeOf(form.filters)
+  const scopeExtra: DeviceScopeExtra = {
+    groupIds: scopeNow.groupIds, locations: scopeNow.locations, deviceTypes: scopeNow.deviceTypes,
+  }
+  const setDeviceScope = (ids: string[], extra: DeviceScopeExtra) =>
+    setForm((f) => ({
+      ...f,
+      filters: {
+        ...f.filters, device_ids: ids, group_ids: extra.groupIds, locations: extra.locations,
+        device_types: extra.deviceTypes,
+      },
+    }))
+
   const chooseTemplate = (o: TemplateOption) =>
     setForm((f) => ({ ...f, report_type: o.report_type, custom_report_id: o.custom_report_id }))
-  const chooseFrequency = (freq: ScheduleFrequency) =>
-    setForm((f) => ({ ...f, frequency: freq, period: periodTouched ? f.period : suggestedPeriod(freq) }))
+  const chooseFrequency = (freq: ScheduleFrequency) => setForm((f) => ({ ...f, frequency: freq }))
+
+  // Periods suggested for the frequency and, for weekly runs, the run day
+  // against the organisation week start (M11).
+  const suggestions = suggestedPeriods(form.frequency, { dayOfWeek: form.day_of_week, weekStart: branding.week_start })
+  const suggestion = suggestions[0]
+  // An untouched period follows the suggestion.
+  useEffect(() => {
+    if (!periodTouched && form.period !== suggestion) setForm((f) => ({ ...f, period: suggestion }))
+  }, [suggestion, periodTouched]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const original = schedule
-    ? { dom: schedule.day_of_month ?? null, time: { hour: schedule.hour, minute: schedule.minute } }
-    : { dom: null, time: null }
+    ? { time: { hour: schedule.hour, minute: schedule.minute }, report_type: storedType, format: schedule.format }
+    : { time: null, report_type: '', format: '' }
   const { errors, warnings } = validateSchedule(form, {
     template,
-    originalDayOfMonth: original.dom,
+    isNew: !isEdit,
+    original: isEdit ? { report_type: original.report_type, format: original.format } : null,
     originalTime: original.time,
     timezone: tz,
+    weekStart: branding.week_start,
+    shareLinksAvailable: shareLinks,
+    recipientsWithheld,
   })
   const valid = errors.length === 0
 
-  const runs = useMemo(() => nextRuns(form, tz, 3, new Date(now)), [form.frequency, form.hour, form.minute, form.day_of_week, form.day_of_month, tz, now]) // eslint-disable-line react-hooks/exhaustive-deps
+  const noDay = form.frequency === 'weekly' && !(form.day_of_week >= 1 && form.day_of_week <= 7)
+  const runs = useMemo(
+    () => (noDay ? [] : nextRuns(form, tz, 3, new Date(now))),
+    [form.frequency, form.hour, form.minute, form.day_of_week, form.day_of_month, tz, now], // eslint-disable-line react-hooks/exhaustive-deps
+  )
   const coverage = isPeriodId(form.period) ? coverageText(form.period, runs[0] ?? new Date(now), zb) : ''
   const nameWarning = nameTimeMismatch(form.name.trim(), form.hour, form.minute)
+
+  // A classic report type being edited: offer the replacement template.
+  // (After "Convert" the stored type differs from the schedule passed in.)
+  const unconverted = schedule && storedType === schedule.report_type ? schedule : null
+  const legacy = !!unconverted && form.report_type === storedType && isLegacySchedule(unconverted, catalog.data)
+  const replacement = legacy && unconverted ? replacementOf(unconverted, catalog.data) : null
+  const doConvert = () => {
+    if (!schedule) return
+    convert.mutateAsync(schedule.id).then(
+      (r) => {
+        const key = r?.report_type || replacement || ''
+        setStoredType(key)
+        setForm((f) => ({ ...f, report_type: key, custom_report_id: null, format: r?.format && ['pdf', 'excel', 'csv', 'html', 'none'].includes(r.format) ? r.format as ScheduleFormat : f.format }))
+        toast.success('Schedule converted', `It now uses the ${catalogTitle(key, catalog.data)} template. Everything else is unchanged.`)
+      },
+      (e) => toast.error('The schedule was not converted', scheduleErrorText(e)),
+    )
+  }
+
+  const focusField = (field: string) => {
+    if (field === 'cc' || field === 'reply_to' || field === 'subject') setEmailOpen(true)
+    window.setTimeout(() => document.getElementById(FIELD_ID[field] ?? 'sched-name')?.focus(), 0)
+  }
 
   const submit = async (andRun: boolean) => {
     setAttempted(true)
     setServerError(null)
     if (!valid) {
-      document.getElementById(FIELD_ID[errors[0].field] ?? 'sched-name')?.focus()
+      focusField(errors[0].field)
       return
     }
     try {
       const saved = await save.mutateAsync({
         id: isEdit ? schedule!.id : null,
-        body: buildBody(form, { keepStoredFilters: withheld }),
+        body: buildBody(form, { keepStoredFilters: withheld, keepStoredRecipients: recipientsWithheld }),
       })
       toast.success(isEdit ? 'Schedule saved' : 'Schedule created', `"${form.name.trim()}" ${form.enabled ? `runs ${lowerFirst(frequencyText(form, branding.time_format))} ${zoneName(tz)}` : 'is paused'}.`)
       onClose()
@@ -195,11 +277,8 @@ function ScheduleEditor({
         toast.info('Generating report', 'You will be told when it has been delivered.')
         runNow.mutateAsync(id).then(
           (r) => {
-            const st = (r?.status || '').toLowerCase()
-            const delivered = r?.delivered?.length ?? 0
-            if (st === 'failed') toast.error('Run failed', r?.errors?.join('; ') || 'The report could not be generated.')
-            else if (st === 'partial') toast.warning('Delivered with problems', r?.errors?.join('; ') || undefined)
-            else toast.success('Report generated', delivered ? `Delivered to ${delivered} recipient${delivered === 1 ? '' : 's'}.` : 'Open it from the run history.')
+            const msg = runResultMessage(r)
+            toast[msg.tone](msg.title, msg.body)
           },
           (e) => toast.error('Run failed', scheduleErrorText(e)),
         )
@@ -260,6 +339,7 @@ function ScheduleEditor({
               id={FIELD_ID.template}
               catalog={catalog.data}
               options={options}
+              keepValue={isEdit ? storedType : ''}
               value={value}
               fallbackTitle={form.report_type ? templateTitle({ report_type: form.report_type, custom_report_id: form.custom_report_id }, catalog.data) : ''}
               loading={catalog.isLoading}
@@ -269,7 +349,36 @@ function ScheduleEditor({
             {catalog.isError && !catalog.data && (
               <QueryFailure compact error={catalog.error} what="the report templates" onRetry={() => void catalog.refetch()} retrying={catalog.isFetching} />
             )}
-            {template && <TemplateDetails template={template} />}
+            {legacy ? (
+              <div role="note" className="flex flex-col gap-2 rounded-md border border-warning/35 bg-warning/5 px-3 py-2.5 text-sm sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-start gap-2 text-text2">
+                  <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning-fg" aria-hidden />
+                  <span>
+                    <span className="font-medium text-text">This classic report type is retired.</span>{' '}
+                    It keeps running, but new schedules cannot use it and its figures can differ from the templates.
+                    {replacement && <> The {catalogTitle(replacement, catalog.data)} template replaces it.</>}
+                  </span>
+                </div>
+                {replacement && (
+                  <Button type="button" size="sm" variant="outline" className="shrink-0" onClick={doConvert} disabled={convert.isPending}>
+                    {convert.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <ArrowRightLeft className="h-3.5 w-3.5" aria-hidden />}
+                    Convert to {catalogTitle(replacement, catalog.data)}
+                  </Button>
+                )}
+              </div>
+            ) : template && <TemplateDetails template={template} />}
+            {!legacy && template?.filterable.includes('devices') && !withheld && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-medium text-text2">Limit to</span>
+                <DeviceScopePicker
+                  selected={scopeOf(form.filters).deviceIds}
+                  onChange={(ids) => setDeviceScope(ids, scopeExtra)}
+                  scope={scopeExtra}
+                  onScopeChange={setDeviceScope}
+                />
+                <span className="text-[11px] text-muted">Devices, groups, locations or types; every chosen filter must match.</span>
+              </div>
+            )}
             {(scopeOf(form.filters).any || withheld) && (
               <div className="rounded-md border border-border bg-surface2/40 px-3 py-2.5">
                 <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -281,7 +390,10 @@ function ScheduleEditor({
                       type="button"
                       className="rounded text-[11px] font-medium text-text2 underline-offset-2 hover:text-text hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                       onClick={() => setForm((f) => {
-                        const { netflow: _n, device_ids: _d, application_id: _a, ...rest } = f.filters
+                        const {
+                          netflow: _n, device_ids: _d, application_id: _a, group_ids: _g, locations: _l,
+                          device_types: _t, ...rest
+                        } = f.filters
                         return { ...f, filters: rest }
                       })}
                     >
@@ -316,7 +428,7 @@ function ScheduleEditor({
                         </SelectPrimitive.Label>
                         {g.periods.map((p) => (
                           <SelectItem key={p.id} value={p.id}>
-                            {p.label}{p.id === suggestedPeriod(form.frequency) ? ' · suggested' : ''}
+                            {p.label}{suggestions.includes(p.id) ? ' · suggested' : ''}
                           </SelectItem>
                         ))}
                       </SelectGroup>
@@ -332,18 +444,25 @@ function ScheduleEditor({
                     <span className="font-medium tabular-nums text-text">{coverage}</span>
                   </span>
                 </p>
-                {form.period !== suggestedPeriod(form.frequency) && (
-                  <p className="text-xs text-muted">
-                    Suggested for {form.frequency} schedules: {PERIOD_LABEL[suggestedPeriod(form.frequency)]}.{' '}
+                {suggestions.filter((p) => p !== form.period).map((p) => (
+                  <p key={p} className="text-xs text-muted">
+                    {p === suggestion
+                      ? <>Suggested for {suggestionReason(form, branding.week_start)}: {PERIOD_LABEL[p]}.</>
+                      : <>Also fits a run on the day after the work week: {PERIOD_LABEL[p]}.</>}{' '}
                     <button
                       type="button"
                       className="rounded font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                      onClick={() => { setPeriodTouched(true); set('period', suggestedPeriod(form.frequency)) }}
+                      onClick={() => { setPeriodTouched(true); set('period', p) }}
                     >
                       Use it
                     </button>
                   </p>
-                )}
+                ))}
+                {warnings.filter((w) => w.field === 'period').map((w, i) => (
+                  <p key={`pw${i}`} className="flex items-start gap-1 text-xs text-warning-fg">
+                    <TriangleAlert className="mt-px h-3 w-3 shrink-0" aria-hidden /> {w.message}
+                  </p>
+                ))}
               </div>
             </div>
           </Step>
@@ -372,22 +491,25 @@ function ScheduleEditor({
                     options={weekdaysFrom(branding.week_start).map((d) => ({ id: String(d.id), label: d.short, aria: d.long }))}
                     onChange={(v) => set('day_of_week', Number(v))}
                   />
+                  {noDay && (
+                    <p className={cn('text-[11px]', attempted ? 'text-danger' : 'text-muted')}>Choose the day the report runs.</p>
+                  )}
                 </div>
               )}
               {form.frequency === 'monthly' && (
                 <FormField
                   label="Day of month"
-                  hint={`Days 29–31 are not offered so the report runs every month. For a month-end report, run on day 1 with “Previous month”.`}
+                  hint={form.day_of_month > 28
+                    ? `In months without a ${ordinal(form.day_of_month)} the report runs on the last day (for example 28 or 29 February${form.day_of_month === 31 ? ', 30 April' : ''}). For a month-end report, run on day 1 with “Previous month”.`
+                    : 'Days 29–31 run on the last day of shorter months. For a month-end report, run on day 1 with “Previous month”.'}
+                  error={attempted ? errors.find((e) => e.field === 'monthday')?.message : null}
                 >
                   <Select value={String(form.day_of_month)} onValueChange={(v) => set('day_of_month', Number(v))}>
                     <SelectTrigger id={FIELD_ID.monthday}><SelectValue /></SelectTrigger>
-                    <SelectContent>
+                    <SelectContent className="max-h-72">
                       {Array.from({ length: MAX_MONTH_DAY }, (_, i) => i + 1).map((d) => (
-                        <SelectItem key={d} value={String(d)}>{ordinal(d)}</SelectItem>
+                        <SelectItem key={d} value={String(d)}>{ordinal(d)}{d > 28 ? ' (or the last day)' : ''}</SelectItem>
                       ))}
-                      {form.day_of_month > MAX_MONTH_DAY && (
-                        <SelectItem value={String(form.day_of_month)}>{ordinal(form.day_of_month)} (last day in shorter months)</SelectItem>
-                      )}
                     </SelectContent>
                   </Select>
                 </FormField>
@@ -442,19 +564,65 @@ function ScheduleEditor({
                 labelledBy="sched-format-label"
                 variant="cards"
                 value={form.format}
-                options={formats.map((f) => ({ id: f, label: FORMAT_META[f].label, hint: FORMAT_META[f].hint }))}
+                options={formats.map((f) => (
+                  f === 'none' && shareLinks === false
+                    ? { id: f, label: FORMAT_META[f].label, hint: 'Needs the Appliance URL for the report link', disabled: true }
+                    : { id: f, label: FORMAT_META[f].label, hint: FORMAT_META[f].hint }
+                ))}
                 onChange={(v) => set('format', v as ScheduleFormat)}
               />
+              {shareLinks === false && (
+                <div
+                  role={form.format === 'none' ? 'alert' : 'note'}
+                  className={cn(
+                    'flex items-start gap-2 rounded-md border px-3 py-2 text-xs',
+                    form.format === 'none' ? 'border-warning/35 bg-warning/5 text-text2' : 'border-border bg-surface2/40 text-text2',
+                  )}
+                >
+                  {form.format === 'none'
+                    ? <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning-fg" aria-hidden />
+                    : <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />}
+                  <span>
+                    {form.format === 'none'
+                      ? 'This schedule sends “Summary only”, but report emails cannot include a link: recipients get the summary without the report. Choose an attachment format, or set the Appliance URL. '
+                      : '“Summary only” is unavailable: report emails cannot include a link until the Appliance URL is set. '}
+                    {can('settings.manage')
+                      ? <Link to={BASE_URL_SETTINGS_PATH} className="font-medium text-primary hover:underline">Settings → General → Company</Link>
+                      : 'Ask an administrator to set it in Settings → General → Company.'}
+                  </span>
+                </div>
+              )}
             </div>
             <ChannelPicker
               selected={form.notify_channels}
               query={channels}
               onChange={(ids) => set('notify_channels', ids)}
             />
-            <RecipientInput
-              id={FIELD_ID.recipients}
-              value={form.recipients}
-              onChange={(r) => set('recipients', r)}
+            {recipientsWithheld ? (
+              <div className="flex items-start gap-2 rounded-md border border-border bg-surface2/40 px-3 py-2 text-xs text-text2">
+                <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
+                <span>
+                  {schedule?.recipient_count ? `${schedule.recipient_count} email recipient${schedule.recipient_count === 1 ? '' : 's'}` : 'Email recipients'} hidden from your role. Saving keeps them unchanged.
+                </span>
+              </div>
+            ) : (
+              <RecipientInput
+                id={FIELD_ID.recipients}
+                value={form.recipients}
+                onChange={(r) => set('recipients', r)}
+              />
+            )}
+            <EmailOptions
+              open={emailOpen}
+              onOpenChange={setEmailOpen}
+              form={form}
+              set={set}
+              title={template?.title || templateTitle({ report_type: form.report_type, custom_report_id: form.custom_report_id }, catalog.data)}
+              runAt={runs[0] ?? new Date(now)}
+              branding={zb}
+              errors={attempted ? errors : []}
+              warnings={warnings}
+              recipientsWithheld={recipientsWithheld}
             />
           </Step>
 
@@ -513,6 +681,8 @@ function ScheduleEditor({
           errors={errors}
           warnings={warnings}
           channelNames={new Map((channels.data ?? []).map((c) => [c.id, c.name]))}
+          recipientCount={recipientsWithheld ? schedule?.recipient_count ?? 0 : null}
+          onFocusField={focusField}
         />
       </form>
 
@@ -562,7 +732,7 @@ function Step({ n, title, description, children }: { n: number; title: string; d
   )
 }
 
-type Choice = { id: string; label: string; hint?: string; aria?: string }
+type Choice = { id: string; label: string; hint?: string; aria?: string; disabled?: boolean }
 
 /** Single-choice radio group with arrow-key navigation (roving tab stop). */
 function ChoiceGroup({
@@ -576,17 +746,23 @@ function ChoiceGroup({
   variant: 'segmented' | 'chips' | 'cards'
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([])
-  const current = Math.max(0, options.findIndex((o) => o.id === value))
-  const move = (i: number) => {
-    const n = (i + options.length) % options.length
-    onChange(options[n].id)
-    refs.current[n]?.focus()
+  const selectedIndex = options.findIndex((o) => o.id === value)
+  const current = selectedIndex >= 0 ? selectedIndex : Math.max(0, options.findIndex((o) => !o.disabled))
+  // Arrow keys skip disabled choices.
+  const move = (i: number, step: number) => {
+    for (let k = 0; k < options.length; k++) {
+      const n = (((i + step * k) % options.length) + options.length) % options.length
+      if (options[n].disabled) continue
+      onChange(options[n].id)
+      refs.current[n]?.focus()
+      return
+    }
   }
   const onKey = (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); move(i + 1) }
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); move(i - 1) }
-    else if (e.key === 'Home') { e.preventDefault(); move(0) }
-    else if (e.key === 'End') { e.preventDefault(); move(options.length - 1) }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); move(i + 1, 1) }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); move(i - 1, -1) }
+    else if (e.key === 'Home') { e.preventDefault(); move(0, 1) }
+    else if (e.key === 'End') { e.preventDefault(); move(options.length - 1, -1) }
   }
   return (
     <div
@@ -595,7 +771,7 @@ function ChoiceGroup({
       className={cn(
         variant === 'segmented' && 'inline-flex rounded-lg border border-border bg-surface2/60 p-0.5',
         variant === 'chips' && 'flex flex-wrap gap-1.5',
-        variant === 'cards' && 'grid grid-cols-2 gap-2 xl:grid-cols-4',
+        variant === 'cards' && 'grid grid-cols-2 gap-2 sm:grid-cols-3',
       )}
     >
       {options.map((o, i) => {
@@ -609,11 +785,13 @@ function ChoiceGroup({
             role="radio"
             aria-checked={on}
             aria-label={o.aria}
+            aria-disabled={o.disabled || undefined}
             tabIndex={i === current ? 0 : -1}
-            onClick={() => onChange(o.id)}
+            onClick={() => { if (!o.disabled) onChange(o.id) }}
             onKeyDown={(e) => onKey(e, i)}
             className={cn(
               'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+              o.disabled && 'cursor-not-allowed opacity-60',
               variant === 'segmented' && cn(
                 'min-w-[84px] rounded-md px-3 py-1.5 text-sm font-medium',
                 on ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
@@ -624,7 +802,9 @@ function ChoiceGroup({
               ),
               variant === 'cards' && cn(
                 'flex flex-col items-start rounded-lg border px-3 py-2 text-left',
-                on ? 'border-primary bg-primary/5 ring-1 ring-primary/40' : 'border-border bg-surface hover:border-primary/40',
+                on ? 'border-primary bg-primary/5 ring-1 ring-primary/40' : 'border-border bg-surface',
+                !on && !o.disabled && 'hover:border-primary/40',
+                on && o.disabled && 'border-warning ring-warning/40',
               ),
             )}
           >
@@ -649,11 +829,13 @@ function ChoiceGroup({
 /* ------------------------------------------------------------------ */
 
 function TemplatePicker({
-  id, catalog, options, value, fallbackTitle, loading, invalid, onChange,
+  id, catalog, options, keepValue, value, fallbackTitle, loading, invalid, onChange,
 }: {
   id: string
   catalog: ReportCatalog | undefined
   options: TemplateOption[]
+  /** The stored report type of the schedule being edited: listed even when retired. */
+  keepValue: string
   value: string
   fallbackTitle: string
   loading: boolean
@@ -667,9 +849,10 @@ function TemplatePicker({
   const selected = options.find((o) => o.value === value) ?? null
 
   const groups = useMemo(() => {
-    const pool = options.filter((o) => o.available || o.value === value)
+    // Classic report types are retired: only the schedule that already uses one lists it.
+    const pool = options.filter((o) => (o.available && !o.deprecated) || (keepValue !== '' && o.value === keepValue))
     return groupTemplateOptions(searchTemplateOptions(pool, q), catalog)
-  }, [options, value, q, catalog])
+  }, [options, keepValue, q, catalog])
   const flat = useMemo(() => groups.flatMap((g) => g.options), [groups])
   const optId = (i: number) => `${listId}-opt-${i}`
 
@@ -792,7 +975,7 @@ function TemplatePicker({
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-1.5">
                           <span className={cn('truncate text-sm font-medium', isSel ? 'text-primary' : 'text-text')}>{o.title}</span>
-                          {o.engine === 'legacy' && <span className="shrink-0 rounded border border-border px-1 text-[10px] text-muted">Classic</span>}
+                          {o.engine === 'legacy' && <span className="shrink-0 rounded border border-border px-1 text-[10px] text-muted">Classic · retired</span>}
                           {!o.available && <span className="shrink-0 rounded border border-warning/40 px-1 text-[10px] text-warning-fg">Unavailable</span>}
                         </span>
                         {o.description && <span className="line-clamp-1 text-xs text-muted">{o.description}</span>}
@@ -948,7 +1131,10 @@ function ChannelPicker({
   )
 }
 
-function RecipientInput({ id, value, onChange }: { id: string; value: string[]; onChange: (r: string[]) => void }) {
+function RecipientInput({
+  id, value, onChange, label = 'Email recipients', max = MAX_RECIPIENTS,
+  hint = `People outside the notification channels. Press Enter or comma after each address, or paste a list. Up to ${MAX_RECIPIENTS}.`,
+}: { id: string; value: string[]; onChange: (r: string[]) => void; label?: string; max?: number; hint?: string }) {
   const [text, setText] = useState('')
   const [message, setMessage] = useState<string | null>(null)
   const hintId = `${id}-hint`
@@ -956,12 +1142,12 @@ function RecipientInput({ id, value, onChange }: { id: string; value: string[]; 
 
   const commit = (raw: string) => {
     if (!raw.trim()) { setMessage(null); return }
-    const r = addRecipients(value, raw, MAX_RECIPIENTS)
+    const r = addRecipients(value, raw, max)
     if (r.next.length !== value.length) onChange(r.next)
     const bits: string[] = []
     if (r.invalid.length) bits.push(`Not a valid email address: ${r.invalid.join(', ')}`)
     if (r.duplicates.length) bits.push(`Already added: ${r.duplicates.join(', ')}`)
-    if (r.overflow.length) bits.push(`The limit is ${MAX_RECIPIENTS} recipients; not added: ${r.overflow.length}`)
+    if (r.overflow.length) bits.push(`The limit is ${max} addresses; not added: ${r.overflow.length}`)
     setMessage(bits.length ? bits.join('. ') + '.' : null)
     setText(r.invalid.join(', '))
   }
@@ -970,9 +1156,9 @@ function RecipientInput({ id, value, onChange }: { id: string; value: string[]; 
   return (
     <div className="space-y-1.5">
       <div className="flex items-baseline justify-between gap-2">
-        <Label htmlFor={id}>Email recipients</Label>
-        <span className={cn('text-[11px] tabular-nums', value.length >= MAX_RECIPIENTS ? 'text-warning-fg' : 'text-muted')}>
-          {value.length} / {MAX_RECIPIENTS}
+        <Label htmlFor={id}>{label}</Label>
+        <span className={cn('text-[11px] tabular-nums', value.length >= max ? 'text-warning-fg' : 'text-muted')}>
+          {value.length} / {max}
         </span>
       </div>
       <div
@@ -984,7 +1170,7 @@ function RecipientInput({ id, value, onChange }: { id: string; value: string[]; 
         onClick={() => document.getElementById(id)?.focus()}
       >
         {value.length > 0 && (
-          <ul className="contents" aria-label="Email recipients added">
+          <ul className="contents" aria-label={`${label} added`}>
             {value.map((addr) => (
               <li key={addr} className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-surface2 py-0.5 pl-2 pr-0.5 text-xs text-text">
                 <Mail className="h-3 w-3 shrink-0 text-muted" aria-hidden />
@@ -1008,7 +1194,7 @@ function RecipientInput({ id, value, onChange }: { id: string; value: string[]; 
           autoComplete="off"
           multiple
           value={text}
-          disabled={value.length >= MAX_RECIPIENTS && !text}
+          disabled={value.length >= max && !text}
           aria-describedby={message ? `${msgId} ${hintId}` : hintId}
           aria-invalid={message ? true : undefined}
           onChange={(e) => { setText(e.target.value); if (message) setMessage(null) }}
@@ -1030,9 +1216,135 @@ function RecipientInput({ id, value, onChange }: { id: string; value: string[]; 
         />
       </div>
       {message && <p id={msgId} role="alert" className="text-[11px] text-danger-fg">{message}</p>}
-      <p id={hintId} className="text-[11px] text-muted">
-        People outside the notification channels. Press Enter or comma after each address, or paste a list. Up to {MAX_RECIPIENTS}.
-      </p>
+      <p id={hintId} className="text-[11px] text-muted">{hint}</p>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Email options                                                      */
+/* ------------------------------------------------------------------ */
+
+function EmailOptions({
+  open, onOpenChange, form, set, title, runAt, branding, errors, warnings, recipientsWithheld,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  form: ScheduleForm
+  set: <K extends keyof ScheduleForm>(k: K, v: ScheduleForm[K]) => void
+  title: string
+  runAt: Date
+  branding: Branding
+  errors: Issue[]
+  warnings: Issue[]
+  recipientsWithheld: boolean
+}) {
+  const panelId = useId()
+  const errorOf = (field: string) => errors.find((e) => e.field === field)?.message ?? null
+  const subjectWarning = warnings.find((w) => w.field === 'subject')?.message
+  const subject = form.subject_template.trim()
+  const preview = subject
+    ? renderSubject(subject, { title: title || 'Report', period: PERIOD_LABEL[form.period] ?? form.period, date: formatDate(runAt, branding) })
+    : ''
+  const on = [
+    form.subject_template.trim() ? 'own subject' : '',
+    form.reply_to.trim() ? 'reply-to' : '',
+    form.group_send ? 'one email to all' : '',
+    form.skip_when_empty ? 'skipped when empty' : '',
+  ].filter(Boolean)
+  return (
+    <div className="rounded-md border border-border">
+      <button
+        type="button"
+        onClick={() => onOpenChange(!open)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm font-medium text-text hover:bg-surface2/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+      >
+        {open ? <ChevronDown className="h-4 w-4 text-muted" aria-hidden /> : <ChevronRight className="h-4 w-4 text-muted" aria-hidden />}
+        Email options
+        <span className="ml-auto truncate text-xs font-normal text-muted">{on.length ? on.join(' · ') : 'Standard subject, one email per recipient'}</span>
+      </button>
+      {open && (
+        <div id={panelId} className="space-y-4 border-t border-border px-3 py-3">
+          <FormField
+            label="Subject"
+            error={errorOf('subject')}
+            hint={
+              <span className="space-y-0.5">
+                <span className="block">Leave empty for the standard subject. Placeholders: <code>{'{title}'}</code> the report, <code>{'{period}'}</code> the data period, <code>{'{date}'}</code> the run date.</span>
+                {preview && <span className="block text-text2">Preview: <span className="font-medium text-text">{preview}</span></span>}
+                {subjectWarning && <span className="block text-warning-fg">{subjectWarning}</span>}
+              </span>
+            }
+          >
+            <Input
+              id={FIELD_ID.subject}
+              value={form.subject_template}
+              maxLength={MAX_SUBJECT}
+              onChange={(e) => set('subject_template', e.target.value)}
+              placeholder="{title} — {period}"
+            />
+          </FormField>
+          <FormField label="Reply-to" error={errorOf('reply_to')} hint="Optional. Replies go to this address instead of the sender.">
+            <Input
+              id={FIELD_ID.reply_to}
+              type="email"
+              inputMode="email"
+              autoComplete="off"
+              value={form.reply_to}
+              maxLength={254}
+              onChange={(e) => set('reply_to', e.target.value.trim())}
+              placeholder="noc@example.com"
+            />
+          </FormField>
+          <div className="space-y-2">
+            <div className="flex items-start gap-3">
+              <Switch
+                id="sched-group-send"
+                checked={form.group_send}
+                onCheckedChange={(v) => set('group_send', v)}
+                aria-describedby="sched-group-send-hint"
+              />
+              <div className="min-w-0">
+                <label htmlFor="sched-group-send" className="text-sm font-medium text-text">Send one email to all recipients (they see each other)</label>
+                <p id="sched-group-send-hint" className="text-[11px] text-muted">
+                  Off: each email recipient gets a separate message. Notification channels are not affected.
+                </p>
+              </div>
+            </div>
+            {form.group_send && !recipientsWithheld && (
+              <div className="sm:pl-12">
+                <RecipientInput
+                  id={FIELD_ID.cc}
+                  label="CC"
+                  max={MAX_CC}
+                  value={form.cc}
+                  onChange={(r) => set('cc', r)}
+                  hint={`Copied on the shared email. Up to ${MAX_CC}.`}
+                />
+                {errorOf('cc') && <p className="mt-1 text-[11px] text-danger">{errorOf('cc')}</p>}
+              </div>
+            )}
+          </div>
+          <div className="flex items-start gap-3">
+            <Switch
+              id="sched-skip-empty"
+              checked={form.skip_when_empty}
+              onCheckedChange={(v) => set('skip_when_empty', v)}
+              aria-describedby="sched-skip-empty-hint"
+            />
+            <div className="min-w-0">
+              <label htmlFor="sched-skip-empty" className="text-sm font-medium text-text">Don&apos;t send when the report has no data</label>
+              <p id="sched-skip-empty-hint" className="text-[11px] text-muted">
+                {form.skip_when_empty
+                  ? 'A run with no table rows or chart points sends nothing and is recorded as skipped.'
+                  : 'A report with no data is still sent, with “[No data]” at the start of the subject.'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1042,7 +1354,8 @@ function RecipientInput({ id, value, onChange }: { id: string; value: string[]; 
 /* ------------------------------------------------------------------ */
 
 function ScheduleSummary({
-  form, template, fallbackTitle, coverage, nextRun, branding, now, errors, warnings, channelNames,
+  form, template, fallbackTitle, coverage, nextRun, branding, now, errors, warnings, channelNames, recipientCount,
+  onFocusField,
 }: {
   form: ScheduleForm
   template: TemplateOption | null
@@ -1054,16 +1367,25 @@ function ScheduleSummary({
   errors: Issue[]
   warnings: Issue[]
   channelNames: Map<string, string>
+  /** Set when the recipients are withheld: their count. */
+  recipientCount: number | null
+  onFocusField: (field: string) => void
 }) {
   const nCh = form.notify_channels.length
-  const nEm = form.recipients.length
+  const nEm = recipientCount ?? form.recipients.length
   const delivery = !nCh && !nEm
     ? 'Not delivered — the run history keeps each report.'
     : `${FORMAT_META[form.format]?.label ?? form.format} to ${[
         nCh ? `${nCh} channel${nCh === 1 ? '' : 's'}` : '',
         nEm ? `${nEm} email recipient${nEm === 1 ? '' : 's'}` : '',
       ].filter(Boolean).join(' and ')}`
-  const focus = (field: string) => document.getElementById(FIELD_ID[field] ?? '')?.focus()
+  const focus = onFocusField
+  const options = [
+    form.group_send ? `One email to all${form.cc.length ? `, ${form.cc.length} CC` : ''}` : '',
+    form.subject_template.trim() ? 'Own subject' : '',
+    form.reply_to.trim() ? `Replies to ${form.reply_to.trim()}` : '',
+    form.skip_when_empty ? 'Not sent when there is no data' : '',
+  ].filter(Boolean)
   return (
     <aside aria-label="Schedule summary" className="lg:sticky lg:top-0 lg:self-start">
       <div className="space-y-4 rounded-lg border border-border bg-surface2/40 p-4">
@@ -1100,6 +1422,7 @@ function ScheduleSummary({
                 {form.notify_channels.map((id) => channelNames.get(id) ?? 'Deleted channel').join(', ')}
               </span>
             )}
+            {options.length > 0 && <span className="block text-xs text-muted">{options.join(' · ')}</span>}
           </SummaryRow>
         </dl>
         {(errors.length > 0 || warnings.length > 0) && (

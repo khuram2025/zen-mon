@@ -373,12 +373,15 @@ def _footer_block(meta: dict, *, email: bool) -> str:
     footer_text = str(meta.get("footer_text") or (b.report_footer if b else "") or "").strip()
     disclaimer = str(meta.get("disclaimer") or (b.report_disclaimer if b else "") or "").strip()
     contact = str(meta.get("contact_line") or (b.contact_line if b else "") or "").strip()
-    note = (
-        "This report was delivered automatically because a notification channel "
-        "is linked to a report schedule."
-        if email else
-        "Automatically generated report. Figures cover the period shown above."
-    )
+    if email:
+        schedule = str(meta.get("schedule_name") or "").strip()
+        why = (f"You receive this report as a recipient of the report schedule “{_esc(schedule)}”."
+               if schedule else "You receive this report as a recipient of a report schedule.")
+        when = (" It was generated on request (manual run), not at the schedule's time."
+                if meta.get("run_kind") == "manual" else "")
+        note = why + when
+    else:
+        note = "Automatically generated report. Figures cover the period shown above."
     extra = ""
     if footer_text or contact:
         extra = "<br>" + _esc(" · ".join(p for p in (footer_text, contact) if p))
@@ -453,6 +456,19 @@ def build_report_email_html(meta: dict, data: dict, view_url: str | None = None,
             f'<div style="font-size:12px;color:{_MUTED};">The full report is attached to this email.</div>'
             f'</td></tr>'
         )
+    if meta.get("delivery_note"):
+        attach_note += (
+            f'<tr><td style="padding:4px 28px 0;">'
+            f'<div style="font-size:12px;color:{_MUTED};">{_esc(meta["delivery_note"])}</div>'
+            f'</td></tr>'
+        )
+    run_note = ""
+    if meta.get("run_note"):
+        run_note = (
+            f'<tr><td style="padding:10px 28px 0;">'
+            f'<div style="background:#FEF3C7;color:#92400E;border-radius:8px;padding:8px 12px;'
+            f'font-size:12px;">{_esc(meta["run_note"])}</div></td></tr>'
+        )
     k = (data or {}).get("kpis", {}) or {}
     pre_bits = []
     if k.get("availability_pct") is not None:
@@ -462,7 +478,9 @@ def build_report_email_html(meta: dict, data: dict, view_url: str | None = None,
     if k.get("mttr_minutes") is not None:
         pre_bits.append(f"MTTR {_num(k.get('mttr_minutes'), 'm')}")
     inner = (
-        _header_block(meta, status_chip="SCHEDULED REPORT", email=True)
+        _header_block(meta, status_chip="MANUAL RUN" if meta.get("run_kind") == "manual"
+                      else "SCHEDULED REPORT", email=True)
+        + run_note
         + f'<tr><td style="padding:16px 22px 0;">{_kpi_grid_html(data, brand)}</td></tr>'
         + f'<tr><td style="padding:6px 28px 0;">{_top_issues_html(data, brand)}</td></tr>'
         + button
@@ -497,8 +515,12 @@ def build_report_email_text(meta: dict, data: dict, view_url: str | None = None)
                 f"  - {it.get('hostname','Unknown')}: {(it.get('issue') or '').upper()} "
                 f"({_num(it.get('duration_minutes'),'m')}, {_num(it.get('alert_count'))} alerts)"
             )
+    if meta.get("run_note"):
+        lines += ["", str(meta["run_note"])]
     if view_url:
         lines += ["", f"View full report: {view_url}"]
+    if meta.get("delivery_note"):
+        lines += ["", str(meta["delivery_note"])]
     lines += ["", f"— {company} automated report"]
     b = _branding(meta)
     disclaimer = str(meta.get("disclaimer") or (b.report_disclaimer if b else "") or "").strip()
