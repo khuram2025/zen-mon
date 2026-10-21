@@ -290,8 +290,12 @@ def test_live_streams_require_authentication_and_a_view_permission(admin):
                       timeout=10) as r:
         assert r.status_code == 200
         assert "text/event-stream" in r.headers["content-type"]
-    # The browser EventSource cannot send headers, so ?token= is accepted.
-    with httpx.stream("GET", f"{API}/stream/alerts", params={"token": viewer.token}, timeout=10) as r:
+    # The browser EventSource cannot send headers: it uses a one-minute ticket.
+    # A session token in the query string is not accepted.
+    assert httpx.get(f"{API}/stream/alerts", params={"token": viewer.token}, timeout=5).status_code == 401
+    ticket = httpx.post(f"{API}/auth/stream-ticket", headers={"Authorization": f"Bearer {viewer.token}"},
+                        timeout=5).json()["ticket"]
+    with httpx.stream("GET", f"{API}/stream/alerts", params={"ticket": ticket}, timeout=10) as r:
         assert r.status_code == 200
 
 
@@ -549,6 +553,9 @@ def test_forced_password_change_blocks_everything_else_until_done(admin):
     assert me["must_change_password"] is True
     blocked = c.get("/devices")
     assert blocked.status_code == 403 and blocked.json()["detail"]["code"] == "password_change_required"
+    # Nobody holding a temporary password may bind an authenticator first.
+    mfa = c.post("/auth/mfa/setup", json={"password": STRONG})
+    assert mfa.status_code == 403 and mfa.json()["detail"]["code"] == "password_change_required"
     new = "A-Brand-New-Passphrase-77"
     assert c.post("/users/me/change-password", json={"current_password": STRONG, "new_password": new}).status_code == 200
     c2 = Client(name, new)

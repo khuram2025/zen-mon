@@ -175,10 +175,14 @@ CREATE TRIGGER alert_rules_updated_at BEFORE UPDATE ON alert_rules
 CREATE TRIGGER dashboard_configs_updated_at BEFORE UPDATE ON dashboard_configs
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
--- ─── Seed default admin user (password: admin123) ───
+-- ─── Seed the admin user, locked ───
+-- '!locked' is not a password hash, so no password signs in. The installer
+-- (install.sh) or the appliance first boot then sets a random one-time
+-- password, readable only by root, that must be changed at first sign-in.
+-- There is no published default password.
 INSERT INTO users (username, email, password_hash, full_name, role)
 VALUES ('admin', 'admin@zenplus.local',
-        '$2b$12$vjHI8XBgL.dCyn.sgl41VufIFkQGcEzjt78GJdB66AwG9e9MZasai',
+        '!locked',
         'System Administrator', 'admin');
 
 -- ─── Seed device groups ───

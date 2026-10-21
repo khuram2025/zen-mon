@@ -105,7 +105,7 @@ active subscription are all preserved.
 ```text
 Dashboard    http://<appliance-ip>
 API docs     http://<appliance-ip>/docs
-Sign in      admin / admin123
+Sign in      admin / one-time password in /var/lib/zenplus/initial-admin-password
 ```
 
 **Change the admin password immediately** — Settings → General → Profile.
@@ -316,16 +316,20 @@ export `http_proxy` / `https_proxy` before running the installer.
 ### Login returns HTTP 500
 
 Caused by a malformed stored password hash (`passlib UnknownHashError`). The
-installer now detects and repairs this automatically on re-run. To fix by hand:
+installer now detects this on re-run and gives the account a new one-time
+password in `/var/lib/zenplus/initial-admin-password`. To fix by hand, set a
+random one-time password (the quoted heredoc keeps the shell from expanding
+the `$2b$` hash prefix, which is what corrupts it in the first place):
 
 ```bash
-sudo -u postgres psql -d zenplus -c \
-"UPDATE users SET password_hash = '\$2b\$12\$vjHI8XBgL.dCyn.sgl41VufIFkQGcEzjt78GJdB66AwG9e9MZasai', is_active = true WHERE username = 'admin';"
+cd /opt/zenplus && source venv/bin/activate
+NEW=$(python3 -c 'import secrets; print(secrets.token_urlsafe(15))')
+HASH=$(python3 -c "import sys; from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash(sys.argv[1]))" "$NEW")
+sudo -u postgres psql -d zenplus -v ON_ERROR_STOP=1 -v h="$HASH" <<'SQL'
+UPDATE users SET password_hash = :'h', must_change_password = TRUE WHERE username = 'admin';
+SQL
+echo "One-time admin password: $NEW   (a new one must be chosen at sign-in)"
 ```
-
-That restores the password to `admin123`. Note the escaped `$` — an unescaped
-`$2b$` is expanded by the shell, which is what corrupts the hash in the first
-place.
 
 ### Poller fails with status=203/EXEC
 

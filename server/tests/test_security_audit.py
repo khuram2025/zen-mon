@@ -81,15 +81,42 @@ def test_viewer_cannot_read_or_write_management_policy(client,as_viewer):
     assert client.put('/api/v1/system/security/access',json={'web_restricted':False}).status_code==403
 
 @pytest.mark.asyncio
-async def test_session_revocation_checks_database_version():
-    user=SimpleNamespace(is_active=True,token_version=2)
+async def test_session_revocation_checks_database_version(monkeypatch):
+    from app.services import session_service
+    monkeypatch.setattr(session_service,'assert_session_active',AsyncMock())
+    user=SimpleNamespace(id='00000000-0000-0000-0000-000000000001',is_active=True,token_version=2)
     db=SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda:user)))
-    token=security.create_access_token({'sub':'00000000-0000-0000-0000-000000000001','ver':1})
+    jti='00000000-0000-0000-0000-0000000000aa'
+    token=security.create_access_token({'sub':'00000000-0000-0000-0000-000000000001','ver':1,'jti':jti})
     with pytest.raises(HTTPException) as e:
         await security.get_current_user(credentials=HTTPAuthorizationCredentials(scheme='Bearer',credentials=token),db=db)
     assert e.value.status_code==401
-    token=security.create_access_token({'sub':'00000000-0000-0000-0000-000000000001','ver':2})
+    token=security.create_access_token({'sub':'00000000-0000-0000-0000-000000000001','ver':2,'jti':jti})
     assert await security.get_current_user(credentials=HTTPAuthorizationCredentials(scheme='Bearer',credentials=token),db=db) is user
+
+@pytest.mark.asyncio
+async def test_token_without_session_id_is_refused(monkeypatch):
+    """A correctly signed token that names no server-side session cannot be
+    revoked or tied to an MFA sign-in, so it is refused (VAPT N1)."""
+    from app.services import session_service
+    check=AsyncMock()
+    monkeypatch.setattr(session_service,'assert_session_active',check)
+    user=SimpleNamespace(id='00000000-0000-0000-0000-000000000001',is_active=True,token_version=0)
+    db=SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda:user)))
+    token=security.create_access_token({'sub':'00000000-0000-0000-0000-000000000001','ver':0})
+    with pytest.raises(HTTPException) as e:
+        await security.get_current_user(credentials=HTTPAuthorizationCredentials(scheme='Bearer',credentials=token),db=db)
+    assert e.value.status_code==401
+    check.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_stream_auth_ignores_session_token_in_query_string():
+    """Session tokens never travel in a URL; only the stream ticket does (ZP-09)."""
+    import inspect
+    assert 'token' not in inspect.signature(security.get_current_user_stream).parameters
+    with pytest.raises(HTTPException) as e:
+        await security.get_current_user_stream(credentials=None,ticket=None,db=None)
+    assert e.value.status_code==401
 
 @pytest.mark.asyncio
 async def test_missing_token_is_401():
@@ -170,3 +197,12 @@ def test_sensor_seed_hashes_console_password_and_hardens_ssh():
     assert '$6$rounds=200000$' in user_data
     cloud=_bootstrap_cloud_init('https://controller.example.invalid','test-token','test-probe',create_data=data)
     assert 'PermitRootLogin no' in cloud and 'X11Forwarding no' in cloud
+
+def test_mfa_enrolment_waits_for_the_password_change():
+    """A seeded or temporary password must not let its holder bind their own
+    authenticator before the owner sets a real password (VAPT ZP-06)."""
+    from app.api.v1 import auth
+    with pytest.raises(HTTPException) as e:
+        auth._require_password_changed(SimpleNamespace(must_change_password=True))
+    assert e.value.status_code==403 and e.value.detail['code']=='password_change_required'
+    auth._require_password_changed(SimpleNamespace(must_change_password=False))

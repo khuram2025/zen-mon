@@ -17,20 +17,25 @@ def test_cli_and_helpers_are_delivered_but_running_binaries_are_preserved(tmp_pa
     code.mkdir()
     monkeypatch.setattr(builder, 'ZENPLUS_DIR', ROOT)
     builder.stage_code_files(code)
-    assert (code / 'bin/zenplus-cli').read_bytes() == (ROOT / 'bin/zenplus-cli').read_bytes()
     assert (code / 'bin/zenplus-management').read_bytes() == (ROOT / 'bin/zenplus-management').read_bytes()
     assert (code / 'bin/zenplus-apply-ntp.sh').read_bytes() == (ROOT / 'bin/zenplus-apply-ntp.sh').read_bytes()
-    write_payload_manifest(code, managed_files=builder.CODE_FILES)
+    for retired in builder.RETIRED_CODE_FILES:
+        assert not (code / retired).exists() and not (ROOT / retired).exists()
+    write_payload_manifest(code, managed_files=[*builder.CODE_FILES, *builder.RETIRED_CODE_FILES])
     destination = tmp_path / 'installed'
     (destination / 'bin').mkdir(parents=True)
     for name in ('zenplus-poller', 'zenplus-netflow-collector', 'local-operator-helper'):
         (destination / 'bin' / name).write_bytes(b'keep running inode')
+    (destination / 'bin/zenplus-management').write_bytes(b'old management cli')
+    # ZP-07: retired, never-installed console CLI and its root network helper.
     (destination / 'bin/zenplus-cli').write_bytes(b'old cli')
+    (destination / 'bin/zenplus-apply-network.sh').write_bytes(b'old helper')
     apply = importlib.import_module('updater.steps.apply_code')
     monkeypatch.setattr(apply, 'ZENPLUS_DIR', destination)
     apply._apply_replace({'source': 'code'}, str(tmp_path))
-    assert (destination / 'bin/zenplus-cli').read_bytes() == (ROOT / 'bin/zenplus-cli').read_bytes()
     assert (destination / 'bin/zenplus-management').read_bytes() == (ROOT / 'bin/zenplus-management').read_bytes()
+    assert not (destination / 'bin/zenplus-cli').exists(), 'upgrade removes the retired CLI'
+    assert not (destination / 'bin/zenplus-apply-network.sh').exists()
     for name in ('zenplus-poller', 'zenplus-netflow-collector', 'local-operator-helper'):
         assert (destination / 'bin' / name).read_bytes() == b'keep running inode'
 

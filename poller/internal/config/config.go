@@ -3,8 +3,81 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
+
+// AllowInsecureDefaultsEnv is the development escape hatch shared with the
+// Python API (server/app/core/secret_policy.py): only the exact value "1"
+// lets a service start with placeholder datastore passwords.
+const AllowInsecureDefaultsEnv = "ZENPLUS_ALLOW_INSECURE_DEFAULTS"
+
+// PlaceholderSecret is the published placeholder value refused everywhere.
+const PlaceholderSecret = "changeme"
+
+// Built-in development fallbacks, used only when the variable is unset or
+// empty. Installed appliances always set real values in /opt/zenplus/.env
+// (install.sh, bin/first-boot-init.sh, appliance/vmware/first-boot.py), which
+// every service reads through EnvironmentFile=, so these never apply there.
+const (
+	DevPostgresPassword   = "zenplus_dev"
+	DevClickHousePassword = "clickhouse_dev"
+	DevRedisPassword      = "redis_dev"
+)
+
+// DatastorePasswordEnvs are the poller's datastore password settings.
+var DatastorePasswordEnvs = []string{"POSTGRES_PASSWORD", "CLICKHOUSE_PASSWORD", "REDIS_PASSWORD"}
+
+var publishedDevPasswords = map[string]bool{
+	DevPostgresPassword:   true,
+	DevClickHousePassword: true,
+	DevRedisPassword:      true,
+}
+
+// InsecureDefaultsAllowed reports whether the development escape hatch is on.
+func InsecureDefaultsAllowed() bool {
+	return os.Getenv(AllowInsecureDefaultsEnv) == "1"
+}
+
+// CheckSecrets refuses datastore passwords that would fall back to a built-in
+// development default (variable unset, empty or blank) or that are the
+// published placeholder "changeme", unless ZENPLUS_ALLOW_INSECURE_DEFAULTS=1.
+//
+// A variable explicitly set to one of the published development passwords
+// (zenplus_dev, clickhouse_dev, redis_dev) only produces a warning: such a
+// value works against a datastore that really uses it, and refusing it here
+// without an OTA preflight check would stop a running appliance on update.
+func CheckSecrets(envs ...string) (warnings []string, err error) {
+	var bad, dev []string
+	for _, name := range envs {
+		v := os.Getenv(name)
+		switch {
+		case strings.TrimSpace(v) == "":
+			bad = append(bad, name+" (unset or empty)")
+		case v == PlaceholderSecret:
+			bad = append(bad, name+" (placeholder \""+PlaceholderSecret+"\")")
+		case publishedDevPasswords[v]:
+			dev = append(dev, name)
+		}
+	}
+	if len(bad) > 0 {
+		if !InsecureDefaultsAllowed() {
+			return nil, fmt.Errorf(
+				"refusing to start with insecure datastore credentials: %s; "+
+					"set the real values in /opt/zenplus/.env (development only: %s=1)",
+				strings.Join(bad, ", "), AllowInsecureDefaultsEnv)
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"running with insecure datastore credentials (%s) because %s=1",
+			strings.Join(bad, ", "), AllowInsecureDefaultsEnv))
+	}
+	if len(dev) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s set to a published development password; rotate it",
+			strings.Join(dev, ", ")))
+	}
+	return warnings, nil
+}
 
 type Config struct {
 	Poller     PollerConfig
@@ -68,7 +141,17 @@ func (p PostgresConfig) DSN() string {
 		p.User, p.Password, p.Host, p.Port, p.Database)
 }
 
+// Load reads the poller configuration from the environment. It refuses
+// (returns an error) when a datastore password is unset/empty or the
+// placeholder "changeme", unless ZENPLUS_ALLOW_INSECURE_DEFAULTS=1.
 func Load() (*Config, error) {
+	warnings, err := CheckSecrets(DatastorePasswordEnvs...)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "WARN: "+w)
+	}
 	cfg := &Config{
 		Poller: PollerConfig{
 			ID:                 getEnv("POLLER_ID", "poller-01"),
@@ -88,21 +171,21 @@ func Load() (*Config, error) {
 			Port:     getEnvInt("POSTGRES_PORT", 5432),
 			Database: getEnv("POSTGRES_DB", "zenplus"),
 			User:     getEnv("POSTGRES_USER", "zenplus"),
-			Password: getEnv("POSTGRES_PASSWORD", "zenplus_dev"),
+			Password: getEnv("POSTGRES_PASSWORD", DevPostgresPassword),
 		},
 		ClickHouse: ClickHouseConfig{
 			Host:          getEnv("CLICKHOUSE_HOST", "localhost"),
 			Port:          getEnvInt("CLICKHOUSE_PORT", 9000),
 			Database:      getEnv("CLICKHOUSE_DB", "zenplus"),
 			User:          getEnv("CLICKHOUSE_USER", "default"),
-			Password:      getEnv("CLICKHOUSE_PASSWORD", "clickhouse_dev"),
+			Password:      getEnv("CLICKHOUSE_PASSWORD", DevClickHousePassword),
 			BatchSize:     1000,
 			FlushInterval: 5 * time.Second,
 		},
 		Redis: RedisConfig{
 			Host:     getEnv("REDIS_HOST", "localhost"),
 			Port:     getEnvInt("REDIS_PORT", 6379),
-			Password: getEnv("REDIS_PASSWORD", "redis_dev"),
+			Password: getEnv("REDIS_PASSWORD", DevRedisPassword),
 			DB:       0,
 		},
 		Health: HealthConfig{

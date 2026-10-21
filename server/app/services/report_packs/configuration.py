@@ -18,9 +18,10 @@ Shared rules in this pack:
   so instead of inferring lifecycle status.
 - Attribution in change events (reported_user) is whatever the device or the
   calling system wrote; it is shown as unverified.
-- SSH host-key trust was removed from NCCM in release 1.23.29 (the key a
-  device presents is accepted); ncm_host_keys and ncm_credentials.
-  ssh_auto_trust remain in the database unused, so no section reads them.
+- NCCM SSH host-key trust is warn-only (app.services.ssh_host_keys): the
+  first key a device presents is recorded in ncm_host_keys and a changed key
+  is audited as backup.host_key_changed, never blocked. ncm_credentials.
+  ssh_auto_trust remains unused, and no report section reads either table.
 - Status cells use words both the dashboard and the PDF/HTML renderers tone
   (ok, stale, warning, failed, expired, compliant, non-compliant, unknown,
   open, resolved); anything else renders neutral.

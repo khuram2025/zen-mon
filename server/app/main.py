@@ -205,6 +205,12 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "zenplus-api"}
 
     @app.on_event("startup")
+    async def _refuse_placeholder_secrets():
+        # Runs first: never serve requests with the published placeholders.
+        from app.core import secret_policy
+        secret_policy.enforce(get_settings())
+
+    @app.on_event("startup")
     async def _start_background_tasks():
         # Built-in roles: reconcile persisted definitions with the code (versioned).
         try:

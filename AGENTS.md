@@ -31,6 +31,8 @@
 
 - License capacity: a node is one device or one server; a server linked to its device counts once, controller children and service checks never count. `license_capacity.NODE_COUNT_SQL` and `updater/inventory.py` `NODE_COUNT_SQL` stay identical (the reported count is the enforced count). Every path that creates a device or server checks the capacity under the `license-node-capacity` advisory lock and refuses with 402 `license_capacity_reached`; enforcement never disables or deletes existing nodes (see `docs/license-capacity.md`).
 
+- SSH host keys (see `docs/ssh-host-key-trust.md`): the SSH terminal confirms unknown keys by fingerprint before sending a password and refuses changed keys; NCCM backups record the first key and only warn on change; UDT gateway collection enforces operator-registered keys only. Session tokens must carry a server-side session id (`jti`), never travel in a URL (streams use `?ticket=`), and the API refuses to start on placeholder secrets (`app.core.secret_policy`). Client addresses come from `app.core.client_ip`, never a client-supplied X-Forwarded-For hop.
+
 ## Device Tracker
 
 - Sidebar groups and breadcrumb ownership are in `dashboard/src/components/layout/navigation.ts`. Device Tracker is separate from Monitoring.

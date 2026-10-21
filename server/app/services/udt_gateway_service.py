@@ -314,7 +314,9 @@ async def poll_gateway(db, device):
             keys = (
                 await db.execute(
                     text(
-                        "SELECT key_type,key_base64 FROM ncm_host_keys WHERE host=:host AND port=:port AND retired_at IS NULL"
+                        "SELECT key_type,key_base64 FROM ncm_host_keys WHERE host=:host AND port=:port AND retired_at IS NULL "
+                        # Keys recorded by the SSH terminal or NCCM (first use) are not enforced here.
+                        "AND verification_method NOT IN ('first_use','terminal_confirmed')"
                     ),
                     {"host": profile["ip"], "port": profile["port"] or 22},
                 )

@@ -44,6 +44,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.client_ip import client_ip
 from app.core.database import get_db, get_clickhouse_client
 from app.schemas.agent import (
     AgentCommandPoll,
@@ -167,10 +168,7 @@ def _same_uuid(left: Any, right: Any) -> bool:
 
 
 def _client_ip(request: Request) -> Optional[str]:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
+    return client_ip(request)
 
 
 async def _sync_server_identity(

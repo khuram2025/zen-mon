@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.apm import authenticate_ingest_key
 from app.api.v1.rum_sdk import RUM_SDK
+from app.core.client_ip import client_ip
 from app.core.config import get_settings
 from app.core.database import get_ch_client, get_db
 from app.core.security import get_current_user
@@ -695,20 +696,9 @@ def _user_agent(value: str) -> tuple[str, str, str, str]:
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort real client IP behind the reverse proxy.
-
-    nginx forwards the caller in X-Forwarded-For / X-Real-IP; the left-most
-    X-Forwarded-For hop is the browser.  Falls back to the socket peer.
-    """
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first[:45]
-    real_ip = request.headers.get("x-real-ip", "").strip()
-    if real_ip:
-        return real_ip[:45]
-    return (request.client.host if request.client else "")[:45]
+    """The browser's address as nginx saw it (never a client-supplied
+    X-Forwarded-For hop, which would dodge the per-IP quota)."""
+    return (client_ip(request) or "")[:45]
 
 
 def _resolve_country(request: Request, client_ip: str) -> str:

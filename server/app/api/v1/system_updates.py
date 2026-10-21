@@ -30,6 +30,15 @@ LOG_FILE = UPDATER_DIR / "logs" / "update.log"
 HISTORY_FILE = UPDATER_DIR / "logs" / "update-history.json"
 TIMER_DROPIN_DIR = "/etc/systemd/system/zenplus-updater.timer.d"
 TIMER_DROPIN_FILE = f"{TIMER_DROPIN_DIR}/override.conf"
+# Root-owned helper (scripts/setup-updater-privileges.sh) that takes a number
+# of hours and writes a fixed [Timer] drop-in. sudo grants exactly
+# `<helper> set-interval *`; the helper validates the number.
+TIMER_HELPER = "/usr/local/sbin/zenplus-updater-timer-helper"
+TIMER_MIN_HOURS = 1
+TIMER_MAX_HOURS = 168
+# The VMware appliance image routes sudo through a typed broker that accepts
+# only the original fixed drop-in text (and writes it with its own helper).
+TYPED_PRIVILEGE_BROKER = "/usr/local/libexec/zentryc-privileged"
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
@@ -386,12 +395,40 @@ async def get_update_status(user: User = Depends(require_admin_user)):
 
 
 def _write_timer_override(check_interval_hours: int) -> tuple[bool, str]:
-    """Install a systemd drop-in that overrides the updater timer interval.
+    """Set the updater timer interval without touching the shipped unit file.
 
-    Uses the narrow NOPASSWD entries in /etc/sudoers.d/zenplus-updater and
-    avoids touching the shipped unit file itself.
+    The root helper accepts only a number of hours and writes a fixed
+    ``[Timer]`` drop-in, then reloads systemd and restarts the timer. The API
+    never supplies drop-in text, so it cannot add other systemd directives.
     """
-    hours = max(1, int(check_interval_hours))
+    hours = max(TIMER_MIN_HOURS, int(check_interval_hours))
+    if hours > TIMER_MAX_HOURS:
+        return False, f"interval must be {TIMER_MIN_HOURS} through {TIMER_MAX_HOURS} hours"
+
+    if os.path.exists(TYPED_PRIVILEGE_BROKER):
+        return _write_timer_override_via_broker(hours)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", TIMER_HELPER, "set-interval", str(hours)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "sudo command timed out"
+    except Exception as e:
+        return False, str(e)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or "unknown error"
+        return False, f"timer helper failed: {detail}"
+    return True, ""
+
+
+def _write_timer_override_via_broker(hours: int) -> tuple[bool, str]:
+    """Typed-broker form used by the VMware appliance image.
+
+    Its broker accepts this exact drop-in text only, extracts the number and
+    hands it to its own fixed-template helper.
+    """
     override_body = (
         "# Managed by zenplus-api — do not edit by hand.\n"
         "[Timer]\n"
@@ -400,7 +437,6 @@ def _write_timer_override(check_interval_hours: int) -> tuple[bool, str]:
     )
 
     try:
-        # 1. Ensure the drop-in directory exists
         mkdir = subprocess.run(
             ["sudo", "-n", "/bin/mkdir", "-p", TIMER_DROPIN_DIR],
             capture_output=True, text=True, timeout=10,
@@ -408,29 +444,12 @@ def _write_timer_override(check_interval_hours: int) -> tuple[bool, str]:
         if mkdir.returncode != 0:
             return False, f"mkdir failed: {mkdir.stderr.strip()}"
 
-        # 2. Write the drop-in via tee (sudoers allows writing only this exact path)
         tee = subprocess.run(
             ["sudo", "-n", "/usr/bin/tee", TIMER_DROPIN_FILE],
-            input=override_body, capture_output=True, text=True, timeout=10,
+            input=override_body, capture_output=True, text=True, timeout=30,
         )
         if tee.returncode != 0:
             return False, f"tee failed: {tee.stderr.strip()}"
-
-        # 3. Reload systemd and restart the timer so the new interval takes effect
-        reload_ = subprocess.run(
-            ["sudo", "-n", "/bin/systemctl", "daemon-reload"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if reload_.returncode != 0:
-            return False, f"daemon-reload failed: {reload_.stderr.strip()}"
-
-        restart = subprocess.run(
-            ["sudo", "-n", "/bin/systemctl", "restart", "zenplus-updater.timer"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if restart.returncode != 0:
-            return False, f"timer restart failed: {restart.stderr.strip()}"
-
         return True, ""
     except subprocess.TimeoutExpired:
         return False, "sudo command timed out"

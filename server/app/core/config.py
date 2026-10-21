@@ -6,7 +6,8 @@ class Settings(BaseSettings):
     # App
     APP_NAME: str = "ZenPlus API"
     DEBUG: bool = False
-    API_HOST: str = "0.0.0.0"
+    # The listen address is not a setting: uvicorn is started with
+    # --host 127.0.0.1 behind nginx (install.sh, setup-management-hardening.py).
     API_PORT: int = 8000
     # Public base URL of this appliance (no trailing slash), used to build
     # absolute links in outbound emails (e.g. scheduled-report share links).

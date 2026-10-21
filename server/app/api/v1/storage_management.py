@@ -676,6 +676,10 @@ async def restore_backup(
         raise HTTPException(400, "This backup does not include ClickHouse data")
     if not os.path.isfile(os.path.join(svc.BACKUP_ROOT, str(backup_id), "manifest.json")):
         raise HTTPException(410, "Backup files are missing on disk")
+    try:
+        await asyncio.to_thread(svc.preflight_restore, str(backup_id), body.components)
+    except (ValueError, UnicodeDecodeError, OSError) as e:
+        raise HTTPException(400, f"Backup cannot be restored: {e}")
 
     await db.execute(
         text(
@@ -756,6 +760,53 @@ async def download_backup(
     )
 
 
+def _extract_uploaded_backup(tmp_path: str) -> dict:
+    """Validate an uploaded backup archive, then extract it.
+
+    The manifest and ClickHouse schema are checked against what this
+    appliance's backup writer produces *before* anything is written, and only
+    regular files/directories (plus hard links inside the backup) are
+    extracted, with the tarfile ``data`` filter where available.
+    """
+    with tarfile.open(tmp_path, "r:gz") as tar:
+        members = tar.getmembers()
+        # Safety: no absolute paths / traversal, and locate manifest.
+        manifest_member = None
+        for m in members:
+            if m.name.startswith("/") or ".." in m.name.split("/"):
+                raise ValueError(f"unsafe path in archive: {m.name}")
+            if m.name.count("/") == 1 and m.name.endswith("/manifest.json"):
+                manifest_member = m
+        if manifest_member is None or not manifest_member.isreg():
+            raise ValueError("archive does not contain a backup manifest")
+        mf = json.load(tar.extractfile(manifest_member))
+        if not isinstance(mf, dict):
+            raise ValueError("backup manifest is not a JSON object")
+        backup_id = svc.validate_uploaded_backup_id(mf.get("id"))
+        if manifest_member.name != f"{backup_id}/manifest.json":
+            raise ValueError("backup manifest is outside the backup directory")
+        svc.validate_backup_manifest(mf, backup_id)
+        schema_member = next(
+            (m for m in members if m.name == f"{backup_id}/clickhouse_schema.sql"), None
+        )
+        if schema_member is not None:
+            if not schema_member.isreg():
+                raise ValueError("clickhouse_schema.sql is not a regular file")
+            schema = tar.extractfile(schema_member).read().decode("utf-8")
+            svc.validate_clickhouse_schema(schema)
+        # Validate every member of both trees before writing anything.
+        for prefix in (backup_id, f"clickhouse-{backup_id}"):
+            for m in members:
+                if m.name == prefix or m.name.startswith(prefix + "/"):
+                    svc._check_archive_member(m, prefix)
+        svc.safe_extract_backup_members(tar, members, svc.BACKUP_ROOT, prefix=backup_id)
+        svc.safe_extract_backup_members(
+            tar, members, os.path.join(svc.CH_BACKUP_HOST_ROOT, "appliance"),
+            prefix=f"clickhouse-{backup_id}", rename_to=backup_id,
+        )
+        return mf
+
+
 @router.post("/backups/upload")
 async def upload_backup(
     file: UploadFile = File(...),
@@ -770,30 +821,7 @@ async def upload_backup(
             while chunk := await file.read(1024 * 1024):
                 out.write(chunk)
 
-        def _extract() -> dict:
-            with tarfile.open(tmp_path, "r:gz") as tar:
-                members = tar.getmembers()
-                # Safety: no absolute paths / traversal, and locate manifest.
-                manifest_member = None
-                for m in members:
-                    if m.name.startswith("/") or ".." in m.name:
-                        raise ValueError(f"unsafe path in archive: {m.name}")
-                    if m.name.count("/") == 1 and m.name.endswith("/manifest.json"):
-                        manifest_member = m
-                if manifest_member is None:
-                    raise ValueError("archive does not contain a backup manifest")
-                mf = json.load(tar.extractfile(manifest_member))
-                backup_id = mf.get("id")
-                uuid.UUID(str(backup_id))  # validates format
-                for m in members:
-                    if m.name.startswith(f"{backup_id}/"):
-                        tar.extract(m, svc.BACKUP_ROOT)
-                    elif m.name.startswith(f"clickhouse-{backup_id}/"):
-                        m.name = m.name.replace(f"clickhouse-{backup_id}", str(backup_id), 1)
-                        tar.extract(m, os.path.join(svc.CH_BACKUP_HOST_ROOT, "appliance"))
-                return mf
-
-        manifest = await asyncio.to_thread(_extract)
+        manifest = await asyncio.to_thread(_extract_uploaded_backup, tmp_path)
         backup_id = str(manifest["id"])
         backup_dir = os.path.join(svc.BACKUP_ROOT, backup_id)
         size = await asyncio.to_thread(svc._dir_size, backup_dir)
@@ -819,7 +847,8 @@ async def upload_backup(
         await db.commit()
         return {"id": backup_id, "message": "Backup imported",
                 "include_clickhouse": has_ch}
-    except (ValueError, KeyError, json.JSONDecodeError, tarfile.TarError) as e:
+    except (ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError,
+            tarfile.TarError) as e:
         raise HTTPException(400, f"Invalid backup archive: {e}")
     finally:
         if os.path.exists(tmp_path):

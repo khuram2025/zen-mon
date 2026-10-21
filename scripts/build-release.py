@@ -65,9 +65,16 @@ CODE_FILES = [
     ".version", "docker-compose.yml",
     # Manage source scripts individually: bin/ also holds running Go binaries,
     # which must stay untouched until their explicit install_binary steps.
-    "bin/zenplus-cli", "bin/zenplus-management", "bin/zenplus-apply-network.sh", "bin/zenplus-apply-ntp.sh",
+    "bin/zenplus-management", "bin/zenplus-apply-ntp.sh",
     "bin/first-boot-init.sh", "bin/wait-for-deps.sh", "bin/expand-storage.sh",
     "bin/verify-ship-ready.sh",
+]
+# Files earlier releases shipped and this one deletes. They stay in the signed
+# inventory's managed_files (but not in the payload), so apply_code removes
+# them from upgraded appliances. bin/zenplus-cli was never installed or
+# granted sudo; bin/zenplus-apply-network.sh was its unreachable root helper.
+RETIRED_CODE_FILES = [
+    "bin/zenplus-cli", "bin/zenplus-apply-network.sh",
 ]
 CODE_IGNORE = [
     "__pycache__", "*.pyc", ".pytest_cache", "node_modules",
@@ -764,7 +771,7 @@ def build_package(version: str, changelog: str, severity: str,
     write_payload_manifest(
         code_dir,
         managed_roots=[*CODE_DIRS, "updater"],
-        managed_files=CODE_FILES,
+        managed_files=[*CODE_FILES, *RETIRED_CODE_FILES],
     )
     print("  + signed code inventory")
 
@@ -1029,6 +1036,17 @@ def build_package(version: str, changelog: str, severity: str,
         steps.append({
             "type": "run_hook",
             "script": "code/scripts/setup-security.sh",
+            "timeout": 120,
+        })
+
+    # Updater privileges: the root timer-interval helper and its sudo grant
+    # replace the free-form `sudo tee` timer drop-in grant, and the all-units
+    # polkit pkla (Ubuntu 20.04/22.04) is removed. Idempotent; keeps an
+    # administrator's check interval.
+    if (Path(build_dir) / "code" / "scripts" / "setup-updater-privileges.sh").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/setup-updater-privileges.sh",
             "timeout": 120,
         })
 

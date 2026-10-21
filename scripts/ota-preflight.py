@@ -18,6 +18,16 @@ def main():
     validate_transition(manifest, current)
     if (PAYLOAD / ".version").read_text().splitlines()[0].strip() != manifest["version"]:
         raise ValueError("Signed manifest and payload version mismatch")
+    # The API of this release refuses placeholder secrets. Refuse an appliance
+    # that still has a placeholder datastore password (nothing changed yet, so
+    # no rollback is needed) and replace a weak JWT secret before any service
+    # is restarted. See updater/secret_floor.py.
+    from updater.secret_floor import SecretFloorError, enforce
+    try:
+        print(enforce(installed))
+    except SecretFloorError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     from updater.backup_transaction import begin_transaction
     begin_transaction(manifest['update_id'])
     print(f"Prerequisite verified: {current} -> {manifest['version']}")

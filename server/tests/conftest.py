@@ -4,12 +4,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
+import os
 import sys
 
 import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Unit tests run on the placeholder settings; the startup secret check
+# (app.core.secret_policy) would otherwise refuse every TestClient startup.
+os.environ.setdefault("ZENPLUS_ALLOW_INSECURE_DEFAULTS", "1")
 
 from app.core.database import get_db
 from app.core.security import get_current_user

@@ -940,7 +940,270 @@ async def run_backup(backup_id: str, kind: str, include_clickhouse: bool, actor:
             await db.commit()
 
 
+# ─── Backup trust validation ─────────────────────────────────────────────────
+#
+# An uploaded archive's manifest.json and clickhouse_schema.sql are attacker
+# controlled (admin-only, but still a different trust level than our own
+# backup writer). Table names are interpolated into DROP/RESTORE statements and
+# the schema file is executed, so both are validated against exactly what
+# ``run_backup`` produces before anything runs. Backups are not yet signed: an
+# appliance HMAC over the manifest and component digests is the remaining
+# step and is tracked separately.
+
+class BackupValidationError(ValueError):
+    """The backup's manifest/schema/archive is not one this appliance wrote."""
+
+
+CH_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_UUID_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+BACKUP_ID_RE = re.compile(rf"^{_UUID_PATTERN}$")
+# run_backup writes f"appliance/{backup_id}" (backup_id = str(uuid.uuid4())).
+CH_BACKUP_NAME_RE = re.compile(rf"^appliance/({_UUID_PATTERN})$")
+BACKUP_KIND_RE = re.compile(r"^[a-z][a-z_]{0,31}$")
+MAX_MANIFEST_TABLES = 5000
+
+_IDENT = r"[A-Za-z_][A-Za-z0-9_]{0,127}"
+_SCHEMA_HEAD_RE = re.compile(
+    r"^(?i:CREATE)\s+((?i:TABLE|MATERIALIZED\s+VIEW|VIEW|DICTIONARY))\s+"
+    r"(?:(?i:IF\s+NOT\s+EXISTS)\s+)?"
+    rf"(?:`{CH_DATABASE}`|{CH_DATABASE})\s*\.\s*(?:`({_IDENT})`|({_IDENT}))(?=[\s(]|$)"
+)
+# MaterializedViews without TO own an implicit inner table. Its DDL may appear
+# in a dump but recreating the view recreates it, so it is skipped, not run.
+_SCHEMA_INNER_TABLE_RE = re.compile(
+    r"^(?i:CREATE\s+TABLE)\s+(?:(?i:IF\s+NOT\s+EXISTS)\s+)?"
+    rf"(?:`{CH_DATABASE}`|{CH_DATABASE})\s*\.\s*`\.inner(?:_id)?\.[A-Za-z0-9_.-]+`(?=[\s(])"
+)
+_ALLOWED_ENGINE_RE = re.compile(
+    r"^(?:(?:Replicated)?(?:Replacing|Summing|Aggregating|Collapsing|"
+    r"VersionedCollapsing|Graphite|Coalescing)?MergeTree|Memory|Log|TinyLog|"
+    r"StripeLog|Null)$"
+)
+_ENGINE_RE = re.compile(r"\bENGINE\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)
+# Table functions / dynamic disks that reach files, the network or other
+# servers. Aggregate combinators (sumMerge) do not match because of \b.
+_FORBIDDEN_CALL_RE = re.compile(
+    r"\b(?:url|urlCluster|file|fileCluster|s3|s3Cluster|gcs|oss|cosn|"
+    r"azureBlobStorage|azureBlobStorageCluster|hdfs|hdfsCluster|remote|"
+    r"remoteSecure|cluster|clusterAllReplicas|mysql|postgresql|mongodb|redis|"
+    r"sqlite|odbc|jdbc|executable|executablePool|input|deltaLake|hudi|iceberg|"
+    r"icebergS3|merge|dictionary|generateRandom|disk|loop)\s*\(",
+    re.IGNORECASE,
+)
+# Any database-qualified reference in FROM/JOIN/TO/AS position must be ours.
+_QUALIFIED_REF_RE = re.compile(
+    r"\b(?:FROM|JOIN|TO|AS)\s+`?([A-Za-z_][A-Za-z0-9_]*)`?\s*\.\s*`?[A-Za-z_.]",
+    re.IGNORECASE,
+)
+
+
+def split_clickhouse_schema(schema_sql: str) -> list[str]:
+    """Split a schema dump exactly the way ``_ch_schema_sync`` joins it."""
+    out = []
+    for stmt in schema_sql.split(";\n"):
+        stmt = stmt.strip().rstrip(";").strip()
+        if stmt:
+            out.append(stmt)
+    return out
+
+
+def validate_clickhouse_schema(schema_sql: str) -> list[tuple[str, str, str]]:
+    """Return ``[(kind, name, statement)]`` or raise BackupValidationError.
+
+    Only CREATE TABLE / MATERIALIZED VIEW / VIEW / DICTIONARY statements for
+    the zenplus database are accepted, with MergeTree-family/Memory/Log/Null
+    engines and no table functions, dynamic disks, foreign databases or
+    stacked statements. The whole file is refused if any statement fails, so a
+    restore never runs half of a hostile schema.
+    """
+    if not isinstance(schema_sql, str):
+        raise BackupValidationError("ClickHouse schema is not text")
+    accepted: list[tuple[str, str, str]] = []
+    for index, stmt in enumerate(split_clickhouse_schema(schema_sql), start=1):
+        if _SCHEMA_INNER_TABLE_RE.match(stmt):
+            continue
+        head = _SCHEMA_HEAD_RE.match(stmt)
+        if not head:
+            raise BackupValidationError(
+                f"schema statement {index} is not a CREATE TABLE/VIEW/DICTIONARY "
+                f"for database {CH_DATABASE}"
+            )
+        kind = re.sub(r"\s+", " ", head.group(1)).upper()
+        name = head.group(2) or head.group(3)
+        if ";" in stmt:
+            raise BackupValidationError(f"schema statement {index} ({name}) has stacked statements")
+        for engine in _ENGINE_RE.findall(stmt):
+            if not _ALLOWED_ENGINE_RE.match(engine):
+                raise BackupValidationError(
+                    f"schema statement {index} ({name}) uses unsupported engine {engine}"
+                )
+        if kind == "TABLE" and not _ENGINE_RE.search(stmt):
+            raise BackupValidationError(f"schema statement {index} ({name}) has no ENGINE")
+        if _FORBIDDEN_CALL_RE.search(stmt):
+            raise BackupValidationError(
+                f"schema statement {index} ({name}) uses a table function or external disk"
+            )
+        for database in _QUALIFIED_REF_RE.findall(stmt):
+            if database != CH_DATABASE:
+                raise BackupValidationError(
+                    f"schema statement {index} ({name}) references database {database}"
+                )
+        if kind == "DICTIONARY":
+            if not re.search(r"\bSOURCE\s*\(\s*CLICKHOUSE\s*\(", stmt, re.IGNORECASE) or \
+                    re.search(r"\b(?:HOST|PORT|USER|PASSWORD)\b", stmt, re.IGNORECASE):
+                raise BackupValidationError(
+                    f"schema statement {index} ({name}) has a non-local dictionary source"
+                )
+        accepted.append((kind, name, stmt))
+    return accepted
+
+
+def validate_backup_manifest(manifest: Any, backup_id: str) -> dict:
+    """Check a manifest against what ``run_backup`` writes for ``backup_id``."""
+    if not isinstance(manifest, dict):
+        raise BackupValidationError("manifest is not a JSON object")
+    mid = manifest.get("id")
+    if mid is not None and str(mid) != backup_id:
+        raise BackupValidationError("manifest id does not match the backup")
+    kind = manifest.get("kind")
+    if kind is not None and (not isinstance(kind, str) or not BACKUP_KIND_RE.match(kind)):
+        raise BackupValidationError("manifest kind is invalid")
+    ch_name = manifest.get("clickhouse_backup_name")
+    if ch_name is not None:
+        if not isinstance(ch_name, str) or not CH_BACKUP_NAME_RE.match(ch_name) \
+                or ch_name != f"appliance/{backup_id}":
+            raise BackupValidationError("manifest clickhouse_backup_name is invalid")
+    tables = manifest.get("clickhouse_tables", [])
+    if tables is None:
+        tables = []
+    if not isinstance(tables, list) or len(tables) > MAX_MANIFEST_TABLES:
+        raise BackupValidationError("manifest clickhouse_tables is invalid")
+    for table in tables:
+        if not isinstance(table, str) or not CH_IDENTIFIER_RE.match(table):
+            raise BackupValidationError(
+                f"manifest lists an invalid ClickHouse table name: {str(table)[:80]!r}"
+            )
+    return manifest
+
+
+def validate_uploaded_backup_id(value: Any) -> str:
+    """The upload's manifest id must be a canonical lowercase UUID string."""
+    text_id = str(value or "")
+    if not BACKUP_ID_RE.match(text_id):
+        raise BackupValidationError("manifest id is not a backup UUID")
+    return text_id
+
+
+def _check_archive_member(member: tarfile.TarInfo, prefix: str) -> None:
+    name = member.name
+    parts = name.split("/")
+    if name.startswith("/") or "\\" in name or ".." in parts or "\x00" in name:
+        raise BackupValidationError(f"unsafe path in archive: {name[:120]}")
+    if member.issym():
+        raise BackupValidationError(f"symbolic link in archive: {name[:120]}")
+    if member.islnk():
+        link = member.linkname
+        if (link.startswith("/") or ".." in link.split("/") or
+                not link.startswith(prefix + "/")):
+            raise BackupValidationError(f"hard link leaves the backup: {name[:120]}")
+    elif not (member.isreg() or member.isdir()):
+        raise BackupValidationError(f"special file in archive: {name[:120]}")
+
+
+def safe_extract_backup_members(
+    tar: tarfile.TarFile,
+    members: list[tarfile.TarInfo],
+    dest: str,
+    *,
+    prefix: str,
+    rename_to: Optional[str] = None,
+) -> int:
+    """Extract only ``prefix/...`` members into ``dest``.
+
+    Every member is validated first (no absolute/.. paths, symlinks, devices,
+    FIFOs, or hard links outside the backup). Extraction then uses the
+    ``data`` filter where the runtime provides it (Python 3.12, and 3.8.17+/
+    3.10.12+ backports), which also re-checks the resolved path.
+    """
+    selected = [m for m in members if m.name == prefix or m.name.startswith(prefix + "/")]
+    for m in selected:
+        _check_archive_member(m, prefix)
+    extracted = 0
+    use_filter = hasattr(tarfile, "data_filter")
+    for m in selected:
+        if rename_to is not None:
+            m.name = rename_to + m.name[len(prefix):]
+            if m.islnk():
+                m.linkname = rename_to + m.linkname[len(prefix):]
+        if use_filter:
+            tar.extract(m, dest, filter="data")
+        else:
+            target = os.path.realpath(os.path.join(dest, m.name))
+            root = os.path.realpath(dest)
+            if os.path.commonpath([root, target]) != root:
+                raise BackupValidationError(f"unsafe path in archive: {m.name[:120]}")
+            tar.extract(m, dest)
+        extracted += 1
+    return extracted
+
+
+def _read_backup_manifest(backup_dir: str, backup_id: str) -> dict:
+    with open(os.path.join(backup_dir, "manifest.json"), "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    return validate_backup_manifest(manifest, backup_id)
+
+
+def _read_backup_schema(backup_dir: str) -> Optional[str]:
+    path = os.path.join(backup_dir, "clickhouse_schema.sql")
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def preflight_restore(backup_id: str, components: list[str]) -> dict:
+    """Validate a backup's manifest (and schema when used) before a restore."""
+    backup_dir = os.path.join(BACKUP_ROOT, backup_id)
+    manifest = _read_backup_manifest(backup_dir, backup_id)
+    if "clickhouse_schema" in components or "clickhouse_data" in components:
+        schema_sql = _read_backup_schema(backup_dir)
+        if schema_sql is not None:
+            validate_clickhouse_schema(schema_sql)
+        elif "clickhouse_schema" in components:
+            raise BackupValidationError("backup has no clickhouse_schema.sql")
+    return manifest
+
+
+def _ch_existing_tables_sync() -> set[str]:
+    client = get_ch_client()
+    rows = client.query(
+        "SELECT name FROM system.tables WHERE database = %(db)s",
+        parameters={"db": CH_DATABASE},
+    ).result_rows
+    return {str(r[0]) for r in rows}
+
+
+def _restorable_tables(manifest: dict, schema_sql: Optional[str]) -> list[str]:
+    """Manifest tables, restricted to the backup's own schema or live tables."""
+    tables = list(manifest.get("clickhouse_tables") or [])
+    known: set[str] = set()
+    if schema_sql is not None:
+        known |= {name for _kind, name, _stmt in validate_clickhouse_schema(schema_sql)}
+    unknown = [t for t in tables if t not in known]
+    if unknown:
+        known |= _ch_existing_tables_sync()
+        unknown = [t for t in tables if t not in known]
+    if unknown:
+        raise BackupValidationError(
+            "manifest lists ClickHouse tables that are neither in the backup schema "
+            f"nor in database {CH_DATABASE}: {', '.join(sorted(unknown)[:10])}"
+        )
+    return tables
+
+
 def _ch_restore_table_sync(table: str, backup_name: str) -> str:
+    if not CH_IDENTIFIER_RE.match(table) or not CH_BACKUP_NAME_RE.match(backup_name):
+        raise BackupValidationError("refusing an invalid ClickHouse restore target")
     client = get_ch_client()
     client.command(f"DROP TABLE IF EXISTS {CH_DATABASE}.{table} SYNC")
     res = client.query(
@@ -951,17 +1214,19 @@ def _ch_restore_table_sync(table: str, backup_name: str) -> str:
 
 
 def _ch_apply_schema_sync(schema_sql: str) -> int:
-    """Create any missing tables from a schema dump (existing tables kept)."""
+    """Create any missing tables from a schema dump (existing tables kept).
+
+    The whole dump is validated first; nothing runs if any statement is not a
+    plain CREATE for the zenplus database.
+    """
+    statements = validate_clickhouse_schema(schema_sql)
     client = get_ch_client()
     created = 0
-    for stmt in schema_sql.split(";\n"):
-        stmt = stmt.strip().rstrip(";")
-        if not stmt:
-            continue
-        stmt = re.sub(r"^CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", stmt)
+    for _kind, _name, stmt in statements:
         stmt = re.sub(
-            r"^CREATE MATERIALIZED VIEW ",
-            "CREATE MATERIALIZED VIEW IF NOT EXISTS ", stmt,
+            r"^CREATE\s+(TABLE|MATERIALIZED\s+VIEW|VIEW|DICTIONARY)\s+(?!IF\s+NOT\s+EXISTS\b)",
+            lambda m: f"CREATE {m.group(1)} IF NOT EXISTS ", stmt, count=1,
+            flags=re.IGNORECASE,
         )
         client.command(stmt)
         created += 1
@@ -1001,8 +1266,10 @@ async def run_restore(backup_id: str, components: list[str], actor: str) -> None
 
     backup_dir = os.path.join(BACKUP_ROOT, backup_id)
     try:
-        with open(os.path.join(backup_dir, "manifest.json"), "r", encoding="utf-8") as f:
-            manifest = json.load(f)
+        # Validate the manifest (and the schema when ClickHouse is involved)
+        # before any component is touched, so a hostile upload is refused
+        # rather than half-applied.
+        manifest = await asyncio.to_thread(preflight_restore, backup_id, components)
         done: dict[str, Any] = {}
 
         if "postgres" in components:
@@ -1015,9 +1282,7 @@ async def run_restore(backup_id: str, components: list[str], actor: str) -> None
             done["postgres"] = True
 
         if "clickhouse_schema" in components:
-            with open(os.path.join(backup_dir, "clickhouse_schema.sql"), "r",
-                      encoding="utf-8") as f:
-                schema_sql = f.read()
+            schema_sql = _read_backup_schema(backup_dir) or ""
             done["clickhouse_schema_statements"] = await asyncio.to_thread(
                 _ch_apply_schema_sync, schema_sql
             )
@@ -1027,8 +1292,11 @@ async def run_restore(backup_id: str, components: list[str], actor: str) -> None
             if not ch_name:
                 raise RuntimeError("backup does not include ClickHouse data")
             restored_tables = []
-            base = [t for t in manifest.get("clickhouse_tables", []) if not t.endswith("_mv")]
-            mvs = [t for t in manifest.get("clickhouse_tables", []) if t.endswith("_mv")]
+            tables = await asyncio.to_thread(
+                _restorable_tables, manifest, _read_backup_schema(backup_dir)
+            )
+            base = [t for t in tables if not t.endswith("_mv")]
+            mvs = [t for t in tables if t.endswith("_mv")]
             for table in base + mvs:
                 op_id = await asyncio.to_thread(_ch_restore_table_sync, table, ch_name)
                 if op_id:

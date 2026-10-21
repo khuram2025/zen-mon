@@ -240,3 +240,11 @@ def test_real_ssh_capture_connects_without_host_key_setup_and_uses_selected_comm
     assert platform=='cisco_ios' and expected in result and result.endswith('end\n')
     assert 'show '+config_type+'-config' in commands
     assert not any(c.startswith('configure') or c.startswith('write') for c in commands)
+
+
+def test_real_ssh_capture_reports_the_presented_host_key(ssh_cli):
+    """Warn-only NCCM trust needs the key the device presented (VAPT ZP-01)."""
+    port,_=ssh_cli
+    observed={}
+    collection.fetch_config('127.0.0.1','cisco_ios','fixture','fixture','',port,'running',observed_key=observed)
+    assert observed['type'].startswith('ecdsa-sha2-') and observed['base64']

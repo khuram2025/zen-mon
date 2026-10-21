@@ -10,7 +10,7 @@ if os.geteuid() != 0:
 def write(path, text, mode=0o644):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     path.write_text(text);os.chown(path,0,0);path.chmod(mode)
-write('/etc/systemd/system/zenplus-api.service.d/security.conf', '[Service]\nExecStart=\nExecStart=/opt/zenplus/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2 --no-access-log\n')
+write('/etc/systemd/system/zenplus-api.service.d/security.conf', '[Service]\nExecStart=\nExecStart=/opt/zenplus/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2 --no-access-log --forwarded-allow-ips 127.0.0.1\n')
 write('/etc/systemd/system/zenplus-netflow-collector.service.d/security.conf', '[Service]\nEnvironment=NETFLOW_HEALTH_LISTEN=127.0.0.1:8091\n')
 known=Path('/etc/zenplus/known_hosts')
 if not known.exists():write(known, '# Add device SSH host keys after independently verifying fingerprints.\n')

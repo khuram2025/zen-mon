@@ -228,10 +228,13 @@ async def _authenticate_token(
     if payload.get("ver", 0) != (getattr(user, "token_version", 0) or 0):
         raise HTTPException(401, "Session revoked; sign in again")
 
+    # Every token the API issues names its server-side session. A token
+    # without one cannot be revoked or tied to an MFA sign-in, so refuse it.
     jti = payload.get("jti")
-    if jti:
-        from app.services import session_service
-        await session_service.assert_session_active(db, str(jti), user.id)
+    if not jti:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    from app.services import session_service
+    await session_service.assert_session_active(db, str(jti), user.id)
 
     if request is not None:
         await _enforce_sign_in_obligations(db, user, request)
@@ -318,28 +321,26 @@ _mark_guard(require_admin_user, "admin", (SUPERUSER_PERMISSION,))
 
 # ─────────────────────────────────────────────────────────────────
 # EventSource (SSE) friendly auth — browser EventSource can't send
-# Authorization headers, so streaming endpoints accept the token as
-# the `?token=` query param as a fallback. Same JWT path otherwise.
+# Authorization headers, so streaming endpoints accept a one-minute,
+# stream-only ``?ticket=``. Session tokens never travel in a URL.
 # ─────────────────────────────────────────────────────────────────
 
 async def get_current_user_stream(
     request: Request = None,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
-    token: Optional[str] = Query(default=None),
     ticket: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Authenticate a streaming request: an Authorization header, a one-minute
-    ``?ticket=`` (what the browser uses), or - for older clients - ``?token=``."""
+    """Authenticate a streaming request: an Authorization header or a
+    one-minute ``?ticket=`` (what the browser uses)."""
     if request:
         from app.services.management_access import check_web_access
         check_web_access(request.client.host if request.client else "unknown")
-    if ticket and not credentials:
+    if credentials:
+        return await _authenticate_token(credentials.credentials, request, db)
+    if ticket:
         return await _authenticate_token(ticket, request, db, allow_purpose="stream")
-    raw = credentials.credentials if credentials else token
-    if not raw:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
-    return await _authenticate_token(raw, request, db)
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
 
 
 def require_permission_stream(*permissions: str):

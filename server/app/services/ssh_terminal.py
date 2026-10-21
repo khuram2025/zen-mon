@@ -5,8 +5,10 @@ the API runs several workers. The worker that opens a session owns the SSH
 connection; every other worker talks to it through Redis (an input list and an
 output stream), so any worker can serve any request for a session.
 
-Credentials are used once to authenticate and are never stored or logged. The
-device host key is not checked (the same policy as NCCM collection).
+Credentials are used once to authenticate and are never stored or logged.
+The device host key is confirmed on first use (``app.services.ssh_host_keys``):
+an unknown key is returned to the administrator as a fingerprint, a changed key
+is refused, and the password is only sent once the key is accepted.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ import redis.asyncio as aioredis
 from paramiko.ssh_exception import NoValidConnectionsError
 
 from app.core.config import get_settings
+from app.services.ssh_host_keys import fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ OUT_MAXLEN = 4000
 READ_CHUNK = 4096
 ALIVE_TTL = 15
 KEY_TTL_AFTER_CLOSE = 120
+INPUT_TTL = 120
 
 _redis: aioredis.Redis | None = None
 
@@ -60,9 +64,39 @@ def _user_key(user_id) -> str:
 class TerminalError(Exception):
     """A failure whose message is safe to show to the operator."""
 
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, detail: dict | None = None):
         super().__init__(message)
         self.status = status
+        self.detail = detail
+
+
+class HostKeyUnknown(Exception):
+    def __init__(self, key_type: str, fp: str):
+        super().__init__(fp)
+        self.key_type = key_type
+        self.fingerprint = fp
+
+
+class _ConfirmOnFirstUse(paramiko.MissingHostKeyPolicy):
+    """Called only for a key type with no stored key (a stored key of the same
+    type that differs makes paramiko raise BadHostKeyException first). Accept
+    it only when the administrator confirmed exactly this fingerprint."""
+
+    def __init__(self, confirmed: str | None):
+        self.confirmed = confirmed
+        self.accepted: tuple[str, str] | None = None
+
+    def missing_host_key(self, client, hostname, key):
+        key_type, key_b64 = key.get_name(), key.get_base64()
+        fp = fingerprint(key_type, key_b64)
+        if self.confirmed and secrets.compare_digest(self.confirmed, fp):
+            self.accepted = (key_type, key_b64)
+            return
+        raise HostKeyUnknown(key_type, fp)
+
+
+def _known_hosts_name(host: str, port: int) -> str:
+    return host if port == 22 else f'[{host}]:{port}'
 
 
 @dataclass
@@ -82,22 +116,44 @@ class _Session:
 _owned: dict[str, _Session] = {}
 
 
-def _connect(host, port, username, password, cols, rows):
+def _connect(host, port, username, password, cols, rows, known_keys=(), confirmed=None):
+    """(client, channel, newly accepted (type, base64) or None)."""
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    name = _known_hosts_name(host, port)
+    for key_type, key_b64 in known_keys:
+        try:
+            entry = paramiko.hostkeys.HostKeyEntry.from_line(f'{name} {key_type} {key_b64}')
+        except Exception:
+            entry = None
+        if entry is not None and entry.key is not None:
+            client.get_host_keys().add(name, key_type, entry.key)
+    policy = _ConfirmOnFirstUse(confirmed)
+    client.set_missing_host_key_policy(policy)
     try:
         client.connect(host, port=port, username=username, password=password,
                        allow_agent=False, look_for_keys=False,
                        timeout=15, banner_timeout=15, auth_timeout=15)
         channel = client.invoke_shell(term='xterm-256color', width=cols, height=rows)
         channel.settimeout(0.5)
-        return client, channel
+        return client, channel, policy.accepted
     except BaseException:
         client.close()
         raise
 
 
 def _safe_error(exc: Exception) -> TerminalError:
+    if isinstance(exc, HostKeyUnknown):
+        return TerminalError('This host key is not trusted yet: compare the fingerprint with the device '
+                             'and confirm it to connect.', 409,
+                             {'code': 'host_key_unknown', 'key_type': exc.key_type,
+                              'fingerprint': exc.fingerprint})
+    if isinstance(exc, paramiko.BadHostKeyException):
+        return TerminalError('The host key has CHANGED since it was trusted. The device may have been '
+                             'replaced, or another host is answering at this address. The password was not sent.',
+                             409, {'code': 'host_key_changed', 'key_type': exc.key.get_name(),
+                                   'fingerprint': fingerprint(exc.key.get_name(), exc.key.get_base64()),
+                                   'previous_fingerprint': fingerprint(exc.expected_key.get_name(),
+                                                                       exc.expected_key.get_base64())})
     if isinstance(exc, paramiko.AuthenticationException):
         return TerminalError('Authentication failed: check the username and password.', 422)  # never 401: the SPA treats that as an expired login
     if isinstance(exc, (NoValidConnectionsError, ConnectionRefusedError)):
@@ -126,7 +182,9 @@ async def _active_count(user_id) -> int:
 
 
 async def open_session(user, host: str, port: int, username: str, password: str,
-                       cols: int, rows: int) -> str:
+                       cols: int, rows: int, known_keys=(), confirmed: str | None = None
+                       ) -> tuple[str, tuple[str, str] | None]:
+    """(session id, the host key accepted by this confirmation, if any)."""
     r = redis_client()
     try:
         await r.ping()
@@ -136,7 +194,8 @@ async def open_session(user, host: str, port: int, username: str, password: str,
     if await _active_count(user_id) >= MAX_PER_USER:
         raise TerminalError(f'Close an existing terminal first (limit {MAX_PER_USER} per user).', 429)
     try:
-        client, channel = await asyncio.to_thread(_connect, host, port, username, password, cols, rows)
+        client, channel, accepted = await asyncio.to_thread(
+            _connect, host, port, username, password, cols, rows, tuple(known_keys), confirmed)
     except Exception as exc:
         raise _safe_error(exc) from None
     session = _Session(id=secrets.token_urlsafe(24), user_id=user_id, client=client, channel=channel)
@@ -150,7 +209,7 @@ async def open_session(user, host: str, port: int, username: str, password: str,
     loop = asyncio.get_running_loop()
     threading.Thread(target=_reader, args=(session, loop), daemon=True, name='ssh-terminal-reader').start()
     asyncio.create_task(_run(session))
-    return session.id
+    return session.id, accepted
 
 
 def _reader(session: _Session, loop: asyncio.AbstractEventLoop) -> None:
@@ -238,7 +297,10 @@ async def _run(session: _Session) -> None:
         r = redis_client()
         try:
             await _emit(session, e='closed', r=session.reason)
-            for part in ('meta', 'out', 'in', 'alive'):
+            # Unread keystrokes are dropped at once; output stays briefly for
+            # a reader that is reconnecting.
+            await r.delete(_k(session.id, 'in'))
+            for part in ('meta', 'out', 'alive'):
                 await r.expire(_k(session.id, part), KEY_TTL_AFTER_CLOSE)
             await r.srem(_user_key(session.user_id), session.id)
             await r.delete(_k(session.id, 'alive'))
@@ -275,7 +337,9 @@ async def send_input(session_id: str, user, payload: dict) -> None:
     if await r.llen(_k(session_id, 'in')) > MAX_INPUT_BACKLOG:
         raise TerminalError('The terminal is not keeping up; slow down.', 429)
     await r.rpush(_k(session_id, 'in'), json.dumps(payload))
-    await r.expire(_k(session_id, 'in'), MAX_SECONDS)
+    # The owning worker consumes input within seconds; never keep typed
+    # text (which may include passwords for the remote shell) for long.
+    await r.expire(_k(session_id, 'in'), INPUT_TTL)
 
 
 async def close_session(session_id: str, user) -> None:
