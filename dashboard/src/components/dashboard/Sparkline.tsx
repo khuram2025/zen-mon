@@ -1,3 +1,5 @@
+import { useId } from 'react'
+
 /**
  * Tiny SVG sparkline used inside KPI cards.
  */
@@ -30,7 +32,8 @@ export function Sparkline({
   })
   const line = `M ${pts.join(' L ')}`
   const area = `${line} L ${width},${height} L 0,${height} Z`
-  const id = `spark-${color.replace('#', '')}`
+  // The gradient id must be a valid, unique fragment: colours like rgb(…) or two sparklines of one colour break it.
+  const id = `spark-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
 
   return (
     <svg width={width} height={height} className="overflow-visible">

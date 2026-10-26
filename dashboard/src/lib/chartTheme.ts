@@ -23,12 +23,18 @@ export function chartFont(px: number): number {
   return Math.round(base * scale * 2) / 2
 }
 
-/** `rgb(r g b)` for a theme token, read from the live stylesheet (ECharts draws on canvas and cannot use var()). */
+/**
+ * A theme token as a colour string, read from the live stylesheet (ECharts draws on canvas and cannot use var()).
+ * `#rrggbb` when opaque, so callers that derive ids or append alpha suffixes get a plain hex value;
+ * `rgba(…)` when an alpha is asked for.
+ */
 export function tokenColor(name: string, alpha = 1): string {
   if (typeof document === 'undefined') return 'transparent'
   const raw = getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim()
-  if (!raw) return 'transparent'
-  return alpha >= 1 ? `rgb(${raw.split(/\s+/).join(', ')})` : `rgba(${raw.split(/\s+/).join(', ')}, ${alpha})`
+  const rgb = raw.split(/\s+/).map(Number)
+  if (rgb.length !== 3 || rgb.some((n) => !Number.isFinite(n))) return 'transparent'
+  if (alpha < 1) return `rgba(${rgb.join(', ')}, ${alpha})`
+  return `#${rgb.map((n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0')).join('')}`
 }
 
 /** The categorical series order, resolved for the current theme. */

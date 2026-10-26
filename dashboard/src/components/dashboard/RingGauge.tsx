@@ -44,7 +44,7 @@ export function RingGauge({
   const mainText = dense
     ? size < 72 ? 'text-xs leading-none' : 'text-sm leading-none'
     : 'text-xl leading-none'
-  const subText = dense ? 'text-[7px] leading-tight mt-0.5' : 'mt-0.5 text-2xs uppercase tracking-wider text-muted'
+  const subText = dense ? 'mt-0.5 text-2xs leading-none text-muted' : 'mt-0.5 text-2xs uppercase tracking-wider text-muted'
 
   return (
     <div className="flex flex-col items-center gap-1.5">
