@@ -33,13 +33,13 @@ export function ApmUnderlineNav({
             {Icon && <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />}
             {item.label}
             {item.count != null && (
-              <span className="font-mono text-[10px] tabular-nums opacity-70">{fmtCount(item.count)}</span>
+              <span className="font-mono text-2xs tabular-nums opacity-70">{fmtCount(item.count)}</span>
             )}
           </>
         )
         const cls = (active: boolean) =>
           cn(
-            '-mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-[13px] font-medium transition-colors',
+            '-mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors',
             active
               ? 'border-primary text-primary'
               : 'border-transparent text-muted hover:border-border hover:text-text',
@@ -83,7 +83,7 @@ export function DurationTimeline({
   if (ms <= 0 || !Number.isFinite(ms)) {
     return (
       <div className={cn('min-w-[5.5rem]', className)}>
-        <div className="text-right font-mono text-[11px] tabular-nums text-muted">—</div>
+        <div className="text-right font-mono text-xs tabular-nums text-muted">—</div>
         <div className="mt-1 h-2 overflow-hidden rounded-sm bg-surface2" />
       </div>
     )
@@ -93,7 +93,7 @@ export function DurationTimeline({
   const color = significant || slow ? '#f59e0b' : '#7c3aed'
   return (
     <div className={cn('min-w-[5.5rem]', className)}>
-      <div className="text-right font-mono text-[11px] tabular-nums text-text">{fmtMs(ms)}</div>
+      <div className="text-right font-mono text-xs tabular-nums text-text">{fmtMs(ms)}</div>
       <div className="mt-1 h-2 overflow-hidden rounded-sm bg-surface2">
         <div className="h-full rounded-sm" style={{ width: `${pct}%`, backgroundColor: color }} />
       </div>
@@ -130,15 +130,15 @@ export function RequestFlow({ hops, totalLabel }: { hops: RequestHop[]; totalLab
           return (
             <div key={hop.id} className="flex min-w-0 items-center">
               <div className="flex min-w-[7rem] flex-col items-center text-center">
-                {hop.metric && <div className="mb-1 text-[10px] font-medium tabular-nums text-text2">{hop.metric}</div>}
+                {hop.metric && <div className="mb-1 text-2xs font-medium tabular-nums text-text2">{hop.metric}</div>}
                 <span className={cn('flex h-9 w-9 items-center justify-center rounded-lg border', HOP_TONE[tone])}>
                   <Icon className="h-4 w-4" />
                 </span>
-                <div className="mt-1.5 text-[11px] font-semibold text-text">{hop.label}</div>
-                {hop.hint && <div className="max-w-[8rem] truncate text-[10px] text-muted" title={hop.hint}>{hop.hint}</div>}
+                <div className="mt-1.5 text-xs font-semibold text-text">{hop.label}</div>
+                {hop.hint && <div className="max-w-[8rem] truncate text-2xs text-muted" title={hop.hint}>{hop.hint}</div>}
                 {hop.status != null && hop.status !== '' && (
                   <span className={cn(
-                    'mt-1 rounded px-1.5 py-px font-mono text-[10px]',
+                    'mt-1 rounded px-1.5 py-px font-mono text-2xs',
                     Number(hop.status) >= 400 ? 'bg-danger/15 text-danger' : 'bg-success/15 text-success',
                   )}>{hop.status}</span>
                 )}
@@ -151,7 +151,7 @@ export function RequestFlow({ hops, totalLabel }: { hops: RequestHop[]; totalLab
         })}
         {totalLabel && (
           <div className="ml-auto flex flex-col items-end justify-center pl-4">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Total time</div>
+            <div className="text-2xs font-semibold uppercase tracking-wider text-muted">Total time</div>
             <div className="text-lg font-semibold tabular-nums text-text">{totalLabel}</div>
           </div>
         )}
@@ -171,11 +171,11 @@ export function ApmFacetSidebar({ title = 'Analytics', groups }: { title?: strin
   if (!visible.length) return null
   return (
     <aside className="h-max rounded-lg border border-border bg-surface">
-      <div className="border-b border-border bg-surface2/30 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</div>
+      <div className="border-b border-border bg-surface2/30 px-2.5 py-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">{title}</div>
       <div className="divide-y divide-border">
         {visible.map((group) => (
           <details key={group.title} open className="px-2.5 py-1.5">
-            <summary className="cursor-pointer list-none text-[11px] font-semibold text-text2 [&::-webkit-details-marker]:hidden">
+            <summary className="cursor-pointer list-none text-xs font-semibold text-text2 [&::-webkit-details-marker]:hidden">
               <span className="inline-flex items-center gap-1">
                 <ChevronDown className="h-3 w-3 text-muted" />
                 {group.title}
@@ -188,7 +188,7 @@ export function ApmFacetSidebar({ title = 'Analytics', groups }: { title?: strin
                   type="button"
                   onClick={item.onSelect}
                   className={cn(
-                    'flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-left text-[11px]',
+                    'flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-left text-xs',
                     item.active ? 'bg-primary/15 text-text' : 'text-muted hover:bg-surface2 hover:text-text',
                   )}
                 >
@@ -235,7 +235,7 @@ export function VolumeHistogram({
           )
         })}
       </div>
-      <div className="flex shrink-0 items-center gap-2.5 pb-0.5 text-[10px] text-muted">
+      <div className="flex shrink-0 items-center gap-2.5 pb-0.5 text-2xs text-muted">
         {(hasOk || !hasErr) && <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-success/70" /> {okLabel}</span>}
         {hasErr &&<span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-warning" /> {errLabel}</span>}
       </div>
@@ -269,7 +269,7 @@ export function ApmExplorerFrame({
       <div className={cn('grid gap-2', sidebar && 'xl:grid-cols-[minmax(0,1fr),216px]')}>
         <div className="min-w-0 self-start overflow-hidden rounded-lg border border-border bg-surface">
           {summary && (
-            <div className="border-b border-border bg-surface2/30 px-3 py-1.5 text-[11px] text-muted">{summary}</div>
+            <div className="border-b border-border bg-surface2/30 px-3 py-1.5 text-xs text-muted">{summary}</div>
           )}
           {histogram}
           {children}
@@ -280,7 +280,7 @@ export function ApmExplorerFrame({
   )
 }
 
-export const EXPLORER_HEAD = 'bg-surface3/80 [&_th]:h-8 [&_th]:text-[10px] [&_th]:font-semibold [&_th]:text-text2'
+export const EXPLORER_HEAD = 'bg-surface3/80 [&_th]:h-8 [&_th]:text-2xs [&_th]:font-semibold [&_th]:text-text2'
 
 /** Tightened row padding so explorer tables show more records per screen. */
 export const EXPLORER_ROWS = '[&_td]:py-2'

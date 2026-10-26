@@ -25,7 +25,7 @@ export function HopHeatmap({ times, ladder }: { times: string[]; ladder: HopLadd
         {ladder.map((row) => (
           <div key={row.ttl} className="flex items-center gap-2 border-b border-border/40 py-1">
             <div className="flex w-52 shrink-0 items-center gap-2">
-              <span className="inline-flex h-5 w-6 items-center justify-center rounded bg-surface2 text-[11px] font-semibold text-muted">
+              <span className="inline-flex h-5 w-6 items-center justify-center rounded bg-surface2 text-xs font-semibold text-muted">
                 {row.ttl}
               </span>
               <span className="truncate text-xs text-text" title={row.ip || ''}>
@@ -47,7 +47,7 @@ export function HopHeatmap({ times, ladder }: { times: string[]; ladder: HopLadd
             </div>
           </div>
         ))}
-        <div className="mt-2 flex items-center gap-3 pl-2 text-[11px] text-muted">
+        <div className="mt-2 flex items-center gap-3 pl-2 text-xs text-muted">
           <span>Latency</span>
           <span className="inline-block h-3 w-24 rounded" style={{ background: 'linear-gradient(90deg,hsl(130 70% 45%),hsl(65 70% 45%),hsl(0 70% 45%))' }} />
           <span>low → high</span>

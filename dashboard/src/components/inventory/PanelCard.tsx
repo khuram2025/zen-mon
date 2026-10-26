@@ -27,7 +27,7 @@ export function Panel({
           <div className="flex min-w-0 items-center gap-2">
             {icon && <span className="text-muted" aria-hidden>{icon}</span>}
             <h2 id={headingId} className="text-sm font-semibold tracking-tight">{title}</h2>
-            {hint && <span className="truncate text-[10px] uppercase tracking-wider text-muted">{hint}</span>}
+            {hint && <span className="truncate text-2xs uppercase tracking-wider text-muted">{hint}</span>}
           </div>
           {right}
         </div>

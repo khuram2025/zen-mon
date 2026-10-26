@@ -14,7 +14,7 @@ export function ViewToggle({ value, onChange, label }: { value: ChartView; onCha
       aria-pressed={value === v}
       onClick={() => onChange(v)}
       className={cn(
-        'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-primary',
+        'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-primary',
         value === v ? 'bg-primary text-on-primary shadow-sm' : 'text-text2 hover:bg-surface3 hover:text-text',
       )}
     >

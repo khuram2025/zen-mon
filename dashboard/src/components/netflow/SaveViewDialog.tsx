@@ -134,7 +134,7 @@ export function SaveViewDialog({
               <label htmlFor={ids.name} className="text-xs font-medium text-text">
                 Name <span className="text-danger-fg" aria-hidden>*</span>
               </label>
-              <span id={ids.nameHint} className="text-[11px] text-text2">
+              <span id={ids.nameHint} className="text-xs text-text2">
                 {draft.name.trim().length}/{SAVED_VIEW_NAME_MAX}
               </span>
             </div>
@@ -152,14 +152,14 @@ export function SaveViewDialog({
               placeholder="e.g. Branch VPN traffic"
             />
             {showErrors && errors.name && (
-              <p id={ids.nameErr} className="text-[11px] font-medium text-danger-fg">{errors.name}</p>
+              <p id={ids.nameErr} className="text-xs font-medium text-danger-fg">{errors.name}</p>
             )}
           </div>
 
           <div className="space-y-1.5">
             <div className="flex items-baseline justify-between">
               <label htmlFor={ids.desc} className="text-xs font-medium text-text">Description</label>
-              <span className="text-[11px] text-text2">{draft.description.trim().length}/{SAVED_VIEW_DESCRIPTION_MAX}</span>
+              <span className="text-xs text-text2">{draft.description.trim().length}/{SAVED_VIEW_DESCRIPTION_MAX}</span>
             </div>
             <Textarea
               id={ids.desc}
@@ -171,7 +171,7 @@ export function SaveViewDialog({
               placeholder="What this view is for (optional)"
             />
             {showErrors && errors.description && (
-              <p id={ids.descErr} className="text-[11px] font-medium text-danger-fg">{errors.description}</p>
+              <p id={ids.descErr} className="text-xs font-medium text-danger-fg">{errors.description}</p>
             )}
           </div>
 
@@ -219,13 +219,13 @@ export function SaveViewDialog({
           </div>
 
           <div className="space-y-1.5 rounded-md border border-border bg-surface2/50 p-2.5">
-            <div className="text-[11px] font-medium text-text2">Saved query</div>
+            <div className="text-xs font-medium text-text2">Saved query</div>
             {isFlowFilterEmpty(filter) ? (
-              <p className="text-[11px] text-text2">No filters: all traffic you can see in the period.</p>
+              <p className="text-xs text-text2">No filters: all traffic you can see in the period.</p>
             ) : (
               <FilterChips filter={filter} tz={w.tz} />
             )}
-            {extraSummary && <div className="text-[11px] text-text2">{extraSummary}</div>}
+            {extraSummary && <div className="text-xs text-text2">{extraSummary}</div>}
           </div>
 
           {error && (
@@ -299,7 +299,7 @@ function ChoiceGroup<V extends string>({
             />
             <span className="min-w-0">
               <span className="block text-xs font-medium text-text">{o.label}</span>
-              {o.hint && <span className="block text-[11px] leading-snug text-text2">{o.hint}</span>}
+              {o.hint && <span className="block text-xs leading-snug text-text2">{o.hint}</span>}
             </span>
           </label>
         )

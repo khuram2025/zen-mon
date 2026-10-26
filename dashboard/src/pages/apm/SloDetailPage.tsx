@@ -49,7 +49,7 @@ export function SloDetailPage() {
       <div className="flex flex-wrap items-center gap-3">
         <Button variant="ghost" size="sm" onClick={() => navigate('/apm/slos')}><ArrowLeft className="mr-1 h-4 w-4" /> SLOs</Button>
         <div>
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">SLO detail</div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-muted">SLO detail</div>
           <h1 className="flex items-center gap-2 text-xl font-semibold text-text"><Target className="h-5 w-5 text-primary" />{slo.name}</h1>
         </div>
       </div>
@@ -122,7 +122,7 @@ export function SloDetailPage() {
         </CardContent>
       </Card>
 
-      <p className="text-[11px] text-muted">
+      <p className="text-xs text-muted">
         A tier alerts only when both its long and short windows burn faster than the threshold.
         Deep-dive the instrumented service:{' '}
         <Link className="text-primary hover:underline" to={`/apm/services/${encodeURIComponent(slo.service_name)}`}>{slo.service_name}</Link>

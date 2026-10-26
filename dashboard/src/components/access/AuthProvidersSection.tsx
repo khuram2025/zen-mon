@@ -85,7 +85,7 @@ export function AuthProvidersSection() {
                   <span className="mx-1 text-muted">·</span>
                   <OrderStep label="Single sign-on (button)" active={oidc.enabled} />
                 </div>
-                <p className="text-[11px] text-muted">
+                <p className="text-xs text-muted">
                   {externalEnabled
                     ? 'Unknown usernames are checked against the enabled external sources in this order and given the mapped role. Sessions of directory users last at most an hour, after which the directory is consulted again.'
                     : 'Only local accounts can sign in. Configure and enable a source below to allow directory users.'}
@@ -142,7 +142,7 @@ export function AuthProvidersSection() {
               </Card>
 
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-[11px] text-muted">
+                <p className="text-xs text-muted">
                   Directory users are matched to a role on every sign-in through the source's mapping rules. Local accounts are never
                   affected by external sources, and an account created by one source cannot sign in through another.
                 </p>
@@ -181,7 +181,7 @@ function SourceCell({ icon: Icon, title, subtitle }: { icon: typeof Server; titl
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-surface2/60"><Icon className="h-4 w-4 text-primary" aria-hidden /></div>
       <div className="min-w-0">
         <div className="text-sm font-medium">{title}</div>
-        <div className="truncate text-[11px] text-muted">{subtitle}</div>
+        <div className="truncate text-xs text-muted">{subtitle}</div>
       </div>
     </div>
   )
@@ -206,7 +206,7 @@ function ProviderRow({ icon, title, subtitle, cfg, configured, unit, mappings, r
       <Td>
         {cfg.enabled ? <StatusCell status="up" label="Enabled" /> : configured ? <StatusCell status="idle" label="Disabled" /> : <StatusCell status="idle" label="Not configured" muted />}
         {configured && (
-          <div className="mt-0.5 text-[11px] text-muted">
+          <div className="mt-0.5 text-xs text-muted">
             {lt
               ? <span className={lt.ok ? 'text-success' : 'text-danger'} title={`${lt.message} — ${lt.by}`}>{lt.ok ? <CheckCircle2 className="mr-0.5 inline h-3 w-3" aria-hidden /> : <XCircle className="mr-0.5 inline h-3 w-3" aria-hidden />}Last test {lt.ok ? 'passed' : 'failed'} {relativeTime(lt.at)}</span>
               : 'Never tested'}
@@ -217,7 +217,7 @@ function ProviderRow({ icon, title, subtitle, cfg, configured, unit, mappings, r
         {serverText ? (
           <div className="text-sm">
             <span className="font-mono text-xs">{serverText}</span>
-            <div className="text-[11px] text-muted">{serverSub}</div>
+            <div className="text-xs text-muted">{serverSub}</div>
           </div>
         ) : <span className="text-xs text-muted">—</span>}
       </Td>
@@ -229,7 +229,7 @@ function ProviderRow({ icon, title, subtitle, cfg, configured, unit, mappings, r
               <span className="text-muted"> · default </span>
               {defaultRole ? <span className="font-medium">{defaultRole}</span> : <span className="text-warning">deny</span>}
             </div>
-            <div className="text-[11px] text-muted">{cfg.auto_provision ? 'Accounts created on first sign-in' : 'Existing accounts only'}</div>
+            <div className="text-xs text-muted">{cfg.auto_provision ? 'Accounts created on first sign-in' : 'Existing accounts only'}</div>
           </div>
         )}
       </Td>
@@ -384,7 +384,7 @@ function HistoryDialog({ open, onClose }: { open: boolean; onClose: () => void }
                     {r.details?.privileged_grants?.length > 0 && <div className="mt-1 text-warning">Privileged grants: {r.details.privileged_grants.join(', ')}</div>}
                     {r.action === 'settings.auth.toggle' && <div className="mt-1 text-muted">{r.details.enabled ? 'Enabled' : 'Disabled'}{r.details.sessions_revoked ? ` · ${r.details.sessions_revoked} sessions signed out` : ''}</div>}
                     {changes && Object.keys(changes).length > 0 && (
-                      <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
+                      <ul className="mt-1.5 space-y-0.5 font-mono text-xs">
                         {Object.entries(changes).map(([k, c]) => (
                           <li key={k}><span className="text-muted">{k}:</span> <span className="text-danger">{JSON.stringify(c?.from)}</span> → <span className="text-success">{JSON.stringify(c?.to)}</span></li>
                         ))}

@@ -173,7 +173,7 @@ export function InventoryAssetsPage() {
         {list.isError && (
           <div className="border-b border-border p-2">
             <QueryFailure compact what="the asset list" error={list.error} onRetry={() => void list.refetch()} retrying={list.isFetching} />
-            <p className="mt-1 text-[11px] text-muted">Showing the last list that loaded; it may be out of date.</p>
+            <p className="mt-1 text-xs text-muted">Showing the last list that loaded; it may be out of date.</p>
           </div>
         )}
         <div className={list.isFetching && list.isPlaceholderData ? 'opacity-60 transition-opacity' : 'transition-opacity'} aria-busy={list.isFetching}>

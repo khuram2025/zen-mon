@@ -34,6 +34,7 @@ import {
   type TimelineResponse,
 } from './model'
 import { Field, FindingStatusChip, SeverityChip } from './parts'
+import { chartFont } from '@/lib/chartTheme'
 
 export interface FindingCardProps {
   finding: Finding
@@ -81,14 +82,14 @@ export function FindingCard({ finding: f, others = [], tz, perms, selected, onSe
               <SeverityChip severity={f.severity} />
               <h3 className="text-sm font-semibold text-text">{f.title}</h3>
               <FindingStatusChip status={f.status} />
-              <span className="rounded-md bg-surface2 px-1.5 py-0.5 text-[11px] font-medium text-text2">{f.label}</span>
+              <span className="rounded-md bg-surface2 px-1.5 py-0.5 text-xs font-medium text-text2">{f.label}</span>
             </div>
-            <p className="mt-1 break-words font-mono text-[13px] text-text">
+            <p className="mt-1 break-words font-mono text-sm text-text">
               {subjectText(f)}
               <span className="ml-2 font-sans text-xs text-text2">via exporter <span className="font-mono text-text">{f.exporter ?? '—'}</span></span>
             </p>
-            <p className="mt-0.5 break-words text-[13px] leading-snug text-text2">{f.description}</p>
-            <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-text2">
+            <p className="mt-0.5 break-words text-sm leading-snug text-text2">{f.description}</p>
+            <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-text2">
               <span>
                 Last seen <span className="text-text">{formatDateTime(f.last_seen, tz, { seconds: false })}</span> ({relativeTime(f.last_seen)})
               </span>
@@ -106,7 +107,7 @@ export function FindingCard({ finding: f, others = [], tz, perms, selected, onSe
               )}
             </p>
             {f.suppression && (
-              <p className="mt-1 text-[11px] text-text2">
+              <p className="mt-1 text-xs text-text2">
                 <span className="font-medium text-text">Suppressed</span>
                 {f.suppression.until ? ` until ${formatDateTime(f.suppression.until, tz, { seconds: false })}` : ''}
                 {f.suppression.reason ? ` — ${f.suppression.reason}` : ''}
@@ -405,15 +406,15 @@ function TimelineChart({ data, tz, kind }: { data: TimelineResponse; tz: string;
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={points} margin={{ top: 6, right: 8, left: 0, bottom: 0 }} barCategoryGap={1}>
             <CartesianGrid stroke="rgb(var(--border))" strokeDasharray="3 3" vertical={false} />
-            <XAxis dataKey="label" tick={{ fontSize: 10, fill: 'rgb(var(--text2))' }} tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={36} />
-            <YAxis tick={{ fontSize: 10, fill: 'rgb(var(--text2))' }} tickLine={false} axisLine={false} width={44} tickFormatter={(v: number) => tickText(v, scale.div)} />
+            <XAxis dataKey="label" tick={{ fontSize: chartFont(10), fill: 'rgb(var(--text2))' }} tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={36} />
+            <YAxis tick={{ fontSize: chartFont(10), fill: 'rgb(var(--text2))' }} tickLine={false} axisLine={false} width={44} tickFormatter={(v: number) => tickText(v, scale.div)} />
             {segs.map((s, i) => (
               <ReferenceArea key={i} x1={points[s.from].label} x2={points[s.to].label} fill="rgb(var(--warning))" fillOpacity={0.12} strokeOpacity={0} ifOverflow="extendDomain" />
             ))}
             {thresholdPps !== null && <ReferenceLine y={thresholdPps} stroke="rgb(var(--danger))" strokeDasharray="4 3" />}
             <Tooltip
               cursor={{ fill: 'rgb(var(--surface2))' }}
-              contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12, color: 'rgb(var(--text))' }}
+              contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: chartFont(12), color: 'rgb(var(--text))' }}
               formatter={(v: number) => [metricFormat(key, v), data.metric.label]}
               labelFormatter={(_l, p) => (p?.[0]?.payload?.t ? formatDateTime(p[0].payload.t as string, tz, { seconds: false }) : '')}
             />

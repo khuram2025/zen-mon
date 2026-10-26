@@ -26,6 +26,7 @@ import type { ServerEventRow, ServerEventsResponse, ServerItem } from '@/types/s
 import {
   C, EmptyState, Panel, Pill, SYNC_ID, Segmented, StatTile, fmtNum, type Tone,
 } from '../ui'
+import { chartFont } from '@/lib/chartTheme'
 
 /* ── Constants ───────────────────────────────────────────────────── */
 
@@ -220,14 +221,14 @@ export function EventsTab({ server }: { server: ServerItem }) {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Select value={channel} onValueChange={(v) => { setChannel(v); pager.reset() }}>
-            <SelectTrigger className="h-8 w-[170px] text-[13px]" aria-label="Channel"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-8 w-[170px] text-sm" aria-label="Channel"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All channels</SelectItem>
               {channels.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
             </SelectContent>
           </Select>
           <Select value={hours} onValueChange={(v) => { setHours(v); pager.reset() }}>
-            <SelectTrigger className="h-8 w-[150px] text-[13px]" aria-label="Time window"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-8 w-[150px] text-sm" aria-label="Time window"><SelectValue /></SelectTrigger>
             <SelectContent>
               {EVENT_WINDOWS.map((w) => <SelectItem key={w.value} value={w.value}>{w.label}</SelectItem>)}
             </SelectContent>
@@ -327,7 +328,7 @@ export function EventsTab({ server }: { server: ServerItem }) {
                           title={active ? 'Show all channels' : `Filter to ${c.name}`}
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <span className={cn('truncate text-[13px] font-medium', active ? 'text-primary' : 'text-text')} title={c.name}>
+                            <span className={cn('truncate text-sm font-medium', active ? 'text-primary' : 'text-text')} title={c.name}>
                               {c.name}
                             </span>
                             <span className="shrink-0 text-xs tabular-nums text-muted">
@@ -395,11 +396,11 @@ export function EventsTab({ server }: { server: ServerItem }) {
                   value={search}
                   onChange={(e) => { setSearch(e.target.value); pager.reset() }}
                   placeholder="Filter channel or level…"
-                  className="h-8 pl-8 text-[13px]"
+                  className="h-8 pl-8 text-sm"
                 />
               </div>
             </div>
-            <Table className="text-[13px]">
+            <Table className="text-sm">
               <THead className="bg-surface2/40">
                 <Tr className="hover:bg-transparent">
                   <Th className={cn('h-9 pl-4', sortableTh)} onClick={() => toggleSort('timestamp')}>
@@ -493,12 +494,12 @@ function EventsChart({ rows, present, domain, tick, bucket }: {
             dataKey="ts" type="number" scale="time"
             // Half a bucket either side so the edge bars are not clipped.
             domain={[domain[0] - bucket / 2, domain[1] - bucket / 2]}
-            tickFormatter={tick} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }}
+            tickFormatter={tick} tick={{ fontSize: chartFont(11), fill: 'rgb(var(--muted))' }}
             tickLine={false} axisLine={false} minTickGap={48}
           />
           <YAxis
             allowDecimals={false}
-            tickFormatter={(v: number) => fmtNum(v, 0)} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }}
+            tickFormatter={(v: number) => fmtNum(v, 0)} tick={{ fontSize: chartFont(11), fill: 'rgb(var(--muted))' }}
             tickLine={false} axisLine={false} width={48}
           />
           <Tooltip
@@ -508,7 +509,7 @@ function EventsChart({ rows, present, domain, tick, bucket }: {
               borderRadius: 10,
               boxShadow: '0 10px 30px rgb(0 0 0 / 0.25)',
               color: 'rgb(var(--text))',
-              fontSize: 12,
+              fontSize: chartFont(12),
               padding: '8px 10px',
             }}
             itemStyle={{ paddingTop: 1, paddingBottom: 1 }}

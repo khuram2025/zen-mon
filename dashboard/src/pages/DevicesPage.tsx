@@ -741,7 +741,7 @@ export function DevicesPage() {
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-4">
           <div className="min-w-0 flex-1">
-            <h1 className="text-[28px] font-bold leading-tight tracking-tight">Devices</h1>
+            <h1 className="text-3xl font-bold leading-tight tracking-tight">Devices</h1>
             <p className="mt-0.5 text-sm text-muted">
               Monitor, search, and manage all network and server devices
             </p>
@@ -756,7 +756,7 @@ export function DevicesPage() {
                 onChange={(e) => patchParams({ search: e.target.value || null, q: null, page: '1' })}
                 className="h-10 pl-10 pr-14 text-sm"
               />
-              <kbd className="pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-muted sm:inline-flex">
+              <kbd className="pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border bg-surface2 px-1.5 py-0.5 text-2xs font-medium text-muted sm:inline-flex">
                 ⌘ K
               </kbd>
             </div>
@@ -832,7 +832,7 @@ export function DevicesPage() {
           <span className="text-muted/70">· cards and charts reflect the filter</span>
         </div>
       )}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 2xl:grid-cols-7">
         <KpiCard
           label="Total Devices"
           value={agg.total}
@@ -900,7 +900,7 @@ export function DevicesPage() {
       </div>
 
       {/* ───────────────────── Main grid ───────────────────── */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid grid-cols-1 gap-4 2xl:grid-cols-[minmax(0,1fr)_21rem]">
         {/* ---------- Devices list ---------- */}
         <Card>
           <CardContent className="space-y-3 p-4">
@@ -1173,7 +1173,7 @@ export function DevicesPage() {
                             >
                               <typeInfo.Icon className="h-4 w-4" />
                               {openAlerts > 0 && (
-                                <span className={`absolute -right-1.5 -top-1.5 min-w-[17px] rounded-full px-1 text-center text-[9px] font-bold leading-[17px] shadow-sm ring-2 ring-surface ${alertTone}`}>
+                                <span className={`absolute -right-1.5 -top-1.5 min-w-[17px] rounded-full px-1 text-center text-2xs font-bold leading-[17px] shadow-sm ring-2 ring-surface ${alertTone}`}>
                                   {openAlerts > 99 ? '99+' : openAlerts}
                                 </span>
                               )}
@@ -1192,7 +1192,7 @@ export function DevicesPage() {
                                 </Link>
                                 {(d.managed_children_count ?? 0) > 0 && (
                                   <button
-                                    className="shrink-0 rounded-full border border-primary/30 bg-primary/10 px-1.5 text-[10px] font-medium leading-[16px] text-primary hover:bg-primary/20"
+                                    className="shrink-0 rounded-full border border-primary/30 bg-primary/10 px-1.5 text-2xs font-medium leading-[16px] text-primary hover:bg-primary/20"
                                     title="Show the devices this controller manages"
                                     onClick={() => patchParams({ managed_by: d.id, page: '1' })}
                                   >
@@ -1200,13 +1200,13 @@ export function DevicesPage() {
                                   </button>
                                 )}
                               </div>
-                              <div className="truncate font-mono text-[11px] text-muted">
+                              <div className="truncate font-mono text-xs text-muted">
                                 {d.ip_address || d.managed_ip || '—'}
                               </div>
                               {d.managed_by_device_id && (
                                 <Link
                                   to={`/devices/${d.managed_by_device_id}`}
-                                  className="block truncate text-[11px] text-muted hover:text-primary"
+                                  className="block truncate text-xs text-muted hover:text-primary"
                                   title={`Managed via ${d.managed_by_hostname || 'controller'}`}
                                 >
                                   via {d.managed_by_hostname || 'controller'}
@@ -1236,12 +1236,12 @@ export function DevicesPage() {
                           </Td>
                         )}
                         {prefs.visible.group_location && (
-                          <Td className="text-sm">
+                          <Td className="max-w-[14rem] text-sm">
                             {d.group_name || d.location ? (
-                              <div className="leading-tight">
-                                <div>{d.group_name || '—'}</div>
+                              <div className="leading-tight" title={[d.group_name, d.location].filter(Boolean).join(' · ')}>
+                                <div className="truncate">{d.group_name || '—'}</div>
                                 {d.location && (
-                                  <div className="text-[11px] text-muted">{d.location}</div>
+                                  <div className="truncate text-xs text-muted">{d.location}</div>
                                 )}
                               </div>
                             ) : (
@@ -1264,7 +1264,7 @@ export function DevicesPage() {
                               ))}
                               {(d.tags || []).length > 3 && (
                                 <span
-                                  className="rounded-full bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-muted"
+                                  className="rounded-full bg-surface2 px-1.5 py-0.5 text-2xs font-medium text-muted"
                                   title={(d.tags || []).slice(3).join(', ')}
                                 >
                                   +{(d.tags || []).length - 3}
@@ -1354,8 +1354,8 @@ export function DevicesPage() {
           </CardContent>
         </Card>
 
-        {/* ---------- Right sidebar ---------- */}
-        <div className="space-y-4">
+        {/* ---------- Right sidebar (a row of summary cards under the table below 2xl) ---------- */}
+        <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-1">
           <DistributionCard byCategory={agg.byCategory} total={agg.total} />
           <AvailabilityChartCard
             title="Availability by Location"
@@ -1505,7 +1505,7 @@ function KpiCard({
         </span>
         {hasTrend && (
           <span
-            className={`inline-flex items-center gap-0.5 text-[11px] font-medium ${
+            className={`inline-flex items-center gap-0.5 text-xs font-medium ${
               trendUp ? 'text-success' : 'text-danger'
             }`}
           >
@@ -1515,7 +1515,7 @@ function KpiCard({
         )}
       </div>
       <div>
-        <div className="text-[11px] font-medium uppercase tracking-wider text-muted">{label}</div>
+        <div className="text-xs font-medium uppercase tracking-wider text-muted">{label}</div>
         <div className="mt-0.5 text-2xl font-bold leading-tight tracking-tight tabular-nums">
           {value.toLocaleString()}
         </div>
@@ -1567,7 +1567,7 @@ function HealthPill({ kind, snmpNoData, flapping }: { kind: HealthKind; snmpNoDa
   }
   const v = map[kind]
   const pill = (
-    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium ${v.className}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${v.className}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${v.dot}`} />
       {v.label}
     </span>
@@ -1579,7 +1579,7 @@ function HealthPill({ kind, snmpNoData, flapping }: { kind: HealthKind; snmpNoDa
       {flapping && <FlappingTag device={flapping} />}
       {snmpNoData && (
         <span
-          className="whitespace-nowrap text-[10px] text-muted"
+          className="whitespace-nowrap text-2xs text-muted"
           title="Reachable by ping, but no SNMP data collected in the last 15 minutes"
         >
           SNMP: no data
@@ -1698,7 +1698,7 @@ function TagsFilter({
               className="h-8 flex-1 text-xs"
             />
             {selected.length > 1 && (
-              <div className="flex flex-none items-center rounded-md bg-surface2 p-0.5 text-[10px] font-medium">
+              <div className="flex flex-none items-center rounded-md bg-surface2 p-0.5 text-2xs font-medium">
                 <button
                   type="button"
                   onClick={() => onMode('any')}
@@ -1736,7 +1736,7 @@ function TagsFilter({
                 >
                   <input type="checkbox" readOnly checked={isSel} className="pointer-events-none" />
                   <TagBadge name={d.name} color={tagColor(d.name, colors)} />
-                  <span className="ml-auto text-[10px] text-muted">{d.device_count}</span>
+                  <span className="ml-auto text-2xs text-muted">{d.device_count}</span>
                 </button>
               )
             })}
@@ -1959,7 +1959,7 @@ function AvailabilityChartCard({
             </span>
             <div className="min-w-0">
               <h3 className="text-sm font-semibold">{title}</h3>
-              <p className="truncate text-[11px] text-muted">{subtitle}</p>
+              <p className="truncate text-xs text-muted">{subtitle}</p>
             </div>
           </div>
         </div>
@@ -2039,8 +2039,8 @@ function Donut({
         })}
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <div className="text-[18px] font-bold leading-none">{total.toLocaleString()}</div>
-        <div className="text-[10px] font-medium uppercase tracking-wider text-muted">Total</div>
+        <div className="text-xl font-bold leading-none">{total.toLocaleString()}</div>
+        <div className="text-2xs font-medium uppercase tracking-wider text-muted">Total</div>
       </div>
     </div>
   )
@@ -2094,7 +2094,7 @@ function StatusBreakdownCard({
             )
           })}
         </div>
-        <div className="mt-2 flex justify-between text-[10px] text-muted">
+        <div className="mt-2 flex justify-between text-2xs text-muted">
           {ticks.map((t, i) => (
             <span key={i}>{t.toLocaleString()}</span>
           ))}
@@ -2167,7 +2167,7 @@ function RecentActivityCard({ alerts }: { alerts: RecentAlert[] }) {
                   ) : (
                     <div className="truncate text-xs font-medium">{text}</div>
                   )}
-                  <div className="text-[10px] text-muted">
+                  <div className="text-2xs text-muted">
                     {relativeTime(a.triggered_at || null) || '—'}
                   </div>
                 </div>
@@ -2665,7 +2665,7 @@ function BulkEditDialog({
 }
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{children}</div>
+    <div className="text-2xs font-semibold uppercase tracking-wider text-muted">{children}</div>
   )
 }
 
@@ -2692,7 +2692,7 @@ function TimeRangePicker({
       role="tablist"
       aria-label="Uptime time range"
     >
-      <span className="px-1.5 text-[11px] font-medium uppercase tracking-wider text-muted">
+      <span className="px-1.5 text-xs font-medium uppercase tracking-wider text-muted">
         Uptime
       </span>
       {presets.map((p) => {

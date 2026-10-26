@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils'
 import { useTheme } from '@/stores/theme'
 import { availNumber, fmtAvail, fmtDateTime, fmtDuration, fmtTarget } from './format'
 import { EvidenceEmpty } from './ui'
+import { chartFont, chartTheme } from '@/lib/chartTheme'
 
 /* ── Theme ─────────────────────────────────────────────────────────────── */
 
@@ -756,7 +757,7 @@ function tooltipBase(colors: VizColors) {
     borderColor: colors.c('border'),
     borderWidth: 1,
     padding: [8, 10],
-    textStyle: { color: colors.c('text'), fontSize: 12 },
+    textStyle: { color: colors.c('text'), fontSize: chartFont(12) },
     extraCssText: 'box-shadow: 0 8px 24px rgba(0,0,0,.25); border-radius: 8px;',
   }
 }
@@ -795,7 +796,7 @@ export function AvailabilityActivityChart({
     const t = target ?? 99.9
     const muted = colors.c('muted')
     const grid = colors.c('border', 0.8)
-    const axisLabel = { color: muted, fontSize: 11, hideOverlap: true, formatter: (v: number) => axisTime(v, span) }
+    const axisLabel = { color: muted, fontSize: chartFont(11), hideOverlap: true, formatter: (v: number) => axisTime(v, span) }
     const topH = hasTrend && act.length ? '58%' : '78%'
     const grids = hasTrend && act.length
       ? [{ left: 52, right: 16, top: 16, height: topH }, { left: 52, right: 16, top: '76%', bottom: 28 }]
@@ -815,7 +816,7 @@ export function AvailabilityActivityChart({
     if (hasTrend) {
       yAxes.push({
         type: 'value', gridIndex: 0, min: domain[0], max: domain[1],
-        axisLabel: { color: muted, fontSize: 11, formatter: (v: number) => `${v}%` },
+        axisLabel: { color: muted, fontSize: chartFont(11), formatter: (v: number) => `${v}%` },
         splitLine: { lineStyle: { color: grid, type: 'dashed' } },
       })
       series.push({
@@ -835,7 +836,7 @@ export function AvailabilityActivityChart({
           silent: true,
           symbol: 'none',
           lineStyle: { color: colors.c('text', 0.7), type: 'dashed', width: 1.5 },
-          label: { formatter: `Target ${fmtTarget(target)}`, color: colors.c('text2'), fontSize: 11, position: 'insideStartTop', backgroundColor: colors.c('surface', 0.85), padding: [1, 4], borderRadius: 3 },
+          label: { formatter: `Target ${fmtTarget(target)}`, color: colors.c('text2'), fontSize: chartFont(11), position: 'insideStartTop', backgroundColor: colors.c('surface', 0.85), padding: [1, 4], borderRadius: 3 },
           data: [{ yAxis: target }],
         } : undefined,
         markArea: gaps.length ? {
@@ -843,7 +844,7 @@ export function AvailabilityActivityChart({
           itemStyle: { color: colors.c('muted', 0.1), borderColor: colors.c('muted', 0.3), borderWidth: 1, borderType: 'dashed' },
           label: { show: false },
           data: gaps.map(([a, b]) => [
-            { xAxis: a, label: { show: b - a > span / 8, position: 'insideBottom', color: muted, fontSize: 11, formatter: 'No evidence' } },
+            { xAxis: a, label: { show: b - a > span / 8, position: 'insideBottom', color: muted, fontSize: chartFont(11), formatter: 'No evidence' } },
             { xAxis: Math.min(b, toMs) },
           ]),
         } : undefined,
@@ -854,7 +855,7 @@ export function AvailabilityActivityChart({
       const maxDown = Math.max(1, ...act.map((p) => p.entities_down))
       yAxes.push({
         type: 'value', gridIndex: gi, min: 0, max: Math.max(2, Math.ceil(maxDown * 1.15)), minInterval: 1, splitNumber: 2,
-        axisLabel: { color: muted, fontSize: 10 },
+        axisLabel: { color: muted, fontSize: chartFont(10) },
         splitLine: { lineStyle: { color: grid, type: 'dashed' } },
       })
       series.push({
@@ -932,7 +933,7 @@ export function AvailabilityActivityChart({
       series,
     }
   }, [trend, activity, target, fromMs, toMs, colors, entity])
-  return <ReactECharts option={option} notMerge style={{ height, width: '100%' }} opts={{ renderer: 'canvas' }} />
+  return <ReactECharts theme={chartTheme()} option={option} notMerge style={{ height, width: '100%' }} opts={{ renderer: 'canvas' }} />
 }
 
 /* ── Availability heatmap ──────────────────────────────────────────────── */
@@ -1017,12 +1018,12 @@ export function AvailabilityHeatmap({
       xAxis: {
         type: 'category', data: model.cols, splitArea: { show: false },
         axisLine: { show: false }, axisTick: { show: false },
-        axisLabel: { color: muted, fontSize: 10, interval: model.mode === 'day-hour' ? 2 : 'auto', hideOverlap: true },
+        axisLabel: { color: muted, fontSize: chartFont(10), interval: model.mode === 'day-hour' ? 2 : 'auto', hideOverlap: true },
       },
       yAxis: {
         type: 'category', data: model.rows, inverse: true,
         axisLine: { show: false }, axisTick: { show: false },
-        axisLabel: { color: colors.c('text2'), fontSize: 11 },
+        axisLabel: { color: colors.c('text2'), fontSize: chartFont(11) },
       },
       visualMap: {
         show: false,
@@ -1057,7 +1058,7 @@ export function AvailabilityHeatmap({
 
   if (!model || !option) return null
   const h = height ?? (model.mode === 'strip' ? 96 : Math.min(460, Math.max(140, model.rows.length * 26 + 44)))
-  return <ReactECharts option={option} notMerge style={{ height: h, width: '100%' }} />
+  return <ReactECharts theme={chartTheme()} option={option} notMerge style={{ height: h, width: '100%' }} />
 }
 
 /* ── Simple bar chart (categorical, echarts) ───────────────────────────── */
@@ -1077,8 +1078,8 @@ export function CategoryBars({
     const muted = colors.c('muted')
     const base = color ?? colors.c('primary')
     const fmt = valueFormat ?? ((v: number) => `${v.toLocaleString()}${unit}`)
-    const cat = { type: 'category', data: items.map((i) => i.label), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: colors.c('text2'), fontSize: 11, width: 120, overflow: 'truncate' as const }, inverse: horizontal }
-    const val = { type: 'value', axisLabel: { color: muted, fontSize: 10, formatter: fmt }, splitLine: { lineStyle: { color: colors.c('border', 0.8), type: 'dashed' } } }
+    const cat = { type: 'category', data: items.map((i) => i.label), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: colors.c('text2'), fontSize: chartFont(11), width: 120, overflow: 'truncate' as const }, inverse: horizontal }
+    const val = { type: 'value', axisLabel: { color: muted, fontSize: chartFont(10), formatter: fmt }, splitLine: { lineStyle: { color: colors.c('border', 0.8), type: 'dashed' } } }
     return {
       animationDuration: 500,
       grid: horizontal ? { left: 128, right: 56, top: 6, bottom: 20 } : { left: 44, right: 12, top: 16, bottom: 36 },
@@ -1100,11 +1101,11 @@ export function CategoryBars({
             },
           },
         })),
-        label: { show: horizontal, position: 'right', color: colors.c('text2'), fontSize: 11, formatter: (p: any) => fmt(p.value) },
+        label: { show: horizontal, position: 'right', color: colors.c('text2'), fontSize: chartFont(11), formatter: (p: any) => fmt(p.value) },
       }],
     }
   }, [items, colors, color, unit, horizontal, valueFormat])
-  return <ReactECharts option={option} notMerge style={{ height, width: '100%' }} />
+  return <ReactECharts theme={chartTheme()} option={option} notMerge style={{ height, width: '100%' }} />
 }
 
 /* ── Service downtime activity (client-side from confirmed episodes) ───── */
@@ -1172,10 +1173,10 @@ export function AlertVolumeChart({
       xAxis: {
         type: 'time', min: fromMs, max: toMs,
         axisLine: { lineStyle: { color: colors.c('border') } }, axisTick: { show: false },
-        axisLabel: { color: muted, fontSize: 11, hideOverlap: true, formatter: (v: number) => axisTime(v, span) },
+        axisLabel: { color: muted, fontSize: chartFont(11), hideOverlap: true, formatter: (v: number) => axisTime(v, span) },
         splitLine: { show: false },
       },
-      yAxis: { type: 'value', minInterval: 1, axisLabel: { color: muted, fontSize: 10 }, splitLine: { lineStyle: { color: colors.c('border', 0.8), type: 'dashed' } } },
+      yAxis: { type: 'value', minInterval: 1, axisLabel: { color: muted, fontSize: chartFont(10) }, splitLine: { lineStyle: { color: colors.c('border', 0.8), type: 'dashed' } } },
       tooltip: {
         ...tooltipBase(colors),
         trigger: 'axis',
@@ -1204,7 +1205,7 @@ export function AlertVolumeChart({
   if (!points.length) return <EvidenceEmpty kind="no_findings">No alerts raised in this period.</EvidenceEmpty>
   return (
     <div>
-      <ReactECharts option={option} notMerge style={{ height, width: '100%' }} />
+      <ReactECharts theme={chartTheme()} option={option} notMerge style={{ height, width: '100%' }} />
       <div className="mt-2 flex flex-wrap gap-x-4 text-sm text-muted">
         <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-sm bg-danger" />Critical</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-sm bg-warning" />Warning</span>

@@ -90,7 +90,7 @@ function TableCard({ title, hint, onCsv, children }: {
       <CardHeader className="flex-row items-center justify-between space-y-0 py-3 px-4 border-b border-border">
         <div className="flex items-baseline gap-2 min-w-0">
           <CardTitle className="text-sm">{title}</CardTitle>
-          {hint && <span className="text-[10px] uppercase tracking-wider text-muted truncate">{hint}</span>}
+          {hint && <span className="text-2xs uppercase tracking-wider text-muted truncate">{hint}</span>}
         </div>
         <CsvButton onClick={onCsv} />
       </CardHeader>
@@ -270,7 +270,7 @@ export function UsagePage() {
                     <Td className="text-xs text-muted">{i + 1}</Td>
                     <Td>
                       <div className="font-mono text-xs text-text truncate max-w-[16rem]" title={p.route}>{p.route}</div>
-                      <div className="text-[10px] text-muted truncate">{p.service}</div>
+                      <div className="text-2xs text-muted truncate">{p.service}</div>
                     </Td>
                     <Td className="text-right">
                       <span className="font-mono text-xs tabular-nums">{fmtCount(p.hits)}</span>
@@ -305,7 +305,7 @@ export function UsagePage() {
                     <Td className="text-xs text-muted">{i + 1}</Td>
                     <Td>
                       <div className="font-mono text-xs text-text truncate max-w-[16rem]" title={o.operation}>{o.operation}</div>
-                      <div className="text-[10px] text-muted truncate">{o.service}</div>
+                      <div className="text-2xs text-muted truncate">{o.service}</div>
                     </Td>
                     <Td className="text-right">
                       <span className="font-mono text-xs tabular-nums">{fmtCount(o.hits)}</span>
@@ -385,7 +385,7 @@ export function UsagePage() {
         <CardHeader className="flex-row items-center justify-between space-y-0 border-b border-border px-4 py-3">
           <div>
             <CardTitle className="text-sm">Ingest cardinality</CardTitle>
-            <p className="mt-0.5 text-[11px] text-muted">Distinct services, operations, routes and span attribute keys in this window. High-cardinality keys inflate storage and query cost.</p>
+            <p className="mt-0.5 text-xs text-muted">Distinct services, operations, routes and span attribute keys in this window. High-cardinality keys inflate storage and query cost.</p>
           </div>
         </CardHeader>
         <CardContent className="p-0">

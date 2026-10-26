@@ -283,7 +283,7 @@ function MonitorDetail({ m, freshRun }: { m: Monitor; freshRun: RunResult | null
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <div>
-        <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted">
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">
           Latest run — step detail
         </div>
         {!latestWithSteps ? (
@@ -301,7 +301,7 @@ function MonitorDetail({ m, freshRun }: { m: Monitor; freshRun: RunResult | null
                       ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
                       : <XCircle className="h-3.5 w-3.5 shrink-0 text-danger" />}
                     <span className="truncate text-sm text-text">{s2.name}</span>
-                    <span className="font-mono text-[10px] text-muted">{s2.method}</span>
+                    <span className="font-mono text-2xs text-muted">{s2.method}</span>
                   </div>
                   <span className="shrink-0 text-xs tabular-nums text-text2">
                     {s2.status_code || '—'} · {fmtMs(s2.ms)}
@@ -310,13 +310,13 @@ function MonitorDetail({ m, freshRun }: { m: Monitor; freshRun: RunResult | null
                 {(s2.asserts ?? []).length > 0 && (
                   <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 pl-5">
                     {s2.asserts.map((a, j) => (
-                      <span key={j} className={cn('text-[11px]', a.ok ? 'text-muted' : 'text-danger')}>
+                      <span key={j} className={cn('text-xs', a.ok ? 'text-muted' : 'text-danger')}>
                         {a.ok ? '✓' : '✗'} {a.detail}
                       </span>
                     ))}
                   </div>
                 )}
-                {s2.error && <div className="mt-1 pl-5 text-[11px] text-danger">{s2.error}</div>}
+                {s2.error && <div className="mt-1 pl-5 text-xs text-danger">{s2.error}</div>}
               </div>
             ))}
           </div>
@@ -324,7 +324,7 @@ function MonitorDetail({ m, freshRun }: { m: Monitor; freshRun: RunResult | null
       </div>
 
       <div>
-        <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted">
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">
           Run history (24h{rows.length ? ` · ${rows.length} runs` : ''})
         </div>
         {/* success/failure strip, most recent first */}
@@ -341,7 +341,7 @@ function MonitorDetail({ m, freshRun }: { m: Monitor; freshRun: RunResult | null
         {rows.some((r) => !r.success) && (
           <div className="mt-3 space-y-1">
             {rows.filter((r) => !r.success).slice(0, 5).map((r, i) => (
-              <div key={i} className="flex items-baseline justify-between gap-2 text-[11px]">
+              <div key={i} className="flex items-baseline justify-between gap-2 text-xs">
                 <span className="truncate text-danger">
                   <AlertTriangle className="mr-1 inline h-3 w-3" />
                   {r.failed_step || 'run'}: {r.error}
@@ -460,7 +460,7 @@ function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; onClose
             <Button variant="outline" size="sm" onClick={() => setSteps([...steps, emptyStep()])}>
               <Plus className="h-3.5 w-3.5" /> Add step
             </Button>
-            <p className="text-[11px] text-muted">
+            <p className="text-xs text-muted">
               Steps run in order in one session (cookies persist). Use{' '}
               <code className="rounded bg-surface2 px-1">{'{{var}}'}</code> to reference values
               extracted from earlier responses.
@@ -587,24 +587,24 @@ function StepEditor({ step, index, total, onChange, onRemove, onMove }: {
             </Button>
           </div>
         ))}
-        <button type="button" className="text-[11px] text-primary hover:underline" onClick={() =>
+        <button type="button" className="text-xs text-primary hover:underline" onClick={() =>
           onChange({ assertions: [...asserts, { type: 'status_code', operator: 'eq', value: 200 }] })}>
           + assertion
         </button>
-        <button type="button" className="ml-3 text-[11px] text-muted hover:text-text2" onClick={() => setShowAdvanced(!showAdvanced)}>
+        <button type="button" className="ml-3 text-xs text-muted hover:text-text2" onClick={() => setShowAdvanced(!showAdvanced)}>
           {showAdvanced ? 'hide' : 'show'} body / headers / extraction
         </button>
       </div>
 
       {showAdvanced && (
         <div className="mt-2 space-y-2 border-t border-border/50 pt-2">
-          <label className="block text-[11px] text-text2">
+          <label className="block text-xs text-text2">
             Request body (supports {'{{vars}}'})
             <Textarea className="mt-1 h-16 font-mono text-xs" value={step.body ?? ''}
               onChange={(e) => onChange({ body: e.target.value })}
               placeholder='{"username":"demo","password":"{{password}}"}' />
           </label>
-          <label className="block text-[11px] text-text2">
+          <label className="block text-xs text-text2">
             Headers (one per line, Name: value)
             <Textarea className="mt-1 h-12 font-mono text-xs"
               value={Object.entries(step.headers ?? {}).map(([k, v]) => `${k}: ${v}`).join('\n')}
@@ -619,7 +619,7 @@ function StepEditor({ step, index, total, onChange, onRemove, onMove }: {
               placeholder="Content-Type: application/json" />
           </label>
           <div className="space-y-1.5">
-            <div className="text-[11px] text-text2">Extract into variables</div>
+            <div className="text-xs text-text2">Extract into variables</div>
             {extracts.map((ex, i) => (
               <div key={i} className="flex items-center gap-1.5">
                 <Input className="h-7 w-28 font-mono text-xs" placeholder="var name" value={ex.var}
@@ -645,7 +645,7 @@ function StepEditor({ step, index, total, onChange, onRemove, onMove }: {
                 </Button>
               </div>
             ))}
-            <button type="button" className="text-[11px] text-primary hover:underline" onClick={() =>
+            <button type="button" className="text-xs text-primary hover:underline" onClick={() =>
               onChange({ extract: [...extracts, { var: '', from: 'json', path: '' }] })}>
               + extraction
             </button>

@@ -306,7 +306,7 @@ export default function AgentFleetPage() {
                       >
                         <div className="flex flex-col gap-0.5">
                           <span className="font-medium">{a.hostname || a.agent_uid}</span>
-                          <span className="font-mono text-[10px] text-muted">
+                          <span className="font-mono text-2xs text-muted">
                             {a.agent_uid.slice(0, 18)}
                           </span>
                         </div>

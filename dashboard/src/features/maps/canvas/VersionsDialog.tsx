@@ -104,7 +104,7 @@ export function VersionsDialog({ mapId, onClose, onRestored }: VersionsDialogPro
           </div>
 
           {/* List */}
-          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-muted">
+          <div className="flex items-center justify-between text-2xs font-bold uppercase tracking-wider text-muted">
             <span>History {rows.length > 0 && <span className="font-mono">({rows.length})</span>}</span>
             <button
               type="button"
@@ -135,13 +135,13 @@ export function VersionsDialog({ mapId, onClose, onRestored }: VersionsDialogPro
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="font-semibold text-text" title={v.created_at}>{new Date(v.created_at).toLocaleString()}</span>
-                        <span className="text-[10px] text-muted">{formatAgo(v.created_at)}</span>
-                        {i === 0 && <span className="rounded bg-primary/10 px-1 text-[9px] font-semibold uppercase text-primary">latest</span>}
+                        <span className="text-2xs text-muted">{formatAgo(v.created_at)}</span>
+                        {i === 0 && <span className="rounded bg-primary/10 px-1 text-2xs font-semibold uppercase text-primary">latest</span>}
                       </div>
-                      <div className="truncate text-[11px] text-text2" title={v.reason || undefined}>
+                      <div className="truncate text-xs text-text2" title={v.reason || undefined}>
                         {v.reason || <span className="italic text-muted">No reason given</span>}
                       </div>
-                      <div className="mt-0.5 font-mono text-[10px] text-muted">
+                      <div className="mt-0.5 font-mono text-2xs text-muted">
                         {v.node_count} nodes · {v.link_count} links · {v.shape_count} shapes
                         {(v.created_by_name || v.created_by) && <span className="font-sans"> · by {v.created_by_name || v.created_by}</span>}
                       </div>

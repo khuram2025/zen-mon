@@ -378,7 +378,7 @@ export const Outline = forwardRef<OutlineHandle, OutlineProps>(function Outline(
                     <span
                       aria-hidden
                       className={cn(
-                        'mt-px flex h-6 min-w-[1.5rem] shrink-0 items-center justify-center rounded-md px-1 text-[11px] font-bold tabular-nums',
+                        'mt-px flex h-6 min-w-[1.5rem] shrink-0 items-center justify-center rounded-md px-1 text-xs font-bold tabular-nums',
                         selected ? 'bg-primary text-on-primary' : 'bg-primary/10 text-primary',
                       )}
                     >
@@ -393,7 +393,7 @@ export const Outline = forwardRef<OutlineHandle, OutlineProps>(function Outline(
                       className="min-w-0 flex-1 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
                     >
                       <span className="flex min-w-0 items-center gap-1.5">
-                        <span className={cn('truncate text-[13px] font-medium', def ? 'text-text' : 'text-danger-fg')}>{title}</span>
+                        <span className={cn('truncate text-sm font-medium', def ? 'text-text' : 'text-danger-fg')}>{title}</span>
                         {renamed && (
                           <span className="inline-flex shrink-0 items-center text-muted" title={`Default title: ${def?.title}`}>
                             <PenLine className="h-3 w-3" aria-hidden />
@@ -401,11 +401,11 @@ export const Outline = forwardRef<OutlineHandle, OutlineProps>(function Outline(
                           </span>
                         )}
                       </span>
-                      <span className="mt-0.5 block truncate text-[11px] text-muted">
+                      <span className="mt-0.5 block truncate text-xs text-muted">
                         {!def ? 'This section is no longer available' : summary || (def.options.length ? '' : 'No options')}
                       </span>
                       {issueCount > 0 && (
-                        <span className="mt-1 flex items-center gap-1 text-[11px] font-medium text-danger-fg">
+                        <span className="mt-1 flex items-center gap-1 text-xs font-medium text-danger-fg">
                           <AlertCircle className="h-3 w-3 shrink-0" aria-hidden />
                           {p?.unknown || p?.restricted ? 'Remove this section to save' : `${issueCount} option${issueCount === 1 ? '' : 's'} to fix`}
                         </span>

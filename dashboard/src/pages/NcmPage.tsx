@@ -261,7 +261,7 @@ function OutcomeTrend({ query }: { query: any }) {
               </div>
             ))}
           </div>
-          <div className="flex justify-between text-[11px] text-muted"><span>{points[0]?.day}</span><span>{points[points.length - 1]?.day} (UTC)</span></div>
+          <div className="flex justify-between text-xs text-muted"><span>{points[0]?.day}</span><span>{points[points.length - 1]?.day} (UTC)</span></div>
         </>
       )}
     </div>

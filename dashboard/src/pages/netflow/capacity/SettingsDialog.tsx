@@ -84,7 +84,7 @@ export function SettingsDialog({
       {label}
       <Input inputMode="decimal" value={text[key]} disabled={ro} aria-invalid={!!err}
         onChange={(e) => setText((t) => ({ ...t, [key]: e.target.value }))} />
-      {err && <span className="block text-[11px] font-normal text-danger-fg">{err}</span>}
+      {err && <span className="block text-xs font-normal text-danger-fg">{err}</span>}
     </label>
   )
 
@@ -148,7 +148,7 @@ export function SettingsDialog({
               <input type="checkbox" checked={bh.enabled} onChange={(e) => setD({ ...d, business_hours: { ...bh, enabled: e.target.checked } })} />
               Bill business hours only by default
             </label>
-            <p className="text-[11px] text-text2">The Capacity page can also switch to these hours at any time.</p>
+            <p className="text-xs text-text2">The Capacity page can also switch to these hours at any time.</p>
             <div className="grid grid-cols-2 gap-3 min-[520px]:grid-cols-3">
               <label className="space-y-1 text-xs font-medium text-text">
                 From
@@ -167,7 +167,7 @@ export function SettingsDialog({
                 <Input value={bh.tz} onChange={(e) => setD({ ...d, business_hours: { ...bh, tz: e.target.value } })} placeholder="Asia/Riyadh" />
               </label>
             </div>
-            {errors.hours && <p className="text-[11px] text-danger-fg">{errors.hours}</p>}
+            {errors.hours && <p className="text-xs text-danger-fg">{errors.hours}</p>}
             <fieldset>
               <legend className="mb-1 text-xs font-medium text-text">Days</legend>
               <div className="flex flex-wrap gap-2">
@@ -184,7 +184,7 @@ export function SettingsDialog({
                   </label>
                 ))}
               </div>
-              {errors.days && <p className="text-[11px] text-danger-fg">{errors.days}</p>}
+              {errors.days && <p className="text-xs text-danger-fg">{errors.days}</p>}
             </fieldset>
           </div>
         </fieldset>

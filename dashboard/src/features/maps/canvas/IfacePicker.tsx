@@ -111,9 +111,9 @@ export function IfaceSelect({ label, loading, ifaces, value, onChange }: {
         })}
       </select>
       {matched && (matched.oper_status || '').toLowerCase() !== 'up' && (
-        <span className="text-[10px] text-warning">This port is {stateTag(matched)} — check the cabling or pick another port.</span>
+        <span className="text-2xs text-warning">This port is {stateTag(matched)} — check the cabling or pick another port.</span>
       )}
-      {missing && <span className="text-[10px] text-warning">Stored port "{value}" is not on this device — it is kept until you pick another.</span>}
+      {missing && <span className="text-2xs text-warning">Stored port "{value}" is not on this device — it is kept until you pick another.</span>}
     </Field>
   )
 }

@@ -60,9 +60,9 @@ function StateCell({ row, age, tz, serverTime }: { row: HealthExporterRow; age: 
     <div className="space-y-0.5">
       <ExporterStateBadge state={row.state} />
       {row.state_since && row.state !== 'receiving' && (
-        <div className="whitespace-nowrap text-[11px] text-text2">since {shortTime(row.state_since, serverTime, tz, false)}</div>
+        <div className="whitespace-nowrap text-xs text-text2">since {shortTime(row.state_since, serverTime, tz, false)}</div>
       )}
-      {row.state === 'receiving' && age != null && <div className="text-[11px] text-text2">{formatAge(age)} ago</div>}
+      {row.state === 'receiving' && age != null && <div className="text-xs text-text2">{formatAge(age)} ago</div>}
     </div>
   )
 }
@@ -103,8 +103,8 @@ export function ExporterTable({ rows, serverTime, onOpen }: {
                 <Tr key={r.exporter} className="cursor-pointer" onClick={() => onOpen(r.exporter)}>
                   <Td className="min-w-[11rem] text-xs">
                     <div className="whitespace-nowrap font-medium text-text">{r.display_name || ipDisplay(r.exporter)}</div>
-                    {r.display_name && <div className="whitespace-nowrap font-mono text-[11px] text-text2">{ipDisplay(r.exporter)}</div>}
-                    <div className="text-[11px] text-text2">
+                    {r.display_name && <div className="whitespace-nowrap font-mono text-xs text-text2">{ipDisplay(r.exporter)}</div>}
+                    <div className="text-xs text-text2">
                       {r.device_hostname
                         ? <>{r.device_hostname}{r.device_status ? ` · ${deviceStatusText(r.device_status)}` : ''}</>
                         : 'No device linked'}
@@ -113,7 +113,7 @@ export function ExporterTable({ rows, serverTime, onOpen }: {
                   <Td><StateCell row={r} age={age} tz={tz} serverTime={serverTime} /></Td>
                   <Td className="whitespace-nowrap text-xs tabular-nums" title={r.last_received_at ? formatDateTime(r.last_received_at, tz) : undefined}>
                     {r.last_received_at ? shortTime(r.last_received_at, serverTime, tz) : <span className="text-text2">Never</span>}
-                    {r.state !== 'receiving' && age != null && <div className="text-[11px] text-text2">{formatAge(age)} ago</div>}
+                    {r.state !== 'receiving' && age != null && <div className="text-xs text-text2">{formatAge(age)} ago</div>}
                   </Td>
                   <Td className="text-right text-xs tabular-nums" title={r.records_15m != null ? formatCountExact(r.records_15m) : 'Unknown'}>
                     {formatCount(r.records_15m)}
@@ -126,20 +126,20 @@ export function ExporterTable({ rows, serverTime, onOpen }: {
                   </Td>
                   <Td className="text-xs">
                     <div>{protocolList(r.export_protocols)}</div>
-                    {r.sampling_interval != null && <div className="text-[11px] text-text2">{samplingLabel(r.sampling_interval)}</div>}
+                    {r.sampling_interval != null && <div className="text-xs text-text2">{samplingLabel(r.sampling_interval)}</div>}
                   </Td>
                   <Td className="text-xs"><Issues row={r} /></Td>
                   <Td className="text-right" onClick={(e) => e.stopPropagation()}>
                     <div className="flex justify-end gap-1">
                       {!r.device_id && (
                         <button type="button" onClick={() => onOpen(r.exporter, 'device')}
-                          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[11px] font-medium text-text hover:bg-surface2"
+                          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-text hover:bg-surface2"
                           aria-label={`Link ${r.display_name || ipDisplay(r.exporter)} to a device`}>
                           <Link2 className="h-3 w-3" aria-hidden /> Link
                         </button>
                       )}
                       <button type="button" onClick={() => onOpen(r.exporter)}
-                        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[11px] font-medium text-text hover:bg-surface2"
+                        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-text hover:bg-surface2"
                         aria-label={`Details of ${r.display_name || ipDisplay(r.exporter)}`}>
                         Details <ChevronRight className="h-3 w-3" aria-hidden />
                       </button>
@@ -159,8 +159,8 @@ export function ExporterTable({ rows, serverTime, onOpen }: {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="break-words font-medium text-text">{r.display_name || ipDisplay(r.exporter)}</div>
-                  {r.display_name && <div className="font-mono text-[11px] text-text2">{ipDisplay(r.exporter)}</div>}
-                  <div className="text-[11px] text-text2">{r.device_hostname ?? 'No device linked'}</div>
+                  {r.display_name && <div className="font-mono text-xs text-text2">{ipDisplay(r.exporter)}</div>}
+                  <div className="text-xs text-text2">{r.device_hostname ?? 'No device linked'}</div>
                 </div>
                 <ExporterStateBadge state={r.state} />
               </div>
@@ -180,13 +180,13 @@ export function ExporterTable({ rows, serverTime, onOpen }: {
               </dl>
               <div className="mt-2 flex gap-2">
                 <button type="button" onClick={() => onOpen(r.exporter)}
-                  className="inline-flex h-8 flex-1 items-center justify-center gap-1 rounded-md border border-border text-[11px] font-medium text-text hover:bg-surface2"
+                  className="inline-flex h-8 flex-1 items-center justify-center gap-1 rounded-md border border-border text-xs font-medium text-text hover:bg-surface2"
                   aria-label={`Details of ${r.display_name || ipDisplay(r.exporter)}`}>
                   Details <ChevronRight className="h-3 w-3" aria-hidden />
                 </button>
                 {!r.device_id && (
                   <button type="button" onClick={() => onOpen(r.exporter, 'device')}
-                    className="inline-flex h-8 flex-1 items-center justify-center gap-1 rounded-md border border-border text-[11px] font-medium text-text hover:bg-surface2"
+                    className="inline-flex h-8 flex-1 items-center justify-center gap-1 rounded-md border border-border text-xs font-medium text-text hover:bg-surface2"
                     aria-label={`Link ${r.display_name || ipDisplay(r.exporter)} to a device`}>
                     <Link2 className="h-3 w-3" aria-hidden /> Link device
                   </button>

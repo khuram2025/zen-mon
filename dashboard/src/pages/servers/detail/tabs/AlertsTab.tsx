@@ -324,7 +324,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
             serverStatus === 'critical' ? 'border-danger/30 bg-danger/5' : 'border-warning/30 bg-warning/5',
           )}
         >
-          <div className="mb-1 flex items-center gap-2 text-[13px] font-semibold text-text">
+          <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-text">
             <AlertTriangle className={cn('h-4 w-4', serverStatus === 'critical' ? 'text-danger' : 'text-warning')} />
             Server health: {serverStatus}
           </div>
@@ -357,12 +357,12 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Filter alerts…"
-                className="h-8 pl-8 text-[13px]"
+                className="h-8 pl-8 text-sm"
               />
             </div>
           </div>
         )}
-        <Table className="text-[13px]">
+        <Table className="text-sm">
           <THead className="bg-surface2/40">
             <Tr className="hover:bg-transparent">
               <Th className="h-9 w-[110px] pl-4">Severity</Th>
@@ -469,7 +469,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
         <Panel icon={BellOff} title="Snoozed & muted" subtitle={`${silences.length} condition${silences.length === 1 ? '' : 's'}`} flush>
           <ul className="divide-y divide-border/60">
             {silences.map((s) => (
-              <li key={s.id} className="flex items-center gap-3 px-4 py-2 text-[13px] hover:bg-surface2/40">
+              <li key={s.id} className="flex items-center gap-3 px-4 py-2 text-sm hover:bg-surface2/40">
                 <Pill tone="muted">{s.forever ? 'Muted' : 'Snoozed'}</Pill>
                 <span className="min-w-0 truncate font-medium" title={s.dedupe}>{silenceLabel(s)}</span>
                 <span className="shrink-0 text-xs text-muted" title={s.until ? new Date(s.until).toLocaleString() : undefined}>
@@ -501,7 +501,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
           </Button>
         )}
       >
-        <Table className="text-[13px]">
+        <Table className="text-sm">
           <THead className="bg-surface2/40">
             <Tr className="hover:bg-transparent">
               <Th className="h-9 w-16 pl-4">On</Th>
@@ -796,7 +796,7 @@ export function CreateHostRuleDialog({
               </div>
               <label className="flex cursor-pointer items-end gap-2 pb-2">
                 <Switch checked={recovery} onCheckedChange={setRecovery} />
-                <span className="text-[13px]">Recovery notice</span>
+                <span className="text-sm">Recovery notice</span>
               </label>
             </div>
           ) : (
@@ -822,7 +822,7 @@ export function CreateHostRuleDialog({
 
           <label className="flex cursor-pointer items-center gap-2">
             <Switch checked={allServers} onCheckedChange={setAllServers} />
-            <span className="text-[13px]">Apply to all servers (not just this one)</span>
+            <span className="text-sm">Apply to all servers (not just this one)</span>
           </label>
 
           {allChannels.length > 0 && (

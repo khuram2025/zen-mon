@@ -3,14 +3,14 @@
 @tailwind utilities;
 
 :root {
-  --bg: 248 250 252;
+  --bg: 243 245 248;
   --surface: 255 255 255;
-  --surface2: 241 245 249;
-  --surface3: 226 232 240;
-  --border: 226 232 240;
-  --border-strong: 203 213 225;
-  --text: 15 23 42;
-  --text2: 51 65 85;
+  --surface2: 241 244 248;
+  --surface3: 228 233 240;
+  --border: 226 231 238;
+  --border-strong: 203 211 222;
+  --text: 15 23 38;
+  --text2: 51 63 82;
   --muted: 100 116 139;
   --muted2: 148 163 184;
   --primary: 37 99 235;
@@ -19,7 +19,7 @@
      theme's blue, near-black on the dark theme's light blue (white there is 2.2:1). */
   --on-primary: 255 255 255;
   --success: 22 163 74;
-  --warning: 234 88 12;
+  --warning: 217 119 6;
   --danger: 220 38 38;
   --info: 14 165 233;
   --accent: 168 85 247;
@@ -29,7 +29,7 @@
      backgrounds. Each *-fg keeps at least 4.5:1 on those fills in both themes
      (scripts/test-netflow-foundation.mjs checks the ratios). */
   --danger-fg: 185 28 28;
-  --warning-fg: 154 52 18;
+  --warning-fg: 146 64 14;
   --success-fg: 22 101 52;
   --info-fg: 7 89 133;
 
@@ -39,49 +39,85 @@
   --sidebar-text-muted: 100 116 139;
   --sidebar-border: 226 232 240;
   --sidebar-hover: 241 245 249;
+
+  /* Charts: hairline grid, axis ink and the categorical series order (validated for colour-vision deficiency;
+     lib/chartTheme.ts). Status colours stay reserved for state and are never a series. */
+  --chart-grid: 229 233 239;
+  --chart-axis: 100 116 139;
+  --series-1: 42 120 214;
+  --series-2: 235 104 52;
+  --series-3: 27 175 122;
+  --series-4: 237 161 0;
+  --series-5: 232 123 164;
+  --series-6: 0 131 0;
+  --series-7: 98 80 214;
+  --series-8: 227 73 72;
 }
 
 .dark {
-  --bg: 7 10 16;
-  --surface: 13 18 27;
-  --surface2: 20 27 40;
-  --surface3: 31 41 59;
-  --border: 30 41 59;
-  --border-strong: 51 65 85;
-  --text: 241 245 249;
-  --text2: 203 213 225;
-  --muted: 148 163 184;
-  --muted2: 100 116 139;
-  --primary: 99 179 255;
-  --primary-hover: 125 196 255;
+  --bg: 10 13 19;
+  --surface: 17 21 30;
+  --surface2: 25 30 41;
+  --surface3: 34 40 54;
+  --border: 36 43 57;
+  --border-strong: 54 63 82;
+  --text: 232 236 242;
+  --text2: 188 197 211;
+  --muted: 138 149 168;
+  --muted2: 104 115 134;
+  --primary: 92 156 255;
+  --primary-hover: 128 178 255;
   --on-primary: 7 10 16;
-  --success: 74 222 128;
-  --warning: 251 146 60;
+  --success: 52 211 129;
+  --warning: 245 183 61;
   --danger: 248 113 113;
   --info: 56 189 248;
   --accent: 192 132 252;
 
   --danger-fg: 252 165 165;
-  --warning-fg: 253 186 116;
+  --warning-fg: 252 211 77;
   --success-fg: 134 239 172;
   --info-fg: 125 211 252;
 
   /* Muted sidebar text keeps 4.5:1 on the sidebar background (section labels were 2.4:1). */
-  --sidebar-bg: 9 13 20;
+  --sidebar-bg: 12 15 22;
   --sidebar-text: 214 222 233;
   --sidebar-text-muted: 120 135 158;
-  --sidebar-border: 26 34 48;
-  --sidebar-hover: 22 30 44;
+  --sidebar-border: 30 37 50;
+  --sidebar-hover: 25 30 41;
+
+  --chart-grid: 30 36 49;
+  --chart-axis: 138 149 168;
+  --series-1: 57 135 229;
+  --series-2: 217 89 38;
+  --series-3: 25 158 112;
+  --series-4: 201 133 0;
+  --series-5: 213 81 129;
+  --series-6: 0 131 0;
+  --series-7: 144 133 233;
+  --series-8: 230 103 103;
 }
 
 html, body, #root { height: 100%; }
-html { font-size: 14px; }
+/* Display density: the root size scales every rem-based size (type, spacing, controls) together.
+   Comfortable suits a desktop; Compact fits more on a laptop; Large is for 1440p+ monitors; Wall is for a NOC
+   video wall read from a distance. Set by stores/display.ts (and ?density= for kiosk screens). */
+html { font-size: 15px; }
+html[data-density='compact'] { font-size: 14px; }
+html[data-density='large'] { font-size: 17px; }
+html[data-density='wall'] { font-size: 20px; }
 
 body {
   @apply bg-bg text-text font-sans antialiased;
+  /* Inter: single-storey a, open digits, square punctuation. */
   font-feature-settings: 'cv11', 'ss01', 'ss03';
   text-rendering: optimizeLegibility;
 }
+
+/* Numbers that line up: table cells, mono figures and anything marked .tabular. */
+table, .font-mono, .tabular { font-variant-numeric: tabular-nums; }
+/* Mono: slashed zero (IP addresses, IDs), no ligatures. */
+.font-mono { font-feature-settings: 'zero' 1, 'calt' 0; }
 
 /* Sidebar transitions */
 .sidebar-transition {

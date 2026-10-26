@@ -62,9 +62,9 @@ export function IpHistoryCard({ endpointId, addresses }: { endpointId: string; a
           <Table>
             <THead className="bg-surface2/40"><Tr><Th>IP / source</Th><Th>State</Th><Th>First observed</Th><Th>Last observed</Th><Th>History</Th></Tr></THead>
             <TBody>{addresses.slice(start, start + 10).map((address) => <Tr key={address.ip}>
-              <Td><span className="font-mono text-xs tabular-nums">{address.ip}</span><span className="block text-[11px] uppercase text-muted">{address.source}</span></Td>
+              <Td><span className="font-mono text-xs tabular-nums">{address.ip}</span><span className="block text-xs uppercase text-muted">{address.source}</span></Td>
               <Td><Badge variant={address.active ? 'success' : 'outline'}>{address.active ? 'Recent' : 'Past'}</Badge>
-                {address.active && address.active_endpoint_count > 1 && <span className="mt-1 block text-[11px] text-muted" title="This address has recent observations on multiple endpoints. It may represent overlapping networks, proxy ARP, or an address conflict.">Shared · {address.active_endpoint_count} endpoints</span>}
+                {address.active && address.active_endpoint_count > 1 && <span className="mt-1 block text-xs text-muted" title="This address has recent observations on multiple endpoints. It may represent overlapping networks, proxy ARP, or an address conflict.">Shared · {address.active_endpoint_count} endpoints</span>}
               </Td>
               <Td className="text-xs text-muted"><time dateTime={address.first_seen} title={fmtDate(address.first_seen)}>{fmtDate(address.first_seen)}</time></Td>
               <Td className="text-xs text-muted"><time dateTime={address.last_seen} title={fmtDate(address.last_seen)}>{relTime(address.last_seen)}</time></Td>

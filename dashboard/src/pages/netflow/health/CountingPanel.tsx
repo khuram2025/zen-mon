@@ -112,7 +112,7 @@ function CountingBody({ c, onEditExporter }: { c: CountingResult; onEditExporter
                 <Tr key={e.exporter}>
                   <Td className="text-xs">
                     <div className="font-medium text-text">{e.display_name || ipDisplay(e.exporter)}</div>
-                    {e.display_name && <div className="font-mono text-[11px] text-text2">{ipDisplay(e.exporter)}</div>}
+                    {e.display_name && <div className="font-mono text-xs text-text2">{ipDisplay(e.exporter)}</div>}
                   </Td>
                   <Td className="text-xs">
                     <ToneChip tone={e.counted_in_edge_mode ? 'success' : 'neutral'} icon={null}>{e.role}</ToneChip>
@@ -123,7 +123,7 @@ function CountingBody({ c, onEditExporter }: { c: CountingResult; onEditExporter
                   <Td className="text-right text-xs tabular-nums">{formatPercent(e.shared_pct)}</Td>
                   <Td className="text-right">
                     <button type="button" onClick={() => onEditExporter(e.exporter)}
-                      className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-text hover:bg-surface2"
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-text hover:bg-surface2"
                       aria-label={`Edit counting settings of ${e.display_name || ipDisplay(e.exporter)}`}>
                       <Pencil className="h-3 w-3" aria-hidden /> Edit
                     </button>
@@ -139,7 +139,7 @@ function CountingBody({ c, onEditExporter }: { c: CountingResult; onEditExporter
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="font-medium text-text">{e.display_name || ipDisplay(e.exporter)}</div>
-                  {e.display_name && <div className="font-mono text-[11px] text-text2">{ipDisplay(e.exporter)}</div>}
+                  {e.display_name && <div className="font-mono text-xs text-text2">{ipDisplay(e.exporter)}</div>}
                 </div>
                 <ToneChip tone={e.counted_in_edge_mode ? 'success' : 'neutral'} icon={null}>{e.role}</ToneChip>
               </div>
@@ -150,7 +150,7 @@ function CountingBody({ c, onEditExporter }: { c: CountingResult; onEditExporter
                 <dt className="text-text2">Reported</dt><dd className="text-right text-text">{directionsText(e.directions)}</dd>
               </dl>
               <button type="button" onClick={() => onEditExporter(e.exporter)}
-                className="mt-2 inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-text hover:bg-surface2"
+                className="mt-2 inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-text hover:bg-surface2"
                 aria-label={`Edit counting settings of ${e.display_name || ipDisplay(e.exporter)}`}>
                 <Pencil className="h-3 w-3" aria-hidden /> Edit
               </button>
@@ -171,7 +171,7 @@ function CountingBody({ c, onEditExporter }: { c: CountingResult; onEditExporter
           </ul>
         </div>
       )}
-      <p className="text-[11px] text-text2">Method: {c.method}</p>
+      <p className="text-xs text-text2">Method: {c.method}</p>
     </div>
   )
 }

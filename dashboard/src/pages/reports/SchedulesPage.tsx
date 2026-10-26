@@ -508,7 +508,7 @@ export default function SchedulesPage() {
 function Stat({ label, value, hint, tone }: { label: string; value: ReactNode; hint?: string; tone?: 'danger' }) {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-surface px-4 py-3 shadow-card dark:shadow-card-dark">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</div>
+      <div className="text-xs font-medium uppercase tracking-wide text-muted">{label}</div>
       <div className={cn('mt-0.5 truncate text-xl font-semibold tabular-nums', tone === 'danger' ? 'text-danger-fg' : 'text-text')}>{value}</div>
       {hint && <div className="truncate text-xs text-muted">{hint}</div>}
     </div>
@@ -578,7 +578,7 @@ function NameTimeWarning({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
   const editable = ctx.canManage && s.can_edit !== false
   const busy = ctx.retiming.has(s.id)
   return (
-    <div role="note" className="mt-1 space-y-1 text-[11px] text-warning-fg">
+    <div role="note" className="mt-1 space-y-1 text-xs text-warning-fg">
       <div className="flex items-start gap-1">
         <TriangleAlert className="mt-px h-3 w-3 shrink-0" aria-hidden />
         <span>
@@ -590,7 +590,7 @@ function NameTimeWarning({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
           <Button
             size="sm"
             variant="outline"
-            className="ml-4 h-6 px-2 text-[11px]"
+            className="ml-4 h-6 px-2 text-xs"
             disabled={busy}
             onClick={() => ctx.onRetime(s)}
           >
@@ -612,7 +612,7 @@ function ScheduleBadges({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
     <span className="ml-1.5 inline-flex flex-wrap items-center gap-1 align-middle">
       {s.overdue && (
         <span
-          className="inline-flex items-center gap-1 rounded border border-danger/30 bg-danger/10 px-1 py-px text-[10px] font-medium text-danger-fg"
+          className="inline-flex items-center gap-1 rounded border border-danger/30 bg-danger/10 px-1 py-px text-2xs font-medium text-danger-fg"
           title="Due more than 10 minutes ago and not started"
         >
           <Clock className="h-2.5 w-2.5" aria-hidden /> Overdue
@@ -620,7 +620,7 @@ function ScheduleBadges({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
       )}
       {legacy && (
         <span
-          className="rounded border border-border px-1 py-px text-[10px] font-medium text-muted"
+          className="rounded border border-border px-1 py-px text-2xs font-medium text-muted"
           title={`A retired classic report type. It keeps running${replacement ? `; convert it to ${catalogTitle(replacement, ctx.catalog)}` : ''}.`}
         >
           Classic
@@ -659,7 +659,7 @@ function EmailOptionsSummary({ s }: { s: ReportSchedule }) {
   if (!items.length) return null
   return (
     <div>
-      <dt className="text-[11px] uppercase tracking-wide text-muted">Email options</dt>
+      <dt className="text-xs uppercase tracking-wide text-muted">Email options</dt>
       <dd className="space-y-0.5 break-words text-text2">{items.map((t) => <div key={t}>{t}</div>)}</dd>
     </div>
   )
@@ -752,7 +752,7 @@ function RowActions({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx; o
             </>
           )}
           {!editable && (
-            <div className="flex items-start gap-1.5 px-2.5 py-1.5 text-[11px] text-muted">
+            <div className="flex items-start gap-1.5 px-2.5 py-1.5 text-xs text-muted">
               <Info className="mt-px h-3 w-3 shrink-0" aria-hidden />
               {ctx.canManage ? 'You cannot change this schedule.' : 'Viewing only: your role cannot change schedules.'}
             </div>
@@ -849,19 +849,19 @@ function ScheduleCard({ s, ctx, open, onExpand }: { s: ReportSchedule; ctx: Ctx;
       </div>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
         <div className="col-span-2">
-          <dt className="text-[11px] uppercase tracking-wide text-muted">Frequency</dt>
+          <dt className="text-xs uppercase tracking-wide text-muted">Frequency</dt>
           <dd className="text-text2"><ScheduleTime s={s} ctx={ctx} /></dd>
         </div>
         <div>
-          <dt className="text-[11px] uppercase tracking-wide text-muted">Next run</dt>
+          <dt className="text-xs uppercase tracking-wide text-muted">Next run</dt>
           <dd><NextRun s={s} ctx={ctx} /></dd>
         </div>
         <div>
-          <dt className="text-[11px] uppercase tracking-wide text-muted">Last run</dt>
+          <dt className="text-xs uppercase tracking-wide text-muted">Last run</dt>
           <dd><LastRun s={s} ctx={ctx} /></dd>
         </div>
         <div className="col-span-2">
-          <dt className="text-[11px] uppercase tracking-wide text-muted">Delivery</dt>
+          <dt className="text-xs uppercase tracking-wide text-muted">Delivery</dt>
           <dd className="mt-1 space-y-1.5">
             <div><FormatBadge format={s.format} /></div>
             <Recipients s={s} ctx={ctx} />
@@ -887,12 +887,12 @@ function ScheduleDetails({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
       <dl className="space-y-3 text-sm">
         {s.description && (
           <div>
-            <dt className="text-[11px] uppercase tracking-wide text-muted">Description</dt>
+            <dt className="text-xs uppercase tracking-wide text-muted">Description</dt>
             <dd className="text-text2">{s.description}</dd>
           </div>
         )}
         <div>
-          <dt className="text-[11px] uppercase tracking-wide text-muted">Recipients</dt>
+          <dt className="text-xs uppercase tracking-wide text-muted">Recipients</dt>
           <dd className="mt-1">
             <Recipients s={s} ctx={ctx} />
           </dd>
@@ -900,17 +900,17 @@ function ScheduleDetails({ s, ctx }: { s: ReportSchedule; ctx: Ctx }) {
         <EmailOptionsSummary s={s} />
         {(scope.any || withheld) && (
           <div>
-            <dt className="text-[11px] uppercase tracking-wide text-muted">Scope</dt>
+            <dt className="text-xs uppercase tracking-wide text-muted">Scope</dt>
             <dd className="mt-1"><ScopeChips filters={s.filters} withheld={withheld} tz={ctx.branding.timezone} /></dd>
           </div>
         )}
         <div>
-          <dt className="text-[11px] uppercase tracking-wide text-muted">Owner</dt>
+          <dt className="text-xs uppercase tracking-wide text-muted">Owner</dt>
           <dd className="text-text2">{ownerLabel(s, ctx.userId)}</dd>
         </div>
         {s.last_error && isFailing(s) && (
           <div className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2">
-            <dt className="text-[11px] font-medium uppercase tracking-wide text-danger-fg">Last error</dt>
+            <dt className="text-xs font-medium uppercase tracking-wide text-danger-fg">Last error</dt>
             <dd className="mt-0.5 break-words text-xs text-text">{s.last_error}</dd>
           </div>
         )}

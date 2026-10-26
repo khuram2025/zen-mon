@@ -46,7 +46,7 @@ export function Sparkline({
         <path d={line} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
         <circle cx={x(points.length - 1)} cy={y(last.value)} r={2} fill="currentColor" />
       </svg>
-      <span aria-hidden className="mt-0.5 block text-[10px] tabular-nums text-muted">{format(first.value)} to {format(last.value)}, {points.length} days</span>
+      <span aria-hidden className="mt-0.5 block text-2xs tabular-nums text-muted">{format(first.value)} to {format(last.value)}, {points.length} days</span>
     </div>
   )
 }

@@ -93,10 +93,10 @@ export function PeriodPicker({ value, onChange, window, branding, defaultPeriod,
           </span>
           <span className="min-w-0 flex-1">
             <span className="block truncate">{p.label}</span>
-            {p.kind === 'calendar' && <span className="block truncate text-[10px] font-normal tabular-nums text-muted">{rangeHint(p.id, branding, now)}</span>}
+            {p.kind === 'calendar' && <span className="block truncate text-2xs font-normal tabular-nums text-muted">{rangeHint(p.id, branding, now)}</span>}
           </span>
           {defaultPeriod === p.id && (
-            <span className="shrink-0 rounded border border-border px-1 text-[9px] font-semibold uppercase tracking-wide text-muted">Default</span>
+            <span className="shrink-0 rounded border border-border px-1 text-2xs font-semibold uppercase tracking-wide text-muted">Default</span>
           )}
         </button>
       </li>
@@ -115,7 +115,7 @@ export function PeriodPicker({ value, onChange, window, branding, defaultPeriod,
         >
           <CalendarRange className="h-3.5 w-3.5 text-primary" aria-hidden />
           <span className="truncate text-xs font-semibold">{label}</span>
-          <span className="hidden text-[10px] font-medium text-muted sm:inline">{zone}</span>
+          <span className="hidden text-2xs font-medium text-muted sm:inline">{zone}</span>
           <ChevronDown className={cn('h-3 w-3 opacity-60 transition-transform', open && 'rotate-180')} aria-hidden />
         </Button>
       </Popover.Trigger>
@@ -129,13 +129,13 @@ export function PeriodPicker({ value, onChange, window, branding, defaultPeriod,
         >
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
-              <p id={`${id}-rolling`} className="px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">Rolling</p>
+              <p id={`${id}-rolling`} className="px-2.5 pb-1 text-2xs font-semibold uppercase tracking-wide text-muted">Rolling</p>
               <ul role="list" aria-labelledby={`${id}-rolling`} className="space-y-0.5">
                 {PERIODS.filter((p) => p.kind === 'rolling').map(item)}
               </ul>
             </div>
             <div>
-              <p id={`${id}-calendar`} className="px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+              <p id={`${id}-calendar`} className="px-2.5 pb-1 text-2xs font-semibold uppercase tracking-wide text-muted">
                 Calendar <span className="font-normal normal-case tracking-normal">· weeks start {branding.week_start}</span>
               </p>
               <ul role="list" aria-labelledby={`${id}-calendar`} className="grid grid-cols-1 gap-0.5 min-[420px]:grid-cols-2 sm:grid-cols-1">
@@ -145,12 +145,12 @@ export function PeriodPicker({ value, onChange, window, branding, defaultPeriod,
           </div>
 
           <form onSubmit={applyCustom} className="mt-3 border-t border-border pt-3" noValidate>
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">
+            <p className="text-2xs font-semibold uppercase tracking-wide text-muted">
               Custom range <span className="font-normal normal-case tracking-normal">· times in {tz.replace(/_/g, ' ')} ({zone})</span>
             </p>
             <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
               <div className="space-y-1">
-                <label htmlFor={`${id}-from`} className="block text-[11px] font-medium text-text2">From</label>
+                <label htmlFor={`${id}-from`} className="block text-xs font-medium text-text2">From</label>
                 <input
                   id={`${id}-from`}
                   type="datetime-local"
@@ -162,7 +162,7 @@ export function PeriodPicker({ value, onChange, window, branding, defaultPeriod,
                 />
               </div>
               <div className="space-y-1">
-                <label htmlFor={`${id}-to`} className="block text-[11px] font-medium text-text2">To</label>
+                <label htmlFor={`${id}-to`} className="block text-xs font-medium text-text2">To</label>
                 <input
                   id={`${id}-to`}
                   type="datetime-local"
@@ -176,9 +176,9 @@ export function PeriodPicker({ value, onChange, window, branding, defaultPeriod,
               <Button type="submit" size="sm" className="h-8">Apply</Button>
             </div>
             {touched && error ? (
-              <p id={`${id}-err`} role="alert" className="mt-1.5 text-[11px] font-medium text-danger-fg">{error}</p>
+              <p id={`${id}-err`} role="alert" className="mt-1.5 text-xs font-medium text-danger-fg">{error}</p>
             ) : (
-              <p className="mt-1.5 text-[11px] text-muted">The end is exclusive; a report covers at most 400 days.</p>
+              <p className="mt-1.5 text-xs text-muted">The end is exclusive; a report covers at most 400 days.</p>
             )}
           </form>
         </Popover.Content>

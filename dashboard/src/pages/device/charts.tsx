@@ -4,6 +4,7 @@ import {
 } from 'recharts'
 import { cn } from '@/lib/utils'
 import { formatAbsolute, MISSING, type Stats } from './format'
+import { chartFont } from '@/lib/chartTheme'
 
 /* One time-series vocabulary for the device page: theme tokens only, fixed or
  * floor-bounded domains, gaps drawn as gaps, configured thresholds as dashed
@@ -197,19 +198,19 @@ export function TimeSeriesPanel({
         <LineChart data={data} syncId={syncId} margin={{ top: 6, right: 16, bottom: 0, left: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border) / 0.4)" vertical={false} />
           <XAxis dataKey="ts" type="number" scale="time" domain={[fromTs, toTs]} ticks={ticks} interval="preserveStartEnd" minTickGap={16}
-            tickFormatter={tickFormatter} tick={{ fontSize: 12, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
+            tickFormatter={tickFormatter} tick={{ fontSize: chartFont(12), fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
           <YAxis domain={yDomain} allowDataOverflow ticks={yTicks} tickCount={yTicks ? undefined : 4} interval={0} width={axisWidth(yLabels)}
-            tick={{ fontSize: 12, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false}
+            tick={{ fontSize: chartFont(12), fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false}
             tickFormatter={(v: number) => tickFmt(Number(v))} />
           <Tooltip
-            contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 6, fontSize: 12, color: 'rgb(var(--text))' }}
+            contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 6, fontSize: chartFont(12), color: 'rgb(var(--text))' }}
             labelFormatter={(ts) => formatAbsolute(Number(ts))}
             formatter={(v: unknown, name: string) => [v == null ? MISSING : format(Number(v)), name]}
           />
           {thresholds.map((t) => (
             <ReferenceLine key={`${t.label}-${t.value}`} y={t.value} ifOverflow="extendDomain"
               stroke={t.tone === 'danger' ? SERIES_COLORS.danger : SERIES_COLORS.warning} strokeDasharray="4 4"
-              label={{ value: t.label, position: t.tone === 'danger' ? 'insideTopRight' : 'insideBottomRight', fontSize: 12, fill: 'rgb(var(--muted))' }} />
+              label={{ value: t.label, position: t.tone === 'danger' ? 'insideTopRight' : 'insideBottomRight', fontSize: chartFont(12), fill: 'rgb(var(--muted))' }} />
           ))}
           {series.map((s) => (
             <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={s.dashed ? 1.4 : 1.8}

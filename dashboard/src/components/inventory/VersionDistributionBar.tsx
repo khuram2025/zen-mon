@@ -96,7 +96,7 @@ export function VersionDistributionBar({
         ))}
       </ul>
       {showLegend && (
-        <ul role="list" className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+        <ul role="list" className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
           {buckets.segments.map((s) => {
             const swatch = <span aria-hidden className="h-2 w-2 shrink-0 rounded-sm" style={segmentStyle(s)} />
             const inner = (

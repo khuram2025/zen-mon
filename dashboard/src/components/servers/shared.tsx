@@ -105,7 +105,7 @@ export function TagPill({ tag, onClick, active }: { tag: string; onClick?: (tag:
       type="button"
       onClick={onClick ? (e) => { e.stopPropagation(); onClick(tag) } : undefined}
       className={cn(
-        'rounded-full border px-1.5 py-0.5 text-[10px] font-medium transition-colors',
+        'rounded-full border px-1.5 py-0.5 text-2xs font-medium transition-colors',
         active
           ? 'border-primary/50 bg-primary/15 text-primary'
           : 'border-border bg-surface2 text-text2',
@@ -145,7 +145,7 @@ export function TagList({ tags, max = 3, onTagClick, activeTag, colors }: {
           <TagPill key={t} tag={t} onClick={onTagClick} active={activeTag === t} />
         ),
       )}
-      {extra > 0 && <span className="text-[10px] text-muted">+{extra}</span>}
+      {extra > 0 && <span className="text-2xs text-muted">+{extra}</span>}
     </div>
   )
 }
@@ -171,9 +171,9 @@ export function KpiTile({ icon: Icon, label, value, sub, tone }: {
         <Icon className="h-[18px] w-[18px]" />
       </span>
       <div className="min-w-0">
-        <div className="truncate text-[11px] font-medium uppercase tracking-wide text-muted">{label}</div>
+        <div className="truncate text-xs font-medium uppercase tracking-wide text-muted">{label}</div>
         <div className="truncate text-lg font-semibold leading-tight">{value}</div>
-        {sub && <div className="truncate text-[11px] text-muted">{sub}</div>}
+        {sub && <div className="truncate text-xs text-muted">{sub}</div>}
       </div>
     </div>
   )

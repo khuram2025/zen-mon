@@ -169,7 +169,7 @@ export function RoutingTab() {
                   <Tr key={r.id} className="align-top">
                     <Td>
                       <div className="font-medium text-text">{r.name}</div>
-                      <div className="mt-1 text-[11px] text-muted">{r.metric} {r.operator} {r.threshold}</div>
+                      <div className="mt-1 text-xs text-muted">{r.metric} {r.operator} {r.threshold}</div>
                     </Td>
                     <Td>
                       <Badge variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}>{r.severity}</Badge>

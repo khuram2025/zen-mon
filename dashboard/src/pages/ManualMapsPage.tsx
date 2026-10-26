@@ -1655,7 +1655,7 @@ export function ManualMapsPage() {
           </div>
           <div className="hidden flex-col leading-tight md:flex">
             <span className="text-xs font-semibold">Network Studio</span>
-            <span className="text-[10px] text-muted">Live device-backed maps</span>
+            <span className="text-2xs text-muted">Live device-backed maps</span>
           </div>
         </div>
 
@@ -1791,7 +1791,7 @@ export function ManualMapsPage() {
               <ToolBtn onClick={() => setView({ x: 0, y: 0, zoom: 1 })} icon={<Maximize2 className="h-3.5 w-3.5" />} label="Fit (0)" />
               <ToolBtn onClick={() => setView((v) => ({ ...v, zoom: clamp(v.zoom * 1.15, 0.4, 3) }))} icon={<Plus className="h-3.5 w-3.5" />} label="Zoom in" />
               <ToolBtn onClick={() => setView((v) => ({ ...v, zoom: clamp(v.zoom / 1.15, 0.4, 3) }))} icon={<Minus className="h-3.5 w-3.5" />} label="Zoom out" />
-              <div className="px-2 text-[11px] tabular-nums text-muted">{Math.round(view.zoom * 100)}%</div>
+              <div className="px-2 text-xs tabular-nums text-muted">{Math.round(view.zoom * 100)}%</div>
             </div>
 
             {/* Map label (top-center) */}
@@ -1807,7 +1807,7 @@ export function ManualMapsPage() {
 
             {/* Hint banner when in connect mode */}
             {mode === 'design' && (tool === 'connect' || connectFrom) && (
-              <div className="pointer-events-none absolute right-3 top-3 rounded-md border border-info/40 bg-info/10 px-3 py-1.5 text-[11px] text-info">
+              <div className="pointer-events-none absolute right-3 top-3 rounded-md border border-info/40 bg-info/10 px-3 py-1.5 text-xs text-info">
                 {connectFrom ? 'Click a target node to create the link · Esc to cancel' : 'Drag from one node to another to link them'}
               </div>
             )}
@@ -1818,7 +1818,7 @@ export function ManualMapsPage() {
                 type="button"
                 onClick={() => autoConnect.mutate()}
                 disabled={autoConnect.isPending}
-                className="pointer-events-auto absolute left-3 top-16 flex items-center gap-1.5 rounded-lg border border-teal-400/40 bg-teal-500/15 px-2.5 py-1.5 text-[11px] font-medium text-teal-200 shadow-md backdrop-blur transition-colors hover:bg-teal-500/25 disabled:opacity-60"
+                className="pointer-events-auto absolute left-3 top-16 flex items-center gap-1.5 rounded-lg border border-teal-400/40 bg-teal-500/15 px-2.5 py-1.5 text-xs font-medium text-teal-200 shadow-md backdrop-blur transition-colors hover:bg-teal-500/25 disabled:opacity-60"
                 title="Draw all real LLDP/CDP links between devices placed on this map"
               >
                 {autoConnect.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
@@ -2153,7 +2153,7 @@ export function ManualMapsPage() {
                   <button
                     key={`sugg-${s.source_node_id}-${s.target_node_id}`}
                     type="button"
-                    className="absolute z-20 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 rounded-full border border-teal-400/50 bg-teal-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-teal-200 shadow-sm backdrop-blur transition-colors hover:border-teal-300 hover:bg-teal-500/40"
+                    className="absolute z-20 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 rounded-full border border-teal-400/50 bg-teal-500/20 px-1.5 py-0.5 text-2xs font-semibold text-teal-200 shadow-sm backdrop-blur transition-colors hover:border-teal-300 hover:bg-teal-500/40"
                     style={{ left: `${p.mid.x}%`, top: `${p.mid.y}%` }}
                     title={`Discovered ${(s.protocol || '').toUpperCase()} link · ${s.src_interface || '?'} ⇄ ${s.dst_interface || '?'}${s.physical_links > 1 ? ` · ${s.physical_links} physical` : ''}\nClick to add`}
                     onPointerDown={(e) => e.stopPropagation()}
@@ -2386,7 +2386,7 @@ function MapSwitcher({
                 <div className={cn('mt-0.5 h-2 w-2 shrink-0 rounded-full', m.status_counts.down ? 'bg-danger' : m.status_counts.degraded ? 'bg-warning' : m.status_counts.up ? 'bg-success' : 'bg-muted')} />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-xs font-medium">{m.name}</div>
-                  <div className="truncate text-[10px] text-muted">{m.node_count} devices · {m.link_count} links</div>
+                  <div className="truncate text-2xs text-muted">{m.node_count} devices · {m.link_count} links</div>
                 </div>
               </button>
             ))}
@@ -2414,7 +2414,7 @@ function StatusChip({ label, count, tone }: { label: string; count: number; tone
   return (
     <div className={cn('flex items-center gap-1 rounded px-2 py-0.5', cls)}>
       <span className="font-semibold tabular-nums">{count}</span>
-      <span className="text-[10px] uppercase tracking-wide">{label}</span>
+      <span className="text-2xs uppercase tracking-wide">{label}</span>
     </div>
   )
 }
@@ -2626,7 +2626,7 @@ function NodeCard({
         onPointerDown={startLabelDrag}
         title={labelEditable ? 'Drag to reposition label' : undefined}
         className={cn(
-          'absolute max-w-[8rem] rounded-md border px-2 py-0.5 text-center text-[11px] font-semibold leading-tight shadow-sm backdrop-blur',
+          'absolute max-w-[8rem] rounded-md border px-2 py-0.5 text-center text-xs font-semibold leading-tight shadow-sm backdrop-blur',
           'bg-surface/90 border-border',
           labelEditable && 'cursor-move hover:border-primary/60',
           selected && 'border-primary/50',
@@ -2638,7 +2638,7 @@ function NodeCard({
         }}
       >
         <div className="truncate text-text">{node.label || node.hostname}</div>
-        <div className="truncate text-[10px] font-normal text-muted">{node.ip_address}</div>
+        <div className="truncate text-2xs font-normal text-muted">{node.ip_address}</div>
       </div>
     </div>
   )
@@ -2690,7 +2690,7 @@ function PaletteRail({
           <div className="flex items-center justify-between border-b border-border px-3 py-2">
             <div>
               <div className="text-xs font-semibold">Device Palette</div>
-              <div className="text-[10px] text-muted">Drag onto canvas to place</div>
+              <div className="text-2xs text-muted">Drag onto canvas to place</div>
             </div>
             <button
               type="button"
@@ -2726,7 +2726,7 @@ function PaletteRail({
                     type="button"
                     onClick={() => onStatus(s)}
                     className={cn(
-                      'rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide transition',
+                      'rounded px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide transition',
                       status === s
                         ? activeCls
                         : 'text-muted hover:bg-surface2 hover:text-text',
@@ -2741,7 +2741,7 @@ function PaletteRail({
 
           {/* Icon legend */}
           <div className="border-b border-border px-3 py-2">
-            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Icon styles</div>
+            <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Icon styles</div>
             <div className="grid grid-cols-7 gap-1">
               {PALETTE_ICONS.map((key) => (
                 <div
@@ -2764,7 +2764,7 @@ function PaletteRail({
                 ))}
               </div>
             ) : devices.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border p-4 text-center text-[11px] text-muted">
+              <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted">
                 No devices match these filters
               </div>
             ) : (
@@ -2798,9 +2798,9 @@ function PaletteRail({
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1">
                           <span className="truncate font-medium">{d.hostname}</span>
-                          {used && <span className="rounded bg-primary/15 px-1 text-[9px] font-semibold text-primary">ON MAP</span>}
+                          {used && <span className="rounded bg-primary/15 px-1 text-2xs font-semibold text-primary">ON MAP</span>}
                         </div>
-                        <div className="flex items-center gap-1.5 text-[10px] text-muted">
+                        <div className="flex items-center gap-1.5 text-2xs text-muted">
                           <span className={cn('h-1.5 w-1.5 rounded-full', color.dot)} />
                           <span className="truncate">{d.ip_address}</span>
                           <span className="text-muted/70">·</span>
@@ -2890,13 +2890,13 @@ function InspectorRail({
           <div className="flex items-center justify-between border-b border-border px-3 py-2">
             <div className="min-w-0">
               <div className="text-xs font-semibold">{header.title}</div>
-              <div className="truncate text-[10px] text-muted">{header.subtitle}</div>
+              <div className="truncate text-2xs text-muted">{header.subtitle}</div>
             </div>
             {selectedLink && (
               <button
                 type="button"
                 onClick={onDeselectLink}
-                className="rounded px-1.5 py-0.5 text-[10px] text-muted hover:bg-surface2 hover:text-text"
+                className="rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-surface2 hover:text-text"
                 title="Clear link selection"
               >Clear</button>
             )}
@@ -2977,7 +2977,7 @@ function DeviceInspector({
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold">{node.label || node.hostname}</div>
-          <div className="truncate text-[11px] text-muted">{node.hostname}</div>
+          <div className="truncate text-xs text-muted">{node.hostname}</div>
         </div>
         <Badge variant={color.badge}>{String(node.status).replace('_', ' ')}</Badge>
       </div>
@@ -2994,12 +2994,12 @@ function DeviceInspector({
           disabled={mode === 'live'}
         />
         {mode === 'design' && (
-          <p className="mt-1 text-[10px] text-muted">Drag the name badge on the canvas to reposition it independently of the device icon.</p>
+          <p className="mt-1 text-2xs text-muted">Drag the name badge on the canvas to reposition it independently of the device icon.</p>
         )}
       </FormField>
 
       <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Icon</div>
+        <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Icon</div>
         <div className="grid grid-cols-7 gap-1.5">
           <button
             type="button"
@@ -3014,7 +3014,7 @@ function DeviceInspector({
               mode === 'live' && 'cursor-not-allowed opacity-50',
             )}
           >
-            <span className="text-[10px] font-semibold">A</span>
+            <span className="text-2xs font-semibold">A</span>
           </button>
           {PALETTE_ICONS.map((key) => (
             <button
@@ -3038,7 +3038,7 @@ function DeviceInspector({
       </div>
 
       <div>
-        <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Properties</div>
+        <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Properties</div>
         <div className="grid grid-cols-2 gap-1.5 text-xs">
           <InfoTile label="IP" value={node.ip_address} />
           <InfoTile label="Type" value={node.device_type.replace('_', ' ')} />
@@ -3090,7 +3090,7 @@ function MapInspector({
       )}
 
       <div>
-        <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Status breakdown</div>
+        <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Status breakdown</div>
         <div className="grid grid-cols-2 gap-1.5 text-xs">
           <InfoTile label="Up" value={String(totals.up || 0)} />
           <InfoTile label="Down" value={String(totals.down || 0)} accent={totals.down ? 'danger' : undefined} />
@@ -3103,10 +3103,10 @@ function MapInspector({
 
       <div>
         <div className="mb-1.5 flex items-center justify-between">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Links ({links.length})</div>
+          <div className="text-2xs font-semibold uppercase tracking-wider text-muted">Links ({links.length})</div>
         </div>
         {links.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border p-3 text-center text-[11px] text-muted">
+          <div className="rounded-md border border-dashed border-border p-3 text-center text-xs text-muted">
             No links yet
           </div>
         ) : (
@@ -3118,10 +3118,10 @@ function MapInspector({
                 <div key={l.id} className="flex items-center gap-2 rounded-md border border-border bg-surface2/40 px-2 py-1.5 text-xs">
                   <Cable className="h-3.5 w-3.5 shrink-0 text-muted" />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[11px] font-medium">
+                    <div className="truncate text-xs font-medium">
                       {s?.hostname || '—'} <span className="text-muted">↔</span> {t?.hostname || '—'}
                     </div>
-                    {l.label && <div className="truncate text-[10px] text-muted">{l.label}</div>}
+                    {l.label && <div className="truncate text-2xs text-muted">{l.label}</div>}
                   </div>
                   {mode === 'design' && (
                     <button
@@ -3144,7 +3144,7 @@ function MapInspector({
         <button
           type="button"
           onClick={onDeleteMap}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-danger/30 bg-danger/5 px-2 py-1.5 text-[11px] font-medium text-danger transition hover:bg-danger/10"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-danger/30 bg-danger/5 px-2 py-1.5 text-xs font-medium text-danger transition hover:bg-danger/10"
         >
           <Trash2 className="h-3.5 w-3.5" /> Delete this map
         </button>
@@ -3157,7 +3157,7 @@ function InfoTile({ label, value, accent }: { label: string; value: string; acce
   const cls = accent === 'danger' ? 'text-danger' : accent === 'warning' ? 'text-warning' : 'text-text'
   return (
     <div className="rounded-md border border-border bg-surface2/40 p-1.5">
-      <div className="text-[9px] uppercase tracking-[0.08em] text-muted">{label}</div>
+      <div className="text-2xs uppercase tracking-[0.08em] text-muted">{label}</div>
       <div className={cn('mt-0.5 truncate text-xs font-semibold', cls)}>{value}</div>
     </div>
   )
@@ -3226,8 +3226,8 @@ function LiveLinkPanel({
   return (
     <div className="rounded-lg border border-border bg-surface2/40 p-3">
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Live interface data</span>
-        <span className="text-[9px] text-muted">{live.window_seconds}s window</span>
+        <span className="text-2xs font-semibold uppercase tracking-wider text-muted">Live interface data</span>
+        <span className="text-2xs text-muted">{live.window_seconds}s window</span>
       </div>
       <div className="grid grid-cols-1 gap-2">
         <LiveInterfaceCard label={source?.hostname || 'Source'} iface={live.source} />
@@ -3241,8 +3241,8 @@ function LiveInterfaceCard({ label, iface }: { label: string; iface: LiveInterfa
   if (!iface.matched) {
     return (
       <div className="rounded border border-dashed border-border bg-surface px-2.5 py-2">
-        <div className="text-[10px] font-semibold text-text2">{label}</div>
-        <div className="mt-0.5 text-[10px] text-muted">No matching interface discovered yet.</div>
+        <div className="text-2xs font-semibold text-text2">{label}</div>
+        <div className="mt-0.5 text-2xs text-muted">No matching interface discovered yet.</div>
       </div>
     )
   }
@@ -3261,33 +3261,33 @@ function LiveInterfaceCard({ label, iface }: { label: string; iface: LiveInterfa
     <div className="rounded border border-border bg-surface px-2.5 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-[10px] font-semibold text-text2">{label}</div>
-          <div className="truncate font-mono text-[10px] text-muted">
+          <div className="truncate text-2xs font-semibold text-text2">{label}</div>
+          <div className="truncate font-mono text-2xs text-muted">
             {iface.if_name || iface.if_descr || `ifIndex ${iface.if_index}`}
           </div>
         </div>
-        <span className={cn('rounded border px-1 py-px text-[9px] font-semibold uppercase tracking-wider', operCls)}>
+        <span className={cn('rounded border px-1 py-px text-2xs font-semibold uppercase tracking-wider', operCls)}>
           {iface.oper_status || 'unknown'}
         </span>
       </div>
       <div className="mt-1.5 grid grid-cols-3 gap-1.5">
         <div>
-          <div className="text-[9px] uppercase tracking-wider text-muted">Speed</div>
-          <div className="font-mono text-[11px] font-semibold">{speedLabel}</div>
+          <div className="text-2xs uppercase tracking-wider text-muted">Speed</div>
+          <div className="font-mono text-xs font-semibold">{speedLabel}</div>
         </div>
         <div>
-          <div className="text-[9px] uppercase tracking-wider text-muted">Throughput</div>
-          <div className="font-mono text-[11px] font-semibold">{formatBps(tput)}</div>
+          <div className="text-2xs uppercase tracking-wider text-muted">Throughput</div>
+          <div className="font-mono text-xs font-semibold">{formatBps(tput)}</div>
         </div>
         <div>
-          <div className="text-[9px] uppercase tracking-wider text-muted">Util</div>
-          <div className={cn('font-mono text-[11px] font-semibold', utilCls)}>
+          <div className="text-2xs uppercase tracking-wider text-muted">Util</div>
+          <div className={cn('font-mono text-xs font-semibold', utilCls)}>
             {iface.util_pct != null ? `${iface.util_pct.toFixed(1)}%` : '—'}
           </div>
         </div>
       </div>
       {(iface.in_bps != null || iface.out_bps != null) && (
-        <div className="mt-1.5 flex items-center gap-3 text-[10px] text-muted">
+        <div className="mt-1.5 flex items-center gap-3 text-2xs text-muted">
           <span>↓ {formatBps(iface.in_bps)}</span>
           <span>↑ {formatBps(iface.out_bps)}</span>
           {iface.if_alias && <span className="ml-auto truncate font-mono">{iface.if_alias}</span>}
@@ -3382,12 +3382,12 @@ function IfaceLabelStyleEditor({
   return (
     <div className="rounded-lg border border-border bg-surface2/30 p-2.5">
       <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</span>
+        <span className="text-2xs font-semibold uppercase tracking-wider text-muted">{title}</span>
         {hasIfaceLabelStyle(style) && !disabled && (
           <button
             type="button"
             onClick={onReset}
-            className="text-[9px] font-medium text-primary hover:underline"
+            className="text-2xs font-medium text-primary hover:underline"
           >
             Reset
           </button>
@@ -3478,7 +3478,7 @@ function IfaceLabelStyleEditor({
       </div>
 
       <div className="mt-2 grid grid-cols-3 gap-2">
-        <label className="flex flex-col gap-1 text-[10px]">
+        <label className="flex flex-col gap-1 text-2xs">
           <span className="text-muted">Text</span>
           <input
             type="color"
@@ -3488,7 +3488,7 @@ function IfaceLabelStyleEditor({
             className="h-8 w-full cursor-pointer rounded border border-border bg-surface disabled:opacity-50"
           />
         </label>
-        <label className="flex flex-col gap-1 text-[10px]">
+        <label className="flex flex-col gap-1 text-2xs">
           <span className="text-muted">Background</span>
           <input
             type="color"
@@ -3498,7 +3498,7 @@ function IfaceLabelStyleEditor({
             className="h-8 w-full cursor-pointer rounded border border-border bg-surface disabled:opacity-50"
           />
         </label>
-        <label className="flex flex-col gap-1 text-[10px]">
+        <label className="flex flex-col gap-1 text-2xs">
           <span className="text-muted">Border</span>
           <input
             type="color"
@@ -3544,7 +3544,7 @@ function LinkChip({
       }}
     >
       <div className={cn(
-        'whitespace-nowrap rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
+        'whitespace-nowrap rounded border px-1 py-px font-mono text-2xs font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
         cls,
       )}>
         {children}
@@ -3631,20 +3631,20 @@ function LinkInspector({
       {/* Header */}
       <div className="rounded-lg border border-border bg-surface2/40 p-3">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Link</span>
+          <span className="text-2xs font-semibold uppercase tracking-wider text-muted">Link</span>
           <Badge variant={color.badge}>{health}</Badge>
         </div>
         <div className="space-y-1.5 text-xs">
           <div className="flex items-center gap-2">
             <span className={cn('h-2 w-2 rounded-full', STATUS_COLOR[statusKey(source?.status)].dot)} />
             <span className="min-w-0 flex-1 truncate font-medium">{source?.hostname || '—'}</span>
-            <span className="font-mono text-[10px] text-muted">{md.src_interface || '—'}</span>
+            <span className="font-mono text-2xs text-muted">{md.src_interface || '—'}</span>
           </div>
           <div className="ml-1 h-3 w-px bg-border" />
           <div className="flex items-center gap-2">
             <span className={cn('h-2 w-2 rounded-full', STATUS_COLOR[statusKey(target?.status)].dot)} />
             <span className="min-w-0 flex-1 truncate font-medium">{target?.hostname || '—'}</span>
-            <span className="font-mono text-[10px] text-muted">{md.dst_interface || '—'}</span>
+            <span className="font-mono text-2xs text-muted">{md.dst_interface || '—'}</span>
           </div>
         </div>
       </div>
@@ -3657,12 +3657,12 @@ function LinkInspector({
       {/* Shape picker — affects only the visual rendering */}
       <div>
         <div className="mb-1 flex items-center justify-between">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Shape</span>
+          <span className="text-2xs font-semibold uppercase tracking-wider text-muted">Shape</span>
           {shape === 'orthogonal' && (md.waypoints?.length || 0) > 0 && !ro && (
             <button
               type="button"
               onClick={() => patchMeta({ waypoints: null })}
-              className="rounded px-1.5 py-0.5 text-[10px] text-muted hover:bg-surface2 hover:text-text"
+              className="rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-surface2 hover:text-text"
               title="Remove all custom bends"
             >
               Reset bends
@@ -3686,12 +3686,12 @@ function LinkInspector({
               )}
             >
               <ShapeGlyph shape={s.value} />
-              <span className="text-[10px] font-medium">{s.label}</span>
+              <span className="text-2xs font-medium">{s.label}</span>
             </button>
           ))}
         </div>
         {shape === 'orthogonal' && (
-          <div className="mt-1 text-[10px] leading-tight text-muted">
+          <div className="mt-1 text-2xs leading-tight text-muted">
             Click a hollow dot on the line to add a bend · drag a bend to reshape · right-click to remove.
           </div>
         )}
@@ -3721,7 +3721,7 @@ function LinkInspector({
 
       {(md.src_interface || md.dst_interface) && (
         <div className="space-y-2">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Port label style</div>
+          <div className="text-2xs font-semibold uppercase tracking-wider text-muted">Port label style</div>
           {md.src_interface && (
             <IfaceLabelStyleEditor
               title={`${source?.hostname || 'Source'} label`}
@@ -3789,7 +3789,7 @@ function LinkInspector({
         <button
           type="button"
           onClick={onDelete}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-danger/30 bg-danger/5 px-2 py-1.5 text-[11px] font-medium text-danger transition hover:bg-danger/10"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-danger/30 bg-danger/5 px-2 py-1.5 text-xs font-medium text-danger transition hover:bg-danger/10"
         >
           <Trash2 className="h-3.5 w-3.5" /> Delete link
         </button>
@@ -3869,11 +3869,11 @@ function LinkWizard({
           <div className="rounded-lg border border-border bg-surface2/40 p-3 text-xs">
             <div className="mb-1 flex items-center justify-between">
               <span className="font-semibold text-text">{source.hostname}</span>
-              <span className="text-[10px] text-muted">{source.ip_address}</span>
+              <span className="text-2xs text-muted">{source.ip_address}</span>
             </div>
             <div className="flex items-center justify-between border-t border-border/60 pt-1">
               <span className="font-semibold text-text">{target.hostname}</span>
-              <span className="text-[10px] text-muted">{target.ip_address}</span>
+              <span className="text-2xs text-muted">{target.ip_address}</span>
             </div>
           </div>
 
@@ -3895,9 +3895,9 @@ function LinkWizard({
 
           <div>
             <div className="mb-1 flex items-center justify-between">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Link kind</span>
+              <span className="text-2xs font-semibold uppercase tracking-wider text-muted">Link kind</span>
               {kindAuto && (
-                <span className="text-[9px] font-medium text-primary">
+                <span className="text-2xs font-medium text-primary">
                   Auto · {LINK_KINDS.find((k) => k.value === inferred.kind)?.label}
                 </span>
               )}
@@ -3917,7 +3917,7 @@ function LinkWizard({
                   )}
                 >
                   <div className="text-xs font-semibold">{k.label}</div>
-                  <div className="text-[9px] leading-tight text-muted">{k.hint}</div>
+                  <div className="text-2xs leading-tight text-muted">{k.hint}</div>
                 </button>
               ))}
             </div>
@@ -3950,7 +3950,7 @@ function LinkWizard({
                   )}
                 >
                   <ShapeGlyph shape={s.value} />
-                  <span className="text-[10px] font-medium">{s.label}</span>
+                  <span className="text-2xs font-medium">{s.label}</span>
                 </button>
               ))}
             </div>

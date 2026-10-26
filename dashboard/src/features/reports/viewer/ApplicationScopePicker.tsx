@@ -138,19 +138,19 @@ export function ApplicationScopePicker({ selected, onChange }: { selected: strin
                     >
                       <span className="min-w-0 flex-1">
                         <span className={cn('block truncate text-xs text-text', on ? 'font-semibold' : 'font-medium')}>{o.title}</span>
-                        {o.detail && <span className="block truncate text-[10px] text-muted">{o.detail}</span>}
+                        {o.detail && <span className="block truncate text-2xs text-muted">{o.detail}</span>}
                       </span>
                       {on && <Check className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden />}
                     </li>
                   )
                 })}
                 {(apps.data ?? []).length === 0 && (
-                  <li role="presentation" className="px-2.5 py-3 text-center text-[11px] text-muted">
+                  <li role="presentation" className="px-2.5 py-3 text-center text-xs text-muted">
                     No browser telemetry in the last 30 days — install a RUM key to populate this list.
                   </li>
                 )}
                 {(apps.data ?? []).length > 0 && options.length === 0 && (
-                  <li role="presentation" className="px-2.5 py-3 text-center text-[11px] text-muted">No application matches “{q}”</li>
+                  <li role="presentation" className="px-2.5 py-3 text-center text-xs text-muted">No application matches “{q}”</li>
                 )}
               </ul>
             )}

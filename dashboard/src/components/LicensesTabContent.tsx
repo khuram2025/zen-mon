@@ -149,11 +149,11 @@ export function LicensesTabContent() {
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="rounded-lg bg-surface2 p-4">
-              <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Appliance ID</p>
+              <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Appliance ID</p>
               <p className="break-all font-mono text-xs">{status?.appliance_id}</p>
             </div>
             <div className="rounded-lg bg-surface2 p-4">
-              <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Registered Server</p>
+              <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Registered Server</p>
               <p className="text-xs">{status?.server_url || '—'}</p>
             </div>
           </div>
@@ -191,13 +191,13 @@ export function LicensesTabContent() {
           {sub ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Plan</p>
+                <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Plan</p>
                 <p className="text-sm font-semibold">{sub.name || sub.plan || '—'}</p>
-                {sub.plan && <p className="text-[10px] text-muted">{sub.plan}</p>}
+                {sub.plan && <p className="text-2xs text-muted">{sub.plan}</p>}
               </div>
               <SubscriptionNodesTile sub={sub} />
               <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Status</p>
+                <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Status</p>
                 <div className="flex items-center gap-2">
                   <span
                     className={cn(
@@ -211,10 +211,10 @@ export function LicensesTabContent() {
                 </div>
               </div>
               <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Expires</p>
+                <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Expires</p>
                 <p className="text-sm font-medium">{sub.expires_at ? fmtDate(sub.expires_at) : 'Never'}</p>
                 {sub.days_remaining != null && (
-                  <p className="text-[10px] text-muted">{sub.days_remaining} days remaining</p>
+                  <p className="text-2xs text-muted">{sub.days_remaining} days remaining</p>
                 )}
               </div>
             </div>
@@ -342,7 +342,7 @@ function NodeCapacityCard() {
         </p>
       )}
 
-      <p className="mt-3 text-[11px] text-muted">
+      <p className="mt-3 text-xs text-muted">
         One node is one device or one server; a server linked to its device counts once. When the
         license is full, adding devices or servers, discovery imports and new agent enrollments are
         refused until the license is extended. Everything already monitored keeps running.
@@ -355,9 +355,9 @@ function NodeCapacityCard() {
 function UsageTile({ label, value, hint }: { label: string; value: number; hint: string }) {
   return (
     <div className="rounded-lg bg-surface2 p-3">
-      <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">{label}</p>
+      <p className="mb-1 text-2xs uppercase tracking-wider text-muted">{label}</p>
       <p className="text-sm font-semibold tabular-nums">{value.toLocaleString()}</p>
-      <p className="text-[10px] text-muted">{hint}</p>
+      <p className="text-2xs text-muted">{hint}</p>
     </div>
   )
 }
@@ -374,11 +374,11 @@ function SubscriptionNodesTile({ sub }: { sub: RemoteSubscription }) {
   const available = live ? (cap!.pool_available ?? 0) : (sub.license?.available_nodes ?? 0)
   return (
     <div className="rounded-lg bg-surface2 p-4" data-testid="subscription-nodes">
-      <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Subscription nodes</p>
+      <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Subscription nodes</p>
       <p className="text-sm font-semibold tabular-nums">{used}/{total}</p>
-      <p className="text-[10px] text-muted">{available} available</p>
+      <p className="text-2xs text-muted">{available} available</p>
       {live && (
-        <p className="text-[10px] text-muted">
+        <p className="text-2xs text-muted">
           {cap!.pool_other_usage
             ? `${cap!.used} here · ${cap!.pool_other_usage} on other appliances`
             : `${cap!.usage.devices} devices + ${cap!.usage.servers} servers`}

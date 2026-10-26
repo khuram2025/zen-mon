@@ -186,7 +186,7 @@ export function NetflowHealthPage() {
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <CardTitle className="text-sm">Exporters</CardTitle>
                 {status.data && (
-                  <span className="text-[11px] text-text2">
+                  <span className="text-xs text-text2">
                     States as of {formatDateTime(status.data.data.server_time, tz, { timeOnly: true })} (appliance) · refreshed every 30 s
                   </span>
                 )}
@@ -226,7 +226,7 @@ export function NetflowHealthPage() {
                 {(r) => <ExporterTable rows={visible} serverTime={r.data.server_time} onOpen={openDetail} />}
               </QueryPanel>
               {status.data && <DataQualityBar meta={status.data.meta} coverage={null} />}
-              <p className="text-[11px] text-text2">
+              <p className="text-xs text-text2">
                 Receiving: flows arrived within the expected interval (configured, or learned from the exporter&apos;s own cadence).
                 Late: longer than two intervals. Silent: longer than ten intervals (at least 15 minutes). Silence says nothing
                 about whether the device itself is reachable — its polled status is shown next to it.

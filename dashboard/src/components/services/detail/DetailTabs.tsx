@@ -95,7 +95,7 @@ export function DetailTabs<K extends string>({ tabs, active, onChange, label }: 
                 <t.Icon className="h-4 w-4" aria-hidden />
                 {t.label}
                 {(t.count ?? 0) > 0 && (
-                  <span className="ml-0.5 rounded-full bg-surface3 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-text2">
+                  <span className="ml-0.5 rounded-full bg-surface3 px-1.5 py-0.5 text-2xs font-semibold tabular-nums text-text2">
                     {t.count}
                     <span className="sr-only"> items</span>
                   </span>

@@ -150,7 +150,7 @@ export function SavedViews({ params, onApply }: {
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Production down or stale"
             />
-            <p className="break-all font-mono text-[11px] text-muted">{current || 'Default view (no filters)'}</p>
+            <p className="break-all font-mono text-xs text-muted">{current || 'Default view (no filters)'}</p>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setSaveOpen(false)}>Cancel</Button>
               <Button type="submit" disabled={!name.trim()}>Save</Button>

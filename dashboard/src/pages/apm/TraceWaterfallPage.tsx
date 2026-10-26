@@ -137,8 +137,8 @@ export function TraceWaterfallPage() {
         </button>
         <div className="flex-1" />
         <div className="inline-flex rounded-md border border-border p-0.5">
-          <button onClick={() => setView('waterfall')} className={`rounded px-2 py-1 text-[11px] font-semibold ${view === 'waterfall' ? 'bg-primary text-black' : 'text-muted'}`}>Waterfall</button>
-          <button onClick={() => setView('logs')} className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold ${view === 'logs' ? 'bg-primary text-black' : 'text-muted'}`}>
+          <button onClick={() => setView('waterfall')} className={`rounded px-2 py-1 text-xs font-semibold ${view === 'waterfall' ? 'bg-primary text-black' : 'text-muted'}`}>Waterfall</button>
+          <button onClick={() => setView('logs')} className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold ${view === 'logs' ? 'bg-primary text-black' : 'text-muted'}`}>
             <ScrollText className="h-3 w-3" /> Logs
           </button>
         </div>
@@ -165,7 +165,7 @@ export function TraceWaterfallPage() {
       {view === 'logs' ? (
         <Card>
           <CardContent className="py-4">
-            <p className="mb-3 text-[11px] text-muted">{logs.data?.note || 'Span events and exceptions correlated to this trace.'}</p>
+            <p className="mb-3 text-xs text-muted">{logs.data?.note || 'Span events and exceptions correlated to this trace.'}</p>
             {logs.isLoading ? (
               <div className="flex items-center gap-2 py-8 text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Loading logs…</div>
             ) : (logs.data?.items ?? []).length === 0 ? (

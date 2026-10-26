@@ -376,7 +376,7 @@ function ScheduleEditor({
                   scope={scopeExtra}
                   onScopeChange={setDeviceScope}
                 />
-                <span className="text-[11px] text-muted">Devices, groups, locations or types; every chosen filter must match.</span>
+                <span className="text-xs text-muted">Devices, groups, locations or types; every chosen filter must match.</span>
               </div>
             )}
             {(scopeOf(form.filters).any || withheld) && (
@@ -384,11 +384,11 @@ function ScheduleEditor({
                 <div className="mb-1.5 flex items-center justify-between gap-2">
                   <span className="text-xs font-medium text-text2">Scope carried by this schedule</span>
                   {withheld ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] text-muted"><Lock className="h-3 w-3" aria-hidden /> Kept unchanged</span>
+                    <span className="inline-flex items-center gap-1 text-xs text-muted"><Lock className="h-3 w-3" aria-hidden /> Kept unchanged</span>
                   ) : (
                     <button
                       type="button"
-                      className="rounded text-[11px] font-medium text-text2 underline-offset-2 hover:text-text hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                      className="rounded text-xs font-medium text-text2 underline-offset-2 hover:text-text hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                       onClick={() => setForm((f) => {
                         const {
                           netflow: _n, device_ids: _d, application_id: _a, group_ids: _g, locations: _l,
@@ -402,7 +402,7 @@ function ScheduleEditor({
                   )}
                 </div>
                 <ScopeChips filters={form.filters} withheld={withheld} tz={tz} />
-                <p className="mt-1.5 text-[11px] text-muted">
+                <p className="mt-1.5 text-xs text-muted">
                   {withheld
                     ? 'This schedule has a NetFlow scope your role may not see. Saving keeps the stored scope exactly as it is.'
                     : 'Each run covers the data period below with exactly this scope, limited to what the schedule’s owner may see.'}
@@ -423,7 +423,7 @@ function ScheduleEditor({
                   <SelectContent>
                     {PERIOD_GROUPS.map((g) => (
                       <SelectGroup key={g.title}>
-                        <SelectPrimitive.Label className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                        <SelectPrimitive.Label className="px-2 pb-1 pt-2 text-2xs font-semibold uppercase tracking-wider text-muted">
                           {g.title}
                         </SelectPrimitive.Label>
                         {g.periods.map((p) => (
@@ -492,7 +492,7 @@ function ScheduleEditor({
                     onChange={(v) => set('day_of_week', Number(v))}
                   />
                   {noDay && (
-                    <p className={cn('text-[11px]', attempted ? 'text-danger' : 'text-muted')}>Choose the day the report runs.</p>
+                    <p className={cn('text-xs', attempted ? 'text-danger' : 'text-muted')}>Choose the day the report runs.</p>
                   )}
                 </div>
               )}
@@ -814,7 +814,7 @@ function ChoiceGroup({
                   {o.label}
                   {on && <CheckCircle2 className="h-3.5 w-3.5 text-primary" aria-hidden />}
                 </span>
-                {o.hint && <span className="mt-0.5 text-[11px] leading-snug text-muted">{o.hint}</span>}
+                {o.hint && <span className="mt-0.5 text-xs leading-snug text-muted">{o.hint}</span>}
               </>
             ) : o.label}
           </button>
@@ -949,7 +949,7 @@ function TemplatePicker({
             )}
             {groups.map((g) => (
               <div key={g.id} role="group" aria-labelledby={`${listId}-g-${g.id}`}>
-                <div id={`${listId}-g-${g.id}`} className="sticky top-0 bg-surface px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                <div id={`${listId}-g-${g.id}`} className="sticky top-0 bg-surface px-2 pb-1 pt-2 text-2xs font-semibold uppercase tracking-wider text-muted">
                   {g.title}
                 </div>
                 {g.options.map((o) => {
@@ -975,11 +975,11 @@ function TemplatePicker({
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-1.5">
                           <span className={cn('truncate text-sm font-medium', isSel ? 'text-primary' : 'text-text')}>{o.title}</span>
-                          {o.engine === 'legacy' && <span className="shrink-0 rounded border border-border px-1 text-[10px] text-muted">Classic · retired</span>}
-                          {!o.available && <span className="shrink-0 rounded border border-warning/40 px-1 text-[10px] text-warning-fg">Unavailable</span>}
+                          {o.engine === 'legacy' && <span className="shrink-0 rounded border border-border px-1 text-2xs text-muted">Classic · retired</span>}
+                          {!o.available && <span className="shrink-0 rounded border border-warning/40 px-1 text-2xs text-warning-fg">Unavailable</span>}
                         </span>
                         {o.description && <span className="line-clamp-1 text-xs text-muted">{o.description}</span>}
-                        {o.custom && o.owner && <span className="block text-[11px] text-muted">by {o.owner}</span>}
+                        {o.custom && o.owner && <span className="block text-xs text-muted">by {o.owner}</span>}
                       </span>
                       {isSel && <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />}
                     </div>
@@ -1041,7 +1041,7 @@ function NextRunsPreview({ runs, branding, now }: { runs: Date[]; branding: Bran
                   <span className="ml-1.5 text-xs text-muted">· {utcClock(r)}</span>
                 )}
                 {i > 0 && crossesClockChange(tz, r, runs[i - 1]) && (
-                  <span className="ml-2 rounded border border-warning/40 px-1 text-[10px] text-warning-fg">Clock change</span>
+                  <span className="ml-2 rounded border border-warning/40 px-1 text-2xs text-warning-fg">Clock change</span>
                 )}
               </span>
               <span className="text-xs tabular-nums text-muted">{relativeTo(r, now)}</span>
@@ -1050,7 +1050,7 @@ function NextRunsPreview({ runs, branding, now }: { runs: Date[]; branding: Bran
         </ol>
       )}
       {showLocal && (
-        <p className="mt-1.5 text-[11px] text-muted">
+        <p className="mt-1.5 text-xs text-muted">
           Your time: {formatDateTime(runs[0], { ...branding, timezone: local }, { zone: true })}
         </p>
       )}
@@ -1080,7 +1080,7 @@ function ChannelPicker({
     <div className="space-y-1.5">
       <div className="flex items-baseline justify-between gap-2">
         <span className={GROUP_LABEL} id="sched-channels-label">Notification channels</span>
-        <span className="text-[11px] tabular-nums text-muted">{selected.length} selected</span>
+        <span className="text-xs tabular-nums text-muted">{selected.length} selected</span>
       </div>
       {query.isLoading ? (
         <div className="flex gap-2"><Skeleton className="h-9 w-32" /><Skeleton className="h-9 w-28" /><Skeleton className="h-9 w-36" /></div>
@@ -1115,16 +1115,16 @@ function ChannelPicker({
                 {c.type === 'email' ? <Mail className="h-3.5 w-3.5 text-muted" aria-hidden /> : <Bell className="h-3.5 w-3.5 text-muted" aria-hidden />}
                 <span className="max-w-[180px] truncate">{c.name}</span>
                 {!missing && (
-                  <span className="rounded bg-surface2 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">{c.type}</span>
+                  <span className="rounded bg-surface2 px-1 py-0.5 text-2xs font-semibold uppercase tracking-wider text-muted">{c.type}</span>
                 )}
-                {c.enabled === false && !missing && <span className="text-[11px] text-muted">disabled</span>}
+                {c.enabled === false && !missing && <span className="text-xs text-muted">disabled</span>}
                 {on && <Check className="h-3.5 w-3.5 text-primary" aria-hidden />}
               </button>
             )
           })}
         </div>
       )}
-      <p className="text-[11px] text-muted">
+      <p className="text-xs text-muted">
         Email channels receive the attachment; chat and webhook channels receive a summary with a link to the report.
       </p>
     </div>
@@ -1157,7 +1157,7 @@ function RecipientInput({
     <div className="space-y-1.5">
       <div className="flex items-baseline justify-between gap-2">
         <Label htmlFor={id}>{label}</Label>
-        <span className={cn('text-[11px] tabular-nums', value.length >= max ? 'text-warning-fg' : 'text-muted')}>
+        <span className={cn('text-xs tabular-nums', value.length >= max ? 'text-warning-fg' : 'text-muted')}>
           {value.length} / {max}
         </span>
       </div>
@@ -1215,8 +1215,8 @@ function RecipientInput({
           className="h-7 min-w-[180px] flex-1 border-0 bg-transparent px-1 text-sm text-text shadow-none outline-none ring-0 placeholder:text-muted focus:outline-none focus:ring-0 focus-visible:outline-none disabled:cursor-not-allowed"
         />
       </div>
-      {message && <p id={msgId} role="alert" className="text-[11px] text-danger-fg">{message}</p>}
-      <p id={hintId} className="text-[11px] text-muted">{hint}</p>
+      {message && <p id={msgId} role="alert" className="text-xs text-danger-fg">{message}</p>}
+      <p id={hintId} className="text-xs text-muted">{hint}</p>
     </div>
   )
 }
@@ -1308,7 +1308,7 @@ function EmailOptions({
               />
               <div className="min-w-0">
                 <label htmlFor="sched-group-send" className="text-sm font-medium text-text">Send one email to all recipients (they see each other)</label>
-                <p id="sched-group-send-hint" className="text-[11px] text-muted">
+                <p id="sched-group-send-hint" className="text-xs text-muted">
                   Off: each email recipient gets a separate message. Notification channels are not affected.
                 </p>
               </div>
@@ -1323,7 +1323,7 @@ function EmailOptions({
                   onChange={(r) => set('cc', r)}
                   hint={`Copied on the shared email. Up to ${MAX_CC}.`}
                 />
-                {errorOf('cc') && <p className="mt-1 text-[11px] text-danger">{errorOf('cc')}</p>}
+                {errorOf('cc') && <p className="mt-1 text-xs text-danger">{errorOf('cc')}</p>}
               </div>
             )}
           </div>
@@ -1336,7 +1336,7 @@ function EmailOptions({
             />
             <div className="min-w-0">
               <label htmlFor="sched-skip-empty" className="text-sm font-medium text-text">Don&apos;t send when the report has no data</label>
-              <p id="sched-skip-empty-hint" className="text-[11px] text-muted">
+              <p id="sched-skip-empty-hint" className="text-xs text-muted">
                 {form.skip_when_empty
                   ? 'A run with no table rows or chart points sends nothing and is recorded as skipped.'
                   : 'A report with no data is still sent, with “[No data]” at the start of the subject.'}
@@ -1390,7 +1390,7 @@ function ScheduleSummary({
     <aside aria-label="Schedule summary" className="lg:sticky lg:top-0 lg:self-start">
       <div className="space-y-4 rounded-lg border border-border bg-surface2/40 p-4">
         <div>
-          <div className="text-[11px] font-medium uppercase tracking-wide text-muted">Summary</div>
+          <div className="text-xs font-medium uppercase tracking-wide text-muted">Summary</div>
           <div className="mt-1 text-sm font-semibold text-text">{form.name.trim() || 'Untitled schedule'}</div>
           <div className="mt-0.5 flex items-center gap-1.5 text-xs">
             {form.enabled
@@ -1463,7 +1463,7 @@ function SummaryRow({ icon: Icon, label, children }: { icon: typeof FileText; la
     <div className="flex items-start gap-2">
       <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted" aria-hidden />
       <div className="min-w-0">
-        <dt className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</dt>
+        <dt className="text-xs font-medium uppercase tracking-wide text-muted">{label}</dt>
         <dd className="text-text">{children}</dd>
       </div>
     </div>

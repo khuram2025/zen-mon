@@ -44,7 +44,7 @@ export function ContextMenu({ state, onClose }: { state: ContextMenuState; onClo
     >
       {state.items.map((it, i) => {
         if (it.type === 'divider') return <div key={i} className="my-1 h-px bg-border" />
-        if (it.type === 'header') return <div key={i} className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted">{it.label}</div>
+        if (it.type === 'header') return <div key={i} className="px-3 py-1 text-2xs font-semibold uppercase tracking-wide text-muted">{it.label}</div>
         return (
           <button
             key={i}

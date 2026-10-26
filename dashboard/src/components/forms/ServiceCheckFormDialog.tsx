@@ -130,8 +130,8 @@ function Field({ id, label, required, hint, error, className, group, children }:
         ? <span id={`${id}-label`} className="block text-xs font-medium uppercase leading-none tracking-wider text-muted">{labelNode}</span>
         : <Label htmlFor={id}>{labelNode}</Label>}
       {group ? <div role="group" aria-labelledby={`${id}-label`} aria-describedby={error ? `${id}-err` : hint ? `${id}-hint` : undefined}>{children}</div> : children}
-      {hint && !error && <p id={`${id}-hint`} className="text-[11px] text-muted">{hint}</p>}
-      {error && <p id={`${id}-err`} role="alert" className="text-[11px] text-danger">{error}</p>}
+      {hint && !error && <p id={`${id}-hint`} className="text-xs text-muted">{hint}</p>}
+      {error && <p id={`${id}-err`} role="alert" className="text-xs text-danger">{error}</p>}
     </div>
   )
 }
@@ -273,14 +273,14 @@ function ServiceTestResultPanel({ result }: { result: ServiceTestResult }) {
           </div>
         </div>
         {result.details.steps_total != null && (
-          <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[10px] text-muted">
+          <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-2xs text-muted">
             {result.details.steps_passed}/{result.details.steps_total} steps
           </span>
         )}
       </div>
 
       {result.details.tls_verification_disabled && (
-        <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+        <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>TLS certificate verification was bypassed for this test. Connectivity was tested, but certificate identity and trust were not validated.</span>
         </div>
@@ -298,13 +298,13 @@ function ServiceTestResultPanel({ result }: { result: ServiceTestResult }) {
                 <span className="text-muted">{Math.round(step.response_time_ms)} ms</span>
                 {step.redirect_count > 0 && <span className="text-muted">{step.redirect_count} redirect{step.redirect_count === 1 ? '' : 's'}</span>}
               </div>
-              {step.response_url && <div className="mt-1 truncate font-mono text-[10px] text-muted">Response: {step.response_url}</div>}
-              <div className="mt-1 flex flex-wrap gap-x-3 text-[10px] text-muted">
+              {step.response_url && <div className="mt-1 truncate font-mono text-2xs text-muted">Response: {step.response_url}</div>}
+              <div className="mt-1 flex flex-wrap gap-x-3 text-2xs text-muted">
                 {step.content_type && <span>{step.content_type}</span>}
                 {step.response_size_bytes != null && <span>{step.response_size_bytes.toLocaleString()} bytes</span>}
                 {step.content_matched != null && <span>Content match: {step.content_matched ? 'yes' : 'no'}</span>}
               </div>
-              {step.error && <div className="mt-1 text-[11px] text-danger">{step.error}</div>}
+              {step.error && <div className="mt-1 text-xs text-danger">{step.error}</div>}
             </div>
           ))}
         </div>
@@ -708,7 +708,7 @@ export function ServiceCheckFormDialog({
             </div>
           </div>
           {isDuplicate && (
-            <p className="rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-[11px] text-muted">
+            <p className="rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-muted">
               Duplicating {sourceCheck?.name ? `“${sourceCheck.name}”` : 'this monitor'} as a new {TYPE_NAMES[s.check_type]} monitor. Fields that do not apply to the chosen type are not saved.
             </p>
           )}
@@ -813,7 +813,7 @@ export function ServiceCheckFormDialog({
                   <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
                     <div>
                       <Label htmlFor="svc-ignore-tls">Ignore TLS/certificate errors</Label>
-                      <div id="svc-ignore-tls-hint" className="mt-0.5 text-[11px] text-muted">Allow self-signed, expired, or hostname-mismatched certificates.</div>
+                      <div id="svc-ignore-tls-hint" className="mt-0.5 text-xs text-muted">Allow self-signed, expired, or hostname-mismatched certificates.</div>
                     </div>
                     <Switch
                       id="svc-ignore-tls"
@@ -823,7 +823,7 @@ export function ServiceCheckFormDialog({
                     />
                   </div>
                   {s.http_ignore_tls_errors && (
-                    <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+                    <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                       <span>TLS verification is disabled. Use this only for trusted internal services; the certificate identity and chain will not be checked.</span>
                     </div>
@@ -831,7 +831,7 @@ export function ServiceCheckFormDialog({
                 </>
               )}
               {isHttpTarget && (
-                <div className="flex items-start gap-2 rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-[11px] text-muted">
+                <div className="flex items-start gap-2 rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-muted">
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                   <span>
                     Plain HTTP monitoring is supported and does not use a certificate. Traffic is unencrypted;
@@ -874,7 +874,7 @@ export function ServiceCheckFormDialog({
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <Label htmlFor="svc-insecure-auth" className="normal-case text-danger">Allow credentials over trusted HTTP</Label>
-                      <div className="mt-0.5 text-[11px] text-muted">Required only for this clear-text HTTP target.</div>
+                      <div className="mt-0.5 text-xs text-muted">Required only for this clear-text HTTP target.</div>
                     </div>
                     <Switch
                       id="svc-insecure-auth"
@@ -882,7 +882,7 @@ export function ServiceCheckFormDialog({
                       onCheckedChange={(http_allow_insecure_auth) => setS((current) => ({ ...current, http_allow_insecure_auth }))}
                     />
                   </div>
-                  <div className="text-[11px] text-danger">
+                  <div className="text-xs text-danger">
                     Basic/form passwords and bearer tokens may be intercepted or modified on the network. Enable only on a trusted isolated network; HTTPS is strongly recommended.
                   </div>
                 </div>
@@ -1213,7 +1213,7 @@ export function ServiceCheckFormDialog({
           {testResult && <ServiceTestResultPanel result={testResult} />}
 
           {saveError && (
-            <div role="alert" className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+            <div role="alert" className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{saveError}</span>
             </div>

@@ -52,9 +52,9 @@ type Selected = RumView | RumSession | RumError | RumResource | RumAction | unde
 function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
   return (
     <div className="rounded-lg border border-border bg-surface2/35 p-3">
-      <div className="text-[9px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs font-semibold uppercase tracking-wider text-muted">{label}</div>
       <div className="mt-1 text-base font-semibold tabular-nums text-text">{value}</div>
-      {hint && <div className="mt-0.5 text-[10px] text-muted">{hint}</div>}
+      {hint && <div className="mt-0.5 text-2xs text-muted">{hint}</div>}
     </div>
   )
 }
@@ -82,7 +82,7 @@ function ViewDetail({ view, onDrill }: { view: RumView; onDrill: (tab: 'sessions
       <Card><CardContent className="p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><Gauge className="h-3.5 w-3.5 text-primary" /> Experience</div>
-          <span className="text-[10px] text-muted">p75 · one sample per page view</span>
+          <span className="text-2xs text-muted">p75 · one sample per page view</span>
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           <RumVitalTile name="lcp" value={view.lcp_p75} samples={view.lcp_samples} />
@@ -94,7 +94,7 @@ function ViewDetail({ view, onDrill }: { view: RumView; onDrill: (tab: 'sessions
         </div>
       </CardContent></Card>
       <Card><CardContent className="p-4">
-        <Fact label="Application">{view.application_id}</Fact><Fact label="Environment">{view.env}</Fact><Fact label="Route">{view.view_name}</Fact><Fact label="Example URL"><span className="font-mono text-[11px]">{view.url || 'Not captured'}</span></Fact><Fact label="Backend trace"><TracePivot traceId={view.backend_trace_id} /></Fact>
+        <Fact label="Application">{view.application_id}</Fact><Fact label="Environment">{view.env}</Fact><Fact label="Route">{view.view_name}</Fact><Fact label="Example URL"><span className="font-mono text-xs">{view.url || 'Not captured'}</span></Fact><Fact label="Backend trace"><TracePivot traceId={view.backend_trace_id} /></Fact>
       </CardContent></Card>
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" size="sm" onClick={() => onDrill('sessions', view.view_name)}><UserRound className="h-3.5 w-3.5" /> Sessions on this view</Button>
@@ -120,13 +120,13 @@ function CrumbIcon({ type }: { type: RumTimelineEvent['event_type'] }) {
 function StackFrames({ detail }: { detail: RumErrorDetail }) {
   const [showRaw, setShowRaw] = useState(false)
   const parsed = detail.frames.filter((frame) => frame.line != null)
-  if (!detail.latest.stack) return <div className="rounded-lg border border-border bg-surface2/40 p-3 text-[11px] text-muted">No stack trace was captured with this error.</div>
+  if (!detail.latest.stack) return <div className="rounded-lg border border-border bg-surface2/40 p-3 text-xs text-muted">No stack trace was captured with this error.</div>
   const symb = detail.symbolication
   return (
     <div>
       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Latest stack trace</div>
-        <div className="flex items-center gap-2 text-[10px] text-muted">
+        <div className="text-2xs font-semibold uppercase tracking-wider text-muted">Latest stack trace</div>
+        <div className="flex items-center gap-2 text-2xs text-muted">
           {symb.resolved > 0
             ? <span className="text-success">{symb.resolved} of {symb.frames} frames symbolicated{symb.release ? ` · release ${symb.release}` : ''}</span>
             : symb.maps_available > 0
@@ -136,11 +136,11 @@ function StackFrames({ detail }: { detail: RumErrorDetail }) {
         </div>
       </div>
       {showRaw || !parsed.length ? (
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-surface2 p-3 font-mono text-[11px] leading-relaxed text-text2">{detail.latest.stack}</pre>
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-surface2 p-3 font-mono text-xs leading-relaxed text-text2">{detail.latest.stack}</pre>
       ) : (
         <ol className="divide-y divide-border/60 overflow-hidden rounded-lg border border-border bg-surface2/40">
           {detail.frames.map((frame, index) => (
-            <li key={index} className="px-3 py-2 font-mono text-[11px]">
+            <li key={index} className="px-3 py-2 font-mono text-xs">
               {frame.line == null ? (
                 <div className="text-text2">{frame.raw.trim()}</div>
               ) : frame.symbolicated && frame.original ? (
@@ -148,12 +148,12 @@ function StackFrames({ detail }: { detail: RumErrorDetail }) {
                   <div className="flex flex-wrap items-baseline gap-x-2">
                     <span className="font-semibold text-text">{frame.original.name || frame.function}</span>
                     <span className="text-primary">{frame.original.source}:{frame.original.line}:{frame.original.column}</span>
-                    <span className="text-[10px] text-muted">from {frame.file_name}:{frame.line}:{frame.column}</span>
+                    <span className="text-2xs text-muted">from {frame.file_name}:{frame.line}:{frame.column}</span>
                   </div>
                   {frame.context.length > 0 && (
                     <div className="mt-1 overflow-x-auto rounded bg-surface px-2 py-1">
                       {frame.context.map((row) => (
-                        <div key={row.line} className={cn('flex gap-3 whitespace-pre text-[10px] leading-relaxed', row.current ? 'bg-danger/10 text-text' : 'text-muted')}>
+                        <div key={row.line} className={cn('flex gap-3 whitespace-pre text-2xs leading-relaxed', row.current ? 'bg-danger/10 text-text' : 'text-muted')}>
                           <span className="w-8 shrink-0 select-none text-right tabular-nums opacity-70">{row.line}</span>
                           <span>{row.code}</span>
                         </div>
@@ -210,25 +210,25 @@ function ErrorDetail({ row: error, detail, loading, loadError, onRetry, onIssueS
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <IssueStatusBadge issue={issue} />
-            <span className="text-[11px] text-muted">{style.hint}{issue?.updated_by ? ` · ${issue.stored_status} by ${issue.updated_by}${issue.updated_at ? ` ${relativeTime(issue.updated_at)}` : ''}` : ''}</span>
+            <span className="text-xs text-muted">{style.hint}{issue?.updated_by ? ` · ${issue.stored_status} by ${issue.updated_by}${issue.updated_at ? ` ${relativeTime(issue.updated_at)}` : ''}` : ''}</span>
           </div>
           <div className="flex items-center gap-1">
             {ISSUE_ACTIONS.filter((action) => action.status !== issue?.stored_status || (action.status === 'open' && status === 'regressed')).map((action) => (
-              <Button key={action.status} size="sm" variant={action.status === 'resolved' ? 'default' : 'outline'} className="h-7 px-2 text-[11px]" disabled={!onIssueStatus || issueUpdating || !fingerprint} title={action.hint}
+              <Button key={action.status} size="sm" variant={action.status === 'resolved' ? 'default' : 'outline'} className="h-7 px-2 text-xs" disabled={!onIssueStatus || issueUpdating || !fingerprint} title={action.hint}
                 onClick={() => onIssueStatus?.({ fingerprint, application_id: applicationId, env, status: action.status, note: note.trim(), release: detail?.latest.service_version ?? error?.service_version ?? '' })}>
                 {issueUpdating ? <Loader2 className="h-3 w-3 animate-spin" /> : null}{action.label}
               </Button>
             ))}
           </div>
         </div>
-        <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Note for the team (ticket, cause, fix version)…" maxLength={2000} className="mt-2 h-7 w-full rounded-md border border-border bg-surface px-2 text-[11px] text-text outline-none placeholder:text-muted focus:border-primary" />
+        <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Note for the team (ticket, cause, fix version)…" maxLength={2000} className="mt-2 h-7 w-full rounded-md border border-border bg-surface px-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary" />
       </CardContent></Card>
 
       <Card><CardContent className="p-4">
         <Fact label="Message"><span className="font-medium text-text">{message}</span></Fact>
         <Fact label="Type">{detail?.error_type ?? error?.error_type ?? 'JavaScript error'}</Fact>
-        <Fact label="Source"><span className="font-mono text-[11px]">{detail?.source ?? error?.source ?? 'Not captured'}</span></Fact>
-        <Fact label="Fingerprint"><span className="font-mono text-[11px]">{fingerprint}</span></Fact>
+        <Fact label="Source"><span className="font-mono text-xs">{detail?.source ?? error?.source ?? 'Not captured'}</span></Fact>
+        <Fact label="Fingerprint"><span className="font-mono text-xs">{fingerprint}</span></Fact>
         <Fact label="Application">{applicationId}{env ? ` · ${env}` : ''}</Fact>
       </CardContent></Card>
 
@@ -245,17 +245,17 @@ function ErrorDetail({ row: error, detail, loading, loadError, onRetry, onIssueS
           <div className="grid gap-2 sm:grid-cols-2">
             {([['view_name', 'Routes'], ['browser', 'Browsers'], ['service_version', 'Releases'], ['os', 'Operating systems']] as const).map(([key, title]) => (
               <Card key={key}><CardContent className="p-3">
-                <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</div>
+                <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">{title}</div>
                 {detail.facets[key].length ? (
                   <ul className="space-y-1">
                     {detail.facets[key].map((row) => (
-                      <li key={row.value || '∅'} className="flex items-center justify-between gap-2 text-[11px]">
+                      <li key={row.value || '∅'} className="flex items-center justify-between gap-2 text-xs">
                         {key === 'view_name' ? <button type="button" className="truncate font-mono text-text2 hover:text-text hover:underline" onClick={() => onDrill('errors', row.value)} title={`Filter errors by ${row.value}`}>{row.value || '/'}</button> : <span className="truncate text-text2">{row.value || 'Unknown'}</span>}
                         <span className="shrink-0 font-mono tabular-nums text-muted">{fmtCount(row.count)} · {fmtCount(row.sessions)} sess.</span>
                       </li>
                     ))}
                   </ul>
-                ) : <div className="text-[11px] text-muted">—</div>}
+                ) : <div className="text-xs text-muted">—</div>}
               </CardContent></Card>
             ))}
           </div>
@@ -264,38 +264,38 @@ function ErrorDetail({ row: error, detail, loading, loadError, onRetry, onIssueS
 
           <Card><CardContent className="p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">What the user did before the latest occurrence</div>
-              {onOpenSession && detail.latest.session_id && <button type="button" className="text-[10px] text-primary hover:underline" onClick={() => onOpenSession(detail.latest.session_id)}>Open session {detail.latest.session_id.slice(0, 8)}…</button>}
+              <div className="text-2xs font-semibold uppercase tracking-wider text-muted">What the user did before the latest occurrence</div>
+              {onOpenSession && detail.latest.session_id && <button type="button" className="text-2xs text-primary hover:underline" onClick={() => onOpenSession(detail.latest.session_id)}>Open session {detail.latest.session_id.slice(0, 8)}…</button>}
             </div>
             {detail.breadcrumbs.length ? (
               <ol className="relative ml-2 space-y-1.5 border-l border-border/70 pl-4">
                 {detail.breadcrumbs.map((crumb, index) => {
                   const isError = crumb.event_type === 'error' && index === detail.breadcrumbs.length - 1
                   return (
-                    <li key={`${crumb.timestamp}:${index}`} className="relative text-[11px]">
+                    <li key={`${crumb.timestamp}:${index}`} className="relative text-xs">
                       <span className="absolute -left-[25px] top-0"><CrumbIcon type={crumb.event_type} /></span>
                       <div className="flex flex-wrap items-baseline gap-x-2">
                         <span className={cn('truncate', isError ? 'font-medium text-danger' : 'text-text')}>{crumb.title}</span>
-                        {crumb.status_code != null && crumb.status_code >= 400 && <span className="font-mono text-[10px] text-danger">{crumb.status_code}</span>}
-                        {crumb.duration_ms != null && crumb.duration_ms > 0 && <span className="font-mono text-[10px] text-muted">{formatDurationMs(crumb.duration_ms)}</span>}
-                        <span className="text-[10px] text-muted">{crumb.view_name ? `on ${crumb.view_name} · ` : ''}{new Date(crumb.timestamp).toLocaleTimeString()}</span>
+                        {crumb.status_code != null && crumb.status_code >= 400 && <span className="font-mono text-2xs text-danger">{crumb.status_code}</span>}
+                        {crumb.duration_ms != null && crumb.duration_ms > 0 && <span className="font-mono text-2xs text-muted">{formatDurationMs(crumb.duration_ms)}</span>}
+                        <span className="text-2xs text-muted">{crumb.view_name ? `on ${crumb.view_name} · ` : ''}{new Date(crumb.timestamp).toLocaleTimeString()}</span>
                       </div>
                     </li>
                   )
                 })}
               </ol>
-            ) : <div className="text-[11px] text-muted">No earlier activity was recorded in that session.</div>}
+            ) : <div className="text-xs text-muted">No earlier activity was recorded in that session.</div>}
           </CardContent></Card>
 
           <Card><CardContent className="p-4">
             <Fact label="Latest client">{[detail.latest.browser && `${detail.latest.browser}${detail.latest.browser_version ? ` ${detail.latest.browser_version}` : ''}`, detail.latest.os, detail.latest.device_type, detail.latest.country].filter(Boolean).join(' · ') || 'Unknown'}</Fact>
-            <Fact label="Page"><span className="font-mono text-[11px]">{detail.latest.url || viewName || '/'}</span></Fact>
-            <Fact label="User">{detail.latest.user_id || 'Anonymous'}{detail.latest.client_ip ? <span className="ml-2 font-mono text-[10px] text-muted">{detail.latest.client_ip}</span> : null}</Fact>
+            <Fact label="Page"><span className="font-mono text-xs">{detail.latest.url || viewName || '/'}</span></Fact>
+            <Fact label="User">{detail.latest.user_id || 'Anonymous'}{detail.latest.client_ip ? <span className="ml-2 font-mono text-2xs text-muted">{detail.latest.client_ip}</span> : null}</Fact>
             <Fact label="Backend trace"><TracePivot traceId={detail.latest.backend_trace_id || detail.backend_trace_ids[0]} /></Fact>
             <Fact label="Recent sessions">{detail.recent_sessions.length ? (
               <div className="flex flex-wrap gap-1.5">
                 {detail.recent_sessions.map((session) => (
-                  <button key={session.session_id} type="button" className="rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] text-text2 hover:border-primary/40 hover:text-text" title={`${session.count} occurrence${session.count === 1 ? '' : 's'} · ${session.browser} · ${relativeTime(session.last_seen)}`} onClick={() => onOpenSession?.(session.session_id)}>{session.session_id.slice(0, 10)}…</button>
+                  <button key={session.session_id} type="button" className="rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-2xs text-text2 hover:border-primary/40 hover:text-text" title={`${session.count} occurrence${session.count === 1 ? '' : 's'} · ${session.browser} · ${relativeTime(session.last_seen)}`} onClick={() => onOpenSession?.(session.session_id)}>{session.session_id.slice(0, 10)}…</button>
                 ))}
               </div>
             ) : '—'}</Fact>
@@ -402,7 +402,7 @@ function ResourceDetail({ resource }: { resource: RumResource }) {
       <Card><CardContent className="p-4">
         <div className="mb-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><Waypoints className="h-3.5 w-3.5 text-primary" /> Where the time goes</div>
-          <span className="text-[10px] text-muted">
+          <span className="text-2xs text-muted">
             {model.hasPhases ? `p75 across ${fmtCount(resource.timing_samples)} measured requests` : `${fmtCount(resource.count)} requests`}
             {model.hasServerTiming ? ` · ${fmtCount(resource.server_samples)} with Server-Timing` : backend ? ` · ${fmtCount(backend.traces)} correlated trace${backend.traces === 1 ? '' : 's'}` : ''}
           </span>
@@ -411,18 +411,18 @@ function ResourceDetail({ resource }: { resource: RumResource }) {
           <>
             <PhaseBar segments={segments} height={10} />
             <PhaseLegend segments={segments} className="mt-2" />
-            {!model.hasPhases && backend && <p className="mt-2 text-[10px] text-muted">Browser phases are unavailable for these requests, so the network share is derived as total time minus the backend&apos;s execution time from {backend.service ? <span className="font-mono">{backend.service}</span> : 'the correlated traces'}.</p>}
+            {!model.hasPhases && backend && <p className="mt-2 text-2xs text-muted">Browser phases are unavailable for these requests, so the network share is derived as total time minus the backend&apos;s execution time from {backend.service ? <span className="font-mono">{backend.service}</span> : 'the correlated traces'}.</p>}
           </>
         ) : (
-          <p className="text-[11px] text-muted">Only the total duration is known for these requests.</p>
+          <p className="text-xs text-muted">Only the total duration is known for these requests.</p>
         )}
         {model.reasons.length > 0 && (
-          <ul className="mt-2 space-y-1 border-t border-border/60 pt-2 text-[10px] leading-snug text-muted">
+          <ul className="mt-2 space-y-1 border-t border-border/60 pt-2 text-2xs leading-snug text-muted">
             {model.reasons.map((reason) => <li key={reason}>• {reason}</li>)}
           </ul>
         )}
       </CardContent></Card>
-      <Card><CardContent className="p-4"><Fact label="Name"><span className="font-mono text-[11px]">{resource.name}</span></Fact><Fact label="URL"><span className="font-mono text-[11px]">{resource.url || 'Not captured'}</span></Fact><Fact label="Kind">{resource.resource_type || 'resource'}{resource.protocol ? ` · ${resource.protocol}` : ''}</Fact><Fact label="HTTP">{[resource.method, resource.status_code].filter((value) => value != null).join(' ') || 'Not captured'}</Fact><Fact label="View">{resource.view_name || '/'}</Fact><Fact label="Application">{resource.application_id} · {resource.env}</Fact><Fact label="Release">{resource.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(resource.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={resource.backend_trace_id} /></Fact></CardContent></Card>
+      <Card><CardContent className="p-4"><Fact label="Name"><span className="font-mono text-xs">{resource.name}</span></Fact><Fact label="URL"><span className="font-mono text-xs">{resource.url || 'Not captured'}</span></Fact><Fact label="Kind">{resource.resource_type || 'resource'}{resource.protocol ? ` · ${resource.protocol}` : ''}</Fact><Fact label="HTTP">{[resource.method, resource.status_code].filter((value) => value != null).join(' ') || 'Not captured'}</Fact><Fact label="View">{resource.view_name || '/'}</Fact><Fact label="Application">{resource.application_id} · {resource.env}</Fact><Fact label="Release">{resource.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(resource.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={resource.backend_trace_id} /></Fact></CardContent></Card>
     </div>
   )
 }
@@ -441,7 +441,7 @@ function ActionDetail({ action }: { action: RumAction }) {
         ]}
         totalLabel={formatDurationMs(action.duration_p75)}
       />
-      <Card><CardContent className="p-4"><Fact label="Action">{action.name || 'Unnamed action'}</Fact><Fact label="Type"><Badge variant={frustration ? 'warning' : 'outline'}>{(action.action_type || 'action').replaceAll('_', ' ')}</Badge></Fact><Fact label="Target"><span className="font-mono text-[11px]">{action.target || 'Not captured'}</span></Fact><Fact label="View">{action.view_name || '/'}</Fact><Fact label="Application">{action.application_id} · {action.env}</Fact><Fact label="Release">{action.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(action.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={action.backend_trace_id} /></Fact></CardContent></Card>
+      <Card><CardContent className="p-4"><Fact label="Action">{action.name || 'Unnamed action'}</Fact><Fact label="Type"><Badge variant={frustration ? 'warning' : 'outline'}>{(action.action_type || 'action').replaceAll('_', ' ')}</Badge></Fact><Fact label="Target"><span className="font-mono text-xs">{action.target || 'Not captured'}</span></Fact><Fact label="View">{action.view_name || '/'}</Fact><Fact label="Application">{action.application_id} · {action.env}</Fact><Fact label="Release">{action.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(action.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={action.backend_trace_id} /></Fact></CardContent></Card>
     </div>
   )
 }
@@ -562,19 +562,19 @@ function TimelineChild({ event, sessionStart }: { event: RumTimelineEvent; sessi
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
-            {event.event_type === 'resource' && event.method && <Badge variant="outline" className="px-1 py-0 text-[9px] uppercase">{event.method}</Badge>}
-            {event.event_type === 'resource' && event.status_code != null && <span className={cn('font-mono text-[9px]', event.status_code >= 400 ? 'text-danger' : 'text-muted')}>{event.status_code}</span>}
+            {event.event_type === 'resource' && event.method && <Badge variant="outline" className="px-1 py-0 text-2xs uppercase">{event.method}</Badge>}
+            {event.event_type === 'resource' && event.status_code != null && <span className={cn('font-mono text-2xs', event.status_code >= 400 ? 'text-danger' : 'text-muted')}>{event.status_code}</span>}
             <span className={cn('max-w-md break-words text-xs', event.event_type === 'error' ? 'font-medium text-danger' : 'text-text')}>{timelineTitle(event)}</span>
           </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
-            <Badge variant="outline" className="px-1.5 py-0 text-[9px]">{meta.label}</Badge>
-            {event.sampled === false && <Badge variant="warning" className="px-1.5 py-0 text-[9px]">retained unsampled</Badge>}
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-2xs text-muted">
+            <Badge variant="outline" className="px-1.5 py-0 text-2xs">{meta.label}</Badge>
+            {event.sampled === false && <Badge variant="warning" className="px-1.5 py-0 text-2xs">retained unsampled</Badge>}
             <span className="font-mono">{offsetLabel(new Date(event.timestamp).getTime() - sessionStart)}</span>
             <span>· {new Date(event.timestamp).toLocaleTimeString()}</span>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {duration != null && duration > 0 && <span className="font-mono text-[10px] text-muted">{formatDurationMs(duration)}</span>}
+          {duration != null && duration > 0 && <span className="font-mono text-2xs text-muted">{formatDurationMs(duration)}</span>}
           <TracePivot traceId={event.backend_trace_id} compact />
         </div>
       </div>
@@ -588,7 +588,7 @@ function TimelineChild({ event, sessionStart }: { event: RumTimelineEvent; sessi
           </div>
         )
       })()}
-      {event.stack && <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-surface2 p-2 font-mono text-[10px] text-text2">{event.stack}</pre>}
+      {event.stack && <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-surface2 p-2 font-mono text-2xs text-text2">{event.stack}</pre>}
     </li>
   )
 }
@@ -606,8 +606,8 @@ function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionSt
           <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary"><Route className="h-3 w-3" /></span>
           <div className="min-w-0">
             <span className="block truncate font-mono text-xs font-semibold text-text" title={seg.viewName}>{seg.viewName || '/'}</span>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-muted">
-              <Badge variant="outline" className="px-1.5 py-0 text-[9px]">Page view</Badge>
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-2xs text-muted">
+              <Badge variant="outline" className="px-1.5 py-0 text-2xs">Page view</Badge>
               <span className="font-mono">{offsetLabel(seg.startMs - sessionStart)}</span>
               {duration > 0 && <span>· {formatDurationMs(duration)} on view</span>}
               {summary && <span>· {summary}</span>}
@@ -616,7 +616,7 @@ function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionSt
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {vitals && (vitals.lcp != null || vitals.inp != null || vitals.cls != null) && (
-            <div className="hidden gap-1.5 font-mono text-[10px] text-text2 sm:flex">
+            <div className="hidden gap-1.5 font-mono text-2xs text-text2 sm:flex">
               {vitals.lcp != null && <span>LCP {formatRumVital('lcp', vitals.lcp)}</span>}
               {vitals.inp != null && <span>INP {formatRumVital('inp', vitals.inp)}</span>}
               {vitals.cls != null && <span>CLS {formatRumVital('cls', vitals.cls)}</span>}
@@ -626,7 +626,7 @@ function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionSt
         </div>
       </div>
       {vitals?.vital_attribution && Object.keys(vitals.vital_attribution).length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 border-b border-border/60 bg-surface2/20 px-3 py-1.5 text-[10px] text-muted">
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border/60 bg-surface2/20 px-3 py-1.5 text-2xs text-muted">
           <span className="font-semibold uppercase tracking-wider">Attribution</span>
           {vitals.vital_attribution['lcp.element'] && <span title={vitals.vital_attribution['lcp.url'] ? `LCP resource: ${vitals.vital_attribution['lcp.url']}` : 'Largest Contentful Paint element'}>LCP <span className="font-mono text-text2">{vitals.vital_attribution['lcp.element']}</span></span>}
           {vitals.vital_attribution['cls.element'] && <span title="Element that shifted most">CLS <span className="font-mono text-text2">{vitals.vital_attribution['cls.element']}</span></span>}
@@ -638,7 +638,7 @@ function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionSt
         if (!segments.length) return null
         return (
           <div className="border-b border-border/60 bg-surface2/20 px-3 py-2">
-            <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-muted">Page load breakdown{vitals.timing.protocol ? ` · ${vitals.timing.protocol}` : ''}</div>
+            <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Page load breakdown{vitals.timing.protocol ? ` · ${vitals.timing.protocol}` : ''}</div>
             <PhaseBar segments={segments} height={6} />
             <PhaseLegend segments={segments} className="mt-1.5" />
           </div>
@@ -646,7 +646,7 @@ function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionSt
       })()}
       {visibleChildren.length > 0 && (
         <>
-          <div className="flex items-center justify-end gap-1 border-b border-border/40 px-3 py-1 text-[10px] text-muted">
+          <div className="flex items-center justify-end gap-1 border-b border-border/40 px-3 py-1 text-2xs text-muted">
             <button type="button" className={cn('rounded px-1.5 py-0.5', mode === 'list' ? 'bg-primary/10 text-primary' : 'hover:text-text')} onClick={() => setMode('list')}>List</button>
             <button type="button" className={cn('rounded px-1.5 py-0.5', mode === 'waterfall' ? 'bg-primary/10 text-primary' : 'hover:text-text')} onClick={() => setMode('waterfall')} title="Requests and interactions laid out on the view's timeline">Waterfall</button>
           </div>
@@ -683,7 +683,7 @@ function Waterfall({ events, startMs }: { events: RumTimelineEvent[]; startMs: n
   const tickCount = 5
   return (
     <div className="px-3 py-2">
-      <div className="relative ml-[200px] mb-1 h-3 text-[9px] text-muted">
+      <div className="relative ml-[200px] mb-1 h-3 text-2xs text-muted">
         {Array.from({ length: tickCount + 1 }, (_, index) => {
           const value = (span / tickCount) * index
           return <span key={index} className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${(index / tickCount) * 100}%` }}>{offsetLabel(value)}</span>
@@ -697,7 +697,7 @@ function Waterfall({ events, startMs }: { events: RumTimelineEvent[]; startMs: n
           const width = Math.max(0.6, ((end - begin) / span) * 100)
           const failed = event.event_type === 'error' || (event.status_code != null && event.status_code >= 400)
           return (
-            <li key={`${event.timestamp}:${index}`} className="flex items-center gap-2 text-[10px]">
+            <li key={`${event.timestamp}:${index}`} className="flex items-center gap-2 text-2xs">
               <div className="flex w-[192px] shrink-0 items-center gap-1.5 overflow-hidden">
                 <span className={cn('flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-border', meta.tone)}><meta.icon className="h-2 w-2" /></span>
                 <span className={cn('truncate', failed ? 'text-danger' : 'text-text2')} title={timelineTitle(event)}>{timelineTitle(event)}</span>
@@ -738,7 +738,7 @@ function Timeline({ events }: { events: RumTimelineEvent[] }) {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Show</span>
+        <span className="text-2xs font-semibold uppercase tracking-wider text-muted">Show</span>
         {CHILD_TYPES.map((type) => {
           const meta = EVENT_META[type]
           const Icon = meta.icon
@@ -752,7 +752,7 @@ function Timeline({ events }: { events: RumTimelineEvent[] }) {
               disabled={empty}
               aria-pressed={!off}
               className={cn(
-                'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition',
+                'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium transition',
                 off ? 'border-border bg-transparent text-muted' : 'border-primary/25 bg-primary/10 text-text2',
                 empty && 'cursor-not-allowed opacity-40',
               )}
@@ -851,8 +851,8 @@ function SessionDetailPanel({ fallback, detail, loading, error, onRetry }: { fal
       {detail?.coverage && <div className="overflow-hidden rounded-lg border border-border"><RumCoverageNotice coverage={detail.coverage} showRetention /></div>}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Stat label="Duration" value={formatDurationMs(session.duration_ms)} /><Stat label="Views" value={fmtCount(session.views)} /><Stat label="Actions" value={fmtCount(session.actions)} /><Stat label="Errors" value={fmtCount(session.errors)} /></div>
       <SessionPathFlow session={session} detail={detail} traceIds={traceIds} />
-      <Card><CardContent className="p-4"><Fact label="Session ID"><span className="font-mono text-[11px]">{session.session_id}</span></Fact><Fact label="User">{session.user_id || 'Anonymous'}</Fact><Fact label="Application">{session.application_id} · {session.env}</Fact><Fact label="Release">{session.service_version || 'Not captured'}</Fact>{session.sampled != null && <Fact label="Sampling"><Badge variant={session.sampled ? 'success' : 'warning'}>{session.sampled ? 'Sampled cohort' : 'Retained unsampled'}</Badge></Fact>}<Fact label="Client">{[session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.device_type].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="Location"><LocationHint country={session.country} timezone={session.timezone} clientIp={session.client_ip} /></Fact><Fact label="IP address"><span className="font-mono text-[11px]">{session.client_ip || 'Not captured'}</span></Fact><Fact label="Connection">{session.connection_type || session.connection_rtt_ms != null ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3 w-3 text-muted" aria-hidden />{[session.connection_type, session.connection_rtt_ms != null ? `~${Math.round(session.connection_rtt_ms)} ms RTT` : '', session.connection_downlink != null ? `${Number(session.connection_downlink.toFixed(1))} Mbps` : ''].filter(Boolean).join(' · ')}</span> : 'Not captured'}</Fact><Fact label="Locale">{[session.language, session.timezone].filter(Boolean).join(' · ') || 'Not captured'}</Fact><Fact label="Display">{[session.screen_res && `screen ${session.screen_res}`, session.viewport && `viewport ${session.viewport}`].filter(Boolean).join(' · ') || 'Not captured'}</Fact><Fact label="Started">{new Date(session.started_at).toLocaleString()}</Fact><Fact label="Backend traces">{traceIds.length ? <div className="flex flex-wrap gap-2">{traceIds.map((id) => <TracePivot key={id} traceId={id} compact />)}</div> : 'No correlated trace'}</Fact></CardContent></Card>
-      <div><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-text">Session timeline</h3><p className="text-[11px] text-muted">Grouped by page view — actions, resources, errors and main-thread work are nested under the view where they happened.{totalEvents > loadedEvents ? ` Showing the first ${loadedEvents.toLocaleString()} of ${totalEvents.toLocaleString()} events.` : ''}</p></div><Badge variant="outline">{loadedEvents.toLocaleString()}{totalEvents > loadedEvents ? ` / ${totalEvents.toLocaleString()}` : ''} events</Badge></div><Timeline events={detail?.timeline ?? []} /></div>
+      <Card><CardContent className="p-4"><Fact label="Session ID"><span className="font-mono text-xs">{session.session_id}</span></Fact><Fact label="User">{session.user_id || 'Anonymous'}</Fact><Fact label="Application">{session.application_id} · {session.env}</Fact><Fact label="Release">{session.service_version || 'Not captured'}</Fact>{session.sampled != null && <Fact label="Sampling"><Badge variant={session.sampled ? 'success' : 'warning'}>{session.sampled ? 'Sampled cohort' : 'Retained unsampled'}</Badge></Fact>}<Fact label="Client">{[session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.device_type].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="Location"><LocationHint country={session.country} timezone={session.timezone} clientIp={session.client_ip} /></Fact><Fact label="IP address"><span className="font-mono text-xs">{session.client_ip || 'Not captured'}</span></Fact><Fact label="Connection">{session.connection_type || session.connection_rtt_ms != null ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3 w-3 text-muted" aria-hidden />{[session.connection_type, session.connection_rtt_ms != null ? `~${Math.round(session.connection_rtt_ms)} ms RTT` : '', session.connection_downlink != null ? `${Number(session.connection_downlink.toFixed(1))} Mbps` : ''].filter(Boolean).join(' · ')}</span> : 'Not captured'}</Fact><Fact label="Locale">{[session.language, session.timezone].filter(Boolean).join(' · ') || 'Not captured'}</Fact><Fact label="Display">{[session.screen_res && `screen ${session.screen_res}`, session.viewport && `viewport ${session.viewport}`].filter(Boolean).join(' · ') || 'Not captured'}</Fact><Fact label="Started">{new Date(session.started_at).toLocaleString()}</Fact><Fact label="Backend traces">{traceIds.length ? <div className="flex flex-wrap gap-2">{traceIds.map((id) => <TracePivot key={id} traceId={id} compact />)}</div> : 'No correlated trace'}</Fact></CardContent></Card>
+      <div><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-text">Session timeline</h3><p className="text-xs text-muted">Grouped by page view — actions, resources, errors and main-thread work are nested under the view where they happened.{totalEvents > loadedEvents ? ` Showing the first ${loadedEvents.toLocaleString()} of ${totalEvents.toLocaleString()} events.` : ''}</p></div><Badge variant="outline">{loadedEvents.toLocaleString()}{totalEvents > loadedEvents ? ` / ${totalEvents.toLocaleString()}` : ''} events</Badge></div><Timeline events={detail?.timeline ?? []} /></div>
     </div>
   )
 }

@@ -214,7 +214,7 @@ export function UserDetailDialog({ user, onClose, canManage }: { user: User | nu
                   {a.history.map((h, i) => (
                     <li key={i} className="rounded-md border border-border px-3 py-1.5 text-xs">
                       <div className="flex flex-wrap justify-between gap-1"><span className="font-medium">{h.action}</span><span className="text-muted">{h.actor || 'system'} · {when(h.at)}</span></div>
-                      {h.details && Object.keys(h.details).length > 0 && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] text-muted">{JSON.stringify(h.details, null, 1)}</pre>}
+                      {h.details && Object.keys(h.details).length > 0 && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-2xs text-muted">{JSON.stringify(h.details, null, 1)}</pre>}
                     </li>
                   ))}
                 </ol>

@@ -257,7 +257,7 @@ export function BulkSettingsDialog({ open, onOpenChange, devices, hiddenIds, onD
                 <label className="flex items-center gap-1.5"><input type="radio" name="tz-mode" checked={v.tz_mode === 'override'} onChange={() => set({ tz_mode: 'override' })} /> Use one timezone for all</label>
               </div>
               {v.tz_mode === 'override' && <TimezoneSelect value={v.schedule_timezone} onChange={(z) => set({ schedule_timezone: z })} />}
-              <p className="text-[11px] text-muted">{HELP.timezone} {HELP.scheduler}</p>
+              <p className="text-xs text-muted">{HELP.timezone} {HELP.scheduler}</p>
             </div>
           </FieldToggle>
           <FieldToggle id="bulk-retention" label="Retention" checked={!!on.retention} onChange={toggle('retention')} currentValue={current(enrolled, (d) => d.keep_versions)}>
@@ -270,7 +270,7 @@ export function BulkSettingsDialog({ open, onOpenChange, devices, hiddenIds, onD
             <div className="flex gap-4 text-sm">{['running', 'startup'].map((t) => (
               <label key={t} className="flex items-center gap-1.5"><input type="checkbox" className="h-4 w-4 accent-primary" checked={v.config_types.includes(t)} onChange={(e) => set({ config_types: e.target.checked ? [...v.config_types, t] : v.config_types.filter((x: string) => x !== t) })} />{t === 'running' ? 'Running configuration' : 'Startup configuration'}</label>
             ))}</div>
-            <p className="text-[11px] text-muted">Startup capture is rejected per device when its driver cannot collect it (FortiOS, PAN-OS, Junos); the preview shows which.</p>
+            <p className="text-xs text-muted">Startup capture is rejected per device when its driver cannot collect it (FortiOS, PAN-OS, Junos); the preview shows which.</p>
           </FieldToggle>
           <FieldToggle id="bulk-alerts" label="Change alerts" checked={!!on.alerts} onChange={toggle('alerts')} currentValue={current(enrolled, (d) => d.alert_on_change)}>
             <div className="flex items-center gap-2 text-sm"><Switch aria-label="Alert on configuration change" checked={v.alert_on_change} onCheckedChange={(x) => set({ alert_on_change: x })} />Alert when a configuration changes</div>
@@ -291,7 +291,7 @@ export function BulkSettingsDialog({ open, onOpenChange, devices, hiddenIds, onD
               : channels.data.data.map((c: any) => (
                 <label key={c.id} className="flex items-center gap-2 text-sm"><input type="checkbox" className="h-4 w-4 accent-primary" checked={v.notify_channels.includes(c.id)} onChange={(e) => set({ notify_channels: e.target.checked ? [...v.notify_channels, c.id] : v.notify_channels.filter((x: string) => x !== c.id) })} />{c.name} <span className="text-muted">({c.type})</span></label>
               ))}
-            <p className="text-[11px] text-muted">Replaces each device's destination list with the selection (none selected clears it).</p>
+            <p className="text-xs text-muted">Replaces each device's destination list with the selection (none selected clears it).</p>
           </FieldToggle>
         </div>
         {errors.length > 0 && <ul role="alert" className="list-disc pl-5 text-xs text-danger">{errors.map((e) => <li key={e}>{e}</li>)}</ul>}

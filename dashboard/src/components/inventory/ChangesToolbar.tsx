@@ -65,7 +65,7 @@ export function ChangesToolbar({
               <X className="h-3.5 w-3.5" aria-hidden />
             </button>
           ) : (
-            <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 text-[10px] text-muted sm:block" aria-hidden>/</kbd>
+            <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 text-2xs text-muted sm:block" aria-hidden>/</kbd>
           )}
         </div>
         <div role="group" aria-label="Kind of asset" className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface2/60 p-0.5">

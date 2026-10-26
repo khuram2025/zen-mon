@@ -170,7 +170,7 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
       <div className={cn('h-full w-full overflow-hidden rounded', selected && 'ring-2 ring-primary/70')} style={{ background: shape.fill || 'transparent' }}>
         {m.src
           ? <img src={m.src} alt={shape.text || 'image'} className="h-full w-full object-contain" draggable={false} />
-          : <div className="flex h-full w-full items-center justify-center text-[10px] text-muted">no image</div>}
+          : <div className="flex h-full w-full items-center justify-center text-2xs text-muted">no image</div>}
       </div>
     )
   } else if (isTextKind) {
@@ -193,7 +193,7 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
         }}
       >
         {textLayer({ height: '100%', width: '100%' })}
-        {placeholder && <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[11px] italic text-muted/70">Double-click to edit</span>}
+        {placeholder && <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs italic text-muted/70">Double-click to edit</span>}
       </div>
     )
   } else if (shape.kind === 'line' || shape.kind === 'arrow') {
@@ -274,7 +274,7 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
       {linkMapId && (
         <button
           type="button"
-          className="nodrag pointer-events-auto absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-border bg-surface/95 px-1.5 py-0.5 text-[10px] font-semibold text-text2 shadow-sm hover:border-primary/60 hover:text-text"
+          className="nodrag pointer-events-auto absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-border bg-surface/95 px-1.5 py-0.5 text-2xs font-semibold text-text2 shadow-sm hover:border-primary/60 hover:text-text"
           style={{ transform: `scale(${ts})`, transformOrigin: 'top right' }}
           title="Open the linked map"
           onClick={(e) => { e.stopPropagation(); navigate(`/maps/manual?map=${encodeURIComponent(linkMapId)}${live ? '&mode=live' : ''}`) }}

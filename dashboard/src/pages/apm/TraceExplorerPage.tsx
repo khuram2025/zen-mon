@@ -240,7 +240,7 @@ export function TraceExplorerPage() {
                       onClick={() => setExpandedId(open ? null : t.trace_id)}
                     >
                       <Td><ExpandToggle open={open} onClick={() => setExpandedId(open ? null : t.trace_id)} /></Td>
-                      <Td className="whitespace-nowrap font-mono text-[11px] text-muted">{relativeTime(t.start_time)}</Td>
+                      <Td className="whitespace-nowrap font-mono text-xs text-muted">{relativeTime(t.start_time)}</Td>
                       <Td>
                         <div className="flex items-center gap-2">
                           {t.has_error && <AlertCircle className="h-4 w-4 shrink-0 text-danger" />}
@@ -278,7 +278,7 @@ export function TraceExplorerPage() {
                           ) : (
                             <div className="space-y-3">
                               {t.has_error && (
-                                <div className="text-[11px] font-medium text-danger">Significant: this trace contains at least one failed span.</div>
+                                <div className="text-xs font-medium text-danger">Significant: this trace contains at least one failed span.</div>
                               )}
                               <RequestFlow
                                 hops={expanded.data?.spans?.length ? hopsFromTraceSpans(expanded.data.spans) : hopsFromTraceSummary(t)}
@@ -288,7 +288,7 @@ export function TraceExplorerPage() {
                                 <Button size="sm" onClick={(event) => { event.stopPropagation(); navigate(`/apm/traces/${t.trace_id}`) }}>
                                   Open waterfall
                                 </Button>
-                                <span className="font-mono text-[10px] text-muted">{t.trace_id}</span>
+                                <span className="font-mono text-2xs text-muted">{t.trace_id}</span>
                               </div>
                             </div>
                           )}

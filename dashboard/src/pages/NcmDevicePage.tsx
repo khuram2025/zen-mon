@@ -681,7 +681,7 @@ function SettingsTab({ device, stale, onDirty, editRequest, onRemoved }: { devic
                 </label>
               )
             })}</div>
-            {errors.config_types && <p className="mt-1 text-[11px] text-danger">{errors.config_types}</p>}
+            {errors.config_types && <p className="mt-1 text-xs text-danger">{errors.config_types}</p>}
           </div>
           <FormField label="Coverage scope" hint="Scope decides whether the device counts in coverage; it never blocks a deliberate backup.">
             <Select value={form.eligible_override === null ? 'auto' : form.eligible_override ? 'include' : 'exclude'} onValueChange={(v) => set({ eligible_override: v === 'auto' ? null : v === 'include' })}>
@@ -701,9 +701,9 @@ function SettingsTab({ device, stale, onDirty, editRequest, onRemoved }: { devic
                   ? <FormField label="Every (hours)" error={errors.interval}><Input type="number" min={1} max={720} value={form.schedule_interval_hours} onChange={(e) => set({ schedule_interval_hours: Number(e.target.value) })} /></FormField>
                   : <FormField label="At (24-hour)" error={errors.time}><Input type="time" value={form.schedule_time} onChange={(e) => set({ schedule_time: e.target.value })} /></FormField>}
               </div>
-              {form.schedule_type === 'weekly' && <div><DayPicker value={form.schedule_days} onChange={(d) => set({ schedule_days: d })} />{errors.days && <p className="mt-1 text-[11px] text-danger">{errors.days}</p>}</div>}
-              {form.schedule_type !== 'interval' && <div><div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted">Timezone</div><TimezoneSelect value={form.schedule_timezone} onChange={(z) => set({ schedule_timezone: z })} /><p className="mt-1 text-[11px] text-muted">{HELP.timezone}</p></div>}
-              <p className="text-[11px] text-muted">{HELP.scheduler}</p>
+              {form.schedule_type === 'weekly' && <div><DayPicker value={form.schedule_days} onChange={(d) => set({ schedule_days: d })} />{errors.days && <p className="mt-1 text-xs text-danger">{errors.days}</p>}</div>}
+              {form.schedule_type !== 'interval' && <div><div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted">Timezone</div><TimezoneSelect value={form.schedule_timezone} onChange={(z) => set({ schedule_timezone: z })} /><p className="mt-1 text-xs text-muted">{HELP.timezone}</p></div>}
+              <p className="text-xs text-muted">{HELP.scheduler}</p>
             </div>
           )}
           <div className="grid gap-3 sm:grid-cols-2">

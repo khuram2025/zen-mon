@@ -27,8 +27,9 @@ import {
 } from './navigation'
 import { filterNavGroups } from './navAccess'
 
-export const SIDEBAR_RAIL = 72
-export const SIDEBAR_WIDE = 264
+// In rem, so the sidebar grows with the display density along with its text (72px / 264px at the 15px default).
+export const SIDEBAR_RAIL = '4.8rem'
+export const SIDEBAR_WIDE = '17.6rem'
 
 const STARS_KEY = 'zp-nav-stars'
 
@@ -44,8 +45,8 @@ function Brand({ compact }: { compact?: boolean }) {
       </div>
       {!compact && (
         <div className="min-w-0 leading-none">
-          <div className="truncate text-[15px] font-bold tracking-tight text-sidebar-text">ZenPlus</div>
-          <div className="mt-1 truncate text-[9.5px] font-medium uppercase tracking-[0.14em] text-sidebar-text-muted">
+          <div className="truncate text-base font-bold tracking-tight text-sidebar-text">ZenPlus</div>
+          <div className="mt-1 truncate text-2xs font-medium uppercase tracking-[0.14em] text-sidebar-text-muted">
             Network Operations
           </div>
         </div>
@@ -59,7 +60,7 @@ function AlertBadge({ count, className }: { count: number; className?: string })
   return (
     <span
       className={cn(
-        'ml-auto shrink-0 rounded-full bg-danger px-1.5 text-center text-[10px] font-bold leading-[18px] text-white',
+        'ml-auto shrink-0 rounded-full bg-danger px-1.5 text-center text-2xs font-bold leading-[18px] text-white',
         className,
       )}
     >
@@ -72,7 +73,7 @@ function SectionLabel({ children, className }: { children: string; className?: s
   return (
     <div
       className={cn(
-        'select-none px-2.5 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-text-muted',
+        'select-none px-2.5 pb-1 pt-2.5 text-2xs font-semibold uppercase tracking-[0.12em] text-sidebar-text-muted',
         className,
       )}
     >
@@ -181,7 +182,7 @@ function LeafRow({ node, pathname, params, alertCount, onNavigate, depth = 1, st
         title={node.hint}
         className={cn(
           'relative flex items-center gap-2.5 rounded-md pl-2.5 pr-2 transition-colors',
-          depth === 1 ? 'min-h-[32px] py-1 text-[13px]' : 'min-h-[28px] py-0.5 text-[12.5px]',
+          depth === 1 ? 'min-h-[32px] py-1 text-sm' : 'min-h-[28px] py-0.5 text-sm',
           active
             ? 'bg-primary/10 font-semibold text-primary'
             : 'text-sidebar-text/75 hover:bg-sidebar-hover hover:text-sidebar-text',
@@ -194,7 +195,7 @@ function LeafRow({ node, pathname, params, alertCount, onNavigate, depth = 1, st
         {showIcon && <node.icon className={cn('h-4 w-4 shrink-0', active ? 'text-primary' : 'text-sidebar-text-muted')} />}
         <span className="min-w-0 flex-1 leading-tight">
           <span className="block truncate">{node.label}</span>
-          {caption && <span className="block truncate text-[10.5px] font-normal text-sidebar-text-muted">{caption}</span>}
+          {caption && <span className="block truncate text-xs font-normal text-sidebar-text-muted">{caption}</span>}
         </span>
         {badge > 0 && <AlertBadge count={badge} className={cn(onToggleStar && 'group-hover/row:invisible')} />}
       </Link>
@@ -235,7 +236,7 @@ function BranchRow({
           }
         }}
         className={cn(
-          'relative flex min-h-[32px] w-full items-center gap-2.5 rounded-md py-1 pl-2.5 pr-2 text-left text-[13px] transition-colors',
+          'relative flex min-h-[32px] w-full items-center gap-2.5 rounded-md py-1 pl-2.5 pr-2 text-left text-sm transition-colors',
           branchActive
             ? 'font-medium text-sidebar-text'
             : 'text-sidebar-text/75 hover:bg-sidebar-hover hover:text-sidebar-text',
@@ -314,13 +315,13 @@ function RailFlyout({
       <div
         role="menu"
         aria-label={group.label}
-        className="w-[264px] overflow-hidden rounded-xl border border-sidebar-border bg-sidebar-bg shadow-2xl ring-1 ring-black/5 animate-fade-in"
+        className="w-[17.6rem] overflow-hidden rounded-xl border border-sidebar-border bg-sidebar-bg shadow-2xl ring-1 ring-black/5 animate-fade-in"
       >
         <div className="flex items-center gap-2.5 border-b border-sidebar-border px-3 py-2.5">
           <span className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/10 text-primary">
             <group.icon className="h-3.5 w-3.5" />
           </span>
-          <span className="truncate text-[13px] font-semibold text-sidebar-text">{group.label}</span>
+          <span className="truncate text-sm font-semibold text-sidebar-text">{group.label}</span>
         </div>
         <div className="sidebar-scroll max-h-[75vh] overflow-y-auto p-1.5">
           {group.items.map((item) => {
@@ -343,12 +344,12 @@ function RailFlyout({
                 >
                   <item.icon className={cn('mt-px h-[15px] w-[15px] shrink-0', branchActive ? 'text-primary' : 'text-sidebar-text-muted')} />
                   <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5 text-[12.5px] font-medium leading-tight">
+                    <span className="flex items-center gap-1.5 text-sm font-medium leading-tight">
                       <span className="truncate">{item.label}</span>
                       {item.badge === 'alerts' && <AlertBadge count={alertCount} />}
                     </span>
                     {item.hint && (
-                      <span className="mt-0.5 block truncate text-[10.5px] leading-tight text-sidebar-text-muted">
+                      <span className="mt-0.5 block truncate text-xs leading-tight text-sidebar-text-muted">
                         {item.hint}
                       </span>
                     )}
@@ -366,7 +367,7 @@ function RailFlyout({
                           onClick={onClose}
                           aria-current={active ? 'page' : undefined}
                           className={cn(
-                            'flex items-center rounded-md px-2 py-1 text-[12px] transition-colors',
+                            'flex items-center rounded-md px-2 py-1 text-sm transition-colors',
                             active
                               ? 'bg-primary/10 font-semibold text-primary'
                               : 'text-sidebar-text/70 hover:bg-sidebar-hover hover:text-sidebar-text',
@@ -577,8 +578,8 @@ export function Sidebar({
           >
             <Icon className={cn('h-4 w-4 shrink-0', i === cursor ? 'text-primary' : 'text-sidebar-text-muted')} />
             <span className="min-w-0 flex-1 leading-tight">
-              <span className="block truncate text-[13px] font-medium">{e.node.label}</span>
-              <span className="block truncate text-[10.5px] text-sidebar-text-muted">{entryTrail(e)}</span>
+              <span className="block truncate text-sm font-medium">{e.node.label}</span>
+              <span className="block truncate text-xs text-sidebar-text-muted">{entryTrail(e)}</span>
             </span>
             {i === cursor && <CornerDownLeft className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden />}
           </Link>
@@ -646,7 +647,7 @@ export function Sidebar({
                     </span>
                     <span
                       className={cn(
-                        'min-w-0 flex-1 truncate text-[13px]',
+                        'min-w-0 flex-1 truncate text-sm',
                         groupActive ? 'font-semibold text-sidebar-text' : 'font-medium text-sidebar-text/85',
                       )}
                     >
@@ -730,12 +731,12 @@ export function Sidebar({
       >
         <group.icon className={cn('h-[18px] w-[18px]', group.id === 'starred' && !active && 'text-warning')} />
         {group.id === 'alerting' && alertCount > 0 && (
-          <span className="absolute -right-1.5 -top-1 min-w-[16px] rounded-full bg-danger px-1 text-center text-[9px] font-bold leading-4 text-white ring-2 ring-sidebar-bg">
+          <span className="absolute -right-1.5 -top-1 min-w-[16px] rounded-full bg-danger px-1 text-center text-2xs font-bold leading-4 text-white ring-2 ring-sidebar-bg">
             {alertCount > 99 ? '99+' : alertCount}
           </span>
         )}
       </span>
-      <span className={cn('max-w-full truncate px-0.5 text-[10px] leading-none', active ? 'font-semibold' : 'font-medium')}>
+      <span className={cn('max-w-full truncate px-0.5 text-2xs leading-none', active ? 'font-semibold' : 'font-medium')}>
         {group.short}
       </span>
     </button>
@@ -827,7 +828,7 @@ export function Sidebar({
               role="combobox"
               aria-expanded={!!results}
               aria-autocomplete="list"
-              className="h-9 w-full rounded-lg border border-sidebar-border bg-sidebar-hover/50 pl-8 pr-8 text-[13px] text-sidebar-text placeholder:text-sidebar-text-muted transition-colors focus:border-primary/50 focus:bg-sidebar-bg focus:outline-none focus:ring-2 focus:ring-primary/20"
+              className="h-9 w-full rounded-lg border border-sidebar-border bg-sidebar-hover/50 pl-8 pr-8 text-sm text-sidebar-text placeholder:text-sidebar-text-muted transition-colors focus:border-primary/50 focus:bg-sidebar-bg focus:outline-none focus:ring-2 focus:ring-primary/20"
             />
             {query ? (
               <button
@@ -839,7 +840,7 @@ export function Sidebar({
                 <X className="h-3.5 w-3.5" />
               </button>
             ) : (
-              <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-sidebar-border bg-sidebar-bg px-1.5 font-mono text-[10px] font-semibold leading-4 text-sidebar-text-muted">
+              <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-sidebar-border bg-sidebar-bg px-1.5 font-mono text-2xs font-semibold leading-4 text-sidebar-text-muted">
                 /
               </kbd>
             )}
@@ -866,16 +867,16 @@ export function Sidebar({
         {wide ? (
           <div className="flex items-center gap-2.5 rounded-lg px-1.5 py-1">
             <div className="relative shrink-0">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-primary/25 to-accent/25 text-[11.5px] font-bold text-primary">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-primary/25 to-accent/25 text-xs font-bold text-primary">
                 {initials}
               </div>
               <span className="absolute -bottom-px -right-px h-2.5 w-2.5 rounded-full bg-success ring-2 ring-sidebar-bg" aria-hidden />
             </div>
             <div className="min-w-0 flex-1 leading-tight">
-              <div className="truncate text-[12.5px] font-semibold text-sidebar-text">
+              <div className="truncate text-sm font-semibold text-sidebar-text">
                 {user?.full_name || user?.username}
               </div>
-              <div className="truncate text-[10.5px] text-sidebar-text-muted">
+              <div className="truncate text-xs text-sidebar-text-muted">
                 <span className="capitalize">{(user?.role || 'user').replace(/_/g, ' ')}</span>
                 {sysStatus?.current_version ? ` · v${sysStatus.current_version}` : ''}
               </div>
@@ -893,7 +894,7 @@ export function Sidebar({
         ) : (
           <>
             <div
-              className="mx-auto flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-primary/25 to-accent/25 text-[11px] font-bold text-primary"
+              className="mx-auto flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-primary/25 to-accent/25 text-xs font-bold text-primary"
               title={`${user?.full_name || user?.username || ''} (${user?.role || 'user'})`}
             >
               {initials}
@@ -916,7 +917,7 @@ export function Sidebar({
   if (variant === 'drawer') {
     return (
       <aside
-        className="flex h-full w-[284px] flex-col border-r border-sidebar-border bg-sidebar-bg"
+        className="flex h-full w-[19rem] flex-col border-r border-sidebar-border bg-sidebar-bg"
         aria-label="Main navigation"
       >
         {body}

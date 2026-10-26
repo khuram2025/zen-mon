@@ -136,7 +136,7 @@ export function InventoryConfigCard({
     },
     { icon: Wifi, label: 'Ping', value: device.ping_enabled ? `Enabled · ${device.ping_interval}s` : 'Disabled' },
     ...(snmp && device.snmp_poll_interval ? [{ icon: Timer, label: 'SNMP polling', value: `Every ${formatSpan(Number(device.snmp_poll_interval))}` }] : []),
-    { icon: Info, label: 'System OID', value: <span className="break-all font-mono text-[13px]">{device.sys_object_id || '—'}</span> },
+    { icon: Info, label: 'System OID', value: <span className="break-all font-mono text-sm">{device.sys_object_id || '—'}</span> },
     { icon: Layers, label: 'Hardware', value: entities.length > 0 ? <button type="button" onClick={onDetails} className="text-primary hover:underline">{entities.length} component{entities.length === 1 ? '' : 's'}</button> : '—' },
     { icon: Clock, label: 'Last Updated', value: <span title={device.updated_at || device.last_seen || undefined}>{formatRelative(device.updated_at || device.last_seen)}</span> },
   ]

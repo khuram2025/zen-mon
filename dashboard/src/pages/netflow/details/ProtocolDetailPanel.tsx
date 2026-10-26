@@ -14,11 +14,11 @@ export function ProtocolDetailPanel({ row, ctx }: { row: ProtocolRow; ctx: Detai
       <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-text">{protocolLabel(row.protocol)}</div>
-          <div className="text-[11px] text-text2">
+          <div className="text-xs text-text2">
             Seen {formatDateTime(row.first_seen, tz, { zone: 'offset' })} → {formatDateTime(row.last_seen, tz, { zone: 'none' })}
           </div>
           {!row.port_applicable && (
-            <div className="mt-0.5 text-[11px] text-text2">{row.name} carries no transport ports: services are not applicable{row.protocol === 1 || row.protocol === 58 ? '; message types are listed instead' : ''}.</div>
+            <div className="mt-0.5 text-xs text-text2">{row.name} carries no transport ports: services are not applicable{row.protocol === 1 || row.protocol === 58 ? '; message types are listed instead' : ''}.</div>
           )}
         </div>
         <div className="flex flex-wrap gap-1.5">
@@ -37,7 +37,7 @@ export function ProtocolDetailPanel({ row, ctx }: { row: ProtocolRow; ctx: Detai
             <li key={`${s.port}-${s.icmp_type_code ?? ''}`} className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="min-w-0 break-words">
                 <span className="font-medium text-text">{serviceText(s)}</span>
-                <span className="ml-1 text-[11px] text-text2">{s.application}</span>
+                <span className="ml-1 text-xs text-text2">{s.application}</span>
               </span>
               <span className="flex items-center gap-2">
                 <span className="tabular-nums text-text" title={formatBytesExact(s.bytes)}>{formatBytes(s.bytes)}</span>

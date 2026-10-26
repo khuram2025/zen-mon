@@ -98,7 +98,7 @@ export function TagPicker({
             >
               <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: tagColor(d.name, colors) }} />
               <span className="flex-1 truncate">{d.name}</span>
-              <span className="text-[10px] text-muted">{d.device_count}</span>
+              <span className="text-2xs text-muted">{d.device_count}</span>
             </button>
           ))}
           {canCreate && (

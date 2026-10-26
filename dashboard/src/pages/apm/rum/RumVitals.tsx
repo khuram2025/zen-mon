@@ -99,10 +99,10 @@ function VitalHistogram({ name, dist }: { name: RumVitalName; dist: RumVitalDist
       <CardHeader className="border-b border-border px-3 py-2">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <CardTitle className="text-[13px]">{VITAL_TITLE[name]}</CardTitle>
-            <div className="text-[10px] text-muted">{fmtCount(dist.samples)} finalized views{lowConfidence ? ' · indicative' : ''}</div>
+            <CardTitle className="text-sm">{VITAL_TITLE[name]}</CardTitle>
+            <div className="text-2xs text-muted">{fmtCount(dist.samples)} finalized views{lowConfidence ? ' · indicative' : ''}</div>
           </div>
-          <div className="flex gap-2 font-mono text-[10px] tabular-nums text-text2">
+          <div className="flex gap-2 font-mono text-2xs tabular-nums text-text2">
             {(['p50', 'p75', 'p90', 'p95'] as const).map((key) => (
               <span key={key} title={`${key} · ${formatRumVital(name, dist.percentiles[key])}`}>
                 <span className="text-muted">{key} </span>{formatRumVital(name, dist.percentiles[key])}
@@ -113,7 +113,7 @@ function VitalHistogram({ name, dist }: { name: RumVitalName; dist: RumVitalDist
       </CardHeader>
       <CardContent className="p-3">
         {dist.samples === 0 ? (
-          <div className="py-8 text-center text-[11px] text-muted">No finalized samples in this segment.</div>
+          <div className="py-8 text-center text-xs text-muted">No finalized samples in this segment.</div>
         ) : buckets.length === 0 ? (
           <div className="space-y-2 py-2">
             <div className="flex h-2 overflow-hidden rounded-full bg-surface2">
@@ -121,7 +121,7 @@ function VitalHistogram({ name, dist }: { name: RumVitalName; dist: RumVitalDist
               <div style={{ width: `${dist.needs_improvement_pct ?? 0}%`, background: BAND_FILL['needs-improvement'] }} />
               <div style={{ width: `${dist.poor_pct ?? 0}%`, background: BAND_FILL.poor }} />
             </div>
-            <p className="text-[10px] text-muted">Windows longer than 14 days read the 5-minute rollup, which keeps percentiles and the good / needs-improvement / poor split{dist.rated_samples != null && dist.rated_samples < dist.samples ? ` (over ${fmtCount(dist.rated_samples)} rated views)` : ''} but not the per-bucket histogram.</p>
+            <p className="text-2xs text-muted">Windows longer than 14 days read the 5-minute rollup, which keeps percentiles and the good / needs-improvement / poor split{dist.rated_samples != null && dist.rated_samples < dist.samples ? ` (over ${fmtCount(dist.rated_samples)} rated views)` : ''} but not the per-bucket histogram.</p>
           </div>
         ) : (
           <>
@@ -157,7 +157,7 @@ function VitalHistogram({ name, dist }: { name: RumVitalName; dist: RumVitalDist
                 )
               })}
             </svg>
-            <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
+            <div className="mt-1 flex items-center justify-between text-2xs text-muted">
               <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm" style={{ background: BAND_FILL.good }} />Good ≤ {formatRumVital(name, dist.thresholds.good)} · {dist.good_pct == null ? '—' : `${dist.good_pct.toFixed(0)}%`}</span>
               <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm" style={{ background: BAND_FILL['needs-improvement'] }} />{dist.needs_improvement_pct == null ? '—' : `${dist.needs_improvement_pct.toFixed(0)}%`}</span>
               <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm" style={{ background: BAND_FILL.poor }} />Poor &gt; {formatRumVital(name, dist.thresholds.poor)} · {dist.poor_pct == null ? '—' : `${dist.poor_pct.toFixed(0)}%`}</span>
@@ -199,18 +199,18 @@ function SlowSegments({ data, dimension, vital, onDimension, onVital, onFilter, 
       actions={(
         <div className="flex items-center gap-1.5">
           <Select value={dimension} onValueChange={(value) => onDimension(value as RumVitalDimension)}>
-            <SelectTrigger className="h-7 w-[150px] text-[11px]" aria-label="Break down by"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-7 w-[150px] text-xs" aria-label="Break down by"><SelectValue /></SelectTrigger>
             <SelectContent>{DIMENSIONS.map((item) => <SelectItem key={item.value} value={item.value}>By {item.label.toLowerCase()}</SelectItem>)}</SelectContent>
           </Select>
           <Select value={vital} onValueChange={(value) => onVital(value as RumVitalName)}>
-            <SelectTrigger className="h-7 w-[110px] text-[11px]" aria-label="Vital"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-7 w-[110px] text-xs" aria-label="Vital"><SelectValue /></SelectTrigger>
             <SelectContent>{VITAL_NAMES.map((name) => <SelectItem key={name} value={name}>{name.toUpperCase()}</SelectItem>)}</SelectContent>
           </Select>
         </div>
       )}
     >
       {data && !data.breakdown.available ? (
-        <div className="px-4 py-8 text-center text-[11px] text-muted">The 5-minute rollup used for windows over 14 days does not carry the connection type. Pick a shorter window or another dimension.</div>
+        <div className="px-4 py-8 text-center text-xs text-muted">The 5-minute rollup used for windows over 14 days does not carry the connection type. Pick a shorter window or another dimension.</div>
       ) : (
         <Table>
           <THead className={EXPLORER_HEAD}><Tr>
@@ -261,12 +261,12 @@ function AttributionCard({ name, rows, onFilter }: { name: 'lcp' | 'cls' | 'inp'
   return (
     <Card className="h-full">
       <CardHeader className="border-b border-border px-3 py-2">
-        <CardTitle className="flex items-center gap-2 text-[13px]"><Icon className="h-3.5 w-3.5 text-primary" />{meta.title}</CardTitle>
-        <p className="text-[10px] text-muted">{meta.hint}</p>
+        <CardTitle className="flex items-center gap-2 text-sm"><Icon className="h-3.5 w-3.5 text-primary" />{meta.title}</CardTitle>
+        <p className="text-2xs text-muted">{meta.hint}</p>
       </CardHeader>
       <CardContent className="p-0">
         {!rows?.length ? (
-          <div className="px-4 py-8 text-center text-[11px] text-muted">{meta.empty}</div>
+          <div className="px-4 py-8 text-center text-xs text-muted">{meta.empty}</div>
         ) : (
           <ul className="divide-y divide-border/60">
             {rows.map((row, index) => {
@@ -276,12 +276,12 @@ function AttributionCard({ name, rows, onFilter }: { name: 'lcp' | 'cls' | 'inp'
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="truncate font-mono text-xs text-text" title={row.element}>{row.element}</div>
-                      <button type="button" className="mt-0.5 max-w-full truncate text-left text-[10px] text-muted hover:text-text hover:underline" title={`Filter by view ${row.view_name}`} onClick={() => onFilter('view_name', row.view_name)}>{row.view_name || '/'}</button>
-                      {row.detail && <div className="truncate text-[10px] text-muted" title={row.detail}>{meta.detail}: <span className="font-mono">{row.detail}</span></div>}
+                      <button type="button" className="mt-0.5 max-w-full truncate text-left text-2xs text-muted hover:text-text hover:underline" title={`Filter by view ${row.view_name}`} onClick={() => onFilter('view_name', row.view_name)}>{row.view_name || '/'}</button>
+                      {row.detail && <div className="truncate text-2xs text-muted" title={row.detail}>{meta.detail}: <span className="font-mono">{row.detail}</span></div>}
                     </div>
                     <div className="shrink-0 text-right">
                       <div className={cn('font-mono text-xs tabular-nums', band === 'good' && 'text-success', band === 'needs-improvement' && 'text-warning', band === 'poor' && 'text-danger')}>{formatRumVital(name, row.p75)}</div>
-                      <div className="text-[9px] text-muted">{fmtCount(row.count)} views · {row.poor_pct == null ? '—' : `${row.poor_pct.toFixed(0)}% poor`}</div>
+                      <div className="text-2xs text-muted">{fmtCount(row.count)} views · {row.poor_pct == null ? '—' : `${row.poor_pct.toFixed(0)}% poor`}</div>
                     </div>
                   </div>
                 </li>
@@ -328,7 +328,7 @@ export function RumWebVitalsPanel({ overview, timeseries, vitals, vitalsLoading,
           <RumVitalCard name="ttfb" metric={overview.vitals.ttfb} compact />
           <RumVitalCard name="load" metric={overview.vitals.load} compact />
         </div>
-        <div className="mt-2.5 rounded-md border border-info/25 bg-info/5 px-3 py-1.5 text-[11px] leading-snug text-text2">
+        <div className="mt-2.5 rounded-md border border-info/25 bg-info/5 px-3 py-1.5 text-xs leading-snug text-text2">
           <div className="flex items-start gap-2"><Gauge className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" /><p><span className="font-semibold text-text">Field performance at p75.</span> At least 75% of measured visits experienced a value at or below each result. Missing samples remain “No data” and are excluded from scoring; figures under 20 samples are marked indicative.</p></div>
         </div>
       </section>

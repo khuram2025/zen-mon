@@ -10,14 +10,18 @@ import {
   CheckCircle2,
   Info,
   LogOut,
+  Maximize2,
   Menu,
+  MonitorCog,
   Moon,
   Search,
   Sun,
   User,
+  X,
 } from 'lucide-react'
 import { useAuth, useCan } from '@/stores/auth'
 import { useTheme } from '@/stores/theme'
+import { DENSITIES, useDisplay } from '@/stores/display'
 import { Button } from '@/components/ui/Button'
 import { api } from '@/lib/api'
 import { relativeTime } from '@/lib/utils'
@@ -50,7 +54,7 @@ function Breadcrumbs() {
   const detailName = useBreadcrumbDetailFor(pathname)
 
   if (!trail) {
-    return <span className="text-xs font-medium text-text">{pathname.split('/').pop() || 'ZenPlus'}</span>
+    return <span className="text-sm font-medium text-text">{pathname.split('/').pop() || 'ZenPlus'}</span>
   }
 
   const leaf = trail.child ?? trail.item
@@ -65,13 +69,75 @@ function Breadcrumbs() {
   ]
 
   return (
-    <div className="flex items-center gap-1.5 text-xs">
+    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-sm">
       {crumbs.map((c, i) => (
         <span key={`${c.label}-${i}`} className="flex items-center gap-1.5">
-          {i > 0 && <ChevronRight className="h-3 w-3 text-muted/40" />}
+          {i > 0 && <ChevronRight className="h-3.5 w-3.5 text-muted/50" />}
           <span className={c.muted ? 'text-muted' : 'font-medium text-text'}>{c.label}</span>
         </span>
       ))}
+    </nav>
+  )
+}
+
+/** Density and wall mode, one click from any page (Settings → Appearance has the same controls). */
+function DisplayMenu() {
+  const { density, setDensity, setKiosk } = useDisplay()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Display density and wall mode"
+        aria-expanded={open}
+        title="Display"
+        className="flex h-8 w-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface2 hover:text-text"
+      >
+        <MonitorCog className="h-4 w-4" />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-50 mt-2 w-64 overflow-hidden rounded-lg border border-border bg-surface shadow-xl animate-fade-in">
+          <div className="border-b border-border px-3 py-2 text-2xs font-semibold uppercase tracking-wider text-muted">Display density</div>
+          <div className="p-1" role="radiogroup" aria-label="Display density">
+            {DENSITIES.map((d) => (
+              <button
+                key={d.value}
+                type="button"
+                role="radio"
+                aria-checked={density === d.value}
+                onClick={() => setDensity(d.value)}
+                className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left transition-colors ${density === d.value ? 'bg-primary/10 text-primary' : 'text-text2 hover:bg-surface2'}`}
+              >
+                <span className={`h-2 w-2 shrink-0 rounded-full ${density === d.value ? 'bg-primary' : 'bg-border-strong'}`} />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium">{d.label}</span>
+                  <span className="block truncate text-2xs text-muted">{d.hint}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          <div className="border-t border-border p-1">
+            <button
+              type="button"
+              onClick={() => { setOpen(false); setKiosk(true) }}
+              className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm font-medium text-text2 transition-colors hover:bg-surface2"
+            >
+              <Maximize2 className="h-4 w-4 text-muted" />
+              NOC wall mode
+              <span className="ml-auto text-2xs text-muted">full screen</span>
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -114,28 +180,28 @@ function HeaderAlertCenter() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className={`relative flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+        className={`relative flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
           critical > 0 ? 'bg-danger/10 text-danger hover:bg-danger/15'
           : active > 0 ? 'bg-warning/10 text-warning hover:bg-warning/15'
           : 'text-muted hover:bg-surface2 hover:text-text'
         }`}
         title={`${active} active alerts`}
       >
-        <BellIcon className="h-3.5 w-3.5" />
+        <BellIcon className="h-4 w-4" />
         {active > 0 && (
-          <span className="absolute -right-1 -top-1 min-w-[16px] rounded-full bg-danger px-1 text-center text-[9px] font-bold leading-4 text-white">
+          <span className="absolute -right-1 -top-1 min-w-[16px] rounded-full bg-danger px-1 text-center text-2xs font-bold leading-4 text-white">
             {active > 99 ? '99+' : active}
           </span>
         )}
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-2 w-[380px] overflow-hidden rounded-lg border border-border bg-surface shadow-xl animate-fade-in">
+        <div className="absolute right-0 top-full z-50 mt-2 w-[26rem] overflow-hidden rounded-lg border border-border bg-surface shadow-xl animate-fade-in">
           <div className="border-b border-border p-3">
             <div className="flex items-center justify-between gap-2">
               <div>
                 <div className="text-sm font-semibold">Alert Center</div>
-                <div className="text-[11px] text-muted">{active} active · {critical} critical · {warning} warning</div>
+                <div className="text-xs text-muted">{active} active · {critical} critical · {warning} warning</div>
               </div>
               <button
                 type="button"
@@ -169,7 +235,7 @@ function HeaderAlertCenter() {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium">{alert.message}</span>
-                      <span className="mt-0.5 block truncate text-[11px] text-muted">
+                      <span className="mt-0.5 block truncate text-xs text-muted">
                         {alert.device_hostname || alert.device_ip || alert.service_check_name || 'System'} · {relativeTime(alert.triggered_at)}
                       </span>
                     </span>
@@ -207,6 +273,41 @@ export function Layout() {
 
   const [userMenu, setUserMenu] = useState(false)
 
+  const { density, kiosk, setKiosk } = useDisplay()
+  // Leaving full screen (Esc) also leaves a wall mode that was entered from the menu; a wall screen opened with
+  // ?kiosk=1 stays in kiosk mode, since its browser may never be full screen.
+  const kioskFromUrl = useRef(new URLSearchParams(window.location.search).get('kiosk') === '1')
+  useEffect(() => {
+    if (!kiosk) return
+    const onFs = () => { if (!document.fullscreenElement && !kioskFromUrl.current) setKiosk(false) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !document.fullscreenElement) setKiosk(false) }
+    document.addEventListener('fullscreenchange', onFs)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('fullscreenchange', onFs); document.removeEventListener('keydown', onKey) }
+  }, [kiosk, setKiosk])
+
+  if (kiosk) {
+    return (
+      <div className="group/kiosk relative min-h-screen bg-bg">
+        <button
+          type="button"
+          onClick={() => setKiosk(false)}
+          className="fixed right-3 top-3 z-50 flex items-center gap-1.5 rounded-md border border-border bg-surface/90 px-2.5 py-1.5 text-xs font-medium text-text2 opacity-0 shadow-lg backdrop-blur transition-opacity hover:text-text focus-visible:opacity-100 group-hover/kiosk:opacity-100"
+        >
+          <X className="h-3.5 w-3.5" /> Exit wall mode
+        </button>
+        {/* key: chart text sizes are read when a chart renders, so a density change re-renders the page */}
+        <main key={density} className="p-4 2xl:p-6 animate-fade-in">
+          <ErrorBoundary resetKey={`${pathname}${search}`}>
+            <RouteGate>
+              <Outlet />
+            </RouteGate>
+          </ErrorBoundary>
+        </main>
+      </div>
+    )
+  }
+
   return (
     <div className="flex min-h-screen bg-bg">
       <Sidebar expanded={expanded} onToggleExpanded={() => setExpanded((v) => !v)} />
@@ -228,15 +329,15 @@ export function Layout() {
 
       <div
         className="content-transition flex min-w-0 flex-1 flex-col md:ml-[var(--sidebar-w)]"
-        style={{ ['--sidebar-w' as any]: `${expanded ? SIDEBAR_WIDE : SIDEBAR_RAIL}px` }}
+        style={{ ['--sidebar-w' as any]: expanded ? SIDEBAR_WIDE : SIDEBAR_RAIL }}
       >
         {/* Header */}
-        <header className="sticky top-0 z-20 flex h-11 items-center gap-3 border-b border-border bg-surface/95 px-4 backdrop-blur">
+        <header className="sticky top-0 z-20 flex h-12 items-center gap-2 border-b border-border bg-surface/95 px-4 backdrop-blur xl:px-5">
           <button
             type="button"
             onClick={() => setDrawer(true)}
             aria-label="Open navigation"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-surface2 hover:text-text md:hidden"
+            className="flex h-8 w-8 items-center justify-center rounded-md text-muted hover:bg-surface2 hover:text-text md:hidden"
           >
             <Menu className="h-4 w-4" />
           </button>
@@ -246,12 +347,12 @@ export function Layout() {
           </div>
 
           {can('devices.view') ? (
-          <div role="search" aria-label="Device search" className="relative ml-auto flex max-w-xs flex-1 items-center">
-            <Search className="absolute left-2.5 h-3.5 w-3.5 text-muted" aria-hidden />
+          <div role="search" aria-label="Device search" className="relative ml-auto mr-1 flex max-w-sm flex-1 items-center">
+            <Search className="absolute left-2.5 h-4 w-4 text-muted" aria-hidden />
             <input
               aria-label="Search devices by name or address"
-              placeholder="Search devices..."
-              className="h-7 w-full rounded-md border border-border bg-bg pl-8 pr-3 text-xs placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
+              placeholder="Search devices by name or IP…"
+              className="h-8 w-full rounded-md border border-border bg-bg pl-8 pr-3 text-sm placeholder:text-muted focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   const q = (e.target as HTMLInputElement).value
@@ -262,15 +363,17 @@ export function Layout() {
           </div>
           ) : <div className="ml-auto" />}
 
+          <DisplayMenu />
+
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7 text-muted hover:text-text"
+            className="h-8 w-8 text-muted hover:text-text"
             onClick={toggle}
             aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
             title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
           >
-            {theme === 'dark' ? <Sun className="h-3.5 w-3.5" aria-hidden /> : <Moon className="h-3.5 w-3.5" aria-hidden />}
+            {theme === 'dark' ? <Sun className="h-4 w-4" aria-hidden /> : <Moon className="h-4 w-4" aria-hidden />}
           </Button>
 
           {can('alerts.view') && <HeaderAlertCenter />}
@@ -296,7 +399,7 @@ export function Layout() {
                   <div className="border-b border-border px-3 py-2">
                     <div className="text-sm font-medium">{user?.full_name || user?.username}</div>
                     <div className="text-xs text-muted">{user?.email}</div>
-                    <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-primary">
+                    <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-2xs font-semibold uppercase text-primary">
                       {user?.role}
                     </span>
                   </div>
@@ -321,7 +424,8 @@ export function Layout() {
         </header>
 
         {/* Content — full width */}
-        <main className="flex-1 overflow-y-auto p-5 animate-fade-in">
+        {/* key: chart text sizes are read when a chart renders, so a density change re-renders the page */}
+        <main key={density} className="flex-1 overflow-y-auto p-4 animate-fade-in xl:p-5 2xl:p-6">
           <ErrorBoundary resetKey={`${pathname}${search}`}>
             <RouteGate>
               <Outlet />

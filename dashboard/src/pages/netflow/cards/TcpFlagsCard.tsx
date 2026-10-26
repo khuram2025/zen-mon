@@ -71,7 +71,7 @@ export function TcpFlagsCard({ ctx, compact }: OverviewCardProps) {
           return (
             <div className="space-y-2">
               {f.support === 'partial' && (
-                <p className="rounded border border-warning/35 bg-warning/10 px-2 py-1 text-[11px] text-text">
+                <p className="rounded border border-warning/35 bg-warning/10 px-2 py-1 text-xs text-text">
                   <span className="font-semibold text-warning-fg">Partial:</span> {f.reason}
                 </p>
               )}
@@ -89,7 +89,7 @@ export function TcpFlagsCard({ ctx, compact }: OverviewCardProps) {
                   />
                 ))}
               </div>
-              <ul role="list" className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-text2">
+              <ul role="list" className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-text2">
                 {SECONDARY.map((k) => (
                   <li key={k}>
                     <Link

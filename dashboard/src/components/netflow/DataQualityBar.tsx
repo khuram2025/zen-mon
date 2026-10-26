@@ -200,7 +200,7 @@ export function DataQualityBar({ meta, window: w, filter, coverage, className }:
   if (!items.length) return null
   return (
     <section aria-label="Data quality" className={cn('rounded-md border border-border bg-surface2/40 px-3 py-2', className)}>
-      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] leading-snug">
+      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs leading-snug">
         {items.map((it) => (
           <li key={it.key} className={cn('inline-flex min-w-0 items-start gap-1', it.tone === 'warn' ? 'text-text' : 'text-text2')} title={it.title}>
             <it.icon className={cn('mt-px h-3.5 w-3.5 shrink-0', it.tone === 'warn' ? 'text-warning-fg' : 'text-text2')} aria-hidden />

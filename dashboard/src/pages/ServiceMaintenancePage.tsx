@@ -419,14 +419,14 @@ function WindowTable({
                     <Td className="text-xs">
                       {new Date(effEnd).toLocaleString()}
                       {endedEarly ? (
-                        <div className="text-[10px] text-muted">
+                        <div className="text-2xs text-muted">
                           Ended early{w.ended_by_name ? ` by ${w.ended_by_name}` : ''} · scheduled {new Date(w.ends_at).toLocaleString()}
                           {w.end_reason ? ` · ${w.end_reason}` : ''}
                         </div>
                       ) : st !== 'cancelled' ? (
-                        <div className="text-[10px] text-muted">{relativeTime(effEnd)}</div>
+                        <div className="text-2xs text-muted">{relativeTime(effEnd)}</div>
                       ) : (
-                        <div className="text-[10px] text-muted">Cancelled {w.cancelled_at ? relativeTime(w.cancelled_at) : ''}</div>
+                        <div className="text-2xs text-muted">Cancelled {w.cancelled_at ? relativeTime(w.cancelled_at) : ''}</div>
                       )}
                     </Td>
                     <Td className="text-xs text-muted">{w.reason || '—'}</Td>

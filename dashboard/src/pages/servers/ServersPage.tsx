@@ -72,7 +72,7 @@ function UsageCell({ pct, warn = 85, crit = 95 }: { pct: number | null | undefin
         <div className={cn('h-full rounded-full bg-gradient-to-r', tone)} style={{ width: `${clamped}%` }} />
       </div>
       <span className={cn(
-        'w-10 text-right text-[11px] font-semibold tabular-nums',
+        'w-10 text-right text-xs font-semibold tabular-nums',
         clamped >= crit ? 'text-danger' : clamped >= warn ? 'text-warning' : 'text-text2',
       )}>
         {clamped.toFixed(0)}%
@@ -92,7 +92,7 @@ function PanelHeader({ icon, title, hint, right }: {
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-muted">{icon}</span>
         <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
-        {hint && <span className="truncate text-[10px] uppercase tracking-wider text-muted">{hint}</span>}
+        {hint && <span className="truncate text-2xs uppercase tracking-wider text-muted">{hint}</span>}
       </div>
       {right}
     </div>
@@ -511,7 +511,7 @@ export function ServerInventoryPage() {
                             <OsIcon os={s.os_type} />
                             <div className="min-w-0">
                               <div className="truncate text-sm font-medium">{s.display_name}</div>
-                              <div className="truncate text-[11px] text-muted">
+                              <div className="truncate text-xs text-muted">
                                 {s.primary_ip || s.fqdn || s.hostname || '—'}
                                 {s.environment ? ` · ${s.environment}` : ''}
                               </div>
@@ -521,7 +521,7 @@ export function ServerInventoryPage() {
                         <Td><ServerStatusBadge status={s.status} reasons={s.status_reasons} /></Td>
                         <Td>
                           <div className="text-xs">{s.os_name || s.os_type}</div>
-                          <div className="text-[11px] text-muted">{s.os_version || ''}</div>
+                          <div className="text-xs text-muted">{s.os_version || ''}</div>
                         </Td>
                         <Td>{liveStale ? <span className="text-xs text-muted">—</span> : <UsageCell pct={lm.cpu_pct} warn={90} crit={98} />}</Td>
                         <Td>{liveStale ? <span className="text-xs text-muted">—</span> : <UsageCell pct={lm.memory_pct} warn={90} crit={97} />}</Td>
@@ -534,7 +534,7 @@ export function ServerInventoryPage() {
                         <Td>
                           <div className="flex flex-col gap-0.5">
                             <AgentStatusBadge status={s.agent_status} />
-                            {s.agent_version && <span className="text-[10px] text-muted">v{s.agent_version}</span>}
+                            {s.agent_version && <span className="text-2xs text-muted">v{s.agent_version}</span>}
                           </div>
                         </Td>
                         <Td onClick={(e) => e.stopPropagation()}>
@@ -593,7 +593,7 @@ export function ServerInventoryPage() {
                       <OsIcon os={s.os_type} />
                       <div className="min-w-0">
                         <div className="truncate font-semibold">{s.display_name}</div>
-                        <div className="truncate text-[11px] text-muted">{s.primary_ip || s.hostname || '—'}</div>
+                        <div className="truncate text-xs text-muted">{s.primary_ip || s.hostname || '—'}</div>
                       </div>
                     </div>
                     <ServerStatusBadge status={s.status} />
@@ -601,19 +601,19 @@ export function ServerInventoryPage() {
                 </div>
                 <CardContent className="grid grid-cols-2 gap-2 p-3 text-xs">
                   <div>
-                    <div className="text-[10px] uppercase text-muted">CPU</div>
+                    <div className="text-2xs uppercase text-muted">CPU</div>
                     {liveStale ? '—' : <UsageCell pct={lm.cpu_pct} warn={90} crit={98} />}
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase text-muted">Memory</div>
+                    <div className="text-2xs uppercase text-muted">Memory</div>
                     {liveStale ? '—' : <UsageCell pct={lm.memory_pct} warn={90} crit={97} />}
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase text-muted">Disk</div>
+                    <div className="text-2xs uppercase text-muted">Disk</div>
                     {liveStale ? '—' : <UsageCell pct={lm.disk_max_pct} />}
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase text-muted">Network</div>
+                    <div className="text-2xs uppercase text-muted">Network</div>
                     <span className="tabular-nums">{liveStale || lm.net_bps == null ? '—' : formatBps(lm.net_bps * 8)}</span>
                   </div>
                   <div className="col-span-2 flex items-center justify-between pt-1">

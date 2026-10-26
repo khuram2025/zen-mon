@@ -71,7 +71,7 @@ function CoreHeatmap({ detail, tick }: { detail: MetricDetail; tick: (ts: number
   return (
     <div>
       <div className="flex gap-2">
-        <div className="flex flex-col justify-between py-px text-[10px] tabular-nums leading-none text-muted" style={{ height: coreCount * (rowH + 1) }}>
+        <div className="flex flex-col justify-between py-px text-2xs tabular-nums leading-none text-muted" style={{ height: coreCount * (rowH + 1) }}>
           {Array.from({ length: coreCount }, (_, i) => (
             <span key={i} className="flex items-center" style={{ height: rowH + 1 }}>{i % labelEvery === 0 ? i : ''}</span>
           ))}
@@ -95,12 +95,12 @@ function CoreHeatmap({ detail, tick }: { detail: MetricDetail; tick: (ts: number
           )}
         </div>
       </div>
-      <div className="mt-1.5 flex justify-between pl-6 text-[10px] text-muted">
+      <div className="mt-1.5 flex justify-between pl-6 text-2xs text-muted">
         <span>{tick(columns[0].ts)}</span>
         <span>{tick(columns[Math.floor(columns.length / 2)].ts)}</span>
         <span>{tick(columns[columns.length - 1].ts)}</span>
       </div>
-      <div className="mt-2 flex items-center gap-2 text-[10px] text-muted">
+      <div className="mt-2 flex items-center gap-2 text-2xs text-muted">
         <span>0%</span>
         <div className="h-1.5 w-28 rounded-full" style={{ background: 'linear-gradient(90deg, rgb(var(--primary) / 0.1), rgb(var(--primary)))' }} />
         <span>75%</span>
@@ -432,7 +432,7 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
                 const growth = fs.growth_bytes_per_day
                 return (
                   <li key={fs.mount} className="space-y-1.5 px-4 py-3">
-                    <div className="flex items-baseline justify-between gap-2 text-[13px]">
+                    <div className="flex items-baseline justify-between gap-2 text-sm">
                       <span className="font-medium">{fs.mount} <span className="text-xs font-normal text-muted">{fs.fs_type}</span></span>
                       <span className="tabular-nums text-text2">{fmtPct(last?.used_pct, 0)}</span>
                     </div>
@@ -516,7 +516,7 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
             </div>
           )}
           {errorTotal === 0 && (
-            <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-[13px] text-text2">
+            <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-text2">
               <CheckCircle2 className="h-4 w-4 text-success" />
               No errors or dropped packets on {activeNic.name} in this window.
               {!hasPackets && <span className="text-xs text-muted">Packet rates are not reported by this agent.</span>}

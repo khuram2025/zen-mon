@@ -21,7 +21,7 @@ export function TagBadge({
     borderColor: active ? c : `${c}66`,
     backgroundColor: active ? `${c}2E` : `${c}1A`,
   }
-  const base = `inline-flex max-w-[150px] items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium leading-4 ${className}`
+  const base = `inline-flex max-w-[150px] items-center gap-1 rounded-full border px-2 py-0.5 text-2xs font-medium leading-4 ${className}`
 
   if (onClick) {
     return (

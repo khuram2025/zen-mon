@@ -37,6 +37,7 @@ import type {
   ServerItem, ServerListResponse, ServerLiveMetrics, ServerMonitoringOverview,
 } from '@/types/servers'
 import { useState } from 'react'
+import { KPI_LABEL, KPI_VALUE, kpiTone } from '@/components/ui/kpiTone'
 
 const KPI_ACCENT: Record<string, string> = {
   success: 'from-emerald-500/80 to-green-500/80',
@@ -58,14 +59,14 @@ function FleetKpi({
 }) {
   const inner = (
     <Card className={cn('relative h-full overflow-hidden transition', to && 'hover:border-primary/40')}>
-      <span className={cn('absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r', KPI_ACCENT[accent])} />
+      <span className={cn('absolute inset-x-0 top-0 h-[3px]', kpiTone(accent).bar)} />
       <CardContent className="flex items-start justify-between gap-3 p-4">
         <div className="min-w-0">
-          <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted">{label}</div>
-          <div className="mt-1 text-2xl font-bold tabular-nums leading-none text-text">{value}</div>
-          {sub && <div className="mt-1.5 text-[11px] text-muted">{sub}</div>}
+          <div className={KPI_LABEL}>{label}</div>
+          <div className={cn('mt-1.5', KPI_VALUE)}>{value}</div>
+          {sub && <div className="mt-1.5 text-xs text-muted">{sub}</div>}
         </div>
-        <span className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white shadow', KPI_ACCENT[accent])}>
+        <span className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-lg', kpiTone(accent).chip)}>
           <Icon className="h-4 w-4" />
         </span>
       </CardContent>
@@ -85,7 +86,7 @@ function PanelHeader({ icon, title, hint, right }: {
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-muted">{icon}</span>
         <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
-        {hint && <span className="truncate text-[10px] uppercase tracking-wider text-muted">{hint}</span>}
+        {hint && <span className="truncate text-2xs uppercase tracking-wider text-muted">{hint}</span>}
       </div>
       {right}
     </div>
@@ -208,7 +209,7 @@ export function ServersDashboardPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2.5 text-2xl font-semibold tracking-tight">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500/90 to-indigo-600/90 text-white shadow">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
               <Server className="h-4 w-4" />
             </span>
             Server Fleet
@@ -334,7 +335,7 @@ export function ServersDashboardPage() {
                           <span className="truncate text-sm font-medium">{s.display_name}</span>
                           <ServerStatusBadge status={s.status} />
                         </div>
-                        <div className="truncate text-[11px] text-muted">
+                        <div className="truncate text-xs text-muted">
                           {s.primary_ip || s.hostname || '—'}
                           {s.status_reasons?.[0] ? ` · ${s.status_reasons[0]}` : ''}
                         </div>
@@ -343,7 +344,7 @@ export function ServersDashboardPage() {
                         <UsageBar pct={lm.cpu_pct ?? null} warn={85} crit={95} />
                         <UsageBar pct={lm.memory_pct ?? null} warn={85} crit={95} />
                       </div>
-                      <span className="shrink-0 text-[10px] text-muted">{relativeTime(s.last_seen)}</span>
+                      <span className="shrink-0 text-2xs text-muted">{relativeTime(s.last_seen)}</span>
                       <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted" />
                     </button>
                   )

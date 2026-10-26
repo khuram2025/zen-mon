@@ -70,10 +70,10 @@ export function InterfacesCard({ ctx, compact }: OverviewCardProps) {
                       className="max-w-full text-left hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                     >
                       <span className="break-words font-medium text-text">{i.display_name}</span>
-                      <span className="ml-1 break-all text-[11px] text-text2">
+                      <span className="ml-1 break-all text-xs text-text2">
                         {i.device_hostname || ipDisplay(i.exporter_ip)} · #{i.ifindex}
                       </span>
-                      {i.pinned && <span className="ml-1 text-[11px] font-medium text-primary">· selected, outside the top {limit}</span>}
+                      {i.pinned && <span className="ml-1 text-xs font-medium text-primary">· selected, outside the top {limit}</span>}
                     </button>
                   )
                 }}

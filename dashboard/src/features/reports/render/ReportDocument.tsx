@@ -124,7 +124,7 @@ export function ReportDocument({
       )}
 
       {(branding.report_footer || branding.report_disclaimer) && (
-        <footer className="space-y-1 border-t border-border pt-3 text-[11px] leading-relaxed text-muted">
+        <footer className="space-y-1 border-t border-border pt-3 text-xs leading-relaxed text-muted">
           {branding.report_footer && <p className="font-medium text-text2">{branding.report_footer}</p>}
           {branding.report_disclaimer && <p className="whitespace-pre-line">{branding.report_disclaimer}</p>}
         </footer>

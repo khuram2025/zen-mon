@@ -70,7 +70,7 @@ export function ReportsPage() {
                   >
                     {r.profile_name || '—'}
                   </button>
-                  <div className="text-[10px] font-mono text-muted">{r.id.slice(0, 8)}</div>
+                  <div className="text-2xs font-mono text-muted">{r.id.slice(0, 8)}</div>
                 </Td>
                 <Td>
                   <RunStatusBadge status={r.status} />

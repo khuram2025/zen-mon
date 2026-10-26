@@ -27,7 +27,7 @@ export function SourceBadge({
       title={age ? `${label}, ${age}` : label}
       data-source={source ?? ''}
       className={cn(
-        'inline-flex items-center gap-1 whitespace-nowrap rounded border border-border bg-surface2 px-1.5 py-px text-[10.5px] font-medium leading-4 text-text2',
+        'inline-flex items-center gap-1 whitespace-nowrap rounded border border-border bg-surface2 px-1.5 py-px text-xs font-medium leading-4 text-text2',
         // No source is still a value; italic keeps it apart without dropping below AA (muted on surface2 is 4.3:1).
         !source && 'italic',
         className,

@@ -94,7 +94,7 @@ export function SoftwareToolbar({
               <X className="h-3.5 w-3.5" aria-hidden />
             </button>
           ) : (
-            <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 text-[10px] text-muted sm:block" aria-hidden>/</kbd>
+            <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 text-2xs text-muted sm:block" aria-hidden>/</kbd>
           )}
         </div>
         <FilterSelect
@@ -132,7 +132,7 @@ export function SoftwareToolbar({
           </Button>
         )}
       </div>
-      {publisherNote && <p className="text-[11px] text-muted">{publisherNote}</p>}
+      {publisherNote && <p className="text-xs text-muted">{publisherNote}</p>}
       <div className="flex min-h-[28px] flex-wrap items-center gap-x-4 gap-y-2">
         <div className="flex items-center gap-2">
           <Switch

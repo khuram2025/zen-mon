@@ -35,7 +35,7 @@ const STATE_ICONS: Record<CapacityState, LucideIcon> = {
 export function StateBadge({ state, className }: { state: CapacityState; className?: string }) {
   const Icon = STATE_ICONS[state]
   return (
-    <span className={cn('inline-flex items-center gap-1 whitespace-nowrap text-[11px] font-semibold', stateTextClass(state), className)}>
+    <span className={cn('inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold', stateTextClass(state), className)}>
       <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
       {STATE_LABELS[state]}
     </span>
@@ -46,7 +46,7 @@ export function DirectionBadge({ direction, className }: { direction: Direction;
   const Icon = direction === 'in' ? ArrowDownLeft : ArrowUpRight
   return (
     <span
-      className={cn('inline-flex items-center gap-0.5 rounded border border-border bg-surface2/60 px-1 text-[10px] font-medium uppercase tracking-wide text-text2', className)}
+      className={cn('inline-flex items-center gap-0.5 rounded border border-border bg-surface2/60 px-1 text-2xs font-medium uppercase tracking-wide text-text2', className)}
       title={direction === 'in' ? 'In: received on this interface' : 'Out: transmitted by this interface'}
     >
       <Icon className="h-3 w-3" style={{ color: DIRECTION_COLORS[direction] }} aria-hidden />
@@ -58,7 +58,7 @@ export function DirectionBadge({ direction, className }: { direction: Direction;
 export function RoleBadge({ role }: { role: InterfaceRole | null | undefined }) {
   if (!role) return null
   return (
-    <span className="inline-flex items-center rounded border border-border bg-surface2/60 px-1.5 text-[10px] font-medium text-text2">
+    <span className="inline-flex items-center rounded border border-border bg-surface2/60 px-1.5 text-2xs font-medium text-text2">
       {ROLE_LABELS[role]}
     </span>
   )
@@ -88,7 +88,7 @@ export function RateCell({
       <span className="whitespace-nowrap text-sm font-medium tabular-nums text-text" title={formatBpsExact(bps)}>
         {formatBps(bps)}
       </span>
-      <span className={cn('whitespace-nowrap text-[11px] tabular-nums', util == null ? 'text-text2' : state ? stateTextClass(state) : 'text-text2')}>
+      <span className={cn('whitespace-nowrap text-xs tabular-nums', util == null ? 'text-text2' : state ? stateTextClass(state) : 'text-text2')}>
         {util == null ? 'util unknown' : `${formatPercent(util)} util`}
       </span>
     </div>
@@ -105,8 +105,8 @@ export function Headroom({ headline, compact }: { headline: Headline; compact?: 
           <OctagonAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
           {v.text}
         </span>
-        {v.sub && <span className="text-[11px] font-medium tabular-nums text-danger-fg">{v.sub}</span>}
-        {!compact && <span className="text-[11px] leading-snug text-text2">Check speed, duplicate export or sampling</span>}
+        {v.sub && <span className="text-xs font-medium tabular-nums text-danger-fg">{v.sub}</span>}
+        {!compact && <span className="text-xs leading-snug text-text2">Check speed, duplicate export or sampling</span>}
       </div>
     )
   }
@@ -114,7 +114,7 @@ export function Headroom({ headline, compact }: { headline: Headline; compact?: 
     return (
       <div className="flex flex-col gap-0.5" title={v.title}>
         <span className="text-xs text-text2">{v.text}</span>
-        {v.sub && <span className="text-[11px] tabular-nums text-text2">{v.sub}</span>}
+        {v.sub && <span className="text-xs tabular-nums text-text2">{v.sub}</span>}
       </div>
     )
   }

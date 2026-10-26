@@ -59,6 +59,7 @@ import type { NfMeta } from '@/lib/netflow/types'
 import { useFlowFilter } from '@/lib/netflow/useFlowFilter'
 import { displayTimeZone, useNfWindow, type NfWindow } from '@/lib/netflow/window'
 import { cn, copyText, relativeTime } from '@/lib/utils'
+import { chartFont } from '@/lib/chartTheme'
 
 /* ─── Response shape ─────────────────────────────────────────────────────────────────────── */
 
@@ -240,7 +241,7 @@ function SectionFailure({ state, label }: { state: SectionState | undefined; lab
 function Fact({ label, children, title }: { label: string; children: ReactNode; title?: string }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] text-text2">{label}</dt>
+      <dt className="text-xs text-text2">{label}</dt>
       <dd className="break-words text-sm text-text" title={title}>
         {children}
       </dd>
@@ -498,7 +499,7 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
                   <Muted>Unknown</Muted>
                 )}
               </Fact>
-              <p className="text-[11px] text-text2">
+              <p className="text-xs text-text2">
                 GeoIP database built {p.geoip.database?.country_built ? formatDateTime(p.geoip.database.country_built, tz, { seconds: false, zone: 'none' }).slice(0, 10) : 'on an unknown date'}
               </p>
             </>
@@ -527,7 +528,7 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
                 <Fact label="Last seen" title={formatDateTime(p.seen.last_seen, tz)}>
                   {formatDateTime(p.seen.last_seen, tz, { seconds: false })} <Muted>({relativeTime(p.seen.last_seen)})</Muted>
                 </Fact>
-                <p className="text-[11px] text-text2">
+                <p className="text-xs text-text2">
                   Within the {p.seen.retention_days ?? '?'}-day rollup retention, exporters you can access.
                 </p>
               </>
@@ -618,7 +619,7 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
                         </Link>
                         <span className="shrink-0 tabular-nums text-text" title={formatBytesExact(a.bytes)}>{formatBytes(a.bytes)}</span>
                       </div>
-                      <div className="flex justify-between gap-2 text-[11px] text-text2">
+                      <div className="flex justify-between gap-2 text-xs text-text2">
                         <span>{a.category}</span>
                         <span>
                           ↓ {formatBytes(a.bytes_in)} · ↑ {formatBytes(a.bytes_out)} · {formatCount(a.flows)} flows
@@ -649,12 +650,12 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
                         >
                           {s.service ?? `${s.protocol_name}/${s.port}`}
                         </Link>
-                        <span className="ml-1.5 font-mono text-[11px] text-text2">
+                        <span className="ml-1.5 font-mono text-xs text-text2">
                           {s.port}/{s.protocol_name.toLowerCase()}
                         </span>
                         <span
                           className={cn(
-                            'ml-1.5 rounded px-1 py-px text-[10px] font-medium',
+                            'ml-1.5 rounded px-1 py-px text-2xs font-medium',
                             s.role === 'server' ? 'bg-info/10 text-info-fg' : 'bg-surface2 text-text2',
                           )}
                         >
@@ -663,7 +664,7 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
                       </span>
                       <span className="shrink-0 text-right tabular-nums">
                         {formatBytes(s.bytes)}
-                        <span className="block text-[11px] text-text2">{formatCount(s.flows)} flows</span>
+                        <span className="block text-xs text-text2">{formatCount(s.flows)} flows</span>
                       </span>
                     </li>
                   ))}
@@ -674,7 +675,7 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
             ) : (
               <SectionFailure state={p.sections.ports} label="service ports" />
             )}
-            <p className="mt-2 text-[11px] text-text2">"Serves" means the service port was on this host's side; "Uses" means it connected to that service elsewhere.</p>
+            <p className="mt-2 text-xs text-text2">"Serves" means the service port was on this host's side; "Uses" means it connected to that service elsewhere.</p>
           </Section>
         </div>
 
@@ -688,12 +689,12 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
                       <Link to={buildNetflowLink(exporterPath(e.exporter), { window: w, filter: hostFlowFilter(filter, p.ip) })} className="font-medium text-text hover:underline">
                         {e.device_hostname ?? e.exporter}
                       </Link>
-                      {e.device_hostname && <span className="ml-1.5 font-mono text-[11px] text-text2">{e.exporter}</span>}
-                      <span className="block text-[11px] text-text2">Last seen {relativeTime(e.last_seen)}</span>
+                      {e.device_hostname && <span className="ml-1.5 font-mono text-xs text-text2">{e.exporter}</span>}
+                      <span className="block text-xs text-text2">Last seen {relativeTime(e.last_seen)}</span>
                     </span>
                     <span className="shrink-0 text-right tabular-nums">
                       {formatBytes(e.bytes)}
-                      <span className="block text-[11px] text-text2">{formatCount(e.flows)} flows</span>
+                      <span className="block text-xs text-text2">{formatCount(e.flows)} flows</span>
                     </span>
                   </li>
                 ))}
@@ -709,7 +710,7 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
               {allExporters ? 'Show 8' : `Show all ${p.exporters!.items.length}`}
             </Button>
           )}
-          <p className="mt-2 text-[11px] text-text2">The same flow seen by several exporters is counted once per exporter.</p>
+          <p className="mt-2 text-xs text-text2">The same flow seen by several exporters is counted once per exporter.</p>
         </Section>
 
         <Section title="Interfaces" icon={Cable}>
@@ -728,13 +729,13 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
                       >
                         {i.name}
                       </Link>
-                      <span className="block text-[11px] text-text2">
+                      <span className="block text-xs text-text2">
                         {i.device_hostname ?? i.exporter} · {i.direction === 'in' ? 'flows entered here' : 'flows left here'}
                       </span>
                     </span>
                     <span className="shrink-0 text-right tabular-nums">
                       {formatBytes(i.bytes)}
-                      <span className="block text-[11px] text-text2">{formatCount(i.flows)} flows</span>
+                      <span className="block text-xs text-text2">{formatCount(i.flows)} flows</span>
                     </span>
                   </li>
                 ))}
@@ -751,7 +752,7 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
             </Button>
           )}
           {p.interfaces?.from && (
-            <p className="mt-2 text-[11px] text-text2">
+            <p className="mt-2 text-xs text-text2">
               From raw flow records, {formatDateTime(p.interfaces.from, tz, { seconds: false })} → {formatDateTime(p.interfaces.to, tz, { seconds: false })} (at most the last 7 days of the period).
             </p>
           )}
@@ -766,7 +767,7 @@ function HostProfileBody({ p, meta, window: w, filter }: { p: HostProfile; meta:
                 <Link to={link('/netflow/anomalies', undefined, { finding: f.id })} className="font-medium text-text hover:underline">
                   {f.title}
                 </Link>
-                <div className="text-[11px] text-text2">
+                <div className="text-xs text-text2">
                   {f.severity} · {f.status} · host is the {f.role} · {f.occurrences} occurrence{f.occurrences === 1 ? '' : 's'} · last {relativeTime(f.last_seen)}
                 </div>
               </li>
@@ -800,7 +801,7 @@ function EndpointFacts({ p }: { p: HostProfile }) {
         {e.randomized_mac && <Muted> · randomized</Muted>}
       </Fact>
       {!e.current_ip && (
-        <p className="text-[11px] text-warning-fg">
+        <p className="text-xs text-warning-fg">
           This MAC used the address earlier{e.ip_last_seen ? ` (last ${relativeTime(e.ip_last_seen)})` : ''}; it has another address now.
         </p>
       )}
@@ -832,7 +833,7 @@ function EndpointFacts({ p }: { p: HostProfile }) {
         )}
       </Fact>
       {(id.other_macs?.length ?? 0) > 0 && (
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           {id.other_macs!.length} other MAC{id.other_macs!.length === 1 ? '' : 's'} used this address: {id.other_macs!.map((m) => m.mac).join(', ')}
         </p>
       )}
@@ -859,14 +860,14 @@ function PeersTable({ p, window: w, filter, peerTi }: { p: HostProfile; window: 
                     {ipDisplay(x.ip)}
                   </Link>
                   {ti && (
-                    <span className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-danger/10 px-1 py-px text-[10px] font-medium text-danger-fg" title={ti.join('\n')}>
+                    <span className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-danger/10 px-1 py-px text-2xs font-medium text-danger-fg" title={ti.join('\n')}>
                       <ShieldAlert className="h-3 w-3" aria-hidden /> Threat list
                     </span>
                   )}
                 </span>
                 <span className="shrink-0 tabular-nums text-text" title={formatBytesExact(x.bytes)}>{formatBytes(x.bytes)}</span>
               </div>
-              <div className="flex flex-wrap justify-between gap-x-2 text-[11px] text-text2">
+              <div className="flex flex-wrap justify-between gap-x-2 text-xs text-text2">
                 <span>
                   {[x.group, x.country, x.asn != null ? `AS${x.asn}${x.as_name ? ` ${x.as_name}` : ''}` : null].filter(Boolean).join(' · ') || '—'}
                 </span>
@@ -885,14 +886,14 @@ function PeersTable({ p, window: w, filter, peerTi }: { p: HostProfile; window: 
         </Button>
       )}
       {p.peers!.truncated && (
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           The profile lists the {loaded.length} busiest of {formatCount(p.peers!.total)} peers.{' '}
           <Link to={buildNetflowLink('/netflow/forensics', { window: w, filter: hostFlowFilter(filter, p.ip), extra: { run: true } })} className="underline-offset-2 hover:underline">
             All flows
           </Link>
         </p>
       )}
-      <p className="text-[11px] text-text2">↓ received by this host · ↑ sent by this host</p>
+      <p className="text-xs text-text2">↓ received by this host · ↑ sent by this host</p>
     </div>
   )
 }
@@ -930,7 +931,7 @@ function TrafficChart({ p, meta }: { p: HostProfile; meta: NfMeta | null }) {
           <table className="w-full text-xs">
             <caption className="sr-only">Traffic rate per {formatInterval(ts.bucket_s)} bucket</caption>
             <thead className="sticky top-0 bg-surface">
-              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-text2">
+              <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text2">
                 <th scope="col" className="px-2 py-1.5 font-medium">Bucket start ({tz})</th>
                 <th scope="col" className="px-2 py-1.5 text-right font-medium">Received</th>
                 <th scope="col" className="px-2 py-1.5 text-right font-medium">Sent</th>
@@ -958,26 +959,26 @@ function TrafficChart({ p, meta }: { p: HostProfile; meta: NfMeta | null }) {
                 scale="time"
                 domain={['dataMin', 'dataMax']}
                 tickFormatter={tick}
-                tick={{ fontSize: 11, fill: 'rgb(var(--text2))' }}
+                tick={{ fontSize: chartFont(11), fill: 'rgb(var(--text2))' }}
                 axisLine={false}
                 tickLine={false}
                 minTickGap={40}
               />
               <YAxis
                 tickFormatter={formatBpsAxis}
-                tick={{ fontSize: 11, fill: 'rgb(var(--text2))' }}
+                tick={{ fontSize: chartFont(11), fill: 'rgb(var(--text2))' }}
                 axisLine={false}
                 tickLine={false}
                 width={48}
-                label={{ value: 'bit/s', angle: -90, position: 'insideLeft', fontSize: 11, fill: 'rgb(var(--text2))', dy: 16 }}
+                label={{ value: 'bit/s', angle: -90, position: 'insideLeft', fontSize: chartFont(11), fill: 'rgb(var(--text2))', dy: 16 }}
               />
               <Tooltip
                 labelFormatter={(v: number) => `${formatDateTime(v, tz, { seconds: false })} · ${formatInterval(ts.bucket_s)} bucket`}
                 formatter={(value, name) => [typeof value === 'number' ? `${formatBps(value)} (${formatBpsExact(value)})` : 'No data', String(name)]}
-                contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12, color: 'rgb(var(--text))' }}
+                contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: chartFont(12), color: 'rgb(var(--text))' }}
                 cursor={{ stroke: 'rgb(var(--border-strong))' }}
               />
-              <Legend wrapperStyle={{ fontSize: 12 }} formatter={(v: string) => <span style={{ color: 'rgb(var(--text))' }}>{v}</span>} />
+              <Legend wrapperStyle={{ fontSize: chartFont(12) }} formatter={(v: string) => <span style={{ color: 'rgb(var(--text))' }}>{v}</span>} />
               <Line type="linear" dataKey="in_bps" name="Received" stroke="var(--nf-in)" strokeWidth={2} dot={false} activeDot={{ r: 4 }} connectNulls={false} isAnimationActive={false} />
               <Line type="linear" dataKey="out_bps" name="Sent" stroke="var(--nf-out)" strokeWidth={2} dot={false} activeDot={{ r: 4 }} connectNulls={false} isAnimationActive={false} />
             </LineChart>
@@ -985,7 +986,7 @@ function TrafficChart({ p, meta }: { p: HostProfile; meta: NfMeta | null }) {
         </div>
       )}
       {ts && (
-        <p className="mt-2 text-[11px] text-text2">
+        <p className="mt-2 text-xs text-text2">
           Average rate per {formatInterval(ts.bucket_s)} bucket.
           {gaps > 0 && ` ${gaps} bucket${gaps === 1 ? '' : 's'} without any records from the exporters in scope are gaps (unknown), not zero.`}
         </p>

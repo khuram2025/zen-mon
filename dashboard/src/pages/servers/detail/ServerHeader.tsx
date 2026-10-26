@@ -159,7 +159,7 @@ export function ServerHeader({
                 <h1 className="truncate text-2xl font-semibold leading-8 tracking-tight">{server.display_name}</h1>
                 <Pill tone={health.tone} title={server.status_reasons.join('\n') || undefined}>{health.label}</Pill>
                 {server.environment && (
-                  <span className="rounded-md border border-border px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+                  <span className="rounded-md border border-border px-1.5 py-0.5 text-xs font-medium uppercase tracking-wide text-muted">
                     {server.environment}
                   </span>
                 )}

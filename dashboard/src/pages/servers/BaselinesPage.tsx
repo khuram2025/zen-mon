@@ -419,7 +419,7 @@ function BaselineFormDialog({
           <div className="col-span-2 space-y-1.5">
             <Label>Tags match (comma-separated)</Label>
             <Input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="prod, web-tier" />
-            <p className="text-[11px] text-muted">
+            <p className="text-xs text-muted">
               Baseline applies only to servers having ALL these tags; empty = all servers
             </p>
           </div>
@@ -441,7 +441,7 @@ function BaselineFormDialog({
 
         <div className="space-y-2">
           <Label>Rules *</Label>
-          <div className={cn(RULES_GRID, 'text-[10px] font-medium uppercase tracking-wider text-muted')}>
+          <div className={cn(RULES_GRID, 'text-2xs font-medium uppercase tracking-wider text-muted')}>
             <span>Type</span>
             <span>Package match</span>
             <span>Match</span>

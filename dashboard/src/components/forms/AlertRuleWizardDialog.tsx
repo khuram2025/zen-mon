@@ -883,7 +883,7 @@ export function AlertRuleWizardDialog({
                   type="button"
                   onClick={() => setStep(st.id)}
                   className={cn(
-                    'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition-colors',
+                    'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors',
                     active ? 'bg-primary text-white' : done ? 'text-primary hover:bg-primary/10' : 'text-muted hover:bg-surface2 hover:text-text',
                   )}
                 >
@@ -1369,7 +1369,7 @@ export function AlertRuleWizardDialog({
                   </FormField>
                 </div>
                 <TemplateVars />
-                <p className="text-[11px] text-muted">
+                <p className="text-xs text-muted">
                   This is the wording that will be sent. Edit any field to word it yourself; a field
                   left as the built-in text keeps tracking it, so improvements to the default wording
                   still reach this rule. Open <span className="text-text">Preview message</span> on the
@@ -1407,7 +1407,7 @@ export function AlertRuleWizardDialog({
                       className={cn('rounded-lg border px-3 py-2 text-left', s.escalation_mode === o.v ? 'border-primary bg-primary/10' : 'border-border hover:bg-surface2')}
                     >
                       <div className={cn('text-xs font-semibold', s.escalation_mode === o.v ? 'text-primary' : 'text-text')}>{o.label}</div>
-                      <div className="text-[11px] text-muted">{o.hint}</div>
+                      <div className="text-xs text-muted">{o.hint}</div>
                     </button>
                   ))}
                 </div>
@@ -1516,7 +1516,7 @@ export function AlertRuleWizardDialog({
                     <Plus className="h-3.5 w-3.5" />Add escalation level
                   </Button>
                 )}
-                <p className="text-[11px] text-muted">
+                <p className="text-xs text-muted">
                   Escalation emails and SMS state the level, how long the alert has been active, and
                   that it is unacknowledged — e.g.&nbsp;
                   <span className="font-mono text-text">[CRITICAL] Escalation L2: Core router down — core-router-01</span>.
@@ -1546,7 +1546,7 @@ export function AlertRuleWizardDialog({
                 ) : (
                   <>
                     <TemplateVars />
-                    <p className="text-[11px] text-muted">
+                    <p className="text-xs text-muted">
                       The wording sent when the condition clears. The built-in text states how long the
                       condition was active &mdash; <span className="text-text">{'{duration_sentence}'}</span>{' '}
                       renders as &ldquo;The condition was active for 12 minutes.&rdquo;
@@ -1584,7 +1584,7 @@ export function AlertRuleWizardDialog({
                       </button>
                     ))}
                   </div>
-                  <p className="mt-2 text-[11px] text-muted">Leave empty for 24/7 notifications. Recovery alerts always send.</p>
+                  <p className="mt-2 text-xs text-muted">Leave empty for 24/7 notifications. Recovery alerts always send.</p>
                 </div>
               </div>
             )}
@@ -1644,7 +1644,7 @@ export function AlertRuleWizardDialog({
                     {preview.recovery && (
                       <EmailPreviewCard title="Recovery email" msg={preview.recovery} accent />
                     )}
-                    <p className="text-[11px] text-muted">
+                    <p className="text-xs text-muted">
                       Sample device and readings. Use the preview button on the alert list to edit
                       these templates against a live preview.
                     </p>
@@ -1730,7 +1730,7 @@ function LiveMail({ msg, label, accent }: { msg: any; label: string; accent?: bo
   const [open, setOpen] = useState(true)
   if (!msg) {
     return (
-      <div className="rounded-lg border border-border bg-surface2/40 px-4 py-3 text-[11px] text-muted">
+      <div className="rounded-lg border border-border bg-surface2/40 px-4 py-3 text-xs text-muted">
         Rendering {label.toLowerCase()}…
       </div>
     )
@@ -1752,9 +1752,9 @@ function LiveMail({ msg, label, accent }: { msg: any; label: string; accent?: bo
           {/* The real HTML mail, sandboxed — scripts off, no navigation out. */}
           <iframe title={label} sandbox="" srcDoc={msg.email_html} className="h-[26rem] w-full bg-white" />
           <div className="border-t border-border bg-surface2/40 px-4 py-2">
-            <div className="text-[10px] uppercase tracking-wider text-muted">SMS</div>
+            <div className="text-2xs uppercase tracking-wider text-muted">SMS</div>
             <div className="mt-1 text-xs">{msg.sms_body}</div>
-            <p className="mt-2 text-[11px] text-muted">
+            <p className="mt-2 text-xs text-muted">
               Sample device and readings. The header, severity pill, readings, details table and
               button are added by the layout — the fields above set the subject and the highlighted
               sentence.
@@ -1800,11 +1800,11 @@ function TemplateField({
       <div className="mb-1.5 flex items-center justify-between gap-3">
         <label className="text-xs font-medium text-muted">{label}</label>
         <div className="flex items-center gap-2">
-          <span className={cn('text-[10px] uppercase tracking-wider', isCustom ? 'text-primary' : 'text-muted')}>
+          <span className={cn('text-2xs uppercase tracking-wider', isCustom ? 'text-primary' : 'text-muted')}>
             {isCustom ? 'Custom' : 'Default'}
           </span>
           {isCustom && (
-            <button type="button" className="text-[10px] text-muted underline-offset-2 hover:text-primary hover:underline"
+            <button type="button" className="text-2xs text-muted underline-offset-2 hover:text-primary hover:underline"
               onClick={() => onChange(field, fallback)}>
               Reset to default
             </button>
@@ -1818,7 +1818,7 @@ function TemplateField({
         <Input value={value} className="font-mono text-xs"
           onChange={(e) => onChange(field, e.target.value)} />
       )}
-      {hint && <p className="mt-1 text-[11px] text-muted">{hint}</p>}
+      {hint && <p className="mt-1 text-xs text-muted">{hint}</p>}
     </div>
   )
 }
@@ -1826,10 +1826,10 @@ function TemplateField({
 function TemplateVars() {
   return (
     <div className="rounded-lg border border-primary/20 bg-primary/5 p-3">
-      <p className="text-[10px] font-semibold uppercase tracking-wider text-primary">Template variables</p>
+      <p className="text-2xs font-semibold uppercase tracking-wider text-primary">Template variables</p>
       <div className="mt-2 flex flex-wrap gap-1">
         {TEMPLATE_VARS.map((v) => (
-          <code key={v} className="cursor-pointer rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted hover:text-primary"
+          <code key={v} className="cursor-pointer rounded bg-surface px-1.5 py-0.5 text-2xs text-muted hover:text-primary"
             onClick={() => { void copyText(v) }} title="Click to copy">{v}</code>
         ))}
       </div>

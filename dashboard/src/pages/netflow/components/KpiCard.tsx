@@ -51,7 +51,7 @@ export function KpiCard({ icon: Icon, label, value, title, sub, badge, loading }
           {badge}
         </div>
       )}
-      {sub && <div className={cn('text-[11px] leading-snug text-text2', loading && 'invisible')}>{sub}</div>}
+      {sub && <div className={cn('text-xs leading-snug text-text2', loading && 'invisible')}>{sub}</div>}
     </div>
   )
 }

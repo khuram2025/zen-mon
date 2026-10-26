@@ -53,6 +53,7 @@ import { buildNetflowLink, hostPath } from '@/lib/netflow/links'
 import { RingGauge } from '@/components/dashboard/RingGauge'
 import { Sparkline } from '@/components/dashboard/Sparkline'
 import { fmtMs, fmtPct } from '@/components/apm/shared'
+import { chartFont, seriesColors, tokenColor } from '@/lib/chartTheme'
 
 /* ── Types ──────────────────────────────────────────────────────────────── */
 
@@ -314,10 +315,10 @@ export function DashboardPage() {
     const scope = all.reduce((s, r) => s + r.bytes, 0)
     if (!(scope > 0)) return []
     const rows = all.slice(0, 5)
-    const colors = ['#22d3ee', '#a78bfa', '#f59e0b', '#34d399', '#f472b6']
+    const colors = seriesColors().slice(0, 5)
     const out = rows.map((r, i) => ({ key: String(r.protocol), name: r.name, bytes: r.bytes, pct: (r.bytes / scope) * 100, color: colors[i % colors.length] }))
     const rest = scope - rows.reduce((s, r) => s + r.bytes, 0)
-    if (rest > 0) out.push({ key: 'other', name: 'Other', bytes: rest, pct: (rest / scope) * 100, color: '#a8a29e' })
+    if (rest > 0) out.push({ key: 'other', name: 'Other', bytes: rest, pct: (rest / scope) * 100, color: tokenColor('muted2') })
     return out
   }, [protocols])
 
@@ -409,7 +410,7 @@ export function DashboardPage() {
         <div>
           <div className="flex items-center gap-2.5">
             <h1 className="text-2xl font-semibold tracking-tight">Network Operations</h1>
-            <span className="flex items-center gap-1.5 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] font-bold tracking-widest text-success">
+            <span className="flex items-center gap-1.5 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-2xs font-bold tracking-widest text-success">
               <span className="relative flex h-1.5 w-1.5">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
                 <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-success" />
@@ -429,27 +430,27 @@ export function DashboardPage() {
       </div>
 
       {/* KPI strip — every figure is real */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-7">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-7">
         <KpiCard to="/devices" label="Devices Online" icon={<Server className="h-4 w-4" />} accent="success"
-          value={<>{up}<span className="text-base font-medium text-muted">/{total}</span></>}
+          value={<>{up}<span className="text-lg font-medium text-muted">/{total}</span></>}
           sub={summary ? <StatusDots s={summary} /> : null}
           foot={<StatusBar s={summary} />}
         />
         <KpiCard to="/alerts" label="Active Alerts" icon={<AlertTriangle className="h-4 w-4" />}
           accent={(alertStats?.critical ?? 0) > 0 ? 'danger' : (alertStats?.active ?? 0) > 0 ? 'warning' : 'success'}
           value={fmtCount(alertStats?.active ?? 0)}
-          sub={<span className="flex items-center gap-2 text-[10.5px]">
-            <span className="text-danger">{alertStats?.critical ?? 0} crit</span>
-            <span className="text-warning">{alertStats?.warning ?? 0} warn</span>
+          sub={<span className="flex items-center gap-2 text-xs">
+            <span className="text-danger-fg">{alertStats?.critical ?? 0} crit</span>
+            <span className="text-warning-fg">{alertStats?.warning ?? 0} warn</span>
           </span>}
-          foot={<div className="text-[10px] text-muted">{alertStats?.resolved_today ?? 0} resolved today</div>}
+          foot={<div className="text-2xs text-muted">{alertStats?.resolved_today ?? 0} resolved today</div>}
         />
         <KpiCard to={canNetflow ? netflowLink('/netflow', range) : '/netflow'} label="Traffic Now" icon={<Waves className="h-4 w-4" />} accent="info"
           value={canNetflow ? (nfOverview ? fmtBps(nfOverview.current_bps) : '—') : '—'}
           sub={canNetflow
-            ? <span className="text-[10.5px] text-muted">peak {nfSeries ? fmtBps(trafficStats.peak) : '—'}</span>
-            : <span className="text-[10.5px] text-muted">No NetFlow access</span>}
-          foot={canNetflow ? <Sparkline values={trafficSpark.slice(-30)} color="#22d3ee" width={250} height={30} /> : null}
+            ? <span className="text-xs text-muted">peak {nfSeries ? fmtBps(trafficStats.peak) : '—'}</span>
+            : <span className="text-xs text-muted">No NetFlow access</span>}
+          foot={canNetflow ? <Sparkline values={trafficSpark.slice(-30)} color={tokenColor('series-1')} width={250} height={30} /> : null}
         />
         <KpiCard to="/availability" label="Availability" icon={<HeartPulse className="h-4 w-4" />}
           accent={(exec?.kpis?.availability_pct ?? 100) >= 99.5 ? 'success' : 'warning'}
@@ -458,48 +459,48 @@ export function DashboardPage() {
             // delta is null when there is no prior window to compare against (fresh install)
             const delta = exec.kpis.availability_delta_pct
             if (delta == null) {
-              return <span className="text-[10.5px] text-muted">SLA {exec.kpis.sla_target_pct}%</span>
+              return <span className="text-xs text-muted">SLA {exec.kpis.sla_target_pct}%</span>
             }
             return (
-              <span className={`flex items-center gap-0.5 text-[10.5px] ${delta >= 0 ? 'text-success' : 'text-danger'}`}>
+              <span className={`flex items-center gap-0.5 text-xs ${delta >= 0 ? 'text-success' : 'text-danger'}`}>
                 {delta >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
                 {delta >= 0 ? '+' : ''}{delta.toFixed(2)}% · SLA {exec.kpis.sla_target_pct}%
               </span>
             )
           })()}
-          foot={<Sparkline values={(exec?.availability_trend || []).flatMap((p) => (p.availability_pct == null ? [] : [p.availability_pct]))} color="#34d399" width={250} height={30} />}
+          foot={<Sparkline values={(exec?.availability_trend || []).flatMap((p) => (p.availability_pct == null ? [] : [p.availability_pct]))} color={tokenColor('success')} width={250} height={30} />}
         />
         <KpiCard to="/services" label="Services" icon={<Shield className="h-4 w-4" />}
           accent={(services?.down ?? 0) > 0 ? 'danger' : 'success'}
-          value={services ? <>{services.up}<span className="text-base font-medium text-muted">/{services.total}</span></> : '—'}
+          value={services ? <>{services.up}<span className="text-lg font-medium text-muted">/{services.total}</span></> : '—'}
           sub={services && services.down > 0
-            ? <span className="text-[10.5px] font-semibold text-danger">{services.down} down</span>
-            : <span className="text-[10.5px] text-success">all passing</span>}
-          foot={<div className="text-[10px] text-muted">HTTP · TCP · DNS probes</div>}
+            ? <span className="text-xs font-semibold text-danger">{services.down} down</span>
+            : <span className="text-xs text-success">all passing</span>}
+          foot={<div className="text-2xs text-muted">HTTP · TCP · DNS probes</div>}
         />
         <KpiCard to="/devices" label="Fleet Load" icon={<Cpu className="h-4 w-4" />} accent="accent"
           value={`${fleet.avgCpu.toFixed(0)}%`}
-          sub={<span className="text-[10.5px] text-muted">mem {fleet.avgMem.toFixed(0)}% · {fleet.sampled} devices</span>}
+          sub={<span className="text-xs text-muted">mem {fleet.avgMem.toFixed(0)}% · {fleet.sampled} devices</span>}
           foot={<DualBar a={fleet.avgCpu} b={fleet.avgMem} />}
         />
         <KpiCard to="/apm" label="APM Services" icon={<Boxes className="h-4 w-4" />}
           accent={apm.critical > 0 || apm.errRate >= 0.05 ? 'danger' : apm.degraded > 0 || apm.errRate >= 0.01 ? 'warning' : 'success'}
           value={apm.list.length
-            ? <>{apm.healthy}<span className="text-base font-medium text-muted">/{apm.list.length}</span></>
+            ? <>{apm.healthy}<span className="text-lg font-medium text-muted">/{apm.list.length}</span></>
             : '—'}
           sub={apm.list.length === 0
-            ? <span className="text-[10.5px] text-muted">no services reporting</span>
+            ? <span className="text-xs text-muted">no services reporting</span>
             : apm.critical > 0
-              ? <span className="text-[10.5px] font-semibold text-danger">{apm.critical} critical · p95 {fmtMs(apm.worstP95)}</span>
+              ? <span className="text-xs font-semibold text-danger">{apm.critical} critical · p95 {fmtMs(apm.worstP95)}</span>
               : apm.degraded > 0
-                ? <span className="text-[10.5px] text-warning">{apm.degraded} degraded · p95 {fmtMs(apm.worstP95)}</span>
-                : <span className="text-[10.5px] text-success">All healthy</span>}
+                ? <span className="text-xs text-warning">{apm.degraded} degraded · p95 {fmtMs(apm.worstP95)}</span>
+                : <span className="text-xs text-success">All healthy</span>}
           foot={apm.list.length
             ? <div className="space-y-1">
                 <ApmHealthBar healthy={apm.healthy} degraded={apm.degraded} critical={apm.critical} noData={apm.noData} />
-                <div className="text-[10px] text-muted">err {fmtPct(apm.errRate)}</div>
+                <div className="text-2xs text-muted">err {fmtPct(apm.errRate)}</div>
               </div>
-            : <div className="text-[10px] text-muted">traces via OTLP ingest</div>}
+            : <div className="text-2xs text-muted">traces via OTLP ingest</div>}
         />
       </div>
 
@@ -509,7 +510,7 @@ export function DashboardPage() {
           <SectionHeader icon={<Activity className="h-3.5 w-3.5" />} title="Network Traffic"
             hint={`NetFlow · ${range.label}${nfOverview ? ' · ' + fmtBytes(nfOverview.bytes) + ' total' : ''}`}
             right={canNetflow && nfOverview?.top_protocol && (
-              <span className="rounded-md bg-surface2/80 px-2 py-0.5 font-mono text-[10px] text-text2">
+              <span className="rounded-md bg-surface2/80 px-2 py-0.5 font-mono text-2xs text-text2">
                 top: {nfOverview.top_protocol.name} · {fmtBytes(nfOverview.top_protocol.bytes)}
               </span>
             )}
@@ -526,19 +527,19 @@ export function DashboardPage() {
               <AreaChart data={chartData} margin={{ top: 8, right: 14, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="noc-traffic" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#22d3ee" stopOpacity={0.5} />
-                    <stop offset="60%" stopColor="#0ea5e9" stopOpacity={0.12} />
-                    <stop offset="100%" stopColor="#0ea5e9" stopOpacity={0} />
+                    <stop offset="0%" stopColor={tokenColor('series-1')} stopOpacity={0.35} />
+                    <stop offset="70%" stopColor={tokenColor('series-1')} stopOpacity={0.08} />
+                    <stop offset="100%" stopColor={tokenColor('series-1')} stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.5} strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="t" stroke="rgb(var(--muted))" fontSize={10} tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={42} />
                 <YAxis stroke="rgb(var(--muted))" fontSize={10} tickLine={false} axisLine={false} width={44} tickFormatter={(v) => fmtMbpsShort(v)} />
                 <Tooltip
-                  contentStyle={{ backgroundColor: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12, color: 'rgb(var(--text))' }}
+                  contentStyle={{ backgroundColor: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: chartFont(12), color: 'rgb(var(--text))' }}
                   formatter={(v: number | string, name: string) => name === 'mbps' ? [fmtBps(Number(v) * 1_000_000), 'Throughput'] : [fmtCount(Number(v)), 'Flows']}
                 />
-                <Area type="monotone" dataKey="mbps" stroke="#22d3ee" strokeWidth={2.2} fill="url(#noc-traffic)" isAnimationActive={false} dot={false} activeDot={{ r: 3.5, fill: '#22d3ee' }} />
+                <Area type="monotone" dataKey="mbps" stroke={tokenColor('series-1')} strokeWidth={2} fill="url(#noc-traffic)" isAnimationActive={false} dot={false} activeDot={{ r: 3.5, fill: '#22d3ee' }} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -558,7 +559,7 @@ export function DashboardPage() {
             </div>
           </div>
           <div className="mt-3 border-t border-border px-4 pb-3 pt-2">
-            <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Needs attention</div>
+            <div className="pb-1.5 text-2xs font-bold uppercase tracking-wider text-muted">Needs attention</div>
             {problemDevices.length === 0 && (
               // Flapping devices beyond the loaded rows still count in the summary: never the all-healthy message then.
               (summary?.flapping ?? 0) > 0
@@ -571,8 +572,8 @@ export function DashboardPage() {
                   <span className={`h-2 w-2 shrink-0 rounded-full ${d.status === 'down' ? 'bg-danger' : d.status === 'degraded' ? 'bg-warning' : critical > 0 ? 'bg-danger' : 'bg-warning'}`} />
                   <span className="min-w-0 flex-1 truncate font-medium text-text">{d.hostname}</span>
                   {isFlapping(d) && <FlappingTag device={d} />}
-                  {alerts > 0 && <span className={`rounded px-1 font-mono text-[10px] font-bold ${critical > 0 ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning'}`}>{alerts}</span>}
-                  <span className="shrink-0 text-[10px] capitalize text-muted">{d.status}</span>
+                  {alerts > 0 && <span className={`rounded px-1 font-mono text-2xs font-bold ${critical > 0 ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning'}`}>{alerts}</span>}
+                  <span className="shrink-0 text-2xs capitalize text-muted">{d.status}</span>
                 </Link>
               ))}
             </div>
@@ -595,11 +596,11 @@ export function DashboardPage() {
                 <div key={t.ip}>
                   <div className="flex items-baseline justify-between gap-2 text-xs">
                     <span className="flex min-w-0 items-center gap-1.5 font-mono font-medium text-text">
-                      <span className="w-3 shrink-0 text-[9px] text-muted">{i + 1}</span>
+                      <span className="w-3 shrink-0 text-2xs text-muted">{i + 1}</span>
                       <Link to={netflowLink(hostPath(t.ip), range)} className="break-all hover:text-primary hover:underline" title={`Host profile for ${t.ip}`}>{t.ip}</Link>
-                      {app && <span className="truncate rounded bg-surface2 px-1 py-px text-[8.5px] font-sans text-muted">{app}</span>}
+                      {app && <span className="truncate rounded bg-surface2 px-1 py-px text-2xs font-sans text-muted">{app}</span>}
                     </span>
-                    <span className="font-mono text-[11px] font-semibold tabular-nums text-text2">{fmtBytes(t.bytes)}</span>
+                    <span className="font-mono text-xs font-semibold tabular-nums text-text2">{fmtBytes(t.bytes)}</span>
                   </div>
                   <InOutBar tx={t.src_bytes} rx={t.dst_bytes} scale={max} />
                 </div>
@@ -620,16 +621,16 @@ export function DashboardPage() {
                   <div className="flex items-baseline justify-between gap-2 text-xs">
                     <span className="min-w-0 truncate">
                       <span className="font-mono font-medium text-text">{f.display_name}</span>
-                      <span className="ml-1.5 text-[10px] text-muted">{f.device_hostname || f.exporter_ip}{f.if_alias ? ` · ${f.if_alias}` : ''}</span>
+                      <span className="ml-1.5 text-2xs text-muted">{f.device_hostname || f.exporter_ip}{f.if_alias ? ` · ${f.if_alias}` : ''}</span>
                     </span>
-                    <span className="shrink-0 font-mono text-[11px] font-semibold tabular-nums text-text2">{fmtBytes(f.bytes)}</span>
+                    <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-text2">{fmtBytes(f.bytes)}</span>
                   </div>
                   <InOutBar tx={f.out_bytes} rx={f.in_bytes} scale={max} />
                 </div>
               )
             })}
             {canNetflow && !!nfIfaces?.length && (
-              <div className="flex items-center gap-3 pt-1 text-[9.5px] text-muted">
+              <div className="flex items-center gap-3 pt-1 text-2xs text-muted">
                 <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full bg-sky-400" /> inbound</span>
                 <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full bg-fuchsia-400" /> outbound</span>
               </div>
@@ -650,14 +651,14 @@ export function DashboardPage() {
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
               {protocols && !protoMix.length && <Empty text="No flow records in this window" />}
               {protoMix.map((p) => (
-                <span key={p.key} className="flex items-center gap-1.5 text-[10.5px] text-text2">
+                <span key={p.key} className="flex items-center gap-1.5 text-xs text-text2">
                   <span className="h-2 w-2 rounded-sm" style={{ background: p.color }} />
                   {p.name} <span className="font-mono text-muted" title={`${fmtBytes(p.bytes)}`}>{p.pct > 0 && p.pct < 1 ? '<1' : p.pct.toFixed(0)}%</span>
                 </span>
               ))}
             </div>
             <div className="mt-3 border-t border-border pt-2">
-              <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Top applications</div>
+              <div className="pb-1.5 text-2xs font-bold uppercase tracking-wider text-muted">Top applications</div>
               <div className="space-y-1.5">
                 {!topApps.length && <Empty text="No classified application traffic" />}
                 {topApps.map(([app, bytes]) => {
@@ -668,7 +669,7 @@ export function DashboardPage() {
                       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2">
                         <div className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-violet-500" style={{ width: `${Math.max(3, (bytes / max) * 100)}%` }} />
                       </div>
-                      <span className="w-16 text-right font-mono text-[10.5px] tabular-nums text-muted">{fmtBytes(bytes)}</span>
+                      <span className="w-16 text-right font-mono text-xs tabular-nums text-muted">{fmtBytes(bytes)}</span>
                     </div>
                   )
                 })}
@@ -692,9 +693,9 @@ export function DashboardPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
                       <span className="truncate text-xs font-semibold text-text">{a.device_hostname}</span>
-                      <span className="shrink-0 text-[10px] tabular-nums text-muted">{relativeTime(a.triggered_at)}</span>
+                      <span className="shrink-0 text-2xs tabular-nums text-muted">{relativeTime(a.triggered_at)}</span>
                     </div>
-                    <div className="truncate text-[11px] text-text2" title={a.message}>{prettyMessage(a.message)}</div>
+                    <div className="truncate text-xs text-text2" title={a.message}>{prettyMessage(a.message)}</div>
                   </div>
                   <Badge variant={a.severity === 'critical' ? 'danger' : a.severity === 'warning' ? 'warning' : 'info'} className="self-center capitalize">{a.severity}</Badge>
                 </div>
@@ -721,13 +722,13 @@ export function DashboardPage() {
             <ResourceRow label="CPU average" value={fleet.avgCpu} />
             <ResourceRow label="Memory average" value={fleet.avgMem} />
             <div className="border-t border-border pt-2">
-              <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Hottest devices</div>
+              <div className="pb-1.5 text-2xs font-bold uppercase tracking-wider text-muted">Hottest devices</div>
               <div className="space-y-1.5">
                 {!fleet.hottest.length && <Empty text="Awaiting SNMP samples" />}
                 {fleet.hottest.map(({ d, cpu, mem }) => (
                   <Link key={d.id} to={`/devices/${d.id}`} className="flex items-center gap-2 rounded-md px-1 py-1 text-xs transition hover:bg-surface2/50">
                     <span className="min-w-0 flex-1 truncate text-text2">{d.hostname}</span>
-                    <span className="shrink-0 font-mono text-[10px] tabular-nums">
+                    <span className="shrink-0 font-mono text-2xs tabular-nums">
                       <span className={cpu >= 80 ? 'text-danger' : cpu >= 60 ? 'text-warning' : 'text-muted'}>C {cpu.toFixed(0)}%</span>
                       <span className="mx-1 text-muted">·</span>
                       <span className={mem >= 80 ? 'text-danger' : mem >= 60 ? 'text-warning' : 'text-muted'}>M {mem.toFixed(0)}%</span>
@@ -751,19 +752,21 @@ function SectionHeader({ icon, title, hint, right }: { icon?: React.ReactNode; t
       <div className="flex min-w-0 items-center gap-2">
         {icon && <span className="text-muted">{icon}</span>}
         <h3 className="shrink-0 whitespace-nowrap text-sm font-semibold tracking-tight">{title}</h3>
-        {hint && <span className="truncate text-[10px] uppercase tracking-wider text-muted" title={hint}>{hint}</span>}
+        {hint && <span className="truncate text-2xs uppercase tracking-wider text-muted" title={hint}>{hint}</span>}
       </div>
       {right}
     </div>
   )
 }
 
-const KPI_ACCENT: Record<string, string> = {
-  success: 'from-emerald-500/80 to-green-500/80',
-  danger: 'from-rose-500/80 to-red-500/80',
-  warning: 'from-amber-500/80 to-orange-500/80',
-  info: 'from-cyan-500/80 to-sky-500/80',
-  accent: 'from-fuchsia-500/80 to-purple-500/80',
+// Tile tone: the top rule and the icon chip carry state (success / warning / danger); info and accent are neutral
+// tiles without a state, so they stay quiet instead of adding decoration colour.
+const KPI_ACCENT: Record<string, { bar: string; chip: string }> = {
+  success: { bar: 'bg-success', chip: 'bg-success/10 text-success-fg' },
+  danger: { bar: 'bg-danger', chip: 'bg-danger/10 text-danger-fg' },
+  warning: { bar: 'bg-warning', chip: 'bg-warning/10 text-warning-fg' },
+  info: { bar: 'bg-primary/60', chip: 'bg-primary/10 text-primary' },
+  accent: { bar: 'bg-primary/60', chip: 'bg-primary/10 text-primary' },
 }
 
 function KpiCard({ to, label, icon, accent, value, sub, foot }: {
@@ -778,18 +781,18 @@ function KpiCard({ to, label, icon, accent, value, sub, foot }: {
   return (
     <Link to={to} className="group">
       <Card className="relative h-full overflow-hidden transition group-hover:border-primary/40">
-        <span className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r ${KPI_ACCENT[accent]}`} />
-        <div className="flex items-start justify-between gap-2 px-4 pt-3">
+        <span className={`absolute inset-x-0 top-0 h-[3px] ${KPI_ACCENT[accent].bar}`} />
+        <div className="flex items-start justify-between gap-2 px-4 pt-3.5">
           <div className="min-w-0">
-            <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted">{label}</div>
-            <div className="mt-1 text-2xl font-bold tabular-nums leading-none text-text">{value}</div>
-            <div className="mt-1 min-h-[14px]">{sub}</div>
+            <div className="truncate text-2xs font-semibold uppercase tracking-wider text-muted">{label}</div>
+            <div className="mt-1.5 whitespace-nowrap text-3xl font-semibold tabular-nums leading-none tracking-tight text-text">{value}</div>
+            <div className="mt-1.5 min-h-[1.125rem]">{sub}</div>
           </div>
-          <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white shadow ${KPI_ACCENT[accent]}`}>
+          <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${KPI_ACCENT[accent].chip}`}>
             {icon}
           </span>
         </div>
-        <div className="px-4 pb-3 pt-1.5">{foot}</div>
+        <div className="px-4 pb-3.5 pt-2">{foot}</div>
       </Card>
     </Link>
   )
@@ -831,7 +834,7 @@ function StatusDots({ s }: { s: DeviceSummary }) {
     s.degraded > 0 && <span key="g" className="text-warning">{s.degraded} degraded</span>,
     s.unknown > 0 && <span key="u" className="text-muted">{s.unknown} unknown</span>,
   ].filter(Boolean)
-  return <span className="flex items-center gap-2 text-[10.5px]">{parts.length ? parts : <span className="text-success">all reachable</span>}</span>
+  return <span className="flex items-center gap-2 text-xs">{parts.length ? parts : <span className="text-success">all reachable</span>}</span>
 }
 
 function DualBar({ a, b }: { a: number; b: number }) {
@@ -850,8 +853,8 @@ function DualBar({ a, b }: { a: number; b: number }) {
 function MiniStat({ label, value, tone }: { label: string; value: string; tone: string }) {
   return (
     <div className="rounded-lg border border-border/60 bg-surface2/30 px-2 py-1.5">
-      <div className="text-[9px] font-bold uppercase tracking-wider text-muted">{label}</div>
-      <div className={`font-mono text-[13px] font-semibold tabular-nums ${tone}`}>{value}</div>
+      <div className="text-2xs font-bold uppercase tracking-wider text-muted">{label}</div>
+      <div className={`font-mono text-sm font-semibold tabular-nums ${tone}`}>{value}</div>
     </div>
   )
 }
@@ -859,11 +862,11 @@ function MiniStat({ label, value, tone }: { label: string; value: string; tone: 
 function HealthDonut({ s }: { s?: DeviceSummary }) {
   const total = s?.total || 0
   const slices = [
-    { v: s?.up ?? 0, c: '#22c55e' },
-    { v: s?.degraded ?? 0, c: '#f59e0b' },
-    { v: s?.down ?? 0, c: '#ef4444' },
-    { v: s?.maintenance ?? 0, c: '#3b82f6' },
-    { v: s?.unknown ?? 0, c: '#6b7280' },
+    { v: s?.up ?? 0, c: tokenColor('success') },
+    { v: s?.degraded ?? 0, c: tokenColor('warning') },
+    { v: s?.down ?? 0, c: tokenColor('danger') },
+    { v: s?.maintenance ?? 0, c: tokenColor('info') },
+    { v: s?.unknown ?? 0, c: tokenColor('muted2') },
   ].filter((x) => x.v > 0)
   const sum = slices.reduce((acc, x) => acc + x.v, 0) || 1
   const size = 132, stroke = 13
@@ -887,7 +890,7 @@ function HealthDonut({ s }: { s?: DeviceSummary }) {
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
         <div className="text-2xl font-bold tabular-nums">{total}</div>
-        <div className="text-[9px] uppercase tracking-widest text-muted">devices</div>
+        <div className="text-2xs uppercase tracking-widest text-muted">devices</div>
       </div>
     </div>
   )
@@ -902,7 +905,7 @@ function HealthRow({ color, label, value, total }: { color: string; label: strin
       <div className="h-1 flex-1 overflow-hidden rounded-full bg-surface2">
         <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.max(value > 0 ? 3 : 0, pct)}%` }} />
       </div>
-      <span className="w-6 text-right font-mono text-[11px] font-semibold tabular-nums">{value}</span>
+      <span className="w-6 text-right font-mono text-xs font-semibold tabular-nums">{value}</span>
     </div>
   )
 }
@@ -929,7 +932,7 @@ function ResourceRow({ label, value }: { label: string; value: number }) {
     <div>
       <div className="flex items-baseline justify-between text-xs">
         <span className="text-text2">{label}</span>
-        <span className="font-mono text-[12px] font-semibold tabular-nums">{v.toFixed(1)}%</span>
+        <span className="font-mono text-sm font-semibold tabular-nums">{v.toFixed(1)}%</span>
       </div>
       <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-surface2">
         <div className={`h-full rounded-full bg-gradient-to-r ${tone} transition-all duration-700`} style={{ width: `${Math.max(2, v)}%` }} />
@@ -944,7 +947,7 @@ function RangePills({ value, onChange }: { value: RangeKey; onChange: (k: RangeK
       <Clock className="ml-1 h-3.5 w-3.5 text-muted" />
       {RANGES.map((r) => (
         <button key={r.key} onClick={() => onChange(r.key)}
-          className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${r.key === value ? 'bg-primary text-white shadow-sm' : 'text-muted hover:bg-surface3 hover:text-text'}`}>
+          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${r.key === value ? 'bg-primary text-white shadow-sm' : 'text-muted hover:bg-surface3 hover:text-text'}`}>
           {r.label}
         </button>
       ))}

@@ -199,7 +199,7 @@ function Note({ tone = 'info', icon: IconC = Info, title, children, className }:
 }
 
 function FieldLabel({ children }: { children: ReactNode }) {
-  return <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted">{children}</div>
+  return <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">{children}</div>
 }
 
 /* ── Update status ───────────────────────────────────────────────── */
@@ -331,7 +331,7 @@ export function AgentTab({ server, sub, setSub, onEdit, onDecommission, onDelete
 }) {
   const active: SectionKey = sub === 'settings' ? 'settings' : 'agent'
   return (
-    <div className="space-y-4 text-[13px]">
+    <div className="space-y-4 text-sm">
       <Segmented items={SECTIONS} value={active} onChange={(k) => setSub(k)} />
       {active === 'agent'
         ? <AgentSection server={server} onDownloadAgent={onDownloadAgent} />
@@ -963,7 +963,7 @@ function DetailsPanel({ agent, capabilities, className }: {
         {capabilities.length ? (
           <div className="flex flex-wrap gap-1.5">
             {[...capabilities].sort().map((c) => (
-              <span key={c} className="rounded-md border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-[11px] text-text2">
+              <span key={c} className="rounded-md border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-xs text-text2">
                 {c}
               </span>
             ))}
@@ -1053,7 +1053,7 @@ function ActionsPanel({ server, agent, onDownloadAgent, onDone }: {
                 <r.icon className="h-3.5 w-3.5" />
               </span>
               <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-medium text-text">{r.title}</div>
+                <div className="text-sm font-medium text-text">{r.title}</div>
                 <div className="text-xs leading-4 text-muted">{r.hint}</div>
               </div>
               <Button variant="outline" size="sm" className="h-7 shrink-0 px-2.5" disabled={disabled} onClick={r.run}>
@@ -1176,7 +1176,7 @@ function CommandHistory({ serverId }: { serverId: string }) {
                 <Tr key={c.id}>
                   <Td className="py-2 pl-4 align-top">
                     <div className="font-mono text-xs text-text">{c.command}</div>
-                    {params && <div className="font-mono text-[11px] text-muted">{params}</div>}
+                    {params && <div className="font-mono text-xs text-muted">{params}</div>}
                   </Td>
                   <Td className="py-2 align-top">
                     <Pill tone={st.tone} pulse={st.pulse}>{st.label}</Pill>
@@ -1252,7 +1252,7 @@ function SettingsSection({ server, onEdit, onDecommission, onDelete }: {
           <div className="min-w-0 md:col-span-2">
             <FieldLabel>Description</FieldLabel>
             {server.description
-              ? <p className="whitespace-pre-wrap break-words text-[13px] text-text">{server.description}</p>
+              ? <p className="whitespace-pre-wrap break-words text-sm text-text">{server.description}</p>
               : <span className="text-muted">No description</span>}
           </div>
         </div>
@@ -1268,7 +1268,7 @@ function SettingsSection({ server, onEdit, onDecommission, onDelete }: {
         <div className="divide-y divide-border/70">
           <div className="flex flex-wrap items-center gap-3 px-4 py-3.5">
             <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-text">Decommission server</div>
+              <div className="text-sm font-medium text-text">Decommission server</div>
               <p className="text-xs text-muted">
                 {decommissioned
                   ? 'This server is already decommissioned. Monitoring and alerting are off; its history is kept.'
@@ -1286,7 +1286,7 @@ function SettingsSection({ server, onEdit, onDecommission, onDelete }: {
           </div>
           <div className="flex flex-wrap items-center gap-3 px-4 py-3.5">
             <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-text">Delete server</div>
+              <div className="text-sm font-medium text-text">Delete server</div>
               <p className="text-xs text-muted">
                 Permanently removes the server, its inventory and its alert history. This cannot be undone.
               </p>

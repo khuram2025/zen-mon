@@ -35,7 +35,7 @@ export function InventoryMetaLine({ summary, loading, failed, onRetry, scopeTags
 
   const scope = scoped && (
     <span
-      className="inline-flex items-center gap-1 rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-[11px] font-medium text-info-fg"
+      className="inline-flex items-center gap-1 rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-xs font-medium text-info-fg"
       title={`Your role limits what you see to assets tagged ${scopeTags.join(', ')}. Every number on these pages covers those assets only.`}
     >
       <ShieldCheck className="h-3 w-3" aria-hidden />

@@ -537,12 +537,12 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
         {/* Free-text link label (design + live). Previously stored but never drawn. */}
         {link.label && (
           <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${path.mid.x}px, ${path.mid.y + labelOffsetY}px) scale(${ts})` }}>
-            <span className="rounded-md border border-border bg-surface/95 px-1.5 py-px text-[10px] font-semibold leading-tight text-text2 shadow-sm backdrop-blur" style={customColor ? { borderColor: customColor, color: customColor } : undefined}>{link.label}</span>
+            <span className="rounded-md border border-border bg-surface/95 px-1.5 py-px text-2xs font-semibold leading-tight text-text2 shadow-sm backdrop-blur" style={customColor ? { borderColor: customColor, color: customColor } : undefined}>{link.label}</span>
           </div>
         )}
         {bundle > 0 && (
           <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${badgeAt.x}px, ${badgeAt.y}px) scale(${ts})` }}>
-            <span className="rounded-full border border-border bg-surface px-1.5 py-px font-mono text-[9px] font-bold leading-none text-text2 shadow-sm" title={`${bundle} physical links: ${members.map((m) => `${m.src_interface || '?'} ⇄ ${m.dst_interface || '?'}`).join(', ')}`}>×{bundle}</span>
+            <span className="rounded-full border border-border bg-surface px-1.5 py-px font-mono text-2xs font-bold leading-none text-text2 shadow-sm" title={`${bundle} physical links: ${members.map((m) => `${m.src_interface || '?'} ⇄ ${m.dst_interface || '?'}`).join(', ')}`}>×{bundle}</span>
           </div>
         )}
         {showThroughput && liveMode && flow && (hasTraffic || faulted) && (
@@ -659,14 +659,14 @@ function TrafficChip({ x, y, flow, faulted, ts, compact }: { x: number; y: numbe
     const text = faulted ? 'DOWN' : u != null ? `${u >= 10 ? u.toFixed(0) : u.toFixed(1)}%` : formatBps(flow.total).replace(' ', '')
     return (
       <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${ts})` }}>
-        <span className={cn('rounded border bg-surface/95 px-1 py-px font-mono text-[9.5px] font-bold leading-none shadow-sm', cls)}>{text}</span>
+        <span className={cn('rounded border bg-surface/95 px-1 py-px font-mono text-2xs font-bold leading-none shadow-sm', cls)}>{text}</span>
       </div>
     )
   }
   return (
     <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${ts})` }}>
       <div className={cn('overflow-hidden rounded-md border bg-surface/95 shadow-md backdrop-blur', cls)}>
-        <div className="flex items-center gap-1.5 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold leading-none tracking-tight">
+        <div className="flex items-center gap-1.5 px-1.5 py-0.5 font-mono text-2xs font-semibold leading-none tracking-tight">
           {faulted ? (
             <span>LINK DOWN</span>
           ) : (
@@ -701,16 +701,16 @@ function LinkHoverCard({ x, y, zoom, link, live, flow, unbound, halfBound, sourc
     <div className="nodrag nopan pointer-events-none absolute z-50" style={{ transform: `translate(-50%, -100%) translate(${x}px, ${y - 14 * scale}px) scale(${scale})`, transformOrigin: 'bottom center' }}>
       <div className="w-64 rounded-lg border border-border bg-surface/95 p-2.5 shadow-xl backdrop-blur animate-fade-in">
         <div className="mb-1.5 flex items-center justify-between gap-2">
-          <span className="truncate text-[11px] font-semibold text-text" title={title}>{title}</span>
-          <span className="rounded bg-surface2 px-1 py-px font-mono text-[9px] uppercase text-muted">{link.metadata?.kind || link.link_type}{link.metadata?.speed ? ` · ${link.metadata.speed}` : ''}</span>
+          <span className="truncate text-xs font-semibold text-text" title={title}>{title}</span>
+          <span className="rounded bg-surface2 px-1 py-px font-mono text-2xs uppercase text-muted">{link.metadata?.kind || link.link_type}{link.metadata?.speed ? ` · ${link.metadata.speed}` : ''}</span>
         </div>
         {unbound && (
-          <div className="mb-2 rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-[9.5px] leading-snug text-warning">
+          <div className="mb-2 rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-2xs leading-snug text-warning">
             No interface is bound on either end, so this cable has no live data. Switch to Design, right-click the link → Edit link, and pick the ports.
           </div>
         )}
         {halfBound && (
-          <div className="mb-2 rounded-md border border-border bg-surface2/60 px-2 py-1 text-[9.5px] leading-snug text-muted">
+          <div className="mb-2 rounded-md border border-border bg-surface2/60 px-2 py-1 text-2xs leading-snug text-muted">
             Only one end is bound to an interface — throughput comes from that side.
           </div>
         )}
@@ -719,7 +719,7 @@ function LinkHoverCard({ x, y, zoom, link, live, flow, unbound, halfBound, sourc
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2">
               <div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.min(100, flow.utilPct))}%`, background: utilHex(flow.utilPct) }} />
             </div>
-            <span className="font-mono text-[10px] font-semibold" style={{ color: utilHex(flow.utilPct) }}>{flow.utilPct.toFixed(1)}%</span>
+            <span className="font-mono text-2xs font-semibold" style={{ color: utilHex(flow.utilPct) }}>{flow.utilPct.toFixed(1)}%</span>
           </div>
         )}
         <div className="grid grid-cols-2 gap-2">
@@ -727,12 +727,12 @@ function LinkHoverCard({ x, y, zoom, link, live, flow, unbound, halfBound, sourc
           <HoverIface title={targetName ? targetName.slice(0, 16) : 'B-END'} iface={live.target} typed={link.metadata?.dst_interface} />
         </div>
         {members.length > 1 && (
-          <div className="mt-1.5 rounded-md border border-border/70 bg-surface2/50 px-1.5 py-1 font-mono text-[9px] leading-snug text-text2">
+          <div className="mt-1.5 rounded-md border border-border/70 bg-surface2/50 px-1.5 py-1 font-mono text-2xs leading-snug text-text2">
             <div className="mb-0.5 font-sans text-[8.5px] font-bold tracking-wider text-muted">BUNDLE · {members.length} LINKS</div>
             {members.map((m, i) => <div key={i} className="truncate">{m.src_interface || '?'} ⇄ {m.dst_interface || '?'}</div>)}
           </div>
         )}
-        <div className="mt-1.5 text-right text-[9px] text-muted">window {Math.round(live.window_seconds / 60)}m</div>
+        <div className="mt-1.5 text-right text-2xs text-muted">window {Math.round(live.window_seconds / 60)}m</div>
       </div>
     </div>
   )
@@ -748,10 +748,10 @@ function HoverIface({ title, iface, typed }: { title: string; iface: LiveInterfa
           {iface.matched ? (iface.oper_status || '?') : 'unbound'}
         </span>
       </div>
-      <div className="truncate font-mono text-[10px] font-semibold text-text">{iface.if_name || typed || '—'}</div>
+      <div className="truncate font-mono text-2xs font-semibold text-text">{iface.if_name || typed || '—'}</div>
       {iface.if_alias ? <div className="truncate text-[8.5px] italic text-muted" title={iface.if_alias}>{iface.if_alias}</div> : null}
       {iface.matched ? (
-        <div className="mt-1 space-y-px font-mono text-[9px] leading-tight text-text2">
+        <div className="mt-1 space-y-px font-mono text-2xs leading-tight text-text2">
           <div>in&nbsp;&nbsp;{formatBps(iface.in_bps)}</div>
           <div>out&nbsp;{formatBps(iface.out_bps)}</div>
           {iface.if_speed ? <div className="text-muted">spd {formatBps(iface.if_speed)}</div> : null}
@@ -815,7 +815,7 @@ function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, ts, down, unm
         onPointerDown={startMove}
         title={unmatched ? `"${value}" was not found on this device — edit the link to pick a valid port` : value}
         className={cn(
-          'relative rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
+          'relative rounded border px-1 py-px font-mono text-2xs font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
           down ? 'border-danger/60 bg-danger/15 text-danger'
             : unmatched ? 'border-dashed border-warning/60 bg-warning/10 text-warning'
             : 'border-border bg-surface/95 text-text2',

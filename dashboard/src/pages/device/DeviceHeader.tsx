@@ -189,7 +189,7 @@ export function DeviceHeader({
             {ids.map((item) => (
               <div key={item.label} className="flex min-w-0 items-baseline gap-1.5">
                 <dt className="text-xs text-muted">{item.label}</dt>
-                <dd className={cn('min-w-0 break-words font-medium', item.mono && 'font-mono text-[13px]')}>{item.value}</dd>
+                <dd className={cn('min-w-0 break-words font-medium', item.mono && 'font-mono text-sm')}>{item.value}</dd>
               </div>
             ))}
           </dl>

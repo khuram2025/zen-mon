@@ -304,7 +304,7 @@ export function ProcessesTab({ server }: { server: ServerItem }) {
           <div className="relative min-w-[220px] flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
             <Input
-              className="h-8 pl-8 pr-8 text-[13px]"
+              className="h-8 pl-8 pr-8 text-sm"
               placeholder="Filter by name, user, PID or command…"
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -371,9 +371,9 @@ export function ProcessesTab({ server }: { server: ServerItem }) {
           )
         ) : (
           <div className="max-h-[640px] overflow-auto">
-            <table className="w-full min-w-[880px] border-separate border-spacing-0 text-[13px]">
+            <table className="w-full min-w-[880px] border-separate border-spacing-0 text-sm">
               <thead>
-                <tr className="text-left text-[11px] font-medium uppercase tracking-wide text-muted">
+                <tr className="text-left text-xs font-medium uppercase tracking-wide text-muted">
                   <HeadCell className={cn('pl-4', sortableTh)} onClick={() => toggleSort('name')}>
                     Process{sortIndicator(sortBy === 'name', sortDir)}
                   </HeadCell>
@@ -423,7 +423,7 @@ export function ProcessesTab({ server }: { server: ServerItem }) {
                           {p.watchlisted && (
                             <span
                               title="On the monitoring profile's process watchlist"
-                              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-px text-[10px] font-medium text-muted"
+                              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-px text-2xs font-medium text-muted"
                             >
                               <Eye className="h-3 w-3" /> Watched
                             </span>
@@ -453,7 +453,7 @@ export function ProcessesTab({ server }: { server: ServerItem }) {
                           >
                             {p.running ? formatBytes(p.memory_bytes) : '—'}
                           </span>
-                          <span className={cn('w-11 shrink-0 text-right text-[11px] tabular-nums', TONE_TEXT[memTone === 'default' ? 'muted' : memTone])}>
+                          <span className={cn('w-11 shrink-0 text-right text-xs tabular-nums', TONE_TEXT[memTone === 'default' ? 'muted' : memTone])}>
                             {p.running && mp != null ? fmtPct(mp) : ''}
                           </span>
                         </div>
@@ -560,7 +560,7 @@ function ProcessDetailDialog({ serverId, row, grouped, memTotal, onClose }: {
                 ]}
               />
               <div>
-                <div className="text-[11px] font-medium uppercase tracking-wide text-muted">Command line</div>
+                <div className="text-xs font-medium uppercase tracking-wide text-muted">Command line</div>
                 <div className="mt-1 max-h-24 overflow-auto rounded-md border border-border bg-surface2/40 px-2.5 py-1.5 font-mono text-xs text-text2 [overflow-wrap:anywhere]">
                   {row.cmdline || 'not reported'}
                 </div>

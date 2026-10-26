@@ -76,7 +76,7 @@ export function SectionLibrary({ sections, categories, usage, full, onAdd, dragg
             </button>
           )}
         </div>
-        <p className="text-[11px] text-muted" aria-live="polite">
+        <p className="text-xs text-muted" aria-live="polite">
           {searching ? (
             <><span className="tabular-nums">{shown}</span> of <span className="tabular-nums">{sections.length}</span> sections match</>
           ) : (
@@ -86,7 +86,7 @@ export function SectionLibrary({ sections, categories, usage, full, onAdd, dragg
       </div>
 
       {full && (
-        <p role="note" className="mx-3 mt-2.5 rounded-md border border-warning/40 bg-warning/5 px-2.5 py-2 text-[11px] leading-relaxed text-text2">
+        <p role="note" className="mx-3 mt-2.5 rounded-md border border-warning/40 bg-warning/5 px-2.5 py-2 text-xs leading-relaxed text-text2">
           This template has the maximum of {MAX_SECTIONS} sections. Remove one to add another.
         </p>
       )}
@@ -114,12 +114,12 @@ export function SectionLibrary({ sections, categories, usage, full, onAdd, dragg
                     aria-controls={listId}
                     disabled={searching}
                     onClick={() => toggleGroup(g.category)}
-                    className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wider text-text2 transition-colors hover:bg-surface2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-default disabled:hover:bg-transparent"
+                    className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold uppercase tracking-wider text-text2 transition-colors hover:bg-surface2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-default disabled:hover:bg-transparent"
                   >
                     <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted transition-transform', !open && '-rotate-90')} aria-hidden />
                     <Icon className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
                     <span className="truncate">{g.category}</span>
-                    <span className="ml-auto rounded-full bg-surface2 px-1.5 text-[10px] font-medium tabular-nums text-muted">
+                    <span className="ml-auto rounded-full bg-surface2 px-1.5 text-2xs font-medium tabular-nums text-muted">
                       {g.sections.length}
                     </span>
                   </button>
@@ -192,14 +192,14 @@ function LibraryItem({ def, used, full, expanded, onToggle, onAdd, draggable, ba
               <Plus className="h-3 w-3" />
             </span>
             <span className="min-w-0 flex-1">
-              <span className="block text-[13px] font-medium leading-5 text-text">
+              <span className="block text-sm font-medium leading-5 text-text">
                 <span className="sr-only">Add </span>
                 {def.title}
               </span>
               {(used > 0 || !def.available || def.semantics === 'snapshot') && (
                 <span className="mt-0.5 flex flex-wrap items-center gap-1">
                   {used > 0 && (
-                    <span className="inline-flex items-center rounded border border-primary/30 bg-primary/10 px-1.5 py-px text-[10px] font-medium leading-4 text-primary">
+                    <span className="inline-flex items-center rounded border border-primary/30 bg-primary/10 px-1.5 py-px text-2xs font-medium leading-4 text-primary">
                       In template{used > 1 ? ` ×${used}` : ''}
                     </span>
                   )}
@@ -224,7 +224,7 @@ function LibraryItem({ def, used, full, expanded, onToggle, onAdd, draggable, ba
         </button>
       </div>
       {expanded && (
-        <div id={descId} className="space-y-1.5 px-2 pb-2 pl-9 pt-1 text-[11px] leading-relaxed text-text2">
+        <div id={descId} className="space-y-1.5 px-2 pb-2 pl-9 pt-1 text-xs leading-relaxed text-text2">
           <p>{def.description}</p>
           <p className="text-muted">
             {def.semantics === 'snapshot' ? 'Snapshot: shows the state when the report runs. ' : 'Covers the report period. '}

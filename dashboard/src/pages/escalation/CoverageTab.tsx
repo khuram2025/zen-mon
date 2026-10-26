@@ -68,7 +68,7 @@ export function CoverageTab({ go }: { go: (t: EscalationTab, id?: string | null)
               ))}
             </ul>
           )}
-          <p className="mt-2 text-[11px] text-muted">Checked against who is on call now. A gap at send time uses the policy&apos;s fallback route and records a coverage-gap event on the incident.</p>
+          <p className="mt-2 text-xs text-muted">Checked against who is on call now. A gap at send time uses the policy&apos;s fallback route and records a coverage-gap event on the incident.</p>
         </CardContent>
       </Card>
     </div>

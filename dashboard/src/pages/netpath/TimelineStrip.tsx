@@ -86,7 +86,7 @@ export function TimelineStrip({ snapshots, selectedId, onSelect }: {
           </rect>
         })}
       </svg>
-      <div className="flex items-center justify-between px-1 text-[11px] text-muted">
+      <div className="flex items-center justify-between px-1 text-xs text-muted">
         <span>{fmtClock(snapshots[0].run_at)}</span>
         <span className="flex items-center gap-3">
           <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: '#a855f7' }} /> route change</span>

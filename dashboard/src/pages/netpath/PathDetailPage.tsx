@@ -29,6 +29,7 @@ import {
   StatusBadge, fmtMs, fmtPct, fmtClock, relTime, flag, PROTO_LABEL, INTERNAL_HEX,
 } from './helpers'
 import { eventLabel } from './ProbesPage'
+import { chartFont } from '@/lib/chartTheme'
 
 const WINDOWS = [{ v: 1, l: 'Last hour' }, { v: 6, l: 'Last 6h' }, { v: 24, l: 'Last 24h' }, { v: 168, l: 'Last 7 days' }]
 
@@ -187,7 +188,7 @@ function Kpi({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <Card><CardContent className="p-3">
       <div className="text-lg font-semibold text-text">{value}</div>
-      <div className="text-[11px] uppercase tracking-wide text-muted">{label}</div>
+      <div className="text-xs uppercase tracking-wide text-muted">{label}</div>
     </CardContent></Card>
   )
 }
@@ -204,7 +205,7 @@ function Legend() {
     </span>
   )
   return (
-    <div className="flex flex-wrap gap-x-4 gap-y-1 px-1 text-[11px] text-muted">
+    <div className="flex flex-wrap gap-x-4 gap-y-1 px-1 text-xs text-muted">
       {item('#22c55e', 'healthy')}{item('#f59e0b', 'degraded')}{item('#ef4444', 'high loss')}
       {item('#22c55e', 'packet loss', true)}
       <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-full border-2" style={{ borderColor: INTERNAL_HEX, background: '#22c55e' }} /> your device</span>
@@ -288,7 +289,7 @@ function LatencyChart({ snapshots, probe, onPick }: { snapshots: SnapshotSummary
               stroke="rgb(var(--muted))" fontSize={11} />
             <YAxis yAxisId="l" stroke="rgb(var(--muted))" fontSize={11} unit="ms" />
             <YAxis yAxisId="r" orientation="right" stroke="rgb(var(--muted))" fontSize={11} unit="%" domain={[0, 100]} />
-            <RTooltip contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12 }}
+            <RTooltip contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: chartFont(12) }}
               labelFormatter={(t) => fmtClock(new Date(t as number).toISOString())}
               formatter={(v: any, n: string) => [n === 'loss' ? `${v}%` : `${v} ms`, n === 'loss' ? 'Loss' : 'Latency']} />
             <Area yAxisId="r" dataKey="loss" fill="#ef4444" stroke="#ef4444" fillOpacity={0.12} />
@@ -297,7 +298,7 @@ function LatencyChart({ snapshots, probe, onPick }: { snapshots: SnapshotSummary
           </ComposedChart>
         </ResponsiveContainer>
       </div>
-      <div className="mt-1 text-center text-[11px] text-muted">Click a point to open that moment on the path map · <span style={{ color: '#a855f7' }}>◆</span> route change</div>
+      <div className="mt-1 text-center text-xs text-muted">Click a point to open that moment on the path map · <span style={{ color: '#a855f7' }}>◆</span> route change</div>
     </CardContent></Card>
   )
 }
@@ -408,7 +409,7 @@ function CompareTab({ id, snapshots, selected }: { id: string; snapshots: Snapsh
           <div className="space-y-1">
             {cmp.rows.map((r) => (
               <div key={r.ttl} className="flex items-start gap-3 border-b border-border/40 py-1.5 text-sm last:border-0">
-                <span className="mt-0.5 inline-flex h-5 w-7 shrink-0 items-center justify-center rounded bg-surface2 text-[11px] font-semibold text-muted">{r.ttl}</span>
+                <span className="mt-0.5 inline-flex h-5 w-7 shrink-0 items-center justify-center rounded bg-surface2 text-xs font-semibold text-muted">{r.ttl}</span>
                 <div className="flex flex-1 flex-wrap gap-1.5">
                   {r.same.map((h) => <Chip key={'s' + h.ip} tone="same" label={h.hostname || h.ip} sub={h.as_name} />)}
                   {r.removed.map((h) => <Chip key={'r' + h.ip} tone="removed" label={h.hostname || h.ip} sub={h.as_name} />)}
@@ -417,7 +418,7 @@ function CompareTab({ id, snapshots, selected }: { id: string; snapshots: Snapsh
               </div>
             ))}
           </div>
-          <div className="mt-3 flex gap-4 text-[11px] text-muted">
+          <div className="mt-3 flex gap-4 text-xs text-muted">
             <span><span className="mr-1 inline-block h-2 w-2 rounded-full bg-success" />added in B</span>
             <span><span className="mr-1 inline-block h-2 w-2 rounded-full bg-danger" />only in A</span>
             <span><span className="mr-1 inline-block h-2 w-2 rounded-full bg-muted" />unchanged</span>

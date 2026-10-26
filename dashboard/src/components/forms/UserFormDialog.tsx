@@ -188,7 +188,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
             {!isEdit && (
               <>
                 <NewPasswordFields password={password} onPassword={(v) => { setPassword(v); setErrors({}) }} confirm={password2} onConfirm={setPassword2} ctx={{ username, email }} label="Initial password" />
-                {errors.password && <p role="alert" className="-mt-2 text-[11px] text-danger">{errors.password}</p>}
+                {errors.password && <p role="alert" className="-mt-2 text-xs text-danger">{errors.password}</p>}
                 <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border px-3 py-2">
                   <input type="checkbox" className="mt-0.5 h-3.5 w-3.5 accent-primary" checked={mustChange} onChange={(e) => setMustChange(e.target.checked)} />
                   <span className="text-xs"><span className="font-medium">Require a new password at first sign-in</span><br /><span className="text-muted">Recommended: you chose this password, so only the user should keep using it.</span></span>
@@ -228,7 +228,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
             </div>
             {assignable.isError && <QueryFailure compact error={assignable.error} what="the roles you may assign" onRetry={() => void assignable.refetch()} />}
             {roleOptions.some((r) => r.name === role && r.privileged) && !roleIsAdmin && (
-              <p role="note" className="flex items-start gap-2 text-[11px] text-warning"><ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" /> This role can manage users or roles. Assign it deliberately.</p>
+              <p role="note" className="flex items-start gap-2 text-xs text-warning"><ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" /> This role can manage users or roles. Assign it deliberately.</p>
             )}
 
             <fieldset className="space-y-2">
@@ -258,11 +258,11 @@ export function UserFormDialog({ open, onOpenChange, user }: {
                     ))}
                   </div>
                   {scopeMode === 'all'
-                    ? <p className="text-[11px] text-muted">{roleScope.length ? 'Sees only the resources tagged with the role’s tags.' : 'Sees every device, server, service and application the role permits.'}</p>
+                    ? <p className="text-xs text-muted">{roleScope.length ? 'Sees only the resources tagged with the role’s tags.' : 'Sees every device, server, service and application the role permits.'}</p>
                     : (
                       <>
                         <TagPicker value={scopeTags} onChange={setScopeTags} allowCreate={false} placeholder="Add tags to limit what this user sees…" />
-                        <p className={cn('text-[11px]', scopeError && (submitted || scopeTags.length === 0 && false) ? 'text-danger' : 'text-muted')}>
+                        <p className={cn('text-xs', scopeError && (submitted || scopeTags.length === 0 && false) ? 'text-danger' : 'text-muted')}>
                           {scopeError && submitted ? scopeError : roleScope.length
                             ? 'Also sees resources carrying ANY of these tags, in addition to the role’s tags.'
                             : 'Sees only resources (and their alerts) carrying ANY of these tags. Untagged resources are hidden. Clearing the last tag switches to All resources.'}

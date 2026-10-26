@@ -5,6 +5,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import { ToastViewport } from './components/ui/Toast'
 import { resetQueryCacheOnSessionChange, useAuth } from './stores/auth'
+import '@fontsource-variable/inter'
+import '@fontsource-variable/jetbrains-mono'
+import './styles/fonts.css'
 import './styles/globals.css'
 
 const queryClient = new QueryClient({

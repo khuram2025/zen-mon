@@ -372,24 +372,24 @@ export function NetworkSecurityDashboard() {
         <KpiCard to="/devices" label="Devices Online" icon={<RouterIcon className="h-4 w-4" />} accent="success"
           value={<>{up}<span className="text-base font-medium text-muted">/{total}</span></>}
           sub={summary && (summary.down > 0
-            ? <span className="text-[10.5px] font-semibold text-danger-fg">{summary.down} down</span>
+            ? <span className="text-xs font-semibold text-danger-fg">{summary.down} down</span>
             : summary.degraded > 0
-              ? <span className="text-[10.5px] text-warning-fg">{summary.degraded} degraded</span>
-              : <span className="text-[10.5px] text-success-fg">all reachable</span>)}
+              ? <span className="text-xs text-warning-fg">{summary.degraded} degraded</span>
+              : <span className="text-xs text-success-fg">all reachable</span>)}
           foot={<DeviceStatusBar s={summary} />}
         />
         <KpiCard to="/alerts" label="Active Alerts" icon={<AlertTriangle className="h-4 w-4" />}
           accent={(alertStats?.critical ?? 0) > 0 ? 'danger' : (alertStats?.active ?? 0) > 0 ? 'warning' : 'success'}
           value={fmtCount(alertStats?.active ?? 0)}
-          sub={<span className="flex items-center gap-2 text-[10.5px]">
+          sub={<span className="flex items-center gap-2 text-xs">
             <span className="text-danger-fg">{alertStats?.critical ?? 0} crit</span>
             <span className="text-warning-fg">{alertStats?.warning ?? 0} warn</span>
           </span>}
-          foot={<div className="text-[10px] text-muted">{alertStats?.resolved_today ?? 0} resolved today</div>}
+          foot={<div className="text-2xs text-muted">{alertStats?.resolved_today ?? 0} resolved today</div>}
         />
         <KpiCard to={nfLink('/netflow')} label="Traffic Now" icon={<Waves className="h-4 w-4" />} accent="info"
           value={hasNfData(nfState.overview) ? fmtBps(nfOverview?.current_bps ?? 0) : '—'}
-          sub={<span className={`text-[10.5px] ${nfState.overview === 'stale' ? 'font-medium text-warning-fg' : 'text-text2'}`}>
+          sub={<span className={`text-xs ${nfState.overview === 'stale' ? 'font-medium text-warning-fg' : 'text-text2'}`}>
             {nfState.overview === 'loading' ? 'loading…'
               : nfState.overview === 'error' || nfState.overview === 'forbidden' ? 'NetFlow unavailable'
               : nfState.overview === 'stale' ? 'refresh failed'
@@ -401,46 +401,46 @@ export function NetworkSecurityDashboard() {
           accent={(exec?.kpis?.availability_pct ?? 100) >= 99.5 ? 'success' : 'warning'}
           value={exec?.kpis?.availability_pct != null ? `${exec.kpis.availability_pct.toFixed(2)}%` : '—'}
           sub={exec?.kpis?.availability_delta_pct != null
-            ? <span className={`flex items-center gap-0.5 text-[10.5px] ${exec.kpis.availability_delta_pct >= 0 ? 'text-success-fg' : 'text-danger-fg'}`}>
+            ? <span className={`flex items-center gap-0.5 text-xs ${exec.kpis.availability_delta_pct >= 0 ? 'text-success-fg' : 'text-danger-fg'}`}>
                 {exec.kpis.availability_delta_pct >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
                 {exec.kpis.availability_delta_pct >= 0 ? '+' : ''}{exec.kpis.availability_delta_pct.toFixed(2)}%
               </span>
-            : <span className="text-[10.5px] text-muted">SLA {exec?.kpis?.sla_target_pct ?? 99.9}%</span>}
+            : <span className="text-xs text-muted">SLA {exec?.kpis?.sla_target_pct ?? 99.9}%</span>}
           foot={<Sparkline values={(exec?.availability_trend || []).flatMap((p) => (p.availability_pct == null ? [] : [p.availability_pct]))} color="#34d399" width={250} height={30} />}
         />
         <KpiCard to="/link-utilization" label="Link Health" icon={<Cable className="h-4 w-4" />}
           accent={(links?.summary?.high_util ?? 0) > 0 ? 'danger' : (links?.summary?.warning_util ?? 0) > 0 ? 'warning' : 'success'}
           value={links ? fmtCount(links.summary.high_util + links.summary.warning_util) : '—'}
-          sub={<span className="text-[10.5px] text-muted">links ≥50% util · avg {links?.summary?.avg_util != null ? `${links.summary.avg_util}%` : '—'}</span>}
-          foot={<div className="text-[10px] text-muted">{links?.summary?.unhealthy ?? 0} with errors/discards/flaps</div>}
+          sub={<span className="text-xs text-muted">links ≥50% util · avg {links?.summary?.avg_util != null ? `${links.summary.avg_util}%` : '—'}</span>}
+          foot={<div className="text-2xs text-muted">{links?.summary?.unhealthy ?? 0} with errors/discards/flaps</div>}
         />
         <KpiCard to="/netpath" label="NetPath" icon={<Waypoints className="h-4 w-4" />}
           accent={(netpath?.unreachable ?? 0) > 0 ? 'danger' : (netpath?.degraded ?? 0) > 0 ? 'warning' : 'success'}
           value={netpath ? <>{netpath.ok}<span className="text-base font-medium text-muted">/{netpath.enabled}</span></> : '—'}
           sub={netpath && (netpath.unreachable > 0
-            ? <span className="text-[10.5px] font-semibold text-danger-fg">{netpath.unreachable} unreachable</span>
+            ? <span className="text-xs font-semibold text-danger-fg">{netpath.unreachable} unreachable</span>
             : netpath.degraded > 0
-              ? <span className="text-[10.5px] text-warning-fg">{netpath.degraded} degraded</span>
-              : <span className="text-[10.5px] text-success-fg">paths healthy</span>)}
-          foot={<div className="text-[10px] text-muted">{netpath?.path_changes_24h ?? 0} route changes · 24h</div>}
+              ? <span className="text-xs text-warning-fg">{netpath.degraded} degraded</span>
+              : <span className="text-xs text-success-fg">paths healthy</span>)}
+          foot={<div className="text-2xs text-muted">{netpath?.path_changes_24h ?? 0} route changes · 24h</div>}
         />
         <KpiCard to={nfLink('/netflow/anomalies')} label="Flow Findings" icon={<ShieldAlert className="h-4 w-4" />}
           accent={!fCounts ? 'primary' : criticalFindings > 0 ? 'danger' : warningFindings > 0 ? 'warning' : fCounts.active > 0 ? 'info' : findingsData?.complete ? 'success' : 'primary'}
           value={fCounts && nfState.findings !== 'error' && nfState.findings !== 'forbidden' ? fmtCount(fCounts.active) : '—'}
-          sub={<span className="text-[10.5px] text-text2">
+          sub={<span className="text-xs text-text2">
             {nfState.findings === 'loading' ? 'loading…'
               : nfState.findings === 'forbidden' ? 'no NetFlow access'
               : nfState.findings === 'error' ? 'detection status unavailable'
               : fCounts && fCounts.active > 0 ? `${criticalFindings} critical · ${warningFindings} warning`
               : findingsData?.complete ? 'none from the detectors that ran' : 'none recorded · coverage incomplete'}
           </span>}
-          foot={<div className="text-[10px] text-text2">{findingsData ? coverageLine(findingsData.detectors) : 'flow detectors'}</div>}
+          foot={<div className="text-2xs text-text2">{findingsData ? coverageLine(findingsData.detectors) : 'flow detectors'}</div>}
         />
         <KpiCard to="/udt" label="Rogue Endpoints" icon={<ScanSearch className="h-4 w-4" />}
           accent={(udt?.rogue ?? 0) > 0 ? 'warning' : 'success'}
           value={fmtCount(udt?.rogue ?? 0)}
-          sub={<span className="text-[10.5px] text-muted">{udt?.new_24h ?? 0} new endpoints · 24h</span>}
-          foot={<div className="text-[10px] text-muted">{fmtCount(udt?.active_endpoints ?? 0)} active · {udt?.watched ?? 0} watched</div>}
+          sub={<span className="text-xs text-muted">{udt?.new_24h ?? 0} new endpoints · 24h</span>}
+          foot={<div className="text-2xs text-muted">{fmtCount(udt?.active_endpoints ?? 0)} active · {udt?.watched ?? 0} watched</div>}
         />
       </div>
 
@@ -450,7 +450,7 @@ export function NetworkSecurityDashboard() {
           <SectionHeader icon={<Activity className="h-3.5 w-3.5" />} title="Network Traffic"
             hint={`NetFlow · ${range.label}${nfOverview ? ` · ${fmtBytes(nfOverview.bytes)} total` : ''}`}
             right={nfOverview?.top_protocol && (
-              <span className="rounded-md bg-surface2/80 px-2 py-0.5 font-mono text-[10px] text-text2">
+              <span className="rounded-md bg-surface2/80 px-2 py-0.5 font-mono text-2xs text-text2">
                 top: {nfOverview.top_protocol.name} · {fmtBytes(nfOverview.top_protocol.bytes)}
               </span>
             )}
@@ -490,19 +490,19 @@ export function NetworkSecurityDashboard() {
             )}
           </div>
           <div className="border-t border-border px-4 py-2.5">
-            <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Protocol mix · {range.label}</div>
+            <div className="pb-1.5 text-2xs font-bold uppercase tracking-wider text-muted">Protocol mix · {range.label}</div>
             {nfState.protocols === 'ok' || nfState.protocols === 'stale' ? (
               <>
                 <ShareBar parts={protoMix.map((p) => ({ label: p.name, value: p.bytes, color: p.color }))} height={10} />
                 <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
                   {protoMix.map((p) => (
-                    <span key={p.protocol} className="flex items-center gap-1.5 text-[10.5px] text-text2">
+                    <span key={p.protocol} className="flex items-center gap-1.5 text-xs text-text2">
                       <span className="h-2 w-2 rounded-sm" style={{ background: p.color }} />
                       {p.name} <span className="font-mono text-muted">{p.pct.toFixed(0)}%</span>
                     </span>
                   ))}
                 </div>
-                <div className="mt-1 text-[10px] text-text2">Share of the top {protoMix.length} protocols' bytes</div>
+                <div className="mt-1 text-2xs text-text2">Share of the top {protoMix.length} protocols' bytes</div>
               </>
             ) : (
               <NfState compact state={nfState.protocols} error={protocolsQ.error} onRetry={() => void protocolsQ.refetch()} empty="No flow records in this window" />
@@ -524,7 +524,7 @@ export function NetworkSecurityDashboard() {
                 return (
                   <div className="py-4 text-center" role="status">
                     <div className={`text-xs font-semibold ${a.tone === 'success' ? 'text-success-fg' : a.tone === 'danger' ? 'text-danger-fg' : a.tone === 'warning' ? 'text-warning-fg' : 'text-text'}`}>{a.title}</div>
-                    <div className="mt-1 text-[11px] text-text2">{a.detail}</div>
+                    <div className="mt-1 text-xs text-text2">{a.detail}</div>
                   </div>
                 )
               })()
@@ -536,19 +536,19 @@ export function NetworkSecurityDashboard() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-baseline justify-between gap-2">
                         <span className="text-xs font-semibold text-text">{f.title}</span>
-                        <span className="shrink-0 text-[10px] tabular-nums text-text2">{relativeTime(f.last_seen)}</span>
+                        <span className="shrink-0 text-2xs tabular-nums text-text2">{relativeTime(f.last_seen)}</span>
                       </div>
-                      <div className="break-words font-mono text-[11px] text-text">
+                      <div className="break-words font-mono text-xs text-text">
                         {subjectText(f)}
-                        {others.length > 0 && <span className="ml-1.5 font-sans text-[10px] text-text2">· {others.length + 1} exporters</span>}
+                        {others.length > 0 && <span className="ml-1.5 font-sans text-2xs text-text2">· {others.length + 1} exporters</span>}
                       </div>
-                      <div className="line-clamp-2 text-[11px] text-text2" title={f.description}>{f.description}</div>
+                      <div className="line-clamp-2 text-xs text-text2" title={f.description}>{f.description}</div>
                     </div>
                     <SeverityChip severity={f.severity} className="self-center" />
                   </Link>
                 ))}
                 {fCounts && fCounts.active > shownFindings && (
-                  <Link to={nfLink('/netflow/anomalies')} className="block px-2 pt-1 text-[11px] text-primary hover:underline">
+                  <Link to={nfLink('/netflow/anomalies')} className="block px-2 pt-1 text-xs text-primary hover:underline">
                     {fCounts.active - shownFindings} more active finding{fCounts.active - shownFindings === 1 ? '' : 's'} →
                   </Link>
                 )}
@@ -572,14 +572,14 @@ export function NetworkSecurityDashboard() {
                   <div className="flex items-baseline justify-between gap-2 text-xs">
                     <span className="min-w-0 truncate">
                       <span className="font-mono font-medium text-text">{l.if_name || `if${l.if_index}`}</span>
-                      <span className="ml-1.5 text-[10px] text-muted">{l.hostname}{l.if_alias ? ` · ${l.if_alias}` : ''}</span>
+                      <span className="ml-1.5 text-2xs text-muted">{l.hostname}{l.if_alias ? ` · ${l.if_alias}` : ''}</span>
                     </span>
-                    <span className={`shrink-0 font-mono text-[11px] font-semibold tabular-nums ${util >= 80 ? 'text-danger-fg' : util >= 50 ? 'text-warning-fg' : 'text-text2'}`}>
+                    <span className={`shrink-0 font-mono text-xs font-semibold tabular-nums ${util >= 80 ? 'text-danger-fg' : util >= 50 ? 'text-warning-fg' : 'text-text2'}`}>
                       {util.toFixed(1)}%
                     </span>
                   </div>
                   <div className="mt-1"><PctBar value={util} warnAt={50} dangerAt={80} /></div>
-                  <div className="mt-0.5 flex items-center justify-between text-[9.5px] text-muted">
+                  <div className="mt-0.5 flex items-center justify-between text-2xs text-muted">
                     <span>↓ {fmtBps(l.in_bps)} · ↑ {fmtBps(l.out_bps)}</span>
                     <span>peak {l.peak_util_pct != null ? `${l.peak_util_pct.toFixed(0)}%` : '—'}{l.issues?.length ? ` · ${l.issues.join(', ')}` : ''}</span>
                   </div>
@@ -605,17 +605,17 @@ export function NetworkSecurityDashboard() {
                     <div key={t.ip}>
                       <div className="flex items-baseline justify-between gap-2 text-xs">
                         <span className="flex min-w-0 items-center gap-1.5 font-mono font-medium text-text">
-                          <span className="w-3 text-[9px] text-muted">{i + 1}</span>
+                          <span className="w-3 text-2xs text-muted">{i + 1}</span>
                           <Link to={hostPath(t.ip)} className="break-all hover:underline">{t.ip}</Link>
-                          {app && <span className="rounded bg-surface2 px-1 py-px font-sans text-[8.5px] text-text2">{app}</span>}
+                          {app && <span className="rounded bg-surface2 px-1 py-px font-sans text-2xs text-text2">{app}</span>}
                         </span>
-                        <span className="shrink-0 font-mono text-[11px] font-semibold tabular-nums text-text2">{fmtBytes(t.bytes)}</span>
+                        <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-text2">{fmtBytes(t.bytes)}</span>
                       </div>
                       <InOutBar tx={t.src_bytes} rx={t.dst_bytes} scale={max} />
                     </div>
                   )
                 })}
-                <div className="flex items-center gap-3 pt-1 text-[9.5px] text-text2">
+                <div className="flex items-center gap-3 pt-1 text-2xs text-text2">
                   <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full" style={{ background: SERIES.traffic }} /> received</span>
                   <span className="flex items-center gap-1"><span className="h-1.5 w-3 rounded-full" style={{ background: CATEGORICAL[3] }} /> sent</span>
                 </div>
@@ -634,7 +634,7 @@ export function NetworkSecurityDashboard() {
               <PathStat label="Down" value={netpath?.unreachable ?? 0} tone="text-danger-fg" />
             </div>
             <div className="mt-3 border-t border-border pt-2">
-              <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Recent path events</div>
+              <div className="pb-1.5 text-2xs font-bold uppercase tracking-wider text-muted">Recent path events</div>
               {!netpath?.recent_events?.length && <Empty text="No route changes or outages recorded" />}
               <div className="space-y-1">
                 {(netpath?.recent_events || []).slice(0, 6).map((e) => (
@@ -642,9 +642,9 @@ export function NetworkSecurityDashboard() {
                     <span className={`h-2 w-2 shrink-0 rounded-full ${e.severity === 'critical' ? 'bg-danger' : e.severity === 'warning' ? 'bg-warning' : 'bg-info'}`} />
                     <span className="min-w-0 flex-1 truncate text-text2">
                       <span className="font-medium text-text">{e.probe_name}</span>
-                      <span className="ml-1.5 text-[10px] text-muted">{prettyEvent(e.event_type)}</span>
+                      <span className="ml-1.5 text-2xs text-muted">{prettyEvent(e.event_type)}</span>
                     </span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-muted">{relativeTime(e.created_at)}</span>
+                    <span className="shrink-0 text-2xs tabular-nums text-muted">{relativeTime(e.created_at)}</span>
                   </Link>
                 ))}
               </div>
@@ -667,9 +667,9 @@ export function NetworkSecurityDashboard() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
                       <span className="truncate text-xs font-semibold text-text">{a.device_hostname || 'network'}</span>
-                      <span className="shrink-0 text-[10px] tabular-nums text-muted">{relativeTime(a.triggered_at)}</span>
+                      <span className="shrink-0 text-2xs tabular-nums text-muted">{relativeTime(a.triggered_at)}</span>
                     </div>
-                    <div className="truncate text-[11px] text-text2" title={a.message}>{prettyMessage(a.message)}</div>
+                    <div className="truncate text-xs text-text2" title={a.message}>{prettyMessage(a.message)}</div>
                   </div>
                   <Badge variant={a.severity === 'critical' ? 'danger' : a.severity === 'warning' ? 'warning' : 'info'} className="self-center capitalize">{a.severity}</Badge>
                 </Link>
@@ -682,7 +682,7 @@ export function NetworkSecurityDashboard() {
           <SectionHeader icon={<Radio className="h-3.5 w-3.5" />} title="Device Health" hint={`${total} monitored`} />
           <div className="px-4 pb-3 pt-3">
             <DeviceStatusBar s={summary} height="h-2.5" />
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10.5px] text-text2">
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-text2">
               <LegendSwatch color="bg-success" label={`Up ${summary?.up ?? 0}`} />
               <LegendSwatch color="bg-warning" label={`Degraded ${summary?.degraded ?? 0}`} />
               <LegendSwatch color="bg-danger" label={`Down ${summary?.down ?? 0}`} />
@@ -690,7 +690,7 @@ export function NetworkSecurityDashboard() {
               <LegendSwatch color="bg-muted/60" label={`Unknown ${summary?.unknown ?? 0}`} />
             </div>
             <div className="mt-3 border-t border-border pt-2">
-              <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Needs attention</div>
+              <div className="pb-1.5 text-2xs font-bold uppercase tracking-wider text-muted">Needs attention</div>
               {problemDevices.length === 0 && ((summary?.flapping ?? 0) > 0
                 // Flapping devices beyond the loaded rows still count in the summary: never the all-healthy message then.
                 ? <Link to="/devices?flapping=1" className="block py-3 text-center text-xs font-medium text-warning hover:underline">{attentionEmptyText(summary?.flapping)}</Link>
@@ -701,8 +701,8 @@ export function NetworkSecurityDashboard() {
                     <span className={`h-2 w-2 shrink-0 rounded-full ${d.status === 'down' ? 'bg-danger' : d.status === 'degraded' ? 'bg-warning' : critical > 0 ? 'bg-danger' : 'bg-warning'}`} />
                     <span className="min-w-0 flex-1 truncate font-medium text-text">{d.hostname}</span>
                     {isFlapping(d) && <FlappingTag device={d} />}
-                    {alerts > 0 && <span className={`rounded px-1 font-mono text-[10px] font-bold ${critical > 0 ? 'bg-danger/15 text-danger-fg' : 'bg-warning/15 text-warning-fg'}`}>{alerts}</span>}
-                    <span className="shrink-0 text-[10px] capitalize text-muted">{d.status}</span>
+                    {alerts > 0 && <span className={`rounded px-1 font-mono text-2xs font-bold ${critical > 0 ? 'bg-danger/15 text-danger-fg' : 'bg-warning/15 text-warning-fg'}`}>{alerts}</span>}
+                    <span className="shrink-0 text-2xs capitalize text-muted">{d.status}</span>
                   </Link>
                 ))}
               </div>
@@ -739,12 +739,12 @@ export function NetworkSecurityDashboard() {
             <div className="border-t border-border pt-3">
               <div className="flex items-baseline justify-between text-xs">
                 <span className="text-text2">Config backup protection</span>
-                <span className="font-mono text-[12px] font-semibold tabular-nums">
+                <span className="font-mono text-sm font-semibold tabular-nums">
                   {backupPct != null ? `${backupPct.toFixed(0)}%` : '—'}
                 </span>
               </div>
               <div className="mt-1.5"><PctBar value={backupPct ?? 0} warnAt={101} dangerAt={102} /></div>
-              <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
+              <div className="mt-1 flex items-center justify-between text-2xs text-muted">
                 <span>{ncm?.fresh ?? 0}/{ncm?.eligible ?? 0} eligible devices fresh &amp; validated</span>
                 <Link to="/ncm" className="text-primary hover:underline">NCM →</Link>
               </div>
@@ -778,8 +778,8 @@ function NfState({ state, error, onRetry, empty, emptyHint, compact }: {
     return (
       <div className={`flex ${pad} flex-col items-center justify-center gap-1 text-center`} role="status">
         <div className="text-xs font-medium text-danger-fg">Could not load NetFlow data</div>
-        <div className="text-[10.5px] text-text2">{apiErrorMessage(error)}</div>
-        <button type="button" onClick={onRetry} className="mt-0.5 rounded-md border border-border px-2 py-0.5 text-[11px] text-text hover:bg-surface2">Retry</button>
+        <div className="text-xs text-text2">{apiErrorMessage(error)}</div>
+        <button type="button" onClick={onRetry} className="mt-0.5 rounded-md border border-border px-2 py-0.5 text-xs text-text hover:bg-surface2">Retry</button>
       </div>
     )
   }
@@ -787,7 +787,7 @@ function NfState({ state, error, onRetry, empty, emptyHint, compact }: {
   return (
     <div className={`flex ${pad} flex-col items-center justify-center gap-1 text-center`}>
       <div className="text-xs text-text2">{empty}</div>
-      {emptyHint && <div className="text-[10px] text-text2">{emptyHint}</div>}
+      {emptyHint && <div className="text-2xs text-text2">{emptyHint}</div>}
     </div>
   )
 }
@@ -795,8 +795,8 @@ function NfState({ state, error, onRetry, empty, emptyHint, compact }: {
 function MiniStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-border/60 bg-surface2/30 px-2 py-1.5">
-      <div className="text-[9px] font-bold uppercase tracking-wider text-text2">{label}</div>
-      <div className="font-mono text-[13px] font-semibold tabular-nums text-text">{value}</div>
+      <div className="text-2xs font-bold uppercase tracking-wider text-text2">{label}</div>
+      <div className="font-mono text-sm font-semibold tabular-nums text-text">{value}</div>
     </div>
   )
 }
@@ -805,7 +805,7 @@ function PathStat({ label, value, tone }: { label: string; value: number; tone: 
   return (
     <div className="rounded-lg border border-border/60 bg-surface2/30 px-2 py-2">
       <div className={`text-xl font-bold tabular-nums ${tone}`}>{value}</div>
-      <div className="text-[9px] font-bold uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs font-bold uppercase tracking-wider text-muted">{label}</div>
     </div>
   )
 }
@@ -860,7 +860,7 @@ function PostureRow({ icon, label, value, detail, to }: {
       <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface2 text-muted">{icon}</span>
       <div className="min-w-0 flex-1">
         <div className="text-xs font-medium text-text">{label}</div>
-        <div className="truncate text-[10px] text-muted">{detail}</div>
+        <div className="truncate text-2xs text-muted">{detail}</div>
       </div>
       <span className="shrink-0 font-mono text-sm font-bold tabular-nums text-text">{value}</span>
     </Link>

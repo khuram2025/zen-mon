@@ -11,6 +11,7 @@ import {
 } from 'recharts'
 import { Inbox } from 'lucide-react'
 import { cn, timeTooltipLabelFormatter } from '@/lib/utils'
+import { chartFont } from '@/lib/chartTheme'
 
 type Icon = ComponentType<{ className?: string }>
 export type Tone = 'default' | 'success' | 'warning' | 'danger' | 'info' | 'muted'
@@ -87,7 +88,7 @@ export function Panel({
               </span>
             )}
             <div className="min-w-0">
-              {title && <h3 className="truncate text-[13px] font-semibold leading-5 text-text">{title}</h3>}
+              {title && <h3 className="truncate text-sm font-semibold leading-5 text-text">{title}</h3>}
               {subtitle && <p className="truncate text-xs leading-4 text-muted">{subtitle}</p>}
             </div>
           </div>
@@ -137,7 +138,7 @@ export function Segmented<K extends string>({ items, value, onChange, size = 'md
             onClick={() => onChange(it.key)}
             className={cn(
               'inline-flex items-center gap-1.5 rounded-md font-medium transition-colors',
-              size === 'sm' ? 'px-2.5 py-1 text-xs' : 'px-3 py-1.5 text-[13px]',
+              size === 'sm' ? 'px-2.5 py-1 text-xs' : 'px-3 py-1.5 text-sm',
               active ? 'bg-surface text-text shadow-sm ring-1 ring-border' : 'text-muted hover:text-text',
             )}
           >
@@ -154,7 +155,7 @@ export function Segmented<K extends string>({ items, value, onChange, size = 'md
 export function CountBadge({ count, tone = 'muted' }: { count: number; tone?: Tone }) {
   if (!count) return null
   return (
-    <span className={cn('rounded-full px-1.5 py-px text-[10px] font-semibold leading-4 tabular-nums', TONE_SOFT[tone])}>
+    <span className={cn('rounded-full px-1.5 py-px text-2xs font-semibold leading-4 tabular-nums', TONE_SOFT[tone])}>
       {count > 99 ? '99+' : count}
     </span>
   )
@@ -219,8 +220,8 @@ export function KeyValues({ items, columns = 2, className }: {
         const [label, value] = row as readonly [ReactNode, ReactNode]
         return (
           <div key={i} className="min-w-0">
-            <dt className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</dt>
-            <dd className="mt-0.5 truncate text-[13px] text-text">{value ?? <span className="text-muted">—</span>}</dd>
+            <dt className="text-xs font-medium uppercase tracking-wide text-muted">{label}</dt>
+            <dd className="mt-0.5 truncate text-sm text-text">{value ?? <span className="text-muted">—</span>}</dd>
           </div>
         )
       })}
@@ -256,7 +257,7 @@ export function StatTile({
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+        <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
           {IconC && <IconC className="h-3.5 w-3.5" />}
           {label}
         </span>
@@ -312,7 +313,7 @@ export function EmptyState({ icon: IconC = Inbox, title, hint, action, compact }
       <span className="flex h-10 w-10 items-center justify-center rounded-full bg-surface2 text-muted">
         <IconC className="h-5 w-5" />
       </span>
-      <div className="text-[13px] font-medium text-text">{title}</div>
+      <div className="text-sm font-medium text-text">{title}</div>
       {hint && <div className="max-w-md text-xs text-muted">{hint}</div>}
       {action}
     </div>
@@ -343,7 +344,7 @@ function tooltipStyle() {
       borderRadius: 10,
       boxShadow: '0 10px 30px rgb(0 0 0 / 0.25)',
       color: 'rgb(var(--text))',
-      fontSize: 12,
+      fontSize: chartFont(12),
       padding: '8px 10px',
     },
     itemStyle: { paddingTop: 1, paddingBottom: 1 },
@@ -393,18 +394,18 @@ export function TimeSeries({
           <CartesianGrid stroke="rgb(var(--border))" strokeDasharray="3 3" vertical={false} />
           <XAxis
             dataKey="ts" type="number" scale="time" domain={['dataMin', 'dataMax']}
-            tickFormatter={tickFormat} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }}
+            tickFormatter={tickFormat} tick={{ fontSize: chartFont(11), fill: 'rgb(var(--muted))' }}
             tickLine={false} axisLine={false} minTickGap={48}
           />
           <YAxis
-            tickFormatter={yFormat} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }}
+            tickFormatter={yFormat} tick={{ fontSize: chartFont(11), fill: 'rgb(var(--muted))' }}
             tickLine={false} axisLine={false} width={56} domain={yDomain ?? [0, 'auto']}
           />
           <Tooltip {...tt} formatter={(v: number | string, name: string) => [typeof v === 'number' ? yFormat(v) : v, name]} />
           {references?.map((r) => (
             <ReferenceLine
               key={r.label} y={r.y} stroke={r.tone === 'danger' ? C.red : C.orange} strokeDasharray="4 4" strokeOpacity={0.7}
-              label={{ value: r.label, position: 'insideTopRight', fontSize: 10, fill: r.tone === 'danger' ? C.red : C.orange }}
+              label={{ value: r.label, position: 'insideTopRight', fontSize: chartFont(10), fill: r.tone === 'danger' ? C.red : C.orange }}
             />
           ))}
           {series.map((s) =>
@@ -434,7 +435,7 @@ export function ChartStats({ items }: { items: { label: string; value: ReactNode
     <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
       {items.map((it) => (
         <div key={it.label}>
-          <div className="text-[11px] font-medium uppercase tracking-wide text-muted">{it.label}</div>
+          <div className="text-xs font-medium uppercase tracking-wide text-muted">{it.label}</div>
           <div className={cn('text-sm font-semibold tabular-nums', TONE_TEXT[it.tone ?? 'default'])}>{it.value}</div>
         </div>
       ))}

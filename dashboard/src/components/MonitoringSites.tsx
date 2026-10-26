@@ -56,11 +56,11 @@ export function MonitoringSites({ targetType, targetId, compact = false }: { tar
         {query.data?.sites.map(site => (
           <div key={site.poller_id} className="min-w-0 rounded-md border border-border/60 bg-surface2/30 p-3">
             <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0"><div className="truncate text-xs font-semibold">{site.name}</div>{site.sensor_name && <div className="mt-0.5 truncate text-[11px] text-muted">{site.sensor_name}{site.location && site.location !== site.name ? ` · ${site.location}` : ''}</div>}</div>
-              {site.poller_id === 'central' && <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">Default</span>}
+              <div className="min-w-0"><div className="truncate text-xs font-semibold">{site.name}</div>{site.sensor_name && <div className="mt-0.5 truncate text-xs text-muted">{site.sensor_name}{site.location && site.location !== site.name ? ` · ${site.location}` : ''}</div>}</div>
+              {site.poller_id === 'central' && <span className="rounded bg-primary/10 px-1.5 py-0.5 text-2xs text-primary">Default</span>}
             </div>
             {Object.entries(site.checks).map(([type, result]) => (
-              <div key={type} className="mt-2 text-[11px]">
+              <div key={type} className="mt-2 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-1">
                   <span className="font-medium">{type === 'service' ? 'Service' : type.toUpperCase()}</span>
                   <span className={result.state === 'up' ? 'text-success' : result.state === 'down' ? 'text-danger' : 'text-muted'}>{labels[result.state] || result.state}</span>
@@ -74,7 +74,7 @@ export function MonitoringSites({ targetType, targetId, compact = false }: { tar
           </div>
         ))}
       </div>
-      {query.data && <p className="mt-2 text-[10px] leading-relaxed text-muted">Availability is based on observed checks over 24 hours. Missing results are not counted as success. {query.data.controller_enabled ? 'Overall status uses the controller.' : targetType === 'device' ? 'Overall status uses the primary selected probe.' : 'Overall status uses the configured sensor consensus.'}</p>}
+      {query.data && <p className="mt-2 text-2xs leading-relaxed text-muted">Availability is based on observed checks over 24 hours. Missing results are not counted as success. {query.data.controller_enabled ? 'Overall status uses the controller.' : targetType === 'device' ? 'Overall status uses the primary selected probe.' : 'Overall status uses the configured sensor consensus.'}</p>}
       <Dialog open={editing} onOpenChange={setEditing}>
         <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
           <DialogHeader><DialogTitle>Monitoring sites</DialogTitle></DialogHeader>

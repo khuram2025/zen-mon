@@ -53,7 +53,7 @@ export function TargetChip({ target, dir, onRemove }: { target: Target; dir: Dir
     >
       <Icon className="h-3 w-3 shrink-0" aria-hidden />
       <span className="truncate">{info.label}</span>
-      {info.disabled && <span className="text-[10px] uppercase">off</span>}
+      {info.disabled && <span className="text-2xs uppercase">off</span>}
       {info.detail === 'No members' && <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />}
       {onRemove && (
         <button type="button" onClick={onRemove} aria-label={`Remove ${info.kindLabel.toLowerCase()} ${info.label}`} className={cn('-mr-0.5 rounded p-0.5 text-muted hover:bg-surface hover:text-danger', focusRing)}>
@@ -139,12 +139,12 @@ export function TargetPicker({ dir, value, onAdd, label, types, disabled }: {
                 >
                   <Icon className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
                   <span className="min-w-0 flex-1 truncate">{o.label}</span>
-                  <span className="shrink-0 text-[11px] text-muted">{o.disabled ? 'disabled' : o.detail}</span>
+                  <span className="shrink-0 text-xs text-muted">{o.disabled ? 'disabled' : o.detail}</span>
                 </button>
               )
             })}
           </div>
-          {noChannels && <p className="border-t border-border px-2 py-1.5 text-[11px] text-muted">Channels are listed for roles with alerts.manage.</p>}
+          {noChannels && <p className="border-t border-border px-2 py-1.5 text-xs text-muted">Channels are listed for roles with alerts.manage.</p>}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -212,7 +212,7 @@ export function PreviewSteps({ steps, current, fmt }: { steps: PreviewStep[]; cu
             <div className="mb-1 flex flex-wrap items-center gap-2">
               <span className="text-xs font-semibold tabular-nums text-text2">{fmtOffset(s.at_offset_minutes)}</span>
               <span className="text-sm font-medium">{s.name || `Step ${i + 1}`}</span>
-              {isCurrent && <span className="rounded bg-primary/15 px-1.5 py-px text-[10px] font-semibold uppercase text-primary">Current step</span>}
+              {isCurrent && <span className="rounded bg-primary/15 px-1.5 py-px text-2xs font-semibold uppercase text-primary">Current step</span>}
               {s.notified_at && fmt && <span className="ml-auto text-xs text-success">Notified {fmt(s.notified_at)}</span>}
             </div>
             {s.uses_fallback && !s.recipients.length ? (

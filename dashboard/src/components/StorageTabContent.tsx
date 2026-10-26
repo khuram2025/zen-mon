@@ -62,7 +62,7 @@ export function StorageTabContent() {
             <s.icon className="h-3.5 w-3.5" />
             {s.label}
             {s.id === 'disks' && diskAttention > 0 && (
-              <span className="rounded-full bg-info/15 px-1.5 text-[10px] font-semibold tabular-nums text-info">
+              <span className="rounded-full bg-info/15 px-1.5 text-2xs font-semibold tabular-nums text-info">
                 {diskAttention}
               </span>
             )}

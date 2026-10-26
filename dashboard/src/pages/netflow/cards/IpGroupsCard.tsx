@@ -75,7 +75,7 @@ export function IpGroupsCard({ ctx, compact }: OverviewCardProps) {
                     <span className="italic text-text2">Traffic touching no group</span>
                     <span>
                       <Figure value={r.data.ungrouped.bytes} className="font-semibold text-text" />
-                      <span className="ml-1.5 text-[11px] text-text2">{formatPercent(r.data.ungrouped.share_pct)}</span>
+                      <span className="ml-1.5 text-xs text-text2">{formatPercent(r.data.ungrouped.share_pct)}</span>
                     </span>
                   </div>
                 )}

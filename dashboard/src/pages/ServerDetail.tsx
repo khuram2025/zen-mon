@@ -54,6 +54,7 @@ import type {
   ServerProcess,
   ServerService,
 } from '@/types/server'
+import { chartFont, chartTheme } from '@/lib/chartTheme'
 
 const STATUS_VARIANT: Record<string, 'success' | 'warning' | 'danger' | 'outline' | 'default'> = {
   healthy: 'success',
@@ -135,16 +136,16 @@ function MetricChart({
       legend: {
         show: data.length > 1,
         bottom: 0,
-        textStyle: { fontSize: 11 },
+        textStyle: { fontSize: chartFont(11) },
       },
       xAxis: {
         type: 'time' as const,
-        axisLabel: { fontSize: 10 },
+        axisLabel: { fontSize: chartFont(10) },
       },
       yAxis: {
         type: 'value' as const,
         axisLabel: {
-          fontSize: 10,
+          fontSize: chartFont(10),
           formatter: (v: number) => {
             const u = unit || data[0]?.unit
             if (u === 'B' || u === 'B/s' || u === 'bps') {
@@ -175,7 +176,7 @@ function MetricChart({
       </div>
     )
   }
-  return <ReactECharts option={option} style={{ height }} notMerge />
+  return <ReactECharts theme={chartTheme()} option={option} style={{ height }} notMerge />
 }
 
 export default function ServerDetail() {
@@ -643,8 +644,8 @@ export default function ServerDetail() {
                   <InfoRow label="Spool" value={fmtBytes(agentQ.data.spool_bytes)} />
                   <InfoRow label="Update ring" value={agentQ.data.update_ring} />
                   <InfoRow label="Policy" value={agentQ.data.policy_name || '—'} />
-                  <InfoRow label="Config hash" value={<code className="font-mono text-[11px]">{agentQ.data.last_config_hash?.slice(0, 12) || '—'}</code>} />
-                  <InfoRow label="API key" value={<code className="font-mono text-[11px]">{agentQ.data.api_key_prefix || '—'}…</code>} />
+                  <InfoRow label="Config hash" value={<code className="font-mono text-xs">{agentQ.data.last_config_hash?.slice(0, 12) || '—'}</code>} />
+                  <InfoRow label="API key" value={<code className="font-mono text-xs">{agentQ.data.api_key_prefix || '—'}…</code>} />
                   <InfoRow label="Last IP" value={agentQ.data.last_ip || '—'} />
                 </div>
                 {agentQ.data.config_apply_error ? (
@@ -887,7 +888,7 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="rounded-md border border-border bg-surface2/40 p-3">
-      <div className="text-[11px] uppercase tracking-wide text-muted">{label}</div>
+      <div className="text-xs uppercase tracking-wide text-muted">{label}</div>
       <div className="mt-1 text-sm">{value}</div>
     </div>
   )

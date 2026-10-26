@@ -33,7 +33,7 @@ export function ApmLayout() {
         <div className="space-y-3">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted">Applications</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">Applications</p>
               <h1 className="mt-0.5 text-2xl font-semibold tracking-tight">Application Performance</h1>
               <p className="mt-1 max-w-3xl text-sm text-muted">
                 Golden signals, traces, errors and real-user journeys — from fleet health down to a single request.

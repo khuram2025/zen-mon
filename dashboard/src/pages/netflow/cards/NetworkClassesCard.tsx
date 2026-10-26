@@ -44,14 +44,14 @@ export function NetworkClassesCard({ ctx }: OverviewCardProps) {
             <div className="space-y-2">
               {(['src_bytes', 'dst_bytes'] as const).map((f) => (
                 <div key={f} className="flex items-center gap-2">
-                  <span className="w-20 shrink-0 text-[11px] text-text2">{f === 'src_bytes' ? 'As source' : 'As destination'}</span>
+                  <span className="w-20 shrink-0 text-xs text-text2">{f === 'src_bytes' ? 'As source' : 'As destination'}</span>
                   <ShareStrip result={side(f)} className="flex-1" />
                 </div>
               ))}
               <table className="w-full text-xs">
                 <caption className="sr-only">Traffic by network class and side</caption>
                 <thead>
-                  <tr className="text-[11px] text-text2">
+                  <tr className="text-xs text-text2">
                     <th scope="col" className="py-1 text-left font-medium">Class</th>
                     <th scope="col" className="py-1 text-right font-medium">As source</th>
                     <th scope="col" className="py-1 text-right font-medium">As destination</th>
@@ -76,11 +76,11 @@ export function NetworkClassesCard({ ctx }: OverviewCardProps) {
                         </th>
                         <td className="py-1 text-right">
                           <Figure value={c.src_bytes} className="text-text" />
-                          <div className="text-[11px] text-text2">{formatPercent(c.src_share_pct)}</div>
+                          <div className="text-xs text-text2">{formatPercent(c.src_share_pct)}</div>
                         </td>
                         <td className="py-1 text-right">
                           <Figure value={c.dst_bytes} className="text-text" />
-                          <div className="text-[11px] text-text2">{formatPercent(c.dst_share_pct)}</div>
+                          <div className="text-xs text-text2">{formatPercent(c.dst_share_pct)}</div>
                         </td>
                       </tr>
                     )

@@ -30,7 +30,7 @@ export function useSlashFocus(target: React.RefObject<HTMLInputElement>) {
   }, [target])
 }
 
-const menuItem = 'flex cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] outline-none data-[highlighted]:bg-surface2 data-[disabled]:opacity-50'
+const menuItem = 'flex cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-surface2 data-[disabled]:opacity-50'
 
 /**
  * Search, the filter pane toggle, the active-filter chips (each removable, with "Clear all"), the column
@@ -85,7 +85,7 @@ export function AssetToolbar({
         >
           <PaneIcon className="h-4 w-4" aria-hidden />
           {wide ? (filtersOpen ? 'Hide filters' : 'Show filters') : 'Filters'}
-          {filterCount > 0 && <span className="rounded-full bg-primary/15 px-1.5 text-[10px] font-bold tabular-nums text-primary" aria-label={`${filterCount} active`}>{filterCount}</span>}
+          {filterCount > 0 && <span className="rounded-full bg-primary/15 px-1.5 text-2xs font-bold tabular-nums text-primary" aria-label={`${filterCount} active`}>{filterCount}</span>}
         </Button>
         <div className="relative min-w-[12rem] flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" aria-hidden />
@@ -111,7 +111,7 @@ export function AssetToolbar({
               <X className="h-3.5 w-3.5" aria-hidden />
             </button>
           ) : (
-            <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 text-[10px] text-muted sm:block" aria-hidden>/</kbd>
+            <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 text-2xs text-muted sm:block" aria-hidden>/</kbd>
           )}
         </div>
         <Menu.Root>
@@ -135,7 +135,7 @@ export function AssetToolbar({
                   {columns.includes(c.id) && <Check className="h-2.5 w-2.5" strokeWidth={3.5} />}
                 </span>
                 {c.label}
-                {c.locked && <span className="ml-auto text-[10px] text-muted">always shown</span>}
+                {c.locked && <span className="ml-auto text-2xs text-muted">always shown</span>}
               </Menu.CheckboxItem>
             ))}
             <DropdownMenuSeparator />

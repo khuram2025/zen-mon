@@ -164,7 +164,7 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
             <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface2">
               <div className="h-full bg-info transition-all" style={{ width: `${layout.pvmove.percent}%` }} />
             </div>
-            <p className="mt-1.5 text-[11px] text-muted">
+            <p className="mt-1.5 text-xs text-muted">
               When the move completes, remove the disk from the pool, then detach it from the VM.
             </p>
           </div>
@@ -201,7 +201,7 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
               aria-label={`Pool ${bytes(allocated)} allocated of ${bytes(vg.size_bytes)}`}>
               <div className="h-full bg-primary" style={{ width: `${(allocated / vg.size_bytes) * 100}%` }} />
             </div>
-            <div className="mt-1 flex justify-between text-[11px] text-muted">
+            <div className="mt-1 flex justify-between text-xs text-muted">
               <span>Allocated {bytes(allocated)}</span>
               <span>Unallocated {bytes(vg.free_bytes)}</span>
             </div>
@@ -219,9 +219,9 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
 function Stat({ label, value, sub, tone }: { label: string; value: string; sub: string; tone?: 'info' }) {
   return (
     <div className="rounded-lg border border-border/50 bg-surface2/20 p-3">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</div>
+      <div className="text-xs font-medium uppercase tracking-wide text-muted">{label}</div>
       <div className={cn('mt-0.5 text-lg font-semibold tabular-nums', tone === 'info' && 'text-info')}>{value}</div>
-      <div className="text-[11px] text-muted">{sub}</div>
+      <div className="text-xs text-muted">{sub}</div>
     </div>
   )
 }
@@ -234,7 +234,7 @@ function VolumeRow({ volume }: { volume: Volume }) {
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/50 px-3 py-2 text-sm">
       <div className="min-w-[12rem] flex-1">
         <div className="font-medium">{roles} volume</div>
-        <div className="text-[11px] text-muted">{bytes(volume.usage?.free_bytes || 0)} available
+        <div className="text-xs text-muted">{bytes(volume.usage?.free_bytes || 0)} available
         </div>
       </div>
       <div className="w-40">
@@ -291,7 +291,7 @@ function DisksCard({ layout, onAdd, onClaim, onRemove }: {
                   <span>
                     <span className="font-mono text-sm font-medium">{diskName(layout, d.path)}</span>{' '}
                     <span className="ml-2 text-sm tabular-nums">{bytes(d.size_bytes)}</span>
-                    <span className="block text-[11px] text-muted">
+                    <span className="block text-xs text-muted">
                       {[d.model, d.transport?.toUpperCase(), d.rotational ? 'HDD' : 'SSD/virtual'].filter(Boolean).join(' · ')}
                     </span>
                   </span>
@@ -342,7 +342,7 @@ function PvUsage({ pv }: { pv: PhysicalVolume }) {
         </span>
       </div>
       {!pv.removal.action && pv.removal.reason && (
-        <div className="mt-1 text-[11px] text-muted">This disk cannot currently be removed safely. Keep it connected.</div>
+        <div className="mt-1 text-xs text-muted">This disk cannot currently be removed safely. Keep it connected.</div>
       )}
     </div>
   )

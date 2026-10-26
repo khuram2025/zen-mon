@@ -16,6 +16,7 @@ import { useVizColors } from '@/components/availability/viz'
 import { ENTITY_ICON, ENTITY_KIND_LABEL, focusRing } from './AlertBits'
 import { fmtAlertDate, parseTs, timezoneName } from './format'
 import type { AlertSummary, AlertTrend, EntityKind } from './types'
+import { chartFont, chartTheme } from '@/lib/chartTheme'
 
 const TREND_RANGES = [
   { hours: 24, label: '24 h' },
@@ -206,7 +207,7 @@ function TrendChart({ trend }: { trend: AlertTrend }) {
       borderColor: colors.c('border'),
       borderWidth: 1,
       padding: [8, 10],
-      textStyle: { color: colors.c('text'), fontSize: 12 },
+      textStyle: { color: colors.c('text'), fontSize: chartFont(12) },
       extraCssText: 'box-shadow: 0 8px 24px rgba(0,0,0,.25); border-radius: 8px;',
     }
     return {
@@ -214,7 +215,7 @@ function TrendChart({ trend }: { trend: AlertTrend }) {
       grid: { left: 40, right: 12, top: 30, bottom: 40 },
       legend: {
         top: 0, left: 0, itemWidth: 12, itemHeight: 8,
-        textStyle: { color: colors.c('text2'), fontSize: 12 },
+        textStyle: { color: colors.c('text2'), fontSize: chartFont(12) },
         data: ['Opened', 'Recovered', 'Closed (other)'],
       },
       xAxis: {
@@ -222,11 +223,11 @@ function TrendChart({ trend }: { trend: AlertTrend }) {
         data: pts.map((p) => label(p.ms)),
         axisLine: { lineStyle: { color: colors.c('border') } },
         axisTick: { show: false },
-        axisLabel: { color: muted, fontSize: 11, hideOverlap: true },
+        axisLabel: { color: muted, fontSize: chartFont(11), hideOverlap: true },
       },
       yAxis: {
         type: 'value', minInterval: 1,
-        axisLabel: { color: muted, fontSize: 11 },
+        axisLabel: { color: muted, fontSize: chartFont(11) },
         splitLine: { lineStyle: { color: colors.c('border', 0.8), type: 'dashed' } },
       },
       tooltip: {
@@ -271,7 +272,7 @@ function TrendChart({ trend }: { trend: AlertTrend }) {
         role="img"
         aria-label={`Opened ${total.o}, recovered ${total.r}, closed other ${total.c} over the period`}
       >
-        <ReactECharts option={option} notMerge style={{ height: 260, width: '100%' }} />
+        <ReactECharts theme={chartTheme()} option={option} notMerge style={{ height: 260, width: '100%' }} />
       </div>
       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted">
         <span>Opened <b className="text-text">{total.o.toLocaleString()}</b></span>

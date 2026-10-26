@@ -223,7 +223,7 @@ export function ShiftTimeline({ shifts, from, to, tz, now }: { shifts: Shift[]; 
     <div className="space-y-2">
       <div className="overflow-x-auto">
         <div className="min-w-[720px]">
-          <div className="relative ml-28 h-5 border-b border-border text-[10px] text-muted">
+          <div className="relative ml-28 h-5 border-b border-border text-2xs text-muted">
             {ticks.map((t) => (
               <span key={t.at} className="absolute top-0 -translate-x-0 whitespace-nowrap pl-0.5" style={{ left: `${t.leftPct}%` }}>
                 {new Date(t.at).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' })}
@@ -239,7 +239,7 @@ export function ShiftTimeline({ shifts, from, to, tz, now }: { shifts: Shift[]; 
                   <span
                     key={b.key}
                     role="listitem"
-                    className={cn('absolute top-0.5 flex h-6 items-center overflow-hidden rounded px-1 text-[10px] font-medium text-white', USER_COLOR_CLS[b.colorIndex], b.override && 'ring-2 ring-warning')}
+                    className={cn('absolute top-0.5 flex h-6 items-center overflow-hidden rounded px-1 text-2xs font-medium text-white', USER_COLOR_CLS[b.colorIndex], b.override && 'ring-2 ring-warning')}
                     style={{ left: `${b.leftPct}%`, width: `${Math.max(b.widthPct, 0.3)}%` }}
                     title={`${b.user_name}${b.override ? ' (override)' : ''}: ${span(b.start, b.end)}`}
                     aria-label={`${b.user_name}${b.override ? ' (override)' : ''} from ${fmtAlertDate(b.start)} to ${fmtAlertDate(b.end)}`}
@@ -506,7 +506,7 @@ function RestrictionsEditor({ layerName, value, onChange }: { layerName: string;
               const on = r.days.includes(d.n)
               return (
                 <button key={d.n} type="button" aria-pressed={on} onClick={() => update(i, { days: on ? r.days.filter((x) => x !== d.n) : [...r.days, d.n].sort((a, b) => a - b) })}
-                  className={cn('h-7 w-9 rounded text-[11px] font-medium', on ? 'bg-primary text-on-primary' : 'bg-surface2 text-muted')}>
+                  className={cn('h-7 w-9 rounded text-xs font-medium', on ? 'bg-primary text-on-primary' : 'bg-surface2 text-muted')}>
                   {d.short}
                 </button>
               )

@@ -111,7 +111,7 @@ export function CreateMonitorDialog({
               <Input className="mt-1" type="number" step="any" value={threshold} onChange={(e) => setThreshold(e.target.value)} />
             </label>
           </div>
-          <p className="text-[11px] text-muted">{current.hint}</p>
+          <p className="text-xs text-muted">{current.hint}</p>
           <label className="flex items-center gap-2 text-xs text-muted">
             <Switch checked={enabled} onCheckedChange={setEnabled} />
             Enable immediately (leave off to save without paging)

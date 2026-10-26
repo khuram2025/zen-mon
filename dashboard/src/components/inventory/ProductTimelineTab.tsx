@@ -83,7 +83,7 @@ export function ProductTimelineTab({ productKey, product, enabled }: { productKe
         {list.isError && (
           <div className="border-b border-border p-2">
             <QueryFailure compact what="the change history" error={list.error} onRetry={() => void list.refetch()} retrying={list.isFetching} />
-            <p className="mt-1 text-[11px] text-muted">Showing the last events that loaded; they may be out of date.</p>
+            <p className="mt-1 text-xs text-muted">Showing the last events that loaded; they may be out of date.</p>
           </div>
         )}
         <div className={cn(list.isFetching && list.isPlaceholderData && 'opacity-60 transition-opacity')} aria-busy={list.isFetching}>
@@ -136,7 +136,7 @@ export function ProductTimelineTab({ productKey, product, enabled }: { productKe
         )}
       </div>
       <Card className="overflow-hidden">{body()}</Card>
-      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
+      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
         <span title={history?.title ?? undefined} data-timeline-history="">{history?.text ?? 'History starts when change capture was enabled; earlier changes were not recorded.'}</span>
         <Link to={productChangesHref(productKey, { since })} data-drill="changes" className={cn('inline-flex items-center gap-1 rounded font-medium text-primary hover:underline', focus)}>
           All changes of this product <ArrowRight className="h-3 w-3" aria-hidden />

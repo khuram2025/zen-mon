@@ -22,7 +22,7 @@ import {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-wide text-muted">{label}</div>
+      <div className="text-xs uppercase tracking-wide text-muted">{label}</div>
       <div className="mt-0.5 text-sm">{children}</div>
     </div>
   )
@@ -64,15 +64,15 @@ function TimelineEntry({ loc }: { loc: EndpointLocation }) {
         <Link to={`/udt/ports?device=${loc.device_id}`} className="text-sm font-medium text-primary hover:underline">
           {loc.switch}
         </Link>
-        <span className="rounded bg-surface2 px-1.5 py-0.5 font-mono text-[11px]">{portLabel(loc.if_name, loc.if_index)}</span>
-        {loc.vlan_id != null && <span className="text-[11px] text-muted">VLAN {loc.vlan_id}</span>}
+        <span className="rounded bg-surface2 px-1.5 py-0.5 font-mono text-xs">{portLabel(loc.if_name, loc.if_index)}</span>
+        {loc.vlan_id != null && <span className="text-xs text-muted">VLAN {loc.vlan_id}</span>}
         {loc.managed ? <Badge variant="outline" title="Controller observed this MAC on the port; direct attachment is unconfirmed">observed port</Badge> : loc.is_direct
           ? <Badge variant="success">direct</Badge>
           : <Badge variant="outline" title="MAC learned through another switch's uplink">via uplink</Badge>}
         {loc.active && <Badge variant="info">connected</Badge>}
       </div>
-      {loc.if_alias && <div className="mt-0.5 text-[11px] text-muted">{loc.if_alias}</div>}
-      <div className="mt-0.5 text-[11px] text-muted tabular-nums">
+      {loc.if_alias && <div className="mt-0.5 text-xs text-muted">{loc.if_alias}</div>}
+      <div className="mt-0.5 text-xs text-muted tabular-nums">
         {fmtDate(loc.first_seen)} → {loc.active ? 'now' : fmtDate(loc.closed_at || loc.last_seen)}
         <span className="ml-2 rounded bg-surface2 px-1.5 py-px">{durationBetween(loc.first_seen, loc.active ? null : (loc.closed_at || loc.last_seen))}</span>
       </div>

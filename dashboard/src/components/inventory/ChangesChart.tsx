@@ -13,8 +13,9 @@ import { InventoryEmpty } from './InventoryEmpty'
 import { fmtInt } from './model'
 import { Panel } from './PanelCard'
 import { ViewToggle, type ChartView } from './ViewToggle'
+import { chartFont } from '@/lib/chartTheme'
 
-const th = 'px-2 py-1.5 text-left text-[10.5px] font-semibold uppercase tracking-wider text-muted'
+const th = 'px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wider text-muted'
 const thRight = cn(th, 'text-right')
 
 function DayTooltip({ active, payload }: { active?: boolean; payload?: { payload: ChartDay }[] }) {
@@ -33,7 +34,7 @@ function DayTooltip({ active, payload }: { active?: boolean; payload?: { payload
         ))}
       </ul>
       <div className="mt-1 flex justify-between border-t border-border pt-1 text-xs"><span>All changes</span><span className="tabular-nums font-semibold">{fmtInt(d.total)}</span></div>
-      <div className="mt-1 text-[10px] text-muted">Click to list this day</div>
+      <div className="mt-1 text-2xs text-muted">Click to list this day</div>
     </div>
   )
 }
@@ -113,13 +114,13 @@ export function ChangesChart({
                 <CartesianGrid stroke="rgb(var(--border))" strokeDasharray="3 3" vertical={false} />
                 <XAxis
                   dataKey="label"
-                  tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }}
+                  tick={{ fontSize: chartFont(11), fill: 'rgb(var(--muted))' }}
                   tickLine={false}
                   axisLine={false}
                   interval={dense ? 'preserveStartEnd' : 0}
                   minTickGap={dense ? 24 : 4}
                 />
-                <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }} tickLine={false} axisLine={false} width={32} />
+                <YAxis allowDecimals={false} tick={{ fontSize: chartFont(11), fill: 'rgb(var(--muted))' }} tickLine={false} axisLine={false} width={32} />
                 <Tooltip content={<DayTooltip />} cursor={{ fill: 'rgb(var(--surface2))' }} isAnimationActive={false} />
                 {CHART_SERIES.map((s) => (
                   <Bar key={s.key} dataKey={s.key} name={s.label} stackId="changes" fill={CATEGORICAL[s.color]} isAnimationActive={false} />
@@ -128,7 +129,7 @@ export function ChangesChart({
             </ResponsiveContainer>
           </div>
           {days.some((d) => d.partial) && (
-            <p className="text-[11px] text-muted" data-chart-partial="">* A partial day: the window starts part-way through the first day, and today is not over.</p>
+            <p className="text-xs text-muted" data-chart-partial="">* A partial day: the window starts part-way through the first day, and today is not over.</p>
           )}
           <ul role="list" aria-label="Categories" className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
             {CHART_SERIES.map((s) => (

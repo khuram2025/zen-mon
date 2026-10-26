@@ -57,7 +57,7 @@ export function InventoryProductPage() {
       {product.isError && (
         <div>
           <QueryFailure compact what="this product" error={product.error} onRetry={() => void product.refetch()} retrying={product.isFetching} />
-          <p className="mt-1 text-[11px] text-muted">Showing the last data that loaded; it may be out of date.</p>
+          <p className="mt-1 text-xs text-muted">Showing the last data that loaded; it may be out of date.</p>
         </div>
       )}
       <ProductHeader data={data} historyStart={historyStart} />

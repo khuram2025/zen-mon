@@ -29,7 +29,7 @@ function Number2({ index, tone = 'primary' }: { index: number; tone?: 'primary' 
     <span
       aria-hidden
       className={cn(
-        'flex h-6 min-w-[1.5rem] shrink-0 items-center justify-center rounded-md px-1 text-[11px] font-bold tabular-nums',
+        'flex h-6 min-w-[1.5rem] shrink-0 items-center justify-center rounded-md px-1 text-xs font-bold tabular-nums',
         tone === 'primary' && 'bg-primary/10 text-primary',
         tone === 'muted' && 'bg-surface2 text-muted',
         tone === 'warning' && 'bg-warning/15 text-warning-fg',
@@ -65,7 +65,7 @@ export function SectionBlock({
           <div className="min-w-0 flex-1">
             <h2 id={headingId} className="flex flex-wrap items-center gap-2 text-sm font-semibold text-text2">
               {section.title}
-              <span className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">
+              <span className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted">
                 <LockKeyhole className="h-3 w-3" aria-hidden /> Restricted
               </span>
             </h2>
@@ -75,7 +75,7 @@ export function SectionBlock({
                 {requires.map((p, i) => (
                   <span key={p}>
                     {i > 0 && (i === requires.length - 1 ? ' and ' : ', ')}
-                    <code className="rounded bg-surface px-1 py-px font-mono text-[11px] text-text2">{p}</code>
+                    <code className="rounded bg-surface px-1 py-px font-mono text-xs text-text2">{p}</code>
                   </span>
                 ))}
                 {', which this section needs, so its data is not shown. Ask an administrator if you need it.'}
@@ -105,7 +105,7 @@ export function SectionBlock({
                 <span className="font-semibold text-warning-fg">This section could not be generated.</span>{' '}
                 {failure.detail || 'The rest of the report is unaffected; the appliance log has details.'}
                 {failure.code && (
-                  <code className="ml-1.5 rounded bg-surface px-1 py-px font-mono text-[10px] text-muted">{failure.code}</code>
+                  <code className="ml-1.5 rounded bg-surface px-1 py-px font-mono text-2xs text-muted">{failure.code}</code>
                 )}
               </p>
             </div>
@@ -134,10 +134,10 @@ export function SectionBlock({
         <Number2 index={index} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <h2 id={headingId} className="text-[15px] font-semibold leading-6 text-text">{section.title}</h2>
+            <h2 id={headingId} className="text-base font-semibold leading-6 text-text">{section.title}</h2>
             {snapshot && (
               <span
-                className="inline-flex items-center gap-1 rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-[10px] font-medium text-info-fg"
+                className="inline-flex items-center gap-1 rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-2xs font-medium text-info-fg"
                 title="Current state when the report was generated, not a figure over the period"
               >
                 <Clock3 className="h-3 w-3" aria-hidden /> As of generation

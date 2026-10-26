@@ -18,7 +18,7 @@ export function PasswordRequirements({ pw, ctx, className }: { pw: string; ctx?:
   const problems = passwordProblems(pw, policy, ctx)
   const lengthOk = pw.length >= policy.min_length
   return (
-    <ul className={cn('space-y-0.5 text-[11px]', className)} aria-label="Password requirements">
+    <ul className={cn('space-y-0.5 text-xs', className)} aria-label="Password requirements">
       <li className={cn('flex items-center gap-1.5', lengthOk ? 'text-success' : 'text-muted')}>
         {lengthOk ? <Check className="h-3 w-3" aria-hidden /> : <Circle className="h-3 w-3" aria-hidden />}
         At least {policy.min_length} characters {pw.length > 0 && !lengthOk && <span>({pw.length} so far)</span>}

@@ -25,7 +25,7 @@ function Shell({ title, subtitle, children, actions }: { title: string; subtitle
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold tracking-tight text-text">{title}</h3>
-          {subtitle && <div className="mt-0.5 text-[11px] text-muted">{subtitle}</div>}
+          {subtitle && <div className="mt-0.5 text-xs text-muted">{subtitle}</div>}
         </div>
         {actions}
       </div>
@@ -54,9 +54,9 @@ function Rows({ rows }: { rows: RowSpec[] }) {
     <dl className="divide-y divide-border/60">
       {rows.map((r) => (
         <div key={r.label} className="flex items-baseline justify-between gap-3 px-4 py-2">
-          <dt className="text-[11px] text-muted">
+          <dt className="text-xs text-muted">
             {r.label}
-            {r.hint && <span className="ml-1 text-[10px] text-muted/80">({r.hint})</span>}
+            {r.hint && <span className="ml-1 text-2xs text-muted/80">({r.hint})</span>}
           </dt>
           <dd className={cn('text-right font-mono text-xs font-medium tabular-nums', r.tone)}>{r.value}</dd>
         </div>
@@ -138,7 +138,7 @@ function CoverageFooter({ sla }: { sla?: SlaStats }) {
   if ((sla.unknown_sec ?? 0) > 0) parts.push(`${formatDur(sla.unknown_sec)} without evidence`)
   if ((sla.maintenance_sec ?? 0) > 0) parts.push(`${formatDur(sla.maintenance_sec)} maintenance excluded`)
   if (parts.length === 0) return null
-  return <p className="border-t border-border/60 px-4 py-2 text-[10.5px] text-muted">{parts.join(' · ')}</p>
+  return <p className="border-t border-border/60 px-4 py-2 text-xs text-muted">{parts.join(' · ')}</p>
 }
 
 /** Target, achieved, budget and burn for the selected window (SLO feature). */
@@ -180,20 +180,20 @@ export function SloCard({ sla, rangeLabel, loading, error, onRetry, fallbackTarg
           <div className="space-y-3 p-4">
             <div className="flex flex-wrap items-end justify-between gap-2">
               <div>
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Achieved</div>
+                <div className="text-2xs font-semibold uppercase tracking-wider text-muted">Achieved</div>
                 <div className={cn('text-2xl font-bold tabular-nums', BAND_TEXT[availabilityBand(achieved, sla?.total_downtime_sec)])}>
                   {formatAvailability(achieved, sla?.total_downtime_sec, 3)}
                 </div>
               </div>
               <span className={cn(
-                'rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                'rounded-full px-2 py-0.5 text-xs font-semibold',
                 meets == null ? 'bg-surface2 text-muted' : meets ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger',
               )}>
                 {meets == null ? 'Not assessed' : meets ? 'Meets target' : 'Below target'}
               </span>
             </div>
             <div>
-              <div className="mb-1 flex justify-between text-[11px] text-muted">
+              <div className="mb-1 flex justify-between text-xs text-muted">
                 <span>Error budget used</span>
                 <span className="font-mono tabular-nums">
                   {usedPct == null ? NO_DATA : !Number.isFinite(usedPct) || usedPct > 999 ? '>999% (exceeded)' : `${usedPct.toFixed(1)}%`}
@@ -204,7 +204,7 @@ export function SloCard({ sla, rangeLabel, loading, error, onRetry, fallbackTarg
                 <div className={cn('h-full rounded-full', barTone)} style={{ width: `${barPct}%` }} />
               </div>
             </div>
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
               <dt className="text-muted">Budget</dt>
               <dd className="text-right font-mono tabular-nums">{budget == null ? NO_DATA : formatDurMeasured(budget)}</dd>
               <dt className="text-muted">Confirmed downtime</dt>
@@ -224,7 +224,7 @@ export function SloCard({ sla, rangeLabel, loading, error, onRetry, fallbackTarg
                 {sla?.maintenance_sec == null ? 'Not reported' : formatDurMeasured(sla.maintenance_sec)}
               </dd>
             </dl>
-            <p className="text-[10.5px] leading-relaxed text-muted">
+            <p className="text-xs leading-relaxed text-muted">
               The budget is the allowed confirmed downtime over the observed time in this window.
               {!server && ' Estimated in the browser: this appliance does not report the budget, and maintenance is not excluded.'}
             </p>

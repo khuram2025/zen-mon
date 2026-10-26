@@ -343,8 +343,8 @@ export function ApmOverviewPage() {
             <Card className="overflow-hidden xl:col-span-7">
               <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
                 <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">Needs attention</div>
-                  <div className="text-[11px] text-text2">{attention.length} of {list.length} services</div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted">Needs attention</div>
+                  <div className="text-xs text-text2">{attention.length} of {list.length} services</div>
                 </div>
                 <DeepDiveLink to={`/apm/services?range=${range}`}>All services</DeepDiveLink>
               </div>
@@ -375,7 +375,7 @@ export function ApmOverviewPage() {
                       <Tr key={s.name} className="cursor-pointer" onClick={() => navigate(`/apm/services/${encodeURIComponent(s.name)}?range=${range}`)}>
                         <Td className="font-medium text-text">
                           <div>{s.name}</div>
-                          <div className="text-[10px] text-muted">{s.envs.join(', ') || '—'}</div>
+                          <div className="text-2xs text-muted">{s.envs.join(', ') || '—'}</div>
                         </Td>
                         <Td><HealthBadge health={s.health} /></Td>
                         <Td className="text-right"><ThroughputCell rps={s.rps} count={s.request_count} maxRps={maxRps} /></Td>
@@ -393,8 +393,8 @@ export function ApmOverviewPage() {
             <Card className="overflow-hidden xl:col-span-5">
               <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
                 <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">Busiest services</div>
-                  <div className="text-[11px] text-text2">by request volume</div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted">Busiest services</div>
+                  <div className="text-xs text-text2">by request volume</div>
                 </div>
                 <DeepDiveLink to={`/apm/services?range=${range}`}>Catalog</DeepDiveLink>
               </div>
@@ -424,7 +424,7 @@ export function ApmOverviewPage() {
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
             <Card className="overflow-hidden">
               <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
                   <Bug className="h-3.5 w-3.5 text-danger" /> Open errors · 24h
                 </div>
                 <DeepDiveLink to="/apm/errors">Inbox</DeepDiveLink>
@@ -441,9 +441,9 @@ export function ApmOverviewPage() {
                     <span className="mt-0.5 w-1 self-stretch rounded-full bg-danger" />
                     <div className="min-w-0 flex-1">
                       <div className="truncate font-mono text-xs font-semibold text-text">{e.exception_type}</div>
-                      <div className="truncate text-[11px] text-muted">{e.service}{e.http_route ? ` · ${e.http_route}` : ''}</div>
+                      <div className="truncate text-xs text-muted">{e.service}{e.http_route ? ` · ${e.http_route}` : ''}</div>
                     </div>
-                    <span className="shrink-0 rounded bg-danger/15 px-1.5 font-mono text-[10px] font-bold text-danger">
+                    <span className="shrink-0 rounded bg-danger/15 px-1.5 font-mono text-2xs font-bold text-danger">
                       ×{fmtCount(e.occurrences)}
                     </span>
                   </Link>
@@ -453,7 +453,7 @@ export function ApmOverviewPage() {
 
             <Card className="overflow-hidden">
               <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
                   <Target className="h-3.5 w-3.5 text-primary" /> Error budgets
                 </div>
                 <DeepDiveLink to="/apm/slos">SLOs</DeepDiveLink>
@@ -472,14 +472,14 @@ export function ApmOverviewPage() {
                     <div key={b.slo.id}>
                       <div className="flex items-baseline justify-between gap-2 text-xs">
                         <span className="truncate font-medium text-text">{b.slo.name}</span>
-                        <span className="shrink-0 font-mono text-[11px] tabular-nums" style={{ color }}>
+                        <span className="shrink-0 font-mono text-xs tabular-nums" style={{ color }}>
                           {pct != null ? `${pct.toFixed(0)}% left` : 'no traffic'}
                         </span>
                       </div>
                       <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface2">
                         <div className="h-full rounded-full" style={{ width: `${Math.max(2, pct ?? 0)}%`, backgroundColor: color }} />
                       </div>
-                      <div className="mt-0.5 text-[10px] text-muted">{b.slo.service_name} · {b.slo.sli_type} · {b.window_days}d</div>
+                      <div className="mt-0.5 text-2xs text-muted">{b.slo.service_name} · {b.slo.sli_type} · {b.window_days}d</div>
                     </div>
                   )
                 })}
@@ -488,7 +488,7 @@ export function ApmOverviewPage() {
 
             <Card className="overflow-hidden">
               <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
                   <AlertTriangle className="h-3.5 w-3.5 text-warning" /> Pipeline
                 </div>
                 <DeepDiveLink to="/apm/settings">Details</DeepDiveLink>
@@ -509,11 +509,11 @@ export function ApmOverviewPage() {
                   <span className={`font-medium ${monitorsDown ? 'text-danger' : 'text-text'}`}>{monitorsDown}</span>
                 </div>
                 {ingestIssues.length === 0 ? (
-                  <p className="flex items-center gap-1.5 pt-1 text-[11px] text-success">
+                  <p className="flex items-center gap-1.5 pt-1 text-xs text-success">
                     <CheckCircle2 className="h-3 w-3" /> Telemetry pipeline healthy
                   </p>
                 ) : ingestIssues.slice(0, 3).map((i) => (
-                  <p key={i} className="pt-0.5 text-[11px] text-warning">• {i}</p>
+                  <p key={i} className="pt-0.5 text-xs text-warning">• {i}</p>
                 ))}
               </div>
             </Card>

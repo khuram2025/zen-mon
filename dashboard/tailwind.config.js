@@ -33,23 +33,42 @@ export default {
         'sidebar-text-muted': 'rgb(var(--sidebar-text-muted) / <alpha-value>)',
         'sidebar-border': 'rgb(var(--sidebar-border) / <alpha-value>)',
         'sidebar-hover': 'rgb(var(--sidebar-hover) / <alpha-value>)',
+        // Chart ink and the categorical series order (lib/chartTheme.ts); series follow the entity, never its rank.
+        'chart-grid': 'rgb(var(--chart-grid) / <alpha-value>)',
+        'chart-axis': 'rgb(var(--chart-axis) / <alpha-value>)',
+        'series-1': 'rgb(var(--series-1) / <alpha-value>)',
+        'series-2': 'rgb(var(--series-2) / <alpha-value>)',
+        'series-3': 'rgb(var(--series-3) / <alpha-value>)',
+        'series-4': 'rgb(var(--series-4) / <alpha-value>)',
+        'series-5': 'rgb(var(--series-5) / <alpha-value>)',
+        'series-6': 'rgb(var(--series-6) / <alpha-value>)',
+        'series-7': 'rgb(var(--series-7) / <alpha-value>)',
+        'series-8': 'rgb(var(--series-8) / <alpha-value>)',
       },
+      // Inter and JetBrains Mono ship with the dashboard (@fontsource-variable, see styles/fonts.css): an appliance
+      // without internet access renders the same type as one with it.
       fontFamily: {
-        sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+        sans: ['"Inter Variable"', 'Inter', 'system-ui', '-apple-system', '"Segoe UI"', 'Roboto', 'sans-serif'],
+        mono: ['"JetBrains Mono Variable"', '"JetBrains Mono"', 'ui-monospace', 'Menlo', 'Consolas', 'monospace'],
       },
+      // One type scale in rem, so the display density (the root size, styles/globals.css) scales every page together.
+      // At the default 15px root: 2xs 11.25, xs 12.2, sm 13.1, base 14.1, lg 15.9, xl 18.8, 2xl 22.5, 3xl 28, 4xl 34px.
+      // Body copy and tables use xs/sm; 2xs is the floor, for uppercase labels and axis ticks only.
       fontSize: {
-        xs: ['0.75rem', { lineHeight: '1rem' }],
-        sm: ['0.8125rem', { lineHeight: '1.125rem' }],
-        base: ['0.875rem', { lineHeight: '1.25rem' }],
-        lg: ['1rem', { lineHeight: '1.5rem' }],
-        xl: ['1.125rem', { lineHeight: '1.625rem' }],
-        '2xl': ['1.375rem', { lineHeight: '1.75rem' }],
-        '3xl': ['1.75rem', { lineHeight: '2.125rem' }],
+        '2xs': ['0.75rem', { lineHeight: '1rem' }],
+        xs: ['0.8125rem', { lineHeight: '1.125rem' }],
+        sm: ['0.875rem', { lineHeight: '1.25rem' }],
+        base: ['0.9375rem', { lineHeight: '1.375rem' }],
+        lg: ['1.0625rem', { lineHeight: '1.5rem' }],
+        xl: ['1.25rem', { lineHeight: '1.75rem' }],
+        '2xl': ['1.5rem', { lineHeight: '2rem' }],
+        '3xl': ['1.875rem', { lineHeight: '2.25rem' }],
+        '4xl': ['2.25rem', { lineHeight: '2.5rem' }],
       },
       boxShadow: {
-        card: '0 1px 2px 0 rgb(0 0 0 / 0.04), 0 1px 3px 0 rgb(0 0 0 / 0.05)',
-        'card-dark': '0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.2)',
+        card: '0 1px 2px 0 rgb(15 23 38 / 0.04), 0 1px 3px 0 rgb(15 23 38 / 0.04)',
+        // Dark panels separate by their border and surface step, not by shadow.
+        'card-dark': '0 0 0 0 transparent',
         elevated: '0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.05)',
         glow: '0 0 0 1px rgb(var(--primary) / 0.2), 0 0 20px rgb(var(--primary) / 0.15)',
       },

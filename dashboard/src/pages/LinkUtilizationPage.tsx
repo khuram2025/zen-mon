@@ -51,6 +51,7 @@ import { netflowInterfaceLinks } from '@/lib/netflow/interfaceLinks'
 import { toast } from '@/components/ui/Toast'
 import { TagBadge } from '@/components/tags/TagBadge'
 import { TagPicker } from '@/components/tags/TagPicker'
+import { chartFont } from '@/lib/chartTheme'
 
 type LinkRow = {
   device_id: string
@@ -223,7 +224,7 @@ const SORT_LABELS: Record<string, string> = {
  *  green "OK" badge on 3,000 rows, so the eye lands on the exceptions. */
 function HealthChips({ row }: { row: LinkRow }) {
   if (!row.issues?.length) {
-    return <span className="text-[11px] text-muted">—</span>
+    return <span className="text-xs text-muted">—</span>
   }
   const tone = row.health === 'critical'
     ? 'border-danger/40 bg-danger/10 text-danger'
@@ -241,7 +242,7 @@ function HealthChips({ row }: { row: LinkRow }) {
           <span
             key={key}
             title={`${meta.label}: ${detail}`}
-            className={cn('rounded border px-1 py-px text-[9px] font-semibold tracking-wide', tone)}
+            className={cn('rounded border px-1 py-px text-2xs font-semibold tracking-wide', tone)}
           >
             {meta.short}
           </span>
@@ -309,7 +310,7 @@ function UtilBar({ pct, avg, peak, className }: {
           />
         )}
       </div>
-      <span className={cn('w-11 text-right font-mono text-[11px] tabular-nums', utilTone(pct))}>
+      <span className={cn('w-11 text-right font-mono text-xs tabular-nums', utilTone(pct))}>
         {pct.toFixed(0)}%
       </span>
     </div>
@@ -415,12 +416,12 @@ function KpiCard({
         : {})}
     >
       <CardContent className="p-4">
-        <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
+        <div className="flex items-center gap-1 text-2xs font-semibold uppercase tracking-wider text-muted">
           {label}
           {active && <X className="h-3 w-3 text-primary" />}
         </div>
         <div className={cn('mt-1 text-2xl font-bold tabular-nums', tone)}>{value}</div>
-        {sub && <div className="mt-0.5 text-[11px] text-muted">{sub}</div>}
+        {sub && <div className="mt-0.5 text-xs text-muted">{sub}</div>}
       </CardContent>
     </Card>
   )
@@ -721,7 +722,7 @@ export function LinkUtilizationPage() {
                     <button
                       type="button"
                       onClick={() => setTagFilter('')}
-                      className="text-[11px] text-muted underline-offset-2 hover:underline"
+                      className="text-xs text-muted underline-offset-2 hover:underline"
                     >
                       clear
                     </button>
@@ -857,7 +858,7 @@ export function LinkUtilizationPage() {
                             <ChevronRight className={cn('h-3.5 w-3.5 text-muted transition-transform', isSel && 'rotate-90 text-primary')} />
                             <div>
                               <div className="text-sm font-medium">{label}</div>
-                              <div className="text-[11px] text-muted">
+                              <div className="text-xs text-muted">
                                 <Link
                                   to={`/devices/${row.device_id}`}
                                   className="hover:text-primary"
@@ -885,7 +886,7 @@ export function LinkUtilizationPage() {
                                     />
                                   ))}
                                   {row.tags.length > 3 && (
-                                    <span className="text-[10px] text-muted">+{row.tags.length - 3}</span>
+                                    <span className="text-2xs text-muted">+{row.tags.length - 3}</span>
                                   )}
                                 </div>
                               )}
@@ -954,7 +955,7 @@ export function LinkUtilizationPage() {
                         {!selectedRow && (
                           <Td className="pr-4">
                             {row.has_netflow ? (
-                              <Badge variant="info" className="text-[10px]">NetFlow</Badge>
+                              <Badge variant="info" className="text-2xs">NetFlow</Badge>
                             ) : (
                               <span className="text-xs text-muted">SNMP</span>
                             )}
@@ -1202,7 +1203,7 @@ function LinkDetailPanel({
         <div>
           <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3">
             <h3 className="text-sm font-medium">Interface health · {rangeLabel}</h3>
-            <span className="text-[11px] text-muted">
+            <span className="text-xs text-muted">
               counter increase over the window, reset-safe
             </span>
           </div>
@@ -1260,19 +1261,19 @@ function LinkDetailPanel({
                   <XAxis
                     dataKey="ts" type="number" scale="time" domain={[fromTs, toTs]}
                     ticks={ticks} interval={0} tickFormatter={tickFormatter}
-                    tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false}
+                    tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false}
                   />
                   <YAxis
                     width={52} allowDecimals={false}
                     tickFormatter={(v) => formatCount(Number(v))}
-                    tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false}
+                    tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false}
                   />
                   <Tooltip
-                    contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12 }}
+                    contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: chartFont(12) }}
                     labelFormatter={timeTooltipLabelFormatter}
                     formatter={(v: number, name: string) => [Number(v).toLocaleString(), name]}
                   />
-                  <Legend verticalAlign="top" align="right" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                  <Legend verticalAlign="top" align="right" iconSize={8} wrapperStyle={{ fontSize: chartFont(11) }} />
                   <Area type="monotone" dataKey="in_errors" name="In errors" stroke="rgb(var(--danger))" fill="rgb(var(--danger))" fillOpacity={0.2} strokeWidth={1.5} dot={false} isAnimationActive={false} />
                   <Area type="monotone" dataKey="out_errors" name="Out errors" stroke="rgb(var(--warning))" fill="rgb(var(--warning))" fillOpacity={0.15} strokeWidth={1.5} dot={false} isAnimationActive={false} />
                   <Area type="monotone" dataKey="in_discards" name="In discards" stroke="rgb(var(--info))" fill="none" strokeWidth={1.5} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
@@ -1281,7 +1282,7 @@ function LinkDetailPanel({
               </ResponsiveContainer>
             </div>
           ) : (
-            <div className="mt-2 rounded-lg border border-border/60 bg-surface2/20 px-3 py-2.5 text-[11px] text-muted">
+            <div className="mt-2 rounded-lg border border-border/60 bg-surface2/20 px-3 py-2.5 text-xs text-muted">
               {isLoading
                 ? 'Loading…'
                 : 'No errors or discards recorded on this interface in the selected window.'}
@@ -1293,7 +1294,7 @@ function LinkDetailPanel({
         <div>
           <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3">
             <h3 className="text-sm font-medium">Bandwidth · {rangeLabel}</h3>
-            <span className="text-[11px] text-muted">
+            <span className="text-xs text-muted">
               {isAveraged
                 ? `SNMP polling · ${formatBucket(bucketSeconds)} average, peak shaded`
                 : 'SNMP polling · raw samples'}
@@ -1331,14 +1332,14 @@ function LinkDetailPanel({
                     ticks={ticks}
                     interval={0}
                     tickFormatter={tickFormatter}
-                    tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                    tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }}
                     axisLine={false}
                     tickLine={false}
                   />
                   <YAxis
                     width={52}
                     tickFormatter={(v) => formatBpsAxis(Number(v))}
-                    tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                    tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }}
                     axisLine={false}
                     tickLine={false}
                   />
@@ -1352,15 +1353,15 @@ function LinkDetailPanel({
                       stroke="rgb(var(--warning))"
                       strokeDasharray="4 4"
                       // Bottom-left: the legend owns the top-right corner.
-                      label={{ value: `100% · ${formatBps(speed)}`, fontSize: 10, fill: 'rgb(var(--warning))', position: 'insideBottomLeft' }}
+                      label={{ value: `100% · ${formatBps(speed)}`, fontSize: chartFont(10), fill: 'rgb(var(--warning))', position: 'insideBottomLeft' }}
                     />
                   )}
                   <Tooltip
-                    contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12 }}
+                    contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: chartFont(12) }}
                     labelFormatter={timeTooltipLabelFormatter}
                     formatter={(v: number, name: string) => [formatBps(v), name]}
                   />
-                  <Legend verticalAlign="top" align="right" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                  <Legend verticalAlign="top" align="right" iconSize={8} wrapperStyle={{ fontSize: chartFont(11) }} />
                   {/* Peaks first so the averages draw on top of them. */}
                   {isAveraged && (
                     <Area type="monotone" dataKey="in_peak_bps" name="Inbound peak" stroke="rgb(var(--success))" strokeOpacity={0.45} fill="rgb(var(--success))" fillOpacity={0.1} strokeWidth={1} dot={false} isAnimationActive={false} />
@@ -1386,7 +1387,7 @@ function LinkDetailPanel({
               </h3>
               {overCapacity && (
                 <span
-                  className="text-[11px] text-warning"
+                  className="text-xs text-warning"
                   title="Throughput exceeds the interface speed reported over SNMP, so the percentage is not meaningful. Set a manual speed override for this interface to correct it."
                 >
                   Exceeds reported {formatBps(speed)} capacity — link speed looks misreported
@@ -1400,11 +1401,11 @@ function LinkDetailPanel({
                   {/* Same numeric domain as the bandwidth chart so the two
                       stay vertically aligned and gaps line up. */}
                   <XAxis dataKey="ts" type="number" scale="time" domain={[fromTs, toTs]} hide />
-                  <YAxis width={44} domain={[0, utilAxisMax]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} />
+                  <YAxis width={44} domain={[0, utilAxisMax]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }} />
                   <ReferenceLine y={80} stroke="rgb(var(--danger))" strokeDasharray="3 3" strokeOpacity={0.6} />
                   <ReferenceLine y={50} stroke="rgb(var(--warning))" strokeDasharray="3 3" strokeOpacity={0.5} />
                   <Tooltip
-                    contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12 }}
+                    contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: chartFont(12) }}
                     labelFormatter={timeTooltipLabelFormatter}
                     formatter={(v: number, name: string) => [`${v.toFixed(1)}%`, name]}
                   />
@@ -1447,9 +1448,9 @@ function LinkDetailPanel({
                     <AreaChart data={nf.timeseries} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                       <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.3} vertical={false} />
                       <XAxis dataKey="ts" type="number" scale="time" domain={[fromTs, toTs]} hide />
-                      <YAxis width={44} tickFormatter={(v) => formatBpsAxis(Number(v))} tick={{ fontSize: 9, fill: 'rgb(var(--muted))' }} />
+                      <YAxis width={44} tickFormatter={(v) => formatBpsAxis(Number(v))} tick={{ fontSize: chartFont(9), fill: 'rgb(var(--muted))' }} />
                       <Tooltip
-                        contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 11 }}
+                        contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: chartFont(11) }}
                         labelFormatter={timeTooltipLabelFormatter}
                         formatter={(v: number, n: string) => [formatBps(v), n === 'in_bps' ? 'Flow in' : 'Flow out']}
                       />
@@ -1556,7 +1557,7 @@ function LinkAlertsSection({
           <Bell className="h-4 w-4 text-warning" />
           Configured alerts
           {rules.length > 0 && (
-            <Badge variant="outline" className="text-[10px]">{rules.length}</Badge>
+            <Badge variant="outline" className="text-2xs">{rules.length}</Badge>
           )}
         </h3>
         <Button size="sm" variant="outline" onClick={onCreate}>
@@ -1589,7 +1590,7 @@ function LinkAlertsSection({
               >
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-xs font-medium">{r.name}</div>
-                  <div className="text-[11px] text-muted">
+                  <div className="text-xs text-muted">
                     {compound
                       ? `${r.conditions!.length} conditions`
                       : `${IF_METRIC_LABELS[r.metric] || r.metric} ${r.operator} ${ruleThresholdLabel(r)}`}
@@ -1601,7 +1602,7 @@ function LinkAlertsSection({
                 </div>
                 <Badge
                   variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}
-                  className="text-[10px]"
+                  className="text-2xs"
                 >
                   {r.severity}
                 </Badge>
@@ -1658,9 +1659,9 @@ function LinkAlertsSection({
 function MiniStat({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
   return (
     <div className="rounded-md border border-border/50 bg-surface2/30 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs uppercase tracking-wider text-muted">{label}</div>
       <div className={cn('text-sm font-semibold tabular-nums', tone)}>{value}</div>
-      {sub && <div className="text-[10px] tabular-nums text-muted">{sub}</div>}
+      {sub && <div className="text-2xs tabular-nums text-muted">{sub}</div>}
     </div>
   )
 }

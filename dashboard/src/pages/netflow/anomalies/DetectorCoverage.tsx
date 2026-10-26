@@ -93,7 +93,7 @@ export function DetectorCoverageRow({ d }: { d: DetectorStatusRow }) {
           </p>
         )}
         {(d.required_fields ?? []).length > 0 && (
-          <p className="text-[11px]">Needs: {(d.required_fields ?? []).map((f) => FIELD_LABEL[f] ?? f).join(', ')}</p>
+          <p className="text-xs">Needs: {(d.required_fields ?? []).map((f) => FIELD_LABEL[f] ?? f).join(', ')}</p>
         )}
       </div>
     </li>

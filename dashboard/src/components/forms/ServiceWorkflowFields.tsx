@@ -165,7 +165,7 @@ export function ServiceWorkflowFields(props: Props) {
           <KeyRound className="h-4 w-4 text-primary" />
           <div>
             <div className="text-xs font-semibold uppercase tracking-wider">Authentication</div>
-            <div className="text-[11px] text-muted">Secrets are encrypted and injected only at probe time.</div>
+            <div className="text-xs text-muted">Secrets are encrypted and injected only at probe time.</div>
           </div>
         </div>
         <Button
@@ -200,7 +200,7 @@ export function ServiceWorkflowFields(props: Props) {
       </FormField>
 
       {props.credentialId && (
-        <div className="rounded-md border border-success/25 bg-success/5 px-3 py-2 text-[11px] text-muted">
+        <div className="rounded-md border border-success/25 bg-success/5 px-3 py-2 text-xs text-muted">
           <span className="font-semibold text-success">Protected credential linked.</span>{' '}
           {effectiveAuthType === 'basic' && 'The username and password will be sent with HTTP Basic authentication. '}
           {effectiveAuthType === 'bearer' && 'The token will be sent in the Authorization header. '}
@@ -211,7 +211,7 @@ export function ServiceWorkflowFields(props: Props) {
       )}
 
       {effectiveAuthType === 'ntlm' && props.targetUrl.trim().toLowerCase().startsWith('http://') && (
-        <div className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+        <div className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">
           Trusted internal HTTP mode: NTLM challenge-response protects the password itself, but the page traffic is unencrypted and NTLM relay remains possible. Prefer HTTPS whenever IIS can provide it.
         </div>
       )}
@@ -221,7 +221,7 @@ export function ServiceWorkflowFields(props: Props) {
           <Route className="h-4 w-4 text-primary" />
           <div>
             <div className="text-xs font-medium">Multi-step service journey</div>
-            <div className="text-[11px] text-muted">Sign in once, retain cookies, then test protected pages in order.</div>
+            <div className="text-xs text-muted">Sign in once, retain cookies, then test protected pages in order.</div>
           </div>
         </div>
         <Switch
@@ -257,7 +257,7 @@ export function ServiceWorkflowFields(props: Props) {
               <Plus className="h-3.5 w-3.5" /> Add navigation
             </Button>
           </div>
-          <p className="text-[11px] text-muted">
+          <p className="text-xs text-muted">
             All URLs must stay on the same origin when a credential is linked. HTTPS is recommended; trusted HTTP requires an explicit confirmation for Basic, bearer, and form credentials. Form steps may use{' '}
             <code>{'{{username}}'}</code> and <code>{'{{password}}'}</code>; token credentials use <code>{'{{token}}'}</code>.
           </p>
@@ -353,7 +353,7 @@ export function ServiceWorkflowFields(props: Props) {
               <Input type="password" autoComplete="new-password" value={credentialDraft.secret} onChange={(event) => setCredentialDraft({ ...credentialDraft, secret: event.target.value })} />
             </FormField>
             <FormField label="Description"><Input value={credentialDraft.description} onChange={(event) => setCredentialDraft({ ...credentialDraft, description: event.target.value })} placeholder="Owner and intended service" /></FormField>
-            <p className="text-[11px] text-muted">Only administrators can create or rotate credentials. The secret cannot be retrieved after saving.</p>
+            <p className="text-xs text-muted">Only administrators can create or rotate credentials. The secret cannot be retrieved after saving.</p>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCredentialOpen(false)}>Cancel</Button>

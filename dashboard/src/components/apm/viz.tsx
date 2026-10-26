@@ -10,6 +10,8 @@ import { Card } from '@/components/ui/Card'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/stores/theme'
 import { HEALTH_COLOR, fmtMs, fmtPct, fmtRps } from './shared'
+import { chartFont, chartTheme } from '@/lib/chartTheme'
+import { KPI_LABEL, KPI_VALUE, kpiTone } from '@/components/ui/kpiTone'
 
 export const APM_SERIES = {
   throughput: '#0284c7',
@@ -160,7 +162,7 @@ export function ApmTimeChart({
         type: 'value' as const,
         axisLabel: {
           color: muted,
-          fontSize: 11,
+          fontSize: chartFont(11),
           formatter: (v: number) => (series[0]?.fmt ? series[0].fmt(v) : String(v)),
         },
         splitLine: { lineStyle: { color: border, opacity: 0.55, type: 'dashed' as const } },
@@ -173,7 +175,7 @@ export function ApmTimeChart({
             type: 'value' as const,
             axisLabel: {
               color: muted,
-              fontSize: 11,
+              fontSize: chartFont(11),
               formatter: (v: number) => {
                 const s = series.find((x) => x.yAxisIndex === 1)
                 return s?.fmt ? s.fmt(v) : String(v)
@@ -196,7 +198,7 @@ export function ApmTimeChart({
         backgroundColor: surface,
         borderColor: border,
         borderWidth: 1,
-        textStyle: { color: text, fontSize: 12 },
+        textStyle: { color: text, fontSize: chartFont(12) },
         axisPointer: { type: 'line', lineStyle: { color: muted, opacity: 0.4 } },
         formatter: (params: Array<{ axisValue: string; marker: string; seriesName: string; value: [string, number]; seriesIndex: number }>) => {
           const ts = params[0]?.axisValue
@@ -213,13 +215,13 @@ export function ApmTimeChart({
         },
       },
       legend: series.length > 1
-        ? { top: 0, right: 8, textStyle: { color: muted, fontSize: 11 }, icon: 'roundRect', itemWidth: 10, itemHeight: 6 }
+        ? { top: 0, right: 8, textStyle: { color: muted, fontSize: chartFont(11) }, icon: 'roundRect', itemWidth: 10, itemHeight: 6 }
         : undefined,
       xAxis: {
         type: 'time',
         axisLabel: {
           color: muted,
-          fontSize: 10,
+          fontSize: chartFont(10),
           hideOverlap: true,
           formatter: (val: number) => formatChartTick(val, window),
         },
@@ -239,7 +241,7 @@ export function ApmTimeChart({
               backgroundColor: cssRgb('surface2', '#141b28'),
               fillerColor: hexAlpha(series[0]?.color || APM_SERIES.throughput, 0.18),
               handleStyle: { color: series[0]?.color || APM_SERIES.throughput },
-              textStyle: { color: muted, fontSize: 10 },
+              textStyle: { color: muted, fontSize: chartFont(10) },
               start: window >= 7 * 86_400_000 ? 50 : 0,
               end: 100,
             },
@@ -269,7 +271,7 @@ export function ApmTimeChart({
               silent: true,
               symbol: 'none',
               lineStyle: { color: '#f59e0b', type: 'dashed', width: 1.25 },
-              label: { color: muted, fontSize: 10, formatter: (p: { name?: string }) => p.name || '' },
+              label: { color: muted, fontSize: chartFont(10), formatter: (p: { name?: string }) => p.name || '' },
               data: markers.map((m) => ({ xAxis: m.timestamp, name: m.label })),
             }
           : undefined,
@@ -285,7 +287,7 @@ export function ApmTimeChart({
   }
 
   return (
-    <ReactECharts
+    <ReactECharts theme={chartTheme()}
       option={option}
       style={{ height }}
       notMerge
@@ -310,8 +312,8 @@ export function ChartPanel({ title, hint, right, children, className }: {
     <Card className={cn('overflow-hidden', className)}>
       <div className="flex items-start justify-between gap-2 border-b border-border px-4 py-2.5">
         <div className="min-w-0">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">{title}</div>
-          {hint && <div className="mt-0.5 truncate text-[11px] text-text2">{hint}</div>}
+          <div className="text-xs font-semibold uppercase tracking-wider text-muted">{title}</div>
+          {hint && <div className="mt-0.5 truncate text-xs text-text2">{hint}</div>}
         </div>
         {right}
       </div>
@@ -331,15 +333,15 @@ export function ApmKpi({ to, label, icon, tone = 'primary', value, sub, foot }: 
 }) {
   const inner = (
     <Card className={cn('relative h-full overflow-hidden', to && 'transition hover:border-primary/40')}>
-      <span className={cn('absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r', KPI_BAR[tone])} />
+      <span className={cn('absolute inset-x-0 top-0 h-[3px]', kpiTone(tone).bar)} />
       <div className="flex items-start justify-between gap-2 px-4 pt-3">
         <div className="min-w-0">
-          <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted">{label}</div>
-          <div className="mt-1 text-2xl font-bold tabular-nums leading-none text-text">{value}</div>
-          {sub && <div className="mt-1.5 min-h-[14px] text-[11px] text-text2">{sub}</div>}
+          <div className={KPI_LABEL}>{label}</div>
+          <div className={cn('mt-1.5', KPI_VALUE)}>{value}</div>
+          {sub && <div className="mt-1.5 min-h-[14px] text-xs text-text2">{sub}</div>}
         </div>
         {icon && (
-          <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white shadow', KPI_BAR[tone])}>
+          <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', kpiTone(tone).chip)}>
             {icon}
           </span>
         )}
@@ -409,7 +411,7 @@ export function ThroughputCell({ rps, count, maxRps }: { rps: number; count?: nu
   return (
     <div className="min-w-[4.5rem] text-right">
       <div className="font-mono text-xs tabular-nums text-text">{fmtRps(rps)}</div>
-      {count != null && <div className="text-[10px] text-muted">{fmtCount(count)} req</div>}
+      {count != null && <div className="text-2xs text-muted">{fmtCount(count)} req</div>}
       {maxRps != null && <RankBar value={rps} max={maxRps} />}
     </div>
   )
@@ -426,14 +428,14 @@ export function DeepLinks({ service, range, operation }: { service: string; rang
       <Link
         to={`/apm/traces?${q}`}
         title="Traces"
-        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-1.5 text-[11px] font-medium text-muted hover:border-primary/40 hover:text-primary"
+        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-1.5 text-xs font-medium text-muted hover:border-primary/40 hover:text-primary"
       >
         <GitBranch className="h-3 w-3" /> Traces
       </Link>
       <Link
         to={`/apm/errors?service=${encodeURIComponent(service)}`}
         title="Errors"
-        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-1.5 text-[11px] font-medium text-muted hover:border-primary/40 hover:text-primary"
+        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-1.5 text-xs font-medium text-muted hover:border-primary/40 hover:text-primary"
       >
         <Bug className="h-3 w-3" /> Errors
       </Link>
@@ -461,12 +463,12 @@ export function VitalGauge({ label, value, good, poor, format }: {
   const color = tone === 'success' ? HEALTH_COLOR.healthy : tone === 'warning' ? HEALTH_COLOR.degraded : HEALTH_COLOR.critical
   return (
     <div className="rounded-lg border border-border bg-surface px-4 py-3">
-      <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className={KPI_LABEL}>{label}</div>
       <div className="mt-1 text-xl font-bold tabular-nums" style={{ color }}>{format(value)}</div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface2">
         <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
       </div>
-      <div className="mt-1 text-[10px] text-muted">good ≤ {format(good)} · poor &gt; {format(poor)}</div>
+      <div className="mt-1 text-2xs text-muted">good ≤ {format(good)} · poor &gt; {format(poor)}</div>
     </div>
   )
 }
@@ -531,7 +533,7 @@ export function ApmLatencyHeatmap({
       tooltip: {
         backgroundColor: surface,
         borderColor: border,
-        textStyle: { color: text, fontSize: 12 },
+        textStyle: { color: text, fontSize: chartFont(12) },
         formatter: (p: { value: [number, number, number] }) => {
           const [xi, yi, v] = p.value
           const ts = times[xi]
@@ -544,7 +546,7 @@ export function ApmLatencyHeatmap({
         data: times,
         axisLabel: {
           color: muted,
-          fontSize: 10,
+          fontSize: chartFont(10),
           hideOverlap: true,
           formatter: (_: string, idx: number) => formatChartTick(times[idx], window),
         },
@@ -555,7 +557,7 @@ export function ApmLatencyHeatmap({
       yAxis: {
         type: 'category',
         data: buckets,
-        axisLabel: { color: muted, fontSize: 10 },
+        axisLabel: { color: muted, fontSize: chartFont(10) },
         axisTick: { show: false },
         axisLine: { show: false },
         splitLine: { show: false },
@@ -569,7 +571,7 @@ export function ApmLatencyHeatmap({
         bottom: 0,
         itemWidth: 10,
         itemHeight: 8,
-        textStyle: { color: muted, fontSize: 10 },
+        textStyle: { color: muted, fontSize: chartFont(10) },
         inRange: { color: ['#0f172a', '#1e3a5f', '#0369a1', '#7c3aed', '#db2777'] },
       },
       series: [{
@@ -588,7 +590,7 @@ export function ApmLatencyHeatmap({
   }
 
   return (
-    <ReactECharts
+    <ReactECharts theme={chartTheme()}
       option={option}
       style={{ height }}
       notMerge

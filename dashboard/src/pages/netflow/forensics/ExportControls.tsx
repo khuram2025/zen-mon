@@ -96,14 +96,14 @@ export function ExportControls(props: ExportControlsProps) {
             <FileDown aria-hidden />
             <span>
               Displayed rows only ({formatCountExact(displayedCount)})
-              <span className="block text-[11px] text-text2">Exactly what is loaded on this page, in the chosen columns</span>
+              <span className="block text-xs text-text2">Exactly what is loaded on this page, in the chosen columns</span>
             </span>
           </DropdownMenuItem>
           <DropdownMenuItem disabled={mode !== 'stream' && mode !== 'job'} onSelect={() => void exportAll()}>
             <FileStack aria-hidden />
             <span>
               {allLabel}
-              <span className="block text-[11px] text-text2">
+              <span className="block text-xs text-text2">
                 {mode === 'too_large'
                   ? 'Narrow the time range or add filters'
                   : mode === 'forbidden'
@@ -168,18 +168,18 @@ export function ExportJobsPanel({ tz, onClose }: { tz: string; onClose: () => vo
         </button>
       </div>
       {q.isPending ? (
-        <p className="text-[11px] text-text2" role="status">Loading export jobs…</p>
+        <p className="text-xs text-text2" role="status">Loading export jobs…</p>
       ) : q.isError ? (
-        <p className="text-[11px] text-danger-fg" role="alert">Could not load export jobs: {errorText(q.error)}</p>
+        <p className="text-xs text-danger-fg" role="alert">Could not load export jobs: {errorText(q.error)}</p>
       ) : items.length === 0 ? (
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           No export jobs. Complete exports larger than {formatCountExact(q.data?.limits.stream_max_rows ?? 0)} rows run here;
           files are kept for {q.data?.limits.retention_hours ?? 24} hours.
         </p>
       ) : (
         <ul className="divide-y divide-border">
           {items.map((j) => (
-            <li key={j.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-[11px]">
+            <li key={j.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-xs">
               <span className={cn('w-16 font-semibold', STATUS_TONE[j.status])}>{STATUS_TEXT[j.status]}</span>
               <span className="min-w-0 flex-1 text-text">
                 {formatCountExact(j.row_count ?? 0)}
@@ -198,7 +198,7 @@ export function ExportJobsPanel({ tz, onClose }: { tz: string; onClose: () => vo
                 </span>
               )}
               {j.download_ready && (
-                <Button type="button" size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]" onClick={() => void download(j)} disabled={downloading === j.id}>
+                <Button type="button" size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => void download(j)} disabled={downloading === j.id}>
                   {downloading === j.id ? <Loader2 className="animate-spin" aria-hidden /> : <Download aria-hidden />}
                   Download
                 </Button>
@@ -207,7 +207,7 @@ export function ExportJobsPanel({ tz, onClose }: { tz: string; onClose: () => vo
                 type="button"
                 size="sm"
                 variant="ghost"
-                className="h-7 gap-1 px-2 text-[11px]"
+                className="h-7 gap-1 px-2 text-xs"
                 disabled={remove.isPending && remove.variables === j.id}
                 onClick={() =>
                   remove.mutate(j.id, { onError: (err) => toast.error('Could not update the export job', errorText(err)) })

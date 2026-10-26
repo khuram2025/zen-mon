@@ -61,7 +61,7 @@ export function StatusTile({
       <div className="flex items-start justify-between gap-2">
         <span className="text-xs font-medium leading-snug text-text2">{label}</span>
         {(Icon || shownWord) && (
-          <span className={cn('inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold uppercase tracking-wide', t.fg)}>
+          <span className={cn('inline-flex shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wide', t.fg)}>
             {Icon && <Icon className="h-3.5 w-3.5" aria-hidden />}
             {shownWord}
           </span>
@@ -72,7 +72,7 @@ export function StatusTile({
       ) : (
         <div className="mt-1 break-words text-2xl font-semibold leading-tight tabular-nums text-text">{shownValue}</div>
       )}
-      {caption && <div className="mt-1 text-[11px] leading-snug text-text2">{caption}</div>}
+      {caption && <div className="mt-1 text-xs leading-snug text-text2">{caption}</div>}
     </>
   )
   const boxClass = cn(

@@ -93,6 +93,6 @@ export function DeviceStatusExplanation({ deviceId, compact = false }: { deviceI
         {recent.recovered_at && <p className="text-success">Recovered {new Date(recent.recovered_at).toLocaleString()} · lasted {Math.round((Date.parse(recent.recovered_at)-Date.parse(recent.timestamp))/1000)} seconds.</p>}
       </div>
     </details>}
-    <p className="mt-3 text-[11px] text-muted">The status follows these confirmation rules, not the selected chart’s average. Settings refresh on the controller’s configuration cycle (about a minute) and apply to later checks. These rules govern ping reachability; CPU, memory and hardware alerts have their own conditions.</p>
+    <p className="mt-3 text-xs text-muted">The status follows these confirmation rules, not the selected chart’s average. Settings refresh on the controller’s configuration cycle (about a minute) and apply to later checks. These rules govern ping reachability; CPU, memory and hardware alerts have their own conditions.</p>
   </section>
 }

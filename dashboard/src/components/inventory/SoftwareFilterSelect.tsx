@@ -54,7 +54,7 @@ export function FilterSelect({
           <SelectItem key={o.value} value={o.value}>
             <span className="flex w-full items-baseline justify-between gap-4">
               <span className="truncate">{o.label}</span>
-              {o.hint && <span className="shrink-0 text-[11px] tabular-nums text-muted">{o.hint}</span>}
+              {o.hint && <span className="shrink-0 text-xs tabular-nums text-muted">{o.hint}</span>}
             </span>
           </SelectItem>
         ))}

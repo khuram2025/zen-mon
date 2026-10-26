@@ -27,7 +27,7 @@ function GradeCell({ item }: { item: BillingItem }) {
         <Info className="h-3.5 w-3.5" aria-hidden />
         Indicative
       </span>
-      <span className="text-[11px] leading-snug text-text2">{item.notes.join('; ')}</span>
+      <span className="text-xs leading-snug text-text2">{item.notes.join('; ')}</span>
     </div>
   )
 }
@@ -131,7 +131,7 @@ export function BillingReport({
             Export CSV
           </Button>
         </div>
-        {bh && settings && <p className="text-[11px] text-text2">Business hours: {businessHoursText(settings.business_hours)}</p>}
+        {bh && settings && <p className="text-xs text-text2">Business hours: {businessHoursText(settings.business_hours)}</p>}
       </div>
 
       <QueryPanel
@@ -165,8 +165,8 @@ export function BillingReport({
                 {b.items.map((i) => (
                   <li key={`${i.exporter}|${i.ifindex}`} className="rounded-lg border border-border bg-surface p-3">
                     <div className="text-sm font-medium text-text">{i.display_name}</div>
-                    <div className="text-[11px] text-text2">{i.device_hostname ?? 'No device'}</div>
-                    <div className="font-mono text-[11px] text-text2">{ipDisplay(i.exporter)} · ifIndex {i.ifindex}</div>
+                    <div className="text-xs text-text2">{i.device_hostname ?? 'No device'}</div>
+                    <div className="font-mono text-xs text-text2">{ipDisplay(i.exporter)} · ifIndex {i.ifindex}</div>
                     <dl className="mt-2 grid grid-cols-2 gap-2 text-xs">
                       <div>
                         <dt className="text-text2">Billable ({i.billable_direction === 'merged' ? 'in + out' : i.billable_direction ?? '—'})</dt>
@@ -207,8 +207,8 @@ export function BillingReport({
                       <Tr key={`${i.exporter}|${i.ifindex}`}>
                         <Td className="min-w-[12rem]">
                           <div className="text-sm font-medium text-text">{i.display_name}</div>
-                          <div className="text-[11px] text-text2">{i.device_hostname ?? 'No device'}</div>
-                          <div className="font-mono text-[11px] text-text2">
+                          <div className="text-xs text-text2">{i.device_hostname ?? 'No device'}</div>
+                          <div className="font-mono text-xs text-text2">
                             <span className="whitespace-nowrap">{ipDisplay(i.exporter)}</span> <span className="whitespace-nowrap">· ifIndex {i.ifindex}</span>
                           </div>
                         </Td>
@@ -220,7 +220,7 @@ export function BillingReport({
                         <Td className="whitespace-nowrap text-right tabular-nums">{i.combined_p_bps != null ? formatBps(i.combined_p_bps) : <span className="text-text2">—</span>}</Td>
                         <Td className="whitespace-nowrap text-right">
                           <div className="text-sm font-semibold tabular-nums text-text">{i.billable_bps != null ? formatBps(i.billable_bps) : '—'}</div>
-                          <div className="text-[11px] text-text2">
+                          <div className="text-xs text-text2">
                             {i.billable_direction === 'merged' ? 'in + out' : i.billable_direction ?? ''}
                             {i.billable_util_pct != null ? ` · ${formatPercent(i.billable_util_pct)} of speed` : ''}
                           </div>

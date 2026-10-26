@@ -133,6 +133,7 @@ import type {
   StatusHistoryEvent,
 } from '@/components/services/detail/types'
 import type { ServiceCheck } from '@/types'
+import { chartFont } from '@/lib/chartTheme'
 
 const UP_COLOR = 'rgb(var(--success))'
 const DOWN_COLOR = 'rgb(var(--danger))'
@@ -948,7 +949,7 @@ function SectionHeading({ title, note }: { title: string; note?: string }) {
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 pt-1">
       <h2 className="text-xs font-semibold uppercase tracking-wider text-text2">{title}</h2>
-      {note && <span className="text-[11px] text-muted">{note}</span>}
+      {note && <span className="text-xs text-muted">{note}</span>}
     </div>
   )
 }
@@ -1016,7 +1017,7 @@ function SectionCard({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold tracking-tight text-text">{title}</h3>
-          {subtitle && <div className="mt-0.5 text-[11px] text-muted">{subtitle}</div>}
+          {subtitle && <div className="mt-0.5 text-xs text-muted">{subtitle}</div>}
         </div>
         {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
       </div>
@@ -1088,21 +1089,21 @@ function ServiceHeader({
                 Verifying failure · attempt {check.verification_attempt}/{check.retry_count ?? 1}
               </span>
             )}
-            <span className="inline-flex items-center gap-1 rounded border border-border bg-surface2/60 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <span className="inline-flex items-center gap-1 rounded border border-border bg-surface2/60 px-1.5 py-px text-2xs font-semibold uppercase tracking-wider text-muted">
               <t.Icon className="h-2.5 w-2.5" />{t.label} · L{check.level ?? 1}
             </span>
             {check.criticality && (
-              <span className="rounded border border-border px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-muted" title="Business criticality">
+              <span className="rounded border border-border px-1.5 py-px text-2xs font-semibold uppercase tracking-wider text-muted" title="Business criticality">
                 {check.criticality}
               </span>
             )}
             {inMaintenance && <Badge variant="info"><Wrench className="h-3 w-3" />Maintenance</Badge>}
             {activeAlertCount > 0 && <Badge variant="danger"><Bell className="h-3 w-3" />{activeAlertCount} active</Badge>}
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted">
+          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted">
             <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
               <Globe className="h-3 w-3 shrink-0 text-primary" />
-              <span className="truncate font-mono text-[11px] text-text2" title={target}>{target}</span>
+              <span className="truncate font-mono text-xs text-text2" title={target}>{target}</span>
             </span>
             <Dot />
             <span className="inline-flex items-center gap-1"><Timer className="h-3 w-3" />every {check.check_interval}s</span>
@@ -1143,7 +1144,7 @@ function ServiceHeader({
             {check.runbook_url && (
               <>
                 <Dot />
-                <RunbookLink url={check.runbook_url} className="text-[11px]" />
+                <RunbookLink url={check.runbook_url} className="text-xs" />
               </>
             )}
           </div>
@@ -1278,18 +1279,18 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
             c.selected ? 'border-primary/40 ring-1 ring-primary/25' : 'border-border hover:border-border-strong',
           )}
         >
-          <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
             {i === 0 && <PulseDot status={pulseStatusOf(check.status, check.enabled)} size="sm" />}
             <span className="truncate" title={c.label}>{c.label}</span>
             {c.selected ? (
-              <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 py-px text-[9px] font-semibold text-primary">Selected</span>
+              <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 py-px text-2xs font-semibold text-primary">Selected</span>
             ) : i > 1 ? (
-              <span className="ml-auto shrink-0 rounded bg-surface2 px-1.5 py-px text-[9px] font-semibold text-muted">Context</span>
+              <span className="ml-auto shrink-0 rounded bg-surface2 px-1.5 py-px text-2xs font-semibold text-muted">Context</span>
             ) : null}
           </div>
-          <div className={cn('mt-1 text-[24px] font-bold leading-none tabular-nums', c.tone)}>{c.value}</div>
-          <div className="mt-1 truncate text-[10.5px] text-muted" title={c.sub}>{c.sub}</div>
-          {c.coverage && <div className="mt-1 text-[10px] text-muted">{c.coverage}</div>}
+          <div className={cn('mt-1 text-2xl font-bold leading-none tabular-nums', c.tone)}>{c.value}</div>
+          <div className="mt-1 truncate text-xs text-muted" title={c.sub}>{c.sub}</div>
+          {c.coverage && <div className="mt-1 text-2xs text-muted">{c.coverage}</div>}
         </div>
       ))}
     </div>
@@ -1331,7 +1332,7 @@ function ThirtyDayStrip({ days, fromTs, toTs, dim, onSelectDay }: {
         <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
           <div className="flex items-baseline gap-2">
             <h3 className="text-sm font-semibold tracking-tight">Last 30 days</h3>
-            <span className="text-[11px] text-muted">context · click a day to zoom the page to it</span>
+            <span className="text-xs text-muted">context · click a day to zoom the page to it</span>
           </div>
           <div className="flex items-baseline gap-3 text-xs">
             {totalDowntime > 0 && <span className="text-muted">{formatDur(totalDowntime)} down</span>}
@@ -1350,7 +1351,7 @@ function ThirtyDayStrip({ days, fromTs, toTs, dim, onSelectDay }: {
             if (d) onSelectDay(d)
           }}
         />
-        <div className="mt-1.5 flex justify-between text-[10px] text-muted">
+        <div className="mt-1.5 flex justify-between text-2xs text-muted">
           <span>30 days ago</span>
           <span>Today</span>
         </div>
@@ -1388,9 +1389,9 @@ function StatusBanner({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2">
           <span className={cn('text-xs font-semibold uppercase tracking-wider', fg)}>{title}</span>
-          {meta && <span className="text-[11px] text-muted">{meta}</span>}
+          {meta && <span className="text-xs text-muted">{meta}</span>}
         </div>
-        <p className={cn('mt-0.5 break-words text-[12.5px] leading-relaxed', mono && 'font-mono')}>{body}</p>
+        <p className={cn('mt-0.5 break-words text-sm leading-relaxed', mono && 'font-mono')}>{body}</p>
       </div>
       {actionLabel && onAction && (
         <Button size="sm" className="shrink-0" onClick={onAction} disabled={actionDisabled}>{actionLabel}</Button>
@@ -1473,8 +1474,8 @@ function AvailabilityTimeline({
             ))}
           </div>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[10px] tabular-nums text-muted">{exactTime(fromTs, false)}</span>
-            <div className="flex items-center gap-3 text-[10px] text-muted">
+            <span className="text-2xs tabular-nums text-muted">{exactTime(fromTs, false)}</span>
+            <div className="flex items-center gap-3 text-2xs text-muted">
               <Swatch color={UP_COLOR} label="All passed" />
               <Swatch color={PARTIAL_COLOR} label="Some failed" />
               <Swatch color={DOWN_COLOR} label="All failed" />
@@ -1482,7 +1483,7 @@ function AvailabilityTimeline({
                 <span className="h-2 w-2 rounded-sm bg-surface2 ring-1 ring-inset ring-border" />No data
               </span>
             </div>
-            <span className="text-[10px] tabular-nums text-muted">{exactTime(toTs, false)}</span>
+            <span className="text-2xs tabular-nums text-muted">{exactTime(toTs, false)}</span>
           </div>
         </>
       )}
@@ -1569,7 +1570,7 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
       title={mode ? LATEST_TITLE[mode] : 'Latest probe'}
       subtitle={mode === 'status' ? 'From the monitor status; individual probe details are not available here' : mode === 'window' ? 'This appliance cannot report probes outside the selected window' : undefined}
       actions={check.check_type === 'http' ? (
-        <span className="rounded-full border border-border bg-surface2/50 px-2 py-0.5 text-[10px] text-muted">Expect HTTP {expected}</span>
+        <span className="rounded-full border border-border bg-surface2/50 px-2 py-0.5 text-2xs text-muted">Expect HTTP {expected}</span>
       ) : undefined}
     >
       <div className="grid grid-cols-2 gap-2">
@@ -1588,7 +1589,7 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
       )}
       {latest?.network_diagnostics && (
         <div className="mt-3 rounded-md border border-border bg-surface2/30 p-2.5">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Connection diagnostics · scheduled probe</div>
+          <div className="text-2xs font-semibold uppercase tracking-wider text-muted">Connection diagnostics · scheduled probe</div>
           <div className="mt-1 break-all text-xs">{latest.network_diagnostics.remote_ip || 'No connection established'} · {latest.network_diagnostics.ip_version === 'ipv4' ? 'IPv4 only' : latest.network_diagnostics.ip_version === 'ipv6' ? 'IPv6 only' : 'Auto'}</div>
           <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
             <span>DNS <b>{formatMs(latest.network_diagnostics.dns_ms)}</b></span>
@@ -1596,12 +1597,12 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
             <span>TLS <b>{formatMs(latest.network_diagnostics.tls_ms)}</b></span>
           </div>
           {latest.network_diagnostics.failure_stage && <div className="mt-1 text-xs text-danger">Failed stage: {latest.network_diagnostics.failure_stage.toUpperCase()}</div>}
-          <p className="mt-1 text-[10px] text-muted">Phase times include connection attempts and redirects. A dash means the phase was not observed.</p>
+          <p className="mt-1 text-2xs text-muted">Phase times include connection attempts and redirects. A dash means the phase was not observed.</p>
         </div>
       )}
       {manualProbe && (
         <div className="mt-2 rounded-md border border-border bg-surface2/40 px-2.5 py-2">
-          <div className="flex items-center justify-between text-[11px] font-semibold">
+          <div className="flex items-center justify-between text-xs font-semibold">
             <span className="inline-flex items-center gap-1.5">
               <Play className="h-3 w-3" /> Manual probe
               <span className={manualProbe.result.status === 'up' ? 'text-success' : 'text-danger'}>
@@ -1610,7 +1611,7 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
             </span>
             <span className="font-normal text-muted" title={exactTime(manualProbe.observedAt)}>{relativeTime(manualProbe.observedAt)}</span>
           </div>
-          <div className="mt-1 text-[11px] text-muted">
+          <div className="mt-1 text-xs text-muted">
             {formatMs(manualProbe.result.response_time_ms)}
             {manualProbe.result.details?.status_code != null ? ` · HTTP ${manualProbe.result.details.status_code}` : ''}
             {' · diagnostic only; not counted in status or SLA'}
@@ -1619,7 +1620,7 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
           {(manualProbe.result.details?.steps?.length || 0) > 1 && (
             <div className="mt-2 space-y-1 border-t border-border/60 pt-1.5">
               {manualProbe.result.details!.steps!.map((s) => (
-                <div key={s.index} className="flex items-center gap-2 text-[10px]">
+                <div key={s.index} className="flex items-center gap-2 text-2xs">
                   <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', s.status === 'up' ? 'bg-success' : 'bg-danger')} />
                   <span className="min-w-0 flex-1 truncate" title={s.name}>{s.index}. {s.name}</span>
                   <span className="shrink-0 tabular-nums text-muted">{s.status_code ?? '—'}</span>
@@ -1632,10 +1633,10 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
       )}
       {recent.length > 0 && (
         <div className="mt-3 border-t border-border/60 pt-2">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Recent scheduled probes</div>
+          <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Recent scheduled probes</div>
           <div className="space-y-1">
             {recent.slice(0, 5).map((p, i) => (
-              <div key={`${p.timestamp}-${i}`} className="flex items-center gap-2 text-[11px]">
+              <div key={`${p.timestamp}-${i}`} className="flex items-center gap-2 text-xs">
                 <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', p.is_up ? 'bg-success' : 'bg-danger')} />
                 <span className="w-[68px] shrink-0 tabular-nums text-muted" title={exactTime(p.timestamp)}>
                   {new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -1657,9 +1658,9 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
 function ProbeStat({ label, value, sub, className, title }: { label: string; value: string; sub: string; className?: string; title?: string }) {
   return (
     <div className="rounded-lg border border-border bg-surface2/30 px-2.5 py-2" title={title}>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs font-semibold uppercase tracking-wider text-muted">{label}</div>
       <div className={cn('mt-0.5 text-lg font-semibold tabular-nums', className)}>{value}</div>
-      <div className="truncate text-[10px] text-muted" title={sub}>{sub}</div>
+      <div className="truncate text-2xs text-muted" title={sub}>{sub}</div>
     </div>
   )
 }
@@ -1691,13 +1692,13 @@ function HealthScoreCard({ score, tint, label, factors, coverage, onViewDetails 
           </svg>
           <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
             <div className="text-2xl font-bold leading-none tabular-nums" style={{ color: tint }}>{score ?? '—'}</div>
-            <div className="text-[9px] font-semibold" style={{ color: tint }}>{label}</div>
+            <div className="text-2xs font-semibold" style={{ color: tint }}>{label}</div>
           </div>
         </div>
         <div className="min-w-0 flex-1 space-y-2">
           {score == null && <p className="text-xs text-muted">No observed availability in this window. A health score will appear when results are available.</p>}
           {factors.map((f) => (
-            <div key={f.key} className="flex items-center gap-2 text-[10px]">
+            <div key={f.key} className="flex items-center gap-2 text-2xs">
               <span className="w-[68px] shrink-0 truncate text-muted">{f.label}</span>
               <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2">
                 {f.available && (
@@ -1711,7 +1712,7 @@ function HealthScoreCard({ score, tint, label, factors, coverage, onViewDetails 
             </div>
           ))}
           {score != null && missing.length > 0 && (
-            <p className="text-[10px] text-muted">
+            <p className="text-2xs text-muted">
               Coverage {Math.round(coverage * 100)}%: {missing.map((f) => f.label.toLowerCase()).join(', ')} not measured and excluded; remaining weights rescaled.
             </p>
           )}
@@ -1811,7 +1812,7 @@ function ActivityLogCard({ events, rangeLabel, showingFallback, onViewAll, onWid
             aria-pressed={filter === f}
             onClick={() => setFilter(f)}
             className={cn(
-              'flex-1 rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors',
+              'flex-1 rounded px-2 py-1 text-xs font-medium capitalize transition-colors',
               filter === f ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
             )}
           >
@@ -1844,11 +1845,11 @@ function ActivityLogCard({ events, rangeLabel, showingFallback, onViewAll, onWid
                 </span>
                 <div className="min-w-0 flex-1 pt-0.5">
                   <div className="flex items-start justify-between gap-2">
-                    <div className="truncate text-[11px] font-semibold" title={e.title}>{e.title}</div>
-                    <div className="shrink-0 text-[10px] tabular-nums text-muted">{relativeTime(e.timestamp)}</div>
+                    <div className="truncate text-xs font-semibold" title={e.title}>{e.title}</div>
+                    <div className="shrink-0 text-2xs tabular-nums text-muted">{relativeTime(e.timestamp)}</div>
                   </div>
-                  <div className="font-mono text-[10px] tabular-nums text-text2">{exactTime(e.timestamp)}</div>
-                  {e.subtitle && <div className="truncate text-[10px] text-muted" title={e.subtitle}>{e.subtitle}</div>}
+                  <div className="font-mono text-2xs tabular-nums text-text2">{exactTime(e.timestamp)}</div>
+                  {e.subtitle && <div className="truncate text-2xs text-muted" title={e.subtitle}>{e.subtitle}</div>}
                 </div>
               </>
             )
@@ -1884,11 +1885,11 @@ function EventsDialog({ open, onOpenChange, events, rangeLabel, checkId }: {
             <div key={e.id} className="rounded-md border border-border bg-surface2/30 px-3 py-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold">{e.title}</span>
-                <span className="text-[10px] text-muted">{relativeTime(e.timestamp)}</span>
+                <span className="text-2xs text-muted">{relativeTime(e.timestamp)}</span>
               </div>
-              <div className="mt-0.5 font-mono text-[10px] text-muted">{exactTime(e.timestamp)}</div>
-              {e.subtitle && <div className="mt-1 break-words text-[11px] text-muted">{e.subtitle}</div>}
-              {e.href && <Link to={e.href} className="mt-1 inline-block text-[11px] text-primary hover:underline">Open alert</Link>}
+              <div className="mt-0.5 font-mono text-2xs text-muted">{exactTime(e.timestamp)}</div>
+              {e.subtitle && <div className="mt-1 break-words text-xs text-muted">{e.subtitle}</div>}
+              {e.href && <Link to={e.href} className="mt-1 inline-block text-xs text-primary hover:underline">Open alert</Link>}
             </div>
           ))}
         </div>
@@ -1965,7 +1966,7 @@ function RelatedServicesCard({ related, failed }: { related?: RelatedResponse; f
   const total = groups.reduce((n, g) => n + g.items.length, 0)
 
   return (
-    <SectionCard title="Related checks" actions={total > 0 ? <span className="text-[11px] tabular-nums text-muted">{total}</span> : undefined}>
+    <SectionCard title="Related checks" actions={total > 0 ? <span className="text-xs tabular-nums text-muted">{total}</span> : undefined}>
       {failed ? (
         <div className="py-6 text-center text-xs text-danger">Could not load related checks.</div>
       ) : groups.length === 0 ? (
@@ -1979,7 +1980,7 @@ function RelatedServicesCard({ related, failed }: { related?: RelatedResponse; f
         <div className="space-y-3">
           {groups.map((g) => (
             <div key={g.title}>
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">{g.title}</div>
+              <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">{g.title}</div>
               <div className="space-y-1">
                 {g.items.map((c) => {
                   const sm = statusOf(c.status)
@@ -1995,10 +1996,10 @@ function RelatedServicesCard({ related, failed }: { related?: RelatedResponse; f
                         c.status === 'up' ? 'bg-success' : c.status === 'down' ? 'bg-danger' : c.status === 'unknown' ? 'bg-muted/60' : 'bg-warning',
                       )} />
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[11px] font-medium">{c.name}</div>
-                        <div className="truncate font-mono text-[10px] text-muted">{target}</div>
+                        <div className="truncate text-xs font-medium">{c.name}</div>
+                        <div className="truncate font-mono text-2xs text-muted">{target}</div>
                       </div>
-                      <span className="shrink-0 text-[10px] text-muted">{sm.label}</span>
+                      <span className="shrink-0 text-2xs text-muted">{sm.label}</span>
                       <ChevronRight className="h-3 w-3 shrink-0 text-muted" />
                     </Link>
                   )
@@ -2163,7 +2164,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
           <>
             <div className="grid grid-cols-7 gap-1.5">
               {WEEKDAYS.map((w) => (
-                <div key={w} aria-hidden className="pb-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-muted">{w}</div>
+                <div key={w} aria-hidden className="pb-0.5 text-center text-2xs font-semibold uppercase tracking-wider text-muted">{w}</div>
               ))}
               {Array.from({ length: leadPad }).map((_, i) => <div key={`pad-${i}`} aria-hidden />)}
               {days.map((d) => {
@@ -2192,8 +2193,8 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                     )}
                     style={d.uptimePct != null ? { backgroundColor: withAlpha(BAND_FILL[band], band === 'perfect' ? 0.22 : 0.28) } : undefined}
                   >
-                    <span className="text-[11px] font-semibold tabular-nums text-text">{d.date.getDate()}</span>
-                    <span className={cn('text-[10px] font-medium tabular-nums', BAND_TEXT[band])}>{label}</span>
+                    <span className="text-xs font-semibold tabular-nums text-text">{d.date.getDate()}</span>
+                    <span className={cn('text-2xs font-medium tabular-nums', BAND_TEXT[band])}>{label}</span>
                     <span
                       className="absolute inset-x-1.5 bottom-1 h-[3px] rounded-full"
                       style={{ backgroundColor: BAND_FILL[band] }}
@@ -2204,7 +2205,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
             </div>
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3">
-              <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted">
+              <div className="flex flex-wrap items-center gap-3 text-2xs text-muted">
                 <Swatch color={BAND_FILL.perfect} label="100% (no confirmed downtime)" />
                 <Swatch color={BAND_FILL.good} label="≥ 99%" />
                 <Swatch color={BAND_FILL.fair} label="≥ 95%" />
@@ -2214,7 +2215,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                 </span>
               </div>
               {worst && (worst.downtimeSec > 0 || (worst.uptimePct as number) < 100) && (
-                <span className="text-[11px] text-muted">
+                <span className="text-xs text-muted">
                   Worst day{' '}
                   <span className={BAND_TEXT[availabilityBand(worst.uptimePct, worst.downtimeSec)]}>
                     {worst.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {formatAvailability(worst.uptimePct, worst.downtimeSec, 2)}
@@ -2222,7 +2223,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                 </span>
               )}
             </div>
-            <p className="mt-1.5 text-[10px] text-muted">Percentages are truncated, never rounded up: 100% means no confirmed downtime that day.</p>
+            <p className="mt-1.5 text-2xs text-muted">Percentages are truncated, never rounded up: 100% means no confirmed downtime that day.</p>
 
             {selectedDay && (
               <div className="mt-3 rounded-lg border border-border bg-surface2/30 p-3">
@@ -2233,13 +2234,13 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                       {formatAvailability(selectedDay.uptimePct, selectedDay.downtimeSec, 3)}
                     </span>
                     {selectedDay.downtimeSec > 0 && (
-                      <span className="ml-2 text-[11px] font-normal text-muted">{formatDur(selectedDay.downtimeSec)} down</span>
+                      <span className="ml-2 text-xs font-normal text-muted">{formatDur(selectedDay.downtimeSec)} down</span>
                     )}
                     {selectedDay.maintenanceSec > 0 && (
-                      <span className="ml-2 text-[11px] font-normal text-muted">{formatDur(selectedDay.maintenanceSec)} maintenance excluded</span>
+                      <span className="ml-2 text-xs font-normal text-muted">{formatDur(selectedDay.maintenanceSec)} maintenance excluded</span>
                     )}
                     {selectedDay.hours.length !== 24 && (
-                      <span className="ml-2 text-[11px] font-normal text-muted">({selectedDay.hours.length}-hour day, clock change)</span>
+                      <span className="ml-2 text-xs font-normal text-muted">({selectedDay.hours.length}-hour day, clock change)</span>
                     )}
                   </div>
                   <Button variant="outline" size="sm" className="h-7" onClick={() => onSelectDay(selectedDay)}>
@@ -2265,7 +2266,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                     )
                   })}
                 </div>
-                <div className="mt-1 flex justify-between text-[9px] tabular-nums text-muted">
+                <div className="mt-1 flex justify-between text-2xs tabular-nums text-muted">
                   <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
                 </div>
 
@@ -2273,16 +2274,16 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                   intervalSeconds={intervalSeconds} downtimeSeconds={selectedDay.downtimeSec}
                   hasCoverage={selectedDay.coveredSec > 0} />
                 <div className="mt-3 border-t border-border/60 pt-2.5">
-                  <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                  <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
                     Confirmed status incidents
                     {selectedOutages.length > 0 && (
                       <span className="ml-1.5 font-mono text-danger">{selectedOutages.length}</span>
                     )}
                   </div>
-                  {historyLoading ? <p className="text-[11px] text-muted">Loading confirmed status incidents…</p>
-                    : historyError ? <p className="text-[11px] text-danger">Could not load confirmed status incidents.</p>
+                  {historyLoading ? <p className="text-xs text-muted">Loading confirmed status incidents…</p>
+                    : historyError ? <p className="text-xs text-danger">Could not load confirmed status incidents.</p>
                     : selectedOutages.length === 0 ? (
-                    <p className="text-[11px] text-muted">
+                    <p className="text-xs text-muted">
                       {selectedDay.coveredSec > 0 ? 'No confirmed Down or Warning incidents recorded for this day.' : 'No monitoring evidence for this day.'}
                     </p>
                   ) : (
@@ -2291,9 +2292,9 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                         const end = o.end ?? nowMs
                         const fmt = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
                         return (
-                          <div key={o.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                          <div key={o.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
                             <span className={cn(
-                              'inline-flex shrink-0 items-center rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider',
+                              'inline-flex shrink-0 items-center rounded px-1.5 py-px text-2xs font-semibold uppercase tracking-wider',
                               o.kind === 'down' ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning',
                             )}>
                               {o.kind === 'down' ? 'Down' : 'Warn'}
@@ -2350,14 +2351,14 @@ function DailyUptimeChart({ days, fromTs, toTs, dim }: { days: DayUptime[]; from
               <CartesianGrid stroke="rgb(var(--border) / 0.35)" strokeDasharray="3 3" vertical={false} />
               <XAxis
                 dataKey="label"
-                tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }}
                 axisLine={false}
                 tickLine={false}
                 interval={Math.max(0, Math.floor(data.length / 8) - 1)}
               />
               <YAxis
                 domain={[(dataMin: number) => (Number.isFinite(dataMin) ? Math.min(90, Math.floor(dataMin)) : 90), 100]}
-                tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }}
                 width={42}
                 axisLine={false}
                 tickLine={false}
@@ -2369,7 +2370,7 @@ function DailyUptimeChart({ days, fromTs, toTs, dim }: { days: DayUptime[]; from
                   background: 'rgb(var(--surface))',
                   border: '1px solid rgb(var(--border))',
                   borderRadius: 6,
-                  fontSize: 11,
+                  fontSize: chartFont(11),
                   color: 'rgb(var(--text))',
                 }}
                 formatter={(v: any, _n: any, item: any) => [v == null ? 'no data' : formatAvailability(Number(v), item?.payload?.downtime, 3), 'Availability']}
@@ -2602,8 +2603,8 @@ function HealthScoreDetailsDialog({
         <div className="flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
           <div>
             <div className="text-xs text-muted">Current score</div>
-            <div className="text-[11px]" style={{ color: tint }}>{label}</div>
-            {score != null && coverage < 1 && <div className="text-[10px] text-muted">Coverage {Math.round(coverage * 100)}% of configured weight</div>}
+            <div className="text-xs" style={{ color: tint }}>{label}</div>
+            {score != null && coverage < 1 && <div className="text-2xs text-muted">Coverage {Math.round(coverage * 100)}% of configured weight</div>}
           </div>
           <div className="text-3xl font-bold tabular-nums" style={{ color: tint }}>
             {score ?? '—'}<span className="text-sm text-muted">/100</span>
@@ -2622,8 +2623,8 @@ function HealthScoreDetailsDialog({
                 <div key={f.key} className="grid grid-cols-[1fr_auto_auto_auto] items-start gap-x-3 border-b border-border/40 py-2 last:border-0">
                   <div className="min-w-0">
                     <div className="text-xs font-semibold">{f.label}</div>
-                    <div className="text-[11px] text-muted">{f.raw}</div>
-                    <div className="mt-0.5 font-mono text-[10px] text-muted/80">{f.formula}</div>
+                    <div className="text-xs text-muted">{f.raw}</div>
+                    <div className="mt-0.5 font-mono text-2xs text-muted/80">{f.formula}</div>
                   </div>
                   <span className={cn('text-right font-mono text-xs tabular-nums', tone)}>{f.available ? f.subScore : 'n/a'}</span>
                   <span className="text-right font-mono text-xs tabular-nums text-muted">{f.weight}</span>
@@ -2667,7 +2668,7 @@ function HealthScoreDetailsDialog({
               <Input id="hs-incscale" type="number" min={0} step={1} value={Number.isFinite(draft.incidentScale) ? draft.incidentScale : ''} onChange={(e) => setDraft({ ...draft, incidentScale: toNum(e.target.value) })} className="h-8 text-xs" />
             </div>
             {problems.length > 0 && (
-              <ul role="alert" className="space-y-0.5 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] text-danger">
+              <ul role="alert" className="space-y-0.5 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
                 {problems.map((p) => <li key={p}>{p}</li>)}
               </ul>
             )}

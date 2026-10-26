@@ -55,7 +55,7 @@ export function QueryBoundary<T>({ query, children, skeleton, what }: {
       {query.isError && (
         <div className="mb-2">
           <QueryFailure compact error={query.error} what={what} onRetry={() => void query.refetch()} retrying={query.isFetching} />
-          <p className="mt-1 text-[11px] text-muted">Showing the last data that loaded; it may be out of date.</p>
+          <p className="mt-1 text-xs text-muted">Showing the last data that loaded; it may be out of date.</p>
         </div>
       )}
       {children(query.data as T)}

@@ -60,7 +60,7 @@ export function Inspector({ entry, def, index, total, problems, full, onChange, 
         <div className="space-y-5 p-4">
           {/* Identity */}
           <div>
-            <p className="text-[11px] font-medium uppercase tracking-wider text-muted">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted">
               Section <span className="tabular-nums">{index + 1}</span> of <span className="tabular-nums">{total}</span>
               {def?.category ? <> · {def.category}</> : null}
             </p>
@@ -74,7 +74,7 @@ export function Inspector({ entry, def, index, total, problems, full, onChange, 
               <div className="space-y-2">
                 <p>
                   <span className="font-semibold text-text">This section is no longer available.</span> It was removed from the
-                  appliance or renamed (<code className="font-mono text-[11px]">{entry.id}</code>). Remove it to save the template.
+                  appliance or renamed (<code className="font-mono text-xs">{entry.id}</code>). Remove it to save the template.
                 </p>
                 <Button type="button" size="sm" variant="outline" onClick={onRemove}>
                   <Trash2 aria-hidden /> Remove section
@@ -109,17 +109,17 @@ export function Inspector({ entry, def, index, total, problems, full, onChange, 
                     </button>
                   )}
                 </div>
-                <p id={titleHint} className="text-[11px] text-muted">
+                <p id={titleHint} className="text-xs text-muted">
                   Leave empty to use the default title.
                   {entry.title.length > TITLE_MAX - 20 && <span className="tabular-nums"> {entry.title.length}/{TITLE_MAX}</span>}
                 </p>
-                {problems?.title && <p id={titleErr} className="text-[11px] font-medium text-danger-fg">{problems.title}</p>}
+                {problems?.title && <p id={titleErr} className="text-xs font-medium text-danger-fg">{problems.title}</p>}
               </div>
 
               {/* Options */}
               <fieldset aria-labelledby={optsHeading} className="space-y-3">
                 <div className="flex items-center justify-between gap-2 border-b border-border pb-1.5">
-                  <h4 id={optsHeading} className="text-[11px] font-semibold uppercase tracking-wider text-text2">Options</h4>
+                  <h4 id={optsHeading} className="text-xs font-semibold uppercase tracking-wider text-text2">Options</h4>
                   {def.options.length > 0 && (
                     <Button
                       type="button"
@@ -152,11 +152,11 @@ export function Inspector({ entry, def, index, total, problems, full, onChange, 
 
               {/* About */}
               <section aria-labelledby={aboutHeading} className="space-y-2">
-                <h4 id={aboutHeading} className="border-b border-border pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text2">
+                <h4 id={aboutHeading} className="border-b border-border pb-1.5 text-xs font-semibold uppercase tracking-wider text-text2">
                   About this section
                 </h4>
                 <p className="text-xs leading-relaxed text-text2">{def.description}</p>
-                <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]">
+                <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
                   <dt className="text-muted">Time</dt>
                   <dd className="text-text2">
                     {def.semantics === 'snapshot' ? 'Snapshot of the state when the report runs' : 'Covers the report period'}
@@ -173,12 +173,12 @@ export function Inspector({ entry, def, index, total, problems, full, onChange, 
                   </dd>
                 </dl>
                 {problems?.restricted ? (
-                  <p role="alert" className="rounded-md border border-danger/40 bg-danger/5 px-2.5 py-2 text-[11px] leading-relaxed text-text2">
+                  <p role="alert" className="rounded-md border border-danger/40 bg-danger/5 px-2.5 py-2 text-xs leading-relaxed text-text2">
                     <span className="font-semibold text-danger-fg">Remove this section to save.</span> Your role lacks this data
                     permission, and a template can only gain sections its author is allowed to view.
                   </p>
                 ) : !def.available && (
-                  <p className="rounded-md border border-warning/40 bg-warning/5 px-2.5 py-2 text-[11px] leading-relaxed text-text2">
+                  <p className="rounded-md border border-warning/40 bg-warning/5 px-2.5 py-2 text-xs leading-relaxed text-text2">
                     Your role lacks this data permission, so your preview shows the section as restricted. Viewers who have it
                     see the data; others see it as restricted.
                   </p>

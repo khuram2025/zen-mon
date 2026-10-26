@@ -13,6 +13,7 @@ import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import type { RumFilters, RumGeo, RumGeoCountry } from '@/types/apm'
 import { QueryErrorPanel, RumEmptyState, RumMetricCell, RumSectionHeader, RumTableCard } from './RumUi'
 import { countryFlag, countryLabel, countryMapName } from './countries'
+import { chartFont, chartTheme } from '@/lib/chartTheme'
 
 type GeoMetric = 'sessions' | 'error_session_rate' | 'lcp_p75' | 'lcp_poor_pct'
 const METRICS: Array<{ value: GeoMetric; label: string; fmt: (row: RumGeoCountry) => string; lowerIsBetter: boolean }> = [
@@ -81,7 +82,7 @@ export function RumGeoPanel({ data, loading, error, onRetry, onFilter }: {
       },
       visualMap: {
         min: 0, max, left: 12, bottom: 12, orient: 'horizontal', calculable: false,
-        text: [spec.label, ''], textStyle: { color: dark ? '#94a3b8' : '#475569', fontSize: 10 },
+        text: [spec.label, ''], textStyle: { color: dark ? '#94a3b8' : '#475569', fontSize: chartFont(10) },
         inRange: { color: spec.lowerIsBetter ? good : [...good].reverse() },
       },
       series: [{
@@ -100,7 +101,7 @@ export function RumGeoPanel({ data, loading, error, onRetry, onFilter }: {
         <RumSectionHeader id="rum-geo-map" title="Experience by country" description="Visitor country from the CDN header or the controller's GeoIP database. Select a country to filter every RUM page."
           action={(
             <Select value={metric} onValueChange={(value) => setMetric(value as GeoMetric)}>
-              <SelectTrigger className="h-7 w-[170px] text-[11px]" aria-label="Map metric"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-7 w-[170px] text-xs" aria-label="Map metric"><SelectValue /></SelectTrigger>
               <SelectContent>{METRICS.map((item) => <SelectItem key={item.value} value={item.value}>Colour by {item.label.toLowerCase()}</SelectItem>)}</SelectContent>
             </Select>
           )} />
@@ -108,13 +109,13 @@ export function RumGeoPanel({ data, loading, error, onRetry, onFilter }: {
           {!countries.length && !loading ? (
             <RumEmptyState icon={Globe2} title="No resolved countries in this window" description={data && !data.geoip_available ? 'The GeoIP database is not installed on the controller and no CDN country header was received. Run scripts/fetch-geoip.py, or forward CF-IPCountry / X-Country-Code from your edge.' : 'Every session in this window came from a private or reserved address (lab traffic), which has no country.'} />
           ) : mapReady ? (
-            <ReactECharts option={option} style={{ height: 420 }} notMerge lazyUpdate />
+            <ReactECharts theme={chartTheme()} option={option} style={{ height: 420 }} notMerge lazyUpdate />
           ) : (
             <div className="flex h-[420px] items-center justify-center text-xs text-muted">{loading ? 'Loading geography…' : 'Map data unavailable'}</div>
           )}
         </Card>
         {data?.unresolved && data.unresolved.sessions > 0 && (
-          <p className="mt-1.5 text-[11px] text-muted">{fmtCount(data.unresolved.sessions)} session{data.unresolved.sessions === 1 ? '' : 's'} from private or reserved addresses have no country and are not on the map.</p>
+          <p className="mt-1.5 text-xs text-muted">{fmtCount(data.unresolved.sessions)} session{data.unresolved.sessions === 1 ? '' : 's'} from private or reserved addresses have no country and are not on the map.</p>
         )}
       </section>
 
@@ -126,7 +127,7 @@ export function RumGeoPanel({ data, loading, error, onRetry, onFilter }: {
               const open = () => onFilter('country', row.country)
               return (
                 <Tr key={row.country} className={INTERACTIVE_ROW} tabIndex={0} onClick={open} onKeyDown={(event) => onRowKey(event, open)} title={`Filter by ${countryLabel(row.country)}`}>
-                  <Td><span className="mr-1.5">{countryFlag(row.country)}</span><span className="text-xs text-text">{countryLabel(row.country)}</span><span className="ml-1.5 font-mono text-[10px] text-muted">{row.country}</span></Td>
+                  <Td><span className="mr-1.5">{countryFlag(row.country)}</span><span className="text-xs text-text">{countryLabel(row.country)}</span><span className="ml-1.5 font-mono text-2xs text-muted">{row.country}</span></Td>
                   <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(row.sessions)}</Td>
                   <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(row.views)}</Td>
                   <Td className="text-right"><span className={cn('font-mono text-xs tabular-nums', (row.error_session_rate ?? 0) >= 0.05 ? 'text-danger' : '')}>{fmtPct(row.error_session_rate)}</span></Td>

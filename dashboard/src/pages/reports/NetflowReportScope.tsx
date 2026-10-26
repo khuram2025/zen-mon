@@ -118,9 +118,9 @@ export function NetflowScopePicker({ value, onChange }: { value: FlowFilter; onC
 
   const field = (k: FlowFilterKey, control: ReactNode) => (
     <div key={k} className="space-y-1">
-      <label htmlFor={`${id}-${k}`} className="block text-[11px] font-medium text-text2">{FLOW_FILTER_LABELS[k]}</label>
+      <label htmlFor={`${id}-${k}`} className="block text-xs font-medium text-text2">{FLOW_FILTER_LABELS[k]}</label>
       {control}
-      {parsed.errors[k] && <p className="text-[11px] font-medium text-danger-fg">{parsed.errors[k]}</p>}
+      {parsed.errors[k] && <p className="text-xs font-medium text-danger-fg">{parsed.errors[k]}</p>}
     </div>
   )
   const text = (k: FlowFilterKey, placeholder: string, list?: string) =>
@@ -147,7 +147,7 @@ export function NetflowScopePicker({ value, onChange }: { value: FlowFilter; onC
         <div id={`${id}-dialog`} role="dialog" aria-label="NetFlow scope"
           className={cn('absolute z-30 mt-1 w-[min(22rem,calc(100vw-2rem))] space-y-3 rounded-lg border border-border bg-surface p-3 shadow-elevated',
             alignRight ? 'right-0' : 'left-0')}>
-          <p className="text-[11px] text-text2">
+          <p className="text-xs text-text2">
             Narrow the report's flow sections. Figures are always limited to the exporters you may see.
           </p>
           {field('exporter', (
@@ -198,7 +198,7 @@ export function NetflowScopeChips({ value, onChange, className }: { value: FlowF
   if (!Object.keys(flowFilterToApiParams(value)).length) return null
   return (
     <div className={cn('flex flex-wrap items-center gap-2', className)}>
-      <span className="text-[11px] font-semibold uppercase tracking-wide text-text2">NetFlow scope</span>
+      <span className="text-xs font-semibold uppercase tracking-wide text-text2">NetFlow scope</span>
       <FilterChips
         filter={value}
         onRemove={(keys) => {

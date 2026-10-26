@@ -75,9 +75,9 @@ export function AccessLevelPicker({ modules, granted, onChange, superPerm, canGr
             <header className="flex items-start justify-between gap-3 border-b border-border bg-surface2/50 px-3 py-2">
               <div className="min-w-0">
                 <h3 id={`area-${area}`} className="text-xs font-semibold uppercase tracking-wider text-text">{area}</h3>
-                {AREA_HINTS[area] && <p className="text-[11px] text-muted">{AREA_HINTS[area]}</p>}
+                {AREA_HINTS[area] && <p className="text-xs text-muted">{AREA_HINTS[area]}</p>}
               </div>
-              <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-medium tabular-nums', withAccess ? 'bg-primary/10 text-primary' : 'bg-surface2 text-muted')}>
+              <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-xs font-medium tabular-nums', withAccess ? 'bg-primary/10 text-primary' : 'bg-surface2 text-muted')}>
                 {withAccess}/{ms.length} with access
               </span>
             </header>
@@ -100,14 +100,14 @@ export function AccessLevelPicker({ modules, granted, onChange, superPerm, canGr
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5 text-sm font-medium">
                           {m.label}
-                          {changed && <span className="rounded bg-primary/10 px-1 text-[9px] font-semibold uppercase tracking-wide text-primary">changed</span>}
-                          {level === 'custom' && <span className="rounded border border-border px-1 text-[9px] font-semibold uppercase tracking-wide text-muted">custom</span>}
+                          {changed && <span className="rounded bg-primary/10 px-1 text-2xs font-semibold uppercase tracking-wide text-primary">changed</span>}
+                          {level === 'custom' && <span className="rounded border border-border px-1 text-2xs font-semibold uppercase tracking-wide text-muted">custom</span>}
                         </div>
-                        <p className="truncate text-[11px] text-muted" title={hint}>{hint}</p>
+                        <p className="truncate text-xs text-muted" title={hint}>{hint}</p>
                       </div>
 
                       {levels.length > 0 && (
-                        <div role="radiogroup" aria-label={`${m.label} access`} className="inline-flex shrink-0 overflow-hidden rounded-md border border-border text-[11px]">
+                        <div role="radiogroup" aria-label={`${m.label} access`} className="inline-flex shrink-0 overflow-hidden rounded-md border border-border text-xs">
                           {levels.map((lv) => {
                             const label = lv === 'full' ? fullLabel(m) : LEVEL_LABEL[lv]
                             const active = level === lv
@@ -140,7 +140,7 @@ export function AccessLevelPicker({ modules, granted, onChange, superPerm, canGr
                           aria-expanded={isOpen}
                           aria-controls={`perm-${m.module}`}
                           onClick={() => setOpen((o) => ({ ...o, [m.module]: !isOpen }))}
-                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted hover:bg-surface2 hover:text-text"
+                          className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted hover:bg-surface2 hover:text-text"
                         >
                           {extras.some((p) => granted.has(p.id)) && <ShieldAlert className="h-3 w-3 text-warning" aria-label="Includes a sensitive or privileged permission" />}
                           Permissions
@@ -182,10 +182,10 @@ export function AccessLevelPicker({ modules, granted, onChange, superPerm, canGr
                                   {p.label}
                                   <RiskBadge risk={p.risk || 'standard'} />
                                   {locked && <Lock className="h-3 w-3 text-muted" aria-label="You do not hold this permission" />}
-                                  {implied && <span className="text-[10px] font-normal text-muted">(included in full administration)</span>}
+                                  {implied && <span className="text-2xs font-normal text-muted">(included in full administration)</span>}
                                 </span>
-                                <span className="block text-[11px] leading-snug text-muted">{p.description}</span>
-                                {p.implies && p.implies.length > 0 && <span className="block text-[10px] text-muted/80">Also adds: {p.implies.join(', ')}</span>}
+                                <span className="block text-xs leading-snug text-muted">{p.description}</span>
+                                {p.implies && p.implies.length > 0 && <span className="block text-2xs text-muted/80">Also adds: {p.implies.join(', ')}</span>}
                               </span>
                             </label>
                           )

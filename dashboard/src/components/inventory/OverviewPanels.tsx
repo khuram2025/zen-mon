@@ -28,7 +28,7 @@ import { ViewToggle, type ChartView } from './ViewToggle'
 type Q<T> = UseQueryResult<T, Error>
 
 const rowLink = 'hover:no-underline'
-const th = 'px-2 py-1.5 text-left text-[10.5px] font-semibold uppercase tracking-wider text-muted'
+const th = 'px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wider text-muted'
 const thRight = cn(th, 'text-right')
 
 /** A hatched swatch for "unknown", a coloured one for a family, a neutral one for the rest. */
@@ -125,17 +125,17 @@ function ServerOsBody({ os, view }: { os: OsResponse; view: ChartView }) {
       <Donut
         slices={m.slices}
         label={summary}
-        centre={<><span className="text-xl font-bold tabular-nums leading-none text-text">{fmtInt(m.total)}</span><span className="mt-0.5 text-[10px] uppercase tracking-wider text-muted">servers</span></>}
+        centre={<><span className="text-xl font-bold tabular-nums leading-none text-text">{fmtInt(m.total)}</span><span className="mt-0.5 text-2xs uppercase tracking-wider text-muted">servers</span></>}
       />
       <ul role="list" aria-label="Operating system releases" className="w-full min-w-0 flex-1 space-y-0.5">
         {m.releases.map((r) => (
           <li key={r.key}>
-            <DrillTarget drill={r.drill} className={cn('flex items-center gap-2 rounded-md px-1.5 py-1 text-[13px] hover:bg-surface2', rowLink)} ariaLabel={`${r.label}: ${plural(r.count, 'server')}, ${fmtPct(r.pct)}`}>
+            <DrillTarget drill={r.drill} className={cn('flex items-center gap-2 rounded-md px-1.5 py-1 text-sm hover:bg-surface2', rowLink)} ariaLabel={`${r.label}: ${plural(r.count, 'server')}, ${fmtPct(r.pct)}`}>
               <Swatch color={r.color} unknown={r.unknown} other={r.color === undefined && !r.unknown} />
               <span className={cn('min-w-0 flex-1 truncate', r.unknown && 'italic text-muted')}>{r.label}</span>
               <span className="hidden w-16 sm:block"><MiniBar pct={r.pct} unknown={r.unknown} color={r.color === undefined ? undefined : CATEGORICAL[r.color % CATEGORICAL.length]} /></span>
               <span className="w-9 text-right font-medium tabular-nums">{fmtInt(r.count)}</span>
-              <span className="w-11 text-right text-[11px] tabular-nums text-muted">{fmtPct(r.pct)}</span>
+              <span className="w-11 text-right text-xs tabular-nums text-muted">{fmtPct(r.pct)}</span>
             </DrillTarget>
           </li>
         ))}
@@ -213,13 +213,13 @@ function NetworkOsBody({ os, view }: { os: OsResponse; view: ChartView }) {
         {m.rows.map((r) => (
           <li key={r.key}>
             <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-              <DrillTarget drill={r.drill} className={cn('text-[13px] font-semibold text-text', r.unknown && 'italic text-muted')}>
+              <DrillTarget drill={r.drill} className={cn('text-sm font-semibold text-text', r.unknown && 'italic text-muted')}>
                 {r.label} <span className="font-normal tabular-nums text-text2">{fmtInt(r.count)} {r.count === 1 ? 'device' : 'devices'}</span>
               </DrillTarget>
               {r.unknown ? (
-                <span className="text-[11px] text-muted">firmware not identified</span>
+                <span className="text-xs text-muted">firmware not identified</span>
               ) : (
-                <Link to={`${PATHS.os}?kind=device`} className="text-[11px] tabular-nums text-muted hover:text-primary hover:underline">
+                <Link to={`${PATHS.os}?kind=device`} className="text-xs tabular-nums text-muted hover:text-primary hover:underline">
                   {fmtInt(r.versions)} {r.versions === 1 ? 'version' : 'versions'}
                 </Link>
               )}
@@ -245,7 +245,7 @@ function SoftwareTable({ rows, by, caption }: { rows: SoftwareRow[]; by: 'hosts'
   if (rows.length === 0) return <InventoryEmpty kind="no-data" compact title="No software reported yet">Titles appear once an agent has uploaded its software list.</InventoryEmpty>
   return (
     // Fixed layout: the product name takes what the two number columns leave and truncates, so the table never outgrows a phone.
-    <table className="w-full table-fixed text-[13px]">
+    <table className="w-full table-fixed text-sm">
       <caption className="sr-only">{caption}</caption>
       <colgroup><col /><col className="w-20" /><col className="w-20" /></colgroup>
       <thead>
@@ -264,7 +264,7 @@ function SoftwareTable({ rows, by, caption }: { rows: SoftwareRow[]; by: 'hosts'
               <th scope="row" className="min-w-0 overflow-hidden px-2 py-1.5 text-left font-normal">
                 <span className="flex items-baseline gap-2">
                   <Link to={r.versionsDrill.href} className="min-w-0 truncate rounded-sm font-medium text-text outline-none hover:text-primary hover:underline focus-visible:ring-2 focus-visible:ring-primary" title={r.name}>{r.name}</Link>
-                  {r.category && <span className="shrink-0 text-[10.5px] text-muted" data-software-category="">{categoryLabel(r.category)}</span>}
+                  {r.category && <span className="shrink-0 text-xs text-muted" data-software-category="">{categoryLabel(r.category)}</span>}
                 </span>
                 <span className="mt-1 block w-full max-w-[12rem]"><MiniBar pct={r.barPct} /></span>
               </th>
@@ -294,7 +294,7 @@ export function TopSoftwarePanel({ query }: { query: Q<InventorySummary> }) {
             <SoftwareTable rows={rows} by="hosts" caption="Most widely installed software, by number of servers" />
             {agent && <AgentCoverageLine coverage={agent} />}
             <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-              <span className="text-[11px] text-muted">{hiddenNote(s)}</span>
+              <span className="text-xs text-muted">{hiddenNote(s)}</span>
               <FooterLink to={PATHS.software}>All {plural(s.software.products, 'title')}</FooterLink>
             </div>
           </div>
@@ -310,7 +310,7 @@ export function SprawlPanel({ query }: { query: Q<InventorySummary> }) {
       {(s) => (
         <div className="space-y-2">
           <SoftwareTable rows={softwareRows(s.software.sprawl, 'versions')} by="versions" caption="Products installed in the most distinct versions: a sign of upgrade drift" />
-          <p className="pt-1 text-[11px] text-muted" data-sprawl-note="">{sprawlNote(s.software.sprawl_basis)}</p>
+          <p className="pt-1 text-xs text-muted" data-sprawl-note="">{sprawlNote(s.software.sprawl_basis)}</p>
         </div>
       )}
     </QueryPanel>
@@ -332,7 +332,7 @@ export function AgentCoverageLine({ coverage, compact }: { coverage: AgentCovera
   return (
     <div className={cn('space-y-0.5', !compact && 'rounded-md border border-border bg-surface2/50 px-2.5 py-1.5')} data-agent-coverage="">
       {answerable > 0 ? (
-        <p className={cn('text-xs text-text2', compact ? 'text-[11px] leading-4' : 'flex flex-wrap items-center gap-x-1.5 gap-y-0.5')}>
+        <p className={cn('text-xs text-text2', compact ? 'text-xs leading-4' : 'flex flex-wrap items-center gap-x-1.5 gap-y-0.5')}>
           {!compact && <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />}
           <span>
             Endpoint protection on <DrillTarget drill={coverage.coveredDrill} className="font-semibold text-text" ariaLabel={`Servers with endpoint protection: ${fmtInt(covered)}`}>{fmtInt(covered)}</DrillTarget> of {plural(answerable, 'server')} with a complete software list
@@ -342,10 +342,10 @@ export function AgentCoverageLine({ coverage, compact }: { coverage: AgentCovera
           {without}
         </p>
       ) : (
-        <p className="text-[11px] leading-4 text-text2" data-agent-unassessed="">Endpoint protection cannot be assessed: no server has a complete software list.</p>
+        <p className="text-xs leading-4 text-text2" data-agent-unassessed="">Endpoint protection cannot be assessed: no server has a complete software list.</p>
       )}
       {unknown > 0 && (
-        <p className="text-[11px] leading-4 text-text2" data-agent-unknown="">
+        <p className="text-xs leading-4 text-text2" data-agent-unknown="">
           <DrillTarget drill={coverage.unknownDrill} className="font-medium text-text2 hover:text-primary" title={UNKNOWN_SERVERS_HINT}>{unknownServersText(unknown)}</DrillTarget>
         </p>
       )}
@@ -370,14 +370,14 @@ function HardwareBody({ summary, hardware }: { summary: InventorySummary; hardwa
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">Most common network models</h3>
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Most common network models</h3>
         {models.length === 0 ? (
           <InventoryEmpty kind="no-data" compact title="No models identified yet">Models appear once the poller has read the hardware of a device.</InventoryEmpty>
         ) : (
           <ul role="list" className="space-y-0.5">
             {models.map((r) => (
               <li key={r.key}>
-                <DrillTarget drill={r.drill} className={cn('flex items-center gap-2 rounded-md px-1.5 py-1 text-[13px] hover:bg-surface2', rowLink)} ariaLabel={`${r.vendor} ${r.model}: ${plural(r.count, 'device')}`}>
+                <DrillTarget drill={r.drill} className={cn('flex items-center gap-2 rounded-md px-1.5 py-1 text-sm hover:bg-surface2', rowLink)} ariaLabel={`${r.vendor} ${r.model}: ${plural(r.count, 'device')}`}>
                   <span className="min-w-0 flex-1 truncate"><span className="text-muted">{r.vendor}</span> <span className="font-medium">{r.model}</span></span>
                   <span className="hidden w-20 sm:block"><MiniBar pct={r.barPct} /></span>
                   <span className="w-8 text-right font-medium tabular-nums">{fmtInt(r.count)}</span>
@@ -389,7 +389,7 @@ function HardwareBody({ summary, hardware }: { summary: InventorySummary; hardwa
       </div>
       <ServerMemory query={hardware} />
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-[11px] text-muted">
+        <span className="text-xs text-muted">
           <DrillTarget drill={assetsDrill({ kind: 'device' }, summary.hardware.devices)} className="font-medium text-text2">{fmtInt(summary.hardware.devices)} network devices</DrillTarget>
           {' · '}<DrillTarget drill={pageDrill(PATHS.hardware, summary.hardware.models)} className="text-muted hover:text-primary">{plural(summary.hardware.models, 'model')} from {plural(summary.hardware.vendors, 'vendor')}</DrillTarget>
         </span>
@@ -403,7 +403,7 @@ function ServerMemory({ query }: { query: Q<HardwareResponse> }) {
   const rows = query.data ? memoryRows(query.data) : []
   return (
     <div>
-      <h3 className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">Servers by installed memory</h3>
+      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Servers by installed memory</h3>
       {query.isLoading ? (
         <div className="h-16 animate-shimmer rounded-md" aria-busy="true" aria-label="Loading server memory" />
       ) : !query.data ? (
@@ -460,7 +460,7 @@ function RecentChangesBody({ data, href }: { data: ChangesResponse; href: string
     return (
       <div className="space-y-2">
         <InventoryEmpty kind="no-data" compact title="No changes in the last 7 days">Installs, removals, upgrades and firmware changes appear here as they are reported.</InventoryEmpty>
-        <p className="text-center text-[11px] text-muted">{history.text}</p>
+        <p className="text-center text-xs text-muted">{history.text}</p>
       </div>
     )
   }
@@ -472,10 +472,10 @@ function RecentChangesBody({ data, href }: { data: ChangesResponse; href: string
           const address = changeAssetAddress(r)
           return (
             <li key={r.id} className="flex items-start gap-2.5 py-1.5" data-change={r.id}>
-              <time dateTime={r.observed_at} title={new Date(toMillis(r.observed_at) ?? 0).toLocaleString()} className="w-14 shrink-0 pt-px text-[11px] tabular-nums text-muted">
+              <time dateTime={r.observed_at} title={new Date(toMillis(r.observed_at) ?? 0).toLocaleString()} className="w-14 shrink-0 pt-px text-xs tabular-nums text-muted">
                 {ageWords(r.observed_at, now)}
               </time>
-              <div className="min-w-0 flex-1 text-[13px] leading-5">
+              <div className="min-w-0 flex-1 text-sm leading-5">
                 {t.marker ? (
                   <span className="italic text-muted">{t.sentence}</span>
                 ) : (
@@ -490,7 +490,7 @@ function RecentChangesBody({ data, href }: { data: ChangesResponse; href: string
                 )}
               </div>
               {!t.marker && (
-                <span className="shrink-0 rounded border border-border bg-surface2 px-1.5 py-px text-[10.5px] font-medium text-text2">{CATEGORY_LABELS[r.category]}</span>
+                <span className="shrink-0 rounded border border-border bg-surface2 px-1.5 py-px text-xs font-medium text-text2">{CATEGORY_LABELS[r.category]}</span>
               )}
             </li>
           )
@@ -534,7 +534,7 @@ function HealthBody({ summary }: { summary: InventorySummary }) {
   return (
     <ul role="list" className="grid gap-x-6 gap-y-2 sm:grid-cols-2 xl:grid-cols-3" data-health="gaps">
       {items.map((i) => (
-        <li key={i.key} className="flex items-start gap-2 text-[13px]" data-health-item={i.key}>
+        <li key={i.key} className="flex items-start gap-2 text-sm" data-health-item={i.key}>
           {i.info ? (
             <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted" aria-hidden />
           ) : i.count > 0 ? (
@@ -550,7 +550,7 @@ function HealthBody({ summary }: { summary: InventorySummary }) {
             ) : (
               <span className="text-muted">{i.none}</span>
             )}
-            {i.count > 0 && i.hint && <span className="mt-0.5 block text-[11px] leading-4 text-muted">{i.hint}</span>}
+            {i.count > 0 && i.hint && <span className="mt-0.5 block text-xs leading-4 text-muted">{i.hint}</span>}
           </span>
         </li>
       ))}
@@ -593,5 +593,5 @@ export function OnboardingCards() {
 
 /** The note that stands where trend lines would be for a user whose scope hides fleet-wide history. */
 export function TrendsNote({ children }: { children: ReactNode }) {
-  return <p className="text-[11px] text-muted" data-trends-note="">{children}</p>
+  return <p className="text-xs text-muted" data-trends-note="">{children}</p>
 }

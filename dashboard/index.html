@@ -6,14 +6,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
     <title>ZenPlus — Network Monitoring</title>
-    <link rel="preconnect" href="https://rsms.me/">
-    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
     <script>
-      // Pre-hydration theme to avoid flash.
+      // Pre-hydration theme and display density to avoid a flash (stores/theme.ts, stores/display.ts).
       try {
-        var t = localStorage.getItem('zp-theme') || 'dark'
+        // zustand persists {"state":{"theme":"dark"}}; an older plain value is accepted too.
+        var raw = localStorage.getItem('zp-theme'), t = 'dark'
+        if (raw) { try { t = (JSON.parse(raw).state || {}).theme || 'dark' } catch (e) { t = raw } }
         if (t === 'dark') document.documentElement.classList.add('dark')
       } catch (e) { document.documentElement.classList.add('dark') }
+      try {
+        var q = new URLSearchParams(location.search).get('density')
+        var d = q || localStorage.getItem('zp-density')
+        if (d === 'compact' || d === 'large' || d === 'wall') document.documentElement.setAttribute('data-density', d)
+      } catch (e) {}
     </script>
   </head>
   <body>

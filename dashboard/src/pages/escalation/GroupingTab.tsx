@@ -98,8 +98,8 @@ function GroupingSettingsCard({ canManage }: { canManage: boolean }) {
               )
             })}
           </div>
-          {errors.group_by && <p className="text-[11px] text-danger">{errors.group_by}</p>}
-          <p className="text-[11px] text-muted">Recipients with different access are never merged: a digest is per group, channel and recipient.</p>
+          {errors.group_by && <p className="text-xs text-danger">{errors.group_by}</p>}
+          <p className="text-xs text-muted">Recipients with different access are never merged: a digest is per group, channel and recipient.</p>
         </fieldset>
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

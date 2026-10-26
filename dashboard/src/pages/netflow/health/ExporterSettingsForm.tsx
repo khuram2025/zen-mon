@@ -116,7 +116,7 @@ export function ExporterSettingsForm({ exporter, settings, row }: {
           <label htmlFor={ids.name} className="text-xs font-medium text-text">Display name</label>
           <input id={ids.name} className={inputCls} value={draft.display_name} maxLength={120} disabled={disabled}
             onChange={(e) => set('display_name', e.target.value)} placeholder="e.g. WAN edge — Riyadh" aria-invalid={!!errors.display_name} />
-          {errors.display_name && <p className="text-[11px] text-danger-fg">{errors.display_name}</p>}
+          {errors.display_name && <p className="text-xs text-danger-fg">{errors.display_name}</p>}
         </div>
         <div className="space-y-1">
           <label htmlFor={ids.interval} className="text-xs font-medium text-text">Expected export interval (seconds)</label>
@@ -124,7 +124,7 @@ export function ExporterSettingsForm({ exporter, settings, row }: {
             onChange={(e) => set('expected_interval_s', e.target.value)}
             placeholder={row?.learned_interval_s ? `learned: ${Math.round(row.learned_interval_s)}` : 'learned automatically'}
             aria-invalid={!!errors.expected_interval_s} aria-describedby={`${ids.interval}-h`} />
-          <p id={`${ids.interval}-h`} className="text-[11px] text-text2">
+          <p id={`${ids.interval}-h`} className="text-xs text-text2">
             {errors.expected_interval_s ? <span className="text-danger-fg">{errors.expected_interval_s}</span> :
               'Leave empty to use the cadence learned from this exporter. Late after 2 intervals + 1 min, silent after 10 (at least 2 and 15 min).'}
           </p>
@@ -135,7 +135,7 @@ export function ExporterSettingsForm({ exporter, settings, row }: {
             onChange={(e) => set('role', e.target.value as ExporterRole)} aria-describedby={`${ids.role}-h`}>
             {(Object.keys(ROLE_LABELS) as ExporterRole[]).map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
           </select>
-          <p id={`${ids.role}-h`} className="text-[11px] text-text2">
+          <p id={`${ids.role}-h`} className="text-xs text-text2">
             Edge counting (the “Counted once at the edge” mode) adds up only edge exporters, so traffic seen again on core
             routers is not counted twice. All observations stay stored and visible.
           </p>
@@ -146,7 +146,7 @@ export function ExporterSettingsForm({ exporter, settings, row }: {
             onChange={(e) => set('count_direction', e.target.value as CountDirection)} aria-describedby={`${ids.dir}-h`}>
             {(Object.keys(DIRECTION_LABELS) as CountDirection[]).map((d) => <option key={d} value={d}>{DIRECTION_LABELS[d]}</option>)}
           </select>
-          <p id={`${ids.dir}-h`} className="text-[11px] text-text2">
+          <p id={`${ids.dir}-h`} className="text-xs text-text2">
             Automatic keeps ingress-monitored records when the exporter reports both directions, otherwise every record.
           </p>
         </div>
@@ -167,7 +167,7 @@ export function ExporterSettingsForm({ exporter, settings, row }: {
           </Button>
         )}
         {settings?.updated_at && (
-          <span className="text-[11px] text-text2">
+          <span className="text-xs text-text2">
             Last changed {formatDateTime(settings.updated_at, tz, { seconds: false })}
             {settings.updated_by_name ? ` by ${settings.updated_by_name}` : ''}
           </span>

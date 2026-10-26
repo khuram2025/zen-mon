@@ -271,14 +271,14 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
                         )}
                       >
                         <span className={cn(
-                          'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold',
+                          'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold',
                           bad ? 'border-danger text-danger' : active ? 'border-primary bg-primary text-white' : done ? 'border-success/50 bg-success/10 text-success' : 'border-border text-muted',
                         )}>
                           {bad ? '!' : done ? <Check className="h-3.5 w-3.5" aria-hidden /> : i + 1}
                         </span>
                         <span className="min-w-0">
                           <span className="block text-xs font-semibold">{s.label}</span>
-                          <span className="hidden truncate text-[10.5px] text-muted md:block">{s.hint}</span>
+                          <span className="hidden truncate text-xs text-muted md:block">{s.hint}</span>
                         </span>
                       </button>
                     </li>
@@ -289,12 +289,12 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
               <div className="hidden space-y-3 border-t border-border px-4 py-3 md:block">
                 <SummaryLine label="Permissions" value={full ? 'Full administration' : `${granted.size} selected`} warn={full || elevatedAdded.length > 0} />
                 <div>
-                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Visibility</div>
+                  <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Visibility</div>
                   {full ? <span className="text-xs text-muted">Everything (bypasses scope)</span> : <ScopeChips tags={effectiveScope} empty="All resources" max={4} />}
                 </div>
                 {step !== 'access' && (
                   <div>
-                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Menu</div>
+                    <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Menu</div>
                     <MenuPreview permissions={granted} compact />
                   </div>
                 )}
@@ -430,16 +430,16 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
                   <div className="grid gap-3 md:grid-cols-2">
                     <ReviewCard title="Role">
                       <div className="text-sm font-semibold">{displayName.trim() || '—'}</div>
-                      <div className="font-mono text-[11px] text-muted">{autoIdentifier ? 'role_… (generated)' : identifier}</div>
+                      <div className="font-mono text-xs text-muted">{autoIdentifier ? 'role_… (generated)' : identifier}</div>
                       {description.trim() && <p className="mt-1 text-xs text-text2">{description.trim()}</p>}
                     </ReviewCard>
                     <ReviewCard title="Visibility">
                       {full
                         ? <p className="text-xs text-muted">Full administration sees everything; scope does not apply.</p>
                         : effectiveScope.length
-                          ? <><ScopeChips tags={effectiveScope} max={12} /><p className="mt-1 text-[11px] text-muted">Members see only resources (and their alerts) tagged with any of these. Users’ own scope tags add to them.</p></>
+                          ? <><ScopeChips tags={effectiveScope} max={12} /><p className="mt-1 text-xs text-muted">Members see only resources (and their alerts) tagged with any of these. Users’ own scope tags add to them.</p></>
                           : <p className="text-xs text-muted">All resources the permissions allow.</p>}
-                      {isEdit && scopeChanged && <p className="mt-1 text-[11px] font-medium text-primary">Changed from: {baselineScope.length ? baselineScope.join(', ') : 'all resources'}</p>}
+                      {isEdit && scopeChanged && <p className="mt-1 text-xs font-medium text-primary">Changed from: {baselineScope.length ? baselineScope.join(', ') : 'all resources'}</p>}
                     </ReviewCard>
                     <ReviewCard title="Access by area">
                       <AccessSummary catalog={catalog} granted={granted} superPerm={superPerm} />
@@ -476,7 +476,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
                           {impact.data.sample_users.length > 0 && (
                             <div className="flex flex-wrap gap-1">
                               {impact.data.sample_users.map((u) => (
-                                <span key={u.username} className="rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-[10px]">{u.username}{!u.is_active ? ' (disabled)' : ''}{u.auth_source !== 'local' ? ` · ${u.auth_source}` : ''}</span>
+                                <span key={u.username} className="rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-2xs">{u.username}{!u.is_active ? ' (disabled)' : ''}{u.auth_source !== 'local' ? ` · ${u.auth_source}` : ''}</span>
                               ))}
                               {impact.data.affected_users > impact.data.sample_users.length && <span className="text-muted">+{impact.data.affected_users - impact.data.sample_users.length} more</span>}
                             </div>
@@ -500,7 +500,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
 
           {/* Footer */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-surface px-5 py-3">
-            <span className="text-[11px] text-muted">Step {stepIndex + 1} of {STEPS.length} · {STEPS[stepIndex].label}</span>
+            <span className="text-xs text-muted">Step {stepIndex + 1} of {STEPS.length} · {STEPS[stepIndex].label}</span>
             <div className="flex flex-wrap gap-2">
               <Button type="button" variant="outline" onClick={() => guard.onOpenChange(false)} disabled={save.isPending}>Cancel</Button>
               {stepIndex > 0 && (
@@ -535,7 +535,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
 function SummaryLine({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
   return (
     <div>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs font-semibold uppercase tracking-wider text-muted">{label}</div>
       <div className={cn('text-xs font-medium', warn ? 'text-warning' : 'text-text')}>{value}</div>
     </div>
   )
@@ -561,8 +561,8 @@ function TemplateCard({ icon: Icon, title, detail, count, team, selected, onClic
         <span className="min-w-0 flex-1 truncate text-xs font-semibold">{title}</span>
         {selected && <Check className="h-3.5 w-3.5 text-primary" aria-hidden />}
       </span>
-      {detail && <span className="line-clamp-2 text-[11px] leading-snug text-muted">{detail}</span>}
-      <span className="mt-auto flex gap-1.5 text-[10px] text-muted">
+      {detail && <span className="line-clamp-2 text-xs leading-snug text-muted">{detail}</span>}
+      <span className="mt-auto flex gap-1.5 text-2xs text-muted">
         {team && <span className="rounded bg-info/10 px-1 font-semibold uppercase tracking-wide text-info">Team</span>}
         {count !== undefined && <span>{count} permissions</span>}
       </span>
@@ -618,14 +618,14 @@ function VisibilityStep({ full, mode, onMode, tags, onTags, error }: {
         <div className="space-y-2 rounded-lg border border-border p-3">
           <label className="text-xs font-medium">Visibility tags</label>
           <TagPicker value={tags} onChange={onTags} allowCreate={false} placeholder="Add tags, e.g. network, riyadh…" />
-          <p className={cn('text-[11px]', error ? 'text-danger' : 'text-muted')}>
+          <p className={cn('text-xs', error ? 'text-danger' : 'text-muted')}>
             {error || 'Members see resources carrying ANY of these tags. Untagged resources are hidden from them. A user’s own scope tags (set on the user) add to these.'}
           </p>
           {tags.length > 0 && (
             <div className="overflow-hidden rounded-md border border-border">
               <table className="w-full text-xs">
                 <caption className="sr-only">Resources each tag currently covers</caption>
-                <thead className="bg-surface2/50 text-[10px] uppercase tracking-wider text-muted">
+                <thead className="bg-surface2/50 text-2xs uppercase tracking-wider text-muted">
                   <tr><th className="px-2.5 py-1.5 text-left font-medium">Tag</th><th className="px-2.5 py-1.5 text-right font-medium">Devices</th><th className="px-2.5 py-1.5 text-right font-medium">Servers</th><th className="px-2.5 py-1.5 text-right font-medium">Service checks</th><th className="px-2.5 py-1.5 text-right font-medium">Applications</th></tr>
                 </thead>
                 <tbody>
@@ -634,7 +634,7 @@ function VisibilityStep({ full, mode, onMode, tags, onTags, error }: {
                     const total = d ? d.device_count + d.server_count + d.service_count + d.app_count : 0
                     return (
                       <tr key={t} className="border-t border-border">
-                        <td className="px-2.5 py-1.5"><ScopeChips tags={[t]} />{d && total === 0 && <span className="ml-1.5 text-[10px] text-warning">nothing tagged yet</span>}</td>
+                        <td className="px-2.5 py-1.5"><ScopeChips tags={[t]} />{d && total === 0 && <span className="ml-1.5 text-2xs text-warning">nothing tagged yet</span>}</td>
                         <td className="px-2.5 py-1.5 text-right tabular-nums">{d?.device_count ?? '—'}</td>
                         <td className="px-2.5 py-1.5 text-right tabular-nums">{d?.server_count ?? '—'}</td>
                         <td className="px-2.5 py-1.5 text-right tabular-nums">{d?.service_count ?? '—'}</td>
@@ -655,7 +655,7 @@ function VisibilityStep({ full, mode, onMode, tags, onTags, error }: {
 function ReviewCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="rounded-lg border border-border p-3">
-      <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</h4>
+      <h4 className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">{title}</h4>
       {children}
     </section>
   )

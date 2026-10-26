@@ -523,7 +523,7 @@ export function DiscoveryPage() {
                                       {r.matched_vendor || '—'}
                                     </div>
                                     {r.matched_model && (
-                                      <div className="text-[11px] text-muted">{r.matched_model}</div>
+                                      <div className="text-xs text-muted">{r.matched_model}</div>
                                     )}
                                   </div>
                                 ) : (
@@ -708,7 +708,7 @@ function StatPill({
         ? 'text-primary'
         : 'text-text'
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-[11px]">
+    <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs">
       <span className={`font-semibold tabular-nums ${color}`}>
         {value}
         {total != null && <span className="text-muted">/{total}</span>}
@@ -738,16 +738,16 @@ function ResultDetails({ row }: { row: DiscoveryResult }) {
       )}
       {row.sys_descr && (
         <div className="md:col-span-2">
-          <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted">
+          <div className="mb-1 text-2xs font-medium uppercase tracking-wider text-muted">
             sysDescr
           </div>
-          <pre className="whitespace-pre-wrap rounded bg-surface px-3 py-2 font-mono text-[11px] text-text/80">
+          <pre className="whitespace-pre-wrap rounded bg-surface px-3 py-2 font-mono text-xs text-text/80">
             {row.sys_descr}
           </pre>
         </div>
       )}
       {row.error_message && (
-        <div className="md:col-span-2 rounded bg-danger/10 px-3 py-2 text-[11px] text-danger">
+        <div className="md:col-span-2 rounded bg-danger/10 px-3 py-2 text-xs text-danger">
           {row.error_message}
         </div>
       )}
@@ -766,7 +766,7 @@ function DetailField({
 }) {
   return (
     <div>
-      <div className="text-[10px] font-medium uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs font-medium uppercase tracking-wider text-muted">{label}</div>
       <div className={`text-xs ${mono ? 'font-mono' : ''} ${value ? 'text-text' : 'text-muted'}`}>
         {value || '—'}
       </div>

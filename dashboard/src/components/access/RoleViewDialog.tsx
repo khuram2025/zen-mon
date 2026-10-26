@@ -76,19 +76,19 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
           <TabsContent value="overview" className="mt-3">
             <div className="grid gap-3 md:grid-cols-2">
               <section className="rounded-lg border border-border p-3 md:col-span-2">
-                <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Access by area</h4>
+                <h4 className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Access by area</h4>
                 <AccessSummary catalog={catalog} granted={granted} superPerm={superPerm} />
               </section>
               <section className="rounded-lg border border-border p-3">
-                <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Visibility</h4>
+                <h4 className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Visibility</h4>
                 {granted.has(superPerm)
                   ? <p className="text-xs text-muted">Everything: full administration bypasses scope.</p>
                   : (role?.scope_tags || []).length
-                    ? <><ScopeChips tags={role?.scope_tags} max={12} /><p className="mt-1 text-[11px] text-muted">Members see only resources tagged with any of these, plus their own scope tags.</p></>
+                    ? <><ScopeChips tags={role?.scope_tags} max={12} /><p className="mt-1 text-xs text-muted">Members see only resources tagged with any of these, plus their own scope tags.</p></>
                     : <p className="text-xs text-muted">All resources the permissions allow (members may still have their own scope tags).</p>}
               </section>
               <section className="rounded-lg border border-border p-3">
-                <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Menu members see</h4>
+                <h4 className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Menu members see</h4>
                 <MenuPreview permissions={granted} />
               </section>
             </div>
@@ -114,9 +114,9 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
                       <li key={u.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm">
                         <div className="min-w-0">
                           <div className="truncate font-medium">{u.full_name || u.username}</div>
-                          <div className="truncate text-[11px] text-muted">{u.username} · {u.email}</div>
+                          <div className="truncate text-xs text-muted">{u.username} · {u.email}</div>
                         </div>
-                        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                        <div className="flex flex-wrap items-center gap-1.5 text-xs">
                           <Badge variant={u.is_active ? 'success' : 'outline'}>{u.is_active ? 'Active' : 'Disabled'}</Badge>
                           {u.auth_source !== 'local' && <Badge variant="info">{u.auth_source.toUpperCase()}</Badge>}
                           {u.mfa_enabled && <Badge variant="outline">MFA</Badge>}
@@ -150,7 +150,7 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
                         <span className="text-muted">{r.actor || 'system'} · <time dateTime={r.at}>{new Date(r.at).toLocaleString()}</time></span>
                       </div>
                       {(r.added.length > 0 || r.removed.length > 0) && (
-                        <div className="mt-1.5 space-y-0.5 font-mono text-[11px]">
+                        <div className="mt-1.5 space-y-0.5 font-mono text-xs">
                           {r.added.length > 0 && <div className="text-success">+ {r.added.join(', ')}</div>}
                           {r.removed.length > 0 && <div className="text-danger">− {r.removed.join(', ')}</div>}
                         </div>

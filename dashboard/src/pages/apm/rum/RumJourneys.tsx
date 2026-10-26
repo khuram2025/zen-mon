@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import type { RumFilters, RumFunnel, RumFunnelResults, RumFunnelStep, RumJourneys } from '@/types/apm'
 import { QueryErrorPanel, RumEmptyState, RumSectionHeader, RumTableCard } from './RumUi'
+import { chartFont, chartTheme } from '@/lib/chartTheme'
 
 const EXIT = '__exit__'
 
@@ -56,28 +57,28 @@ function JourneySankey({ data }: { data: RumJourneys }) {
         draggable: false,
         emphasis: { focus: 'adjacency' },
         lineStyle: { color: 'gradient', curveness: 0.5, opacity: dark ? 0.35 : 0.3 },
-        label: { color: dark ? '#e2e8f0' : '#1e293b', fontSize: 11, fontFamily: 'ui-monospace, monospace', formatter: (params: { data?: { label?: string } }) => params.data?.label ?? '' },
+        label: { color: dark ? '#e2e8f0' : '#1e293b', fontSize: chartFont(11), fontFamily: 'ui-monospace, monospace', formatter: (params: { data?: { label?: string } }) => params.data?.label ?? '' },
         data: [...nodes.values()].map((node) => ({ name: node.name, label: node.label, itemStyle: { color: node.exit ? '#64748b' : node.label === 'Other routes' ? '#94a3b8' : ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#14b8a6', '#f97316'][node.step % 8] } })),
         links,
       }],
     }
   }, [data, theme])
   if (!data.journey.steps.length) return <div className="flex h-[300px] items-center justify-center text-xs text-muted">No sessions passed through {data.journey.start || 'this route'} in this window.</div>
-  return <ReactECharts option={option} style={{ height: Math.max(300, Math.min(560, 90 + data.journey.steps.length * 22)) }} notMerge lazyUpdate />
+  return <ReactECharts theme={chartTheme()} option={option} style={{ height: Math.max(300, Math.min(560, 90 + data.journey.steps.length * 22)) }} notMerge lazyUpdate />
 }
 
 function RouteList({ title, hint, rows, onFilter, extra }: { title: string; hint: string; rows: Array<{ route: string; sessions: number; extra?: string }>; onFilter: (route: string) => void; extra?: string }) {
   const max = Math.max(1, ...rows.map((row) => row.sessions))
   return (
     <Card className="h-full">
-      <CardHeader className="border-b border-border px-3 py-2"><CardTitle className="text-[13px]">{title}</CardTitle><p className="text-[10px] text-muted">{hint}</p></CardHeader>
+      <CardHeader className="border-b border-border px-3 py-2"><CardTitle className="text-sm">{title}</CardTitle><p className="text-2xs text-muted">{hint}</p></CardHeader>
       <CardContent className="space-y-1 p-2">
         {rows.length ? rows.map((row) => (
           <button key={row.route} type="button" onClick={() => onFilter(row.route)} title={`Filter by ${row.route}`} className="block w-full rounded-md px-1.5 py-1 text-left hover:bg-surface2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
-            <div className="flex items-center justify-between gap-2 text-[11px]"><span className="truncate font-mono text-text2">{row.route || '/'}</span><span className="shrink-0 font-mono tabular-nums text-muted">{fmtCount(row.sessions)}{row.extra ? <span className="ml-1 text-[10px]">{row.extra}</span> : null}</span></div>
+            <div className="flex items-center justify-between gap-2 text-xs"><span className="truncate font-mono text-text2">{row.route || '/'}</span><span className="shrink-0 font-mono tabular-nums text-muted">{fmtCount(row.sessions)}{row.extra ? <span className="ml-1 text-2xs">{row.extra}</span> : null}</span></div>
             <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-surface2"><div className="h-full rounded-full bg-primary/70" style={{ width: `${(row.sessions / max) * 100}%` }} /></div>
           </button>
-        )) : <div className="py-6 text-center text-[11px] text-muted">{extra ?? 'No data'}</div>}
+        )) : <div className="py-6 text-center text-xs text-muted">{extra ?? 'No data'}</div>}
       </CardContent>
     </Card>
   )
@@ -89,11 +90,11 @@ function FunnelBars({ results }: { results: RumFunnelResults }) {
     <ol className="space-y-2">
       {results.steps.map((step, index) => (
         <li key={step.index} className="grid grid-cols-[28px,minmax(0,1fr)] items-center gap-3">
-          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface2 text-[10px] font-semibold text-text2">{step.index}</span>
+          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface2 text-2xs font-semibold text-text2">{step.index}</span>
           <div>
-            <div className="flex items-baseline justify-between gap-2 text-[11px]">
-              <span className="truncate"><span className="font-mono text-text">{step.label}</span><span className="ml-1.5 text-[10px] uppercase tracking-wider text-muted">{step.type}</span></span>
-              <span className="shrink-0 font-mono tabular-nums text-text2">{fmtCount(step.sessions)}{index > 0 && step.step_conversion_pct != null && <span className={cn('ml-1.5 text-[10px]', step.step_conversion_pct < 50 ? 'text-danger' : step.step_conversion_pct < 80 ? 'text-warning' : 'text-success')}>{step.step_conversion_pct.toFixed(0)}% of previous</span>}{index > 0 && step.drop_off > 0 && <span className="ml-1.5 text-[10px] text-muted">−{fmtCount(step.drop_off)}</span>}</span>
+            <div className="flex items-baseline justify-between gap-2 text-xs">
+              <span className="truncate"><span className="font-mono text-text">{step.label}</span><span className="ml-1.5 text-2xs uppercase tracking-wider text-muted">{step.type}</span></span>
+              <span className="shrink-0 font-mono tabular-nums text-text2">{fmtCount(step.sessions)}{index > 0 && step.step_conversion_pct != null && <span className={cn('ml-1.5 text-2xs', step.step_conversion_pct < 50 ? 'text-danger' : step.step_conversion_pct < 80 ? 'text-warning' : 'text-success')}>{step.step_conversion_pct.toFixed(0)}% of previous</span>}{index > 0 && step.drop_off > 0 && <span className="ml-1.5 text-2xs text-muted">−{fmtCount(step.drop_off)}</span>}</span>
             </div>
             <div className="mt-1 h-3 overflow-hidden rounded bg-surface2"><div className={cn('h-full rounded', index === results.steps.length - 1 ? 'bg-success/80' : 'bg-primary/70')} style={{ width: `${Math.max(step.sessions / max * 100, step.sessions ? 1 : 0)}%` }} /></div>
           </div>
@@ -136,11 +137,11 @@ function FunnelEditor({ open, onOpenChange, applications, onSave, saving }: {
             <Input type="number" min={1} max={10080} value={windowMinutes} onChange={(event) => setWindowMinutes(event.target.value)} className="w-32" />
           </FormField>
           <div>
-            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">Steps</div>
+            <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted">Steps</div>
             <ol className="space-y-1.5">
               {steps.map((step, index) => (
                 <li key={index} className="flex items-center gap-2">
-                  <span className="w-5 text-right font-mono text-[11px] text-muted">{index + 1}</span>
+                  <span className="w-5 text-right font-mono text-xs text-muted">{index + 1}</span>
                   <Select value={step.type} onValueChange={(value) => update(index, { type: value as 'view' | 'action' })}><SelectTrigger className="w-[110px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="view">Route</SelectItem><SelectItem value="action">Action</SelectItem></SelectContent></Select>
                   <Input value={step.match} onChange={(event) => update(index, { match: event.target.value })} placeholder={step.type === 'view' ? '/checkout' : 'Place order'} className="font-mono text-xs" />
                   <Input value={step.label ?? ''} onChange={(event) => update(index, { label: event.target.value })} placeholder="Label (optional)" className="w-36 text-xs" />
@@ -196,9 +197,9 @@ export function RumJourneysPanel({ data, loading, error, onRetry, start, onStart
         <RumSectionHeader id="rum-journey-map" title="Journey map" description={data ? `${fmtCount(data.sessions)} sessions · ${data.avg_path_length.toFixed(1)} routes per session on average · ${fmtCount(data.bounced_sessions)} left after one route. Each column is the next step from the chosen start.` : 'Where sessions go, step by step, from a chosen start route.'}
           action={(
             <div className="flex items-center gap-1.5">
-              <span className="text-[10px] uppercase tracking-wider text-muted">Start at</span>
+              <span className="text-2xs uppercase tracking-wider text-muted">Start at</span>
               <Select value={startRoute} onValueChange={onStart}>
-                <SelectTrigger className="h-7 w-[220px] font-mono text-[11px]" aria-label="Start route"><SelectValue placeholder="Top entry route" /></SelectTrigger>
+                <SelectTrigger className="h-7 w-[220px] font-mono text-xs" aria-label="Start route"><SelectValue placeholder="Top entry route" /></SelectTrigger>
                 <SelectContent>{startOptions.map((route) => <SelectItem key={route} value={route}>{route || '/'}</SelectItem>)}</SelectContent>
               </Select>
             </div>
@@ -214,7 +215,7 @@ export function RumJourneysPanel({ data, loading, error, onRetry, start, onStart
         <RouteList title="Entry routes" hint="First route of each session; the bounce figure is sessions that saw nothing else" rows={(data?.entries ?? []).map((row) => ({ route: row.route, sessions: row.sessions, extra: row.bounced ? `· ${fmtCount(row.bounced)} bounced` : undefined }))} onFilter={(route) => onFilter('view_name', route)} />
         <RouteList title="Exit routes" hint="Last route before the session ended" rows={data?.exits ?? []} onFilter={(route) => onFilter('view_name', route)} />
         <Card className="h-full">
-          <CardHeader className="border-b border-border px-3 py-2"><CardTitle className="text-[13px]">Top transitions</CardTitle><p className="text-[10px] text-muted">Most travelled route-to-route moves</p></CardHeader>
+          <CardHeader className="border-b border-border px-3 py-2"><CardTitle className="text-sm">Top transitions</CardTitle><p className="text-2xs text-muted">Most travelled route-to-route moves</p></CardHeader>
           <CardContent className="overflow-x-auto p-0">
             {data?.transitions.length ? (
               <Table>
@@ -222,22 +223,22 @@ export function RumJourneysPanel({ data, loading, error, onRetry, start, onStart
                 <TBody className={EXPLORER_ROWS}>
                   {data.transitions.slice(0, 10).map((row) => (
                     <Tr key={`${row.from}>${row.to}`}>
-                      <Td className="max-w-[120px]"><button type="button" className="block max-w-full truncate font-mono text-[11px] text-text2 hover:text-text hover:underline" onClick={() => onStart(row.from)} title="Start the journey map here">{row.from || '/'}</button></Td>
+                      <Td className="max-w-[120px]"><button type="button" className="block max-w-full truncate font-mono text-xs text-text2 hover:text-text hover:underline" onClick={() => onStart(row.from)} title="Start the journey map here">{row.from || '/'}</button></Td>
                       <Td className="w-6 text-muted"><ArrowRight className="h-3 w-3" /></Td>
-                      <Td className="max-w-[120px]"><span className="block truncate font-mono text-[11px] text-text2" title={row.to}>{row.to || '/'}</span></Td>
+                      <Td className="max-w-[120px]"><span className="block truncate font-mono text-xs text-text2" title={row.to}>{row.to || '/'}</span></Td>
                       <Td className="whitespace-nowrap text-right font-mono text-xs tabular-nums">{fmtCount(row.sessions)}</Td>
                     </Tr>
                   ))}
                 </TBody>
               </Table>
-            ) : <div className="py-6 text-center text-[11px] text-muted">No multi-route sessions yet.</div>}
+            ) : <div className="py-6 text-center text-xs text-muted">No multi-route sessions yet.</div>}
           </CardContent>
         </Card>
       </div>
 
       <section aria-labelledby="rum-funnels">
         <RumSectionHeader id="rum-funnels" title="Funnels" description="Sessions that reach each step in order within the funnel's window. Results use the current time range and segment filters."
-          action={<Button size="sm" variant="outline" className="h-7 px-2 text-[11px]" onClick={() => setEditorOpen(true)}><Plus className="h-3.5 w-3.5" /> New funnel</Button>} />
+          action={<Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => setEditorOpen(true)}><Plus className="h-3.5 w-3.5" /> New funnel</Button>} />
         {!funnelOptions.length ? (
           <Card><RumEmptyState icon={Filter} title="No funnels yet" description="Define the routes and actions a user must pass through, for example Home → Product → Cart → Checkout, and see where sessions drop off." action={<Button size="sm" onClick={() => setEditorOpen(true)}><Plus className="h-3.5 w-3.5" /> Create the first funnel</Button>} /></Card>
         ) : (
@@ -248,7 +249,7 @@ export function RumJourneysPanel({ data, loading, error, onRetry, start, onStart
                   <div key={funnel.id} className={cn('flex items-center justify-between gap-1 rounded-md px-2 py-1.5', funnel.id === selectedFunnel ? 'bg-primary/10' : 'hover:bg-surface2')}>
                     <button type="button" className="min-w-0 flex-1 text-left" onClick={() => onSelectFunnel(funnel.id)}>
                       <div className={cn('truncate text-xs font-medium', funnel.id === selectedFunnel ? 'text-primary' : 'text-text')}>{funnel.name}</div>
-                      <div className="truncate text-[10px] text-muted">{funnel.application_id} · {funnel.steps.length} steps · {Math.round(funnel.window_seconds / 60)} min</div>
+                      <div className="truncate text-2xs text-muted">{funnel.application_id} · {funnel.steps.length} steps · {Math.round(funnel.window_seconds / 60)} min</div>
                     </button>
                     <Button variant="ghost" size="sm" className="h-6 w-6 shrink-0 p-0 text-muted hover:text-danger" aria-label={`Delete funnel ${funnel.name}`} onClick={() => onDeleteFunnel(funnel.id)}><Trash2 className="h-3 w-3" /></Button>
                   </div>

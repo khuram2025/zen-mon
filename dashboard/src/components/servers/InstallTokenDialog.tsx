@@ -166,7 +166,7 @@ export function InstallTokenDialog({
               <div key={String(title)} className="rounded-lg border border-border bg-surface2/30 p-3">
                 <Icon className="mb-2 h-4 w-4 text-primary" />
                 <div className="text-xs font-semibold text-text">{String(title)}</div>
-                <div className="mt-1 text-[11px] leading-relaxed text-muted">{String(detail)}</div>
+                <div className="mt-1 text-xs leading-relaxed text-muted">{String(detail)}</div>
               </div>
             ))}
           </div>
@@ -211,7 +211,7 @@ export function InstallTokenDialog({
           <div className="space-y-1.5">
             <Label htmlFor="agent-install-command">Controller-only deployment command</Label>
             <div className="flex items-start gap-2">
-              <code id="agent-install-command" className="min-w-0 flex-1 select-all break-all rounded-md border border-border bg-bg px-3 py-2 font-mono text-[11px] leading-relaxed text-text">
+              <code id="agent-install-command" className="min-w-0 flex-1 select-all break-all rounded-md border border-border bg-bg px-3 py-2 font-mono text-xs leading-relaxed text-text">
                 {command}
               </code>
               <Button size="sm" variant="outline" onClick={copyCommand}>
@@ -220,7 +220,7 @@ export function InstallTokenDialog({
               </Button>
             </div>
             {platform === 'windows' && (
-              <div className="flex items-start gap-2 rounded-md border border-info/25 bg-info/5 px-3 py-2 text-[11px] leading-relaxed text-muted">
+              <div className="flex items-start gap-2 rounded-md border border-info/25 bg-info/5 px-3 py-2 text-xs leading-relaxed text-muted">
                 <Terminal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
                 {windowsShell === 'powershell' ? (
                   <span>Open <strong className="text-text">PowerShell as Administrator</strong> and paste this command directly. Do not wrap it inside another <code>powershell -Command</code>.</span>
@@ -302,7 +302,7 @@ function MassDeployment({
       {open && (
         <div className="space-y-2 border-t border-border px-3 py-2">
           {commands.map((c) => <CopyableCommand key={c.label} label={c.label} text={c.text} />)}
-          <p className="text-[11px] leading-relaxed text-muted">
+          <p className="text-xs leading-relaxed text-muted">
             These are the commands for deployment tools, which wait for Setup. At a Command Prompt, prefix
             them with <code>start "" /wait</code> (PowerShell: <code>Start-Process -Wait</code>), otherwise the
             prompt returns at once while Setup runs in the background. Run as SYSTEM or an administrator. Exit codes: <strong className="text-text">0</strong> installed,{' '}
@@ -332,8 +332,8 @@ function CopyableCommand({ label, text }: { label: string; text: string }) {
   }
   return (
     <div className="flex items-start gap-2">
-      <span className="mt-2 w-16 shrink-0 text-[11px] font-medium text-muted">{label}</span>
-      <code className="min-w-0 flex-1 select-all break-all rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[11px] leading-relaxed text-text">
+      <span className="mt-2 w-16 shrink-0 text-xs font-medium text-muted">{label}</span>
+      <code className="min-w-0 flex-1 select-all break-all rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-xs leading-relaxed text-text">
         {text}
       </code>
       <Button size="sm" variant="ghost" onClick={copy} aria-label={`Copy ${label} command`}>

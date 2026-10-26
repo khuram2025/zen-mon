@@ -37,13 +37,14 @@ import {
   type TrendMode,
 } from './model'
 import { DIRECTION_COLORS, DirectionBadge, Headroom, StateBadge } from './shared'
+import { chartFont } from '@/lib/chartTheme'
 
 const TREND_RANGES = [30, 90, 180, 365] as const
 
 function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <div title={title}>
-      <dt className="text-[11px] text-text2">{label}</dt>
+      <dt className="text-xs text-text2">{label}</dt>
       <dd className="text-sm font-medium tabular-nums text-text">{value}</dd>
     </div>
   )
@@ -78,7 +79,7 @@ function ForecastCard({ fc, d, levels }: { fc: ForecastResult; d: Direction; lev
         {DIRECTION_LABELS[d]}
       </h4>
       <p className="mt-1 text-base font-semibold text-text">{forecastHeadline(fc)}</p>
-      {fc.reason && <p className="text-[11px] text-text2">{fc.reason}</p>}
+      {fc.reason && <p className="text-xs text-text2">{fc.reason}</p>}
       {fc.slope_bps_per_day != null && (
         <dl className="mt-2 grid grid-cols-3 gap-2">
           <Stat label={`To ${formatPercent(levels.warn)}`} value={ok ? daysText(fc.days_to_warn) : '—'} />
@@ -111,17 +112,17 @@ function TrendChart({ data, statistic, levels, mode }: { data: TrendData; statis
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={m.points} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
           <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.5} vertical={false} />
-          <XAxis dataKey="day" tick={{ fontSize: 11, fill: 'rgb(var(--text2))' }} tickLine={false} axisLine={false} minTickGap={24}
+          <XAxis dataKey="day" tick={{ fontSize: chartFont(11), fill: 'rgb(var(--text2))' }} tickLine={false} axisLine={false} minTickGap={24}
             tickFormatter={(v: string) => v.slice(5)} />
-          <YAxis tick={{ fontSize: 11, fill: 'rgb(var(--text2))' }} tickLine={false} axisLine={false} width={48}
+          <YAxis tick={{ fontSize: chartFont(11), fill: 'rgb(var(--text2))' }} tickLine={false} axisLine={false} width={48}
             tickFormatter={(v: number) => (pct ? `${v}%` : formatBpsAxis(v))} domain={[0, Math.ceil(m.yMax * 1.08) || 1]}
-            label={{ value: pct ? '% of speed' : 'bit/s', angle: -90, position: 'insideLeft', fontSize: 11, fill: 'rgb(var(--text2))' }} />
+            label={{ value: pct ? '% of speed' : 'bit/s', angle: -90, position: 'insideLeft', fontSize: chartFont(11), fill: 'rgb(var(--text2))' }} />
           <Tooltip
-            contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 6, fontSize: 12, color: 'rgb(var(--text))' }}
+            contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 6, fontSize: chartFont(12), color: 'rgb(var(--text))' }}
             formatter={(v, name) => [typeof v === 'number' ? fmt(v) : pct ? 'unknown' : 'no percentile', String(name)]}
           />
-          <Legend wrapperStyle={{ fontSize: 12 }} />
-          {pct && <ReferenceLine y={100} stroke="rgb(var(--text2))" strokeDasharray="6 4" label={{ value: 'Speed', position: 'insideTopRight', fontSize: 11, fill: 'rgb(var(--text2))' }} />}
+          <Legend wrapperStyle={{ fontSize: chartFont(12) }} />
+          {pct && <ReferenceLine y={100} stroke="rgb(var(--text2))" strokeDasharray="6 4" label={{ value: 'Speed', position: 'insideTopRight', fontSize: chartFont(11), fill: 'rgb(var(--text2))' }} />}
           {pct && <ReferenceLine y={levels.crit} stroke="rgb(var(--danger))" strokeOpacity={0.6} strokeDasharray="2 4" />}
           {pct && <ReferenceLine y={levels.warn} stroke="rgb(var(--warning))" strokeOpacity={0.6} strokeDasharray="2 4" />}
           {!pct && m.anySpeed && m.symmetric && (
@@ -239,11 +240,11 @@ export function InterfaceDialog({
         <section aria-label="This period" className="space-y-2">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h3 className="text-sm font-semibold text-text">This period</h3>
-            <span className="text-[11px] text-text2">{samplesText(row)}</span>
+            <span className="text-xs text-text2">{samplesText(row)}</span>
           </div>
           <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface2/40 p-3">
             <div>
-              <div className="text-[11px] text-text2">Utilization ({statisticLabel(h.statistic)}, higher direction)</div>
+              <div className="text-xs text-text2">Utilization ({statisticLabel(h.statistic)}, higher direction)</div>
               <div className="flex items-center gap-2">
                 <span className="text-2xl font-semibold tabular-nums text-text">{h.utilization_pct != null ? formatPercent(h.utilization_pct) : 'Unknown'}</span>
                 <DirectionBadge direction={h.direction} />
@@ -252,7 +253,7 @@ export function InterfaceDialog({
             <div className="min-w-[12rem] flex-1"><Headroom headline={h} /></div>
             {compare && (
               <div>
-                <div className="text-[11px] text-text2">vs previous period</div>
+                <div className="text-xs text-text2">vs previous period</div>
                 <div className="text-sm font-medium tabular-nums text-text">{changeText(row.previous?.change_pct)}</div>
               </div>
             )}
@@ -265,7 +266,7 @@ export function InterfaceDialog({
             <DirectionPanel row={row} d="in" statistic={statistic} />
             <DirectionPanel row={row} d="out" statistic={statistic} />
           </div>
-          <p className="text-[11px] text-text2">
+          <p className="text-xs text-text2">
             Combined throughput (in + out, not a utilization): {statistic} {formatBps(row.combined.p_bps)}, peak {formatBps(row.combined.max_bps)}.
             {snmpSentence(row.snmp) && ` ${snmpSentence(row.snmp)}`}
             {row.counters?.status === 'ok' && ` sFlow counters: in ${formatBps(row.counters.in_p_bps ?? row.counters.in_max_bps)}, out ${formatBps(row.counters.out_p_bps ?? row.counters.out_max_bps)}.`}
@@ -305,7 +306,7 @@ export function InterfaceDialog({
                 <div className="space-y-3">
                   <DataQualityBar meta={r.meta} coverage={null} />
                   <TrendChart data={t} statistic={statistic} levels={levels} mode={mode} />
-                  <p className="text-[11px] text-text2">
+                  <p className="text-xs text-text2">
                     Complete local days ({t.window.tz}) only; days without enough samples for a percentile are gaps.{' '}
                     {mode === 'pct'
                       ? 'Each direction is divided by its own speed in effect that day; dashed: 100%, dotted: warning and critical levels.'

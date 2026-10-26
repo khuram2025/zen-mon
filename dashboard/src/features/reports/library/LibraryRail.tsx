@@ -51,7 +51,7 @@ function RailButton({ icon, label, count, active, onClick, dim }: {
       onClick={onClick}
       aria-current={active ? 'true' : undefined}
       className={cn(
-        'group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors',
+        'group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
         active ? 'bg-primary/10 font-semibold text-primary' : dim ? 'text-muted hover:bg-surface2 hover:text-text' : 'text-text2 hover:bg-surface2 hover:text-text',
       )}
@@ -59,7 +59,7 @@ function RailButton({ icon, label, count, active, onClick, dim }: {
       {icon}
       <span className="min-w-0 flex-1 leading-snug">{label}</span>
       {count !== undefined && (
-        <span className={cn('shrink-0 text-[11px] tabular-nums', active ? 'text-primary' : 'text-muted')}>{count}</span>
+        <span className={cn('shrink-0 text-xs tabular-nums', active ? 'text-primary' : 'text-muted')}>{count}</span>
       )}
     </button>
   )
@@ -113,7 +113,7 @@ export function LibraryRail({ selection, viewCounts, categories, onSelect, loadi
     <nav aria-label="Report library" className="hidden w-60 shrink-0 lg:block">
       <div ref={inner} className="sticky top-[60px] max-h-[calc(100vh-76px)] space-y-5 overflow-y-auto overscroll-contain pb-4 pr-1 will-change-transform">
         <div>
-          <h2 className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">Views</h2>
+          <h2 className="px-2 pb-1 text-xs font-semibold uppercase tracking-wider text-muted">Views</h2>
           <ul className="space-y-px" role="list">
             {LIBRARY_VIEWS.map((v) => {
               const Icon = VIEW_ICONS[v.id]
@@ -134,7 +134,7 @@ export function LibraryRail({ selection, viewCounts, categories, onSelect, loadi
           </ul>
         </div>
         <div>
-          <h2 className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">Categories</h2>
+          <h2 className="px-2 pb-1 text-xs font-semibold uppercase tracking-wider text-muted">Categories</h2>
           {loading ? (
             <div className="space-y-1.5 px-2 pt-1" aria-hidden>
               {Array.from({ length: 8 }).map((_, i) => <div key={i} className="h-5 animate-shimmer rounded" />)}
@@ -190,7 +190,7 @@ export function RailSelect({ selection, viewCounts, categories, onSelect }: Rail
       </SelectTrigger>
       <SelectContent className="max-h-[60vh] overflow-y-auto">
         <SelectGroup>
-          <SelectPrimitive.Label className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-muted">Views</SelectPrimitive.Label>
+          <SelectPrimitive.Label className="px-2 py-1 text-xs font-semibold uppercase tracking-wider text-muted">Views</SelectPrimitive.Label>
           {LIBRARY_VIEWS.map((v) => (
             <SelectItem key={v.id} value={`view:${v.id}`}>
               {v.label}
@@ -200,7 +200,7 @@ export function RailSelect({ selection, viewCounts, categories, onSelect }: Rail
         </SelectGroup>
         <SelectPrimitive.Separator className="-mx-1 my-1 h-px bg-border" />
         <SelectGroup>
-          <SelectPrimitive.Label className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-muted">Categories</SelectPrimitive.Label>
+          <SelectPrimitive.Label className="px-2 py-1 text-xs font-semibold uppercase tracking-wider text-muted">Categories</SelectPrimitive.Label>
           {categories.map((c) => (
             <SelectItem key={c.id} value={`cat:${c.id}`}>
               {c.title} ({c.count})

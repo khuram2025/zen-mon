@@ -12,6 +12,7 @@ import { ApmRangePicker, rangePhrase, useApmRange } from '@/components/apm/ApmRa
 import { ApmKpi, ErrorRateCell, LatencyCell, RankBar, fmtCount } from '@/components/apm/viz'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import type { ServiceMap } from '@/types/apm'
+import { chartFont, chartTheme } from '@/lib/chartTheme'
 
 function Legend() {
   const items: [string, string][] = [
@@ -21,7 +22,7 @@ function Legend() {
     [HEALTH_COLOR.no_data, 'No inbound RED'],
   ]
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-muted">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted">
       {items.map(([c, label]) => (
         <span key={label} className="inline-flex items-center gap-1.5">
           <span className="h-2 w-2 rounded-full" style={{ backgroundColor: c }} />
@@ -55,7 +56,7 @@ export function ServiceMapPage() {
       tooltip: {
         backgroundColor: '#0d121b',
         borderColor: '#1e293b',
-        textStyle: { color: '#e5e7eb', fontSize: 12 },
+        textStyle: { color: '#e5e7eb', fontSize: chartFont(12) },
         formatter: (p: any) => {
           if (p.dataType === 'edge') {
             return `<b>${p.data.source} → ${p.data.target}</b><br/>`
@@ -76,7 +77,7 @@ export function ServiceMapPage() {
         roam: true,
         draggable: true,
         force: { repulsion: 340, edgeLength: 160, gravity: 0.08 },
-        label: { show: true, color: '#e5e7eb', fontSize: 11, position: 'bottom' },
+        label: { show: true, color: '#e5e7eb', fontSize: chartFont(11), position: 'bottom' },
         edgeSymbol: ['none', 'arrow'],
         edgeSymbolSize: 8,
         emphasis: { focus: 'adjacency', lineStyle: { opacity: 1 } },
@@ -156,7 +157,7 @@ export function ServiceMapPage() {
               </span>
             </div>
           ) : (
-            <ReactECharts
+            <ReactECharts theme={chartTheme()}
               option={option}
               style={{ height: 560 }}
               onEvents={{
@@ -171,7 +172,7 @@ export function ServiceMapPage() {
 
       {edgeCount > 0 && (
         <Card className="overflow-hidden">
-          <div className="border-b border-border px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
+          <div className="border-b border-border px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
             Dependency deep dive
           </div>
           <Table>

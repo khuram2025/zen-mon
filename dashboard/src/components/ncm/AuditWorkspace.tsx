@@ -63,7 +63,7 @@ function MetadataChips({ metadata, resourceId }: { metadata: unknown; resourceId
         const full = `${k}=${v}`
         return (
           <span key={k} title={full.length > CHIP_MAX ? clip(full, TITLE_MAX) : undefined}
-            className="inline-block max-w-full truncate rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-[11px]">
+            className="inline-block max-w-full truncate rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-xs">
             <span className="text-muted">{k}=</span>{clip(v, CHIP_MAX - k.length)}
           </span>
         )

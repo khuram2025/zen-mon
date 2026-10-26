@@ -128,14 +128,14 @@ export function FilterBuilder({ draft, onChange, errors, showErrors, advancedOpe
       >
         {advancedOpen ? <ChevronDown className="h-3.5 w-3.5" aria-hidden /> : <ChevronRight className="h-3.5 w-3.5" aria-hidden />}
         All filters
-        {advancedCount > 0 && <span className="rounded-full bg-primary/15 px-1.5 text-[10px] font-semibold text-text">{advancedCount} set</span>}
-        {advancedErrors > 0 && <span className="rounded-full bg-danger/15 px-1.5 text-[10px] font-semibold text-danger-fg">{advancedErrors} to fix</span>}
+        {advancedCount > 0 && <span className="rounded-full bg-primary/15 px-1.5 text-2xs font-semibold text-text">{advancedCount} set</span>}
+        {advancedErrors > 0 && <span className="rounded-full bg-danger/15 px-1.5 text-2xs font-semibold text-danger-fg">{advancedErrors} to fix</span>}
       </button>
       {advancedOpen && (
         <div id={panelId} className="space-y-4 rounded-md border border-border bg-surface2/30 p-3">
           {GROUPS.map((g) => (
             <fieldset key={g.title} className="space-y-2">
-              <legend className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-text2">{g.title}</legend>
+              <legend className="mb-1 text-xs font-semibold uppercase tracking-wide text-text2">{g.title}</legend>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 {g.fields.map((f) => (
                   <Field key={f.key} spec={f} uid={uid} value={draft[f.key] ?? ''} onChange={onChange} error={showErrors ? errors[f.key] : undefined} tz={tz} />
@@ -143,7 +143,7 @@ export function FilterBuilder({ draft, onChange, errors, showErrors, advancedOpe
               </div>
             </fieldset>
           ))}
-          <p className="text-[11px] text-text2">
+          <p className="text-xs text-text2">
             All conditions must match (AND). Exclusions remove matching records. Hour and day are evaluated in {tz}.
           </p>
         </div>
@@ -219,18 +219,18 @@ function Field({
         spellCheck={false}
         aria-invalid={!!error}
         aria-describedby={describedBy}
-        className={cn(base, 'font-mono text-[13px]')}
+        className={cn(base, 'font-mono text-sm')}
       />
     )
   }
   return (
     <div className={cn('min-w-0', spec.wide && 'sm:col-span-2')}>
-      <label htmlFor={id} className="text-[11px] font-medium text-text2">{label}</label>
+      <label htmlFor={id} className="text-xs font-medium text-text2">{label}</label>
       {control}
       {error ? (
-        <p id={errId} className="mt-1 text-[11px] font-medium text-danger-fg">{error}</p>
+        <p id={errId} className="mt-1 text-xs font-medium text-danger-fg">{error}</p>
       ) : hint ? (
-        <p id={hintId} className="mt-1 text-[11px] text-text2">{hint}</p>
+        <p id={hintId} className="mt-1 text-xs text-text2">{hint}</p>
       ) : null}
     </div>
   )

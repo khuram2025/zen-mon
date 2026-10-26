@@ -52,14 +52,14 @@ export function ShareMenu({ exactUrl, exactLabel, latestUrl, latestLabel }: Shar
           <CalendarRange className="text-primary" aria-hidden />
           <span className="min-w-0">
             <span className="block font-medium">This exact period</span>
-            <span className="block truncate text-[11px] text-muted">{exactLabel}</span>
+            <span className="block truncate text-xs text-muted">{exactLabel}</span>
           </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void copy(latestUrl, `Always opens ${latestLabel?.toLowerCase() ?? 'the latest period'}`)}>
           <History className="text-primary" aria-hidden />
           <span className="min-w-0">
             <span className="block font-medium">Always the latest</span>
-            <span className="block truncate text-[11px] text-muted">{latestLabel} when opened</span>
+            <span className="block truncate text-xs text-muted">{latestLabel} when opened</span>
           </span>
         </DropdownMenuItem>
       </DropdownMenuContent>

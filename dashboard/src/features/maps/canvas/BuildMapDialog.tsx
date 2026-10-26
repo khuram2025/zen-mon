@@ -144,13 +144,13 @@ export function BuildMapDialog({ mapId, onClose, onBuilt, devices }: BuildMapDia
                 {Object.entries(result.tiers).map(([tier, n]) => (
                   <div key={tier} className="rounded-md border border-border bg-surface2/40 px-2 py-1.5 text-center">
                     <div className="font-mono text-sm font-bold text-text">{n}</div>
-                    <div className="text-[10px] text-muted">{tierLabel(tier)}</div>
+                    <div className="text-2xs text-muted">{tierLabel(tier)}</div>
                   </div>
                 ))}
               </div>
             )}
             {result.version_id && (
-              <p className="text-[11px] text-muted">The previous layout was saved as a version — use Versions to go back.</p>
+              <p className="text-xs text-muted">The previous layout was saved as a version — use Versions to go back.</p>
             )}
             <DialogFooter>
               <Button size="sm" onClick={dismiss}>Done</Button>
@@ -207,8 +207,8 @@ export function BuildMapDialog({ mapId, onClose, onBuilt, devices }: BuildMapDia
                   autoFocus
                 />
                 {cidrTouched && cidrErr
-                  ? <span className="text-[11px] text-danger">{cidrErr}</span>
-                  : <span className="text-[11px] text-muted">Devices whose management IP is in this subnet.</span>}
+                  ? <span className="text-xs text-danger">{cidrErr}</span>
+                  : <span className="text-xs text-muted">Devices whose management IP is in this subnet.</span>}
               </label>
             )}
 
@@ -239,7 +239,7 @@ export function BuildMapDialog({ mapId, onClose, onBuilt, devices }: BuildMapDia
                       )}
                     >
                       <span className="truncate font-medium">{d.hostname}</span>
-                      <span className="shrink-0 font-mono text-[10px] text-muted">{d.ip_address}</span>
+                      <span className="shrink-0 font-mono text-2xs text-muted">{d.ip_address}</span>
                     </button>
                   ))}
                 </div>
@@ -265,7 +265,7 @@ export function BuildMapDialog({ mapId, onClose, onBuilt, devices }: BuildMapDia
                 Replace existing nodes
               </label>
               {replace && (
-                <div className="flex items-start gap-1.5 rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
+                <div className="flex items-start gap-1.5 rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5 text-xs text-warning">
                   <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" />
                   Nodes already on this map (and their cables) are removed before building. A snapshot is taken first,
                   so you can restore it from Versions.
@@ -274,7 +274,7 @@ export function BuildMapDialog({ mapId, onClose, onBuilt, devices }: BuildMapDia
             </div>
 
             {build.isError && (
-              <div className="rounded-md border border-danger/40 bg-danger/10 px-2 py-1.5 text-[11px] text-danger">
+              <div className="rounded-md border border-danger/40 bg-danger/10 px-2 py-1.5 text-xs text-danger">
                 {apiErrorMessage(build.error, 'Build failed')}
               </div>
             )}

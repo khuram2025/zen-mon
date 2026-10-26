@@ -44,7 +44,7 @@ function CapacityText({ row, perms, actions }: { row: CapacityRow; perms?: Capac
     return (
       <div className="flex flex-col items-start gap-1">
         <span className="text-sm text-text2">Unknown</span>
-        <span className="text-[11px] leading-snug text-text2">{RESOLUTION_SHORT[row.resolution]}</span>
+        <span className="text-xs leading-snug text-text2">{RESOLUTION_SHORT[row.resolution]}</span>
         {act && actions && act.kind !== 'none' && (
           <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => actions.onResolve(row)} title={act.hint}
             aria-label={`${act.label} for ${row.display_name}`}>
@@ -68,11 +68,11 @@ function CapacityText({ row, perms, actions }: { row: CapacityRow; perms?: Capac
           {speedText(in_bps, source_in)} <span className="text-text2">/</span> {speedText(out_bps, source_out)}
         </span>
       )}
-      <span className="text-[11px] text-text2" title={same ? SOURCE_LABELS[source_in] : `in: ${SOURCE_LABELS[source_in]}, out: ${SOURCE_LABELS[source_out]}`}>
+      <span className="text-xs text-text2" title={same ? SOURCE_LABELS[source_in] : `in: ${SOURCE_LABELS[source_in]}, out: ${SOURCE_LABELS[source_out]}`}>
         {same ? SOURCE_SHORT[source_in] : source_in === source_out ? `in / out ${SOURCE_SHORT[source_in]}` : `in ${SOURCE_SHORT[source_in]} · out ${SOURCE_SHORT[source_out]}`}
       </span>
       {shadow && (
-        <span className="text-[11px] leading-snug text-warning-fg" title={shadow}>
+        <span className="text-xs leading-snug text-warning-fg" title={shadow}>
           Override not in use
         </span>
       )}
@@ -100,15 +100,15 @@ function InterfaceName({ row, onDetail }: { row: CapacityRow; onDetail: () => vo
         </button>
         <RoleBadge role={row.role} />
       </div>
-      {row.if_alias && row.if_alias !== row.display_name && <div className="text-[11px] text-text2">{row.if_alias}</div>}
-      <div className="text-[11px] text-text2">
+      {row.if_alias && row.if_alias !== row.display_name && <div className="text-xs text-text2">{row.if_alias}</div>}
+      <div className="text-xs text-text2">
         {row.device_id ? (
           <Link to={`/devices/${row.device_id}`} className="hover:underline">{row.device_hostname ?? 'device'}</Link>
         ) : (
           <span>No device</span>
         )}
       </div>
-      <div className="font-mono text-[11px] text-text2">
+      <div className="font-mono text-xs text-text2">
         <span className="whitespace-nowrap">{ipDisplay(row.exporter)}</span> <span className="whitespace-nowrap">· ifIndex {row.ifindex}</span>
       </div>
     </div>
@@ -153,8 +153,8 @@ function UtilizationCell({ row, size = 'lg' }: { row: CapacityRow; size?: 'lg' |
         {h.utilization_pct != null && <DirectionBadge direction={h.direction} />}
       </div>
       <StateBadge state={h.state} />
-      {note && <span className="text-[11px] leading-snug text-text2">{note}</span>}
-      {cc && <span className="text-[11px] text-text2" title={cc.title}>{cc.text}</span>}
+      {note && <span className="text-xs leading-snug text-text2">{note}</span>}
+      {cc && <span className="text-xs text-text2" title={cc.title}>{cc.text}</span>}
     </div>
   )
 }
@@ -218,7 +218,7 @@ export function CapacityTable({
                   <Td className={cn(cell, 'text-right')}>
                     <div className="flex flex-col items-end" title={samplesText(r)}>
                       <span className="whitespace-nowrap text-xs tabular-nums text-text">{smp.count}</span>
-                      <span className="whitespace-nowrap text-[11px] tabular-nums text-text2">{smp.coverage}</span>
+                      <span className="whitespace-nowrap text-xs tabular-nums text-text2">{smp.coverage}</span>
                     </div>
                   </Td>
                   <Td className={cn(cell, 'w-10 pl-0')}><ActionButtons row={r} perms={perms} actions={actions} /></Td>
@@ -279,7 +279,7 @@ export function CapacityTable({
                   ) : null
                 })()}
               </dl>
-              <p className="mt-2 text-[11px] text-text2">{samplesText(r)}</p>
+              <p className="mt-2 text-xs text-text2">{samplesText(r)}</p>
               <div className="mt-2"><ActionButtons row={r} perms={perms} actions={actions} compact /></div>
             </li>
           )

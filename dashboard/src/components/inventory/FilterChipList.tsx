@@ -40,7 +40,7 @@ export function FilterChipList({
             data-chip-remove=""
             onClick={(e) => onRemove?.(index, e)}
             aria-label={`Remove filter ${c.label}: ${c.text}`}
-            className={cn('inline-flex items-center gap-1 rounded-full border border-border bg-surface2 px-2 py-0.5 text-[11px] font-medium text-text2 outline-none hover:border-primary/50 hover:text-text focus-visible:ring-2 focus-visible:ring-primary', maxWidth)}
+            className={cn('inline-flex items-center gap-1 rounded-full border border-border bg-surface2 px-2 py-0.5 text-xs font-medium text-text2 outline-none hover:border-primary/50 hover:text-text focus-visible:ring-2 focus-visible:ring-primary', maxWidth)}
           >
             <span className="shrink-0 font-normal text-text2" data-chip-label="">{c.label}:</span>
             <span className="truncate text-text">{c.text}</span>

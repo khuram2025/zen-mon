@@ -262,7 +262,7 @@ export function TimeRangePicker({
   }
 
   const btn = (active: boolean) =>
-    `whitespace-nowrap rounded px-2 py-1 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+    `whitespace-nowrap rounded px-2 py-1 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
       active ? 'bg-primary text-on-primary' : 'text-text2 hover:text-text'
     }`
   const errId = `${uid}-err`
@@ -331,7 +331,7 @@ export function TimeRangePicker({
               onSubmit={(e) => { e.preventDefault(); apply() }}
             >
               <div>
-                <label htmlFor={`${uid}-from`} className="text-[10px] uppercase tracking-wider text-muted">From</label>
+                <label htmlFor={`${uid}-from`} className="text-2xs uppercase tracking-wider text-muted">From</label>
                 <input
                   id={`${uid}-from`}
                   type="datetime-local"
@@ -344,7 +344,7 @@ export function TimeRangePicker({
                 />
               </div>
               <div>
-                <label htmlFor={`${uid}-to`} className="text-[10px] uppercase tracking-wider text-muted">To</label>
+                <label htmlFor={`${uid}-to`} className="text-2xs uppercase tracking-wider text-muted">To</label>
                 <input
                   id={`${uid}-to`}
                   type="datetime-local"
@@ -356,19 +356,19 @@ export function TimeRangePicker({
                   className="mt-1 w-full rounded border border-border bg-transparent px-2 py-1 text-xs text-text aria-[invalid=true]:border-danger"
                 />
               </div>
-              <p id={tzId} className="text-[10px] text-muted">Times are in {timezoneLabel()}.</p>
-              {error && <p id={errId} role="alert" className="text-[11px] text-danger">{error.message}</p>}
+              <p id={tzId} className="text-2xs text-muted">Times are in {timezoneLabel()}.</p>
+              {error && <p id={errId} role="alert" className="text-xs text-danger">{error.message}</p>}
               <div className="flex justify-end gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => setOpen(false)}
-                  className="rounded px-2 py-1 text-[11px] text-muted hover:text-text"
+                  className="rounded px-2 py-1 text-xs text-muted hover:text-text"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="rounded bg-primary px-2 py-1 text-[11px] font-semibold text-on-primary"
+                  className="rounded bg-primary px-2 py-1 text-xs font-semibold text-on-primary"
                 >
                   Apply
                 </button>

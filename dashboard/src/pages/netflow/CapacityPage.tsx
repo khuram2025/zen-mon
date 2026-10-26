@@ -237,7 +237,7 @@ export function NetflowCapacityPage() {
                   <section aria-labelledby="cap-table" className="space-y-3 rounded-lg border border-border bg-surface p-4 shadow-card">
                     <div className="flex flex-col gap-1">
                       <h2 id="cap-table" className="text-sm font-semibold text-text">Interfaces by utilization risk</h2>
-                      <p className="text-[11px] text-text2">
+                      <p className="text-xs text-text2">
                         {d.method.statistic} per direction by nearest rank over {d.window.expected_slots.toLocaleString()} expected 5-minute samples
                         {d.window.business_hours ? ' in business hours' : ''}; warning at {formatPercent(levels.warn)}, critical at {formatPercent(levels.crit)}.
                         Not a billing figure: use the billing report for a complete period.

@@ -28,9 +28,9 @@ export function IpTrafficDetailPanel({ row, by, ctx }: { row: Talker; by: RankBy
       <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="break-all font-mono text-sm font-semibold text-text">{shown}</div>
-          {isUnspecifiedIp(ip) && <div className="text-[11px] italic text-text2" title={UNRECORDED_ADDRESS_HINT}>{UNRECORDED_ADDRESS_LABEL}: {UNRECORDED_ADDRESS_HINT}</div>}
-          {row.hostname && <div className="break-all text-[11px] text-text2">{row.hostname}</div>}
-          <div className="mt-0.5 text-[11px] text-text2">
+          {isUnspecifiedIp(ip) && <div className="text-xs italic text-text2" title={UNRECORDED_ADDRESS_HINT}>{UNRECORDED_ADDRESS_LABEL}: {UNRECORDED_ADDRESS_HINT}</div>}
+          {row.hostname && <div className="break-all text-xs text-text2">{row.hostname}</div>}
+          <div className="mt-0.5 text-xs text-text2">
             {rankPhrase(by)} · seen {formatDateTime(row.first_seen, tz, { zone: 'offset' })} → {formatDateTime(row.last_seen, tz, { zone: 'none' })}
           </div>
         </div>
@@ -59,7 +59,7 @@ export function IpTrafficDetailPanel({ row, by, ctx }: { row: Talker; by: RankBy
                 <li key={`${s.protocol}-${s.service_port ?? s.icmp_type_code ?? 'x'}`} className="flex flex-wrap items-center justify-between gap-x-2 text-xs">
                   <span className="min-w-0 break-words text-text">
                     {serviceText({ ...s, protocol_name: protocolName(s.protocol) ?? undefined })}
-                    <span className="ml-1 text-[11px] text-text2">{s.application}</span>
+                    <span className="ml-1 text-xs text-text2">{s.application}</span>
                   </span>
                   <DetailLink to={forensicsLink(ctx.filter, { talker: ip, ...s.drill }, ctx.window, ctx.meta)}>
                     <span className="tabular-nums">{formatCountExact(s.flows)} flows</span>

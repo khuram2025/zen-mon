@@ -44,11 +44,11 @@ export function TelemetryInsights({ insights, links, loading, onRetry, retrying,
             <Lightbulb className="h-4 w-4 text-text2" aria-hidden />
             Telemetry insights
           </CardTitle>
-          <p className="text-[11px] text-text2">Heuristics for this window and scope, not platform alerts</p>
+          <p className="text-xs text-text2">Heuristics for this window and scope, not platform alerts</p>
         </div>
         <span
           className={cn(
-            'inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold tabular-nums',
+            'inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold tabular-nums',
             badgeTone ? `${badgeTone.box} ${badgeTone.fg} border-l` : 'border-border bg-surface2 text-text2',
           )}
           aria-label={summary.aria}
@@ -78,7 +78,7 @@ export function TelemetryInsights({ insights, links, loading, onRetry, retrying,
         ) : (
           <>
             {(insights.unavailable ?? []).length > 0 && (
-              <div role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text">
+              <div role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-text">
                 <CircleHelp className="h-3.5 w-3.5 shrink-0 text-warning-fg" aria-hidden />
                 <span className="min-w-0">Not evaluated (query failed): {joinList(insights.unavailable ?? [])}.</span>
                 <RetryLine onRetry={onRetry} retrying={retrying} errorRef={errorRef} />
@@ -93,10 +93,10 @@ export function TelemetryInsights({ insights, links, loading, onRetry, retrying,
         )}
         {context.length > 0 && (
           <div>
-            <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-text2">Context</div>
+            <div className="mb-1 text-xs font-medium uppercase tracking-wide text-text2">Context</div>
             <ul className="space-y-1" aria-label="Context">
               {context.map((c) => (
-                <li key={c.id} className="text-[11px] leading-snug text-text2">
+                <li key={c.id} className="text-xs leading-snug text-text2">
                   <span className="font-medium text-text">{c.title}.</span> {c.body}
                   {c.link && (
                     <Link to={c.link.to} className="ml-1 font-medium text-primary hover:underline">
@@ -108,7 +108,7 @@ export function TelemetryInsights({ insights, links, loading, onRetry, retrying,
             </ul>
           </div>
         )}
-        <div className="mt-auto flex flex-wrap gap-x-3 gap-y-1 border-t border-border pt-2 text-[11px]">
+        <div className="mt-auto flex flex-wrap gap-x-3 gap-y-1 border-t border-border pt-2 text-xs">
           <Link to={links.anomalies} className="inline-flex items-center gap-1 font-medium text-primary hover:underline">
             Anomaly findings <ArrowRight className="h-3 w-3" aria-hidden />
           </Link>
@@ -129,7 +129,7 @@ function RetryLine({ onRetry, retrying, errorRef }: { onRetry?: () => unknown; r
   return (
     <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
       {errorRef && (
-        <span className="text-[11px] text-text2">
+        <span className="text-xs text-text2">
           Reference <span className="select-all font-mono">{errorRef}</span>
         </span>
       )}
@@ -138,7 +138,7 @@ function RetryLine({ onRetry, retrying, errorRef }: { onRetry?: () => unknown; r
           type="button"
           onClick={() => onRetry()}
           disabled={retrying}
-          className="inline-flex items-center gap-1 text-[11px] font-semibold text-text underline-offset-2 hover:underline disabled:opacity-60"
+          className="inline-flex items-center gap-1 text-xs font-semibold text-text underline-offset-2 hover:underline disabled:opacity-60"
         >
           <RefreshCw className={cn('h-3 w-3', retrying && 'animate-spin')} aria-hidden />
           {retrying ? 'Retrying…' : 'Retry'}
@@ -157,12 +157,12 @@ function InsightRow({ insight }: { insight: Insight }) {
         <Icon className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', t.fg)} aria-hidden />
         <div className="min-w-0 flex-1">
           <div className="text-xs font-semibold leading-snug text-text">
-            <span className={cn('mr-1 text-[10px] font-semibold uppercase tracking-wide', t.fg)}>{t.word}</span>
+            <span className={cn('mr-1 text-2xs font-semibold uppercase tracking-wide', t.fg)}>{t.word}</span>
             {insight.title}
           </div>
-          <div className="mt-0.5 break-words text-[11px] leading-snug text-text2">{insight.body}</div>
+          <div className="mt-0.5 break-words text-xs leading-snug text-text2">{insight.body}</div>
           {insight.link && (
-            <Link to={insight.link.to} className={cn('mt-1 inline-flex items-center gap-1 text-[11px]', TINT_LINK)}>
+            <Link to={insight.link.to} className={cn('mt-1 inline-flex items-center gap-1 text-xs', TINT_LINK)}>
               {insight.link.label} <ArrowRight className="h-3 w-3" aria-hidden />
             </Link>
           )}
@@ -182,18 +182,18 @@ function InsightGroup({ block }: { block: Extract<InsightBlock, { kind: 'group' 
         <Icon className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', t.fg)} aria-hidden />
         <div className="min-w-0 flex-1">
           <div className="text-xs font-semibold leading-snug text-text">
-            <span className={cn('mr-1 text-[10px] font-semibold uppercase tracking-wide', t.fg)}>{t.word}</span>
+            <span className={cn('mr-1 text-2xs font-semibold uppercase tracking-wide', t.fg)}>{t.word}</span>
             {block.title}
           </div>
           <ul className="mt-1 divide-y divide-border/60" aria-label={block.title}>
             {block.items.map((i) => (
               <li key={i.id} className="flex flex-wrap items-baseline justify-between gap-x-2 py-1">
-                <span className="min-w-0 text-[11px] leading-snug">
+                <span className="min-w-0 text-xs leading-snug">
                   <span className="break-all font-medium text-text">{i.short ?? i.title}</span>
                   <span className="block text-text2">{i.body}</span>
                 </span>
                 {i.link && (
-                  <Link to={i.link.to} className={cn('shrink-0 text-[11px]', TINT_LINK)} aria-label={`${i.link.label}: ${i.short ?? i.title}`}>
+                  <Link to={i.link.to} className={cn('shrink-0 text-xs', TINT_LINK)} aria-label={`${i.link.label}: ${i.short ?? i.title}`}>
                     {i.link.label}
                   </Link>
                 )}

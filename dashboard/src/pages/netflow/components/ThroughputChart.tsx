@@ -24,6 +24,7 @@ import {
   type ChartRow,
   type SeriesPoint,
 } from '../overviewModel'
+import { chartFont } from '@/lib/chartTheme'
 
 // Validated two-series palette (dataviz reference slots 1–2, checked against this app's light
 // #ffffff and dark #0d121b surfaces): throughput blue, previous period orange (dashed).
@@ -76,7 +77,7 @@ export function ThroughputChart({ points, prior, bucketS, fromMs, toMs, tz, prio
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-text2" aria-hidden>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text2" aria-hidden>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-0.5 w-4 rounded" style={{ background: colors.current }} />
           Throughput, bit/s ({formatInterval(bucketS)} buckets)
@@ -151,7 +152,7 @@ export function ThroughputChart({ points, prior, bucketS, fromMs, toMs, tz, prio
               domain={[fromMs, toMs]}
               ticks={ticks}
               tickFormatter={(v: number) => formatTick(v, span, tz)}
-              tick={{ fontSize: 11, fill: 'rgb(var(--text2))' }}
+              tick={{ fontSize: chartFont(11), fill: 'rgb(var(--text2))' }}
               axisLine={{ stroke: 'rgb(var(--border-strong))' }}
               tickLine={false}
               allowDataOverflow
@@ -160,7 +161,7 @@ export function ThroughputChart({ points, prior, bucketS, fromMs, toMs, tz, prio
               domain={yDomain}
               allowDataOverflow
               tickFormatter={(v: number) => formatBpsAxis(v)}
-              tick={{ fontSize: 11, fill: 'rgb(var(--text2))' }}
+              tick={{ fontSize: chartFont(11), fill: 'rgb(var(--text2))' }}
               axisLine={false}
               tickLine={false}
               width={44}
@@ -202,7 +203,7 @@ export function ThroughputChart({ points, prior, bucketS, fromMs, toMs, tz, prio
           </ComposedChart>
         </ResponsiveContainer>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-text2">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text2">
         <span>
           Peak <b className="font-semibold text-text">{formatBps(summary.peakBps)}</b>
           {summary.peakExcluded > 0 && (
@@ -257,7 +258,7 @@ function ChartTooltip({
   const r = payload[0].payload
   const note = STATE_NOTE[r.state]
   return (
-    <div className="min-w-[180px] rounded-md border border-border bg-surface px-2.5 py-2 text-[11px] shadow-elevated">
+    <div className="min-w-[180px] rounded-md border border-border bg-surface px-2.5 py-2 text-xs shadow-elevated">
       <div className="text-text2">
         {formatDateTime(r.x, tz, { zone: 'none' })} · {formatInterval(bucketS)}
       </div>
@@ -288,7 +289,7 @@ function ChartTooltip({
 function SeriesTable({ rows, tz, withPrior, priorLabel }: { rows: ChartRow[]; tz: string; withPrior: boolean; priorLabel: string }) {
   return (
     <div className="max-h-64 overflow-auto rounded-md border border-border">
-      <table className="w-full text-left text-[11px]">
+      <table className="w-full text-left text-xs">
         <caption className="sr-only">Throughput by bucket</caption>
         <thead className="sticky top-0 bg-surface2 text-text2">
           <tr>

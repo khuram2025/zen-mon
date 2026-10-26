@@ -231,35 +231,35 @@ export function ApplicationTeamDashboard() {
             ? <>{healthyCount}<span className="text-base font-medium text-muted">/{list.length}</span></>
             : '—'}
           sub={criticalCount > 0
-            ? <span className="text-[10.5px] font-semibold text-danger">{criticalCount} critical</span>
+            ? <span className="text-xs font-semibold text-danger">{criticalCount} critical</span>
             : degradedCount > 0
-              ? <span className="text-[10.5px] text-warning">{degradedCount} degraded</span>
-              : list.length ? <span className="text-[10.5px] text-success">all healthy</span>
-                : <span className="text-[10.5px] text-muted">no services reporting</span>}
+              ? <span className="text-xs text-warning">{degradedCount} degraded</span>
+              : list.length ? <span className="text-xs text-success">all healthy</span>
+                : <span className="text-xs text-muted">no services reporting</span>}
           foot={<ApmHealthBar healthy={healthyCount} degraded={degradedCount} critical={criticalCount} noData={list.length - healthyCount - degradedCount - criticalCount} />}
         />
         <KpiCard to="/apm" label="Throughput" icon={<Activity className="h-4 w-4" />} accent="info"
           value={fmtRps(totalRps)}
-          sub={<span className="text-[10.5px] text-muted">{fmtCount(totalReqs)} requests · {rangeKey}</span>}
-          foot={<div className="text-[10px] text-muted">sum across services</div>}
+          sub={<span className="text-xs text-muted">{fmtCount(totalReqs)} requests · {rangeKey}</span>}
+          foot={<div className="text-2xs text-muted">sum across services</div>}
         />
         <KpiCard to="/apm/services" label="Error Rate" icon={<Bug className="h-4 w-4" />}
           accent={fleetErrorRate >= 0.05 ? 'danger' : fleetErrorRate >= 0.01 ? 'warning' : 'success'}
           value={fmtPct(fleetErrorRate)}
-          sub={<span className="text-[10.5px] text-muted">request-weighted fleet rate</span>}
+          sub={<span className="text-xs text-muted">request-weighted fleet rate</span>}
           foot={<PctBar value={fleetErrorRate * 100} warnAt={1} dangerAt={5} />}
         />
         <KpiCard to="/apm/services" label="Worst p95" icon={<GaugeIcon className="h-4 w-4" />}
           accent={worstP95 >= 2000 ? 'danger' : worstP95 >= 800 ? 'warning' : 'success'}
           value={worstP95 ? fmtMs(worstP95) : '—'}
-          sub={<span className="text-[10.5px] text-muted">slowest service latency</span>}
-          foot={<div className="text-[10px] text-muted">what a user actually waits on</div>}
+          sub={<span className="text-xs text-muted">slowest service latency</span>}
+          foot={<div className="text-2xs text-muted">what a user actually waits on</div>}
         />
         <KpiCard to="/apm/slos" label="SLO Budgets" icon={<Target className="h-4 w-4" />}
           accent={slosAtRisk > 0 ? 'danger' : (slos?.items?.length ?? 0) > 0 ? 'success' : 'primary'}
           value={slos?.items?.length ? <>{slosAtRisk}<span className="text-base font-medium text-muted"> at risk</span></> : '—'}
-          sub={<span className="text-[10.5px] text-muted">{slos?.items?.length ?? 0} objectives tracked</span>}
-          foot={<div className="text-[10px] text-muted">&lt;25% error budget left = at risk</div>}
+          sub={<span className="text-xs text-muted">{slos?.items?.length ?? 0} objectives tracked</span>}
+          foot={<div className="text-2xs text-muted">&lt;25% error budget left = at risk</div>}
         />
         <KpiCard to="/apm/synthetics" label="Synthetics" icon={<Workflow className="h-4 w-4" />}
           accent={monitorsDown > 0 ? 'danger' : monitors.length ? 'success' : 'primary'}
@@ -267,23 +267,23 @@ export function ApplicationTeamDashboard() {
             ? <>{monitors.length - monitorsDown}<span className="text-base font-medium text-muted">/{monitors.length}</span></>
             : '—'}
           sub={monitorsDown > 0
-            ? <span className="text-[10.5px] font-semibold text-danger">{monitorsDown} journeys failing</span>
-            : <span className="text-[10.5px] text-success">journeys passing</span>}
-          foot={<div className="text-[10px] text-muted">scripted user flows</div>}
+            ? <span className="text-xs font-semibold text-danger">{monitorsDown} journeys failing</span>
+            : <span className="text-xs text-success">journeys passing</span>}
+          foot={<div className="text-2xs text-muted">scripted user flows</div>}
         />
         <KpiCard to="/apm/errors" label="Open Errors" icon={<AlertTriangle className="h-4 w-4" />}
           accent={openIssues.length > 0 ? 'warning' : 'success'}
           value={fmtCount(errors?.counts?.unresolved ?? openIssues.length)}
-          sub={<span className="text-[10.5px] text-muted">unresolved groups · 24h</span>}
-          foot={<div className="text-[10px] text-muted">{fmtCount(openIssues.reduce((s, i) => s + i.occurrences, 0))} occurrences</div>}
+          sub={<span className="text-xs text-muted">unresolved groups · 24h</span>}
+          foot={<div className="text-2xs text-muted">{fmtCount(openIssues.reduce((s, i) => s + i.occurrences, 0))} occurrences</div>}
         />
         <KpiCard to="/services" label="Uptime Checks" icon={<Shield className="h-4 w-4" />}
           accent={(checks?.down ?? 0) > 0 ? 'danger' : 'success'}
           value={checks ? <>{checks.up}<span className="text-base font-medium text-muted">/{checks.total}</span></> : '—'}
           sub={checks && checks.down > 0
-            ? <span className="text-[10.5px] font-semibold text-danger">{checks.down} down</span>
-            : <span className="text-[10.5px] text-success">all passing</span>}
-          foot={<div className="text-[10px] text-muted">HTTP · TCP · DNS probes</div>}
+            ? <span className="text-xs font-semibold text-danger">{checks.down} down</span>
+            : <span className="text-xs text-success">all passing</span>}
+          foot={<div className="text-2xs text-muted">HTTP · TCP · DNS probes</div>}
         />
       </div>
 
@@ -303,7 +303,7 @@ export function ApplicationTeamDashboard() {
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
-                <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-muted">
+                <tr className="border-b border-border text-left text-2xs uppercase tracking-wider text-muted">
                   <th className="px-4 py-2 font-semibold">Service</th>
                   <th className="px-2 py-2 font-semibold">Health</th>
                   <th className="px-2 py-2 text-right font-semibold">Req/s</th>
@@ -340,16 +340,16 @@ export function ApplicationTeamDashboard() {
                   <div className="flex items-baseline justify-between gap-2 text-xs">
                     <span className="min-w-0 truncate">
                       <span className="font-medium text-text">{b.slo.name}</span>
-                      <span className="ml-1.5 text-[10px] text-muted">{b.slo.service_name} · {b.slo.sli_type} · {b.slo.target}%</span>
+                      <span className="ml-1.5 text-2xs text-muted">{b.slo.service_name} · {b.slo.sli_type} · {b.slo.target}%</span>
                     </span>
-                    <span className={`shrink-0 font-mono text-[11px] font-semibold tabular-nums ${pct != null && pct < 25 ? 'text-danger' : 'text-text2'}`}>
+                    <span className={`shrink-0 font-mono text-xs font-semibold tabular-nums ${pct != null && pct < 25 ? 'text-danger' : 'text-text2'}`}>
                       {pct != null ? `${pct.toFixed(0)}% left` : 'no traffic'}
                     </span>
                   </div>
                   <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface2">
                     <div className={`h-full rounded-full ${tone}`} style={{ width: `${Math.max(2, pct ?? 0)}%` }} />
                   </div>
-                  <div className="mt-0.5 text-[9.5px] text-muted">
+                  <div className="mt-0.5 text-2xs text-muted">
                     {fmtCount(b.window_requests)} requests · {b.window_days}d window
                   </div>
                 </div>
@@ -371,12 +371,12 @@ export function ApplicationTeamDashboard() {
                 <span className={`h-2 w-2 shrink-0 rounded-full ${m.status === 'down' ? 'bg-danger' : m.status === 'up' ? 'bg-success' : 'bg-muted/60'}`} />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-xs font-medium text-text">{m.name}</div>
-                  <div className="text-[10px] text-muted">
+                  <div className="text-2xs text-muted">
                     {m.uptime_pct != null ? `${m.uptime_pct.toFixed(2)}% uptime` : 'no runs yet'}
                     {m.avg_ms != null ? ` · avg ${fmtMs(m.avg_ms)}` : ''}
                   </div>
                 </div>
-                <span className="shrink-0 text-[10px] tabular-nums text-muted">{m.last_run_at ? relativeTime(m.last_run_at) : '—'}</span>
+                <span className="shrink-0 text-2xs tabular-nums text-muted">{m.last_run_at ? relativeTime(m.last_run_at) : '—'}</span>
               </div>
             ))}
           </div>
@@ -394,12 +394,12 @@ export function ApplicationTeamDashboard() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
                       <span className="truncate font-mono text-xs font-semibold text-text">{e.exception_type}</span>
-                      <span className="shrink-0 text-[10px] tabular-nums text-muted">{relativeTime(e.last_seen)}</span>
+                      <span className="shrink-0 text-2xs tabular-nums text-muted">{relativeTime(e.last_seen)}</span>
                     </div>
-                    <div className="truncate text-[11px] text-text2" title={e.message}>{e.message}</div>
-                    <div className="text-[9.5px] text-muted">{e.service}{e.http_route ? ` · ${e.http_route}` : ''}</div>
+                    <div className="truncate text-xs text-text2" title={e.message}>{e.message}</div>
+                    <div className="text-2xs text-muted">{e.service}{e.http_route ? ` · ${e.http_route}` : ''}</div>
                   </div>
-                  <span className="self-center rounded bg-danger/15 px-1.5 font-mono text-[10px] font-bold text-danger">
+                  <span className="self-center rounded bg-danger/15 px-1.5 font-mono text-2xs font-bold text-danger">
                     ×{fmtCount(e.occurrences)}
                   </span>
                 </Link>
@@ -412,20 +412,20 @@ export function ApplicationTeamDashboard() {
           <SectionHeader icon={<HeartPulse className="h-3.5 w-3.5" />} title="App Alerts & Ingest" />
           <div className="space-y-3 px-4 pb-4 pt-3">
             <div>
-              <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Active app alerts</div>
-              {!appAlerts.length && <div className="text-[10.5px] text-muted">Nothing firing for checks or APM rules</div>}
+              <div className="pb-1.5 text-2xs font-bold uppercase tracking-wider text-muted">Active app alerts</div>
+              {!appAlerts.length && <div className="text-xs text-muted">Nothing firing for checks or APM rules</div>}
               <div className="space-y-1">
                 {appAlerts.slice(0, 4).map((a) => (
                   <Link to={`/alerts/${a.id}`} key={a.id} className="flex items-center gap-2 rounded-md px-1.5 py-1 text-xs transition hover:bg-surface2/50">
                     <span className={`h-2 w-2 shrink-0 rounded-full ${a.severity === 'critical' ? 'bg-danger' : a.severity === 'warning' ? 'bg-warning' : 'bg-info'}`} />
                     <span className="min-w-0 flex-1 truncate text-text2">{a.service_check_name || a.message.replace(/^\[[^\]]+\]\s*/, '')}</span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-muted">{relativeTime(a.triggered_at)}</span>
+                    <span className="shrink-0 text-2xs tabular-nums text-muted">{relativeTime(a.triggered_at)}</span>
                   </Link>
                 ))}
               </div>
             </div>
             <div className="border-t border-border pt-3">
-              <div className="pb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">Telemetry ingest · 24h</div>
+              <div className="pb-1.5 text-2xs font-bold uppercase tracking-wider text-muted">Telemetry ingest · 24h</div>
               <div className="flex items-center gap-2 text-xs">
                 <Radio className={`h-3.5 w-3.5 ${ingestHealthy === false ? 'text-warning' : 'text-success'}`} />
                 <span className="text-text2">
@@ -437,13 +437,13 @@ export function ApplicationTeamDashboard() {
                 </span>
               </div>
               {quality && (
-                <div className="mt-1.5 space-y-0.5 text-[10px] text-muted">
+                <div className="mt-1.5 space-y-0.5 text-2xs text-muted">
                   <div>{fmtCount(quality.ingest.accepted)} spans accepted</div>
                   <div>{fmtCount(quality.ingest.rejected)} rejected · {fmtCount(quality.ingest.dropped)} dropped</div>
                   <div>{quality.services.filter((s) => !s.reporting).length} services gone silent</div>
                 </div>
               )}
-              <div className="mt-1.5 text-[10px]">
+              <div className="mt-1.5 text-2xs">
                 <Link to="/apm/usage" className="text-primary hover:underline">Ingest usage →</Link>
               </div>
             </div>
@@ -462,16 +462,16 @@ function ServiceRow({ s, dim }: { s: ServiceRED; dim?: boolean }) {
       <td className="max-w-[220px] px-4 py-2">
         <Link to={`/apm/services/${encodeURIComponent(s.name)}`} className="block min-w-0">
           <span className="block truncate font-medium text-text">{s.name}</span>
-          <span className="block truncate text-[10px] text-muted">{s.envs?.join(', ') || '—'}</span>
+          <span className="block truncate text-2xs text-muted">{s.envs?.join(', ') || '—'}</span>
         </Link>
       </td>
       <td className="px-2 py-2"><HealthBadge health={s.health} /></td>
-      <td className="px-2 py-2 text-right font-mono text-[11px] tabular-nums text-text2">{fmtRps(s.rps)}</td>
-      <td className={`px-2 py-2 text-right font-mono text-[11px] tabular-nums ${s.error_rate >= 0.05 ? 'text-danger' : s.error_rate >= 0.01 ? 'text-warning' : 'text-text2'}`}>
+      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-text2">{fmtRps(s.rps)}</td>
+      <td className={`px-2 py-2 text-right font-mono text-xs tabular-nums ${s.error_rate >= 0.05 ? 'text-danger' : s.error_rate >= 0.01 ? 'text-warning' : 'text-text2'}`}>
         {fmtPct(s.error_rate)}
       </td>
-      <td className="px-2 py-2 text-right font-mono text-[11px] tabular-nums text-text2">{fmtMs(s.p95_ms)}</td>
-      <td className="px-2 py-2 text-right font-mono text-[11px] tabular-nums text-text2">{s.apdex != null ? s.apdex.toFixed(2) : '—'}</td>
+      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-text2">{fmtMs(s.p95_ms)}</td>
+      <td className="px-2 py-2 text-right font-mono text-xs tabular-nums text-text2">{s.apdex != null ? s.apdex.toFixed(2) : '—'}</td>
     </tr>
   )
 }
@@ -500,7 +500,7 @@ function FleetChart({ data, dataKey, color, label, fmt }: {
   const gid = `appteam-${dataKey}`
   return (
     <Card>
-      <div className="px-4 pt-3 text-[10.5px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className="px-4 pt-3 text-xs font-semibold uppercase tracking-wider text-muted">{label}</div>
       <div className="h-[132px] px-2 pb-2 pt-1">
         {!data.length ? (
           <div className="flex h-full items-center justify-center text-xs text-muted">awaiting trace data</div>

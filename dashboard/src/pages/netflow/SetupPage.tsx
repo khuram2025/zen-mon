@@ -106,19 +106,19 @@ function DestinationCard({ info, collectorAddr, setCollectorAddr }: {
                   <datalist id={listId}>
                     {r.data.addresses.map((a) => <option key={a.address} value={a.address}>{a.interface}{a.virtual ? ' (virtual)' : ''}</option>)}
                   </datalist>
-                  <p id={`${id}-h`} className="text-[11px] text-text2">
+                  <p id={`${id}-h`} className="text-xs text-text2">
                     The address the device can reach. This appliance has {r.data.addresses.filter((a) => !a.virtual).map((a) => a.address).join(', ') || 'no global address'}.
                   </p>
                 </div>
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-text">NetFlow v5 / v9 / IPFIX</div>
                   <div className="text-lg font-semibold tabular-nums text-text">UDP {c.netflow_port}</div>
-                  <p className="text-[11px] text-text2">{c.port_source === 'collector' ? `Reported by the collector (${c.listen})` : 'Default port; the collector did not report its own'}</p>
+                  <p className="text-xs text-text2">{c.port_source === 'collector' ? `Reported by the collector (${c.listen})` : 'Default port; the collector did not report its own'}</p>
                 </div>
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-text">sFlow v5</div>
                   <div className="text-lg font-semibold tabular-nums text-text">UDP {c.sflow_port}</div>
-                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-text2">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-text2">
                     Collector
                     <ToneChip tone={!c.reachable ? 'unknown' : c.status === 'ok' ? 'success' : c.status === 'down' ? 'danger' : 'warning'}>
                       {!c.reachable ? 'not answering' : c.status}
@@ -184,7 +184,7 @@ function ConfigCard({ vendor, setVendor, collector, netflowPort, sflowPort }: {
               )}
             >
               <div className="font-semibold text-text">{x.label}</div>
-              <div className="hidden text-[11px] text-text2 min-[480px]:block">{x.platform}</div>
+              <div className="hidden text-xs text-text2 min-[480px]:block">{x.platform}</div>
             </button>
           ))}
         </div>
@@ -195,13 +195,13 @@ function ConfigCard({ vendor, setVendor, collector, netflowPort, sflowPort }: {
             <input id={ids.ifs} className={inputCls} placeholder={v.interfaceHint} aria-describedby={`${ids.ifs}-h`}
               value={opts.interfaces.join(', ')}
               onChange={(e) => setOpts((o) => ({ ...o, interfaces: e.target.value.split(',').map((s) => s.trim()).filter((s, i, a) => s || i === a.length - 1) }))} />
-            <p id={`${ids.ifs}-h`} className="text-[11px] text-text2">Comma-separated; the traffic you want to see (WAN / uplinks).</p>
+            <p id={`${ids.ifs}-h`} className="text-xs text-text2">Comma-separated; the traffic you want to see (WAN / uplinks).</p>
           </div>
           <div className="space-y-1">
             <label htmlFor={ids.src} className="text-xs font-medium text-text">Export source {v.sourceIsAddress ? 'address' : 'interface'}</label>
             <input id={ids.src} className={inputCls} placeholder={v.sourceHint} value={opts.source} aria-describedby={`${ids.src}-h`}
               onChange={(e) => setOpts((o) => ({ ...o, source: e.target.value }))} />
-            <p id={`${ids.src}-h`} className="text-[11px] text-text2">A stable source (loopback): its address is the exporter address ZenPlus sees.</p>
+            <p id={`${ids.src}-h`} className="text-xs text-text2">A stable source (loopback): its address is the exporter address ZenPlus sees.</p>
           </div>
           {v.formats.length > 1 && (
             <div className="space-y-1">
@@ -217,7 +217,7 @@ function ConfigCard({ vendor, setVendor, collector, netflowPort, sflowPort }: {
               <label htmlFor={ids.rate} className="text-xs font-medium text-text">Sampling 1 in N</label>
               <input id={ids.rate} className={inputCls} inputMode="numeric" value={String(opts.samplingRate)} aria-describedby={`${ids.rate}-h`}
                 onChange={(e) => setOpts((o) => ({ ...o, samplingRate: Math.max(1, Number(e.target.value.replace(/\D/g, '')) || 1) }))} />
-              <p id={`${ids.rate}-h`} className="text-[11px] text-text2">1 = every packet where the platform allows it.</p>
+              <p id={`${ids.rate}-h`} className="text-xs text-text2">1 = every packet where the platform allows it.</p>
             </div>
           )}
           {showV6 && (
@@ -230,14 +230,14 @@ function ConfigCard({ vendor, setVendor, collector, netflowPort, sflowPort }: {
         </div>
 
         <div className="relative">
-          <div className="flex items-center justify-between rounded-t-md border border-b-0 border-border bg-surface2/60 px-3 py-1.5 text-[11px] text-text2">
+          <div className="flex items-center justify-between rounded-t-md border border-b-0 border-border bg-surface2/60 px-3 py-1.5 text-xs text-text2">
             <span>{v.label} · {FORMAT_LABEL[opts.format] ?? ''} → {collector}:{opts.format === 'sflow' ? sflowPort : netflowPort}</span>
             <button type="button" onClick={copy} className="inline-flex items-center gap-1 font-medium text-text hover:underline" aria-label="Copy the configuration">
               {copied ? <Check className="h-3.5 w-3.5 text-success-fg" aria-hidden /> : <ClipboardCopy className="h-3.5 w-3.5" aria-hidden />}
               {copied ? 'Copied' : 'Copy'}
             </button>
           </div>
-          <pre className="max-h-96 overflow-auto rounded-b-md border border-border bg-surface2/30 p-3 font-mono text-[12px] leading-relaxed text-text" tabIndex={0} aria-label="Device configuration">
+          <pre className="max-h-96 overflow-auto rounded-b-md border border-border bg-surface2/30 p-3 font-mono text-sm leading-relaxed text-text" tabIndex={0} aria-label="Device configuration">
             {snippet}
           </pre>
         </div>
@@ -302,7 +302,7 @@ function CheckCard({ ip, setIp }: { ip: string; setIp: (ip: string) => void }) {
             <label htmlFor={inputId} className="text-xs font-medium text-text">Exporter address (the device&apos;s export source)</label>
             <input id={inputId} className={inputCls} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="e.g. 10.0.0.1"
               aria-invalid={!!draft && !valid} aria-describedby={`${inputId}-h`} />
-            <p id={`${inputId}-h`} className="text-[11px] text-text2">
+            <p id={`${inputId}-h`} className="text-xs text-text2">
               {draft && !valid ? <span className="text-danger-fg">Enter an IPv4 or IPv6 address</span> : `Checked every ${pollMs / 1000} seconds against what the collector has received.`}
             </p>
           </div>
@@ -391,7 +391,7 @@ function RecentCard({ onCheck }: { onCheck: (ip: string) => void }) {
                     <span className="min-w-0">
                       <span className="font-medium text-text">{e.display_name || ipDisplay(e.exporter)}</span>
                       {e.display_name && <span className="ml-1.5 font-mono text-text2">{ipDisplay(e.exporter)}</span>}
-                      <span className="block text-[11px] text-text2">
+                      <span className="block text-xs text-text2">
                         {e.device_hostname ? `Device ${e.device_hostname}` : 'No device linked'}
                         {e.last_received_at ? ` · last flow ${formatDateTime(e.last_received_at, tz, { seconds: false })}` : ''}
                       </span>

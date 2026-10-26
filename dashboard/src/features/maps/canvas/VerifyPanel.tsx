@@ -117,7 +117,7 @@ export function VerifyPanel({ mapId, open, onClose, onFocusLink, onFocusNode, la
     <div className="flex w-80 max-w-[85vw] flex-col rounded-lg border border-border bg-surface/95 shadow-xl backdrop-blur">
       {/* Header */}
       <div className="flex items-center justify-between gap-2 px-2.5 py-1.5">
-        <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">
+        <span className="flex items-center gap-1.5 text-2xs font-bold uppercase tracking-wider text-muted">
           {q.data && problems === 0
             ? <ShieldCheck className="h-3.5 w-3.5 text-success" />
             : <AlertTriangle className={cn('h-3.5 w-3.5', groups.critical.length ? 'text-danger' : 'text-warning')} />}
@@ -125,7 +125,7 @@ export function VerifyPanel({ mapId, open, onClose, onFocusLink, onFocusNode, la
         </span>
         <span className="flex items-center gap-1">
           {SEVERITIES.map((s) => groups[s.key].length > 0 && (
-            <span key={s.key} className={cn('rounded px-1 font-mono text-[10px]', s.chip)}>{groups[s.key].length}</span>
+            <span key={s.key} className={cn('rounded px-1 font-mono text-2xs', s.chip)}>{groups[s.key].length}</span>
           ))}
           <button
             type="button"
@@ -145,29 +145,29 @@ export function VerifyPanel({ mapId, open, onClose, onFocusLink, onFocusNode, la
       {/* Body */}
       <div className="max-h-[55vh] overflow-y-auto border-t border-border/60">
         {q.isLoading ? (
-          <div className="flex items-center justify-center gap-2 px-3 py-6 text-[11px] text-muted">
+          <div className="flex items-center justify-center gap-2 px-3 py-6 text-xs text-muted">
             <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking cables against discovery…
           </div>
         ) : q.isError && !q.data ? (
-          <div className="flex flex-col items-center gap-2 px-3 py-4 text-center text-[11px] text-danger">
+          <div className="flex flex-col items-center gap-2 px-3 py-4 text-center text-xs text-danger">
             {apiErrorMessage(q.error, 'Verification failed')}
             <button type="button" onClick={() => q.refetch()} className="rounded border border-border px-2 py-0.5 text-text2 hover:bg-primary/10">Retry</button>
           </div>
         ) : total === 0 ? (
           <div className="flex flex-col items-center gap-1.5 px-3 py-6 text-center">
             <ShieldCheck className="h-6 w-6 text-success" />
-            <div className="text-[12px] font-semibold text-text">All cables verified</div>
-            <div className="text-[10px] text-muted">Every cable matches a bound, up interface with fresh neighbour evidence.</div>
+            <div className="text-sm font-semibold text-text">All cables verified</div>
+            <div className="text-2xs text-muted">Every cable matches a bound, up interface with fresh neighbour evidence.</div>
           </div>
         ) : (
           <>
             {q.isError && (
-              <div className="border-b border-border/60 px-2.5 py-1 text-[10px] text-danger">
+              <div className="border-b border-border/60 px-2.5 py-1 text-2xs text-danger">
                 Re-check failed: {apiErrorMessage(q.error, 'request failed')} — showing the previous result.
               </div>
             )}
             {problems === 0 && (
-              <div className="flex items-center gap-1.5 border-b border-border/60 px-2.5 py-1.5 text-[10.5px] text-success">
+              <div className="flex items-center gap-1.5 border-b border-border/60 px-2.5 py-1.5 text-xs text-success">
                 <ShieldCheck className="h-3.5 w-3.5" /> No problems found — only notes below.
               </div>
             )}
@@ -180,7 +180,7 @@ export function VerifyPanel({ mapId, open, onClose, onFocusLink, onFocusNode, la
                   <button
                     type="button"
                     onClick={() => setCollapsed((c) => ({ ...c, [s.key]: !c[s.key] }))}
-                    className={cn('flex w-full items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition hover:bg-primary/5', s.text)}
+                    className={cn('flex w-full items-center gap-1.5 px-2.5 py-1 text-2xs font-bold uppercase tracking-wider transition hover:bg-primary/5', s.text)}
                   >
                     {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                     {s.icon} {s.label}
@@ -196,11 +196,11 @@ export function VerifyPanel({ mapId, open, onClose, onFocusLink, onFocusNode, la
                     >
                       <span className={cn('mt-0.5 shrink-0', s.text)}>{rowIcon(r)}</span>
                       <span className="min-w-0">
-                        <span className="block truncate text-[11px] font-semibold text-text">
+                        <span className="block truncate text-xs font-semibold text-text">
                           {r.kind === 'link' ? labelForLink(r.id) : labelForNode(r.id)}
                         </span>
-                        <span className="block text-[10px] text-text2">{verifyCodeText(r.code)}</span>
-                        {r.message && <span className="block text-[9.5px] leading-snug text-muted">{r.message}</span>}
+                        <span className="block text-2xs text-text2">{verifyCodeText(r.code)}</span>
+                        {r.message && <span className="block text-2xs leading-snug text-muted">{r.message}</span>}
                       </span>
                     </button>
                   ))}
@@ -212,7 +212,7 @@ export function VerifyPanel({ mapId, open, onClose, onFocusLink, onFocusNode, la
       </div>
 
       {q.data?.generated_at && (
-        <div className="border-t border-border/60 px-2.5 py-1 text-[9px] text-muted">Checked {formatAgo(q.data.generated_at)}</div>
+        <div className="border-t border-border/60 px-2.5 py-1 text-2xs text-muted">Checked {formatAgo(q.data.generated_at)}</div>
       )}
     </div>
   )

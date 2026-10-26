@@ -375,7 +375,7 @@ export function WizardPage() {
               >
                 <span
                   className={cn(
-                    'flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-semibold',
+                    'flex h-6 w-6 items-center justify-center rounded-full text-2xs font-semibold',
                     active
                       ? 'bg-primary text-white'
                       : done

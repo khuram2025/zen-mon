@@ -151,12 +151,12 @@ export function ProductInstalledTab({
         {list.isError && (
           <div className="border-b border-border p-2">
             <QueryFailure compact what="the installations" error={list.error} onRetry={() => void list.refetch()} retrying={list.isFetching} />
-            <p className="mt-1 text-[11px] text-muted">Showing the last list that loaded; it may be out of date.</p>
+            <p className="mt-1 text-xs text-muted">Showing the last list that loaded; it may be out of date.</p>
           </div>
         )}
         <div className={list.isFetching && list.isPlaceholderData ? 'opacity-60 transition-opacity' : 'transition-opacity'} aria-busy={list.isFetching}>
           <div className="overflow-auto lg:max-h-[calc(100dvh-22rem)]">
-            <table className="w-full border-separate border-spacing-0 text-[13px]" data-installed-table="">
+            <table className="w-full border-separate border-spacing-0 text-sm" data-installed-table="">
               <caption className="sr-only">{captionText(product?.header.name ?? productKey, data.total, state.sort, state.order)}</caption>
               <thead className="sticky top-0 z-10 bg-surface">
                 <tr className="[&>th]:border-b [&>th]:border-border">
@@ -185,7 +185,7 @@ export function ProductInstalledTab({
                     </td>
                     <td className="hidden px-3 align-middle text-text2 lg:table-cell">{r.architecture ?? <span className="text-muted">—</span>}</td>
                     <td className="hidden px-3 align-middle sm:table-cell">
-                      <span className="rounded-full border border-border bg-surface2 px-1.5 py-px text-[10.5px] text-text2" title={r.source ?? 'Source not reported'}>{installSourceLabel(r.source)}</span>
+                      <span className="rounded-full border border-border bg-surface2 px-1.5 py-px text-xs text-text2" title={r.source ?? 'Source not reported'}>{installSourceLabel(r.source)}</span>
                     </td>
                     <td className="hidden whitespace-nowrap px-3 align-middle text-text2 lg:table-cell"><span title={r.install_date ?? undefined}>{shortDate(r.install_date)}</span></td>
                     <td className="hidden whitespace-nowrap px-3 align-middle text-text2 xl:table-cell"><FirstSeen iso={r.first_seen_at} historyStart={historyStart} /></td>

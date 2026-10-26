@@ -86,7 +86,7 @@ export function MonitorRow({
     ? <div className="h-full w-full animate-pulse rounded-[3px] bg-surface3/50" aria-label="Loading daily history" />
     : barsState === 'error'
       ? (
-        <div className="flex h-full w-full items-center justify-center rounded-[3px] border border-dashed border-border text-[10px] text-muted" title="The daily availability request failed; this is not a monitoring gap.">
+        <div className="flex h-full w-full items-center justify-center rounded-[3px] border border-dashed border-border text-2xs text-muted" title="The daily availability request failed; this is not a monitoring gap.">
           History unavailable
         </div>
       )
@@ -114,25 +114,25 @@ export function MonitorRow({
         <PulseDot status={pulse} size="md" />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="min-w-0 max-w-full truncate text-[13px] font-semibold text-text">{c.name}</span>
+            <span className="min-w-0 max-w-full truncate text-sm font-semibold text-text">{c.name}</span>
             <span
-              className="inline-flex shrink-0 items-center gap-1 rounded border border-border bg-surface2/60 px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wider text-muted"
+              className="inline-flex shrink-0 items-center gap-1 rounded border border-border bg-surface2/60 px-1.5 py-px text-2xs font-semibold uppercase tracking-wider text-muted"
               title={level ? `${level.label} — ${level.hint}` : undefined}
             >
               <t.Icon className="h-2.5 w-2.5" />{t.label}{level && <span className="text-muted/70">· {level.short}</span>}
             </span>
             {!c.enabled && (
-              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-surface3/70 px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wider text-muted" title="Paused — not probing or alerting">
+              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-surface3/70 px-1.5 py-px text-2xs font-semibold uppercase tracking-wider text-muted" title="Paused — not probing or alerting">
                 <Pause className="h-2.5 w-2.5" />Paused
               </span>
             )}
             {stale && (
-              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-warning/10 px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wider text-warning" title={staleTitle}>
+              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-warning/10 px-1.5 py-px text-2xs font-semibold uppercase tracking-wider text-warning" title={staleTitle}>
                 <ClockAlert className="h-2.5 w-2.5" />Stale
               </span>
             )}
             {c.in_maintenance && (
-              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-info/10 px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wider text-info" title="In maintenance — alerts suppressed">
+              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-info/10 px-1.5 py-px text-2xs font-semibold uppercase tracking-wider text-info" title="In maintenance — alerts suppressed">
                 <Wrench className="h-2.5 w-2.5" />Maint
               </span>
             )}
@@ -141,14 +141,14 @@ export function MonitorRow({
             )}
             {c.check_type === 'tls' && c.tls_days_remaining != null && c.tls_days_remaining < 30 && (
               <span className={cn(
-                'shrink-0 rounded px-1.5 py-px font-mono text-[9.5px] font-bold',
+                'shrink-0 rounded px-1.5 py-px font-mono text-2xs font-bold',
                 c.tls_days_remaining < 7 ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning',
               )}>
                 cert {c.tls_days_remaining}d
               </span>
             )}
           </div>
-          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px]">
+          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs">
             <span className={cn('shrink-0 font-medium', statusTone)} title={stale ? staleTitle : undefined}>{statusText}</span>
             <span className="text-border-strong">·</span>
             <span className={cn('shrink-0 tabular-nums', stale ? 'text-warning' : 'text-muted')} title={`Last result: ${lastExact}`}>
@@ -183,7 +183,7 @@ export function MonitorRow({
         </span>
 
         {/* Interval */}
-        <span className="hidden w-14 shrink-0 text-right text-[11px] tabular-nums text-muted sm:inline" title={`Checked every ${c.check_interval}s · last result ${lastExact}`}>
+        <span className="hidden w-14 shrink-0 text-right text-xs tabular-nums text-muted sm:inline" title={`Checked every ${c.check_interval}s · last result ${lastExact}`}>
           {c.check_interval}s
         </span>
 

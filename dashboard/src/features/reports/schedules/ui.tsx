@@ -151,19 +151,19 @@ export function RecipientsSummary({
         <div className="space-y-1.5">
           {nCh > 0 && (
             <div>
-              <div className="text-[11px] font-medium uppercase tracking-wide text-muted">Channels</div>
+              <div className="text-xs font-medium uppercase tracking-wide text-muted">Channels</div>
               <div>{names.join(', ')}</div>
             </div>
           )}
           {nEm > 0 && (
             <div>
-              <div className="text-[11px] font-medium uppercase tracking-wide text-muted">Email</div>
+              <div className="text-xs font-medium uppercase tracking-wide text-muted">Email</div>
               <div className="break-all">{recipients.slice(0, 8).join(', ')}{nEm > 8 ? ` and ${nEm - 8} more` : ''}</div>
             </div>
           )}
           {cc.length > 0 && (
             <div>
-              <div className="text-[11px] font-medium uppercase tracking-wide text-muted">CC</div>
+              <div className="text-xs font-medium uppercase tracking-wide text-muted">CC</div>
               <div className="break-all">{cc.slice(0, 8).join(', ')}{cc.length > 8 ? ` and ${cc.length - 8} more` : ''}</div>
             </div>
           )}
@@ -220,7 +220,7 @@ export function RecipientChips({
       ))}
       {cc.map((r) => (
         <li key={`cc-${r}`} className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs text-text">
-          <span className="text-[10px] font-semibold uppercase text-muted">CC</span>
+          <span className="text-2xs font-semibold uppercase text-muted">CC</span>
           <span className="break-all">{r}</span>
         </li>
       ))}
@@ -255,42 +255,42 @@ export function ScopeChips({ filters, withheld, tz }: { filters: ScheduleFilters
     <div className="space-y-1.5">
       <div className="flex flex-wrap items-center gap-1.5">
         {scope.deviceIds.length > 0 && (
-          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] text-text">
+          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs text-text">
             <Server className="h-3 w-3 text-muted" aria-hidden />
             <span className="text-text2">Devices</span>
             <span className="font-medium tabular-nums">{scope.deviceIds.length} selected</span>
           </span>
         )}
         {scope.groupIds.length > 0 && (
-          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] text-text">
+          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs text-text">
             <Boxes className="h-3 w-3 text-muted" aria-hidden />
             <span className="text-text2">Groups</span>
             <span className="font-medium tabular-nums">{scope.groupIds.length} selected</span>
           </span>
         )}
         {scope.locations.length > 0 && (
-          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] text-text">
+          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs text-text">
             <MapPin className="h-3 w-3 text-muted" aria-hidden />
             <span className="text-text2">Locations</span>
             <span className="font-medium">{scope.locations.join(', ')}</span>
           </span>
         )}
         {scope.deviceTypes.length > 0 && (
-          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] text-text">
+          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs text-text">
             <Server className="h-3 w-3 text-muted" aria-hidden />
             <span className="text-text2">Types</span>
             <span className="font-medium">{scope.deviceTypes.join(', ')}</span>
           </span>
         )}
         {scope.applicationId && (
-          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] text-text">
+          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs text-text">
             <AppWindow className="h-3 w-3 text-muted" aria-hidden />
             <span className="text-text2">Application</span>
             <span className="font-medium">{appName ?? scope.applicationId}</span>
           </span>
         )}
         {withheld && (
-          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] text-text2">
+          <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs text-text2">
             <Lock className="h-3 w-3" aria-hidden /> NetFlow scope hidden from your role
           </span>
         )}

@@ -48,7 +48,7 @@ export function TemplateCard({ item }: { item: LibraryItem }) {
               {item.title}
             </button>
           </h3>
-          <p className="mt-0.5 truncate text-[11px] text-muted">{item.categoryTitle}</p>
+          <p className="mt-0.5 truncate text-xs text-muted">{item.categoryTitle}</p>
         </div>
         <FavoriteButton
           item={item}
@@ -61,7 +61,7 @@ export function TemplateCard({ item }: { item: LibraryItem }) {
       <p id={descId} className="line-clamp-2 min-h-[2rem] px-4 text-xs leading-4 text-text2">
         {item.description || <span className="text-muted">No description.</span>}
       </p>
-      <p className="mt-2 truncate px-4 text-[11px] tabular-nums text-muted">{metaLine(item)}</p>
+      <p className="mt-2 truncate px-4 text-xs tabular-nums text-muted">{metaLine(item)}</p>
       <div className="mb-3 mt-2 flex min-w-0 flex-wrap items-center gap-1.5 px-4">
         <OriginBadges item={item} />
       </div>
@@ -92,14 +92,14 @@ export function ShelfCard({ item, viewedAt }: { item: LibraryItem; viewedAt?: nu
           to={openLink(item)}
           onClick={() => a.opened(item)}
           className={cn(
-            'block truncate text-[13px] font-medium text-text group-hover:text-primary focus-visible:outline-none',
+            'block truncate text-sm font-medium text-text group-hover:text-primary focus-visible:outline-none',
             'after:absolute after:inset-0 after:rounded-lg after:content-[""] focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-primary/50',
           )}
           aria-label={`Open ${item.title}`}
         >
           {item.title}
         </Link>
-        <p className="truncate text-[11px] tabular-nums text-muted">{sub}</p>
+        <p className="truncate text-xs tabular-nums text-muted">{sub}</p>
       </div>
       <button
         type="button"

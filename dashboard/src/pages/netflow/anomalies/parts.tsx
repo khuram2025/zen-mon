@@ -53,7 +53,7 @@ export function ToneChip({
     <span
       title={title}
       className={cn(
-        'inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold leading-tight',
+        'inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs font-semibold leading-tight',
         CHIP[tone],
         className,
       )}
@@ -111,8 +111,8 @@ export function FindingStatusChip({ status, className }: { status: FindingStatus
 export function Field({ label, children, mono }: { label: string; children: ReactNode; mono?: boolean }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] font-medium text-text2">{label}</dt>
-      <dd className={cn('break-words text-sm text-text', mono && 'font-mono text-[13px]')}>{children}</dd>
+      <dt className="text-xs font-medium text-text2">{label}</dt>
+      <dd className={cn('break-words text-sm text-text', mono && 'font-mono text-sm')}>{children}</dd>
     </div>
   )
 }

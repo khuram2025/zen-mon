@@ -31,7 +31,7 @@ export const DropdownMenuItem = React.forwardRef<
   <Menu.Item
     ref={ref}
     className={cn(
-      'flex cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] outline-none',
+      'flex cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-1.5 text-sm outline-none',
       'data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
       destructive
         ? 'text-danger data-[highlighted]:bg-danger/10'
@@ -50,7 +50,7 @@ export function DropdownMenuSeparator({ className }: { className?: string }) {
 
 export function DropdownMenuLabel({ className, children }: { className?: string; children: React.ReactNode }) {
   return (
-    <Menu.Label className={cn('px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide text-muted', className)}>
+    <Menu.Label className={cn('px-2.5 py-1 text-xs font-medium uppercase tracking-wide text-muted', className)}>
       {children}
     </Menu.Label>
   )

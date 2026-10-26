@@ -281,7 +281,7 @@ export function ProfilesDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                 <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
                   <div>
                     <div className="text-sm font-medium">Legacy SSH compatibility</div>
-                    <div className="text-[11px] text-muted">Allow RSA/SHA-1 signatures and SHA-1 key exchange for devices using this profile.</div>
+                    <div className="text-xs text-muted">Allow RSA/SHA-1 signatures and SHA-1 key exchange for devices using this profile.</div>
                   </div>
                   <Switch checked={form.ssh_legacy_compat} onCheckedChange={(v) => set('ssh_legacy_compat', v)} aria-label="Legacy SSH compatibility" />
                 </div>
@@ -294,7 +294,7 @@ export function ProfilesDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                 <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
                   <div>
                     <div className="text-sm font-medium" id="default-profile-label">Default profile</div>
-                    <div className="text-[11px] text-muted">Pre-selected when enrolling devices. Only one profile can be the default.</div>
+                    <div className="text-xs text-muted">Pre-selected when enrolling devices. Only one profile can be the default.</div>
                   </div>
                   <Switch checked={form.is_default} onCheckedChange={(v) => set('is_default', v)} aria-label="Default profile" />
                 </div>

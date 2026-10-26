@@ -25,7 +25,7 @@ function Card({ title, subtitle, actions, children }: { title: string; subtitle?
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold tracking-tight text-text">{title}</h3>
-          {subtitle && <div className="mt-0.5 text-[11px] text-muted">{subtitle}</div>}
+          {subtitle && <div className="mt-0.5 text-xs text-muted">{subtitle}</div>}
         </div>
         {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
       </div>
@@ -38,7 +38,7 @@ export function InfoGrid({ rows, labelWidth = 112 }: { rows: InfoRow[]; labelWid
   return (
     <dl className="space-y-1.5">
       {rows.map((r) => (
-        <div key={r.label} className="grid items-start gap-2 text-[11px]" style={{ gridTemplateColumns: `${labelWidth}px 1fr` }}>
+        <div key={r.label} className="grid items-start gap-2 text-xs" style={{ gridTemplateColumns: `${labelWidth}px 1fr` }}>
           <dt className="text-muted">{r.label}</dt>
           <dd
             className={cn('min-w-0 truncate font-medium', r.mono && 'font-mono', r.muted && 'font-normal text-muted')}
@@ -172,7 +172,7 @@ export function ConfigSummaryCard({ check, onEdit, onOpenConfig }: { check: Serv
       {check.tags.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1 border-t border-border/60 pt-2.5">
           {check.tags.map((t) => (
-            <span key={t} className="rounded-full border border-border bg-surface2/50 px-2 py-0.5 text-[10px] text-muted">{t}</span>
+            <span key={t} className="rounded-full border border-border bg-surface2/50 px-2 py-0.5 text-2xs text-muted">{t}</span>
           ))}
         </div>
       )}
@@ -278,7 +278,7 @@ export function ConfigTab({ check, onEdit, onExport }: { check: ServiceCheckExt;
           title="Authenticated journey"
           subtitle={`Cookie-preserving · ${(check.workflow_operator || 'all').toUpperCase()} rule · ${steps.length} step${steps.length === 1 ? '' : 's'}`}
           actions={check.credential_name ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 text-[10px] font-semibold text-success">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 text-2xs font-semibold text-success">
               <LockKeyhole className="h-3 w-3" /> {check.credential_name} · {check.credential_auth_type}
             </span>
           ) : undefined}
@@ -287,11 +287,11 @@ export function ConfigTab({ check, onEdit, onExport }: { check: ServiceCheckExt;
             {steps.map((step, index) => (
               <div key={`${step.name}-${index}`} className="rounded-lg border border-border bg-surface2/30 p-3">
                 <div className="flex items-center gap-2">
-                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-bold text-primary">{index + 1}</span>
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-2xs font-bold text-primary">{index + 1}</span>
                   <span className="truncate text-xs font-semibold">{step.name}</span>
                 </div>
-                <div className="mt-2 truncate font-mono text-[10px] text-muted" title={step.url}>{step.method} {step.url}</div>
-                <div className="mt-1 text-[10px] text-muted">
+                <div className="mt-2 truncate font-mono text-2xs text-muted" title={step.url}>{step.method} {step.url}</div>
+                <div className="mt-1 text-2xs text-muted">
                   Expect {step.expected_statuses || '200'}{step.content_match ? ' + content validation' : ''}
                 </div>
               </div>
@@ -375,14 +375,14 @@ export function ConfigHistory({ checkId }: { checkId: string }) {
             const changes = h.changes ? Object.entries(h.changes) : []
             return (
               <li key={h.id} className="rounded-md border border-border bg-surface2/30 px-3 py-2">
-                <div className="flex flex-wrap items-baseline justify-between gap-2 text-[11px]">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs">
                   <span className="font-semibold">{actionText(h.action)}{h.actor ? ` by ${h.actor}` : ''}</span>
                   <span className="font-mono tabular-nums text-muted">{exactTime(h.at)} <span className="font-sans">({relativeTime(h.at)})</span></span>
                 </div>
                 {changes.length > 0 && (
                   <dl className="mt-1.5 space-y-1">
                     {changes.map(([field, diff]) => (
-                      <div key={field} className="grid grid-cols-[140px_1fr] gap-2 text-[11px]">
+                      <div key={field} className="grid grid-cols-[140px_1fr] gap-2 text-xs">
                         <dt className="truncate font-mono text-muted" title={field}>{field}</dt>
                         <dd className="min-w-0 break-words">
                           <span className="font-mono text-danger line-through decoration-danger/50">{renderValue(diff?.old)}</span>
