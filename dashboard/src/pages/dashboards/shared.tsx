@@ -11,6 +11,9 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Clock } from 'lucide-react'
 import { Card } from '@/components/ui/Card'
+import { chartFont } from '@/lib/chartTheme'
+import { cn } from '@/lib/utils'
+import { KPI_LABEL, KPI_VALUE, kpiTone } from '@/components/ui/kpiTone'
 
 /* ── Categorical palette ────────────────────────────────────────────────────
  * Fixed assignment order, never cycled. Validated (CVD ΔE ≥ 8 adjacent pairs,
@@ -31,7 +34,7 @@ export const chartTooltipStyle = {
   backgroundColor: 'rgb(var(--surface))',
   border: '1px solid rgb(var(--border))',
   borderRadius: 8,
-  fontSize: 12,
+  fontSize: chartFont(12),
   color: 'rgb(var(--text))',
 } as const
 
@@ -59,7 +62,7 @@ export function RangePills({ value, onChange, keys }: {
         <button
           key={r.key}
           onClick={() => onChange(r.key)}
-          className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
             r.key === value ? 'bg-primary text-on-primary shadow-sm' : 'text-text2 hover:bg-surface3 hover:text-text'
           }`}
         >
@@ -99,14 +102,14 @@ export function TeamHeader({ title, subtitle, right, live = 'live' }: {
           <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
           {live === 'stale' ? (
             <span
-              className="flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[10px] font-bold tracking-widest text-warning-fg"
+              className="flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-2xs font-bold tracking-widest text-warning-fg"
               title="Some panels could not refresh and show earlier data"
             >
               <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-warning" />
               STALE
             </span>
           ) : (
-            <span className="flex items-center gap-1.5 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] font-bold tracking-widest text-success-fg">
+            <span className="flex items-center gap-1.5 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-2xs font-bold tracking-widest text-success-fg">
               <span className="relative flex h-1.5 w-1.5">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
                 <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-success" />
@@ -145,14 +148,14 @@ export function KpiCard({ to, label, icon, accent, value, sub, foot }: {
   return (
     <Link to={to} className="group">
       <Card className="relative h-full overflow-hidden transition group-hover:border-primary/40">
-        <span className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r ${KPI_ACCENT[accent]}`} />
+        <span className={`absolute inset-x-0 top-0 h-[3px] ${kpiTone(accent).bar}`} />
         <div className="flex items-start justify-between gap-2 px-4 pt-3">
           <div className="min-w-0">
-            <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted">{label}</div>
-            <div className="mt-1 text-2xl font-bold tabular-nums leading-none text-text">{value}</div>
+            <div className={KPI_LABEL}>{label}</div>
+            <div className={cn('mt-1.5', KPI_VALUE)}>{value}</div>
             <div className="mt-1 min-h-[14px]">{sub}</div>
           </div>
-          <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white shadow ${KPI_ACCENT[accent]}`}>
+          <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${kpiTone(accent).chip}`}>
             {icon}
           </span>
         </div>
@@ -175,7 +178,7 @@ export function SectionHeader({ icon, title, hint, right }: {
       <div className="flex min-w-0 items-center gap-2">
         {icon && <span className="text-muted">{icon}</span>}
         <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
-        {hint && <span className="truncate text-[10px] uppercase tracking-wider text-muted">{hint}</span>}
+        {hint && <span className="truncate text-2xs uppercase tracking-wider text-muted">{hint}</span>}
       </div>
       {right}
     </div>

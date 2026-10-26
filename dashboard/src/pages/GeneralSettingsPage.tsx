@@ -9,7 +9,7 @@ import {
   legacyPresetForm, lossGranularityNote, policyFromForm, policySentences, settingsPayload, timingRows, validateMonitoringForm,
   type MonitoringForm, type MonitoringFormField, type MonitoringSettingsDoc,
 } from '@/components/devices/deviceStatus'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Textarea } from '@/components/ui/Textarea'
@@ -18,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/Switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { useTheme } from '@/stores/theme'
+import { DENSITIES, useDisplay } from '@/stores/display'
 import { useAuth, useCan } from '@/stores/auth'
 import { toast } from '@/components/ui/Toast'
 import { UpdatesTabContent } from '@/components/UpdatesTabContent'
@@ -237,7 +238,7 @@ export function MonitoringCard() {
                 </div>
               </FormField>
             </div>
-            <p className="text-[11px] text-muted">{lossGranularityNote(policy)}</p>
+            <p className="text-xs text-muted">{lossGranularityNote(policy)}</p>
           </section>
 
           <section className="space-y-2.5">
@@ -291,7 +292,7 @@ export function MonitoringCard() {
           <section aria-label="What these settings do" className="space-y-2 rounded-lg border border-border bg-surface2/30 p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-semibold">With these settings</h3>
-              {isLegacyPolicy(policy) && <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">Legacy single-check behaviour</span>}
+              {isLegacyPolicy(policy) && <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted">Legacy single-check behaviour</span>}
             </div>
             <ul className="list-disc space-y-1 pl-4 text-xs text-muted">
               {[rules.degraded, rules.recovery, rules.down, rules.flapping].map((r) => <li key={r}>{r}</li>)}
@@ -316,7 +317,7 @@ export function MonitoringCard() {
                 </tbody>
               </table>
             </div>
-            <p className="text-[11px] text-muted">Times run from the moment the condition begins on a sustained problem. {flapDetectionLimitText(policy)}</p>
+            <p className="text-xs text-muted">Times run from the moment the condition begins on a sustained problem. {flapDetectionLimitText(policy)}</p>
           </section>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -345,7 +346,7 @@ function Sentence({ children, errors }: { children: React.ReactNode; errors: Arr
   return (
     <div>
       <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm">{children}</p>
-      {shown.map((e) => <p key={e} className="mt-0.5 text-[11px] text-danger">{e}</p>)}
+      {shown.map((e) => <p key={e} className="mt-0.5 text-xs text-danger">{e}</p>)}
     </div>
   )
 }
@@ -391,31 +392,77 @@ function ClearLimit({ label, unit, autoValue, override, value, error, onOverride
           Set manually
         </label>
       </div>
-      {error && <p className="mt-0.5 text-[11px] text-danger">{error}</p>}
+      {error && <p className="mt-0.5 text-xs text-danger">{error}</p>}
     </div>
   )
 }
 
 function AppearanceCard() {
   const { theme, set } = useTheme()
+  const { density, setDensity, setKiosk } = useDisplay()
   return (
-    <Card>
-      <CardHeader><CardTitle>Appearance</CardTitle></CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-2 gap-3">
-          <button onClick={() => set('dark')} className={`rounded-lg border-2 p-3 text-left transition ${theme === 'dark' ? 'border-primary' : 'border-border'}`}>
-            <div className="mb-2 h-12 rounded bg-[rgb(7,10,16)]" />
-            <div className="text-sm font-medium">Dark (NOC)</div>
-            <div className="text-xs text-muted">High contrast</div>
-          </button>
-          <button onClick={() => set('light')} className={`rounded-lg border-2 p-3 text-left transition ${theme === 'light' ? 'border-primary' : 'border-border'}`}>
-            <div className="mb-2 h-12 rounded bg-[rgb(248,250,252)]" />
-            <div className="text-sm font-medium">Light</div>
-            <div className="text-xs text-muted">Daylight reading</div>
-          </button>
-        </div>
-      </CardContent>
-    </Card>
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      <Card>
+        <CardHeader>
+          <CardTitle>Theme</CardTitle>
+          <CardDescription>Dark suits a NOC room and wall screens; light suits a bright office.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-3">
+            <button onClick={() => set('dark')} aria-pressed={theme === 'dark'} className={`rounded-lg border-2 p-3 text-left transition ${theme === 'dark' ? 'border-primary' : 'border-border hover:border-border-strong'}`}>
+              <div className="mb-2 flex h-14 gap-1.5 rounded-md bg-[rgb(10,13,19)] p-1.5">
+                <div className="w-1/4 rounded bg-[rgb(17,21,30)]" />
+                <div className="flex-1 rounded bg-[rgb(17,21,30)]" />
+              </div>
+              <div className="text-sm font-medium">Dark (NOC)</div>
+              <div className="text-xs text-muted">Low glare, high contrast</div>
+            </button>
+            <button onClick={() => set('light')} aria-pressed={theme === 'light'} className={`rounded-lg border-2 p-3 text-left transition ${theme === 'light' ? 'border-primary' : 'border-border hover:border-border-strong'}`}>
+              <div className="mb-2 flex h-14 gap-1.5 rounded-md bg-[rgb(243,245,248)] p-1.5">
+                <div className="w-1/4 rounded bg-white" />
+                <div className="flex-1 rounded bg-white" />
+              </div>
+              <div className="text-sm font-medium">Light</div>
+              <div className="text-xs text-muted">Daylight reading</div>
+            </button>
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Display density</CardTitle>
+          <CardDescription>Scales text, spacing and charts together. Saved in this browser only.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" role="radiogroup" aria-label="Display density">
+            {DENSITIES.map((d) => (
+              <button
+                key={d.value}
+                role="radio"
+                aria-checked={density === d.value}
+                onClick={() => setDensity(d.value)}
+                className={`rounded-lg border-2 px-3 py-2.5 text-left transition ${density === d.value ? 'border-primary bg-primary/5' : 'border-border hover:border-border-strong'}`}
+              >
+                <div className="flex h-7 items-end font-semibold leading-none text-text" style={{ fontSize: `${d.rootPx + 4}px` }} aria-hidden>Aa</div>
+                <div className="mt-1.5 whitespace-nowrap text-sm font-medium">{d.label}</div>
+                <div className="mt-0.5 text-2xs text-muted">{d.hint}</div>
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface2/50 px-3 py-2.5">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">NOC wall mode</div>
+              <div className="text-xs text-muted">
+                Full screen without the sidebar and header. For a wall screen, open any page with
+                <code className="mx-1 rounded bg-surface3 px-1 font-mono text-2xs">?density=wall&amp;kiosk=1</code>
+                · press Esc to leave.
+              </div>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setKiosk(true)}>Enter wall mode</Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 
@@ -489,7 +536,7 @@ function ProfileCard() {
                 <Input required type="password" value={currentPass} onChange={(e) => setCurrentPass(e.target.value)} autoComplete="current-password" />
               </FormField>
               <NewPasswordFields password={newPass} onPassword={setNewPass} confirm={confirmPass} onConfirm={setConfirmPass} ctx={{ username: user?.username, email: user?.email }} />
-              <p className="text-[11px] text-muted">Changing your password signs you out of every session, including this one.</p>
+              <p className="text-xs text-muted">Changing your password signs you out of every session, including this one.</p>
               <div className="flex justify-end">
                 <Button type="submit" disabled={changePw.isPending || !currentPass || !check.ok}>
                   {changePw.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Change password
@@ -521,7 +568,7 @@ function ProfileCard() {
                   return (
                     <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs">
                       <div className="min-w-0">
-                        <div className="font-medium">{row.ip_address || 'unknown address'} {current && <span className="ml-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">This session</span>}</div>
+                        <div className="font-medium">{row.ip_address || 'unknown address'} {current && <span className="ml-1 rounded bg-primary/10 px-1.5 py-0.5 text-2xs text-primary">This session</span>}</div>
                         <div className="truncate text-muted" title={row.user_agent || ''}>{row.user_agent || 'unknown client'}</div>
                         <div className="text-muted">Started {new Date(row.created_at).toLocaleString()} · last seen {relativeTime(row.last_seen_at)}</div>
                       </div>
@@ -626,7 +673,7 @@ function SmtpCard() {
           <div className="md:col-span-2 flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
             <div>
               <p className="text-sm font-medium">Enabled</p>
-              <p className="text-[11px] text-muted">When off, the system won't attempt to send any email.</p>
+              <p className="text-xs text-muted">When off, the system won't attempt to send any email.</p>
             </div>
             <Switch
               checked={form.enabled}

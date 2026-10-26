@@ -239,14 +239,14 @@ export function ServiceCredentialsPage() {
                   <SelectItem value="form">Form login journey</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="mt-1.5 text-[11px] text-muted">{AUTH_DESCRIPTIONS[form.auth_type]}</p>
+              <p className="mt-1.5 text-xs text-muted">{AUTH_DESCRIPTIONS[form.auth_type]}</p>
             </FormField>
             {form.auth_type !== 'bearer' && <FormField label="Username" required><Input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} placeholder={form.auth_type === 'ntlm' ? 'DOMAIN\\service-account' : 'service-account'} required /></FormField>}
             <FormField label={editing ? `${form.auth_type === 'bearer' ? 'Token' : 'Password'} (leave blank to keep current)` : form.auth_type === 'bearer' ? 'Token' : 'Password'} required={!editing}>
               <PasswordInput value={form.secret} onChange={(event) => setForm({ ...form, secret: event.target.value })} placeholder={editing ? 'Leave blank to preserve encrypted secret' : 'Enter secret'} required={!editing} />
             </FormField>
             <FormField label="Description"><Input value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="Where and why this credential is used" /></FormField>
-            <div className="rounded-md border border-warning/25 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+            <div className="rounded-md border border-warning/25 bg-warning/5 px-3 py-2 text-xs text-warning">
               Prefer HTTPS for Basic, bearer, and form authentication. NTLM over trusted HTTP protects the password exchange, but the page content remains unencrypted.
             </div>
             <DialogFooter>

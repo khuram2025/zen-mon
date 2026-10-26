@@ -81,7 +81,7 @@ function EntityInventory({ entities, loading, error }: { entities?: Entity[]; lo
                   <td className="px-2 py-1.5 text-muted">{e.class || MISSING}</td>
                   <td className="px-2 py-1.5 font-medium">{e.name || MISSING}</td>
                   <td className="px-2 py-1.5">{e.model_name || MISSING}</td>
-                  <td className="px-2 py-1.5 font-mono text-[13px]">{e.serial_number || MISSING}</td>
+                  <td className="px-2 py-1.5 font-mono text-sm">{e.serial_number || MISSING}</td>
                   <td className="px-2 py-1.5 text-muted">{e.hw_revision || MISSING}</td>
                   <td className="px-2 py-1.5 text-muted">{e.fw_revision || MISSING}</td>
                 </tr>

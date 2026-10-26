@@ -123,7 +123,7 @@ function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder
     <div className="overflow-hidden rounded-md border border-border">
       <table className="w-full text-sm">
         <caption className="sr-only">Role mapping rules, evaluated top to bottom; the first match wins</caption>
-        <thead className="bg-surface2/50 text-[11px] uppercase tracking-wider text-muted">
+        <thead className="bg-surface2/50 text-xs uppercase tracking-wider text-muted">
           <tr>
             <th scope="col" className="w-10 px-2 py-2 text-center font-medium">#</th>
             <th scope="col" className="px-3 py-2 text-left font-medium">{keyLabel}</th>
@@ -151,7 +151,7 @@ function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder
                     value={(m as any)[keyField] || ''}
                     onChange={(e) => patch(i, { [keyField]: e.target.value } as Partial<Mapping>)}
                   />
-                  {problem && <p role="alert" className="mt-1 text-[11px] text-danger">{problem}</p>}
+                  {problem && <p role="alert" className="mt-1 text-xs text-danger">{problem}</p>}
                 </td>
                 {withAttribute && (
                   <td className="p-1.5">
@@ -166,7 +166,7 @@ function MappingRows({ mappings, setMappings, keyField, keyLabel, keyPlaceholder
                 )}
                 <td className="p-1.5">
                   <RoleSelect value={m.role} roles={roles} label={`Rule ${i + 1} role`} onChange={(v) => patch(i, { role: v })} />
-                  {priv && <p className="mt-1 flex items-center gap-1 text-[10px] text-warning"><ShieldAlert className="h-3 w-3" aria-hidden /> Privileged role</p>}
+                  {priv && <p className="mt-1 flex items-center gap-1 text-2xs text-warning"><ShieldAlert className="h-3 w-3" aria-hidden /> Privileged role</p>}
                 </td>
                 <td className="p-1.5 text-right">
                   <div className="flex justify-end">
@@ -212,7 +212,7 @@ function ToggleRow({ title, description, checked, onChange }: {
     <label className="flex cursor-pointer items-center justify-between gap-4 rounded-md border border-border px-3 py-2">
       <div>
         <div className="text-sm font-medium">{title}</div>
-        {description && <div className="text-[11px] text-muted">{description}</div>}
+        {description && <div className="text-xs text-muted">{description}</div>}
       </div>
       <Switch checked={checked} onCheckedChange={(v) => onChange(!!v)} aria-label={title} />
     </label>
@@ -284,7 +284,7 @@ function TestPanel({ kind, payload, requireCreds, roleLabel }: {
             {result.message}
           </div>
           {result.steps && result.steps.length > 0 && (
-            <ol className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+            <ol className="mt-2 flex flex-wrap gap-1.5 text-xs">
               {result.steps.map((s) => (
                 <li key={s.name} className={cn('inline-flex items-center gap-1 rounded border px-1.5 py-0.5', s.ok ? 'border-success/30 text-success' : 'border-danger/30 text-danger')}>
                   {s.ok ? <CheckCircle2 className="h-3 w-3" aria-hidden /> : <XCircle className="h-3 w-3" aria-hidden />}{STEP_LABEL[s.name] || s.name}
@@ -317,7 +317,7 @@ function TestPanel({ kind, payload, requireCreds, roleLabel }: {
                   <dt className="text-muted">Groups</dt>
                   <dd className="flex flex-wrap gap-1">
                     {result.groups.length === 0 && <span className="text-muted">(none)</span>}
-                    {result.groups.map((g) => <span key={g} className="rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-[10px]">{g}</span>)}
+                    {result.groups.map((g) => <span key={g} className="rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-2xs">{g}</span>)}
                   </dd>
                 </>
               )}
@@ -327,7 +327,7 @@ function TestPanel({ kind, payload, requireCreds, roleLabel }: {
                   <dd className="flex flex-wrap gap-1">
                     {(result.reply_attributes?.length ? result.reply_attributes : (result.reply_values || []).map((v) => ({ attribute: '', value: v }))).length === 0 && <span className="text-muted">(none)</span>}
                     {(result.reply_attributes?.length ? result.reply_attributes : (result.reply_values || []).map((v) => ({ attribute: '', value: v }))).map((a, i) => (
-                      <span key={i} className="rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-[10px]">{a.attribute ? `${a.attribute}=` : ''}{a.value}</span>
+                      <span key={i} className="rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-2xs">{a.attribute ? `${a.attribute}=` : ''}{a.value}</span>
                     ))}
                   </dd>
                 </>
@@ -344,7 +344,7 @@ function DialogTabs({ showTest, mappingIssues }: { showTest: boolean; mappingIss
   return (
     <TabsList className="h-9 bg-surface2/50 p-1">
       <TabsTrigger value="connection" className="text-xs">Connection</TabsTrigger>
-      <TabsTrigger value="mapping" className="text-xs">Role mapping{mappingIssues > 0 && <span className="ml-1 rounded-full bg-danger px-1.5 text-[10px] text-white" aria-label={`${mappingIssues} problems`}>{mappingIssues}</span>}</TabsTrigger>
+      <TabsTrigger value="mapping" className="text-xs">Role mapping{mappingIssues > 0 && <span className="ml-1 rounded-full bg-danger px-1.5 text-2xs text-white" aria-label={`${mappingIssues} problems`}>{mappingIssues}</span>}</TabsTrigger>
       <TabsTrigger value="test" className="text-xs" disabled={!showTest}>Test</TabsTrigger>
     </TabsList>
   )
@@ -474,7 +474,7 @@ export function LdapDialog({ open, onOpenChange, initial, roles, rolesFailed, in
 
               <TabsContent value="connection" className="mt-3 space-y-3">
                 <ToggleRow title="Enable LDAP / Active Directory sign-in" description="Unknown usernames are looked up in the directory when they sign in." checked={form.enabled} onChange={(v) => f({ enabled: v })} />
-                {missing && <p role="alert" className="text-[11px] text-warning">Server and Base DN are required before this source can be enabled.</p>}
+                {missing && <p role="alert" className="text-xs text-warning">Server and Base DN are required before this source can be enabled.</p>}
 
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
                   <FormField label="Server" required className="md:col-span-3">
@@ -526,7 +526,7 @@ export function LdapDialog({ open, onOpenChange, initial, roles, rolesFailed, in
                       <FormField label="Group attribute"><Input value={form.group_attr} onChange={(e) => f({ group_attr: e.target.value })} className="font-mono text-xs" /></FormField>
                     </div>
                   </div>
-                  <p className="mt-2 text-[11px] text-muted">
+                  <p className="mt-2 text-xs text-muted">
                     Defaults suit Active Directory. For OpenLDAP use <code className="font-mono">(uid={'{username}'})</code> and the <code className="font-mono">cn</code> name attribute. Only direct group membership (<code className="font-mono">memberOf</code>) is read; nested groups are not expanded.
                   </p>
                 </Advanced>
@@ -547,7 +547,7 @@ export function LdapDialog({ open, onOpenChange, initial, roles, rolesFailed, in
                     <ToggleRow title="Create accounts on first sign-in" description="Off: only users who already have an LDAP account here can sign in." checked={form.auto_provision} onChange={(v) => f({ auto_provision: v })} />
                   </div>
                 </div>
-                <p className="text-[11px] text-muted">New accounts get no visibility tags (they see everything their role permits). Limit them afterwards in Users, or give the mapped role only the access a whole team should have.</p>
+                <p className="text-xs text-muted">New accounts get no visibility tags (they see everything their role permits). Limit them afterwards in Users, or give the mapped role only the access a whole team should have.</p>
               </TabsContent>
 
               <TabsContent value="test" className="mt-3">
@@ -632,7 +632,7 @@ export function RadiusDialog({ open, onOpenChange, initial, roles, rolesFailed, 
 
               <TabsContent value="connection" className="mt-3 space-y-3">
                 <ToggleRow title="Enable RADIUS sign-in" description="Tried after LDAP / Active Directory for unknown usernames." checked={form.enabled} onChange={(v) => f({ enabled: v })} />
-                {missing && <p role="alert" className="text-[11px] text-warning">Server and shared secret are required before this source can be enabled.</p>}
+                {missing && <p role="alert" className="text-xs text-warning">Server and shared secret are required before this source can be enabled.</p>}
 
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
                   <FormField label="Server" required className="md:col-span-3">
@@ -664,10 +664,10 @@ export function RadiusDialog({ open, onOpenChange, initial, roles, rolesFailed, 
                       <Input value={form.nas_identifier} onChange={(e) => f({ nas_identifier: e.target.value })} placeholder="zenplus" className="font-mono text-xs" />
                     </FormField>
                   </div>
-                  <p className={cn('mt-2 text-[11px]', budgetBad ? 'text-danger' : 'text-muted')} role={budgetBad ? 'alert' : undefined}>
+                  <p className={cn('mt-2 text-xs', budgetBad ? 'text-danger' : 'text-muted')} role={budgetBad ? 'alert' : undefined}>
                     Worst-case wait: timeout × retries = {budget} s. Sign-in and the Test button give up after at most 30 s, so keep this at or below 30.
                   </p>
-                  <p className="mt-1 text-[11px] text-muted">RADIUS here is PAP Access-Request/Accept/Reject only. Access-Challenge (token or push MFA served by the RADIUS server) is not supported; use ZenPlus's own two-step verification for local accounts.</p>
+                  <p className="mt-1 text-xs text-muted">RADIUS here is PAP Access-Request/Accept/Reject only. Access-Challenge (token or push MFA served by the RADIUS server) is not supported; use ZenPlus's own two-step verification for local accounts.</p>
                 </Advanced>
               </TabsContent>
 
@@ -787,7 +787,7 @@ export function OidcDialog({ open, onOpenChange, initial, roles, rolesFailed, in
 
               <TabsContent value="connection" className="mt-3 space-y-3">
                 <ToggleRow title="Enable single sign-on" description="Adds a “Sign in with …” button to the sign-in page. Local accounts keep working." checked={form.enabled} onChange={(v) => f({ enabled: v })} />
-                {missing && <p role="alert" className="text-[11px] text-warning">Issuer, client ID and client secret are required before this source can be enabled.</p>}
+                {missing && <p role="alert" className="text-xs text-warning">Issuer, client ID and client secret are required before this source can be enabled.</p>}
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <FormField label="Issuer URL" required hint="e.g. https://login.microsoftonline.com/<tenant>/v2.0 — the discovery document is read from here">
                     <Input value={form.issuer} onChange={(e) => f({ issuer: e.target.value })} placeholder="https://idp.example.com/realms/corp" className="font-mono text-xs" />
@@ -820,7 +820,7 @@ export function OidcDialog({ open, onOpenChange, initial, roles, rolesFailed, in
                     <FormField label="Groups claim" hint="Entra ID: “groups” (object IDs) · Okta/Keycloak: configure a groups claim"><Input value={form.groups_claim} onChange={(e) => f({ groups_claim: e.target.value })} className="font-mono text-xs" /></FormField>
                   </div>
                   <FormField label="Provider CA certificate (PEM)" hint="Only for a private CA; blank uses the appliance trust store."><textarea className="mt-1 min-h-20 w-full rounded border border-border bg-surface p-2 font-mono text-xs" value={form.ca_certificate_pem || ''} onChange={(e) => f({ ca_certificate_pem: e.target.value })} /></FormField>
-                  <p className="mt-2 text-[11px] text-muted">An account is matched by the provider's stable subject (<code>sub</code>), never by username or email, so a renamed or reassigned address cannot take over another account. A local account with the same username blocks the sign-in instead of being merged.</p>
+                  <p className="mt-2 text-xs text-muted">An account is matched by the provider's stable subject (<code>sub</code>), never by username or email, so a renamed or reassigned address cannot take over another account. A local account with the same username blocks the sign-in instead of being merged.</p>
                 </Advanced>
               </TabsContent>
 

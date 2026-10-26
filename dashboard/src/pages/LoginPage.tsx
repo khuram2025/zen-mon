@@ -134,7 +134,7 @@ export function LoginPage() {
               </Button>
               {!challenge && sso?.enabled && (
                 <>
-                  <div className="relative py-1 text-center text-[11px] uppercase tracking-wider text-muted before:absolute before:left-0 before:top-1/2 before:h-px before:w-[40%] before:bg-border after:absolute after:right-0 after:top-1/2 after:h-px after:w-[40%] after:bg-border">or</div>
+                  <div className="relative py-1 text-center text-xs uppercase tracking-wider text-muted before:absolute before:left-0 before:top-1/2 before:h-px before:w-[40%] before:bg-border after:absolute after:right-0 after:top-1/2 after:h-px after:w-[40%] after:bg-border">or</div>
                   <Button type="button" variant="outline" className="w-full" onClick={() => { window.location.href = '/api/v1/auth/oidc/login' }}>
                     <KeyRound className="h-4 w-4" /> {sso.display_name || 'Single sign-on'}
                   </Button>

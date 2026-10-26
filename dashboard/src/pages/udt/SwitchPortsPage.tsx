@@ -124,9 +124,9 @@ export function SwitchPortsPage() {
                 <Server className="h-4 w-4 text-muted" />
                 <span className="truncate text-sm font-medium">{d.hostname}</span>
               </div>
-              {d.managed && <div className="mt-1 text-[11px] text-muted">Controller-managed</div>}
+              {d.managed && <div className="mt-1 text-xs text-muted">Controller-managed</div>}
               <div className="mt-2"><CapacityBar used={d.used} total={d.total} /></div>
-              <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted">
+              <div className="mt-1.5 flex items-center gap-2 text-xs text-muted">
                 <span>{d.free} down</span>{!!d.unknown && <><span>·</span><span>{d.unknown} unknown</span></>}·<span>{d.uplinks} uplinks</span>·<span>{d.active} with endpoints</span>
               </div>
             </button>
@@ -207,7 +207,7 @@ export function SwitchPortsPage() {
                           {p.is_uplink ? (
                             <span className="inline-flex items-center gap-1">
                               <Badge variant="info"><ArrowUpFromLine className="mr-0.5 inline h-3 w-3" />uplink</Badge>
-                              {p.uplink_reason && <span className="text-[10px] text-muted">{p.uplink_reason}</span>}
+                              {p.uplink_reason && <span className="text-2xs text-muted">{p.uplink_reason}</span>}
                             </span>
                           ) : <span className="text-xs text-muted">{managed ? 'unconfirmed' : 'access'}</span>}
                         </Td>

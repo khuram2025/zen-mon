@@ -195,7 +195,7 @@ export function SnmpProfilesPage({ hideHeader = false }: { hideHeader?: boolean 
                       <div className="flex items-center gap-2">
                         <span className="font-medium">{c.name}</span>
                         {c.is_default && (
-                          <span className="flex items-center gap-0.5 rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+                          <span className="flex items-center gap-0.5 rounded bg-warning/10 px-1.5 py-0.5 text-2xs font-semibold text-warning">
                             <Star className="h-3 w-3" /> DEFAULT
                           </span>
                         )}
@@ -325,7 +325,7 @@ function ExpandedCredential({ cred }: { cred: Credential }) {
             <div className="space-y-1 text-sm">
               {usage.groups.map((g) => (
                 <div key={g.id} className="flex items-center gap-1.5">
-                  <Badge variant="outline" className="text-[10px]">GROUP</Badge> {g.name}
+                  <Badge variant="outline" className="text-2xs">GROUP</Badge> {g.name}
                 </div>
               ))}
               {usage.devices.slice(0, 10).map((d) => (
@@ -493,7 +493,7 @@ function CredentialFormDialog({
                   }`}
                 >
                   <div className="text-base font-bold">v{v}</div>
-                  <div className="text-[10px] text-muted">
+                  <div className="text-2xs text-muted">
                     {v === '1' ? 'Legacy' : v === '2c' ? 'Community' : 'USM Auth'}
                   </div>
                 </button>

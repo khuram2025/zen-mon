@@ -78,13 +78,13 @@ export function IncidentPanel({ checkId, outage, intervalSec, timeoutSec, nowMs,
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
         <div className="flex flex-wrap items-center gap-2">
           <span className={cn(
-            'rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider',
+            'rounded px-1.5 py-px text-2xs font-semibold uppercase tracking-wider',
             outage.kind === 'down' ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning',
           )}>
             {outage.kind === 'down' ? 'Down' : 'Warning'}
           </span>
           <h3 className="text-sm font-semibold">Incident investigation</h3>
-          <span className="font-mono text-[11px] text-muted">{durationText}</span>
+          <span className="font-mono text-xs text-muted">{durationText}</span>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" className="h-7" onClick={() => onZoom(new Date(outage.start - pad * 2).toISOString(), new Date(Math.min(end + pad * 2, nowMs)).toISOString())}>
@@ -98,7 +98,7 @@ export function IncidentPanel({ checkId, outage, intervalSec, timeoutSec, nowMs,
 
       <div className="grid gap-4 p-4 lg:grid-cols-2">
         <div className="space-y-3">
-          <dl className="grid grid-cols-[110px_1fr] gap-x-3 gap-y-1.5 text-[11px]">
+          <dl className="grid grid-cols-[110px_1fr] gap-x-3 gap-y-1.5 text-xs">
             <dt className="text-muted">Started</dt>
             <dd className="font-mono tabular-nums">{exactTime(outage.start)}{outage.clippedStart && <span className="ml-1 font-sans text-muted">(began before the selected window)</span>}</dd>
             <dt className="text-muted">Ended</dt>
@@ -116,38 +116,38 @@ export function IncidentPanel({ checkId, outage, intervalSec, timeoutSec, nowMs,
             </dd>
           </dl>
           {outage.reason && (
-            <div className="rounded-md border border-border bg-surface2/30 p-2 text-[11px]">
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Reason at start</div>
+            <div className="rounded-md border border-border bg-surface2/30 p-2 text-xs">
+              <div className="mb-0.5 text-2xs font-semibold uppercase tracking-wider text-muted">Reason at start</div>
               <ServiceFailureReason reason={outage.reason} timeoutSeconds={timeoutSec} />
             </div>
           )}
           {outage.reasonEnd && (
-            <div className="rounded-md border border-border bg-surface2/30 p-2 text-[11px]">
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Reason at end</div>
+            <div className="rounded-md border border-border bg-surface2/30 p-2 text-xs">
+              <div className="mb-0.5 text-2xs font-semibold uppercase tracking-wider text-muted">Reason at end</div>
               <span className="text-text2">{explainServiceFailure(outage.reasonEnd, { timeoutSeconds: timeoutSec })}</span>
             </div>
           )}
 
           <div>
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">
               Probes around the incident {!probes.isLoading && points.length > 0 && <span className="ml-1 font-mono normal-case text-text2">{failed.length} failed of {points.length}</span>}
             </div>
-            {probes.isLoading ? <p className="text-[11px] text-muted">Loading probes…</p>
-              : probes.isError ? <p className="text-[11px] text-danger">Could not load probes. <button type="button" className="underline" onClick={() => probes.refetch()}>Retry</button></p>
-                : points.length === 0 ? <p className="text-[11px] text-muted">No stored probes around this incident (raw probes are kept for 30 days).</p>
+            {probes.isLoading ? <p className="text-xs text-muted">Loading probes…</p>
+              : probes.isError ? <p className="text-xs text-danger">Could not load probes. <button type="button" className="underline" onClick={() => probes.refetch()}>Retry</button></p>
+                : points.length === 0 ? <p className="text-xs text-muted">No stored probes around this incident (raw probes are kept for 30 days).</p>
                   : (
                     <div className="max-h-[220px] space-y-1 overflow-y-auto pr-1">
                       {failed.slice(0, 40).map((p, i) => (
-                        <div key={`${p.timestamp}-${i}`} className="flex items-start gap-2 text-[11px]">
+                        <div key={`${p.timestamp}-${i}`} className="flex items-start gap-2 text-xs">
                           <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-danger" />
                           <span className="shrink-0 font-mono tabular-nums text-muted">{exactTime(p.timestamp)}</span>
                           <span className="min-w-0 flex-1 text-text2">{p.error_message ? explainServiceFailure(p.error_message, { failureStage: p.network_diagnostics?.failure_stage, timeoutSeconds: timeoutSec }) : 'Failed'}</span>
                         </div>
                       ))}
-                      {failed.length > 40 && <p className="text-[10px] text-muted">…and {failed.length - 40} more failed probes.</p>}
-                      {failed.length === 0 && <p className="text-[11px] text-muted">No failed probes stored in this span.</p>}
+                      {failed.length > 40 && <p className="text-2xs text-muted">…and {failed.length - 40} more failed probes.</p>}
+                      {failed.length === 0 && <p className="text-xs text-muted">No failed probes stored in this span.</p>}
                       {firstSuccessAfter && (
-                        <div className="flex items-start gap-2 text-[11px]">
+                        <div className="flex items-start gap-2 text-xs">
                           <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-success" />
                           <span className="shrink-0 font-mono tabular-nums text-muted">{exactTime(firstSuccessAfter.timestamp)}</span>
                           <span className="text-success">First successful probe · {formatMs(firstSuccessAfter.response_ms)}</span>
@@ -160,14 +160,14 @@ export function IncidentPanel({ checkId, outage, intervalSec, timeoutSec, nowMs,
 
         <div className="space-y-3">
           <div>
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Alerts during the incident</div>
-            {alerts.isLoading ? <p className="text-[11px] text-muted">Loading alerts…</p>
-              : alerts.isError ? <p className="text-[11px] text-danger">Could not load alerts.</p>
-                : (alerts.data?.data || []).length === 0 ? <p className="text-[11px] text-muted">No alerts were raised in this span.</p>
+            <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Alerts during the incident</div>
+            {alerts.isLoading ? <p className="text-xs text-muted">Loading alerts…</p>
+              : alerts.isError ? <p className="text-xs text-danger">Could not load alerts.</p>
+                : (alerts.data?.data || []).length === 0 ? <p className="text-xs text-muted">No alerts were raised in this span.</p>
                   : (
                     <ul className="space-y-1">
                       {(alerts.data?.data || []).map((a) => (
-                        <li key={a.id} className="flex items-start gap-2 text-[11px]">
+                        <li key={a.id} className="flex items-start gap-2 text-xs">
                           <span className={cn('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', isRecoveryAlert(a) ? 'bg-success' : a.status === 'active' ? 'bg-danger' : 'bg-muted')} />
                           <span className="shrink-0 font-mono tabular-nums text-muted">{exactTime(a.triggered_at)}</span>
                           <Link to={`/alerts/${a.id}`} className="min-w-0 flex-1 truncate hover:text-primary hover:underline" title={cleanAlertMessage(a.message)}>
@@ -221,19 +221,19 @@ function IncidentNotes({ checkId, incidentStartISO }: { checkId: string; inciden
   const assigneeId = `note-assignee-${incidentStartISO}`
   return (
     <div>
-      <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+      <div className="mb-1 flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
         <StickyNote className="h-3 w-3" /> Notes & assignment
       </div>
-      {notes.isLoading ? <p className="text-[11px] text-muted">Loading notes…</p>
-        : notes.isError ? <p className="text-[11px] text-danger">Could not load notes.</p>
-          : notes.data === null ? <p className="text-[11px] text-muted">Incident notes are not available on this appliance version.</p>
+      {notes.isLoading ? <p className="text-xs text-muted">Loading notes…</p>
+        : notes.isError ? <p className="text-xs text-danger">Could not load notes.</p>
+          : notes.data === null ? <p className="text-xs text-muted">Incident notes are not available on this appliance version.</p>
             : (
               <>
-                {(notes.data || []).length === 0 ? <p className="mb-2 text-[11px] text-muted">No notes yet.</p> : (
+                {(notes.data || []).length === 0 ? <p className="mb-2 text-xs text-muted">No notes yet.</p> : (
                   <ul className="mb-2 space-y-1.5">
                     {(notes.data || []).map((n) => (
-                      <li key={n.id} className="rounded-md border border-border bg-surface2/30 px-2 py-1.5 text-[11px]">
-                        <div className="flex flex-wrap items-baseline justify-between gap-2 text-[10px] text-muted">
+                      <li key={n.id} className="rounded-md border border-border bg-surface2/30 px-2 py-1.5 text-xs">
+                        <div className="flex flex-wrap items-baseline justify-between gap-2 text-2xs text-muted">
                           <span>{n.author_name || 'Unknown'}{n.assignee ? ` · assigned to ${n.assignee}` : ''}</span>
                           <span className="font-mono">{exactTime(n.created_at, false)} ({relativeTime(n.created_at)})</span>
                         </div>
@@ -255,7 +255,7 @@ function IncidentNotes({ checkId, incidentStartISO }: { checkId: string; inciden
                       {add.isPending && <Loader2 className="h-3 w-3 animate-spin" />} Add note
                     </Button>
                   </div>
-                  {error && <p id={`${noteId}-err`} role="alert" className="text-[11px] text-danger">{error}</p>}
+                  {error && <p id={`${noteId}-err`} role="alert" className="text-xs text-danger">{error}</p>}
                 </form>
               </>
             )}

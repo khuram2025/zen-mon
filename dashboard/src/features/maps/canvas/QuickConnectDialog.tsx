@@ -64,7 +64,7 @@ export function QuickConnectDialog({ mapId, saving, onCancel, onConnect }: {
         ) : (
           <div className="max-h-[50vh] overflow-y-auto rounded-md border border-border">
             <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-surface2 text-[10px] uppercase tracking-wide text-muted">
+              <thead className="sticky top-0 bg-surface2 text-2xs uppercase tracking-wide text-muted">
                 <tr>
                   <th className="w-8 px-2 py-1.5 text-left">
                     <input
@@ -88,16 +88,16 @@ export function QuickConnectDialog({ mapId, saving, onCancel, onConnect }: {
                       <td className="px-2 py-1.5 align-top"><input type="checkbox" className="accent-primary" checked={picked.has(k)} onChange={() => toggle(k)} aria-label={`Connect ${r.source_hostname} to ${r.target_hostname}`} /></td>
                       <td className="px-2 py-1.5 align-top">
                         <div className="font-medium text-text">{short(r.source_hostname)} ⇄ {short(r.target_hostname)}</div>
-                        {r.physical_links > 1 && <div className="text-[10px] text-muted">bundle · {r.physical_links} links</div>}
+                        {r.physical_links > 1 && <div className="text-2xs text-muted">bundle · {r.physical_links} links</div>}
                       </td>
-                      <td className="px-2 py-1.5 align-top font-mono text-[10.5px] text-text2">
+                      <td className="px-2 py-1.5 align-top font-mono text-xs text-text2">
                         {r.src_interface || '?'} ⇄ {r.dst_interface || '?'}
-                        {(r.src_oper || r.dst_oper) && <div className="font-sans text-[10px] text-muted">{r.src_oper || '?'} / {r.dst_oper || '?'}</div>}
+                        {(r.src_oper || r.dst_oper) && <div className="font-sans text-2xs text-muted">{r.src_oper || '?'} / {r.dst_oper || '?'}</div>}
                       </td>
                       <td className="px-2 py-1.5 align-top">
-                        <div className="text-[10.5px] uppercase text-muted">{r.protocol || 'cdp'} · seen {formatAgo(r.last_seen_at)}</div>
+                        <div className="text-xs uppercase text-muted">{r.protocol || 'cdp'} · seen {formatAgo(r.last_seen_at)}</div>
                         {r.stale && (
-                          <div className="mt-0.5 flex items-start gap-1 text-[10.5px] text-warning">
+                          <div className="mt-0.5 flex items-start gap-1 text-xs text-warning">
                             <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
                             <span>{(r.reasons || []).map((x) => REASON_TEXT[x] || x.replace(/_/g, ' ')).join(' · ') || 'stale'}</span>
                           </div>
@@ -112,7 +112,7 @@ export function QuickConnectDialog({ mapId, saving, onCancel, onConnect }: {
         )}
 
         <DialogFooter>
-          <span className="mr-auto self-center text-[11px] text-muted">{freshCount} current · {staleCount} stale</span>
+          <span className="mr-auto self-center text-xs text-muted">{freshCount} current · {staleCount} stale</span>
           <Button variant="outline" onClick={onCancel} disabled={saving}>Cancel</Button>
           <Button
             onClick={() => onConnect(chosen.map((r) => [r.source_node_id, r.target_node_id] as [string, string]), chosen.some((r) => r.stale))}

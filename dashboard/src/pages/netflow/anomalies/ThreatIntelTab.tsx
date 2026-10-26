@@ -158,7 +158,7 @@ function FeedRow({
           {f.source === 'url' ? <Globe className="h-4 w-4 text-text2" aria-hidden /> : <FileUp className="h-4 w-4 text-text2" aria-hidden />}
           <span className="text-sm font-medium text-text">{f.name}</span>
           <ToneChip tone={state.tone}>{state.label}</ToneChip>
-          <span className="rounded-md bg-surface2 px-1.5 py-0.5 text-[11px] text-text2">{f.category}</span>
+          <span className="rounded-md bg-surface2 px-1.5 py-0.5 text-xs text-text2">{f.category}</span>
         </div>
         <p className="mt-0.5 text-xs text-text2">
           {formatCount(f.entry_count)} prefix{f.entry_count === 1 ? '' : 'es'} · {f.source === 'url' ? `every ${f.refresh_hours} h` : 'uploaded list'}
@@ -175,7 +175,7 @@ function FeedRow({
             )}
           </p>
         )}
-        {f.url && <p className="break-all font-mono text-[11px] text-text2">{f.url}</p>}
+        {f.url && <p className="break-all font-mono text-xs text-text2">{f.url}</p>}
         {f.last_status && (
           <p className={cn('mt-0.5 break-words text-xs', state.tone === 'danger' ? 'text-danger-fg' : 'text-text2')}>{f.last_status}</p>
         )}
@@ -298,7 +298,7 @@ function AddFeed({ catalog, categories, existing }: { catalog: TiCatalogEntry[];
           }}
         >
           <fieldset className="min-[560px]:col-span-2">
-            <legend className="text-[11px] font-medium text-text">Source</legend>
+            <legend className="text-xs font-medium text-text">Source</legend>
             <div className="mt-1 flex flex-wrap gap-1.5">
               {(['url', 'upload'] as const).map((s) => (
                 <label key={s} className={cn('cursor-pointer rounded-md border px-2.5 py-1 text-xs', source === s ? 'border-primary bg-primary/10 text-text' : 'border-border text-text2')}>
@@ -347,7 +347,7 @@ function AddFeed({ catalog, categories, existing }: { catalog: TiCatalogEntry[];
                   if (!name) setName(file.name.replace(/\.[^.]+$/, ''))
                 }}
               />
-              {fileName && <span className="mt-0.5 block text-[11px] text-text2">{fileName} ready</span>}
+              {fileName && <span className="mt-0.5 block text-xs text-text2">{fileName} ready</span>}
             </Row>
           )}
           {error && <p className="text-xs text-danger-fg min-[560px]:col-span-2" role="alert">{error}</p>}
@@ -365,7 +365,7 @@ function AddFeed({ catalog, categories, existing }: { catalog: TiCatalogEntry[];
 function Row({ id, label, children }: { id: string; label: string; children: ReactNode }) {
   return (
     <div>
-      <label htmlFor={id} className="block text-[11px] font-medium text-text">{label}</label>
+      <label htmlFor={id} className="block text-xs font-medium text-text">{label}</label>
       <div className="mt-1">{children}</div>
     </div>
   )

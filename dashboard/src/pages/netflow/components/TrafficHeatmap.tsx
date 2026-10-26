@@ -92,7 +92,7 @@ export function TrafficHeatmap({ data, activeHour, activeDow, onSelect }: Traffi
       <div role="group" aria-label={`Traffic by weekday and hour in ${tzShort}${onSelect ? '; select a cell to filter the page' : ''}`} className="space-y-[3px]">
         {DOWS.map((dow, di) => (
           <div key={dow} className="flex items-center gap-1.5">
-            <span className="w-8 shrink-0 text-[11px] text-text2" aria-hidden>{dowName(dow, true)}</span>
+            <span className="w-8 shrink-0 text-xs text-text2" aria-hidden>{dowName(dow, true)}</span>
             <div className="grid flex-1 gap-[2px]" style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}>
               {HOURS.map((h) => {
                 const index = di * 24 + h
@@ -131,7 +131,7 @@ export function TrafficHeatmap({ data, activeHour, activeDow, onSelect }: Traffi
         ))}
         <div className="flex items-center gap-1.5" aria-hidden>
           <span className="w-8 shrink-0" />
-          <div className="relative h-3 flex-1 text-[10px] text-text2">
+          <div className="relative h-3 flex-1 text-2xs text-text2">
             {HOUR_TICKS.map((h) => (
               <span key={h} className="absolute -translate-x-1/2 tabular-nums" style={{ left: `${((h + 0.5) / 24) * 100}%` }}>
                 {String(h).padStart(2, '0')}
@@ -140,7 +140,7 @@ export function TrafficHeatmap({ data, activeHour, activeDow, onSelect }: Traffi
           </div>
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[10px] text-text2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-2xs text-text2">
         {legend.length > 0 && (
           <div
             role="img"
@@ -167,7 +167,7 @@ export function TrafficHeatmap({ data, activeHour, activeDow, onSelect }: Traffi
         <Swatch style={{ background: `repeating-linear-gradient(135deg, rgba(${hatch},0.25) 0 1px, transparent 1px 4px)` }} className="border border-border" label="Not tracked" />
         <Swatch style={{ background: `linear-gradient(225deg, rgb(var(--text2)) 0 4px, transparent 4px), ${ramp[2]}` }} label="Collection gaps in some of these hours" />
       </div>
-      <p className="text-[10px] leading-snug text-text2">
+      <p className="text-2xs leading-snug text-text2">
         Linear scale. {data.basis === 'avg' ? 'Average hour: bytes divided by the hours of that weekday and hour that had records.' : 'Total bytes over the window.'}{' '}
         {data.coverage.coverage_pct != null && `${data.coverage.hours_covered} of ${data.coverage.hours_in_window} hours had records.`}
       </p>

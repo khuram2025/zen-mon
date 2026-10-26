@@ -51,7 +51,7 @@ export function ScrollShadow({
         <span aria-hidden data-scroll-edge="left" className={cn('pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-surface to-transparent transition-opacity', edges.left ? 'opacity-100' : 'opacity-0')} />
         <span aria-hidden data-scroll-edge="right" className={cn('pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-surface to-transparent transition-opacity', edges.right ? 'opacity-100' : 'opacity-0')} />
       </div>
-      {edges.right && <p className="text-[11px] text-muted" data-scroll-hint="">{hint}</p>}
+      {edges.right && <p className="text-xs text-muted" data-scroll-hint="">{hint}</p>}
     </div>
   )
 }

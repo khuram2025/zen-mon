@@ -36,8 +36,8 @@ function Section({ title, hint, children, className }: { title: string; hint?: R
   return (
     <section className={cn('border-b border-border/70 px-4 py-3 last:border-b-0', className)}>
       <div className="mb-2 flex items-baseline justify-between gap-2">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted">{title}</h3>
-        {hint && <span className="text-[11px] text-muted">{hint}</span>}
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">{title}</h3>
+        {hint && <span className="text-xs text-muted">{hint}</span>}
       </div>
       {children}
     </section>
@@ -47,8 +47,8 @@ function Section({ title, hint, children, className }: { title: string; hint?: R
 function Fact({ label, children, wide }: { label: string; children: ReactNode; wide?: boolean }) {
   return (
     <div className={cn('min-w-0', wide && 'col-span-2')}>
-      <dt className="text-[11px] text-muted">{label}</dt>
-      <dd className="mt-0.5 break-words text-[13px] text-text">{children}</dd>
+      <dt className="text-xs text-muted">{label}</dt>
+      <dd className="mt-0.5 break-words text-sm text-text">{children}</dd>
     </div>
   )
 }
@@ -107,7 +107,7 @@ export function FlyoutHeader({ detail, now }: { detail: AssetDetail; now: number
 function Identity({ detail, now }: { detail: AssetDetail; now: number }) {
   return (
     <Section title="Identity" hint="value, source, age">
-      <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[13px]">
+      <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm">
         {detail.identity.map((v) => {
           const text = identityText(v)
           return (
@@ -134,7 +134,7 @@ function Identity({ detail, now }: { detail: AssetDetail; now: number }) {
             {Object.entries(detail.raw).map(([k, v]) => (
               <div key={k} className="contents">
                 <dt className="text-muted">{k}</dt>
-                <dd className="break-words font-mono text-[11px] text-text2">{v ?? '—'}</dd>
+                <dd className="break-words font-mono text-xs text-text2">{v ?? '—'}</dd>
               </div>
             ))}
           </dl>
@@ -152,7 +152,7 @@ function SecurityPill({ agent }: { agent: ServerBody['software']['security_agent
   const tone = state === 'present' ? 'border-success/30 bg-success/10 text-success-fg' : state === 'missing' ? 'border-warning/35 bg-warning/10 text-warning-fg' : 'border-border bg-surface2 text-text2'
   return (
     <div className="space-y-1">
-      <span data-security-agent={state} className={cn('inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium', tone)}>
+      <span data-security-agent={state} className={cn('inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium', tone)}>
         <Icon className="h-3.5 w-3.5" aria-hidden />
         {text}
         {state === 'present' && detail && <span className="font-normal">({detail})</span>}
@@ -195,14 +195,14 @@ function ServerSections({ detail }: { detail: AssetDetail }) {
         ) : (
           <ul role="list" className="divide-y divide-border/60" data-flyout="software">
             {sw.top.map((p) => (
-              <li key={`${p.package_name}:${p.version}:${p.architecture}`} className="flex items-baseline gap-2 py-1 text-[13px]">
+              <li key={`${p.package_name}:${p.version}:${p.architecture}`} className="flex items-baseline gap-2 py-1 text-sm">
                 {p.product_key ? (
                   <Link to={productHref(p.product_key)} className="min-w-0 flex-1 truncate rounded-sm font-medium text-text outline-none hover:text-primary hover:underline focus-visible:ring-2 focus-visible:ring-primary" title={p.package_name}>{p.product}</Link>
                 ) : (
                   <span className="min-w-0 flex-1 truncate font-medium text-text" title={p.package_name}>{p.product}</span>
                 )}
-                {(p.category === 'security' || p.category === 'endpoint-protection') && <span className="shrink-0 rounded border border-border bg-surface2 px-1 py-px text-[10px] font-medium text-text2">{categoryLabel(p.category)}</span>}
-                <span className="shrink-0 font-mono text-[11px] text-text2">{p.version ?? '—'}</span>
+                {(p.category === 'security' || p.category === 'endpoint-protection') && <span className="shrink-0 rounded border border-border bg-surface2 px-1 py-px text-2xs font-medium text-text2">{categoryLabel(p.category)}</span>}
+                <span className="shrink-0 font-mono text-xs text-text2">{p.version ?? '—'}</span>
               </li>
             ))}
           </ul>
@@ -257,7 +257,7 @@ function DeviceSections({ detail, now }: { detail: AssetDetail; now: number }) {
             {d.modules.map((g) => (
               <li key={`${g.class}:${g.model ?? ''}`}>
                 <details className="group rounded-md border border-border/70 bg-surface2/30 px-2.5 py-1.5">
-                  <summary className="flex cursor-pointer select-none items-baseline gap-2 rounded text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-primary">
+                  <summary className="flex cursor-pointer select-none items-baseline gap-2 rounded text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary">
                     <span className="font-medium text-text">{g.class_label}</span>
                     <span className={cn('min-w-0 flex-1 truncate font-mono text-xs text-text2', !g.model && 'font-sans italic text-muted')}>{g.model ?? 'model unknown'}</span>
                     <span className="shrink-0 tabular-nums text-xs text-muted">× {fmtInt(g.count)}</span>
@@ -266,7 +266,7 @@ function DeviceSections({ detail, now }: { detail: AssetDetail; now: number }) {
                     {g.items.map((it) => (
                       <li key={it.ent_index} className="flex items-baseline gap-2 text-xs">
                         <span className="min-w-0 flex-1 truncate text-text2" title={it.name ?? undefined}>{it.name ?? `Component ${it.ent_index}`}</span>
-                        <span className={cn('shrink-0 font-mono text-[11px]', it.serial ? 'text-text' : 'font-sans italic text-muted')}>{it.serial ?? 'no serial'}</span>
+                        <span className={cn('shrink-0 font-mono text-xs', it.serial ? 'text-text' : 'font-sans italic text-muted')}>{it.serial ?? 'no serial'}</span>
                       </li>
                     ))}
                   </ul>
@@ -294,14 +294,14 @@ function RecentChanges({ detail, now }: { detail: AssetDetail; now: number }) {
           {items.map((c) => {
             const t = changeText(c)
             return (
-              <li key={c.id} className="flex items-start gap-2 py-1.5 text-[13px]">
-                <time dateTime={c.observed_at} title={new Date(toMillis(c.observed_at) ?? 0).toLocaleString()} className="w-14 shrink-0 whitespace-nowrap pt-px text-[11px] tabular-nums text-muted">
+              <li key={c.id} className="flex items-start gap-2 py-1.5 text-sm">
+                <time dateTime={c.observed_at} title={new Date(toMillis(c.observed_at) ?? 0).toLocaleString()} className="w-14 shrink-0 whitespace-nowrap pt-px text-xs tabular-nums text-muted">
                   {ageWords(c.observed_at, now)}
                 </time>
                 <span className="min-w-0 flex-1 text-text2">
                   {t.marker ? <span className="italic text-muted">{t.sentence}</span> : <><span className="font-medium text-text">{t.subject}</span> {t.verb}{t.detail && <> <span className="break-words font-mono text-xs">{t.detail}</span></>}</>}
                 </span>
-                {!t.marker && <span className="shrink-0 rounded border border-border bg-surface2 px-1 py-px text-[10px] font-medium text-text2">{CATEGORY_LABELS[c.category]}</span>}
+                {!t.marker && <span className="shrink-0 rounded border border-border bg-surface2 px-1 py-px text-2xs font-medium text-text2">{CATEGORY_LABELS[c.category]}</span>}
               </li>
             )
           })}
@@ -329,7 +329,7 @@ function Placement({ detail }: { detail: AssetDetail }) {
         {tags.length > 0 && (
           <Fact label="Tags">
             <ul role="list" className="flex flex-wrap gap-1">
-              {tags.map((t) => <li key={t} className="rounded-full border border-border bg-surface2 px-2 py-px text-[11px] text-text2">{t}</li>)}
+              {tags.map((t) => <li key={t} className="rounded-full border border-border bg-surface2 px-2 py-px text-xs text-text2">{t}</li>)}
             </ul>
           </Fact>
         )}

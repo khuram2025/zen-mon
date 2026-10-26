@@ -136,7 +136,7 @@ export function ServiceDetailPage() {
           <ArrowLeft className="mr-1 h-4 w-4" /> Services
         </Button>
         <div className="min-w-0">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">Service deep dive</div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-muted">Service deep dive</div>
           <h1 className="flex flex-wrap items-center gap-2 text-xl font-semibold text-text">
             {name}
             {s && <HealthBadge health={s.health} />}
@@ -183,7 +183,7 @@ export function ServiceDetailPage() {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-            <ApmKpi label="Throughput" icon={<Activity className="h-4 w-4" />} tone="info" value={fmtRps(s?.rps ?? 0)} sub={<CompareDelta current={s?.rps ?? 0} previous={compare ? prev?.rps : undefined} />} foot={<span className="text-[11px] text-muted">{fmtCount(s?.request_count)} requests</span>} />
+            <ApmKpi label="Throughput" icon={<Activity className="h-4 w-4" />} tone="info" value={fmtRps(s?.rps ?? 0)} sub={<CompareDelta current={s?.rps ?? 0} previous={compare ? prev?.rps : undefined} />} foot={<span className="text-xs text-muted">{fmtCount(s?.request_count)} requests</span>} />
             <ApmKpi label="Error rate" icon={<Bug className="h-4 w-4" />} tone={errorTone(s?.error_rate ?? 0)} value={fmtPct(s?.error_rate ?? 0)} sub={<CompareDelta current={s?.error_rate ?? 0} previous={compare ? prev?.error_rate : undefined} invert />} />
             <ApmKpi label="p50" icon={<Gauge className="h-4 w-4" />} tone={latencyTone(s?.p50_ms ?? 0)} value={fmtMs(s?.p50_ms ?? 0)} sub={<CompareDelta current={s?.p50_ms ?? 0} previous={compare ? prev?.p50_ms : undefined} invert />} />
             <ApmKpi label="p95" icon={<Gauge className="h-4 w-4" />} tone={latencyTone(s?.p95_ms ?? 0)} value={fmtMs(s?.p95_ms ?? 0)} sub={<CompareDelta current={s?.p95_ms ?? 0} previous={compare ? prev?.p95_ms : undefined} invert />} />
@@ -197,7 +197,7 @@ export function ServiceDetailPage() {
                 key={t.key}
                 onClick={() => setParam('tab', t.key)}
                 className={cn(
-                  'rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors',
+                  'rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
                   tab === t.key ? 'bg-surface text-text shadow-sm ring-1 ring-border' : 'text-muted hover:text-text',
                 )}
               >
@@ -263,7 +263,7 @@ export function ServiceDetailPage() {
               <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
                 <Card className="overflow-hidden">
                   <CardHeader className="border-b border-border py-3">
-                    <CardTitle className="text-[11px] font-semibold uppercase tracking-wider text-muted">Top operations</CardTitle>
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted">Top operations</CardTitle>
                   </CardHeader>
                   <CardContent className="p-0">
                     <Table>
@@ -300,7 +300,7 @@ export function ServiceDetailPage() {
                 </Card>
                 <Card className="overflow-hidden">
                   <CardHeader className="border-b border-border py-3">
-                    <CardTitle className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                    <CardTitle className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
                       <Server className="h-3.5 w-3.5" /> Hosts & processes
                     </CardTitle>
                   </CardHeader>
@@ -312,7 +312,7 @@ export function ServiceDetailPage() {
                           <Tr key={p.id}>
                             <Td>
                               <div className="text-sm text-text">{p.server_name || p.hostname}</div>
-                              <div className="font-mono text-[11px] text-muted">pid {p.pid}</div>
+                              <div className="font-mono text-xs text-muted">pid {p.pid}</div>
                             </Td>
                             <Td className="text-xs">{p.runtime}</Td>
                             <Td className="text-xs capitalize">{p.instrumentation_state}</Td>
@@ -417,7 +417,7 @@ function DatabaseInsights({ queries, loading, onTrace }: { queries: DatabaseQuer
               <Tr key={q.query_digest}>
                 <Td className="max-w-xl">
                   <div className="truncate font-mono text-xs text-text" title={q.statement}>{q.statement}</div>
-                  <div className="mt-1 font-mono text-[10px] text-muted">{q.query_digest.slice(0, 16)}</div>
+                  <div className="mt-1 font-mono text-2xs text-muted">{q.query_digest.slice(0, 16)}</div>
                 </Td>
                 <Td>
                   <span className="text-xs uppercase text-muted">{q.db_system || 'database'}</span>

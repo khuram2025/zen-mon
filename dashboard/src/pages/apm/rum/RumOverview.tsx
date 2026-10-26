@@ -94,7 +94,7 @@ function HealthPanel({ overview, health }: { overview: RumOverview; health?: Rum
   return (
     <Card className="h-full">
       <CardHeader className="border-b border-border px-3 py-2">
-        <CardTitle className="flex items-center gap-2 text-[13px]"><ServerCog className="h-3.5 w-3.5 text-primary" /> Collection health</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-sm"><ServerCog className="h-3.5 w-3.5 text-primary" /> Collection health</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2.5 p-3">
         <div className="flex items-center justify-between gap-3">
@@ -104,27 +104,27 @@ function HealthPanel({ overview, health }: { overview: RumOverview; health?: Rum
             </span>
             <div>
               <div className="text-sm font-medium capitalize text-text">{status.replace('_', ' ')}</div>
-              <div className="text-[11px] text-muted">Browser SDK ingest pipeline</div>
+              <div className="text-xs text-muted">Browser SDK ingest pipeline</div>
             </div>
           </div>
           {!!sdkVersions.length && <Badge variant="outline" title={sdkVersions.join(', ')}>SDK {sdkVersions.slice(0, 2).join(', ')}{sdkVersions.length > 2 ? ` +${sdkVersions.length - 2}` : ''}</Badge>}
         </div>
         <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface2/50 p-2 text-center">
-          <div><div className="font-mono text-sm font-semibold text-text">{fmtCount(details?.accepted)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Accepted</div></div>
-          <div><div className="font-mono text-sm font-semibold text-warning">{fmtCount(details?.rejected)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Rejected</div></div>
-          <div><div className="font-mono text-sm font-semibold text-danger">{fmtCount(details?.dropped)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Dropped</div></div>
+          <div><div className="font-mono text-sm font-semibold text-text">{fmtCount(details?.accepted)}</div><div className="text-2xs uppercase tracking-wider text-muted">Accepted</div></div>
+          <div><div className="font-mono text-sm font-semibold text-warning">{fmtCount(details?.rejected)}</div><div className="text-2xs uppercase tracking-wider text-muted">Rejected</div></div>
+          <div><div className="font-mono text-sm font-semibold text-danger">{fmtCount(details?.dropped)}</div><div className="text-2xs uppercase tracking-wider text-muted">Dropped</div></div>
         </div>
-        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[10px] sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-2xs sm:grid-cols-4">
           <div><div className="font-mono font-semibold text-text2">{fmtCount(details?.accepted_since_process_start)}</div><div className="text-muted">Process accepted</div></div>
           <div><div className="font-mono font-semibold text-text2">{fmtCount(details?.duplicates)}</div><div className="text-muted">Duplicates</div></div>
           <div><div className="font-mono font-semibold text-warning">{fmtCount(details?.rate_limited)}</div><div className="text-muted">Rate limited</div></div>
           <div><div className="font-mono font-semibold text-danger">{fmtCount(details?.storage_errors)}</div><div className="text-muted">Write errors</div></div>
         </div>
-        <div className="flex items-center justify-between text-[11px] text-muted">
+        <div className="flex items-center justify-between text-xs text-muted">
           <span>Last event</span><span>{details?.last_event_at ? relativeTime(details.last_event_at) : 'not reported'}</span>
         </div>
         {!!details?.issues?.length && (
-          <div className="rounded-md border border-warning/30 bg-warning/10 p-2.5 text-[11px] text-warning">
+          <div className="rounded-md border border-warning/30 bg-warning/10 p-2.5 text-xs text-warning">
             {details.issues.slice(0, 3).map((issue) => <div key={issue}>• {issue}</div>)}
           </div>
         )}
@@ -158,8 +158,8 @@ function BreakdownCard({ title, hint, side }: { title: string; hint: string; sid
     <Card className="h-full">
       <CardHeader className="border-b border-border px-3 py-2">
         <div className="flex items-center justify-between gap-2">
-          <CardTitle className="text-[13px]">{title}</CardTitle>
-          <span className="text-[10px] text-muted">{hint}</span>
+          <CardTitle className="text-sm">{title}</CardTitle>
+          <span className="text-2xs text-muted">{hint}</span>
         </div>
       </CardHeader>
       <CardContent className="space-y-2.5 p-3">
@@ -167,21 +167,21 @@ function BreakdownCard({ title, hint, side }: { title: string; hint: string; sid
           <>
             <div className="flex items-baseline justify-between gap-2">
               <span className="text-lg font-semibold tabular-nums text-text">{formatDurationMs(side?.duration_p75)}</span>
-              <span className="text-[10px] text-muted">p75 · {fmtCount(side?.samples)} measured{hasServer ? ` · ${fmtCount(side?.server_samples)} with app/db split` : ''}</span>
+              <span className="text-2xs text-muted">p75 · {fmtCount(side?.samples)} measured{hasServer ? ` · ${fmtCount(side?.server_samples)} with app/db split` : ''}</span>
             </div>
             <PhaseBar segments={segments} height={12} />
             <PhaseLegend segments={segments} />
             {hasServer && (
               <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface2/50 p-2 text-center">
-                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.network }}>{formatDurationMs(Math.max(0, (side!.phases.wait ?? 0) - Math.min(side!.server_p75 ?? 0, side!.phases.wait ?? 0)))}</div><div className="text-[9px] uppercase tracking-wider text-muted">Network</div></div>
-                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.server }}>{formatDurationMs(Math.max(0, (side!.server_p75 ?? 0) - (side!.db_p75 ?? 0)))}</div><div className="text-[9px] uppercase tracking-wider text-muted">App execution</div></div>
-                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.db }}>{formatDurationMs(side!.db_p75)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Database</div></div>
+                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.network }}>{formatDurationMs(Math.max(0, (side!.phases.wait ?? 0) - Math.min(side!.server_p75 ?? 0, side!.phases.wait ?? 0)))}</div><div className="text-2xs uppercase tracking-wider text-muted">Network</div></div>
+                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.server }}>{formatDurationMs(Math.max(0, (side!.server_p75 ?? 0) - (side!.db_p75 ?? 0)))}</div><div className="text-2xs uppercase tracking-wider text-muted">App execution</div></div>
+                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.db }}>{formatDurationMs(side!.db_p75)}</div><div className="text-2xs uppercase tracking-wider text-muted">Database</div></div>
               </div>
             )}
-            {!hasServer && <p className="text-[10px] text-muted">Add a <span className="font-mono">Server-Timing</span> header (e.g. <span className="font-mono">app;dur=12, db;dur=4</span>) or instrument the backend with APM to split wait time into network vs. execution.</p>}
+            {!hasServer && <p className="text-2xs text-muted">Add a <span className="font-mono">Server-Timing</span> header (e.g. <span className="font-mono">app;dur=12, db;dur=4</span>) or instrument the backend with APM to split wait time into network vs. execution.</p>}
           </>
         ) : (
-          <div className="py-8 text-center text-[11px] text-muted">No timing-capable samples in this segment yet. Requires browser SDK 2.1+.</div>
+          <div className="py-8 text-center text-xs text-muted">No timing-capable samples in this segment yet. Requires browser SDK 2.1+.</div>
         )}
       </CardContent>
     </Card>
@@ -202,15 +202,15 @@ function FacetCard({ title, items, onSelect, empty = 'No breakdown data' }: { ti
   const max = Math.max(...visible.map((item) => item.count), 1)
   return (
     <Card className="h-full">
-      <CardHeader className="border-b border-border bg-surface2/30 px-3 py-1.5"><CardTitle className="text-[11px] uppercase tracking-wider text-muted">{title}</CardTitle></CardHeader>
+      <CardHeader className="border-b border-border bg-surface2/30 px-3 py-1.5"><CardTitle className="text-xs uppercase tracking-wider text-muted">{title}</CardTitle></CardHeader>
       <CardContent className="space-y-1 p-2">
         {visible.map((item) => (
           <button key={item.value} type="button" onClick={() => onSelect(item.value)} className="block w-full rounded-md px-1.5 py-1 text-left hover:bg-surface2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
-            <div className="flex items-center justify-between gap-2 text-[11px]"><span className="truncate text-text2">{item.value || 'Unknown'}</span><span className="font-mono tabular-nums text-muted">{fmtCount(item.count)}</span></div>
+            <div className="flex items-center justify-between gap-2 text-xs"><span className="truncate text-text2">{item.value || 'Unknown'}</span><span className="font-mono tabular-nums text-muted">{fmtCount(item.count)}</span></div>
             <RankBar value={item.count} max={max} />
           </button>
         ))}
-        {!visible.length && <div className="px-2 py-6 text-center text-[11px] leading-snug text-muted">{empty}</div>}
+        {!visible.length && <div className="px-2 py-6 text-center text-xs leading-snug text-muted">{empty}</div>}
       </CardContent>
     </Card>
   )
@@ -233,10 +233,10 @@ function Delta({ current, previous, lowerIsBetter = false, pointsOf, format, lab
   detail?: boolean
 }) {
   if (current == null || previous == null || !Number.isFinite(current) || !Number.isFinite(previous)) {
-    return <span className="text-[10px] text-muted">no prior data</span>
+    return <span className="text-2xs text-muted">no prior data</span>
   }
   const diff = current - previous
-  if (Math.abs(diff) < 1e-9) return <span className="text-[10px] text-muted">unchanged vs. {label}</span>
+  if (Math.abs(diff) < 1e-9) return <span className="text-2xs text-muted">unchanged vs. {label}</span>
   const better = lowerIsBetter ? diff < 0 : diff > 0
   const text = pointsOf != null
     ? `${diff > 0 ? '+' : '−'}${(Math.abs(diff) * pointsOf).toFixed(1)} pp`
@@ -245,7 +245,7 @@ function Delta({ current, previous, lowerIsBetter = false, pointsOf, format, lab
       : `${diff > 0 ? '+' : '−'}${Math.abs((diff / previous) * 100).toFixed(Math.abs(diff / previous) >= 1 ? 0 : 1)}%`
   const change = format ? `${format(previous)} → ${format(current)}` : `${previous} → ${current}`
   return (
-    <span className={cn('whitespace-nowrap text-[10px] tabular-nums', better ? 'text-success' : 'text-danger')} title={`${label}: ${change}`}>
+    <span className={cn('whitespace-nowrap text-2xs tabular-nums', better ? 'text-success' : 'text-danger')} title={`${label}: ${change}`}>
       {diff > 0 ? '▲' : '▼'} {text} vs. {label}{detail && format && <span className="text-muted"> ({change})</span>}
     </span>
   )
@@ -334,7 +334,7 @@ export function RumOverviewPanel(props: OverviewProps) {
           id="rum-vitals-heading"
           title="Core Web Vitals"
           description="p75 across finalized view measurements."
-          action={<Button asChild variant="ghost" size="sm" className="h-7 px-2 text-[11px]"><Link to={exploreTo['web-vitals']}>Open Web Vitals</Link></Button>}
+          action={<Button asChild variant="ghost" size="sm" className="h-7 px-2 text-xs"><Link to={exploreTo['web-vitals']}>Open Web Vitals</Link></Button>}
         />
         <div className="grid gap-2.5 xl:grid-cols-4">
           <RumExperienceCard vitals={d.vitals} href={exploreTo['web-vitals']} />
@@ -345,9 +345,9 @@ export function RumOverviewPanel(props: OverviewProps) {
         <div className="mt-2.5 grid grid-cols-3 divide-x divide-border overflow-hidden rounded-lg border border-border bg-surface">
           {(['fcp', 'ttfb', 'load'] as const).map((name) => (
             <div key={name} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3 py-2">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{name.toUpperCase()} p75</span>
+              <span className="text-2xs font-semibold uppercase tracking-wider text-muted">{name.toUpperCase()} p75</span>
               <span className="text-base font-semibold tabular-nums text-text">{formatRumVital(name, d.vitals[name].p75)}</span>
-              <span className="text-[10px] text-muted">{d.vitals[name].samples.toLocaleString()} samples</span>
+              <span className="text-2xs text-muted">{d.vitals[name].samples.toLocaleString()} samples</span>
               {prev && <Delta current={d.vitals[name].p75} previous={prev.vitals[name].p75} lowerIsBetter label={prior} format={(value) => formatRumVital(name, value)} />}
             </div>
           ))}
@@ -378,7 +378,7 @@ export function RumOverviewPanel(props: OverviewProps) {
                           <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(endpoint.count)}</Td>
                           <Td className="text-right font-mono text-xs tabular-nums">{formatDurationMs(endpoint.duration_p75)}</Td>
                           <Td className="text-right font-mono text-xs tabular-nums">{formatDurationMs(endpoint.wait_p75)}</Td>
-                          <Td className="text-right font-mono text-xs tabular-nums" title={endpoint.server_source === 'trace' ? `Average over ${endpoint.server_samples} correlated APM traces` : endpoint.server_source ? 'From the Server-Timing header' : undefined}>{endpoint.server_p75 != null ? formatDurationMs(endpoint.server_p75) : '—'}{endpoint.server_source === 'trace' && <span className="ml-1 text-[9px] text-muted">trace</span>}</Td>
+                          <Td className="text-right font-mono text-xs tabular-nums" title={endpoint.server_source === 'trace' ? `Average over ${endpoint.server_samples} correlated APM traces` : endpoint.server_source ? 'From the Server-Timing header' : undefined}>{endpoint.server_p75 != null ? formatDurationMs(endpoint.server_p75) : '—'}{endpoint.server_source === 'trace' && <span className="ml-1 text-2xs text-muted">trace</span>}</Td>
                           <Td className="text-right font-mono text-xs tabular-nums">{endpoint.server_p75 != null ? formatDurationMs(endpoint.db_p75) : '—'}</Td>
                           <Td className="text-right"><span className={endpoint.failures ? 'font-mono text-xs text-danger' : 'font-mono text-xs text-muted'}>{fmtCount(endpoint.failures)}</span></Td>
                         </Tr>
@@ -425,7 +425,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             <TBody className={EXPLORER_ROWS}>
               {props.topViewsLoading ? <Tr><Td colSpan={4} className="py-10 text-center text-xs text-muted">Loading measured views…</Td></Tr> : props.topViewsError ? <Tr><Td colSpan={4} className="py-8 text-center text-xs text-danger">Could not load view performance. <button className="font-medium underline" onClick={props.onRetryViews}>Retry</button></Td></Tr> : (props.topViews ?? []).map((view) => (
                 <Tr key={`${view.application_id}:${view.env}:${view.view_name}`} className={INTERACTIVE_ROW} tabIndex={0} onClick={() => props.onOpenView(view)} onKeyDown={(event) => onRowKey(event, () => props.onOpenView(view))}>
-                  <Td><div className="max-w-[260px] truncate font-mono text-xs text-text" title={view.view_name}>{view.view_name}</div><div className="text-[10px] text-muted">{view.application_id} · {view.env}</div></Td>
+                  <Td><div className="max-w-[260px] truncate font-mono text-xs text-text" title={view.view_name}>{view.view_name}</div><div className="text-2xs text-muted">{view.application_id} · {view.env}</div></Td>
                   <Td><RumMetricCell name="lcp" value={view.lcp_p75} samples={view.lcp_samples} /></Td>
                   <Td><RumMetricCell name="inp" value={view.inp_p75} samples={view.inp_samples} /></Td>
                   <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(view.views)}</Td>
@@ -446,7 +446,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             <TBody className={EXPLORER_ROWS}>
               {props.topErrorsLoading ? <Tr><Td colSpan={4} className="py-10 text-center text-xs text-muted">Loading browser errors…</Td></Tr> : props.topErrorsError ? <Tr><Td colSpan={4} className="py-8 text-center text-xs text-danger">Could not load error groups. <button className="font-medium underline" onClick={props.onRetryErrors}>Retry</button></Td></Tr> : (props.topErrors ?? []).map((error) => (
                 <Tr key={error.fingerprint} className={INTERACTIVE_ROW} tabIndex={0} onClick={() => props.onOpenError(error)} onKeyDown={(event) => onRowKey(event, () => props.onOpenError(error))}>
-                  <Td><div className="max-w-[280px] truncate text-xs font-medium text-text" title={error.message}>{error.message}</div><div className="text-[10px] text-muted">{error.view_name || 'Unknown view'}</div></Td>
+                  <Td><div className="max-w-[280px] truncate text-xs font-medium text-text" title={error.message}>{error.message}</div><div className="text-2xs text-muted">{error.view_name || 'Unknown view'}</div></Td>
                   <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(error.sessions)}</Td>
                   <Td className="text-right font-mono text-xs tabular-nums text-danger">{fmtCount(error.count)}</Td>
                   <Td><TracePivot traceId={error.backend_trace_id} compact /></Td>
@@ -475,7 +475,7 @@ export function RumOverviewPanel(props: OverviewProps) {
                   <Td><div className="max-w-[240px] truncate font-mono text-xs font-medium text-text" title={release.service_version}>{release.service_version || 'Unknown'}</div></Td>
                   <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(release.sessions)}</Td>
                   <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(release.views)}</Td>
-                  <Td className="text-right"><span className={(release.error_session_rate ?? 0) >= 0.05 ? 'font-mono text-xs text-danger' : 'font-mono text-xs'}>{fmtPct(release.error_session_rate)}</span><div className="text-[9px] text-muted">{fmtCount(release.errors)} errors</div></Td>
+                  <Td className="text-right"><span className={(release.error_session_rate ?? 0) >= 0.05 ? 'font-mono text-xs text-danger' : 'font-mono text-xs'}>{fmtPct(release.error_session_rate)}</span><div className="text-2xs text-muted">{fmtCount(release.errors)} errors</div></Td>
                   <Td><RumMetricCell name="lcp" value={release.lcp_p75} samples={release.lcp_samples} /></Td>
                   <Td><RumMetricCell name="inp" value={release.inp_p75} samples={release.inp_samples} /></Td>
                   <Td><RumMetricCell name="cls" value={release.cls_p75} samples={release.cls_samples} /></Td>

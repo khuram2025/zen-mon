@@ -84,7 +84,7 @@ export function SearchBox({ value, onChange, placeholder, label }: {
           <X className="h-3.5 w-3.5" aria-hidden />
         </button>
       ) : (
-        <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 py-px font-mono text-[10px] font-medium text-muted sm:inline-block" aria-hidden>
+        <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 py-px font-mono text-2xs font-medium text-muted sm:inline-block" aria-hidden>
           /
         </kbd>
       )}

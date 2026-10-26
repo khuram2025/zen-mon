@@ -49,7 +49,7 @@ export function ConnectedEndpointsCard({ deviceId }: { deviceId: string }) {
                   ) : (
                     <span className="tabular-nums">{p.active_endpoints} {p.active_endpoints === 1 ? 'device' : 'devices'}</span>
                   )}
-                  {p.last_endpoint_seen && <span className="text-[10px]">{relTime(p.last_endpoint_seen)}</span>}
+                  {p.last_endpoint_seen && <span className="text-2xs">{relTime(p.last_endpoint_seen)}</span>}
                 </span>
               </div>
             ))}

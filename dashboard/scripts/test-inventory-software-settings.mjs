@@ -808,7 +808,7 @@ function productPage(url, { permissions = VIEW, product = PRODUCT, fail, install
   assert(/role="tab" aria-selected="true"[^>]*>Evidence<\/button>/.test(productPage('/inventory/software/git?tab=evidence')), '?tab= selects the tab')
   // The Versions tab: a bar per version, newest first, N / N-1 / Older, each bar one link with its host count.
   assert(html.includes('Windows and other installers') && html.includes('Debian and Ubuntu packages'))
-  assert.deepEqual([...html.matchAll(/inline-flex shrink-0 items-center rounded-full border px-1\.5 py-px text-\[10\.5px\] font-semibold leading-4[^"]*"[^>]*>([^<]+)</g)].map((x) => x[1]), ['N', 'N-1', 'Older', 'N', 'N-1'])
+  assert.deepEqual([...html.matchAll(/inline-flex shrink-0 items-center rounded-full border px-1\.5 py-px text-xs font-semibold leading-4[^"]*"[^>]*>([^<]+)</g)].map((x) => x[1]), ['N', 'N-1', 'Older', 'N', 'N-1'])
   for (const v of PRODUCT.versions) {
     assert(links.some((l) => l.href === `/inventory/assets?product=git&product_version=${encodeURIComponent(v.version)}` && l.attrs['data-drill-count'] === String(v.hosts) && l.attrs['aria-label'].includes(`${v.hosts} ${v.hosts === 1 ? 'host' : 'hosts'}`)), v.version)
   }

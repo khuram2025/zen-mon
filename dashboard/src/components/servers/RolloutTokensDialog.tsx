@@ -160,7 +160,7 @@ export function RolloutTokensDialog({
                   <Tr key={token.id} className={index % 2 === 0 ? 'bg-surface2/10' : undefined}>
                     <Td className="py-2 pl-4">
                       <div className="font-mono text-xs">{token.token_prefix}...</div>
-                      <div className="mt-0.5 max-w-[260px] truncate text-[11px] text-muted">
+                      <div className="mt-0.5 max-w-[260px] truncate text-xs text-muted">
                         {token.hostname_hint || token.server_name || 'Fleet rollout'}
                         {token.policy_name ? ` / ${token.policy_name}` : ''}
                       </div>

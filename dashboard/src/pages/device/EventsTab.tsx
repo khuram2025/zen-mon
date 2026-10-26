@@ -20,6 +20,7 @@ import {
   type AlertRow, type EventFilter, type EventSeverity, type MaintenanceWindow, type TimelineEvent,
 } from './eventsModel'
 import type { DeviceRange, DeviceRecord, DeviceSummary, MetricSeriesMap, StatusHistoryEvent, TrapRow } from './types'
+import { chartFont } from '@/lib/chartTheme'
 
 /* Events — what happened, and when. Availability and confirmed outages for
  * the range, a per-bucket count of events by severity, then one timeline that
@@ -207,11 +208,11 @@ function EventsChart({ events, fromTs, toTs, rangeHours, loading }: { events: Ti
         <BarChart data={buckets} margin={{ top: 4, right: 40, bottom: 0, left: 24 }} barCategoryGap={1}>
           <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border) / 0.4)" vertical={false} />
           <XAxis dataKey="mid" type="number" scale="time" domain={[fromTs, toTs]} ticks={ticks} interval={0}
-            tickFormatter={tickFormatter} tick={{ fontSize: 12, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-          <YAxis allowDecimals={false} width={32} tick={{ fontSize: 12, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
+            tickFormatter={tickFormatter} tick={{ fontSize: chartFont(12), fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
+          <YAxis allowDecimals={false} width={32} tick={{ fontSize: chartFont(12), fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
           <Tooltip
             cursor={{ fill: 'rgb(var(--surface2))' }}
-            contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 6, fontSize: 12, color: 'rgb(var(--text))' }}
+            contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 6, fontSize: chartFont(12), color: 'rgb(var(--text))' }}
             labelFormatter={(_, payload) => {
               const b = payload?.[0]?.payload as { start: number; end: number } | undefined
               return b ? `${formatAbsolute(b.start, { seconds: withSeconds })} – ${formatAbsolute(b.end, { seconds: withSeconds })}` : ''

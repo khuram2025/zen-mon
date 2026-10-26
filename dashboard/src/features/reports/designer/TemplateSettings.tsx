@@ -68,7 +68,7 @@ export function TemplateSettings({
           <span className="shrink-0 text-sm font-semibold text-text">Template details</span>
           {!open && <span className="min-w-0 truncate text-xs text-muted">{summary}</span>}
           {!open && panelErrors > 0 && (
-            <span className="shrink-0 rounded-full bg-danger/10 px-1.5 py-px text-[10px] font-semibold text-danger-fg">
+            <span className="shrink-0 rounded-full bg-danger/10 px-1.5 py-px text-2xs font-semibold text-danger-fg">
               {panelErrors} to fix
             </span>
           )}
@@ -94,13 +94,13 @@ export function TemplateSettings({
               aria-invalid={!!err('description') || undefined}
               className="min-h-[3.75rem] resize-y text-sm xl:flex-1"
             />
-            <p id={descHint} className="text-[11px] text-muted">
+            <p id={descHint} className="text-xs text-muted">
               Shown on the report cover and the library card.
               {draft.description.length > DESCRIPTION_MAX - 200 && (
                 <span className="tabular-nums"> {draft.description.length}/{DESCRIPTION_MAX}</span>
               )}
             </p>
-            {err('description') && <p id={descErr} className="text-[11px] font-medium text-danger-fg">{err('description')}</p>}
+            {err('description') && <p id={descErr} className="text-xs font-medium text-danger-fg">{err('description')}</p>}
           </div>
 
           <div className="space-y-1.5">
@@ -129,8 +129,8 @@ export function TemplateSettings({
                 })}
               </SelectContent>
             </Select>
-            <p className="text-[11px] text-muted">Where the template is listed in the library.</p>
-            {err('category') && <p className="text-[11px] font-medium text-danger-fg">{err('category')}</p>}
+            <p className="text-xs text-muted">Where the template is listed in the library.</p>
+            {err('category') && <p className="text-xs font-medium text-danger-fg">{err('category')}</p>}
           </div>
 
           <div className="space-y-1.5">
@@ -144,8 +144,8 @@ export function TemplateSettings({
               onChange={(p) => onChange({ defaultPeriod: p })}
               allowNone
             />
-            <p className="text-[11px] text-muted">Used when the report opens; viewers can change it.</p>
-            {err('defaultPeriod') && <p className="text-[11px] font-medium text-danger-fg">{err('defaultPeriod')}</p>}
+            <p className="text-xs text-muted">Used when the report opens; viewers can change it.</p>
+            {err('defaultPeriod') && <p className="text-xs font-medium text-danger-fg">{err('defaultPeriod')}</p>}
           </div>
 
           <div className="space-y-1.5">
@@ -165,7 +165,7 @@ export function TemplateSettings({
                 { value: 'shared', label: 'Shared', icon: Globe2 },
               ]}
             />
-            <p className="text-[11px] leading-snug text-muted">
+            <p className="text-xs leading-snug text-muted">
               {!canChangeVisibility
                 ? `Only ${ownerName ? `the owner (${ownerName})` : 'the owner'} or an administrator can change who sees this template.`
                 : draft.visibility === 'private'

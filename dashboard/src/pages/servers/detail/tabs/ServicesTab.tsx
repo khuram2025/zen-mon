@@ -292,7 +292,7 @@ export function ServicesTab({ server }: { server: ServerItem }) {
           <div className="relative min-w-[220px] flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
             <Input
-              className="h-8 pl-8 pr-8 text-[13px]"
+              className="h-8 pl-8 pr-8 text-sm"
               placeholder="Filter by display or service name…"
               value={q}
               onChange={(e) => { setQ(e.target.value); pager.reset() }}
@@ -309,7 +309,7 @@ export function ServicesTab({ server }: { server: ServerItem }) {
             )}
           </div>
           <Select value={filter} onValueChange={(v) => applyFilter(v as Filter)}>
-            <SelectTrigger className="h-8 w-[200px] text-[13px]"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-8 w-[200px] text-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
               {FILTERS.map((f) => <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>)}
             </SelectContent>
@@ -355,9 +355,9 @@ export function ServicesTab({ server }: { server: ServerItem }) {
           )
         ) : (
           <div className="max-h-[680px] overflow-auto">
-            <table className="w-full min-w-[900px] border-separate border-spacing-0 text-[13px]">
+            <table className="w-full min-w-[900px] border-separate border-spacing-0 text-sm">
               <thead>
-                <tr className="text-left text-[11px] font-medium uppercase tracking-wide text-muted">
+                <tr className="text-left text-xs font-medium uppercase tracking-wide text-muted">
                   <HeadCell className={cn('pl-4', sortableTh)} onClick={() => toggleSort('name')}>
                     Name{sortIndicator(sortBy === 'name', sortDir)}
                   </HeadCell>
@@ -446,7 +446,7 @@ export function ServicesTab({ server }: { server: ServerItem }) {
                               <BellOff /> Remove alert
                             </Button>
                           ) : (
-                            <span className="text-[11px] text-muted" title="Defined for all servers — edit it on the Alerts page">
+                            <span className="text-xs text-muted" title="Defined for all servers — edit it on the Alerts page">
                               Global rule
                             </span>
                           )

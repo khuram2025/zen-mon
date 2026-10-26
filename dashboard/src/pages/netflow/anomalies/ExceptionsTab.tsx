@@ -164,7 +164,7 @@ export function ExceptionsTab({ tz }: { tz: string }) {
                       </Button>
                     )}
                     {canManage && !x.can_change && (
-                      <p className="flex max-w-56 items-start gap-1.5 text-[11px] text-text2">
+                      <p className="flex max-w-56 items-start gap-1.5 text-xs text-text2">
                         <Lock className="mt-px h-3 w-3 shrink-0" aria-hidden />
                         {x.scope === 'global' ? 'Applies on every exporter: only an administrator can remove it.' : 'Also applies outside your scope: only an administrator can remove it.'}
                       </p>
@@ -211,10 +211,10 @@ function ExporterScope({ x }: { x: DetectorException }) {
 function Labeled({ id, label, error, hint, children }: { id: string; label: string; error?: string; hint?: string; children: ReactNode }) {
   return (
     <div>
-      <label htmlFor={id} className="block text-[11px] font-medium text-text">{label}</label>
+      <label htmlFor={id} className="block text-xs font-medium text-text">{label}</label>
       <div className="mt-1">{children}</div>
-      {error && <span id={hint ? `${id}-h` : undefined} className="mt-0.5 block text-[11px] text-danger-fg">{error}</span>}
-      {hint && !error && <span id={`${id}-h`} className="mt-0.5 block text-[11px] text-text2">{hint}</span>}
+      {error && <span id={hint ? `${id}-h` : undefined} className="mt-0.5 block text-xs text-danger-fg">{error}</span>}
+      {hint && !error && <span id={`${id}-h`} className="mt-0.5 block text-xs text-text2">{hint}</span>}
     </div>
   )
 }

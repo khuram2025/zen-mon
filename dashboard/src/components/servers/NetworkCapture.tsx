@@ -30,6 +30,7 @@ import {
   EmptyState, ExportCsvButton, QueryError, TablePager, TableStateRow,
 } from '@/components/servers/tables'
 import type { AgentStatus, OsType, ServerNetworkInterface } from '@/types/servers'
+import { chartFont } from '@/lib/chartTheme'
 
 type CaptureStatus =
   | 'queued'
@@ -230,10 +231,10 @@ function sourceAndDestination(flow: Flow): { source: string; destination: string
 }
 
 function directionBadge(direction: ReturnType<typeof inferredDirection>) {
-  if (direction === 'inbound') return <Badge variant="success" className="text-[10px]">Inbound</Badge>
-  if (direction === 'outbound') return <Badge variant="info" className="text-[10px]">Outbound</Badge>
-  if (direction === 'local') return <Badge variant="outline" className="text-[10px]">Local endpoint</Badge>
-  return <Badge variant="outline" className="text-[10px]">Unknown</Badge>
+  if (direction === 'inbound') return <Badge variant="success" className="text-2xs">Inbound</Badge>
+  if (direction === 'outbound') return <Badge variant="info" className="text-2xs">Outbound</Badge>
+  if (direction === 'local') return <Badge variant="outline" className="text-2xs">Local endpoint</Badge>
+  return <Badge variant="outline" className="text-2xs">Unknown</Badge>
 }
 
 function statusBadge(status: CaptureStatus) {
@@ -533,7 +534,7 @@ export function NetworkCapturePanel({
             </div>
           )}
 
-          <p className="flex items-start gap-1.5 text-[11px] text-muted">
+          <p className="flex items-start gap-1.5 text-xs text-muted">
             <Info className="mt-0.5 h-3 w-3 shrink-0" />
             Shows the local owning process or service and its remote peer. Connection metadata
             and interface counters are collected; packet payloads are never captured or stored.
@@ -765,7 +766,7 @@ function CaptureDetail({
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
           <div>
             <h3 className="text-sm font-semibold tracking-tight">Traffic records</h3>
-            <p className="mt-0.5 text-[11px] text-muted">
+            <p className="mt-0.5 text-xs text-muted">
               {total.toLocaleString()} shown from {capture.flow_count.toLocaleString()} captured records.
               Application traffic is selected by default; use All owners to include kernel and system endpoints.
             </p>
@@ -897,7 +898,7 @@ function CaptureDetail({
                             <div className="truncate text-sm font-medium" title={flow.process_name || 'Unattributed'}>
                               {system ? (flow.process_name || 'Kernel / unattributed') : flow.process_name}
                             </div>
-                            <div className="truncate text-[11px] text-muted" title={flow.service_name || undefined}>
+                            <div className="truncate text-xs text-muted" title={flow.service_name || undefined}>
                               {flow.service_name || (system ? 'System-owned socket' : 'No service mapping')}
                               {' / '}pid {flow.pid}
                             </div>
@@ -907,7 +908,7 @@ function CaptureDetail({
                       <Td className="py-2.5">
                         <div className="space-y-1">
                           {directionBadge(path.direction)}
-                          <div className="text-[10px] text-muted">{kindLabel}</div>
+                          <div className="text-2xs text-muted">{kindLabel}</div>
                         </div>
                       </Td>
                       <Td className="py-2.5 font-mono text-xs">
@@ -925,8 +926,8 @@ function CaptureDetail({
                       </Td>
                       <Td className="py-2.5">
                         <div className="flex flex-wrap items-center gap-1">
-                          <Badge variant="outline" className="text-[10px] uppercase">{flow.protocol}</Badge>
-                          {flow.state && <span className="text-[10px] uppercase text-muted">{flow.state}</span>}
+                          <Badge variant="outline" className="text-2xs uppercase">{flow.protocol}</Badge>
+                          {flow.state && <span className="text-2xs uppercase text-muted">{flow.state}</span>}
                         </div>
                       </Td>
                       <Td className="py-2.5 text-xs tabular-nums">
@@ -939,7 +940,7 @@ function CaptureDetail({
                               <ArrowDown className="h-3 w-3" />{formatBytes(flow.bytes_received)} received
                             </span>
                           </div>
-                        ) : <span className="text-[11px] text-muted">Metadata only</span>}
+                        ) : <span className="text-xs text-muted">Metadata only</span>}
                       </Td>
                       <Td className="py-2.5 pr-4 text-xs text-muted" title={new Date(flow.last_seen).toLocaleString()}>
                         {relativeTime(flow.last_seen)}
@@ -963,7 +964,7 @@ function CaptureDetail({
       </Card>
 
       {capture.truncated && (
-        <p className="text-[11px] text-warning">
+        <p className="text-xs text-warning">
           This capture hit its flow limit; additional conversations were omitted.
           Use a shorter window or a specific interface to narrow the result.
         </p>
@@ -1030,7 +1031,7 @@ function CaptureTrafficPanel({ capture, supported }: { capture: Capture; support
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
         <div>
           <h3 className="text-sm font-semibold tracking-tight">Interface traffic</h3>
-          <p className="text-[11px] text-muted">All traffic on the interface, including flows without process byte attribution.</p>
+          <p className="text-xs text-muted">All traffic on the interface, including flows without process byte attribution.</p>
         </div>
         {options.length > 1 && (
           <Select value={selected?.id || ''} onValueChange={setSelectedInterface}>
@@ -1058,7 +1059,7 @@ function CaptureTrafficPanel({ capture, supported }: { capture: Capture; support
               <TrafficStatCard label="Peak" stats={selected.traffic.peak} />
               <TrafficStatCard label="p95" stats={selected.traffic.p95} />
             </div>
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
               <span>{selected.label}</span>
               <span>
                 Link speed: {selected.traffic.link_speed_bps
@@ -1085,14 +1086,14 @@ function CaptureTrafficPanel({ capture, supported }: { capture: Capture; support
                     <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
                     <XAxis
                       dataKey="ts"
-                      tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                      tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }}
                       tickFormatter={(value) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                       axisLine={false}
                       tickLine={false}
                     />
                     <YAxis
                       width={48}
-                      tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                      tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }}
                       tickFormatter={(value) => formatBpsAxis(Number(value))}
                       axisLine={false}
                       tickLine={false}
@@ -1103,7 +1104,7 @@ function CaptureTrafficPanel({ capture, supported }: { capture: Capture; support
                         border: '1px solid rgb(var(--border))',
                         borderRadius: 8,
                         color: 'rgb(var(--text))',
-                        fontSize: 12,
+                        fontSize: chartFont(12),
                       }}
                       labelFormatter={(value) => new Date(Number(value)).toLocaleString()}
                       formatter={(value: number, name: string) => [formatBps(Number(value)), name === 'rx' ? 'Received' : 'Sent']}
@@ -1111,7 +1112,7 @@ function CaptureTrafficPanel({ capture, supported }: { capture: Capture; support
                     <Legend
                       iconType="circle"
                       iconSize={8}
-                      wrapperStyle={{ fontSize: 11 }}
+                      wrapperStyle={{ fontSize: chartFont(11) }}
                       formatter={(value) => value === 'rx' ? 'Received' : 'Sent'}
                     />
                     <Area type="monotone" dataKey="rx" stroke="rgb(var(--success))" fill={`url(#captureRx-${capture.id})`} strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -1131,13 +1132,13 @@ function TrafficStatCard({ label, stats }: { label: string; stats: TrafficStats 
   const total = stats.total_bps ?? (stats.rx_bps || 0) + (stats.tx_bps || 0)
   return (
     <div className="rounded-md border border-border/60 bg-surface2/25 px-3 py-2">
-      <div className="text-[10px] font-medium uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs font-medium uppercase tracking-wider text-muted">{label}</div>
       <div className="mt-1 text-sm font-semibold tabular-nums">{formatBps(total)}</div>
-      <div className="mt-1 flex flex-wrap gap-x-2 text-[10px] tabular-nums text-muted">
+      <div className="mt-1 flex flex-wrap gap-x-2 text-2xs tabular-nums text-muted">
         <span className="text-success">RX {formatBps(stats.rx_bps || 0)}</span>
         <span className="text-info">TX {formatBps(stats.tx_bps || 0)}</span>
       </div>
-      <div className="mt-1 text-[10px] text-muted">
+      <div className="mt-1 text-2xs text-muted">
         Utilization: {stats.utilization_pct == null ? 'unknown' : `${stats.utilization_pct.toFixed(1)}%`}
       </div>
     </div>
@@ -1164,7 +1165,7 @@ function TopList({
             <div className="flex items-baseline justify-between gap-2 text-xs">
               <span className="truncate font-medium">
                 {row.label}
-                {row.sub && <span className="ml-1 text-[10px] text-muted">{row.sub}</span>}
+                {row.sub && <span className="ml-1 text-2xs text-muted">{row.sub}</span>}
               </span>
               <span className="shrink-0 tabular-nums text-muted">
                 {bytesKnown ? formatBytes(total) : `${row.flows} flow${row.flows === 1 ? '' : 's'}`}

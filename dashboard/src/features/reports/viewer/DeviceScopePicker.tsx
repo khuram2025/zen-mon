@@ -102,7 +102,7 @@ function ScopeOptionList({ label, options, selected, onToggle, loading, error, o
                       {on && <Check className="h-2.5 w-2.5" />}
                     </span>
                     <span className="min-w-0 flex-1 truncate font-medium text-text">{o.label}</span>
-                    {o.hint && <span className="shrink-0 text-[10px] text-muted">{o.hint}</span>}
+                    {o.hint && <span className="shrink-0 text-2xs text-muted">{o.hint}</span>}
                   </label>
                 </li>
               )
@@ -296,7 +296,7 @@ export function DeviceScopePicker({ selected, onChange, scope, onScopeChange }: 
         >
           <div className="border-b border-border px-3 py-2">
             <p className="text-xs font-semibold text-text">Limit the report to devices</p>
-            <p className="text-[11px] text-muted">
+            <p className="text-xs text-muted">
               {extended
                 ? 'Device sections use only the devices that match every choice. Leave empty for every device you can see.'
                 : 'Device sections use only the devices you choose. Leave empty for every device you can see.'}
@@ -311,7 +311,7 @@ export function DeviceScopePicker({ selected, onChange, scope, onScopeChange }: 
                     aria-selected={tab === t.key}
                     onClick={() => setTab(t.key)}
                     className={cn(
-                      'rounded-md px-2 py-1 text-[11px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+                      'rounded-md px-2 py-1 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
                       tab === t.key ? 'bg-primary/10 text-primary' : 'text-muted hover:bg-surface2 hover:text-text',
                     )}
                   >
@@ -387,7 +387,7 @@ export function DeviceScopePicker({ selected, onChange, scope, onScopeChange }: 
                 {draft.map((devId) => {
                   const name = deviceLabel(known.current.get(devId), devId)
                   return (
-                    <li key={devId} className="inline-flex items-center gap-0.5 rounded-md border border-primary/30 bg-primary/10 py-0.5 pl-1.5 pr-0.5 text-[11px] text-text">
+                    <li key={devId} className="inline-flex items-center gap-0.5 rounded-md border border-primary/30 bg-primary/10 py-0.5 pl-1.5 pr-0.5 text-xs text-text">
                       <span className="max-w-[9rem] truncate">{name}</span>
                       <button
                         type="button"
@@ -445,10 +445,10 @@ export function DeviceScopePicker({ selected, onChange, scope, onScopeChange }: 
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-medium text-text">{deviceLabel(d, d.id)}</span>
                         {(d.location || d.device_type) && (
-                          <span className="block truncate text-[10px] text-muted">{[d.device_type, d.location].filter(Boolean).join(' · ')}</span>
+                          <span className="block truncate text-2xs text-muted">{[d.device_type, d.location].filter(Boolean).join(' · ')}</span>
                         )}
                       </span>
-                      <span className="shrink-0 font-mono text-[10px] text-muted">{(d.ip_address || '').split('/')[0]}</span>
+                      <span className="shrink-0 font-mono text-2xs text-muted">{(d.ip_address || '').split('/')[0]}</span>
                     </li>
                   )
                 })}
@@ -457,7 +457,7 @@ export function DeviceScopePicker({ selected, onChange, scope, onScopeChange }: 
           </div>
 
           {devices.data && devices.data.total > rows.length && (
-            <p className="border-t border-border px-3 py-1.5 text-[11px] text-muted">
+            <p className="border-t border-border px-3 py-1.5 text-xs text-muted">
               Showing {fmtNumber(rows.length)} of {fmtNumber(devices.data.total)} — search to narrow the list.
             </p>
           )}
@@ -477,7 +477,7 @@ export function DeviceScopePicker({ selected, onChange, scope, onScopeChange }: 
             >
               Clear
             </Button>
-            <span className="ml-auto text-[11px] text-muted" aria-live="polite">
+            <span className="ml-auto text-xs text-muted" aria-live="polite">
               {draftCount ? `${draftCount} selected` : 'All devices'}
             </span>
             <Popover.Close asChild>

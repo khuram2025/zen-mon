@@ -109,5 +109,5 @@ function Logs({ overview }: { overview: Overview }) {
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-lg border border-border/50 bg-surface2/20 p-3"><div className="text-[11px] text-muted">{label}</div><div className="mt-1 text-base font-semibold tabular-nums">{value}</div></div>
+  return <div className="rounded-lg border border-border/50 bg-surface2/20 p-3"><div className="text-xs text-muted">{label}</div><div className="mt-1 text-base font-semibold tabular-nums">{value}</div></div>
 }

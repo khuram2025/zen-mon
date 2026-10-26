@@ -23,7 +23,7 @@ export function TemplateTable({ items, sort, onSortByName, caption, showCategory
   const byName = sort === 'name'
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-surface shadow-card dark:shadow-card-dark">
-      <Table className="text-[13px]">
+      <Table className="text-sm">
         <caption className="sr-only">{caption}</caption>
         <THead className="bg-surface2/50">
           <Tr className="hover:bg-transparent">
@@ -71,7 +71,7 @@ export function TemplateTable({ items, sort, onSortByName, caption, showCategory
                         <p className="line-clamp-1 max-w-[60ch] text-xs text-muted" title={item.description}>{item.description}</p>
                       )}
                       {/* What the hidden columns show, under the name at narrower widths. */}
-                      <p className={cn('mt-0.5 text-[11px] text-text2', showCategory ? '2xl:hidden' : 'xl:hidden')}>
+                      <p className={cn('mt-0.5 text-xs text-text2', showCategory ? '2xl:hidden' : 'xl:hidden')}>
                         {showCategory && <span>{item.categoryTitle}</span>}
                         {showCategory && <span className="xl:hidden"> · </span>}
                         <span className="xl:hidden">{period}</span>
@@ -87,7 +87,7 @@ export function TemplateTable({ items, sort, onSortByName, caption, showCategory
                     <OriginBadges item={item} compact />
                   </div>
                   {item.origin === 'custom' && (
-                    <p className="mt-0.5 truncate text-[11px] text-muted">by {item.isOwner ? 'you' : item.ownerName || 'a former user'}</p>
+                    <p className="mt-0.5 truncate text-xs text-muted">by {item.isOwner ? 'you' : item.ownerName || 'a former user'}</p>
                   )}
                 </Td>
                 <Td className="py-2.5 text-right tabular-nums text-text2">{item.entries.length}</Td>

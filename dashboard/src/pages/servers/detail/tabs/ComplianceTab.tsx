@@ -221,7 +221,7 @@ export function ComplianceTab({ server }: { server: ServerItem }) {
       {/* Summary */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <div className="col-span-2 flex min-w-0 flex-col gap-1 rounded-xl border border-border bg-surface p-3.5 md:col-span-1">
-          <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+          <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
             <ShieldCheck className="h-3.5 w-3.5" /> Compliance score
           </span>
           <div
@@ -295,7 +295,7 @@ export function ComplianceTab({ server }: { server: ServerItem }) {
                   )}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className={cn('truncate text-[13px] font-medium', active ? 'text-primary' : 'text-text')} title={b.name}>
+                    <span className={cn('truncate text-sm font-medium', active ? 'text-primary' : 'text-text')} title={b.name}>
                       {b.name}
                     </span>
                     <span className="shrink-0 text-xs tabular-nums text-muted">
@@ -344,12 +344,12 @@ export function ComplianceTab({ server }: { server: ServerItem }) {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Filter package or baseline…"
-                className="h-8 pl-8 text-[13px]"
+                className="h-8 pl-8 text-sm"
               />
             </div>
           </div>
         </div>
-        <Table className="text-[13px]">
+        <Table className="text-sm">
           <THead className="bg-surface2/40">
             <Tr className="hover:bg-transparent">
               <Th className={cn('h-9 w-[120px] pl-4', sortableTh)} onClick={() => toggleSort('status')}>

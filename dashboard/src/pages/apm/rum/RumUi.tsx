@@ -149,7 +149,7 @@ function SearchBox({ value, onChange }: { value: string; onChange: (value: strin
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => { if (event.key === 'Enter') onChange(draft.trim()) }}
         placeholder="Search session, user, URL, error…"
-        className="h-7 w-full rounded-md border border-border bg-surface pl-6 pr-6 text-[11px] text-text outline-none placeholder:text-muted focus:border-primary focus:ring-2 focus:ring-primary/20"
+        className="h-7 w-full rounded-md border border-border bg-surface pl-6 pr-6 text-xs text-text outline-none placeholder:text-muted focus:border-primary focus:ring-2 focus:ring-primary/20"
       />
       {draft && (
         <button type="button" aria-label="Clear search" onClick={() => { setDraft(''); onChange('') }} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted hover:text-text">
@@ -210,7 +210,7 @@ export function RumRangePicker({ value, bounds, onChange, onCustom }: {
               aria-selected={active}
               onClick={() => onChange(range.value)}
               className={cn(
-                'rounded px-2 py-1 text-[11px] font-semibold transition-colors',
+                'rounded px-2 py-1 text-xs font-semibold transition-colors',
                 active ? 'bg-primary text-black' : 'text-muted hover:text-text',
               )}
             >
@@ -226,7 +226,7 @@ export function RumRangePicker({ value, bounds, onChange, onCustom }: {
           title={custom ? formatWindowLabel(bounds) : 'Pick an absolute start and end'}
           onClick={openEditor}
           className={cn(
-            'inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold transition-colors',
+            'inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold transition-colors',
             custom ? 'bg-primary text-black' : 'text-muted hover:text-text',
           )}
         >
@@ -237,19 +237,19 @@ export function RumRangePicker({ value, bounds, onChange, onCustom }: {
       {open && (
         <div className="absolute right-0 z-30 mt-1 w-[300px] rounded-md border border-border bg-surface p-3 shadow-lg" role="dialog" aria-label="Custom time range">
           <div className="grid gap-2">
-            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <label className="text-2xs font-semibold uppercase tracking-wider text-muted">
               From
               <input type="datetime-local" value={from} onChange={(event) => setFrom(event.target.value)} className="mt-1 h-8 w-full rounded-md border border-border bg-surface2 px-2 text-xs font-normal normal-case tracking-normal text-text" />
             </label>
-            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <label className="text-2xs font-semibold uppercase tracking-wider text-muted">
               To
               <input type="datetime-local" value={to} onChange={(event) => setTo(event.target.value)} className="mt-1 h-8 w-full rounded-md border border-border bg-surface2 px-2 text-xs font-normal normal-case tracking-normal text-text" />
             </label>
-            {error && <p className="text-[11px] text-danger">{error}</p>}
-            <p className="text-[10px] text-muted">Times are in your local zone. Windows longer than 14 days read the 5-minute rollup.</p>
+            {error && <p className="text-xs text-danger">{error}</p>}
+            <p className="text-2xs text-muted">Times are in your local zone. Windows longer than 14 days read the 5-minute rollup.</p>
             <div className="flex justify-end gap-1.5">
-              <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button size="sm" className="h-7 px-2.5 text-[11px]" onClick={apply}>Apply</Button>
+              <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setOpen(false)}>Cancel</Button>
+              <Button size="sm" className="h-7 px-2.5 text-xs" onClick={apply}>Apply</Button>
             </div>
           </div>
         </div>
@@ -306,7 +306,7 @@ function FilterSelect({
     <label className="min-w-[132px] flex-1">
       <span className="sr-only">{RUM_FILTER_LABEL[filterKey]}</span>
       <Select value={filters[filterKey] || ALL} onValueChange={(value) => onChange(filterKey, value === ALL ? '' : value)}>
-        <SelectTrigger className="h-7 min-w-0 bg-surface text-[11px]" aria-label={`Filter by ${RUM_FILTER_LABEL[filterKey].toLowerCase()}`}>
+        <SelectTrigger className="h-7 min-w-0 bg-surface text-xs" aria-label={`Filter by ${RUM_FILTER_LABEL[filterKey].toLowerCase()}`}>
           <SelectValue placeholder={placeholder} />
         </SelectTrigger>
         <SelectContent>
@@ -352,7 +352,7 @@ export function RumFilterBar({
   return (
     <div className="rounded-md border border-border bg-surface2/35">
       <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5">
-        <span className="inline-flex shrink-0 items-center gap-1 pl-0.5 pr-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+        <span className="inline-flex shrink-0 items-center gap-1 pl-0.5 pr-0.5 text-2xs font-semibold uppercase tracking-wider text-muted">
           <Filter className="h-3 w-3 text-primary" aria-hidden />
           Segment
         </span>
@@ -365,7 +365,7 @@ export function RumFilterBar({
             key={key}
             type="button"
             onClick={() => onChange(key, '')}
-            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-primary/25 bg-primary/10 px-1.5 text-[11px] font-medium text-primary hover:bg-primary/15"
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-primary/25 bg-primary/10 px-1.5 text-xs font-medium text-primary hover:bg-primary/15"
             aria-label={`Remove ${RUM_FILTER_LABEL[key]} filter`}
             title={`${RUM_FILTER_LABEL[key]}: ${filters[key]}`}
           >
@@ -376,7 +376,7 @@ export function RumFilterBar({
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
           {loading && <Loader2 className="h-3 w-3 animate-spin text-muted" aria-label="Loading filter values" />}
           {error && (
-            <button type="button" className="px-1 text-[10px] text-warning hover:underline" onClick={onRetry}>
+            <button type="button" className="px-1 text-2xs text-warning hover:underline" onClick={onRetry}>
               Filter values unavailable · retry
             </button>
           )}
@@ -384,7 +384,7 @@ export function RumFilterBar({
             <Button
               variant="ghost"
               size="sm"
-              className="h-7 gap-1 px-1.5 text-[11px] text-muted"
+              className="h-7 gap-1 px-1.5 text-xs text-muted"
               onClick={() => setAdvancedOpen((open) => !open)}
               aria-expanded={advancedOpen}
             >
@@ -394,7 +394,7 @@ export function RumFilterBar({
             </Button>
           )}
           {activeCount > 0 && (
-            <Button variant="ghost" size="sm" className="h-7 gap-1 px-1.5 text-[11px] text-muted" onClick={onClear}>
+            <Button variant="ghost" size="sm" className="h-7 gap-1 px-1.5 text-xs text-muted" onClick={onClear}>
               <RotateCcw className="h-3 w-3" /> Clear
             </Button>
           )}
@@ -433,18 +433,18 @@ export function RumVitalCard({ name, metric, compact = false, delta }: { name: R
       <CardContent className={cn('p-3', compact && 'p-2.5')}>
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{VITAL_SHORT[name]} p75</div>
+            <div className="text-2xs font-semibold uppercase tracking-wider text-muted">{VITAL_SHORT[name]} p75</div>
             <div className={cn('mt-0.5 font-bold tabular-nums tracking-tight', compact ? 'text-xl' : 'text-[1.5rem] leading-none', style.text)}>
               {formatRumVital(name, metric.p75)}
             </div>
-            <div className="mt-0.5 truncate text-[10px] text-muted">{VITAL_LABEL[name]}</div>
+            <div className="mt-0.5 truncate text-2xs text-muted">{VITAL_LABEL[name]}</div>
           </div>
           <Badge variant={lowConfidence ? 'outline' : style.badge} title={confidenceTitle(metric.samples)}>{lowConfidence ? `${style.label} · indicative` : style.label}</Badge>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface2" aria-hidden>
           <div className={cn('h-full rounded-full', style.bar)} style={{ width: `${width}%` }} />
         </div>
-        <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
+        <div className="mt-1 flex items-center justify-between gap-2 text-2xs text-muted">
           <span title={confidenceTitle(metric.samples)}>{metric.samples.toLocaleString()} {metric.samples === 1 ? 'sample' : 'samples'}{lowConfidence ? ` · fewer than ${MIN_CONFIDENT_SAMPLES}` : ''}</span>
           {delta}
           <span>Good ≤ {formatRumVital(name, limits.good)}</span>
@@ -456,7 +456,7 @@ export function RumVitalCard({ name, metric, compact = false, delta }: { name: R
               <div className="bg-warning" style={{ width: `${Math.max(0, distribution.needsImprovement ?? 0)}%` }} />
               <div className="bg-danger" style={{ width: `${Math.max(0, distribution.poor ?? 0)}%` }} />
             </div>
-            <div className="mt-1 flex justify-between text-[10px] text-muted">
+            <div className="mt-1 flex justify-between text-2xs text-muted">
               <span>{distribution.good == null ? '—' : `${distribution.good.toFixed(0)}% good`}</span>
               {metric.rated_samples != null && metric.rated_samples < metric.samples && (
                 <span title="Buckets written before the distribution counters existed contribute to p75 but not to this split.">split over {metric.rated_samples.toLocaleString()} rated</span>
@@ -506,13 +506,13 @@ export function RumExperienceCard({
             <span className={cn('text-xl font-bold tabular-nums leading-none', style.text)}>
               {assessment.score == null ? '—' : assessment.score}
             </span>
-            <span className="mt-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted">score</span>
+            <span className="mt-0.5 text-2xs font-semibold uppercase tracking-wider text-muted">score</span>
           </div>
         </div>
         <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Field experience</div>
+          <div className="text-2xs font-semibold uppercase tracking-wider text-muted">Field experience</div>
           <div className="text-sm font-semibold text-text">{style.label}</div>
-          <p className="mt-0.5 text-[10px] leading-snug text-muted">
+          <p className="mt-0.5 text-2xs leading-snug text-muted">
             {assessment.rated === 0
               ? 'Waiting for finalized Core Web Vital samples.'
               : `${assessment.goodCount} of ${assessment.rated} Core Web Vitals are in the good range at p75.`}
@@ -544,7 +544,7 @@ export function RumMetricCell({ name, value, samples }: { name: RumVitalName; va
         band === 'no-data' && 'text-muted',
         lowConfidence && 'opacity-60',
       )}>{value == null ? '—' : formatRumVital(name, value)}{lowConfidence && <span aria-hidden className="ml-0.5 text-muted">~</span>}</div>
-      {samples != null && <div className="text-[9px] text-muted">n={samples.toLocaleString()}{lowConfidence ? ' · low' : ''}</div>}
+      {samples != null && <div className="text-2xs text-muted">n={samples.toLocaleString()}{lowConfidence ? ' · low' : ''}</div>}
     </div>
   )
 }
@@ -557,11 +557,11 @@ export function RumVitalTile({ name, value, samples }: { name: RumVitalName; val
   return (
     <div className={cn('rounded-lg border bg-surface2/35 p-2.5', lowConfidence ? 'border-dashed border-border' : style.border)} title={confidenceTitle(samples)}>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[9px] font-semibold uppercase tracking-wider text-muted">{VITAL_SHORT[name]} p75</span>
+        <span className="text-2xs font-semibold uppercase tracking-wider text-muted">{VITAL_SHORT[name]} p75</span>
         <span className={cn('h-1.5 w-1.5 rounded-full', style.bar, lowConfidence && 'opacity-50')} aria-hidden />
       </div>
       <div className={cn('mt-1 font-mono text-sm font-semibold tabular-nums', style.text, lowConfidence && 'opacity-70')}>{formatRumVital(name, value)}{lowConfidence && <span aria-hidden className="ml-0.5 text-muted">~</span>}</div>
-      <div className="mt-0.5 truncate text-[10px] text-muted" title={VITAL_LABEL[name]}>
+      <div className="mt-0.5 truncate text-2xs text-muted" title={VITAL_LABEL[name]}>
         {band === 'no-data' ? VITAL_LABEL[name] : lowConfidence ? `Indicative · n=${samples!.toLocaleString()}` : `${style.label}${samples != null ? ` · n=${samples.toLocaleString()}` : ''}`}
       </div>
     </div>
@@ -613,8 +613,8 @@ export function RumEmptyState({
   return (
     <div className="flex flex-col items-center justify-center px-4 py-10 text-center">
       <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary"><Icon className="h-4 w-4" /></span>
-      <h3 className="mt-2.5 text-[13px] font-semibold text-text">{title}</h3>
-      <p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted">{description}</p>
+      <h3 className="mt-2.5 text-sm font-semibold text-text">{title}</h3>
+      <p className="mt-1 max-w-xl text-xs leading-relaxed text-muted">{description}</p>
       {action && <div className="mt-3">{action}</div>}
     </div>
   )
@@ -634,8 +634,8 @@ export function RumSectionHeader({
   return (
     <div className="mb-1.5 flex items-end justify-between gap-3">
       <div className="min-w-0">
-        <h3 id={id} className="text-[13px] font-semibold tracking-tight text-text">{title}</h3>
-        {description && <p className="text-[11px] text-muted">{description}</p>}
+        <h3 id={id} className="text-sm font-semibold tracking-tight text-text">{title}</h3>
+        {description && <p className="text-xs text-muted">{description}</p>}
       </div>
       {action}
     </div>
@@ -707,7 +707,7 @@ export function RumExplorerShell({
               type="button"
               onClick={onExport}
               disabled={exporting || shown === 0}
-              className="inline-flex items-center gap-1 rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] font-medium text-text2 hover:border-primary/40 hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded border border-border bg-surface px-1.5 py-0.5 text-2xs font-medium text-text2 hover:border-primary/40 hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
               title={`Download up to 5,000 ${noun} matching the current filters as CSV`}
             >
               {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
@@ -747,8 +747,8 @@ export function RumTableCard({ title, description, actions, notice, children, fo
     <Card className="overflow-hidden">
       <CardHeader className="flex-row items-center justify-between gap-3 border-b border-border px-3 py-2">
         <div className="min-w-0">
-          <CardTitle className="text-[13px]">{title}</CardTitle>
-          {description && <p className="text-[11px] text-muted">{description}</p>}
+          <CardTitle className="text-sm">{title}</CardTitle>
+          {description && <p className="text-xs text-muted">{description}</p>}
         </div>
         {actions}
       </CardHeader>
@@ -762,7 +762,7 @@ export function RumTableCard({ title, description, actions, notice, children, fo
 export function RumCoverageNotice({ coverage, showRetention = false }: { coverage?: RumCoverage; showRetention?: boolean }) {
   if (!coverage || (!coverage.partial && !showRetention)) return null
   return (
-    <div role="status" className="flex items-start gap-2 border-b border-warning/25 bg-warning/10 px-3 py-1.5 text-[11px] leading-snug text-text2">
+    <div role="status" className="flex items-start gap-2 border-b border-warning/25 bg-warning/10 px-3 py-1.5 text-xs leading-snug text-text2">
       <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden />
       {coverage.partial ? <span>
         <span className="font-semibold text-text">90-day rollup:</span>{' '}
@@ -775,7 +775,7 @@ export function RumCoverageNotice({ coverage, showRetention = false }: { coverag
 export function RumSamplingNotice({ sampling }: { sampling?: RumSamplingMetadata }) {
   if (!sampling?.includes_retained_unsampled_errors) return null
   return (
-    <div role="status" className="flex items-start gap-2 border-b border-info/25 bg-info/5 px-3 py-1.5 text-[11px] leading-snug text-text2">
+    <div role="status" className="flex items-start gap-2 border-b border-info/25 bg-info/5 px-3 py-1.5 text-xs leading-snug text-text2">
       <Activity className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" aria-hidden />
       <span><span className="font-semibold text-text">Sampling-aware errors:</span> forced unsampled errors remain visible here; aggregate session-impact rates use the sampled cohort.</span>
     </div>
@@ -833,7 +833,7 @@ export function RumPager({
   const last = Math.min(total, safePage * pageSize)
   const nounLabel = total === 1 && noun.endsWith('s') ? noun.slice(0, -1) : noun
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-1.5 text-[11px]">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-1.5 text-xs">
       <span className="text-muted">{first.toLocaleString()}–{last.toLocaleString()} of <span className="font-medium text-text2">{total.toLocaleString()}</span> {nounLabel}</span>
       <div className="flex items-center gap-2">
         <select
@@ -862,7 +862,7 @@ export function TracePivot({ traceId, label = 'View trace', compact = false }: {
       to={`/apm/traces/${traceId}?${query}`}
       state={{ returnTo }}
       onClick={(event) => event.stopPropagation()}
-      className={cn('inline-flex items-center gap-1 font-medium text-primary hover:underline', compact ? 'font-mono text-[10px]' : 'text-xs')}
+      className={cn('inline-flex items-center gap-1 font-medium text-primary hover:underline', compact ? 'font-mono text-2xs' : 'text-xs')}
       title={`Open backend trace ${traceId}`}
     >
       {compact ? `${traceId.slice(0, 10)}…` : label}<ExternalLink className="h-3 w-3" aria-hidden />
@@ -890,9 +890,9 @@ export function SignalTile({ icon: Icon = Activity, label, value, hint, tone = '
       <CardContent className="flex items-start gap-2.5 p-3">
         <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', colors[tone])}><Icon className="h-4 w-4" /></span>
         <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+          <div className="text-2xs font-semibold uppercase tracking-wider text-muted">{label}</div>
           <div className="mt-0.5 text-xl font-bold tabular-nums text-text">{value}</div>
-          {hint && <div className="mt-1 text-[10px] text-muted">{hint}</div>}
+          {hint && <div className="mt-1 text-2xs text-muted">{hint}</div>}
         </div>
       </CardContent>
     </Card>

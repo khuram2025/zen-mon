@@ -105,7 +105,7 @@ export function RolesSection() {
                           onClick={(e) => { e.stopPropagation(); setViewing(r) }}
                         >
                           <span className="block text-sm font-medium">{r.display_name}</span>
-                          <span className="block font-mono text-[11px] text-muted">{r.name}</span>
+                          <span className="block font-mono text-xs text-muted">{r.name}</span>
                         </button>
                       </Td>
                       <Td className="max-w-md text-xs text-muted">{r.description || <span className="italic">No description</span>}</Td>

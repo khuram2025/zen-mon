@@ -244,15 +244,15 @@ export function UsersSection() {
                     <Tr key={u.id} className={cn('cursor-pointer', !active && 'opacity-70')} onClick={() => setDetail(u)}>
                       <Td>
                         <div className="flex items-center gap-3">
-                          <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold', isAdmin ? 'bg-primary/15 text-primary' : 'bg-surface2 text-muted')} aria-hidden>
+                          <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold', isAdmin ? 'bg-primary/15 text-primary' : 'bg-surface2 text-muted')} aria-hidden>
                             {initials(u)}
                           </div>
                           <div className="min-w-0">
                             <button type="button" className="flex items-center gap-1.5 text-left text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" aria-label={`Account details for ${u.username}`} onClick={(e) => { e.stopPropagation(); setDetail(u) }}>
                               <span className="truncate">{u.full_name || u.username}</span>
-                              {isMe && <Badge variant="outline" className="px-1.5 py-0 text-[10px]">You</Badge>}
+                              {isMe && <Badge variant="outline" className="px-1.5 py-0 text-2xs">You</Badge>}
                             </button>
-                            <div className="truncate text-[11px] text-muted">{u.full_name ? <>{u.username} · </> : null}{u.email}</div>
+                            <div className="truncate text-xs text-muted">{u.full_name ? <>{u.username} · </> : null}{u.email}</div>
                           </div>
                         </div>
                       </Td>
@@ -268,8 +268,8 @@ export function UsersSection() {
                           return (
                             <div className="flex max-w-[220px] flex-wrap gap-1" title={fromRole.length ? `From the role: ${fromRole.join(', ')}${own.length ? ` · own: ${own.join(', ')}` : ''}` : undefined}>
                               {all.slice(0, 3).map((t) => <TagBadge key={t} name={t} color={tagColor(t, tagColors)} />)}
-                              {all.length > 3 && <span className="text-[10px] text-muted">+{all.length - 3}</span>}
-                              {fromRole.length > 0 && <span className="text-[10px] text-muted">via role</span>}
+                              {all.length > 3 && <span className="text-2xs text-muted">+{all.length - 3}</span>}
+                              {fromRole.length > 0 && <span className="text-2xs text-muted">via role</span>}
                             </div>
                           )
                         })()}
@@ -279,7 +279,7 @@ export function UsersSection() {
                         <span className="inline-flex items-center gap-2 text-xs">
                           <StatusDot status={u.locked ? 'down' : active ? 'up' : 'idle'} />
                           {u.locked ? 'Locked' : active ? 'Active' : 'Disabled'}
-                          {u.must_change_password && <Badge variant="outline" className="px-1 py-0 text-[9px]">pw change due</Badge>}
+                          {u.must_change_password && <Badge variant="outline" className="px-1 py-0 text-2xs">pw change due</Badge>}
                         </span>
                       </Td>
                       <Td className="text-xs">{external ? <span className="text-muted">via directory</span> : u.mfa_enabled ? <Badge variant="success">On</Badge> : <span className="text-muted">Off</span>}</Td>

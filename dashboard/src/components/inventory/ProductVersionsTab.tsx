@@ -15,7 +15,7 @@ const HATCH = 'repeating-linear-gradient(45deg, rgb(var(--muted) / 0.6) 0 2px, r
 
 export function GenerationPill({ meta, className }: { meta: GenerationMeta; className?: string }) {
   return (
-    <span title={meta.title} className={cn('inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-[10.5px] font-semibold leading-4', meta.tone, className)}>
+    <span title={meta.title} className={cn('inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-xs font-semibold leading-4', meta.tone, className)}>
       {meta.label}
     </span>
   )
@@ -61,7 +61,7 @@ function GroupHeading({ group, visible }: { group: VersionGroup; visible: boolea
   return (
     <h3 className={cn('flex flex-wrap items-baseline gap-x-2 px-2 pb-1 pt-3 text-xs font-semibold text-text first:pt-0', !visible && 'sr-only')}>
       {label.title}
-      <span className="text-[11px] font-normal text-muted">{label.note} · {plural(group.versions.length, 'version')}</span>
+      <span className="text-xs font-normal text-muted">{label.note} · {plural(group.versions.length, 'version')}</span>
     </h3>
   )
 }
@@ -73,7 +73,7 @@ function Unversioned({ productKey, unversioned, maxHosts }: { productKey: string
     <li data-unversioned="">
       <div className={cn(rowGrid, 'px-2 py-1.5')}>
         <span className="flex min-w-0 items-center gap-2">
-          <span className="inline-flex shrink-0 items-center rounded-full border border-border bg-surface2 px-1.5 py-px text-[10.5px] font-semibold leading-4 text-text2" title="These rows report no version, so they are not a version and have no generation">Unknown</span>
+          <span className="inline-flex shrink-0 items-center rounded-full border border-border bg-surface2 px-1.5 py-px text-xs font-semibold leading-4 text-text2" title="These rows report no version, so they are not a version and have no generation">Unknown</span>
           <span className="truncate text-xs italic text-muted">No version reported</span>
         </span>
         <span className="order-last col-span-2 h-3 overflow-hidden rounded bg-surface2 sm:order-none sm:col-span-1" aria-hidden>
@@ -81,7 +81,7 @@ function Unversioned({ productKey, unversioned, maxHosts }: { productKey: string
         </span>
         <span className="text-right text-sm tabular-nums text-text2" title="Hosts with a row that reports no version. There is no list of these hosts; the installations are listed.">{fmtInt(unversioned.hosts)}</span>
       </div>
-      <p className="px-2 pb-1 text-[11px] text-muted">
+      <p className="px-2 pb-1 text-xs text-muted">
         <Link to={installedHref(productKey, unversioned.address || NO_VERSION)} data-drill="page" data-drill-count={unversioned.installs} className={cn('rounded font-medium text-primary hover:underline', focus)}>
           {plural(unversioned.installs, 'installation')}
         </Link>{' '}
@@ -94,15 +94,15 @@ function Unversioned({ productKey, unversioned, maxHosts }: { productKey: string
 function VersionTable({ rows, caption, hideCaption }: { rows: VersionBarRow[]; caption: string; hideCaption: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full table-fixed border-separate border-spacing-0 text-[13px]" data-versions-table="">
+      <table className="w-full table-fixed border-separate border-spacing-0 text-sm" data-versions-table="">
         <colgroup><col className="w-24 sm:w-32" /><col /><col className="w-20 sm:w-32" /><col className="w-24 sm:w-36" /></colgroup>
         <caption className={cn('px-2 pb-1 pt-3 text-left text-xs font-semibold text-text', hideCaption && 'sr-only')}>{caption}</caption>
         <thead>
           <tr className="[&>th]:border-b [&>th]:border-border">
-            <th scope="col" className="h-8 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Generation</th>
-            <th scope="col" className="h-8 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Version</th>
-            <th scope="col" className="h-8 px-3 text-right text-[11px] font-semibold uppercase tracking-wider text-muted">Hosts</th>
-            <th scope="col" className="h-8 px-3 text-right text-[11px] font-semibold uppercase tracking-wider text-muted">Installs</th>
+            <th scope="col" className="h-8 px-3 text-left text-xs font-semibold uppercase tracking-wider text-muted">Generation</th>
+            <th scope="col" className="h-8 px-3 text-left text-xs font-semibold uppercase tracking-wider text-muted">Version</th>
+            <th scope="col" className="h-8 px-3 text-right text-xs font-semibold uppercase tracking-wider text-muted">Hosts</th>
+            <th scope="col" className="h-8 px-3 text-right text-xs font-semibold uppercase tracking-wider text-muted">Installs</th>
           </tr>
         </thead>
         <tbody>
@@ -148,7 +148,7 @@ export function ProductVersionsTab({ productKey, data }: { productKey: string; d
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
         <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
           <h2 className="text-sm font-semibold tracking-tight">Hosts per version</h2>
-          <span className="text-[10px] uppercase tracking-wider text-muted">newest first · N is the newest seen on a visible server</span>
+          <span className="text-2xs uppercase tracking-wider text-muted">newest first · N is the newest seen on a visible server</span>
         </div>
         {data.versions.length > 0 && <ViewToggle value={view} onChange={setView} label="Versions view" />}
       </div>
@@ -190,7 +190,7 @@ export function ProductVersionsTab({ productKey, data }: { productKey: string; d
           </div>
         )}
         {data.header.mixed_schemes && (
-          <p className="mt-3 border-t border-border/60 px-2 pt-3 text-[11px] text-muted">
+          <p className="mt-3 border-t border-border/60 px-2 pt-3 text-xs text-muted">
             Versions that follow different numbering schemes are ranked apart: one scheme&apos;s version is never compared with another&apos;s, so each group has its own N.
           </p>
         )}

@@ -296,7 +296,7 @@ export function PolicyEditorBody({ draft, setDraft, errors, dir, readOnly, other
               {draft.enabled ? `: ${DEFAULT_CONFLICT_REFUSAL}.` : `. This policy is disabled, so it can be saved, but enabling it later will be refused unless the other policy drops it.`}
             </p>
           )}
-          <p className="text-[11px] text-muted">Used for incidents whose rule names no policy and has no legacy tiers. Leave all off for a policy that rules choose explicitly.</p>
+          <p className="text-xs text-muted">Used for incidents whose rule names no policy and has no legacy tiers. Leave all off for a policy that rules choose explicitly.</p>
         </fieldset>
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -449,7 +449,7 @@ function PreviewPanel({ draft, dir, policyId, revision, dirty }: { draft: Policy
           <p className="text-xs text-muted">Complete the policy (a name, and targets on every step) to resolve who would be notified. The dry run never sends anything.</p>
         ) : (
           <>
-            {useDraft && <p className="mb-2 text-[11px] text-muted">Previewing your unsaved changes.</p>}
+            {useDraft && <p className="mb-2 text-xs text-muted">Previewing your unsaved changes.</p>}
             {preview.isLoading || (useDraft && !body) ? (
               <div className="flex items-center gap-2 py-3 text-xs text-muted"><Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Resolving recipients…</div>
             ) : preview.isError ? (
@@ -474,7 +474,7 @@ function PreviewPanel({ draft, dir, policyId, revision, dirty }: { draft: Policy
                     {preview.data.warnings!.map((w) => <li key={w} className="flex items-start gap-1 text-xs text-warning"><AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden />{w}</li>)}
                   </ul>
                 )}
-                <p className="text-[11px] text-muted">Resolved for now: on-call overrides win, then the highest layer on duty. Duplicate addresses across targets are sent once.</p>
+                <p className="text-xs text-muted">Resolved for now: on-call overrides win, then the highest layer on duty. Duplicate addresses across targets are sent once.</p>
               </div>
             ) : null}
           </>

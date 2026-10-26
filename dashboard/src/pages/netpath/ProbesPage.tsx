@@ -128,7 +128,7 @@ export function ProbesPage() {
                   <Metric label="Routes" value={p.last_num_paths ?? '—'} />
                 </div>
                 <div className="mt-3 flex items-center justify-between">
-                  <span className="text-[11px] text-muted">{p.last_run_at ? `checked ${relTime(p.last_run_at)}` : 'never run'}</span>
+                  <span className="text-xs text-muted">{p.last_run_at ? `checked ${relTime(p.last_run_at)}` : 'never run'}</span>
                   {canManage && (
                     <Button size="sm" variant="ghost" className="h-7 px-2 opacity-0 group-hover:opacity-100"
                       onClick={(e) => { e.stopPropagation(); runNow.mutate(p.id) }}>
@@ -168,7 +168,7 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="rounded-md bg-surface2/50 py-1.5">
       <div className="text-sm font-semibold text-text">{value}</div>
-      <div className="text-[10px] uppercase tracking-wide text-muted">{label}</div>
+      <div className="text-2xs uppercase tracking-wide text-muted">{label}</div>
     </div>
   )
 }

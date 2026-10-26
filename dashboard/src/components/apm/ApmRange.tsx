@@ -91,7 +91,7 @@ export function ApmRangePicker({ value, onChange, options = APM_RANGES, classNam
             role="tab"
             aria-selected={active}
             onClick={() => onChange(r)}
-            className={`rounded px-2 py-1 text-[11px] font-semibold transition-colors ${
+            className={`rounded px-2 py-1 text-xs font-semibold transition-colors ${
               active ? 'bg-primary text-black' : 'text-muted hover:text-text'
             }`}
           >
@@ -105,7 +105,7 @@ export function ApmRangePicker({ value, onChange, options = APM_RANGES, classNam
 
 export function CompareToggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-md border border-border bg-surface2/40 px-2.5 text-[11px] font-semibold text-muted">
+    <label className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-md border border-border bg-surface2/40 px-2.5 text-xs font-semibold text-muted">
       <Switch checked={value} onCheckedChange={onChange} />
       Compare previous
     </label>

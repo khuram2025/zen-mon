@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import { DrillTarget } from './DrillTarget'
 import { fmtInt } from './model'
 import type { KpiModel } from './overviewModel'
+import { KPI_LABEL, KPI_VALUE, kpiTone } from '@/components/ui/kpiTone'
 
 /**
  * A KPI card whose every figure is a link (the drill-down contract). The whole card opens the list
@@ -27,11 +28,11 @@ export function InventoryKpiCard({
   const bigName = model.valueCount !== null ? `${model.label}: ${fmtInt(model.valueCount)}` : `${model.label}: ${model.value}`
   return (
     <Card data-kpi={model.id} className="group relative flex h-full flex-col overflow-hidden transition hover:border-primary/40 focus-within:border-primary/60">
-      <span aria-hidden className={cn('absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r', KPI_ACCENT[accent])} />
+      <span aria-hidden className={cn('absolute inset-x-0 top-0 h-[3px]', kpiTone(accent).bar)} />
       <div className="flex items-start justify-between gap-2 px-4 pt-3">
         <div className="min-w-0">
-          <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted">{model.label}</div>
-          <div className="mt-1 text-2xl font-bold leading-none tabular-nums text-text">
+          <div className={KPI_LABEL}>{model.label}</div>
+          <div className={cn('mt-1.5', KPI_VALUE)}>
             <DrillTarget
               drill={model.drill}
               ariaLabel={bigName}
@@ -41,13 +42,13 @@ export function InventoryKpiCard({
             </DrillTarget>
           </div>
         </div>
-        <span aria-hidden className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white shadow', KPI_ACCENT[accent])}>
+        <span aria-hidden className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', kpiTone(accent).chip)}>
           {icon}
         </span>
       </div>
       <div className="flex flex-1 flex-col gap-1.5 px-4 pb-3 pt-1.5">
         {model.parts.length > 0 && (
-          <ul role="list" className="relative z-10 flex flex-wrap gap-x-2.5 gap-y-0.5 text-[11px] leading-4 text-muted">
+          <ul role="list" className="relative z-10 flex flex-wrap gap-x-2.5 gap-y-0.5 text-xs leading-4 text-muted">
             {model.parts.map((p) => (
               <li key={p.text} className="whitespace-nowrap">
                 {p.drill && p.value !== undefined ? (
@@ -61,8 +62,8 @@ export function InventoryKpiCard({
             ))}
           </ul>
         )}
-        {model.note && <p className="relative z-10 text-[11px] leading-4 text-muted" data-kpi-note="">{model.note}</p>}
-        {foot && <div className="relative z-10 text-[11px] leading-4 text-muted">{foot}</div>}
+        {model.note && <p className="relative z-10 text-xs leading-4 text-muted" data-kpi-note="">{model.note}</p>}
+        {foot && <div className="relative z-10 text-xs leading-4 text-muted">{foot}</div>}
         {trend && <div className="mt-auto pt-1">{trend}</div>}
       </div>
     </Card>

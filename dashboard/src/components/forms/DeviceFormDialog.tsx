@@ -288,12 +288,12 @@ export function DeviceFormDialog({
                       <button type="button" onClick={() => setState({ ...state, snmp_credential_mode: 'saved' })}
                         className={`rounded-md border-2 px-3 py-2 text-left text-sm transition ${state.snmp_credential_mode === 'saved' ? 'border-primary bg-primary/5' : 'border-border hover:border-border-strong'}`}>
                         <div className="flex items-center gap-1.5 font-medium"><Key className="h-3.5 w-3.5" /> Saved Credential</div>
-                        <div className="text-[11px] text-muted">Select from credential store</div>
+                        <div className="text-xs text-muted">Select from credential store</div>
                       </button>
                       <button type="button" onClick={() => setState({ ...state, snmp_credential_mode: 'manual' })}
                         className={`rounded-md border-2 px-3 py-2 text-left text-sm transition ${state.snmp_credential_mode === 'manual' ? 'border-primary bg-primary/5' : 'border-border hover:border-border-strong'}`}>
                         <div className="font-medium">Manual Entry</div>
-                        <div className="text-[11px] text-muted">Enter credentials inline</div>
+                        <div className="text-xs text-muted">Enter credentials inline</div>
                       </button>
                     </div>
 

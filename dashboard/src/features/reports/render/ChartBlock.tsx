@@ -300,7 +300,7 @@ function Donut({ series, height, description }: { series: ChartSeries; height: n
         <ReactECharts option={option} notMerge style={{ height: size, width: size }} opts={{ renderer: 'svg' }} />
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
           <span className="text-lg font-semibold tabular-nums text-text">{formatValue(total, series.unit, { compact: true })}</span>
-          <span className="text-[10px] uppercase tracking-wide text-muted">Total{series.unit && !['%'].includes(series.unit) ? ` ${series.unit}` : ''}</span>
+          <span className="text-2xs uppercase tracking-wide text-muted">Total{series.unit && !['%'].includes(series.unit) ? ` ${series.unit}` : ''}</span>
         </div>
       </div>
       <ul role="list" className="min-w-0 flex-1 space-y-1.5">
@@ -381,7 +381,7 @@ export function ChartBlock({ chart, branding, compact, window }: ChartBlockProps
   return (
     <figure className="zp-avoid-break zp-chart min-w-0">
       {chart.title && (
-        <figcaption className="mb-1.5 flex items-baseline gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
+        <figcaption className="mb-1.5 flex items-baseline gap-2 text-xs font-semibold uppercase tracking-wide text-muted">
           <span className="min-w-0 truncate">{chart.title}</span>
           {series?.unit && series.kind !== 'donut' && unitKind(series.unit) === 'count' && (
             // Counted units ("alerts", "sessions") are not in the axis labels; measured ones (%, ms, bps) are.

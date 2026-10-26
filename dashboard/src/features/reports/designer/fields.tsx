@@ -116,10 +116,10 @@ export function TagInput({
           className="h-6 min-w-[8rem] flex-1 bg-transparent px-1 text-sm text-text placeholder:text-muted focus:outline-none disabled:cursor-not-allowed"
         />
       </div>
-      <p id={hintId} className="mt-1 text-[11px] text-muted">
+      <p id={hintId} className="mt-1 text-xs text-muted">
         <span className="tabular-nums">{value.length}/{TAGS_MAX}</span> · Press Enter or comma to add; up to {TAG_LEN_MAX} characters each.
       </p>
-      {shown && <p id={errId} className="mt-0.5 text-[11px] text-danger-fg">{shown}</p>}
+      {shown && <p id={errId} className="mt-0.5 text-xs text-danger-fg">{shown}</p>}
     </div>
   )
 }
@@ -161,7 +161,7 @@ export function OptionField({
     <span className="flex items-center gap-1.5">
       <span id={labelId} className="text-xs font-medium text-text">{o.label}</span>
       {modified && (
-        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-primary">
+        <span className="inline-flex items-center gap-1 text-2xs font-medium text-primary">
           <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-primary" />
           <span className="sr-only">(</span>changed<span className="sr-only">)</span>
         </span>
@@ -170,13 +170,13 @@ export function OptionField({
   )
 
   const hint = (
-    <p id={hintId} className="text-[11px] leading-snug text-muted">
+    <p id={hintId} className="text-xs leading-snug text-muted">
       {o.help ? `${o.help} ` : ''}
       {(o.type === 'int' || o.type === 'number') && rangeHint(o) && <>Range {rangeHint(o)}. </>}
       Default {defaultText(o)}.
     </p>
   )
-  const err = error ? <p id={errId} className="text-[11px] font-medium text-danger-fg">{error}</p> : null
+  const err = error ? <p id={errId} className="text-xs font-medium text-danger-fg">{error}</p> : null
 
   if (o.type === 'bool') {
     return (

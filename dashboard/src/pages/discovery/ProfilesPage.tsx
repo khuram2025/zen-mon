@@ -158,7 +158,7 @@ export function ProfilesPage() {
                         <div className="flex items-center gap-2 font-medium text-text">
                           {p.name}
                           {!p.enabled && (
-                            <Badge variant="outline" className="text-[10px]">
+                            <Badge variant="outline" className="text-2xs">
                               disabled
                             </Badge>
                           )}
@@ -182,7 +182,7 @@ export function ProfilesPage() {
                     <Td>
                       <div className="flex flex-col gap-0.5">
                         <RunStatusBadge status={p.last_run_status as any} />
-                        <span className="text-[10px] text-muted">
+                        <span className="text-2xs text-muted">
                           {relativeTime(p.last_run_at)}
                         </span>
                       </div>

@@ -60,7 +60,7 @@ function AddDCDialog({ onClose }: { onClose: () => void }) {
               </SelectContent>
             </Select>
             {(creds.data || []).length === 0 && (
-              <p className="mt-1 text-[11px] text-muted">
+              <p className="mt-1 text-xs text-muted">
                 No Windows credentials yet — add one under <Link to="/credentials?tab=windows" className="text-primary hover:underline">Credentials</Link>.
               </p>
             )}
@@ -237,7 +237,7 @@ function DevicePolling() {
                         <Link to={`/devices/${r.device_id}`} className="font-medium hover:text-primary">{r.hostname}</Link>
                         {!r.is_l2 && <Badge variant="outline">{r.device_type}</Badge>}
                       </div>
-                      <div className="font-mono text-[11px] text-muted">{r.ip || '—'}{r.vendor ? ` · ${r.vendor}` : ''}</div>
+                      <div className="font-mono text-xs text-muted">{r.ip || '—'}{r.vendor ? ` · ${r.vendor}` : ''}</div>
                     </Td>
                     <Td>
                       <Select
@@ -344,7 +344,7 @@ function DomainControllers() {
                   <Td>
                     <div className="flex items-center gap-1">
                       {statusBadge(dc.last_status)}
-                      {dc.last_error && <span className="max-w-[140px] truncate text-[10px] text-danger" title={dc.last_error}>{dc.last_error}</span>}
+                      {dc.last_error && <span className="max-w-[140px] truncate text-2xs text-danger" title={dc.last_error}>{dc.last_error}</span>}
                     </div>
                   </Td>
                   <Td className="text-xs text-muted">{relTime(dc.last_poll_at)}</Td>

@@ -285,7 +285,7 @@ function RecommendedMatrixDialog({ dir, existing, onClose }: { dir: Directory; e
                     <label key={c.id} className={cn('flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-sm', f[key].includes(c.id) ? 'border-primary/50 bg-primary/5' : 'border-border')}>
                       <input type="checkbox" className="h-4 w-4" checked={f[key].includes(c.id)} onChange={() => toggle(key, c.id)} />
                       <span className="min-w-0 flex-1 truncate">{c.name}</span>
-                      <span className="text-[11px] uppercase text-muted">{c.type}</span>
+                      <span className="text-xs uppercase text-muted">{c.type}</span>
                     </label>
                   ))}
                 </div>

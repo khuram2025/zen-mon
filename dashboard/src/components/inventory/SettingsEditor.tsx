@@ -36,7 +36,7 @@ function NumberField({
   const id = useId()
   return (
     <div className={cn('space-y-1.5', className)} data-field={field}>
-      <Label htmlFor={id} className="normal-case tracking-normal text-[12px] font-medium text-text2">{FIELD_LABELS[field]}</Label>
+      <Label htmlFor={id} className="normal-case tracking-normal text-sm font-medium text-text2">{FIELD_LABELS[field]}</Label>
       <div className="flex items-center gap-2">
         <Input
           id={id}
@@ -54,7 +54,7 @@ function NumberField({
         />
         <span className="text-xs text-muted">{unit}</span>
       </div>
-      <p id={`${id}-help`} role={error ? 'alert' : undefined} className={cn('text-[11px] leading-4', error ? 'text-danger-fg' : 'text-muted')}>{error ?? help}</p>
+      <p id={`${id}-help`} role={error ? 'alert' : undefined} className={cn('text-xs leading-4', error ? 'text-danger-fg' : 'text-muted')}>{error ?? help}</p>
     </div>
   )
 }
@@ -169,7 +169,7 @@ export function SettingsEditor({ canManage, enabled = true }: { canManage: boole
       {query.isError && (
         <div>
           <QueryFailure compact what="the inventory settings" error={query.error} onRetry={() => void query.refetch()} retrying={query.isFetching} />
-          <p className="mt-1 text-[11px] text-muted">Showing the settings that loaded last; they may be out of date.</p>
+          <p className="mt-1 text-xs text-muted">Showing the settings that loaded last; they may be out of date.</p>
         </div>
       )}
       <fieldset disabled={locked} className="grid min-w-0 gap-4 lg:grid-cols-2">
@@ -203,8 +203,8 @@ export function SettingsEditor({ canManage, enabled = true }: { canManage: boole
               className="mt-0.5"
             />
             <div className="min-w-0">
-              <Label htmlFor="trends-enabled" className="normal-case tracking-normal text-[13px] font-medium text-text">Show trends on the Overview</Label>
-              <p className="mt-0.5 text-[11px] leading-4 text-muted">
+              <Label htmlFor="trends-enabled" className="normal-case tracking-normal text-sm font-medium text-text">Show trends on the Overview</Label>
+              <p className="mt-0.5 text-xs leading-4 text-muted">
                 Sparklines appear once three days of snapshots exist. Switching this off only hides them: snapshots are still recorded, so the history is there when you switch it on again.
               </p>
             </div>
@@ -218,10 +218,10 @@ export function SettingsEditor({ canManage, enabled = true }: { canManage: boole
             description="Categories the Software catalog and the Overview leave out unless asked. Hidden products stay stored and counted."
           >
             <fieldset className="min-w-0">
-              <legend className="mb-2 text-[12px] font-medium text-text2">Hidden by default</legend>
+              <legend className="mb-2 text-sm font-medium text-text2">Hidden by default</legend>
               <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 md:grid-cols-3 xl:grid-cols-4">
                 {data.categories.map((c) => (
-                  <label key={c} className={cn('flex items-center gap-2 rounded-md px-2 py-1 text-[13px] text-text', !locked && 'cursor-pointer hover:bg-surface2/60')}>
+                  <label key={c} className={cn('flex items-center gap-2 rounded-md px-2 py-1 text-sm text-text', !locked && 'cursor-pointer hover:bg-surface2/60')}>
                     <input
                       type="checkbox"
                       className="h-4 w-4 accent-[rgb(var(--primary))]"
@@ -233,7 +233,7 @@ export function SettingsEditor({ canManage, enabled = true }: { canManage: boole
                   </label>
                 ))}
               </div>
-              <p className="mt-2 text-[11px] leading-4 text-muted" data-hidden-summary="">{hiddenSummary(draft.hide)}</p>
+              <p className="mt-2 text-xs leading-4 text-muted" data-hidden-summary="">{hiddenSummary(draft.hide)}</p>
             </fieldset>
           </Section>
         </div>

@@ -76,15 +76,15 @@ export function UpdateNotificationBell() {
     <Button
       variant="ghost"
       size="icon"
-      className="relative h-7 w-7 text-muted hover:text-text"
+      className="relative h-8 w-8 text-muted hover:text-text"
       onClick={() => navigate('/settings/general?tab=updates')}
       title={tooltip}
       aria-label={tooltip}
     >
       {inFlight ? (
-        <BellRing className="h-3.5 w-3.5 animate-pulse" />
+        <BellRing className="h-4 w-4 animate-pulse" />
       ) : (
-        <Bell className="h-3.5 w-3.5" />
+        <Bell className="h-4 w-4" />
       )}
       {anyAttention && (
         <span

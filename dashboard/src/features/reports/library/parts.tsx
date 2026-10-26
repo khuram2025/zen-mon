@@ -44,7 +44,7 @@ export function Chip({ tone = 'neutral', icon, children, title, className }: {
     <span
       title={title}
       className={cn(
-        'inline-flex max-w-full items-center gap-1 whitespace-nowrap rounded border px-1.5 py-px text-[11px] font-medium leading-4',
+        'inline-flex max-w-full items-center gap-1 whitespace-nowrap rounded border px-1.5 py-px text-xs font-medium leading-4',
         CHIP[tone],
         className,
       )}
@@ -70,7 +70,7 @@ export function OriginBadges({ item, compact }: { item: LibraryItem; compact?: b
             <Chip icon={<Lock className="h-3 w-3" aria-hidden />}>Private</Chip>
           )}
           {!compact && (
-            <span className="truncate text-[11px] text-muted">
+            <span className="truncate text-xs text-muted">
               by {item.isOwner ? 'you' : item.ownerName || 'a former user'}
             </span>
           )}

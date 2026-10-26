@@ -247,7 +247,7 @@ export function PeriodSelect({
         {allowNone && <SelectItem value={NONE}>{noneLabel}</SelectItem>}
         {groups.map((g) => (
           <SelectGroup key={g.kind}>
-            <SelectPrimitive.Label className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <SelectPrimitive.Label className="px-2 pb-1 pt-2 text-2xs font-semibold uppercase tracking-wider text-muted">
               {g.label}
             </SelectPrimitive.Label>
             {PERIODS.filter((p) => p.kind === g.kind).map((p) => (
@@ -274,7 +274,7 @@ function NoHint({ children }: { content: ReactNode; children: ReactNode }) {
   return <>{children}</>
 }
 
-const badge = 'inline-flex items-center gap-1 rounded border px-1.5 py-px text-[10px] font-medium leading-4'
+const badge = 'inline-flex items-center gap-1 rounded border px-1.5 py-px text-2xs font-medium leading-4'
 
 /** Scope / snapshot / permission badges for a section (library, outline, inspector). */
 export function SectionBadges({ def, className, showScope = true, tooltips = true }: {

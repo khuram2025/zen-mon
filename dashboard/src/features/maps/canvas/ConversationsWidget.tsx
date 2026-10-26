@@ -55,7 +55,7 @@ export function ConversationsWidget({ shape }: { shape: MapShape }) {
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
             <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-success" />
           </span>
-          <span className="truncate text-[10px] font-bold uppercase tracking-wider text-text">
+          <span className="truncate text-2xs font-bold uppercase tracking-wider text-text">
             Top {limit} Conversations
           </span>
         </div>
@@ -65,14 +65,14 @@ export function ConversationsWidget({ shape }: { shape: MapShape }) {
       </div>
 
       <div className="min-h-0 flex-1 space-y-[5px] overflow-hidden px-2.5 py-2">
-        {!allowed && <div className="py-3 text-center text-[10px] text-muted">No access to NetFlow data (needs the NetFlow view permission)</div>}
-        {allowed && q.isLoading && <div className="py-3 text-center text-[10px] text-muted">Loading flows…</div>}
-        {allowed && q.isError && !rows.length && <div className="py-3 text-center text-[10px] text-muted">Flow data is unavailable right now</div>}
-        {allowed && !q.isLoading && !q.isError && !rows.length && <div className="py-3 text-center text-[10px] text-muted">No flow records{exporter ? ' for this device' : ''}</div>}
+        {!allowed && <div className="py-3 text-center text-2xs text-muted">No access to NetFlow data (needs the NetFlow view permission)</div>}
+        {allowed && q.isLoading && <div className="py-3 text-center text-2xs text-muted">Loading flows…</div>}
+        {allowed && q.isError && !rows.length && <div className="py-3 text-center text-2xs text-muted">Flow data is unavailable right now</div>}
+        {allowed && !q.isLoading && !q.isError && !rows.length && <div className="py-3 text-center text-2xs text-muted">No flow records{exporter ? ' for this device' : ''}</div>}
         {allowed && rows.map((c, i) => (
           <div key={`${c.src}-${c.dst}-${c.protocol}-${c.dst_port}`} className="group">
             <div className="flex items-baseline justify-between gap-1.5">
-              <span className="flex min-w-0 items-center gap-1 font-mono text-[9.5px] font-medium leading-tight text-text">
+              <span className="flex min-w-0 items-center gap-1 font-mono text-2xs font-medium leading-tight text-text">
                 <span className="w-2.5 shrink-0 text-[8px] text-muted">{i + 1}</span>
                 <span className="truncate" title={c.orientation === 'client_server' ? `Client ${c.src}` : c.src}>{c.src}</span>
                 {c.orientation === 'client_server'
@@ -80,7 +80,7 @@ export function ConversationsWidget({ shape }: { shape: MapShape }) {
                   : <ArrowLeftRight className="h-2.5 w-2.5 shrink-0 text-muted" aria-label="between" />}
                 <span className="truncate" title={c.orientation === 'client_server' ? `Server ${c.dst}` : c.dst}>{c.dst}</span>
               </span>
-              <span className="shrink-0 font-mono text-[9px] font-semibold tabular-nums" style={{ color: RANK_COLORS[i % RANK_COLORS.length] }}>
+              <span className="shrink-0 font-mono text-2xs font-semibold tabular-nums" style={{ color: RANK_COLORS[i % RANK_COLORS.length] }}>
                 {fmtBytes(c.bytes)}
               </span>
             </div>

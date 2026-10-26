@@ -127,7 +127,7 @@ export function DeliveredReports({ q, branding, canSchedule, onClearSearch }: {
             <X className="h-3.5 w-3.5" aria-hidden /> Clear filters
           </Button>
         )}
-        <span className="ml-auto text-[11px] text-muted" aria-live="polite">
+        <span className="ml-auto text-xs text-muted" aria-live="polite">
           {q.trim() ? `${shown.length} of ${all.length} loaded` : `${all.length} of ${total}`} run{total === 1 ? '' : 's'}
         </span>
       </div>
@@ -153,7 +153,7 @@ export function DeliveredReports({ q, branding, canSchedule, onClearSearch }: {
         )
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-surface shadow-card dark:shadow-card-dark">
-          <Table className="text-[13px]">
+          <Table className="text-sm">
             <caption className="sr-only">Delivered reports, newest first</caption>
             <THead className="bg-surface2/50">
               <Tr className="hover:bg-transparent">
@@ -173,7 +173,7 @@ export function DeliveredReports({ q, branding, canSchedule, onClearSearch }: {
                   <Tr key={r.id} className="align-top">
                     <Td className="max-w-[360px] py-2.5">
                       <p className="font-medium text-text">{r.title || r.report_type}</p>
-                      <p className="text-[11px] text-muted">{periodLabel(r.period)}</p>
+                      <p className="text-xs text-muted">{periodLabel(r.period)}</p>
                       <div className="mt-1 space-y-0.5">
                         <RunDetails run={r} branding={branding} retryAttempts={retryAttempts} />
                       </div>

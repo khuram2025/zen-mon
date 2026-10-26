@@ -49,7 +49,7 @@ export function ExporterHealthCard({ rows, rowsLoading, device, windowEndsNow, e
           <Server className="h-4 w-4 text-text2" aria-hidden />
           Exporter health
         </CardTitle>
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           {windowEndsNow
             ? 'Receipt state measured on the appliance clock, independent of page filters'
             : 'What each exporter delivered in the selected (historical) window'}
@@ -60,7 +60,7 @@ export function ExporterHealthCard({ rows, rowsLoading, device, windowEndsNow, e
           {(r) => <HealthTiles d={r.data} />}
         </QueryPanel>
         <div>
-          <div className="mb-1.5 flex items-center justify-between text-[11px]">
+          <div className="mb-1.5 flex items-center justify-between text-xs">
             <span className="font-medium text-text">{deviceView ? 'This exporter' : rowsError || (rowsLoading && rows.length === 0) ? 'Exporters' : `Exporters (${rows.length})`}</span>
             {estimated && <span className="text-text2" title="The collector status service did not answer; states come from the last receipt time on the appliance clock">estimated</span>}
           </div>
@@ -87,7 +87,7 @@ export function ExporterHealthCard({ rows, rowsLoading, device, windowEndsNow, e
           ) : rowsLoading && rows.length === 0 ? (
             <div role="status" className="text-xs text-text2">Loading exporters…</div>
           ) : rows.length === 0 ? (
-            <div className="rounded border border-dashed border-border p-2 text-center text-[11px] text-text2">
+            <div className="rounded border border-dashed border-border p-2 text-center text-xs text-text2">
               {windowEndsNow ? 'No exporter has sent flows to this appliance' : 'No exporter delivered records in this window'}
             </div>
           ) : (
@@ -98,7 +98,7 @@ export function ExporterHealthCard({ rows, rowsLoading, device, windowEndsNow, e
             </ul>
           )}
         </div>
-        <Link to={healthLink} className="mt-auto inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline">
+        <Link to={healthLink} className="mt-auto inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
           Collector health <ArrowRight className="h-3 w-3" aria-hidden />
         </Link>
       </CardContent>
@@ -158,10 +158,10 @@ function ExporterRow({ row, to }: { row: ExporterHealthRow; to: string | null })
     <>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="break-all font-mono text-[11px] font-medium text-text">{row.name}</span>
-          {row.name !== row.exporter && <span className="font-mono text-[10px] text-text2">{row.exporter}</span>}
+          <span className="break-all font-mono text-xs font-medium text-text">{row.name}</span>
+          {row.name !== row.exporter && <span className="font-mono text-2xs text-text2">{row.exporter}</span>}
         </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10px] text-text2">
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-2xs text-text2">
           {row.deviceHostname ? (
             <span>
               Device {row.deviceHostname}
@@ -182,7 +182,7 @@ function ExporterRow({ row, to }: { row: ExporterHealthRow; to: string | null })
       </div>
       <div className="shrink-0 text-right">
         {row.mode === 'historical' ? (
-          <span className="text-[11px] tabular-nums text-text" title="Share of the window's minutes in which this exporter delivered records">
+          <span className="text-xs tabular-nums text-text" title="Share of the window's minutes in which this exporter delivered records">
             {row.coveragePct == null ? '—' : `${formatPercent(row.coveragePct)} of minutes`}
           </span>
         ) : row.state ? (

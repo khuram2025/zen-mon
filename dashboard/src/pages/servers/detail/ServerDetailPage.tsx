@@ -55,7 +55,7 @@ function TabNav({ tab, go, badges }: {
             aria-selected={active}
             onClick={() => go(t.key)}
             className={cn(
-              'relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3.5 py-3 text-[13px] font-medium transition-colors',
+              'relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3.5 py-3 text-sm font-medium transition-colors',
               active ? 'text-text' : 'text-muted hover:text-text',
             )}
           >

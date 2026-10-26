@@ -32,6 +32,7 @@ import { statusBands, type SeededEvent } from './incidents'
 import { windowEnd } from './maintenance'
 import { exactTime, formatDur, formatMs } from './format'
 import type { MaintenanceWindow, MetricPoint, MetricResponse } from './types'
+import { chartFont } from '@/lib/chartTheme'
 
 type Row = {
   ts: number
@@ -257,7 +258,7 @@ export function PerformanceChart({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold tracking-tight text-text">Response & failures</h3>
-          <div className="mt-0.5 flex flex-wrap items-center gap-3 text-[11px] text-muted">
+          <div className="mt-0.5 flex flex-wrap items-center gap-3 text-xs text-muted">
             <LegendDot color="rgb(var(--info))" label="Avg (successful probes)" />
             {built.p95Label && <LegendDot color="rgb(var(--accent))" label={built.p95Label} />}
             <LegendDot color="rgb(var(--warning))" label="Failed probes %" />
@@ -269,11 +270,11 @@ export function PerformanceChart({
         <div className="flex flex-wrap items-center gap-2">
           {stats?.map((s) => (
             <span key={s.label} title={s.title} className="inline-flex items-baseline gap-1 rounded-md border border-border bg-surface2/50 px-2 py-0.5">
-              <span className="text-[9.5px] font-semibold uppercase tracking-wider text-muted">{s.label}</span>
-              <span className="font-mono text-[11px] font-medium tabular-nums text-text">{s.value}</span>
+              <span className="text-2xs font-semibold uppercase tracking-wider text-muted">{s.label}</span>
+              <span className="font-mono text-xs font-medium tabular-nums text-text">{s.value}</span>
             </span>
           ))}
-          <span className="text-[11px] font-medium text-muted">{rangeLabel}</span>
+          <span className="text-xs font-medium text-muted">{rangeLabel}</span>
         </div>
       </div>
       <div className="flex flex-1 flex-col p-4">
@@ -287,7 +288,7 @@ export function PerformanceChart({
         ) : (
           <>
             {truncatedNote && (
-              <div role="status" className="mb-2 rounded-md border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px] text-warning">{truncatedNote}</div>
+              <div role="status" className="mb-2 rounded-md border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-xs text-warning">{truncatedNote}</div>
             )}
             <div className="min-h-[236px] w-full flex-1 select-none" aria-label={`Response time and failed probes for ${rangePhrase(rangeLabel)}`} role="img">
               <ResponsiveContainer width="100%" height="100%">
@@ -313,10 +314,10 @@ export function PerformanceChart({
                   </defs>
                   <CartesianGrid stroke="rgb(var(--border) / 0.4)" strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="ts" type="number" domain={[fromTs, toTs]} scale="time" ticks={ticks} interval={0}
-                    tickFormatter={tickFormatter} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-                  <YAxis yAxisId="ms" tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={52} axisLine={false} tickLine={false}
+                    tickFormatter={tickFormatter} tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
+                  <YAxis yAxisId="ms" tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }} width={52} axisLine={false} tickLine={false}
                     tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`)} />
-                  <YAxis yAxisId="err" orientation="right" tick={{ fontSize: 10, fill: 'rgb(var(--warning))' }} width={36} axisLine={false}
+                  <YAxis yAxisId="err" orientation="right" tick={{ fontSize: chartFont(10), fill: 'rgb(var(--warning))' }} width={36} axisLine={false}
                     tickLine={false} tickFormatter={(v) => `${Number(v).toFixed(0)}%`} domain={[0, (dataMax: number) => Math.max(10, Math.min(100, dataMax * 1.2))]} />
                   <Tooltip content={<ChartTooltip rowLabel={rowLabel} p95Label={built.p95Label} />} />
                   {gaps.map((g, i) => (
@@ -343,7 +344,7 @@ export function PerformanceChart({
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
+            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
               <span>
                 {!hasSeries
                   ? bands.length > 0
@@ -375,8 +376,8 @@ function ChartTooltip({ active, payload, rowLabel, p95Label }: any) {
   const r: Row = payload[0]?.payload
   if (!r || r.samples == null && r.avg == null) return null
   return (
-    <div className="max-w-[280px] rounded-md border border-border bg-surface px-2.5 py-2 text-[11px] text-text shadow-lg">
-      <div className="mb-1 font-mono text-[10px] text-muted">{rowLabel(r)}</div>
+    <div className="max-w-[280px] rounded-md border border-border bg-surface px-2.5 py-2 text-xs text-text shadow-lg">
+      <div className="mb-1 font-mono text-2xs text-muted">{rowLabel(r)}</div>
       <div>Avg: <b className="font-mono">{formatMs(r.avg, 'No successful probes')}</b></div>
       {p95Label && <div>P95: <b className="font-mono">{formatMs(r.p95, 'No data')}</b></div>}
       {r.max != null && <div>Max: <b className="font-mono">{formatMs(r.max)}</b></div>}
@@ -411,20 +412,20 @@ function ChartDataTable({ rows, rowLabel, showP95 }: { rows: Row[]; rowLabel: (r
         <TBody>
           {shown.map((r) => (
             <Tr key={r.ts}>
-              <Td className="whitespace-nowrap font-mono text-[10.5px]">{rowLabel(r)}</Td>
-              <Td className="text-right font-mono text-[11px]">{formatMs(r.avg)}</Td>
-              {showP95 && <Td className="text-right font-mono text-[11px]">{formatMs(r.p95)}</Td>}
-              <Td className="text-right font-mono text-[11px]">{formatMs(r.max)}</Td>
-              <Td className="text-right font-mono text-[11px]">{r.samples ?? '—'}</Td>
-              <Td className={cn('text-right font-mono text-[11px]', (r.failed ?? 0) > 0 && 'text-warning')}>{r.failed ?? '—'}</Td>
+              <Td className="whitespace-nowrap font-mono text-xs">{rowLabel(r)}</Td>
+              <Td className="text-right font-mono text-xs">{formatMs(r.avg)}</Td>
+              {showP95 && <Td className="text-right font-mono text-xs">{formatMs(r.p95)}</Td>}
+              <Td className="text-right font-mono text-xs">{formatMs(r.max)}</Td>
+              <Td className="text-right font-mono text-xs">{r.samples ?? '—'}</Td>
+              <Td className={cn('text-right font-mono text-xs', (r.failed ?? 0) > 0 && 'text-warning')}>{r.failed ?? '—'}</Td>
             </Tr>
           ))}
         </TBody>
       </Table>
       {rows.length > shown.length && (
-        <div className="border-t border-border px-3 py-1.5 text-[10px] text-muted">Showing the newest 200 of {rows.length} rows. Narrow the range for more detail.</div>
+        <div className="border-t border-border px-3 py-1.5 text-2xs text-muted">Showing the newest 200 of {rows.length} rows. Narrow the range for more detail.</div>
       )}
-      <div className="border-t border-border px-3 py-1.5 text-[10px] text-muted">Periods are {formatDur(((rows[0]?.end ?? 0) - (rows[0]?.ts ?? 0)) / 1000)} wide.</div>
+      <div className="border-t border-border px-3 py-1.5 text-2xs text-muted">Periods are {formatDur(((rows[0]?.end ?? 0) - (rows[0]?.ts ?? 0)) / 1000)} wide.</div>
     </div>
   )
 }

@@ -273,11 +273,11 @@ export function BackupsSection() {
                 <Tr key={b.id}>
                   <Td>
                     <div className="text-sm">{new Date(b.created_at).toLocaleString()}</div>
-                    <div className="text-[11px] text-muted">
+                    <div className="text-xs text-muted">
                       {relativeTime(b.created_at)} · by {b.created_by}
                       {b.note && <> · {b.note}</>}
                     </div>
-                    {b.error && <div className="mt-0.5 max-w-md truncate text-[11px] text-danger" >Backup could not complete. Check capacity and contact support if this continues.</div>}
+                    {b.error && <div className="mt-0.5 max-w-md truncate text-xs text-danger" >Backup could not complete. Check capacity and contact support if this continues.</div>}
                   </Td>
                   <Td>
                     <Badge variant={b.kind === 'full' ? 'info' : 'default'}>
@@ -291,7 +291,7 @@ export function BackupsSection() {
                       <div>
                         <StatusBadge status={b.last_restore_status} />
                         {b.last_restore_error && (
-                          <div className="mt-0.5 max-w-[16rem] truncate text-[11px] text-danger" >
+                          <div className="mt-0.5 max-w-[16rem] truncate text-xs text-danger" >
                             Restore could not complete. Contact support before retrying.
                           </div>
                         )}

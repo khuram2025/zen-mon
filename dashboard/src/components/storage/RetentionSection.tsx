@@ -129,7 +129,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
                       <div className="flex items-center gap-1.5 font-medium">
                         {c.label}
                       </div>
-                      <div className="text-[11px] text-muted">{c.description}</div>
+                      <div className="text-xs text-muted">{c.description}</div>
                     </Td>
                     <Td className="text-right tabular-nums">{bytes(c.size_bytes)}</Td>
                     <Td className="text-right tabular-nums text-text2">{c.daily_bytes ? bytes(c.daily_bytes) : '—'}</Td>
@@ -151,7 +151,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
                         aria-label={`${c.label} retention in days`}
                         aria-invalid={!!err}
                       />
-                      {err && <div className="mt-0.5 text-[11px] text-danger">{err}</div>}
+                      {err && <div className="mt-0.5 text-xs text-danger">{err}</div>}
                     </Td>
                   </Tr>
 
@@ -166,7 +166,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Eraser className="h-4 w-4 text-warning" /> Low-space protection
               </div>
-              <p className="mt-0.5 max-w-2xl text-[11px] text-muted">
+              <p className="mt-0.5 max-w-2xl text-xs text-muted">
                 Automatic cleanup starts before storage fills. It removes eligible old appliance logs first,
                 then monitoring history older than your minimum keep window. Protected records are retained.
                 Free-space reserves scale down on small disks and are recalculated after expansion.

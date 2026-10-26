@@ -299,7 +299,7 @@ export function RunPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-surface2/40 px-3 py-2 font-mono text-[11px]">
+            <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-surface2/40 px-3 py-2 font-mono text-xs">
               {(run.activity_log || []).slice().reverse().map((e, i) => (
                 <div key={i} className="flex gap-3">
                   <span className="text-muted">
@@ -353,7 +353,7 @@ export function RunPage() {
                     )}
                   >
                     {label}
-                    <span className="ml-1.5 rounded-full bg-surface2 px-1.5 py-0.5 text-[10px] tabular-nums text-muted">
+                    <span className="ml-1.5 rounded-full bg-surface2 px-1.5 py-0.5 text-2xs tabular-nums text-muted">
                       {count}
                     </span>
                   </button>
@@ -455,24 +455,24 @@ export function RunPage() {
                         <Td>
                           <ResultStatusBadge status={r.status} />
                           {r.conflict_type && (
-                            <div className="text-[10px] text-warning">{r.conflict_type}</div>
+                            <div className="text-2xs text-warning">{r.conflict_type}</div>
                           )}
                         </Td>
                         <Td>
                           <div className="font-medium">{r.hostname || r.sys_name || '—'}</div>
                           {r.fqdn && r.fqdn !== r.hostname && (
-                            <div className="text-[10px] text-muted">{r.fqdn}</div>
+                            <div className="text-2xs text-muted">{r.fqdn}</div>
                           )}
                         </Td>
                         <Td className="font-mono text-xs">{r.ip_address}</Td>
-                        <Td className="font-mono text-[10px] text-muted">
+                        <Td className="font-mono text-2xs text-muted">
                           {r.mac_address || '—'}
                         </Td>
                         <Td>
                           {r.vendor ? (
                             <>
                               <div className="text-sm">{r.vendor}</div>
-                              {r.model && <div className="text-[10px] text-muted">{r.model}</div>}
+                              {r.model && <div className="text-2xs text-muted">{r.model}</div>}
                             </>
                           ) : (
                             <span className="text-muted">—</span>
@@ -485,7 +485,7 @@ export function RunPage() {
                             detected={r.protocols_detected}
                           />
                         </Td>
-                        <Td className="text-[10px] text-muted">
+                        <Td className="text-2xs text-muted">
                           {(r.open_ports || []).join(', ') || '—'}
                         </Td>
                         <Td>
@@ -643,7 +643,7 @@ function SummaryCards({
             onClick={clickable ? () => onFilter(t.filter!) : undefined}
           >
             <CardContent className="p-4">
-              <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-muted">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
                 <t.icon className="h-3.5 w-3.5" />
                 {t.label}
               </div>
@@ -677,7 +677,7 @@ function Stat({
 }) {
   return (
     <div className="rounded-md border border-border bg-surface2/40 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs uppercase tracking-wider text-muted">{label}</div>
       <div
         className={cn(
           'mt-0.5 text-base font-semibold tabular-nums',
@@ -997,7 +997,7 @@ function ImportDrawer({
           </div>
 
           <div className="max-h-40 overflow-y-auto rounded-md border border-border bg-surface2/30 p-2">
-            <div className="mb-1 text-[10px] uppercase tracking-wider text-muted">
+            <div className="mb-1 text-2xs uppercase tracking-wider text-muted">
               Hosts to import
             </div>
             <div className="flex flex-wrap gap-1">
@@ -1039,7 +1039,7 @@ function Tile({
 }) {
   return (
     <div className="rounded-md border border-border bg-surface px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
+      <div className="text-2xs uppercase tracking-wider text-muted">{label}</div>
       <div
         className={cn(
           'text-lg font-semibold tabular-nums',

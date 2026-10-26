@@ -53,7 +53,7 @@ function Pill({ value, kind }: { value: string; kind: 'status' | 'severity' }) {
   const tone = kind === 'status' ? statusTone(value) : severityTone(value)
   const Icon = (kind === 'status' ? STATUS_ICON : SEVERITY_ICON)[tone]
   return (
-    <span className={cn('inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium', PILL[tone])}>
+    <span className={cn('inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium', PILL[tone])}>
       <Icon className="h-3 w-3 shrink-0" aria-hidden />
       <span className="truncate">{value}</span>
     </span>
@@ -151,7 +151,7 @@ export function DataTable({ table, compact, canExport, filenameBase = 'report', 
       {(table.title || searchable || (canExport && total > 0)) && (
         <div className="mb-2 flex flex-wrap items-center gap-2">
           {table.title && (
-            <p className="mr-auto text-[11px] font-semibold uppercase tracking-wide text-muted">{table.title}</p>
+            <p className="mr-auto text-xs font-semibold uppercase tracking-wide text-muted">{table.title}</p>
           )}
           {searchable && (
             <div className="relative ml-auto print:hidden">
@@ -180,7 +180,7 @@ export function DataTable({ table, compact, canExport, filenameBase = 'report', 
               type="button"
               onClick={exportCsv}
               className={cn(
-                'inline-flex h-7 items-center gap-1 rounded-md border border-border bg-surface px-2 text-[11px] font-medium text-text2 hover:bg-surface2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 print:hidden',
+                'inline-flex h-7 items-center gap-1 rounded-md border border-border bg-surface px-2 text-xs font-medium text-text2 hover:bg-surface2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 print:hidden',
                 !searchable && 'ml-auto',
               )}
               aria-label={`Download ${table.title || 'table'} as CSV${query || sort ? ' (current filter and sort)' : ''}`}
@@ -276,7 +276,7 @@ export function DataTable({ table, compact, canExport, filenameBase = 'report', 
                             'text-text2',
                             cellPad,
                             ci === 0 && 'font-medium text-text',
-                            s === 'mono' && 'font-mono text-[11px]',
+                            s === 'mono' && 'font-mono text-xs',
                             (s === 'num' || s === 'pct') && 'whitespace-nowrap text-right tabular-nums',
                             s === 'pct-bar' && 'text-right',
                           )}
@@ -294,7 +294,7 @@ export function DataTable({ table, compact, canExport, filenameBase = 'report', 
       </div>
 
       {(collapsible || (query && rows.length !== total)) && (
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted print:hidden">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted print:hidden">
           {query && <span role="status">{rows.length} of {total} rows match</span>}
           {collapsible && (
             <button

@@ -47,7 +47,7 @@ export function ActivitySection() {
                       {EVENT_LABELS[e.event_type] || 'Storage operation'}
                     </span>
                     {count > 1 && (
-                      <span className="ml-1.5 rounded bg-surface2 px-1.5 py-0.5 text-[10px] tabular-nums text-text2">×{count}</span>
+                      <span className="ml-1.5 rounded bg-surface2 px-1.5 py-0.5 text-2xs tabular-nums text-text2">×{count}</span>
                     )}
                     <span className="ml-2 text-muted">
                       {e.freed_bytes > 0 && e.event_type !== 'watchdog_reclaim' && <>freed {bytes(e.freed_bytes)} · </>}

@@ -90,7 +90,7 @@ export function PhaseLegend({ segments, className }: { segments: PhaseSegment[];
   return (
     <div className={cn('flex flex-wrap items-center gap-x-3 gap-y-1', className)}>
       {segments.map((segment) => (
-        <span key={segment.key} className="inline-flex items-center gap-1.5 text-[10px] text-muted">
+        <span key={segment.key} className="inline-flex items-center gap-1.5 text-2xs text-muted">
           <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: segment.color }} aria-hidden />
           {segment.label}
           <span className="font-mono tabular-nums text-text2">{formatDurationMs(segment.ms)}</span>
@@ -196,7 +196,7 @@ export function BreakdownInline({ timing, backend, className }: { timing?: RumRe
   }
   add('download', timing.download_ms, PHASE_COLORS.download)
   if (!parts.length) return null
-  return <div className={cn('flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-muted', className)}>{parts}</div>
+  return <div className={cn('flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-2xs text-muted', className)}>{parts}</div>
 }
 
 export function LocationHint({ country, timezone, clientIp }: { country?: string; timezone?: string; clientIp?: string }) {

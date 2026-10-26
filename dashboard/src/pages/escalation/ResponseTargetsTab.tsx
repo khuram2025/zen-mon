@@ -66,12 +66,12 @@ export function ResponseTargetsTab({ canManage }: { canManage: boolean }) {
                   placeholder="none"
                   onChange={(v) => setForm({ ...form, [p]: v })}
                 />
-                {errors[p] && <p className="mt-1 text-[11px] text-danger">{errors[p]}</p>}
+                {errors[p] && <p className="mt-1 text-xs text-danger">{errors[p]}</p>}
               </div>
             </li>
           ))}
         </ul>
-        <p className="text-[11px] text-muted">Recommended: {PRIORITIES.map((p) => `${p} ${DEFAULT_RESPONSE_TARGETS[p] ? fmtMinutes(DEFAULT_RESPONSE_TARGETS[p]) : 'no target'}`).join(' · ')}.</p>
+        <p className="text-xs text-muted">Recommended: {PRIORITIES.map((p) => `${p} ${DEFAULT_RESPONSE_TARGETS[p] ? fmtMinutes(DEFAULT_RESPONSE_TARGETS[p]) : 'no target'}`).join(' · ')}.</p>
         {canManage && (
           <div className="flex flex-wrap justify-end gap-2">
             <Button variant="outline" size="sm" onClick={() => setForm(toForm(DEFAULT_RESPONSE_TARGETS))}><RotateCcw className="h-3.5 w-3.5" aria-hidden /> Use recommended</Button>

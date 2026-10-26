@@ -20,7 +20,7 @@ export function SortableHeader<K extends string>({
 }) {
   const base = cn('h-9 align-middle', className)
   if (!sortKey) {
-    return <th scope="col" className={cn(base, 'px-2 text-[11px] font-semibold uppercase tracking-wider text-muted sm:px-3', align === 'right' ? 'text-right' : 'text-left')}>{label}</th>
+    return <th scope="col" className={cn(base, 'px-2 text-xs font-semibold uppercase tracking-wider text-muted sm:px-3', align === 'right' ? 'text-right' : 'text-left')}>{label}</th>
   }
   const active = sort === sortKey
   const Icon = !active ? ArrowUpDown : order === 'asc' ? ArrowUp : ArrowDown
@@ -31,7 +31,7 @@ export function SortableHeader<K extends string>({
         onClick={() => onSort(sortKey)}
         title={`Sort by ${label}${active ? (order === 'asc' ? ', now ascending' : ', now descending') : ''}`}
         className={cn(
-          'flex h-9 w-full items-center gap-1 whitespace-nowrap px-2 text-[11px] sm:px-3 font-semibold uppercase tracking-wider outline-none hover:text-text focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary',
+          'flex h-9 w-full items-center gap-1 whitespace-nowrap px-2 text-xs sm:px-3 font-semibold uppercase tracking-wider outline-none hover:text-text focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary',
           align === 'right' && 'justify-end',
           active ? 'text-text' : 'text-muted',
         )}

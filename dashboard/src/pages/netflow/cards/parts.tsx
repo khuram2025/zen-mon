@@ -79,7 +79,7 @@ export function CardShell({ title, icon: Icon, subtitle, controls, viewAll, view
             {Icon && <Icon className="h-4 w-4 shrink-0 text-primary" aria-hidden />}
             {title}
           </h3>
-          {subtitle && <div className="mt-0.5 text-[11px] leading-snug text-text2">{subtitle}</div>}
+          {subtitle && <div className="mt-0.5 text-xs leading-snug text-text2">{subtitle}</div>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {controls}
@@ -137,7 +137,7 @@ export function Segmented<V extends string>({
             }}
             className={cn(
               'rounded px-2 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
-              size === 'sm' ? 'py-0.5 text-[11px]' : 'py-1 text-xs',
+              size === 'sm' ? 'py-0.5 text-xs' : 'py-1 text-xs',
               active ? 'bg-surface text-text shadow-sm' : 'text-text2 hover:text-text',
             )}
           >
@@ -230,11 +230,11 @@ export function ShareLegend<T>({
                   {render && !r.remainder ? render(r) : r.label}
                 </span>
               )}
-              {item && sub && <div className="mt-0.5 text-[11px] text-text2">{sub(item)}</div>}
+              {item && sub && <div className="mt-0.5 text-xs text-text2">{sub(item)}</div>}
             </div>
             <div className="shrink-0 text-right text-xs">
               <Figure value={r.value} metric={metric} className="font-semibold text-text" />
-              <div className="text-[11px] tabular-nums text-text2">{formatPercent(r.pct)}</div>
+              <div className="text-xs tabular-nums text-text2">{formatPercent(r.pct)}</div>
             </div>
             {href && (
               <Link
@@ -284,11 +284,11 @@ export function RankedBars<T>({
               <div className="min-w-0 flex-1 text-xs">{label(r)}</div>
               <div className="shrink-0 text-right text-xs">
                 <Figure value={r.value} metric={metric} className="font-semibold text-text" />
-                {r.pct !== null && <span className="ml-1.5 text-[11px] tabular-nums text-text2">{formatPercent(r.pct)}</span>}
+                {r.pct !== null && <span className="ml-1.5 text-xs tabular-nums text-text2">{formatPercent(r.pct)}</span>}
               </div>
               {trailing?.(r.item)}
             </div>
-            {sub && <div className="mt-0.5 text-[11px] text-text2">{sub(r.item)}</div>}
+            {sub && <div className="mt-0.5 text-xs text-text2">{sub(r.item)}</div>}
             <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface2" aria-hidden>
               {parts ? (
                 <div className="flex h-full gap-[2px]" style={{ width: `${Math.max(1.5, r.width)}%` }}>
@@ -309,7 +309,7 @@ export function RankedBars<T>({
 /** Legend for two-part bars. */
 export function SplitLegend({ a, b }: { a: string; b: string }) {
   return (
-    <div className="flex flex-wrap items-center gap-3 text-[11px] text-text2">
+    <div className="flex flex-wrap items-center gap-3 text-xs text-text2">
       <span className="inline-flex items-center gap-1"><span className={cn('h-2 w-2 rounded-sm', BAR_CLASS)} aria-hidden />{a}</span>
       <span className="inline-flex items-center gap-1"><span className={cn('h-2 w-2 rounded-sm', BAR2_CLASS)} aria-hidden />{b}</span>
     </div>
@@ -360,12 +360,12 @@ export function HostLabel({
           <span className="break-all font-mono text-xs font-medium text-text">{shown}</span>
         )}
         {hostname && (
-          <div className="break-all text-[11px] text-text2" title={resolvedAt ? `Reverse DNS, resolved ${relativeTime(resolvedAt)}` : 'Reverse DNS'}>
+          <div className="break-all text-xs text-text2" title={resolvedAt ? `Reverse DNS, resolved ${relativeTime(resolvedAt)}` : 'Reverse DNS'}>
             {hostname}
             {resolvedAt && <span className="ml-1 text-text2/80">· rDNS {relativeTime(resolvedAt)}</span>}
           </div>
         )}
-        {pending && <div className="text-[11px] italic text-text2">Name lookup pending</div>}
+        {pending && <div className="text-xs italic text-text2">Name lookup pending</div>}
         {extra}
       </div>
       {onFilter && (
@@ -404,7 +404,7 @@ export function HostProfileLink({ href, ip }: { href: string; ip: string }) {
     <Link
       to={href}
       aria-label={`Host profile for ${ipDisplay(ip)}`}
-      className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+      className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
     >
       <UserSearch className="h-3 w-3" aria-hidden /> Host profile
     </Link>
@@ -424,7 +424,7 @@ const CONF_TONE: Record<string, string> = {
 export function ConfidenceChip({ confidence, title }: { confidence: string; title?: string }) {
   const word = confidence === 'n/a' ? 'unclassified' : `${confidence} confidence`
   return (
-    <span className={cn('inline-flex items-center rounded border px-1.5 py-px text-[10px] font-semibold', CONF_TONE[confidence] ?? CONF_TONE['n/a'])} title={title}>
+    <span className={cn('inline-flex items-center rounded border px-1.5 py-px text-2xs font-semibold', CONF_TONE[confidence] ?? CONF_TONE['n/a'])} title={title}>
       {word}
     </span>
   )
@@ -432,7 +432,7 @@ export function ConfidenceChip({ confidence, title }: { confidence: string; titl
 
 export function Chip({ children, title, className }: { children: ReactNode; title?: string; className?: string }) {
   return (
-    <span className={cn('inline-flex items-center gap-1 rounded border border-border bg-surface2/70 px-1.5 py-px text-[10px] font-medium text-text2', className)} title={title}>
+    <span className={cn('inline-flex items-center gap-1 rounded border border-border bg-surface2/70 px-1.5 py-px text-2xs font-medium text-text2', className)} title={title}>
       {children}
     </span>
   )
@@ -491,7 +491,7 @@ export function CardFootnote({
   }
   if (parts.length === 0) return null
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] leading-snug text-text2">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs leading-snug text-text2">
       <Info className="h-3 w-3 shrink-0" aria-hidden />
       {parts.map((p, i) => (
         <span key={i} className="inline-flex items-center gap-2">

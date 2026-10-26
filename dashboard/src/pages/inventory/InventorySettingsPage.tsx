@@ -47,7 +47,7 @@ export function InventorySettingsPage() {
             <div className="min-w-0 space-y-0.5">
               <p className="text-sm font-semibold text-text">You can read these settings but not change them</p>
               <p className="text-xs text-text2">
-                Changing them needs <code className="rounded bg-surface2 px-1 py-0.5 font-mono text-[11px] font-semibold text-text">inventory.manage</code>. Ask an administrator to add it to your role.
+                Changing them needs <code className="rounded bg-surface2 px-1 py-0.5 font-mono text-xs font-semibold text-text">inventory.manage</code>. Ask an administrator to add it to your role.
               </p>
             </div>
           </div>

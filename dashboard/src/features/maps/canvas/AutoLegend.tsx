@@ -140,20 +140,20 @@ export function AutoLegend({ detail, live, collapsedKey, defaultCollapsed = fals
       <button
         type="button"
         onClick={toggle}
-        className="flex w-full items-center justify-between gap-3 px-2.5 py-1 text-[9.5px] font-bold uppercase tracking-wider text-muted transition hover:text-text"
+        className="flex w-full items-center justify-between gap-3 px-2.5 py-1 text-2xs font-bold uppercase tracking-wider text-muted transition hover:text-text"
         aria-expanded={!collapsed}
       >
         Legend {collapsed ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
       </button>
       {!collapsed && (
         <div className="flex max-h-[45vh] flex-col gap-2.5 overflow-y-auto border-t border-border/60 px-2.5 py-2">
-          {empty && <div className="text-[10px] text-muted">Nothing on the map yet.</div>}
+          {empty && <div className="text-2xs text-muted">Nothing on the map yet.</div>}
 
           {c.statuses.length > 0 && (
             <Section title="Status">
               <div className="flex flex-wrap gap-x-2.5 gap-y-1">
                 {c.statuses.map((s) => (
-                  <span key={s} className="flex items-center gap-1 text-[9.5px] text-text2">
+                  <span key={s} className="flex items-center gap-1 text-2xs text-text2">
                     <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[s])} /> {STATUS_LABEL[s]}
                   </span>
                 ))}
@@ -165,12 +165,12 @@ export function AutoLegend({ detail, live, collapsedKey, defaultCollapsed = fals
             <Section title="Cables">
               <div className="grid grid-cols-2 gap-x-2 gap-y-1">
                 {c.kinds.map((k) => (
-                  <span key={k} className="flex items-center gap-1.5 text-[9.5px] text-text2">
+                  <span key={k} className="flex items-center gap-1.5 text-2xs text-text2">
                     <KindSample kind={k} /> {KIND_LABEL[k] || k}
                   </span>
                 ))}
                 {c.bundles && (
-                  <span className="flex items-center gap-1.5 text-[9.5px] text-text2">
+                  <span className="flex items-center gap-1.5 text-2xs text-text2">
                     <span className="flex w-[30px] shrink-0 justify-center">
                       <span className="rounded-full border border-border bg-surface px-1.5 py-px font-mono text-[8.5px] font-bold leading-none text-text2">×N</span>
                     </span>
@@ -185,13 +185,13 @@ export function AutoLegend({ detail, live, collapsedKey, defaultCollapsed = fals
             <Section title="Devices">
               <div className="grid grid-cols-2 gap-x-2 gap-y-1">
                 {c.icons.map((k) => (
-                  <span key={k} className="flex min-w-0 items-center gap-1.5 text-[9.5px] text-text2">
+                  <span key={k} className="flex min-w-0 items-center gap-1.5 text-2xs text-text2">
                     <NetworkIcon name={k} className="h-4 w-4 shrink-0 text-text2" />
                     <span className="truncate">{iconLabel[k]}</span>
                   </span>
                 ))}
                 {c.unmanaged && (
-                  <span className="flex min-w-0 items-center gap-1.5 text-[9.5px] text-text2">
+                  <span className="flex min-w-0 items-center gap-1.5 text-2xs text-text2">
                     <NetworkIcon name="switch" className="h-4 w-4 shrink-0 text-muted opacity-60" />
                     <span className="truncate">Unmanaged</span>
                   </span>
@@ -203,16 +203,16 @@ export function AutoLegend({ detail, live, collapsedKey, defaultCollapsed = fals
           {live && (
             <Section title="Live">
               <div className="flex items-center gap-1.5">
-                <span className="text-[9px] text-muted">Load</span>
+                <span className="text-2xs text-muted">Load</span>
                 <div className="h-2 flex-1 rounded-full" style={{ background: 'linear-gradient(90deg, #22c55e 0%, #a3e635 35%, #f59e0b 65%, #ef4444 90%)' }} />
                 <span className="font-mono text-[8.5px] text-muted">0→100%</span>
               </div>
               <div className="flex flex-wrap gap-x-3 gap-y-1">
-                <span className="flex items-center gap-1.5 text-[9px] text-text2">
+                <span className="flex items-center gap-1.5 text-2xs text-text2">
                   <svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" className="stroke-danger" strokeWidth="2" strokeDasharray="5 3" /></svg>
                   iface down
                 </span>
-                <span className="flex items-center gap-1.5 text-[9px] text-text2">
+                <span className="flex items-center gap-1.5 text-2xs text-text2">
                   <svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" className="stroke-muted/70" strokeWidth="2" strokeDasharray="2 4" /></svg>
                   unbound
                 </span>

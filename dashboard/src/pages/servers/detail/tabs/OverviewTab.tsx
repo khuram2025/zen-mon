@@ -139,7 +139,7 @@ export function OverviewTab({
           flush
         >
           {attention.length === 0 ? (
-            <div className="flex items-center gap-3 px-4 py-3.5 text-[13px] text-text2">
+            <div className="flex items-center gap-3 px-4 py-3.5 text-sm text-text2">
               <CheckCircle2 className="h-5 w-5 text-success" />
               No open alerts, compliance findings, stopped automatic services or filling volumes.
             </div>
@@ -161,7 +161,7 @@ export function OverviewTab({
                       <a.icon className="h-4 w-4" />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] font-medium text-text">{a.title}</span>
+                      <span className="block truncate text-sm font-medium text-text">{a.title}</span>
                       {a.detail && <span className="block truncate text-xs text-muted" title={a.detail}>{a.detail}</span>}
                     </span>
                     <ArrowRight className="h-4 w-4 shrink-0 text-muted" />
@@ -254,9 +254,9 @@ export function OverviewTab({
         >
           {topProcesses.length ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-[13px]">
+              <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border/70 text-left text-[11px] font-medium uppercase tracking-wide text-muted">
+                  <tr className="border-b border-border/70 text-left text-xs font-medium uppercase tracking-wide text-muted">
                     <th className="px-4 py-2 font-medium">Process</th>
                     <th className="w-[34%] px-4 py-2 font-medium">CPU</th>
                     <th className="px-4 py-2 text-right font-medium">Memory</th>
@@ -268,7 +268,7 @@ export function OverviewTab({
                     <tr key={`${p.pid}-${p.name}`} className="hover:bg-surface2/40">
                       <td className="max-w-[220px] truncate px-4 py-2" title={p.cmdline || p.name}>
                         <span className="font-medium text-text">{p.name}</span>
-                        {p.pid ? <span className="ml-1.5 font-mono text-[11px] text-muted">{p.pid}</span> : null}
+                        {p.pid ? <span className="ml-1.5 font-mono text-xs text-muted">{p.pid}</span> : null}
                       </td>
                       <td className="px-4 py-2">
                         <div className="flex items-center gap-2">
@@ -356,14 +356,14 @@ export function OverviewTab({
                 const days = f?.days_until_full
                 return (
                   <li key={fs.mount}>
-                    <div className="mb-1 flex items-baseline justify-between gap-2 text-[13px]">
+                    <div className="mb-1 flex items-baseline justify-between gap-2 text-sm">
                       <span className="truncate font-medium text-text" title={fs.mount}>{fs.mount}</span>
                       <span className={cn('tabular-nums', pctTone(fs.used_pct, 85, 95) === 'danger' ? 'text-danger' : pctTone(fs.used_pct, 85, 95) === 'warning' ? 'text-warning' : 'text-text2')}>
                         {fmtPct(fs.used_pct, 0)}
                       </span>
                     </div>
                     <Meter pct={fs.used_pct} warn={85} crit={95} />
-                    <div className="mt-1 flex justify-between gap-2 text-[11px] text-muted">
+                    <div className="mt-1 flex justify-between gap-2 text-xs text-muted">
                       <span>{formatBytes(fs.used_bytes ?? 0)} of {formatBytes(fs.total_bytes ?? 0)}</span>
                       <span className={cn(days != null && days < 7 ? 'text-danger' : days != null && days < 30 ? 'text-warning' : '')}>
                         {days != null ? `full in ~${Math.max(1, Math.round(days))}d` : f?.growth_bytes_per_day != null && f.growth_bytes_per_day <= 0 ? 'not growing' : ''}
@@ -389,7 +389,7 @@ export function OverviewTab({
                         style={{ height: `${Math.max(2, pct)}%` }}
                       />
                     </div>
-                    <span className="text-[10px] tabular-nums text-muted">{i}</span>
+                    <span className="text-2xs tabular-nums text-muted">{i}</span>
                   </div>
                 )
               })}

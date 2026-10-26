@@ -11,7 +11,7 @@ export function RiskBadge({ risk, className }: { risk: PermissionRisk; className
   if (risk === 'standard') return null
   const m = RISK_META[risk]
   return (
-    <span title={m.hint} className={cn('inline-flex items-center gap-0.5 rounded border border-current/30 px-1 text-[9px] font-semibold uppercase tracking-wide', m.tone, className)}>
+    <span title={m.hint} className={cn('inline-flex items-center gap-0.5 rounded border border-current/30 px-1 text-2xs font-semibold uppercase tracking-wide', m.tone, className)}>
       {risk === 'critical' || risk === 'privileged' ? <ShieldAlert className="h-2.5 w-2.5" aria-hidden /> : null}
       {m.label}
     </span>
@@ -66,7 +66,7 @@ export function PermissionMatrix({ catalog, granted, superPerm, readOnly, canGra
       <div className="overflow-hidden rounded-md border border-border">
         <table className="w-full text-sm">
           <caption className="sr-only">Permissions by module</caption>
-          <thead className="bg-surface2/50 text-[11px] uppercase tracking-wider text-muted">
+          <thead className="bg-surface2/50 text-xs uppercase tracking-wider text-muted">
             <tr>
               <th scope="col" className="w-40 px-3 py-2 text-left font-medium sm:w-48">Module</th>
               <th scope="col" className="px-3 py-2 text-left font-medium">Permissions</th>
@@ -103,7 +103,7 @@ export function PermissionMatrix({ catalog, granted, superPerm, readOnly, canGra
                               <span className="sr-only">{on ? 'Granted: ' : 'Not granted: '}{m.label}: </span>
                               {p.label}
                               {on && <RiskBadge risk={risk} />}
-                              {implied && <span className="text-[10px] text-muted">(implied)</span>}
+                              {implied && <span className="text-2xs text-muted">(implied)</span>}
                             </span>
                           )
                         }
@@ -158,7 +158,7 @@ export function PermissionMatrix({ catalog, granted, superPerm, readOnly, canGra
         </table>
       </div>
       {!readOnly && (
-        <p id="perm-help" role="status" className="min-h-[2.25rem] rounded-md bg-surface2/40 px-3 py-1.5 text-[11px] text-muted">
+        <p id="perm-help" role="status" className="min-h-[2.25rem] rounded-md bg-surface2/40 px-3 py-1.5 text-xs text-muted">
           {focus
             ? <><span className="font-medium text-text">{focus.module}: {focus.perm.label}</span> — {focus.perm.description}
                 {focus.perm.implies && focus.perm.implies.length > 0 && <> Requires {focus.perm.implies.join(', ')}.</>}</>

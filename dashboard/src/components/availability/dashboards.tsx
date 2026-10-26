@@ -340,7 +340,7 @@ export function DevicesDashboard({
                 {activity && (
                   <>
                     <span className="inline-flex items-center gap-1.5"><span className="h-3 w-2 rounded-sm bg-danger/80" />Devices down</span>
-                    <span className="inline-flex items-center gap-1.5"><span className="text-[10px] leading-none" style={{ color: colors.c('amber') }}>▲</span>Outages started</span>
+                    <span className="inline-flex items-center gap-1.5"><span className="text-2xs leading-none" style={{ color: colors.c('amber') }}>▲</span>Outages started</span>
                   </>
                 )}
               </div>
@@ -719,7 +719,7 @@ export function ServicesDashboard({
               <AvailabilityActivityChart trend={null} activity={activity} target={null} fromMs={fromMs} toMs={toMs} height={large ? 320 : 260} entity="services" />
               <div className="mt-2 flex flex-wrap gap-x-4 text-sm text-muted">
                 <span className="inline-flex items-center gap-1.5"><span className="h-3 w-2 rounded-sm bg-danger/80" />Services down</span>
-                <span className="inline-flex items-center gap-1.5"><span className="text-[10px]" style={{ color: colors.c('amber') }}>▲</span>Outages started</span>
+                <span className="inline-flex items-center gap-1.5"><span className="text-2xs" style={{ color: colors.c('amber') }}>▲</span>Outages started</span>
                 {business?.confirmed_downtime_minutes != null && <span>Total {fmtDuration(business.confirmed_downtime_minutes)} with at least one service down</span>}
               </div>
             </>

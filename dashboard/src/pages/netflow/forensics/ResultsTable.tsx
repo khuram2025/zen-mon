@@ -59,20 +59,20 @@ function cell(row: ForensicsRow, key: string, tz: string): ReactNode {
   switch (key) {
     case 'time':
       return (
-        <span className="whitespace-nowrap font-mono text-[11px]" title={`${row.timestamp ?? ''} · ${relativeTime(row.timestamp)}`}>
+        <span className="whitespace-nowrap font-mono text-xs" title={`${row.timestamp ?? ''} · ${relativeTime(row.timestamp)}`}>
           {formatDateTime(row.timestamp, tz, { zone: 'none' })}
         </span>
       )
     case 'received':
-      return <span className="whitespace-nowrap font-mono text-[11px]">{formatDateTime(row.received_at, tz, { zone: 'none' })}</span>
+      return <span className="whitespace-nowrap font-mono text-xs">{formatDateTime(row.received_at, tz, { zone: 'none' })}</span>
     case 'exporter':
-      return <span className="font-mono text-[11px]">{ipDisplay(row.exporter)}</span>
+      return <span className="font-mono text-xs">{ipDisplay(row.exporter)}</span>
     case 'src':
-      return <span className="whitespace-nowrap font-mono text-[11px]">{rowEndpoint(row, 'src')}</span>
+      return <span className="whitespace-nowrap font-mono text-xs">{rowEndpoint(row, 'src')}</span>
     case 'dst': {
       // ICMP carries type/code where ports would be: shown as such, never as ":2048".
       const icmp = icmpTypeCodeText(row)
-      return <span className="whitespace-nowrap font-mono text-[11px]" title={icmp ? `ICMP ${icmp}` : undefined}>{rowEndpoint(row, 'dst')}</span>
+      return <span className="whitespace-nowrap font-mono text-xs" title={icmp ? `ICMP ${icmp}` : undefined}>{rowEndpoint(row, 'dst')}</span>
     }
     case 'protocol':
       return <span className="whitespace-nowrap" title={`IP protocol ${row.protocol}`}>{protoShort(row.protocol)}</span>
@@ -80,43 +80,43 @@ function cell(row: ForensicsRow, key: string, tz: string): ReactNode {
       return (
         <span className="block min-w-[7rem]">
           <span className="block">{row.service ?? '—'}</span>
-          {row.application && row.application !== row.service && <span className="block text-[10px] text-text2">{row.application}</span>}
+          {row.application && row.application !== row.service && <span className="block text-2xs text-text2">{row.application}</span>}
         </span>
       )
     case 'flags': {
       const f = flagsText(row)
-      return <span className={cn('font-mono text-[11px]', f.text === 'n/e' && 'text-text2')} title={f.title}>{f.text}</span>
+      return <span className={cn('font-mono text-xs', f.text === 'n/e' && 'text-text2')} title={f.title}>{f.text}</span>
     }
     case 'dscp':
       return row.dscp === null ? <span className="text-text2" title="Not exported">n/e</span> : <span className="whitespace-nowrap">{dscpLabel(row.dscp)}</span>
     case 'interfaces':
       return (
-        <span className="block min-w-[8rem] text-[11px]">
+        <span className="block min-w-[8rem] text-xs">
           <span className="block" title="Input interface">{interfaceText(row.input_interface, row.input_if)}</span>
           <span className="block text-text2" title="Output interface">→ {interfaceText(row.output_interface, row.output_if)}</span>
         </span>
       )
     case 'bytes':
-      return <span className="whitespace-nowrap font-mono text-[11px]" title={formatBytesExact(row.bytes)}>{formatBytes(row.bytes)}</span>
+      return <span className="whitespace-nowrap font-mono text-xs" title={formatBytesExact(row.bytes)}>{formatBytes(row.bytes)}</span>
     case 'packets':
-      return <span className="whitespace-nowrap font-mono text-[11px]" title={`${formatCountExact(row.packets)} packets`}>{formatCount(row.packets)}</span>
+      return <span className="whitespace-nowrap font-mono text-xs" title={`${formatCountExact(row.packets)} packets`}>{formatCount(row.packets)}</span>
     case 'duration':
       return row.duration_ms === null
         ? <span className="text-text2" title="Start/end times were not exported or are inconsistent">n/e</span>
-        : <span className="whitespace-nowrap font-mono text-[11px]">{formatDuration(row.duration_ms)}</span>
+        : <span className="whitespace-nowrap font-mono text-xs">{formatDuration(row.duration_ms)}</span>
     case 'sampling':
-      return row.sampling_interval > 1 ? <span className="font-mono text-[11px]" title="Volumes are scaled estimates">1:{row.sampling_interval}</span> : <span className="text-text2">1:1</span>
+      return row.sampling_interval > 1 ? <span className="font-mono text-xs" title="Volumes are scaled estimates">1:{row.sampling_interval}</span> : <span className="text-text2">1:1</span>
     case 'direction':
       return <span>{row.flow_direction ?? '—'}</span>
     case 'as':
       return row.src_as === null && row.dst_as === null
         ? <span className="text-text2">n/e</span>
-        : <span className="whitespace-nowrap font-mono text-[11px]">AS{row.src_as ?? '?'} → AS{row.dst_as ?? '?'}</span>
+        : <span className="whitespace-nowrap font-mono text-xs">AS{row.src_as ?? '?'} → AS{row.dst_as ?? '?'}</span>
     case 'next_hop':
-      return <span className="font-mono text-[11px]">{row.next_hop ?? '—'}</span>
+      return <span className="font-mono text-xs">{row.next_hop ?? '—'}</span>
     case 'nat':
       return row.nat
-        ? <span className="whitespace-nowrap font-mono text-[11px]">{endpoint(row.nat.src ?? row.src, row.nat.src_port)} → {endpoint(row.nat.dst ?? row.dst, row.nat.dst_port)}</span>
+        ? <span className="whitespace-nowrap font-mono text-xs">{endpoint(row.nat.src ?? row.src, row.nat.src_port)} → {endpoint(row.nat.dst ?? row.dst, row.nat.dst_port)}</span>
         : <span className="text-text2">—</span>
     case 'fw_event':
       return <span>{row.fw_event ?? '—'}</span>
@@ -177,7 +177,7 @@ export function ResultsCards({ rows, columns, sort, order, onSort, onSortChange,
   }
   return (
     <div className={cn('space-y-2', dimmed && 'opacity-60')}>
-      <div className="flex items-center justify-between gap-2 text-[11px] text-text2">
+      <div className="flex items-center justify-between gap-2 text-xs text-text2">
         <span>Times in {offset}</span>
         <label className="flex items-center gap-1.5">
           <span>Sort</span>
@@ -209,7 +209,7 @@ export function ResultsCards({ rows, columns, sort, order, onSort, onSortChange,
                 className="block w-full rounded-md px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
               >
                 <span className="flex items-baseline justify-between gap-2">
-                  <span className="flex min-w-0 items-center gap-1 font-mono text-[11px] text-text2">
+                  <span className="flex min-w-0 items-center gap-1 font-mono text-xs text-text2">
                     {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" aria-hidden />}
                     {formatDateTime(r.timestamp, tz, { zone: 'none' })}
                   </span>
@@ -217,10 +217,10 @@ export function ResultsCards({ rows, columns, sort, order, onSort, onSortChange,
                     {formatBytes(r.bytes)}
                   </span>
                 </span>
-                <span className="mt-1 block break-all font-mono text-[12px] text-text">
+                <span className="mt-1 block break-all font-mono text-sm text-text">
                   {rowEndpoint(r, 'src')} <span className="text-text2">→</span> {rowEndpoint(r, 'dst')}
                 </span>
-                <span className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] text-text2">
+                <span className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-text2">
                   <span className="text-text">{protoShort(r.protocol)}</span>
                   {r.service && <span>{r.service}</span>}
                   <span>{formatCountExact(r.packets)} pkt</span>
@@ -228,7 +228,7 @@ export function ResultsCards({ rows, columns, sort, order, onSort, onSortChange,
                   <span className="font-mono">via {ipDisplay(r.exporter)}</span>
                 </span>
                 {extra.length > 0 && (
-                  <span className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]">
+                  <span className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
                     {extra
                       // TCP flags only mean something on TCP records.
                       .filter((c) => c.key !== 'flags' || r.protocol === 6)
@@ -280,7 +280,7 @@ function ResultsGrid({ rows, columns, sort, order, onSort, expanded, onToggle, t
                   key={c.key}
                   scope="col"
                   aria-sort={c.sort ? (active ? (order === 'asc' ? 'ascending' : 'descending') : 'none') : undefined}
-                  className={cn('border-b border-border bg-surface2 px-2 py-2 text-left text-[11px] font-semibold text-text2', c.numeric && 'text-right')}
+                  className={cn('border-b border-border bg-surface2 px-2 py-2 text-left text-xs font-semibold text-text2', c.numeric && 'text-right')}
                 >
                   {c.sort ? (
                     <button
@@ -342,8 +342,8 @@ function ResultsGrid({ rows, columns, sort, order, onSort, expanded, onToggle, t
 function Item({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[10px] font-medium uppercase tracking-wide text-text2">{label}</dt>
-      <dd className="break-words text-[12px] text-text">{children}</dd>
+      <dt className="text-2xs font-medium uppercase tracking-wide text-text2">{label}</dt>
+      <dd className="break-words text-sm text-text">{children}</dd>
     </div>
   )
 }
@@ -406,7 +406,7 @@ function RowDetail({ row, tz, window: w, filter }: { row: ForensicsRow; tz: stri
         <Item label="End reason">{row.flow_end_reason ?? 'Not exported'}</Item>
         <Item label="Fields the exporter sent">{presentFields(row.fields_present)}{row.reverse ? ' · reverse direction of a bidirectional record' : ''}</Item>
       </dl>
-      <div className="flex flex-wrap gap-2 text-[11px]">
+      <div className="flex flex-wrap gap-2 text-xs">
         <Link className="rounded-md border border-border bg-surface px-2 py-1 hover:bg-surface2" to={link(conv)}>Only this conversation</Link>
         <Link className="rounded-md border border-border bg-surface px-2 py-1 hover:bg-surface2" to={link({ talker: row.src })}>All flows of {ipDisplay(row.src)}</Link>
         <Link className="rounded-md border border-border bg-surface px-2 py-1 hover:bg-surface2" to={link({ talker: row.dst })}>All flows of {ipDisplay(row.dst)}</Link>

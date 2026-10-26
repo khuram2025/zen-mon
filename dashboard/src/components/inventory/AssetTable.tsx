@@ -36,7 +36,7 @@ function Cell({ col, row, now }: { col: ColumnDef; row: AssetRow; now: number })
       ) : (
         <span className="flex min-w-0 items-baseline gap-1.5" title={os.title}>
           <span className="truncate">{os.label}</span>
-          {os.version && <span className="shrink-0 font-mono text-[11px] text-text2">{os.version}</span>}
+          {os.version && <span className="shrink-0 font-mono text-xs text-text2">{os.version}</span>}
         </span>
       )
     }
@@ -65,8 +65,8 @@ function Cell({ col, row, now }: { col: ColumnDef; row: AssetRow; now: number })
       if (tags.length === 0) return absent('No tags')
       return (
         <span className="flex flex-wrap gap-1">
-          {tags.slice(0, MAX_TAGS).map((t) => <span key={t} className="rounded-full border border-border bg-surface2 px-1.5 py-px text-[10.5px] text-text2">{t}</span>)}
-          {tags.length > MAX_TAGS && <span className="text-[10.5px] text-muted" title={tags.slice(MAX_TAGS).join(', ')}>+{tags.length - MAX_TAGS}</span>}
+          {tags.slice(0, MAX_TAGS).map((t) => <span key={t} className="rounded-full border border-border bg-surface2 px-1.5 py-px text-xs text-text2">{t}</span>)}
+          {tags.length > MAX_TAGS && <span className="text-xs text-muted" title={tags.slice(MAX_TAGS).join(', ')}>+{tags.length - MAX_TAGS}</span>}
         </span>
       )
     }
@@ -79,7 +79,7 @@ function Cell({ col, row, now }: { col: ColumnDef; row: AssetRow; now: number })
 
 function SortHeader({ col, sort, order, onSort }: { col: ColumnDef; sort: string; order: SortOrder; onSort: (key: AssetSortKey) => void }) {
   const key = col.sort
-  if (!key) return <th scope="col" className="h-9 px-3 text-left align-middle text-[11px] font-semibold uppercase tracking-wider text-muted">{col.label}</th>
+  if (!key) return <th scope="col" className="h-9 px-3 text-left align-middle text-xs font-semibold uppercase tracking-wider text-muted">{col.label}</th>
   const active = sort === key
   const Icon = !active ? ArrowUpDown : order === 'asc' ? ArrowUp : ArrowDown
   return (
@@ -89,7 +89,7 @@ function SortHeader({ col, sort, order, onSort }: { col: ColumnDef; sort: string
         onClick={() => onSort(key)}
         title={`Sort by ${col.label}${active ? (order === 'asc' ? ', now ascending' : ', now descending') : ''}`}
         className={cn(
-          'flex h-9 w-full items-center gap-1 whitespace-nowrap px-3 text-[11px] font-semibold uppercase tracking-wider outline-none hover:text-text focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary',
+          'flex h-9 w-full items-center gap-1 whitespace-nowrap px-3 text-xs font-semibold uppercase tracking-wider outline-none hover:text-text focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary',
           active ? 'text-text' : 'text-muted',
         )}
       >
@@ -142,7 +142,7 @@ export function AssetTable({
   }
 
   return (
-    <table className="w-full min-w-max border-separate border-spacing-0 text-[13px]" data-asset-table="">
+    <table className="w-full min-w-max border-separate border-spacing-0 text-sm" data-asset-table="">
       <caption className="sr-only">{caption}</caption>
       <thead className="sticky top-0 z-10 bg-surface">
         <tr className="[&>th]:border-b [&>th]:border-border">

@@ -76,7 +76,7 @@ export function RoutePanel({ alert, now }: { alert: AlertDetail; now: number }) 
                 {route.warnings.map((w) => <li key={w} className="flex items-start gap-1 text-xs text-warning"><AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden />{w}</li>)}
               </ul>
             )}
-            <p className="text-[11px] text-muted">Recipients are resolved from who is on call now. Accepted by the mail server is not proof that someone read it.</p>
+            <p className="text-xs text-muted">Recipients are resolved from who is on call now. Accepted by the mail server is not proof that someone read it.</p>
           </>
         )}
       </CardContent>

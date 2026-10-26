@@ -20,7 +20,7 @@ export function ChangesFootnote({
 }) {
   const t = historyText(info, now, tz)
   return (
-    <div className="space-y-1 px-1 text-[11px] leading-4 text-muted" data-changes-footnote="">
+    <div className="space-y-1 px-1 text-xs leading-4 text-muted" data-changes-footnote="">
       <p className="flex items-start gap-1.5">
         <Info className="mt-px h-3 w-3 shrink-0" aria-hidden />
         <span title={t.title ?? undefined}>{t.text}</span>

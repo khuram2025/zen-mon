@@ -151,9 +151,9 @@ export function ApmAgentsTab() {
           <Button onClick={() => setInstallOpen(true)}><Download className="h-4 w-4" /> Download APM installer</Button>
         </CardHeader>
         <CardContent><div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-lg border border-border bg-surface2/30 p-3"><ShieldCheck className="mb-2 h-4 w-4 text-success" /><div className="text-xs font-semibold text-text">Controller-authorized</div><p className="mt-1 text-[11px] text-muted">No local token, site ID, or policy ID is required.</p></div>
-          <div className="rounded-lg border border-border bg-surface2/30 p-3"><Activity className="mb-2 h-4 w-4 text-primary" /><div className="text-xs font-semibold text-text">Local OTLP gateway</div><p className="mt-1 text-[11px] text-muted">Loopback-only ports 4317 and 4318 buffer telemetry.</p></div>
-          <div className="rounded-lg border border-border bg-surface2/30 p-3"><Settings2 className="mb-2 h-4 w-4 text-primary" /><div className="text-xs font-semibold text-text">Managed runtime lifecycle</div><p className="mt-1 text-[11px] text-muted">IIS, .NET services, Java, and Node.js with verified rollback.</p></div>
+          <div className="rounded-lg border border-border bg-surface2/30 p-3"><ShieldCheck className="mb-2 h-4 w-4 text-success" /><div className="text-xs font-semibold text-text">Controller-authorized</div><p className="mt-1 text-xs text-muted">No local token, site ID, or policy ID is required.</p></div>
+          <div className="rounded-lg border border-border bg-surface2/30 p-3"><Activity className="mb-2 h-4 w-4 text-primary" /><div className="text-xs font-semibold text-text">Local OTLP gateway</div><p className="mt-1 text-xs text-muted">Loopback-only ports 4317 and 4318 buffer telemetry.</p></div>
+          <div className="rounded-lg border border-border bg-surface2/30 p-3"><Settings2 className="mb-2 h-4 w-4 text-primary" /><div className="text-xs font-semibold text-text">Managed runtime lifecycle</div><p className="mt-1 text-xs text-muted">IIS, .NET services, Java, and Node.js with verified rollback.</p></div>
         </div></CardContent>
       </Card>
       <Card>
@@ -175,13 +175,13 @@ export function ApmAgentsTab() {
                   return <Tr key={row.id}>
                     <Td>
                       <div className="font-medium text-text">{row.server_name || row.hostname}</div>
-                      <div className="text-[11px] text-muted">
+                      <div className="text-xs text-muted">
                         {row.hostname}{row.server_ip ? ` · ${row.server_ip}` : ''}
                       </div>
-                      <div className="text-[11px] text-muted">Agent {row.agent_status}{row.agent_version ? ` · v${row.agent_version}` : ''}</div>
+                      <div className="text-xs text-muted">Agent {row.agent_status}{row.agent_version ? ` · v${row.agent_version}` : ''}</div>
                     </Td>
-                    <Td><div className="font-medium text-text">{row.configured_service_name || row.service_name_guess || 'Unnamed process'}</div>{row.iis_app_pool && <div className="text-[11px] text-muted">IIS pool · {row.iis_app_pool}</div>}{row.windows_service && <div className="text-[11px] text-muted">Windows service · {row.windows_service}</div>}{row.last_deployment_at && <div className="mt-1 text-[11px] font-medium text-primary">Deployment detected {relativeTime(row.last_deployment_at)}</div>}{row.last_command_error && <div className="mt-1 max-w-xs text-[11px] text-danger">{row.last_command_error}</div>}</Td>
-                    <Td><Badge variant="outline">{row.runtime}{row.runtime_version ? ` ${row.runtime_version}` : ''}</Badge></Td><Td>{stateBadge(row)}</Td><Td><div>{telemetryBadge(row)}</div>{row.last_trace_at && <div className="mt-1 text-[11px] text-muted">Last {relativeTime(row.last_trace_at)}</div>}</Td><Td className="text-xs text-muted">{relativeTime(row.last_seen_at)}</Td>
+                    <Td><div className="font-medium text-text">{row.configured_service_name || row.service_name_guess || 'Unnamed process'}</div>{row.iis_app_pool && <div className="text-xs text-muted">IIS pool · {row.iis_app_pool}</div>}{row.windows_service && <div className="text-xs text-muted">Windows service · {row.windows_service}</div>}{row.last_deployment_at && <div className="mt-1 text-xs font-medium text-primary">Deployment detected {relativeTime(row.last_deployment_at)}</div>}{row.last_command_error && <div className="mt-1 max-w-xs text-xs text-danger">{row.last_command_error}</div>}</Td>
+                    <Td><Badge variant="outline">{row.runtime}{row.runtime_version ? ` ${row.runtime_version}` : ''}</Badge></Td><Td>{stateBadge(row)}</Td><Td><div>{telemetryBadge(row)}</div>{row.last_trace_at && <div className="mt-1 text-xs text-muted">Last {relativeTime(row.last_trace_at)}</div>}</Td><Td className="text-xs text-muted">{relativeTime(row.last_seen_at)}</Td>
                     <Td className="text-right"><Button variant="outline" size="sm" disabled={!manageable || isCommandPending(row)} onClick={() => setSelected(row)}>{isCommandPending(row) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />}{actionLabel}</Button></Td>
                   </Tr>
                 })}</TBody></Table>}

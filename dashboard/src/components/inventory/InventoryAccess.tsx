@@ -66,7 +66,7 @@ export function InventoryAccessDenied() {
           <p>{ACCESS_DENIED_DETAIL}</p>
           <p>
             Ask an administrator to add{' '}
-            <code className="rounded bg-surface2 px-1 py-0.5 font-mono text-[11px] font-semibold text-text">{INVENTORY_VIEW_PERMISSION}</code>{' '}
+            <code className="rounded bg-surface2 px-1 py-0.5 font-mono text-xs font-semibold text-text">{INVENTORY_VIEW_PERMISSION}</code>{' '}
             to your role.
           </p>
           <p>

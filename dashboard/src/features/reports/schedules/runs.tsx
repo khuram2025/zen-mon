@@ -69,7 +69,7 @@ export function RunKindBadge({ kind }: { kind: string | null | undefined }) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 whitespace-nowrap rounded border px-1 py-px text-[10px] font-medium',
+        'inline-flex items-center gap-1 whitespace-nowrap rounded border px-1 py-px text-2xs font-medium',
         kind === 'retry' ? 'border-warning/35 text-warning-fg' : 'border-border text-text2',
       )}
     >
@@ -85,14 +85,14 @@ export function LinkStateText({ run, branding, now }: { run: ScheduleRun; brandi
   if (state === 'ended') {
     const at = toInstant(run.expires_at)
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] text-muted" title={at ? formatDateTime(at, branding, { zone: true }) : undefined}>
+      <span className="inline-flex items-center gap-1 text-xs text-muted" title={at ? formatDateTime(at, branding, { zone: true }) : undefined}>
         <Link2Off className="h-3 w-3" aria-hidden /> Link expired or revoked{at ? ` on ${formatDate(at, branding)}` : ''}
       </span>
     )
   }
   if (state === 'active') {
     const at = toInstant(run.expires_at)!
-    return <span className="text-[11px] text-muted" title={formatDateTime(at, branding, { zone: true })}>Link expires {formatDate(at, branding)}</span>
+    return <span className="text-xs text-muted" title={formatDateTime(at, branding, { zone: true })}>Link expires {formatDate(at, branding)}</span>
   }
   return null
 }
@@ -205,7 +205,7 @@ export function RunActions({ run, now, canManage, canExport }: { run: ScheduleRu
         </Button>
       ) : run.token_withheld && state !== 'ended' ? (
         <span
-          className="inline-flex items-center gap-1 px-2 text-[11px] text-muted"
+          className="inline-flex items-center gap-1 px-2 text-xs text-muted"
           title="Report links are shown to the schedule's owner and to people who manage reports"
         >
           <Lock className="h-3 w-3" aria-hidden /> Restricted

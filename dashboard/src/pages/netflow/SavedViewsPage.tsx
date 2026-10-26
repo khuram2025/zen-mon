@@ -149,7 +149,7 @@ export function NetflowSavedViewsPage() {
                   aria-pressed={kind === k}
                   onClick={() => setKind(k)}
                   className={cn(
-                    'rounded px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+                    'rounded px-2 py-1 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
                     kind === k ? 'bg-primary text-on-primary' : 'text-text2 hover:text-text',
                   )}
                 >
@@ -175,7 +175,7 @@ export function NetflowSavedViewsPage() {
             {() => (
               <div className="space-y-5">
                 {truncated && (
-                  <p className="text-[11px] text-text2">Showing the first {list.length} views; search to narrow the list.</p>
+                  <p className="text-xs text-text2">Showing the first {list.length} views; search to narrow the list.</p>
                 )}
                 {shown === 0 && <p className="py-6 text-center text-xs text-text2">No saved views match “{q}”.</p>}
                 <Group title="Pinned" views={groups.pinned} tz={tz} onEdit={setEditing} onDuplicate={dup} onPin={togglePin} onDelete={setDeleting} busy={update.isPending || duplicate.isPending} />
@@ -283,10 +283,10 @@ function Group({ title, note, views, ...rest }: GroupProps) {
   if (!views.length) return null
   return (
     <section aria-label={title} className="space-y-2">
-      <h2 className="text-[11px] font-semibold uppercase tracking-wide text-text2">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-text2">
         {title} <span className="font-normal">({views.length})</span>
       </h2>
-      {note && <p className="text-[11px] text-text2">{note}</p>}
+      {note && <p className="text-xs text-text2">{note}</p>}
       <ul role="list" className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
         {views.map((v) => (
           <li key={v.id}>
@@ -329,7 +329,7 @@ function ViewCard({ view: v, tz, busy, onEdit, onDuplicate, onPin, onDelete }: {
             {v.pinned && <Pin className="h-3.5 w-3.5 shrink-0 text-warning-fg" aria-label="Pinned" />}
             {v.name}
           </h3>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-text2">
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-text2">
             <span className="inline-flex items-center gap-1 rounded border border-border bg-surface px-1.5 py-px font-medium text-text">
               {v.visibility === 'shared' ? <Users className="h-3 w-3" aria-hidden /> : <Lock className="h-3 w-3" aria-hidden />}
               {v.visibility === 'shared' ? 'Shared' : 'Private'}
@@ -359,14 +359,14 @@ function ViewCard({ view: v, tz, busy, onEdit, onDuplicate, onPin, onDelete }: {
           )}
         </div>
       </div>
-      {v.description && <p className="text-[12px] text-text">{v.description}</p>}
+      {v.description && <p className="text-sm text-text">{v.description}</p>}
       <div className="space-y-1">
         {isFlowFilterEmpty(query.filter) ? (
-          <p className="text-[11px] text-text2">No filters: all traffic in the period.</p>
+          <p className="text-xs text-text2">No filters: all traffic in the period.</p>
         ) : (
           <FilterChips filter={query.filter} tz={tz} />
         )}
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           {savedWindowLabel(query.window, tz)}
           {sort ? ` · ${sort}` : ''}
           {settings ? ` · ${settings}` : ''}
@@ -375,7 +375,7 @@ function ViewCard({ view: v, tz, busy, onEdit, onDuplicate, onPin, onDelete }: {
         </p>
       </div>
       {(legacyTime || v.query_issues.length > 0) && (
-        <p className="flex items-start gap-1 text-[11px] text-text">
+        <p className="flex items-start gap-1 text-xs text-text">
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-warning-fg" aria-hidden />
           <span>
             {legacyTime && 'Saved before periods were stored: it opens with the last hour. '}
@@ -384,12 +384,12 @@ function ViewCard({ view: v, tz, busy, onEdit, onDuplicate, onPin, onDelete }: {
           </span>
         </p>
       )}
-      <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-text2">
+      <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-1 text-xs text-text2">
         <span title={v.updated_at ? formatDateTime(v.updated_at, tz) : undefined}>
           Updated {relativeTime(v.updated_at)}
           {v.updated_by_username && !v.is_owner && v.updated_by_username !== v.owner_username ? ` by ${v.updated_by_username}` : ''}
         </span>
-        <Button asChild size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]">
+        <Button asChild size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs">
           <Link to={savedViewLink(v)} aria-label={`Open ${v.name}`}>
             <Play className="h-3 w-3" aria-hidden />
             Open

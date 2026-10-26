@@ -264,13 +264,13 @@ export function ServiceCheckTemplatesPage() {
                           {t.tags.slice(0, 3).map((x) => (
                             <span
                               key={x}
-                              className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary"
+                              className="rounded-full bg-primary/10 px-1.5 py-0.5 text-2xs text-primary"
                             >
                               {x}
                             </span>
                           ))}
                           {t.tags.length > 3 && (
-                            <span className="text-[10px] text-muted">+{t.tags.length - 3}</span>
+                            <span className="text-2xs text-muted">+{t.tags.length - 3}</span>
                           )}
                         </div>
                       )}

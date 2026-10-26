@@ -58,14 +58,14 @@ function RuleEscalationLine({ rule, policies }: { rule: any; policies: Escalatio
   const source = ruleRouteSource({ policyId: rule.escalation_policy_id, policyEnabled: policy?.enabled, tiers: tiers.length, defaultPolicy })
   if (source === 'none' && !rule.escalation_policy_id) return null
   if (source === 'priority_default' && !rule.escalation_policy_id) {
-    return <div className="mt-0.5 text-[10px] text-muted" title="No policy or legacy tiers on this rule">{priority} default: {defaultPolicy!.name}</div>
+    return <div className="mt-0.5 text-2xs text-muted" title="No policy or legacy tiers on this rule">{priority} default: {defaultPolicy!.name}</div>
   }
   const text = policies
     ? ruleEscalationSummary({ policy, policyId: rule.escalation_policy_id, tiers, priority, defaultPolicy })
     : source === 'rule' ? 'Escalation policy' : `${tiers.length} legacy tier${tiers.length === 1 ? '' : 's'}`
   const tone = rule.escalation_policy_id && source !== 'rule' ? 'text-warning' : source === 'rule' ? 'text-primary' : 'text-amber-600'
   return (
-    <div className={`mt-0.5 max-w-[16rem] text-[10px] font-medium ${tone}`}
+    <div className={`mt-0.5 max-w-[16rem] text-2xs font-medium ${tone}`}
       title={source === 'legacy_levels' ? `The rule's own tiers take precedence over the ${priority} default policy` : undefined}>
       {text}
     </div>
@@ -190,12 +190,12 @@ export function AlertRulesPage() {
                       {isNetflowMetric(r.metric) ? (
                         <>
                           <div className="font-medium text-text">{NETFLOW_METRIC_BY_KEY[r.metric as NetflowMetric].label}</div>
-                          <div className="max-w-[16rem] text-[10px] text-muted">{summarizeNetflowForm(formFromRule(r))}</div>
+                          <div className="max-w-[16rem] text-2xs text-muted">{summarizeNetflowForm(formFromRule(r))}</div>
                         </>
                       ) : (
                         <>
                           <div className="font-medium text-text">{TRIGGER_LABELS[r.trigger_on] || r.trigger_on || '—'}</div>
-                          <div className="font-mono text-[10px] text-muted">
+                          <div className="font-mono text-2xs text-muted">
                             {r.metric === 'trap'
                               ? r.trap_oid ? `trap ${r.trap_oid}` : 'any trap'
                               : Array.isArray(r.conditions) && r.conditions.length > 1
@@ -206,7 +206,7 @@ export function AlertRulesPage() {
                       )}
                     </Td>
                     <Td>
-                      <Badge variant="outline" className="text-[10px]">{scopeLabel(r)}</Badge>
+                      <Badge variant="outline" className="text-2xs">{scopeLabel(r)}</Badge>
                     </Td>
                     <Td>
                       <div className="flex flex-wrap items-center gap-1">

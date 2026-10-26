@@ -53,7 +53,7 @@ function NoAccess({ page, needed, landing }: { page?: string; needed: string[]; 
           </p>
           {needed.length > 0 && (
             <p className="text-xs text-muted">
-              Requires: {needed.map((p) => <code key={p} className="mr-1 rounded bg-surface2 px-1 py-0.5 font-mono text-[11px]">{p}</code>)}
+              Requires: {needed.map((p) => <code key={p} className="mr-1 rounded bg-surface2 px-1 py-0.5 font-mono text-xs">{p}</code>)}
             </p>
           )}
           <div className="flex flex-wrap gap-2 pt-1">

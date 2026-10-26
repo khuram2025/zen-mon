@@ -449,7 +449,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-2 pb-2">
             <div className="min-w-0">
               <CardTitle className="text-sm">Traffic throughput</CardTitle>
-              <p className="text-[11px] text-text2">
+              <p className="text-xs text-text2">
                 {windowLabel(w)}
                 {compare && ` · vs ${priorLabel.toLowerCase()}, same filters`}
               </p>
@@ -543,12 +543,12 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-2 pb-2">
             <div className="min-w-0">
               <CardTitle className="text-sm">Traffic by weekday and hour</CardTitle>
-              <p className="text-[11px] text-text2">
+              <p className="text-xs text-text2">
                 {heatmap.data ? heatmapPeriod(heatmap.data.data) : hmWindow.label}
                 {hmWindow !== w && ' · last 7 days (the page window is shorter)'}
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
               <Segmented
                 label="Time zone"
                 value={sp.get('tz') === 'UTC' ? 'utc' : 'local'}
@@ -680,7 +680,7 @@ function HostFilterBox({ value, onApply }: { value: string; onApply: (v: string 
         </button>
       </div>
       {error && (
-        <span id="nf-host-filter-err" role="alert" className="mt-1 max-w-[16rem] text-[11px] text-danger-fg">
+        <span id="nf-host-filter-err" role="alert" className="mt-1 max-w-[16rem] text-xs text-danger-fg">
           {error}
         </span>
       )}
@@ -691,13 +691,13 @@ function HostFilterBox({ value, onApply }: { value: string; onApply: (v: string 
 function DeltaChip({ pct, reason, label }: { pct: number | null; reason: ComparePayload['totals']['delta_reason']; label: string }) {
   if (pct == null) {
     return (
-      <span className="rounded border border-border bg-surface2 px-1.5 py-0.5 text-[11px] font-medium text-text2" title={`No change stated: ${deltaReasonText(reason)}`}>
+      <span className="rounded border border-border bg-surface2 px-1.5 py-0.5 text-xs font-medium text-text2" title={`No change stated: ${deltaReasonText(reason)}`}>
         vs {label.toLowerCase()}: n/a
       </span>
     )
   }
   return (
-    <span className="rounded border border-border bg-surface2 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-text" title={`Change against the ${label.toLowerCase()}, same filters`}>
+    <span className="rounded border border-border bg-surface2 px-1.5 py-0.5 text-xs font-semibold tabular-nums text-text" title={`Change against the ${label.toLowerCase()}, same filters`}>
       {formatDelta(pct)}
     </span>
   )
@@ -707,7 +707,7 @@ function CompareSummary({ data, label, tz }: { data: ComparePayload; label: stri
   const t = data.totals
   const prior = windowLabel({ from: data.prior_window.from, to: data.prior_window.to, mode: 'fixed', tz })
   return (
-    <div className="rounded-md border border-border bg-surface2/40 px-2.5 py-1.5 text-[11px] text-text2">
+    <div className="rounded-md border border-border bg-surface2/40 px-2.5 py-1.5 text-xs text-text2">
       <span className="font-medium text-text">{label}:</span> {prior} ·{' '}
       <b className="font-semibold text-text">{formatBytes(t.prior_bytes)}</b> then, <b className="font-semibold text-text">{formatBytes(t.bytes)}</b> now
       {t.delta_pct != null ? (

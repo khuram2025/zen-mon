@@ -6,6 +6,7 @@ import { formatCount, formatCountExact, formatDateTime, formatInterval, zonedDat
 import { displayTimeZone } from '@/lib/netflow/window'
 import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
 import { fillSeries, type FilledPoint, type SeriesPoint } from './model'
+import { chartFont } from '@/lib/chartTheme'
 
 // Single series, validated against both chart surfaces (dataviz validator: light #2563eb, dark #3d8ee6).
 const SERIES_COLOR = { light: '#2563eb', dark: '#3d8ee6' }
@@ -39,7 +40,7 @@ export function SeriesChart({ series, from, to, granularityS, title }: {
         <button
           type="button"
           onClick={() => setAsTable((v) => !v)}
-          className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-text2 hover:bg-surface2 hover:text-text"
+          className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:bg-surface2 hover:text-text"
           aria-pressed={asTable}
         >
           {asTable ? <BarChart3 className="h-3.5 w-3.5" aria-hidden /> : <TableIcon className="h-3.5 w-3.5" aria-hidden />}
@@ -90,14 +91,14 @@ export function SeriesChart({ series, from, to, granularityS, title }: {
                 scale="time"
                 domain={[points[0]?.t ?? 'auto', (points[points.length - 1]?.t ?? 0) + granularityS * 1000]}
                 tickFormatter={tick}
-                tick={{ fontSize: 11, fill: 'rgb(var(--text2))' }}
+                tick={{ fontSize: chartFont(11), fill: 'rgb(var(--text2))' }}
                 stroke="rgb(var(--border))"
                 minTickGap={40}
               />
               <YAxis
                 width={48}
                 tickFormatter={(v) => formatCount(v)}
-                tick={{ fontSize: 11, fill: 'rgb(var(--text2))' }}
+                tick={{ fontSize: chartFont(11), fill: 'rgb(var(--text2))' }}
                 stroke="rgb(var(--border))"
                 allowDecimals={false}
               />
@@ -107,7 +108,7 @@ export function SeriesChart({ series, from, to, granularityS, title }: {
                   const p = active && payload?.[0]?.payload as (FilledPoint & { value: number | null }) | undefined
                   if (!p) return null
                   return (
-                    <div className="rounded-md border border-border bg-surface px-2.5 py-2 text-[11px] text-text shadow-elevated">
+                    <div className="rounded-md border border-border bg-surface px-2.5 py-2 text-xs text-text shadow-elevated">
                       <div className="font-semibold">{formatDateTime(p.t, tz, { seconds: false })}</div>
                       {p.missing ? (
                         <div className="text-text2">No statistics recorded for this bucket</div>
@@ -131,7 +132,7 @@ export function SeriesChart({ series, from, to, granularityS, title }: {
         </div>
       )}
       {missing > 0 && (
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           {missing === points.length
             ? 'No collector statistics were recorded in this period.'
             : `${missing} of ${points.length} buckets have no statistics (collector stopped, or not yet recording); they are shown as gaps, not zero.`}

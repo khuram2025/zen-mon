@@ -44,7 +44,7 @@ export function FilterChips({ filter, onRemove, onClearAll, invalid, errors, tz,
             <li
               key={chip.key}
               className={cn(
-                'inline-flex max-w-full items-center gap-1 rounded-md border bg-surface2/70 py-0.5 pl-2 text-[11px] text-text',
+                'inline-flex max-w-full items-center gap-1 rounded-md border bg-surface2/70 py-0.5 pl-2 text-xs text-text',
                 chip.negated ? 'border-dashed border-border-strong' : 'border-border',
                 onRemove ? 'pr-0.5' : 'pr-2',
               )}
@@ -72,7 +72,7 @@ export function FilterChips({ filter, onRemove, onClearAll, invalid, errors, tz,
             <li
               key={`invalid-${key}`}
               className={cn(
-                'inline-flex max-w-full items-center gap-1 rounded-md border border-danger/40 bg-danger/10 py-0.5 pl-2 text-[11px] text-text',
+                'inline-flex max-w-full items-center gap-1 rounded-md border border-danger/40 bg-danger/10 py-0.5 pl-2 text-xs text-text',
                 onRemove ? 'pr-0.5' : 'pr-2',
               )}
               title={message}
@@ -97,7 +97,7 @@ export function FilterChips({ filter, onRemove, onClearAll, invalid, errors, tz,
         })}
       </ul>
       {onClearAll && chips.length + bad.length > 1 && (
-        <button type="button" onClick={onClearAll} className="rounded px-1.5 py-0.5 text-[11px] font-medium text-text2 underline-offset-2 hover:text-text hover:underline">
+        <button type="button" onClick={onClearAll} className="rounded px-1.5 py-0.5 text-xs font-medium text-text2 underline-offset-2 hover:text-text hover:underline">
           Clear all
         </button>
       )}
@@ -121,7 +121,7 @@ function CopyLinkButton({ path }: { path: string }) {
     <button
       type="button"
       onClick={copy}
-      className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-text2 hover:text-text"
+      className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-text2 hover:text-text"
     >
       {state === 'copied' ? <Check className="h-3 w-3 text-success-fg" aria-hidden /> : <Link2 className="h-3 w-3" aria-hidden />}
       <span aria-live="polite">{state === 'copied' ? 'Link copied' : state === 'failed' ? 'Copy failed' : 'Copy link'}</span>

@@ -29,7 +29,7 @@ function Section({ title, subtitle, actions, children }: { title: string; subtit
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold tracking-tight text-text">{title}</h3>
-          {subtitle && <div className="mt-0.5 text-[11px] text-muted">{subtitle}</div>}
+          {subtitle && <div className="mt-0.5 text-xs text-muted">{subtitle}</div>}
         </div>
         {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
       </div>
@@ -54,7 +54,7 @@ function Segmented<T extends string>({ value, options, onChange, label }: { valu
     <div className="flex gap-0.5 rounded-md bg-surface2/60 p-0.5" role="group" aria-label={label}>
       {options.map((o) => (
         <button key={o.v} type="button" aria-pressed={value === o.v} onClick={() => onChange(o.v)}
-          className={cn('rounded px-2 py-1 text-[11px] font-medium transition-colors', value === o.v ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text')}>
+          className={cn('rounded px-2 py-1 text-xs font-medium transition-colors', value === o.v ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text')}>
           {o.label}
         </button>
       ))}
@@ -189,18 +189,18 @@ export function IncidentsTab({
                         </button>
                       </Td>
                       <Td>
-                        <div className="font-mono text-[11px] tabular-nums">{exactTime(o.start)}</div>
-                        <div className="text-[10px] text-muted">{o.clippedStart ? 'started before this window' : relativeTime(new Date(o.start).toISOString())}</div>
+                        <div className="font-mono text-xs tabular-nums">{exactTime(o.start)}</div>
+                        <div className="text-2xs text-muted">{o.clippedStart ? 'started before this window' : relativeTime(new Date(o.start).toISOString())}</div>
                       </Td>
                       <Td>
                         {ongoing ? (
-                          <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-danger">
+                          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-danger">
                             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-danger" /> Ongoing
                           </span>
                         ) : (
                           <>
-                            <div className="font-mono text-[11px] tabular-nums">{exactTime(end)}</div>
-                            <div className="text-[10px] text-muted">
+                            <div className="font-mono text-xs tabular-nums">{exactTime(end)}</div>
+                            <div className="text-2xs text-muted">
                               {o.clippedEnd ? 'continues past this window'
                                 : o.endKind === 'gap' ? 'evidence stopped — recovery not observed'
                                   : o.endKind === 'escalated' ? 'escalated to Down'
@@ -218,7 +218,7 @@ export function IncidentsTab({
                 })}
               </TBody>
             </Table>
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-2 text-[11px] text-muted">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-2 text-xs text-muted">
               <span>
                 {source === 'server' ? 'Built by the appliance from the full status log.' : 'Rebuilt in the browser from status history.'}
                 {historyTruncated && ' Status history for this window exceeded the request limit; older incidents may be missing — narrow the range.'}
@@ -295,7 +295,7 @@ export function IncidentsTab({
               </TBody>
             </Table>
             {pages > 1 && (
-              <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-2 text-[11px] text-muted">
+              <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-2 text-xs text-muted">
                 <span>Page {alertPage + 1} of {pages} · {alertTotal} alerts</span>
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" className="h-7" disabled={alertPage === 0 || alertsQ.isFetching} onClick={() => setAlertPage((p) => p - 1)}>Newer</Button>
@@ -326,21 +326,21 @@ function AlertRow({ alert: a }: { alert: ServiceAlert }) {
         )}
       </Td>
       <Td>
-        <Link to={`/alerts/${a.id}`} className="block max-w-[420px] truncate text-[11px] hover:text-primary hover:underline" title={cleanAlertMessage(a.message)}>
+        <Link to={`/alerts/${a.id}`} className="block max-w-[420px] truncate text-xs hover:text-primary hover:underline" title={cleanAlertMessage(a.message)}>
           {recovery ? 'Recovery notification · ' : ''}{cleanAlertMessage(a.message)}
         </Link>
       </Td>
       <Td>
-        <span className={cn('text-[11px] font-medium capitalize',
+        <span className={cn('text-xs font-medium capitalize',
           recovery ? 'text-success' : a.status === 'active' ? 'text-danger' : a.status === 'acknowledged' || a.status === 'pending' ? 'text-warning' : 'text-success')}>
           {recovery ? 'recovered' : a.status === 'pending' ? 'held' : a.status}
         </span>
       </Td>
-      <Td className="text-[11px] tabular-nums text-muted">
+      <Td className="text-xs tabular-nums text-muted">
         <div className="font-mono text-text2">{exactTime(a.triggered_at)}</div>
         <div>{relativeTime(a.triggered_at)}</div>
       </Td>
-      <Td className="text-[11px] tabular-nums text-muted">
+      <Td className="text-xs tabular-nums text-muted">
         {a.resolved_at ? <><div className="font-mono text-text2">{exactTime(a.resolved_at)}</div><div>{relativeTime(a.resolved_at)}</div></> : open ? 'Open' : '—'}
       </Td>
     </Tr>

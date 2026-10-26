@@ -218,7 +218,7 @@ export function SupportTabContent() {
           <div className="mb-4 grid gap-3 lg:grid-cols-2">
             <div className="rounded-md border border-border bg-surface2/40 p-3">
               <p className="text-xs font-medium text-text">What the bundle covers</p>
-              <p className="mt-1 text-[11px] leading-relaxed text-muted">
+              <p className="mt-1 text-xs leading-relaxed text-muted">
                 Appliance and service health, recent logs, redacted configuration, PostgreSQL and
                 ClickHouse diagnostics, storage, network and reachability state, updates and
                 migrations, plus module-level feature inventories.
@@ -228,7 +228,7 @@ export function SupportTabContent() {
               <p className="flex items-center gap-1.5 text-xs font-medium text-amber-300">
                 <AlertTriangle className="h-3.5 w-3.5" /> Review before sharing
               </p>
-              <p className="mt-1 text-[11px] leading-relaxed text-muted">
+              <p className="mt-1 text-xs leading-relaxed text-muted">
                 Credentials and known secrets are redacted, but diagnostic logs can still contain
                 operational details such as hostnames, IP addresses, usernames, topology, and
                 application error context. Share the archive only through an approved secure channel.
@@ -283,7 +283,7 @@ export function SupportTabContent() {
             <div className="md:col-span-2 flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
               <div>
                 <p className="text-sm font-medium">Include extended logs</p>
-                <p className="text-[11px] text-muted">
+                <p className="text-xs text-muted">
                   Bundles are capped at 50 MB. Turn this on to allocate more of that space to
                   longer journal and application-log tails for the selected timeframe.
                 </p>
@@ -296,7 +296,7 @@ export function SupportTabContent() {
             </div>
 
             <div className="md:col-span-2 flex flex-col items-start justify-between gap-3 border-t border-border pt-3 sm:flex-row sm:items-center">
-              <p className="text-[11px] text-muted">
+              <p className="text-xs text-muted">
                 Bundle file is also retained under <code>/opt/zenplus/support/bundles</code> for 7 days (max 5).
               </p>
               <Button type="submit" disabled={isBusy}>
@@ -415,7 +415,7 @@ export function SupportTabContent() {
           ) : list.data && list.data.length > 0 ? (
             <div>
               {list.isError && (
-                <div className="mb-2 flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-muted">
+                <div className="mb-2 flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted">
                   <span>Showing the last known history because the latest refresh failed.</span>
                   <Button type="button" size="sm" variant="ghost" onClick={() => void list.refetch()}>
                     Retry
@@ -489,7 +489,7 @@ function BundleRow({
           </span>
           <BundleStatusBadge status={bundle.status} partial={partial} />
         </div>
-        <dl className="grid grid-cols-1 gap-x-5 gap-y-0.5 text-[11px] text-muted sm:grid-cols-2 xl:grid-cols-3">
+        <dl className="grid grid-cols-1 gap-x-5 gap-y-0.5 text-xs text-muted sm:grid-cols-2 xl:grid-cols-3">
           <Metadata label="Phase" value={formatPhase(bundle.phase)} />
           <Metadata label="Job ID" value={bundle.id} />
           <Metadata label="Created" value={formatTime(bundle.created_at)} />
@@ -503,22 +503,22 @@ function BundleRow({
           <Metadata label="Collector" value={bundle.worker_version || '—'} />
         </dl>
         {bundle.request?.issue_summary && (
-          <p className="max-w-4xl break-words text-[11px] text-muted">
+          <p className="max-w-4xl break-words text-xs text-muted">
             <span className="font-medium text-text">Summary:</span> {bundle.request.issue_summary}
           </p>
         )}
         {bundle.sha256 && (
-          <p className="break-all font-mono text-[10px] text-muted" title="SHA-256 checksum">
+          <p className="break-all font-mono text-2xs text-muted" title="SHA-256 checksum">
             SHA-256 {bundle.sha256}
           </p>
         )}
         {bundle.status === 'failed' && (
-          <p className="max-w-4xl whitespace-pre-wrap break-words text-[11px] text-rose-300">
+          <p className="max-w-4xl whitespace-pre-wrap break-words text-xs text-rose-300">
             {bundle.error || 'The collector did not provide an error message.'}
           </p>
         )}
         {bundle.status === 'expired' && (
-          <p className="text-[11px] text-muted">The retained archive is no longer available. Generate a new bundle if needed.</p>
+          <p className="text-xs text-muted">The retained archive is no longer available. Generate a new bundle if needed.</p>
         )}
         <BundleDiagnosticDetails bundle={bundle} />
       </div>
@@ -590,7 +590,7 @@ function BundleDiagnosticDetails({ bundle }: { bundle: BundleStatus }) {
     .reduce((count, group) => count + group.values.length, 0)
 
   return (
-    <details className={`max-w-4xl rounded-md border px-3 py-2 text-[11px] ${partialCount > 0 ? 'border-amber-500/30 bg-amber-500/5' : 'border-border bg-surface2/40'}`}>
+    <details className={`max-w-4xl rounded-md border px-3 py-2 text-xs ${partialCount > 0 ? 'border-amber-500/30 bg-amber-500/5' : 'border-border bg-surface2/40'}`}>
       <summary className="cursor-pointer font-medium text-text">
         {partialCount > 0
           ? `Partial diagnostics: ${partialCount} collection issue${partialCount === 1 ? '' : 's'}`

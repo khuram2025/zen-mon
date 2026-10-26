@@ -138,13 +138,13 @@ function SettingsForm({ data }: { data: DetectorsResponse }) {
                     {d.status && <DetectorStateChip state={d.status} />}
                   </div>
                   <p className="mt-0.5 text-xs text-text2">{d.description}</p>
-                  <p className="mt-0.5 text-[11px] text-text2">
+                  <p className="mt-0.5 text-xs text-text2">
                     <span className="font-medium text-text">Method:</span> {d.method}
                   </p>
                   {(d.required_fields ?? []).length > 0 && (
-                    <p className="text-[11px] text-text2">Needs: {(d.required_fields ?? []).map((f) => FIELD_LABEL[f] ?? f).join(', ')}</p>
+                    <p className="text-xs text-text2">Needs: {(d.required_fields ?? []).map((f) => FIELD_LABEL[f] ?? f).join(', ')}</p>
                   )}
-                  {d.reason && <p className="mt-0.5 text-[11px] text-warning-fg">{d.reason}</p>}
+                  {d.reason && <p className="mt-0.5 text-xs text-warning-fg">{d.reason}</p>}
                 </div>
                 <label className="flex shrink-0 items-center gap-2 text-xs text-text">
                   <Switch
@@ -164,7 +164,7 @@ function SettingsForm({ data }: { data: DetectorsResponse }) {
                   const set = (v: string | boolean) => setDrafts((s) => ({ ...s, [d.kind]: { ...(s[d.kind] ?? {}), [p.key]: v } }))
                   return (
                     <div key={p.key} className={cn(p.kind === 'ports' && 'min-[480px]:col-span-2')}>
-                      <label htmlFor={id} className="block text-[11px] font-medium text-text">
+                      <label htmlFor={id} className="block text-xs font-medium text-text">
                         {p.label}
                         {p.unit ? ` (${p.unit})` : ''}
                       </label>
@@ -196,9 +196,9 @@ function SettingsForm({ data }: { data: DetectorsResponse }) {
                         />
                       )}
                       {err ? (
-                        <span className="mt-0.5 block text-[11px] text-danger-fg">{err}</span>
+                        <span className="mt-0.5 block text-xs text-danger-fg">{err}</span>
                       ) : (
-                        <span className="mt-0.5 block text-[11px] text-text2">Default {Array.isArray(p.default) ? (p.default as number[]).join(', ') : String(p.default)}</span>
+                        <span className="mt-0.5 block text-xs text-text2">Default {Array.isArray(p.default) ? (p.default as number[]).join(', ') : String(p.default)}</span>
                       )}
                     </div>
                   )

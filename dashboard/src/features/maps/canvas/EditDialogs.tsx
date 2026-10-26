@@ -93,7 +93,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
           <NetworkIcon name={iconForNode({ ...node, icon })} className="h-6 w-6" />
           <div className="min-w-0">
             <div className="truncate font-semibold text-text">{selectedDev?.hostname || node.hostname}</div>
-            <div className="truncate text-[10px] text-muted">{selectedDev?.ip_address || node.ip_address} · {selectedDev?.device_type || node.device_type}</div>
+            <div className="truncate text-2xs text-muted">{selectedDev?.ip_address || node.ip_address} · {selectedDev?.device_type || node.device_type}</div>
           </div>
         </div>
 
@@ -108,7 +108,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
           </select>
         </Field>}
         {profileChanged && (
-          <div className="rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
+          <div className="rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5 text-xs text-warning">
             Links to this node are kept. Their interface labels still reference the old device —
             edit each link to re-map its interfaces to {selectedDev?.hostname || 'the new device'}.
           </div>
@@ -186,7 +186,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
               type="button"
               title="Auto (by device type)"
               onClick={() => setIcon('auto')}
-              className={cn('flex aspect-square items-center justify-center rounded border text-[9px] font-semibold uppercase',
+              className={cn('flex aspect-square items-center justify-center rounded border text-2xs font-semibold uppercase',
                 icon === 'auto' ? 'border-primary bg-primary/15 text-primary' : 'border-border bg-surface2/40 text-muted hover:border-primary/45')}
             >
               Auto
@@ -320,7 +320,7 @@ export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel,
           <Field label="Colour (design)">
             <div className="flex items-center gap-1">
               <ColorInput value={color || '#64748b'} onChange={(c, commit) => { if (commit) setColor(c) }} />
-              {color ? <button type="button" className="text-[10px] text-muted hover:text-text" onClick={() => setColor('')}>auto</button> : <span className="text-[10px] text-muted">auto</span>}
+              {color ? <button type="button" className="text-2xs text-muted hover:text-text" onClick={() => setColor('')}>auto</button> : <span className="text-2xs text-muted">auto</span>}
             </div>
           </Field>
           <Field label="Line style">

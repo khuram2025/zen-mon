@@ -9,9 +9,9 @@ import type { InterfaceRef } from '../cards/shapes'
 function DetailMetric({ label, value, sub, title }: { label: string; value: ReactNode; sub?: ReactNode; title?: string }) {
   return (
     <div className="min-w-0 rounded-md border border-border/70 bg-surface2/30 p-3" title={title}>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-text2">{label}</div>
+      <div className="text-2xs font-semibold uppercase tracking-wider text-text2">{label}</div>
       <div className="mt-1 break-words text-lg font-semibold tabular-nums leading-tight text-text">{value}</div>
-      {sub && <div className="mt-0.5 text-[11px] text-text2">{sub}</div>}
+      {sub && <div className="mt-0.5 text-xs text-text2">{sub}</div>}
     </div>
   )
 }
@@ -23,7 +23,7 @@ function BytesMetric({ label, bytes, sub }: { label: string; bytes: number | nul
 function DetailListPanel({ title, children, className }: { title: string; children: ReactNode; className?: string }) {
   return (
     <section className={cn('min-w-0 rounded-md border border-border/70 bg-surface2/30 p-3', className)}>
-      <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text2">{title}</h4>
+      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-text2">{title}</h4>
       <div className="space-y-2">{children}</div>
     </section>
   )
@@ -33,11 +33,11 @@ function PillList({ label, values, empty, mono = false }: { label: string; value
   const clean = Array.from(new Set(values.filter(Boolean))).slice(0, 12)
   return (
     <div>
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-text2">{label}</div>
+      <div className="mb-1 text-2xs uppercase tracking-wider text-text2">{label}</div>
       {clean.length ? (
         <ul role="list" className="flex flex-wrap gap-1.5">
           {clean.map((value) => (
-            <li key={value} className={cn('rounded border border-border bg-surface px-2 py-0.5 text-[11px] text-text', mono && 'font-mono')}>
+            <li key={value} className={cn('rounded border border-border bg-surface px-2 py-0.5 text-xs text-text', mono && 'font-mono')}>
               {value}
             </li>
           ))}
@@ -53,7 +53,7 @@ function PillList({ label, values, empty, mono = false }: { label: string; value
 function InterfaceList({ title, values, empty, filterTo }: { title: string; values: InterfaceRef[]; empty: string; filterTo?: (i: InterfaceRef) => string }) {
   return (
     <div>
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-text2">{title}</div>
+      <div className="mb-1 text-2xs uppercase tracking-wider text-text2">{title}</div>
       {values.length ? (
         <ul role="list" className="flex flex-wrap gap-1.5">
           {values.map((v) => {
@@ -65,7 +65,7 @@ function InterfaceList({ title, values, empty, filterTo }: { title: string; valu
               </>
             )
             return (
-              <li key={v.iface} className="rounded border border-border bg-surface px-2 py-0.5 text-[11px] text-text">
+              <li key={v.iface} className="rounded border border-border bg-surface px-2 py-0.5 text-xs text-text">
                 {filterTo ? (
                   <Link to={filterTo(v)} className="hover:text-primary hover:underline" title={`Filter to interface ${v.iface}`}>
                     {text}
@@ -109,7 +109,7 @@ function DirectionBar({ a, b, aLabel, bLabel }: { a: number; b: number; aLabel: 
         {sum > 0 && a > 0 && <div className="h-full bg-[#2a78d6] dark:bg-[#3987e5]" style={{ flexGrow: a, flexBasis: 0 }} />}
         {sum > 0 && b > 0 && <div className="h-full bg-[#eb6834] dark:bg-[#d95926]" style={{ flexGrow: b, flexBasis: 0 }} />}
       </div>
-      <div className="mt-1 flex flex-wrap justify-between gap-x-3 text-[11px] tabular-nums text-text2">
+      <div className="mt-1 flex flex-wrap justify-between gap-x-3 text-xs tabular-nums text-text2">
         <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-[#2a78d6] dark:bg-[#3987e5]" aria-hidden />{aLabel}</span>
         <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-[#eb6834] dark:bg-[#d95926]" aria-hidden />{bLabel}</span>
       </div>

@@ -93,7 +93,7 @@ function deviceScopeText(label: string | null | undefined): string {
 
 function ScopeChip({ icon: Icon, children }: { icon: typeof Server; children: string }) {
   return (
-    <li className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] font-medium text-text2">
+    <li className="inline-flex items-center gap-1 rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs font-medium text-text2">
       <Icon className="h-3 w-3 text-muted" aria-hidden />
       {children}
     </li>
@@ -383,7 +383,7 @@ export function SectionReportViewer() {
         )}
       </ul>
       {sentNf && (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted">
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-muted">
           <Waypoints className="h-3 w-3" aria-hidden /> NetFlow
         </span>
       )}
@@ -402,7 +402,7 @@ export function SectionReportViewer() {
         <button
           type="button"
           onClick={clearScope}
-          className="inline-flex items-center gap-0.5 rounded px-1 text-[11px] font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 print:hidden"
+          className="inline-flex items-center gap-0.5 rounded px-1 text-xs font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 print:hidden"
         >
           <X className="h-3 w-3" aria-hidden /> Clear scope
         </button>
@@ -411,7 +411,7 @@ export function SectionReportViewer() {
   )
 
   const customBadges = custom ? (
-    <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">
+    <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-xs text-muted">
       {custom.visibility === 'shared' ? 'Shared' : 'Private'}
       {custom.owner_name && <> · {custom.is_owner ? 'yours' : custom.owner_name}</>}
     </span>
@@ -528,7 +528,7 @@ export function SectionReportViewer() {
         </div>
 
         {catalogQ.isError && (
-          <p role="status" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text">
+          <p role="status" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-xs text-text">
             <span>
               <span className="font-semibold text-warning-fg">Scope filters are unavailable:</span> the report catalog could not be loaded.
             </span>
@@ -543,13 +543,13 @@ export function SectionReportViewer() {
           </p>
         )}
         {nfScope.invalid.length > 0 && (
-          <p role="status" className="mt-2 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text">
+          <p role="status" className="mt-2 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-xs text-text">
             <span className="font-semibold text-warning-fg">Not applied:</span> the link's NetFlow scope has invalid {nfScope.invalid.join(', ')}.
           </p>
         )}
         {hasScopeParams && template && (nodeIds.length > sentNodes.length || (hasDeviceScope && !allows('devices'))
           || (appId && !sentApp) || (nfParam && !sentNf)) && (
-          <p role="status" className="mt-2 text-[11px] text-muted">
+          <p role="status" className="mt-2 text-xs text-muted">
             Part of the link's scope does not apply to this report's sections and was ignored.
           </p>
         )}

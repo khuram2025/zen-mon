@@ -534,7 +534,7 @@ export function ServicesPage() {
       </div>
 
       {(summaryState === 'error' || summaryRefreshFailed || availabilityFailed) && (
-        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           {summaryState === 'error' && (
             <ErrorChip label="Status counts could not be loaded" onRetry={() => summaryQ.refetch()} />
           )}
@@ -607,7 +607,7 @@ export function ServicesPage() {
                 <SelectItem key={l} value={String(l)}>
                   <span className="flex flex-col">
                     <span>{LEVEL_META[l].label}</span>
-                    <span className="text-[10.5px] text-muted">{LEVEL_META[l].hint}</span>
+                    <span className="text-xs text-muted">{LEVEL_META[l].hint}</span>
                   </span>
                 </SelectItem>
               ))}
@@ -681,7 +681,7 @@ export function ServicesPage() {
         )}
 
         {legacyPageFilter && (
-          <p className="text-[11px] text-warning">
+          <p className="text-xs text-warning">
             This appliance version filters these conditions within the current page only; counts and paging may not reflect them.
           </p>
         )}
@@ -746,7 +746,7 @@ export function ServicesPage() {
 
       {/* Monitor list */}
       <Card className={cn('overflow-hidden', listQ.isPlaceholderData && 'opacity-70 transition-opacity')}>
-        <div className="hidden items-center gap-3 border-b border-border bg-surface2/40 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted lg:flex">
+        <div className="hidden items-center gap-3 border-b border-border bg-surface2/40 px-4 py-2 text-2xs font-semibold uppercase tracking-wider text-muted lg:flex">
           <span className="w-4 shrink-0">
             {operator && (
               <input
@@ -916,7 +916,7 @@ function clock(ms: number): string {
 
 function ErrorChip({ label, onRetry }: { label: string; onRetry: () => void }) {
   return (
-    <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-danger/30 bg-danger/10 px-2 py-1 text-[11px] text-danger" role="status">
+    <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-danger/30 bg-danger/10 px-2 py-1 text-xs text-danger" role="status">
       <AlertTriangle className="h-3 w-3 shrink-0" />
       <span className="min-w-0 break-words">{label}</span>
       <button type="button" onClick={onRetry} className="shrink-0 font-semibold underline-offset-2 hover:underline">Retry</button>
@@ -975,18 +975,18 @@ function StatCard({ label, count, state, icon, tone, sub, active, attention, onC
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-[10.5px] font-semibold uppercase tracking-wider text-muted">{label}</span>
+        <span className="truncate text-xs font-semibold uppercase tracking-wider text-muted">{label}</span>
         <span className={cn('relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full', t.chip)}>
           {attention && <span className="svc-ping absolute inline-flex h-full w-full rounded-full bg-danger" />}
           {icon}
         </span>
       </div>
-      <div className={cn('mt-1 text-[26px] font-bold leading-none tabular-nums', count == null || zero ? 'text-muted/50' : t.value)}>
+      <div className={cn('mt-1 text-3xl font-bold leading-none tabular-nums', count == null || zero ? 'text-muted/50' : t.value)}>
         {state === 'loading'
           ? <span className="inline-block h-[26px] w-10 animate-pulse rounded bg-surface3/60 align-middle" aria-label="Loading" />
           : count == null ? '—' : count.toLocaleString()}
       </div>
-      <div className="mt-1 truncate text-[10.5px] text-muted" title={sub}>{state === 'error' ? 'unavailable' : sub}</div>
+      <div className="mt-1 truncate text-xs text-muted" title={sub}>{state === 'error' ? 'unavailable' : sub}</div>
     </button>
   )
 }

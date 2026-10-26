@@ -140,7 +140,7 @@ function ExporterList({ initial, onPick }: { initial?: ExporterDeviceRow[]; onPi
                     {ipDisplay(e.exporter_ip)}
                     {e.display_name && <span className="ml-2 font-sans text-text2">{e.display_name}</span>}
                   </div>
-                  <div className="mt-0.5 text-[11px] text-text2">
+                  <div className="mt-0.5 text-xs text-text2">
                     {formatCount(e.flows)} records in 7 days ·{' '}
                     {e.source === 'mapped' && <>linked to <span className="font-medium text-text">{e.device_hostname}</span></>}
                     {e.source === 'ip-match' && <>management address of <span className="font-medium text-text">{e.device_hostname}</span></>}
@@ -356,7 +356,7 @@ function SourcesNote({ s }: { s: Suggestions }) {
   }
   parts.push(reverseDnsSourceText(s))
   return (
-    <p className="mt-2 text-[11px] text-text2">
+    <p className="mt-2 text-xs text-text2">
       Evidence checked: {parts.join(', ')}.
       {!s.sources.ncm.permitted && ' Configuration evidence needs the NCM view permission.'}
     </p>
@@ -453,7 +453,7 @@ function DevicePicker({ onPick }: { onPick: (d: PickedDevice) => void }) {
         )}
       </QueryPanel>
       {total > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-text2">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text2">
           <span>Showing {skip + 1}–{skip + rows.length} of {total.toLocaleString()} devices · ↑ ↓ to move, Enter to choose</span>
           <span className="flex gap-2">
             <Button size="sm" variant="outline" className="h-7" disabled={skip === 0} onClick={() => setSkip((s) => Math.max(0, s - 20))}>Previous</Button>
@@ -521,7 +521,7 @@ function ImpactBody({ i }: { i: MappingImpact }) {
             <li key={g.code} className="flex flex-wrap items-center gap-2">
               <ToneChip tone={g.code === 'overrides_ip_match' ? 'info' : 'warning'} className="whitespace-normal">{g.message}</ToneChip>
               {(g.code === 'no_snmp' || g.code === 'no_interfaces' || g.code === 'no_speeds') && (
-                <Link to={`/devices/${i.target.device_id}`} className="text-[11px] font-medium text-text underline underline-offset-2">Open the device</Link>
+                <Link to={`/devices/${i.target.device_id}`} className="text-xs font-medium text-text underline underline-offset-2">Open the device</Link>
               )}
             </li>
           ))}

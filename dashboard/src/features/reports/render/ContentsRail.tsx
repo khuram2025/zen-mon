@@ -99,7 +99,7 @@ export function ContentsRail({ sections, idPrefix, active, className }: Contents
   if (sections.length < 2) return null
   return (
     <nav aria-label="Report contents" className={cn('text-xs', className)}>
-      <p className="mb-2 flex items-center gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wide text-muted">
+      <p className="mb-2 flex items-center gap-1.5 px-2 text-2xs font-semibold uppercase tracking-wide text-muted">
         <ListTree className="h-3.5 w-3.5" aria-hidden /> Contents
       </p>
       <ol role="list" className="space-y-0.5 border-l border-border">
@@ -142,7 +142,7 @@ export function ContentsSelect({ sections, idPrefix, active, className }: Conten
   if (sections.length < 2) return null
   return (
     <div className={cn('flex items-center gap-2', className)}>
-      <label htmlFor={id} className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted">
+      <label htmlFor={id} className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">
         Jump to
       </label>
       <select

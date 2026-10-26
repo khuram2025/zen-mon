@@ -30,7 +30,7 @@ export const Tr = React.forwardRef<HTMLTableRowElement, React.HTMLAttributes<HTM
     <tr
       ref={ref}
       className={cn(
-        'border-b border-border transition-colors hover:bg-surface2/60 data-[state=selected]:bg-surface2',
+        'border-b border-border/70 transition-colors hover:bg-surface2/60 data-[state=selected]:bg-surface2',
         className,
       )}
       {...props}
@@ -44,7 +44,7 @@ export const Th = React.forwardRef<HTMLTableCellElement, React.ThHTMLAttributes<
     <th
       ref={ref}
       className={cn(
-        'h-10 px-3 text-left align-middle text-xs font-medium uppercase tracking-wider text-muted [&:has([role=checkbox])]:pr-0',
+        'h-10 whitespace-nowrap px-3 text-left align-middle text-2xs font-semibold uppercase tracking-wider text-muted [&:has([role=checkbox])]:pr-0',
         className,
       )}
       {...props}
@@ -57,7 +57,7 @@ export const Td = React.forwardRef<HTMLTableCellElement, React.TdHTMLAttributes<
   ({ className, ...props }, ref) => (
     <td
       ref={ref}
-      className={cn('p-3 align-middle [&:has([role=checkbox])]:pr-0', className)}
+      className={cn('px-3 py-2.5 align-middle [&:has([role=checkbox])]:pr-0', className)}
       {...props}
     />
   ),

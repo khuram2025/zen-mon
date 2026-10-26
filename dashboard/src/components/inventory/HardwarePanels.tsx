@@ -15,7 +15,7 @@ import { fmtInt, fmtPct, plural } from './model'
 import { Panel } from './PanelCard'
 import { ScrollShadow } from './ScrollShadow'
 
-const th = 'h-9 px-3 text-left align-middle text-[11px] font-semibold uppercase tracking-wider text-muted'
+const th = 'h-9 px-3 text-left align-middle text-xs font-semibold uppercase tracking-wider text-muted'
 const thRight = cn(th, 'text-right')
 
 /** A thin proportional bar (decorative: the number beside it is the information). Unknown is hatched. */
@@ -54,17 +54,17 @@ function SerialCell({ pct, tone, missing, drill, count, notCollected, notCollect
   return (
     <span className="inline-flex flex-wrap items-center justify-end gap-x-2 gap-y-0.5">
       <span
-        className={cn('inline-flex items-center rounded-full border px-2 py-px text-[11px] font-medium tabular-nums', TONE_CLASS[tone])}
+        className={cn('inline-flex items-center rounded-full border px-2 py-px text-xs font-medium tabular-nums', TONE_CLASS[tone])}
         title={pct === null ? SERIAL_TONE_TEXT.none : `${SERIAL_TONE_TEXT[tone]}: ${fmtPct(pct)} of the ${plural(reporting, 'device')} that can report one have a serial number`}
       >
         {pct === null ? '—' : fmtPct(pct)}
         <span className="sr-only">{pct === null ? ` ${SERIAL_TONE_TEXT.none}.` : ` of devices report a serial number. ${SERIAL_TONE_TEXT[tone]}.`}</span>
       </span>
       {missing > 0 && drill && (
-        <DrillTarget drill={drill} className="text-[11px] text-text2" title={`${fmtInt(missing)} without a serial number: open the list`}>{fmtInt(missing)} missing</DrillTarget>
+        <DrillTarget drill={drill} className="text-xs text-text2" title={`${fmtInt(missing)} without a serial number: open the list`}>{fmtInt(missing)} missing</DrillTarget>
       )}
       {notCollected > 0 && notCollectedDrill && (
-        <DrillTarget drill={notCollectedDrill} className="text-[11px] text-muted" title="Ping-only and controller-managed devices cannot report a serial number; they are not in the percentage">{fmtInt(notCollected)} not reported by design</DrillTarget>
+        <DrillTarget drill={notCollectedDrill} className="text-xs text-muted" title="Ping-only and controller-managed devices cannot report a serial number; they are not in the percentage">{fmtInt(notCollected)} not reported by design</DrillTarget>
       )}
     </span>
   )
@@ -101,7 +101,7 @@ export function HardwareNetworkPanel({ hw, onMatrix, matrixVendor }: { hw: Hardw
         <div className="p-4"><InventoryEmpty kind="no-data" title="No network devices yet">Devices appear here once the poller has read their vendor and model. This page fills in by itself.</InventoryEmpty></div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full border-separate border-spacing-0 text-[13px]" data-hardware-table="">
+          <table className="w-full border-separate border-spacing-0 text-sm" data-hardware-table="">
             <caption className="sr-only">{fmtInt(hw.network.devices)} network devices by vendor and model, with firmware versions, serial number coverage and modules</caption>
             <thead>
               <tr className="[&>th]:border-b [&>th]:border-border">
@@ -129,12 +129,12 @@ export function HardwareNetworkPanel({ hw, onMatrix, matrixVendor }: { hw: Hardw
                         >
                           {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />}
                           <span className="font-semibold">{v.label}</span>{' '}
-                          <span className="text-[11px] text-muted">{modelCountText(v.models, v.unknownModelDevices)}</span>
+                          <span className="text-xs text-muted">{modelCountText(v.models, v.unknownModelDevices)}</span>
                         </button>
                       ) : (
                         <span className="flex items-center gap-1.5 pl-5">
                           <span className={cn('font-semibold', v.unknown && 'italic text-muted')}>{v.label}</span>
-                          {v.unknown && <span className="text-[11px] text-muted">no vendor or model identified</span>}
+                          {v.unknown && <span className="text-xs text-muted">no vendor or model identified</span>}
                         </span>
                       )}
                     </th>
@@ -148,7 +148,7 @@ export function HardwareNetworkPanel({ hw, onMatrix, matrixVendor }: { hw: Hardw
                           type="button"
                           onClick={() => onMatrix(v.vendor as string)}
                           aria-pressed={matrixVendor === v.vendor}
-                          className="whitespace-nowrap rounded text-[11px] font-medium text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary"
+                          className="whitespace-nowrap rounded text-xs font-medium text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary"
                           title={`Show ${v.vendor} models by firmware release`}
                         >
                           Firmware matrix
@@ -195,7 +195,7 @@ function cellStyle(step: number): CSSProperties {
 export function MatrixLegend({ m }: { m: MatrixModel }) {
   if (m.legend.length === 0) return null
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-muted" data-matrix-legend="">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted" data-matrix-legend="">
       <span>Devices per cell (every cell shows its number):</span>
       <ul role="list" className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {m.legend.map((l) => (
@@ -218,20 +218,20 @@ export function MatrixTable({ m }: { m: MatrixModel }) {
         <caption className="sr-only">{matrixSummary(m)}. Each cell is the number of devices of that model on that firmware release.</caption>
         <thead>
           <tr>
-            <th scope="col" className="sticky left-0 z-10 h-9 bg-surface px-2 text-left align-bottom text-[11px] font-semibold uppercase tracking-wider text-muted">Model</th>
-            <th scope="col" className="h-9 px-2 text-right align-bottom text-[11px] font-semibold uppercase tracking-wider text-muted">Total</th>
+            <th scope="col" className="sticky left-0 z-10 h-9 bg-surface px-2 text-left align-bottom text-xs font-semibold uppercase tracking-wider text-muted">Model</th>
+            <th scope="col" className="h-9 px-2 text-right align-bottom text-xs font-semibold uppercase tracking-wider text-muted">Total</th>
             {m.columns.map((c) => (
-              <th key={c.release} scope="col" className={cn('h-9 min-w-[3.25rem] px-1 text-center align-bottom text-[11px] font-semibold', c.unknown ? 'italic text-muted' : 'font-mono text-text2')}>{c.label}</th>
+              <th key={c.release} scope="col" className={cn('h-9 min-w-[3.25rem] px-1 text-center align-bottom text-xs font-semibold', c.unknown ? 'italic text-muted' : 'font-mono text-text2')}>{c.label}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {m.rows.map((r) => (
             <tr key={r.key} data-matrix-row={r.model ?? ''}>
-              <th scope="row" className={cn('sticky left-0 z-10 max-w-[11rem] truncate bg-surface px-2 py-0.5 text-left text-[12px] font-normal', r.unknown && 'italic text-muted')} title={r.label}>
+              <th scope="row" className={cn('sticky left-0 z-10 max-w-[11rem] truncate bg-surface px-2 py-0.5 text-left text-sm font-normal', r.unknown && 'italic text-muted')} title={r.label}>
                 {r.label}
                 {r.releases > 1 && (
-                  <span className="ml-1.5 rounded-full border border-border px-1.5 text-[10px] text-text2" title={`Runs on ${plural(r.releases, 'release')}`}>
+                  <span className="ml-1.5 rounded-full border border-border px-1.5 text-2xs text-text2" title={`Runs on ${plural(r.releases, 'release')}`}>
                     <span aria-hidden>{r.releases}</span>
                     <span className="sr-only">, runs on {plural(r.releases, 'release')}</span>
                   </span>
@@ -280,13 +280,13 @@ export function HardwareModulesPanel({ hw }: { hw: HardwareResponse }) {
         </div>
       ) : (
         <div className="space-y-3 p-4">
-          <p className="text-[11px] text-muted">A group is a component class and model. The link counts the devices that have it; a device can hold several, so components can outnumber devices.</p>
+          <p className="text-xs text-muted">A group is a component class and model. The link counts the devices that have it; a device can hold several, so components can outnumber devices.</p>
           {groups.map((g) => {
             const open = all.has(g.class)
             const { shown: rows, hidden } = visibleModuleRows(g.rows, open)
             return (
               <section key={g.class} aria-label={g.label} data-module-class={g.class}>
-                <h3 className="mb-1 flex items-baseline justify-between text-[11px] font-semibold uppercase tracking-wider text-muted">
+                <h3 className="mb-1 flex items-baseline justify-between text-xs font-semibold uppercase tracking-wider text-muted">
                   <span>{g.label}</span>
                   <span className="font-normal normal-case tracking-normal">{fmtInt(g.components)} {g.components === 1 ? 'component' : 'components'}</span>
                 </h3>
@@ -318,7 +318,7 @@ export function HardwareModulesPanel({ hw }: { hw: HardwareResponse }) {
                     type="button"
                     aria-expanded={open}
                     onClick={() => setAll((s) => { const n = new Set(s); if (n.has(g.class)) n.delete(g.class); else n.add(g.class); return n })}
-                    className="mt-1 rounded text-[11px] font-medium text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary"
+                    className="mt-1 rounded text-xs font-medium text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary"
                   >
                     {open ? 'Show fewer' : `Show ${fmtInt(hidden)} more ${hidden === 1 ? 'model' : 'models'}`}
                   </button>
@@ -337,13 +337,13 @@ export function HardwareModulesPanel({ hw }: { hw: HardwareResponse }) {
 function Distribution({ title, rows, noun = 'servers', note, stacked }: { title: string; rows: BucketRow[]; noun?: string; note?: string; stacked?: boolean }) {
   return (
     <section aria-label={title} className="min-w-0">
-      <h3 className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">{title}</h3>
+      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">{title}</h3>
       <ul role="list" className="space-y-0.5">
         {rows.map((r) => (
           <li key={r.value}>
             <DrillTarget
               drill={r.drill}
-              className={cn('rounded-md px-1.5 py-1 text-[13px] hover:bg-surface2 hover:no-underline', stacked ? 'block' : 'flex items-center gap-2')}
+              className={cn('rounded-md px-1.5 py-1 text-sm hover:bg-surface2 hover:no-underline', stacked ? 'block' : 'flex items-center gap-2')}
               ariaLabel={`${r.label}: ${fmtInt(r.count)} ${r.count === 1 ? noun.replace(/s$/, '') : noun}, ${fmtPct(r.pct)}`}
             >
               {stacked ? (
@@ -352,7 +352,7 @@ function Distribution({ title, rows, noun = 'servers', note, stacked }: { title:
                   <span className="flex items-baseline gap-2">
                     <span className={cn('min-w-0 flex-1 truncate', r.unknown && 'italic text-muted')} title={r.label}>{r.label}</span>
                     <span className="w-8 shrink-0 text-right font-medium tabular-nums">{fmtInt(r.count)}</span>
-                    <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-muted">{fmtPct(r.pct)}</span>
+                    <span className="w-12 shrink-0 text-right text-xs tabular-nums text-muted">{fmtPct(r.pct)}</span>
                   </span>
                   <span className="mt-1 block"><Bar pct={r.barPct} unknown={r.unknown} /></span>
                 </>
@@ -361,14 +361,14 @@ function Distribution({ title, rows, noun = 'servers', note, stacked }: { title:
                   <span className={cn('w-[42%] min-w-0 shrink-0 truncate', r.unknown && 'italic text-muted')} title={r.label}>{r.label}</span>
                   <span className="min-w-0 flex-1"><Bar pct={r.barPct} unknown={r.unknown} /></span>
                   <span className="w-8 text-right font-medium tabular-nums">{fmtInt(r.count)}</span>
-                  <span className="hidden w-12 text-right text-[11px] tabular-nums text-muted sm:block">{fmtPct(r.pct)}</span>
+                  <span className="hidden w-12 text-right text-xs tabular-nums text-muted sm:block">{fmtPct(r.pct)}</span>
                 </>
               )}
             </DrillTarget>
           </li>
         ))}
       </ul>
-      {note && <p className="mt-1.5 px-1.5 text-[11px] text-muted">{note}</p>}
+      {note && <p className="mt-1.5 px-1.5 text-xs text-muted">{note}</p>}
     </section>
   )
 }
@@ -400,7 +400,7 @@ export function HardwareServersPanel({ hw }: { hw: HardwareResponse }) {
               <Distribution title="Virtualization" rows={s.virtualization} />
             ) : (
               <section aria-label="Virtualization" className="min-w-0" data-server-hardware="pending">
-                <h3 className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">Virtualization</h3>
+                <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Virtualization</h3>
                 <p className="rounded-md border border-dashed border-border-strong px-3 py-2 text-xs leading-5 text-muted">{PENDING_SERVER_HARDWARE}</p>
               </section>
             )}

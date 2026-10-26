@@ -62,7 +62,7 @@ export function QueryPanel<D>({
           <div className={cn('relative', className)} aria-busy="true">
             <div className="pointer-events-none select-none opacity-50 transition-opacity">{children(query.data)}</div>
             <div className="absolute right-2 top-2">
-              <span role="status" className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-text2 shadow-card">
+              <span role="status" className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-text2 shadow-card">
                 <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
                 Loading the new selection…
               </span>
@@ -214,7 +214,7 @@ export function PanelMessage({ icon: Icon, iconClass, title, detail, errorRef, o
       <div className="text-sm font-medium text-text">{title}</div>
       {detail && <div className="max-w-md text-xs leading-relaxed text-text2">{detail}</div>}
       {errorRef && (
-        <div className="text-[11px] text-text2">
+        <div className="text-xs text-text2">
           Reference <span className="select-all font-mono">{errorRef}</span>
         </div>
       )}
@@ -250,7 +250,7 @@ export function StaleChip({ query, className }: { query: PanelQueryLike<unknown>
     <div
       role="status"
       className={cn(
-        'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-[11px] text-text',
+        'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/35 bg-warning/10 px-2.5 py-1.5 text-xs text-text',
         className,
       )}
       title={apiErrorMessage(query.error) + (ref ? ` (reference ${ref})` : '')}

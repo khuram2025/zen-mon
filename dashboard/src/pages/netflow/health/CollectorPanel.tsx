@@ -148,7 +148,7 @@ function CollectorBody({ c }: { c: CollectorHealth }) {
         <SeriesChart series={c.series} from={c.window.from} to={c.window.to} granularityS={c.window.granularity_s} title="Records stored" />
       )}
 
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text2">
         {p?.last_stats_at && (
           <span>
             Statistics written {formatDateTime(p.last_stats_at, tz, { seconds: false })}

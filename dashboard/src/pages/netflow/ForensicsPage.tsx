@@ -382,7 +382,7 @@ export function NetflowForensicsPage() {
                   Update “{view.name}”
                 </Button>
               )}
-              <span className="text-[11px] text-text2" role="status" aria-live="polite">
+              <span className="text-xs text-text2" role="status" aria-live="polite">
                 {dirty
                   ? showErrors && !draftResult.ok
                     ? 'Fix the highlighted fields to search.'
@@ -396,7 +396,7 @@ export function NetflowForensicsPage() {
 
       {(runnable || badKeys.length > 0) && (
         <section aria-label="Applied search" className="space-y-2">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text2">
             <span className="font-semibold uppercase tracking-wide">Applied search</span>
             <span>{applied.sort !== 'timestamp' || applied.order !== 'desc' ? sortLabel({ sort: applied.sort, order: applied.order }) : 'Newest first'}</span>
             {isFlowFilterEmpty(applied.filter) && badKeys.length === 0 && <span>No filters: every record in {w.label}</span>}
@@ -411,7 +411,7 @@ export function NetflowForensicsPage() {
             copyLink={copyLink}
           />
           {badKeys.length > 0 && (
-            <p role="alert" className="text-[11px] font-medium text-danger-fg">
+            <p role="alert" className="text-xs font-medium text-danger-fg">
               The link contains filters that are not valid. Fix them in the form or remove them; the search does not run until then.
             </p>
           )}
@@ -448,17 +448,17 @@ export function NetflowForensicsPage() {
                     {searchHeading({ page: first, placeholder, failed: search.isError, loaded })}
                   </div>
                   {placeholder && rows.length > 0 && (
-                    <div className="text-[11px] text-text2">The dimmed rows below are from the previous search until this one finishes.</div>
+                    <div className="text-xs text-text2">The dimmed rows below are from the previous search until this one finishes.</div>
                   )}
                   {first && !first.unavailable && (
-                    <div className="text-[11px] text-text2">
+                    <div className="text-xs text-text2">
                       {first.snapshot_at ? `Records received up to ${formatDateTime(first.snapshot_at, w.tz)}` : ''}
                       {meta?.query_ms != null ? ` · query ${formatDuration(meta.query_ms)}` : ''}
                       {!exact && total !== null ? ' · counting stopped at its time limit, the total is a lower bound' : ''}
                     </div>
                   )}
                   {fwEvents > 0 && (
-                    <div className="text-[11px] text-text2">
+                    <div className="text-xs text-text2">
                       Includes {first?.fw_events?.exact === false ? 'at least ' : ''}{formatCountExact(fwEvents)} firewall event records
                       (NSEL connection created/denied) without traffic volume, which traffic totals and cards leave out.{' '}
                       <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => setSp(flowRecordsOnlyParams(sp))}>
@@ -520,12 +520,12 @@ export function NetflowForensicsPage() {
                           <div className="mt-1 flex justify-between border-t border-border pt-1">
                             <button
                               type="button"
-                              className="rounded px-1.5 py-0.5 text-[11px] text-text2 hover:text-text"
+                              className="rounded px-1.5 py-0.5 text-xs text-text2 hover:text-text"
                               onClick={() => setSp(columnsSearchParams(sp, []), { replace: true })}
                             >
                               Default columns
                             </button>
-                            <button type="button" className="rounded px-1.5 py-0.5 text-[11px] font-medium text-text" onClick={() => setColumnsOpen(false)}>
+                            <button type="button" className="rounded px-1.5 py-0.5 text-xs font-medium text-text" onClick={() => setColumnsOpen(false)}>
                               Done
                             </button>
                           </div>
@@ -595,7 +595,7 @@ export function NetflowForensicsPage() {
                         filter={applied.filter}
                         dimmed={search.isFetching && !search.isFetchingNextPage}
                       />
-                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-text2">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text2">
                         <span>{placeholder ? 'Previous search: updating…' : showingLabel(loaded, total, exact)}</span>
                         {placeholder ? null : search.hasNextPage ? (
                           <Button
@@ -614,7 +614,7 @@ export function NetflowForensicsPage() {
                         )}
                       </div>
                       {search.isFetchNextPageError && (
-                        <p role="alert" className="text-[11px] text-danger-fg">
+                        <p role="alert" className="text-xs text-danger-fg">
                           The next page could not be loaded: {errorText(search.error)}
                         </p>
                       )}

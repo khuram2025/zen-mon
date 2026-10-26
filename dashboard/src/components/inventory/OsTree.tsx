@@ -23,7 +23,7 @@ function CountBar({ pct, unknown, strong }: { pct: number; unknown?: boolean; st
   )
 }
 
-const th = 'h-9 px-3 text-left align-middle text-[11px] font-semibold uppercase tracking-wider text-muted'
+const th = 'h-9 px-3 text-left align-middle text-xs font-semibold uppercase tracking-wider text-muted'
 
 function SortHeader({
   label, sortKey, sort, onSort, className, align = 'left',
@@ -44,7 +44,7 @@ function SortHeader({
         onClick={() => onSort(sortKey)}
         title={`Sort by ${label.toLowerCase()}${active ? (sort.order === 'asc' ? ', now ascending' : ', now descending') : ''}`}
         className={cn(
-          'flex h-9 w-full items-center gap-1 whitespace-nowrap px-3 text-[11px] font-semibold uppercase tracking-wider outline-none hover:text-text focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary',
+          'flex h-9 w-full items-center gap-1 whitespace-nowrap px-3 text-xs font-semibold uppercase tracking-wider outline-none hover:text-text focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary',
           align === 'right' && 'justify-end',
           active ? 'text-text' : 'text-muted',
         )}
@@ -104,15 +104,15 @@ function TreeRow({
             </>
           )}
           {row.type === 'release' && row.versions !== null && row.versions > 1 && (
-            <span className="shrink-0 rounded-full border border-border bg-surface px-1.5 text-[10px] text-text2" title={`${row.versions} versions of this release are in use`}>{row.versions}</span>
+            <span className="shrink-0 rounded-full border border-border bg-surface px-1.5 text-2xs text-text2" title={`${row.versions} versions of this release are in use`}>{row.versions}</span>
           )}
         </div>
         {/* Below md the latest observed version moves under the name; the raw string of a version too (where it has no column). */}
         {row.type === 'release' && row.latest && (
-          <div className="mt-0.5 pl-5 text-[11px] text-muted md:hidden">Latest <span className="font-mono text-text2">{row.latest}</span></div>
+          <div className="mt-0.5 pl-5 text-xs text-muted md:hidden">Latest <span className="font-mono text-text2">{row.latest}</span></div>
         )}
         {isVersion && row.raw && (
-          <div className="mt-0.5 break-all pl-5 font-mono text-[10.5px] text-muted lg:hidden" title="As the device reported it">Reported as {row.raw}</div>
+          <div className="mt-0.5 break-all pl-5 font-mono text-xs text-muted lg:hidden" title="As the device reported it">Reported as {row.raw}</div>
         )}
       </th>
       <td className="hidden w-32 px-3 align-middle sm:table-cell"><CountBar pct={row.pct} unknown={row.unknown} strong={isFamily} /></td>
@@ -133,7 +133,7 @@ function TreeRow({
       </td>
       {showRaw && (
         <td className="hidden max-w-[16rem] px-3 align-middle lg:table-cell">
-          {isVersion && row.raw ? <span className="block truncate font-mono text-[10.5px] text-muted" title={`As the device reported it: ${row.raw}`}>{row.raw}</span> : null}
+          {isVersion && row.raw ? <span className="block truncate font-mono text-xs text-muted" title={`As the device reported it: ${row.raw}`}>{row.raw}</span> : null}
         </td>
       )}
     </tr>
@@ -163,7 +163,7 @@ export function OsTree({
   const showRaw = visible.some((r) => r.type === 'version' && r.raw)
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-0 border-separate border-spacing-0 text-[13px]" data-os-tree="">
+      <table className="w-full min-w-0 border-separate border-spacing-0 text-sm" data-os-tree="">
         <caption className="sr-only">{caption}</caption>
         <thead className="bg-surface">
           <tr className="[&>th]:border-b [&>th]:border-border">

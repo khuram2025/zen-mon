@@ -305,18 +305,18 @@ export function ChannelsPage() {
                                 <div className="font-medium text-text">{channel.name}</div>
                                 <div className="mt-1 flex flex-wrap items-center gap-1.5">
                                   <Badge variant="outline">{meta.label}</Badge>
-                                  <span className="text-[11px] text-muted">{channel.id.slice(0, 8)}</span>
+                                  <span className="text-xs text-muted">{channel.id.slice(0, 8)}</span>
                                 </div>
                               </div>
                             </div>
                           </Td>
                           <Td>
                             <div className="max-w-sm truncate text-sm">{destinationLabel(channel)}</div>
-                            <div className="mt-1 text-[11px] text-muted">{secondaryDestinationLabel(channel)}</div>
+                            <div className="mt-1 text-xs text-muted">{secondaryDestinationLabel(channel)}</div>
                           </Td>
                           <Td>
                             <div className="text-sm">{channel.gateway_name || gatewayLabel(channel, gateways)}</div>
-                            <div className="mt-1 text-[11px] text-muted">{meta.gatewayLabel}</div>
+                            <div className="mt-1 text-xs text-muted">{meta.gatewayLabel}</div>
                           </Td>
                           <Td>
                             <Badge variant={channel.enabled ? 'success' : 'outline'}>
@@ -325,7 +325,7 @@ export function ChannelsPage() {
                           </Td>
                           <Td>
                             <div className="text-sm text-text2">{channel.updated_at ? relativeTime(channel.updated_at) : '-'}</div>
-                            <div className="mt-1 text-[11px] text-muted">{channel.created_at ? `Created ${relativeTime(channel.created_at)}` : ''}</div>
+                            <div className="mt-1 text-xs text-muted">{channel.created_at ? `Created ${relativeTime(channel.created_at)}` : ''}</div>
                           </Td>
                           <Td>
                             <div className="flex justify-end gap-1">
@@ -426,7 +426,7 @@ export function ChannelsPage() {
                     <div key={gateway.id} className="flex items-center justify-between gap-3 rounded-md border border-border bg-bg px-3 py-2">
                       <div className="min-w-0">
                         <div className="truncate text-sm font-medium">{gateway.name || `${gateway.type.toUpperCase()} gateway`}</div>
-                        <div className="text-[11px] text-muted">{gateway.type.toUpperCase()} {gateway.is_default ? 'default' : ''}</div>
+                        <div className="text-xs text-muted">{gateway.type.toUpperCase()} {gateway.is_default ? 'default' : ''}</div>
                       </div>
                       <Badge variant={gateway.enabled ? 'success' : 'outline'}>{gateway.enabled ? 'Enabled' : 'Disabled'}</Badge>
                     </div>
@@ -740,7 +740,7 @@ function MetricCard({
 function HealthPill({ ok, label }: { ok: boolean; label: string }) {
   return (
     <span className={cn(
-      'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium',
+      'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium',
       ok ? 'border-success/30 bg-success/10 text-success' : 'border-warning/30 bg-warning/10 text-warning',
     )}>
       {ok ? <CheckCircle2 className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}

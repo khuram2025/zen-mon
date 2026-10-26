@@ -76,7 +76,7 @@ export function ExportMenu({ params, formats, onPrint }: ExportMenuProps) {
             <f.icon className="mt-0.5 text-primary" aria-hidden />
             <span className="min-w-0">
               <span className="block font-medium">{f.label}</span>
-              <span className="block text-[11px] text-muted">{f.hint}</span>
+              <span className="block text-xs text-muted">{f.hint}</span>
             </span>
           </DropdownMenuItem>
         ))}
@@ -85,7 +85,7 @@ export function ExportMenu({ params, formats, onPrint }: ExportMenuProps) {
           <Printer className="mt-0.5" aria-hidden />
           <span className="min-w-0">
             <span className="block font-medium">Print or save as PDF</span>
-            <span className="block text-[11px] text-muted">From the browser, as shown on screen</span>
+            <span className="block text-xs text-muted">From the browser, as shown on screen</span>
           </span>
         </DropdownMenuItem>
       </DropdownMenuContent>

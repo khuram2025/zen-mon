@@ -86,13 +86,13 @@ export function ChangesStatsStrip({
                 c.active ? 'border-primary bg-primary/10' : 'border-border bg-surface hover:border-primary/50 hover:bg-surface2/60',
               )}
             >
-              <span className={cn('block truncate text-[10.5px] font-semibold uppercase tracking-wider', c.active ? 'text-text' : 'text-muted')}>{c.label}</span>
+              <span className={cn('block truncate text-xs font-semibold uppercase tracking-wider', c.active ? 'text-text' : 'text-muted')}>{c.label}</span>
               <span className="mt-0.5 block text-xl font-bold tabular-nums leading-tight text-text">{fmtInt(c.count)}</span>
             </Link>
           </li>
         ))}
       </ul>
-      {note && <p className="mt-2.5 text-[11px] text-muted" data-paired-note="">{note}</p>}
+      {note && <p className="mt-2.5 text-xs text-muted" data-paired-note="">{note}</p>}
     </Panel>
   )
 }

@@ -34,17 +34,17 @@ export function ConversationDetailPanel({ row, ctx }: { row: Conversation; ctx: 
       <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5 text-sm">
-            <span className="text-[11px] text-text2">{orient.a}</span>
+            <span className="text-xs text-text2">{orient.a}</span>
             <span className="break-all font-mono font-semibold text-text">{ipDisplay(row.client)}</span>
             {row.orientation === 'client_server' ? <ArrowRight className="h-4 w-4 text-text2" aria-hidden /> : <ArrowLeftRight className="h-4 w-4 text-text2" aria-hidden />}
-            <span className="text-[11px] text-text2">{orient.b}</span>
+            <span className="text-xs text-text2">{orient.b}</span>
             <span className="break-all font-mono font-semibold text-text">{ipDisplay(row.server)}</span>
           </div>
-          <div className="mt-0.5 text-[11px] text-text2">
+          <div className="mt-0.5 text-xs text-text2">
             {serviceText(row)} · first {formatDateTime(row.first_seen, tz, { zone: 'offset' })} · last {formatDateTime(row.last_seen, tz, { zone: 'none' })}
           </div>
           {row.orientation !== 'client_server' && (
-            <div className="mt-0.5 text-[11px] text-text2">
+            <div className="mt-0.5 text-xs text-text2">
               Direction unknown (no service port identifies a server): endpoints are ordered by address.
             </div>
           )}
@@ -75,7 +75,7 @@ export function ConversationDetailPanel({ row, ctx }: { row: Conversation; ctx: 
             <Network className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
             <div className="min-w-0 text-xs">
               <div className="font-semibold text-text">{serviceText(row)}</div>
-              <div className="text-[11px] text-text2">
+              <div className="text-xs text-text2">
                 {row.port_applicable
                   ? row.service_port
                     ? `Service port ${row.service_port}, identified on either side of the flow (requests and responses).`
@@ -101,8 +101,8 @@ export function ConversationDetailPanel({ row, ctx }: { row: Conversation; ctx: 
                 {row.application}
                 <ConfidenceChip confidence={row.confidence} title={CONFIDENCE_LABELS[row.confidence]} />
               </div>
-              <div className="text-[11px] text-text2">{row.basis_text} · category {row.category}</div>
-              {row.visibility_note && <div className="mt-1 text-[11px] font-medium text-warning-fg">{row.visibility_note}</div>}
+              <div className="text-xs text-text2">{row.basis_text} · category {row.category}</div>
+              {row.visibility_note && <div className="mt-1 text-xs font-medium text-warning-fg">{row.visibility_note}</div>}
             </div>
           </div>
         </DetailListPanel>
@@ -112,7 +112,7 @@ export function ConversationDetailPanel({ row, ctx }: { row: Conversation; ctx: 
             <div className="min-w-0 text-xs">
               <div className="font-semibold text-text">{row.ip_protocol} ({row.protocol})</div>
               <div className="mt-1 text-text">Flags: {flags.primary}</div>
-              <div className="text-[11px] text-text2">{flags.detail}</div>
+              <div className="text-xs text-text2">{flags.detail}</div>
             </div>
           </div>
         </DetailListPanel>
@@ -127,11 +127,11 @@ export function ConversationDetailPanel({ row, ctx }: { row: Conversation; ctx: 
         <DetailListPanel title="Per flow">
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div>
-              <div className="text-[10px] uppercase tracking-wider text-text2">Avg size</div>
+              <div className="text-2xs uppercase tracking-wider text-text2">Avg size</div>
               <div className="font-semibold tabular-nums text-text">{formatBytes(row.avg_bytes)}</div>
             </div>
             <div>
-              <div className="text-[10px] uppercase tracking-wider text-text2">Avg packets</div>
+              <div className="text-2xs uppercase tracking-wider text-text2">Avg packets</div>
               <div className="font-semibold tabular-nums text-text">{row.avg_packets == null ? '—' : row.avg_packets.toLocaleString('en-US', { maximumFractionDigits: row.avg_packets < 10 ? 1 : 0 })}</div>
             </div>
           </div>

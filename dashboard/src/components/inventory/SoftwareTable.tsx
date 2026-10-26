@@ -78,7 +78,7 @@ export function SoftwareTable({
   }
 
   return (
-    <table className="w-full border-separate border-spacing-0 text-[13px]" data-software-table="">
+    <table className="w-full border-separate border-spacing-0 text-sm" data-software-table="">
       <caption className="sr-only">{caption}</caption>
       <thead className="sticky top-0 z-10 bg-surface">
         <tr className="[&>th]:border-b [&>th]:border-border">
@@ -120,10 +120,10 @@ export function SoftwareTable({
                     {row.name}
                   </Link>
                   {row.norm_status !== 'normalized' && (
-                    <span title={status.meaning} className={cn('shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium', status.tone)}>{status.label}</span>
+                    <span title={status.meaning} className={cn('shrink-0 rounded-full border px-1.5 py-px text-2xs font-medium', status.tone)}>{status.label}</span>
                   )}
                 </div>
-                <div className="truncate text-[11px] leading-4 text-muted lg:hidden">
+                <div className="truncate text-xs leading-4 text-muted lg:hidden">
                   <span className="md:hidden">{row.publisher ?? 'Unknown publisher'} · </span>
                   {categoryLabel(row.category)}
                 </div>
@@ -132,7 +132,7 @@ export function SoftwareTable({
                 {row.publisher ?? <span className="italic text-muted">Unknown</span>}
               </td>
               <td className="hidden px-3 align-middle lg:table-cell">
-                <span className="whitespace-nowrap rounded-full border border-border bg-surface2 px-1.5 py-px text-[10.5px] text-text2">{categoryLabel(row.category)}</span>
+                <span className="whitespace-nowrap rounded-full border border-border bg-surface2 px-1.5 py-px text-xs text-text2">{categoryLabel(row.category)}</span>
               </td>
               <td className="px-2 text-right align-middle sm:px-3">
                 <Link to={assetsHref({ product: row.product_key })} data-drill="assets" data-drill-count={row.hosts} aria-label={hostsLinkLabel(row)} {...roving} className={cn(linkClass, 'font-medium text-text')}>

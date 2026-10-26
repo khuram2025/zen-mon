@@ -208,7 +208,7 @@ function StatCard({ icon: Icon, label, value, detail, tone }: { icon: typeof Act
   const colors = {
     danger: 'bg-danger/10 text-danger', warning: 'bg-warning/10 text-warning', success: 'bg-success/10 text-success', info: 'bg-info/10 text-info',
   }
-  return <Card><CardContent className="flex items-center gap-3 p-4"><div className={`rounded-xl p-2.5 ${colors[tone]}`}><Icon className="h-5 w-5" /></div><div className="min-w-0"><div className="text-xs font-medium text-muted">{label}</div><div className="mt-0.5 text-xl font-semibold tabular-nums">{value}</div><div className="truncate text-[11px] text-muted">{detail}</div></div></CardContent></Card>
+  return <Card><CardContent className="flex items-center gap-3 p-4"><div className={`rounded-xl p-2.5 ${colors[tone]}`}><Icon className="h-5 w-5" /></div><div className="min-w-0"><div className="text-xs font-medium text-muted">{label}</div><div className="mt-0.5 text-xl font-semibold tabular-nums">{value}</div><div className="truncate text-xs text-muted">{detail}</div></div></CardContent></Card>
 }
 
 function IncidentRow({ event, longest }: { event: StatusEvent; longest: number }) {

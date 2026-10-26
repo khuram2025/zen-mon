@@ -60,7 +60,7 @@ export function TimezoneSelect({
           <span className="flex min-w-0 items-center gap-1.5">
             {!value && <Building2 className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />}
             <span className="truncate">{zoneName(effective)}</span>
-            {!value && <span className="shrink-0 text-[11px] text-muted">(organisation)</span>}
+            {!value && <span className="shrink-0 text-xs text-muted">(organisation)</span>}
           </span>
           <span className="flex shrink-0 items-center gap-2 text-xs tabular-nums text-muted">
             {zoneLabel(effective, at)}

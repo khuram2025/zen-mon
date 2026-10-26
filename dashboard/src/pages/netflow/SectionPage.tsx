@@ -301,7 +301,7 @@ function DataTable<T>({
       <table className="w-full text-xs" style={{ minWidth }}>
         <caption className="sr-only">{caption}</caption>
         <thead>
-          <tr className="border-b border-border text-[11px] text-text2">
+          <tr className="border-b border-border text-xs text-text2">
             {cols.map((c) => {
               const clientSortable = !!c.sort && !!onSort
               const active = clientSortable ? sortKey === c.key : !!c.serverActive
@@ -344,7 +344,7 @@ function DataTable<T>({
                       {c.cell(row)}
                       {i === 0 && decision && decision !== c && (
                         <div className="mt-1 flex flex-wrap items-baseline gap-x-2 text-xs sm:hidden" aria-hidden>
-                          <span className="text-[11px] text-text2">{decision.label}</span>
+                          <span className="text-xs text-text2">{decision.label}</span>
                           <span className="font-semibold">{decision.cell(row)}</span>
                           {share && share !== c && <span>{share.cell(row)}</span>}
                         </div>
@@ -418,7 +418,7 @@ function DirBytes({ row, side }: { row: { request_bytes: number; response_bytes:
   return (
     <div>
       <Bytes value={side === 'req' ? row.request_bytes : row.response_bytes} />
-      {side === 'resp' && unknown > 0.5 && <div className="text-[11px] text-text2" title={DIRECTION_UNKNOWN}>+{formatBytes(unknown)} unknown</div>}
+      {side === 'resp' && unknown > 0.5 && <div className="text-xs text-text2" title={DIRECTION_UNKNOWN}>+{formatBytes(unknown)} unknown</div>}
     </div>
   )
 }
@@ -442,7 +442,7 @@ function Pct({ value }: { value: number | null | undefined }) {
 
 function RowAction({ to, label, children }: { to: string; label: string; children: ReactNode }) {
   return (
-    <Link to={to} aria-label={label} title={label} className="inline-flex items-center gap-1 whitespace-nowrap rounded px-1 text-[11px] font-medium text-primary hover:underline">
+    <Link to={to} aria-label={label} title={label} className="inline-flex items-center gap-1 whitespace-nowrap rounded px-1 text-xs font-medium text-primary hover:underline">
       {children}
     </Link>
   )
@@ -722,7 +722,7 @@ function SectionBody({ section, data, s }: { section: string; data: unknown; s: 
 
 /** Scope line above a table: the denominator and what the listed rows cover. */
 function ScopeLine({ children }: { children: ReactNode }) {
-  return <p className="mb-2 text-[11px] leading-snug text-text2">{children}</p>
+  return <p className="mb-2 text-xs leading-snug text-text2">{children}</p>
 }
 
 function serverPager<T>(data: Paged<T>, s: PageState) {
@@ -767,7 +767,7 @@ function TalkersTable({ data, s }: { data: TalkersPage; s: PageState }) {
           pending={t.hostname_pending}
           profileHref={hostLink(t.ip, s.filter, s.dctx.window, s.dctx.meta)}
           onFilter={() => s.toggle('talker', t.ip, s.filter.talker)}
-          extra={t.group ? <div className="text-[11px] text-text2">Group {t.group}</div> : null}
+          extra={t.group ? <div className="text-xs text-text2">Group {t.group}</div> : null}
         />
       ),
     },
@@ -819,7 +819,7 @@ function MetricCell({ t, side, metric }: { t: Talker; side: '' | 'src_' | 'dst_'
   return (
     <div>
       {metric === 'bytes' ? <Bytes value={b} /> : <Count value={metric === 'flows' ? flows : packets} />}
-      <div className="text-[11px] tabular-nums text-text2">{metric === 'bytes' ? `${formatCount(flows)} flows` : formatBytes(b)}</div>
+      <div className="text-xs tabular-nums text-text2">{metric === 'bytes' ? `${formatCount(flows)} flows` : formatBytes(b)}</div>
     </div>
   )
 }
@@ -837,11 +837,11 @@ function ConversationsTable({ data, s }: { data: Paged<Conversation>; s: PageSta
         return (
           <div className="space-y-1">
             <div className="flex items-baseline gap-1.5">
-              <span className="shrink-0 whitespace-nowrap text-[10px] uppercase tracking-wide text-text2 sm:w-[5.5rem]">{o.a}</span>
+              <span className="shrink-0 whitespace-nowrap text-2xs uppercase tracking-wide text-text2 sm:w-[5.5rem]">{o.a}</span>
               <HostLabel ip={c.client} hostname={c.client_hostname} resolvedAt={c.client_hostname_resolved_at} pending={c.client_hostname_pending} profileHref={hostLink(c.client, s.filter, s.dctx.window, s.dctx.meta)} onFilter={() => s.toggle('talker', c.client, s.filter.talker)} />
             </div>
             <div className="flex items-baseline gap-1.5">
-              <span className="shrink-0 whitespace-nowrap text-[10px] uppercase tracking-wide text-text2 sm:w-[5.5rem]">{o.b}</span>
+              <span className="shrink-0 whitespace-nowrap text-2xs uppercase tracking-wide text-text2 sm:w-[5.5rem]">{o.b}</span>
               <HostLabel ip={c.server} hostname={c.server_hostname} resolvedAt={c.server_hostname_resolved_at} pending={c.server_hostname_pending} profileHref={hostLink(c.server, s.filter, s.dctx.window, s.dctx.meta)} onFilter={() => s.toggle('talker', c.server, s.filter.talker)} />
             </div>
           </div>
@@ -918,8 +918,8 @@ function ApplicationsTable({ data, s }: { data: Paged<ApplicationRow>; s: PageSt
           <Swatch slot={slotOf.get(a.name)} />
           <div className="min-w-0">
             <div className="font-medium text-text">{a.name}</div>
-            <div className="text-[11px] text-text2">{a.category}</div>
-            {a.visibility_note && <div className="text-[11px] text-warning-fg">{a.visibility_note}</div>}
+            <div className="text-xs text-text2">{a.category}</div>
+            {a.visibility_note && <div className="text-xs text-warning-fg">{a.visibility_note}</div>}
           </div>
           <FilterButton label={`Filter the page to application ${a.name}`} active={s.filter.app === a.name} onClick={() => s.toggle('app', a.name, s.filter.app)} />
         </div>
@@ -1159,15 +1159,15 @@ function InterfacesTable({ data, s }: { data: InterfacesPage; s: PageState }) {
         <div className="flex items-start gap-1">
           <div className="min-w-0">
             <div className="break-words font-medium text-text">{i.display_name}</div>
-            <div className="break-all text-[11px] text-text2">{i.device_hostname || ipDisplay(i.exporter_ip)} · ifIndex {i.ifindex}{i.role ? ` · ${i.role}` : ''}</div>
-            {i.pinned && <div className="text-[11px] font-medium text-primary">Selected interface (not among the rows ranked on this page)</div>}
+            <div className="break-all text-xs text-text2">{i.device_hostname || ipDisplay(i.exporter_ip)} · ifIndex {i.ifindex}{i.role ? ` · ${i.role}` : ''}</div>
+            {i.pinned && <div className="text-xs font-medium text-primary">Selected interface (not among the rows ranked on this page)</div>}
           </div>
           <FilterButton label={`${i.selected ? 'Clear' : 'Filter the page to'} interface ${interfaceTitle(i)}`} active={i.selected} onClick={() => s.apply({ iface: i.selected ? undefined : i.iface })} />
         </div>
       ),
     },
-    { key: 'in', label: 'In', header: 'In', align: 'right', cell: (i) => <div><Bytes value={i.in_bytes} /><div className="text-[11px] tabular-nums text-text2">{formatBps(i.in_bps_avg)} avg</div></div> },
-    { key: 'out', label: 'Out', header: 'Out', align: 'right', cell: (i) => <div><Bytes value={i.out_bytes} /><div className="text-[11px] tabular-nums text-text2">{formatBps(i.out_bps_avg)} avg</div></div> },
+    { key: 'in', label: 'In', header: 'In', align: 'right', cell: (i) => <div><Bytes value={i.in_bytes} /><div className="text-xs tabular-nums text-text2">{formatBps(i.in_bps_avg)} avg</div></div> },
+    { key: 'out', label: 'Out', header: 'Out', align: 'right', cell: (i) => <div><Bytes value={i.out_bytes} /><div className="text-xs tabular-nums text-text2">{formatBps(i.out_bps_avg)} avg</div></div> },
     { key: 'bytes', label: 'Total', header: 'Total', align: 'right', emphasis: true, serverActive: true, cell: (i) => <Bytes value={i.bytes} /> },
     {
       key: 'speed',
@@ -1177,8 +1177,8 @@ function InterfacesTable({ data, s }: { data: InterfacesPage; s: PageState }) {
       cell: (i) => (
         <div>
           <span className="tabular-nums text-text" title={i.speed_in_bps != null ? undefined : 'Set the speed on the device or as an interface override in NetFlow settings'}>{i.speed_in_bps != null ? formatBps(i.speed_in_bps) : 'Unknown'}</span>
-          <div className="text-[11px] text-text2">{i.speed_in_bps != null ? i.speed_source : 'not configured'}</div>
-          <Link to={capacityLink(i.iface, s.dctx.window)} className="text-[11px] text-primary hover:underline" title={UTILIZATION_LINK_TITLE}>Utilization</Link>
+          <div className="text-xs text-text2">{i.speed_in_bps != null ? i.speed_source : 'not configured'}</div>
+          <Link to={capacityLink(i.iface, s.dctx.window)} className="text-xs text-primary hover:underline" title={UTILIZATION_LINK_TITLE}>Utilization</Link>
         </div>
       ),
     },
@@ -1234,7 +1234,7 @@ function CountriesTable({ data, s }: { data: CountriesPage; s: PageState }) {
         <div className="flex flex-wrap items-center gap-1">
           {c.country && <span aria-hidden>{flagEmoji(c.country)}</span>}
           <span className="font-medium text-text">{c.country_name}</span>
-          {c.country && <span className="text-[11px] text-text2">{c.country}</span>}
+          {c.country && <span className="text-xs text-text2">{c.country}</span>}
           {c.kind !== 'country' && <Chip title={c.hint}>no country</Chip>}
         </div>
       ),
@@ -1268,7 +1268,7 @@ function AsnsTable({ data, s }: { data: AsnsPage; s: PageState }) {
           <div className="flex items-start gap-1">
             <div className="min-w-0">
               <div className="font-medium text-text">{a.asn != null ? `AS${a.asn}` : a.as_name}</div>
-              {a.asn != null && <div className="break-words text-[11px] text-text2">{a.as_name ?? 'Name unknown'}</div>}
+              {a.asn != null && <div className="break-words text-xs text-text2">{a.as_name ?? 'Name unknown'}</div>}
               {a.source && <Chip title={AS_SOURCE_TEXT[a.source]}>{a.source === 'geoip' ? 'GeoIP' : a.source === 'flow' ? 'Router' : 'Router + GeoIP'}</Chip>}
             </div>
             {filterable && <FilterButton label={`Filter the page to AS${a.asn}`} active={s.filter.asn === a.asn} onClick={() => s.toggle('asn', a.asn, s.filter.asn)} />}
@@ -1314,7 +1314,7 @@ function NextHopsTable({ data, s }: { data: NextHopsPage; s: PageState }) {
       label: 'Egress interfaces',
       header: 'Egress interfaces',
       cell: (h) => (
-        <ul role="list" className="space-y-0.5 text-[11px]">
+        <ul role="list" className="space-y-0.5 text-xs">
           {h.out_interfaces.slice(0, 4).map((i) => (
             <li key={i.iface}>
               <button type="button" className="text-left text-text hover:text-primary hover:underline" onClick={() => s.apply({ iface: i.iface })} aria-label={`Filter the page to interface ${interfaceTitle(i)}`}>
@@ -1365,7 +1365,7 @@ function IpGroupsTable({ data, s }: { data: IpGroupsPage; s: PageState }) {
         <div className="flex items-start gap-1">
           <div className="min-w-0">
             <div className="font-medium text-text">{g.name}</div>
-            <div className="break-all text-[11px] text-text2">{g.cidrs.slice(0, 3).join(', ')}{g.cidrs.length > 3 ? ` +${g.cidrs.length - 3}` : ''}</div>
+            <div className="break-all text-xs text-text2">{g.cidrs.slice(0, 3).join(', ')}{g.cidrs.length > 3 ? ` +${g.cidrs.length - 3}` : ''}</div>
           </div>
           <FilterButton label={`Filter the page to IP group ${g.name}`} active={s.filter.group === g.name} onClick={() => s.toggle('group', g.name, s.filter.group)} />
         </div>

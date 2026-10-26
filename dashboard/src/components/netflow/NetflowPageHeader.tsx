@@ -25,7 +25,7 @@ export function NetflowPageHeader({ title, icon: Icon, description, parents = []
   return (
     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
       <div className="min-w-0">
-        <nav aria-label="Breadcrumb" className="mb-1 flex flex-wrap items-center gap-1.5 text-[11px] text-text2">
+        <nav aria-label="Breadcrumb" className="mb-1 flex flex-wrap items-center gap-1.5 text-xs text-text2">
           <Link to={rootTo} className="inline-flex items-center gap-1 hover:text-text">
             <ArrowLeft className="h-3 w-3" aria-hidden />
             NetFlow

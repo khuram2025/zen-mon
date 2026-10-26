@@ -338,7 +338,7 @@ function SectionTitle({ icon: Icon, children, hint }: { icon: typeof Info; child
 function FieldError({ id, children }: { id?: string; children?: ReactNode }) {
   if (!children) return null
   return (
-    <p id={id} className="text-[11px] font-medium text-danger-fg" role="alert">
+    <p id={id} className="text-xs font-medium text-danger-fg" role="alert">
       {children}
     </p>
   )
@@ -368,7 +368,7 @@ function Field({
         {required && <span className="ml-0.5 text-danger-fg" aria-hidden>*</span>}
       </label>
       {children}
-      {error ? <FieldError id={`${htmlFor}-error`}>{error}</FieldError> : hint ? <p className="text-[11px] text-text2">{hint}</p> : null}
+      {error ? <FieldError id={`${htmlFor}-error`}>{error}</FieldError> : hint ? <p className="text-xs text-text2">{hint}</p> : null}
     </div>
   )
 }
@@ -405,7 +405,7 @@ function MutationError({ error }: { error: unknown }) {
   return (
     <Note tone="danger">
       <div>{apiErrorMessage(error, 'The change could not be saved')}</div>
-      {ref && <div className="text-[11px] text-text2">Reference <span className="select-all font-mono">{ref}</span></div>}
+      {ref && <div className="text-xs text-text2">Reference <span className="select-all font-mono">{ref}</span></div>}
     </Note>
   )
 }
@@ -464,7 +464,7 @@ export function NetflowSettingsPage() {
         description="How flows are grouped and classified, how hosts are enriched, and what flow data cannot see."
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[11px] text-text2">Traffic figures cover</span>
+            <span className="text-xs text-text2">Traffic figures cover</span>
             <TimeRangePicker
               rangeIdx={rangeIdx}
               isCustom={isCustom}
@@ -781,7 +781,7 @@ function IpGroupsTab({ window: w, filter, canManage }: { window: NfWindow; filte
             }}
           </QueryPanel>
           {list.data?.data.import && (
-            <p className="text-[11px] text-text2">
+            <p className="text-xs text-text2">
               Imported once from {list.data.data.import.source ?? 'the legacy groups file'}
               {list.data.data.import.imported_at ? ` on ${formatDateTime(list.data.data.import.imported_at, displayTimeZone(), { seconds: false })}` : ''}
               {list.data.data.import.problems?.length ? ` (${list.data.data.import.problems.length} entries skipped)` : ''}. The file is no longer read.
@@ -850,7 +850,7 @@ function UsageStatus({ usage, window: w }: { usage: ReturnType<typeof useNfQuery
       <Note tone="warning">
         <div>
           Traffic per group could not be loaded: {apiErrorMessage(usage.error)}
-          {apiErrorRef(usage.error) && <span className="ml-1 font-mono text-[11px]">(ref {apiErrorRef(usage.error)})</span>}
+          {apiErrorRef(usage.error) && <span className="ml-1 font-mono text-xs">(ref {apiErrorRef(usage.error)})</span>}
         </div>
         <button type="button" onClick={() => usage.refetch()} className="inline-flex items-center gap-1 font-medium underline-offset-2 hover:underline">
           <RefreshCw className="h-3 w-3" aria-hidden /> Retry
@@ -871,7 +871,7 @@ function UsageStatus({ usage, window: w }: { usage: ReturnType<typeof useNfQuery
     <div className="space-y-2">
       {view === 'stale' && <StaleChip query={usage} />}
       {d && (
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           {formatBytes(d.ungrouped.bytes)} ({formatPercent(shareOf(d.ungrouped.bytes, d.total.bytes))}) of the traffic in this window touched no group.{' '}
           {d.counting}
         </p>
@@ -921,7 +921,7 @@ function GroupTable({
     return (
       <span className="block min-w-[7rem]" title={`${formatBytesExact(u.bytes)}; ${formatCountExact(u.flows)} flow records`}>
         <span className="font-medium tabular-nums text-text">{formatBytes(u.bytes)}</span>
-        <span className="ml-1 text-[11px] text-text2">{pct == null ? '' : formatPercent(pct)}</span>
+        <span className="ml-1 text-xs text-text2">{pct == null ? '' : formatPercent(pct)}</span>
         <ShareBar pct={pct} />
       </span>
     )
@@ -938,7 +938,7 @@ function GroupTable({
     const names = Array.from(new Set(foreign.map((o) => o.group)))
     return (
       <span
-        className="inline-flex items-center gap-1 rounded border border-warning/35 bg-warning/10 px-1.5 py-0.5 text-[11px] font-medium text-warning-fg"
+        className="inline-flex items-center gap-1 rounded border border-warning/35 bg-warning/10 px-1.5 py-0.5 text-xs font-medium text-warning-fg"
         title={foreign.map((o) => `${o.cidr} ${o.relation} ${o.group} ${o.other_cidr}`).join('\n')}
       >
         <AlertTriangle className="h-3 w-3" aria-hidden />
@@ -977,12 +977,12 @@ function GroupTable({
         <Link to={groupLink(g)} className="break-words font-medium text-text hover:underline">
           {g.name}
         </Link>
-        {g.parent_name && <div className="text-[11px] text-text2">Sub-group of {g.parent_name}</div>}
-        {g.description && <div className="line-clamp-2 text-[11px] text-text2">{g.description}</div>}
+        {g.parent_name && <div className="text-xs text-text2">Sub-group of {g.parent_name}</div>}
+        {g.description && <div className="line-clamp-2 text-xs text-text2">{g.description}</div>}
         {g.tags.length > 0 && (
           <div className="mt-0.5 flex flex-wrap gap-1">
             {g.tags.map((t) => (
-              <span key={t} className="rounded bg-surface2 px-1.5 py-px text-[10px] text-text2">
+              <span key={t} className="rounded bg-surface2 px-1.5 py-px text-2xs text-text2">
                 {t}
               </span>
             ))}
@@ -993,18 +993,18 @@ function GroupTable({
   )
   const cidrCell = (g: IpGroup) => (
     <div className="min-w-0">
-      <div className="break-all font-mono text-[11px] text-text">
+      <div className="break-all font-mono text-xs text-text">
         {g.cidrs.slice(0, 3).join(', ')}
         {g.cidrs.length > 3 && <span className="text-text2"> +{g.cidrs.length - 3} more</span>}
       </div>
-      <div className="text-[11px] text-text2">
+      <div className="text-xs text-text2">
         {g.addresses.label}
         {g.children.length > 0 && ` · with sub-groups: ${g.effective_addresses.label}`}
       </div>
       <div className="mt-0.5 flex flex-wrap gap-1">
         {overlapBadge(g)}
         {g.references.saved_views > 0 && (
-          <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-text2">
+          <span className="rounded border border-border px-1.5 py-0.5 text-xs text-text2">
             {g.references.saved_views} saved view{g.references.saved_views === 1 ? '' : 's'}
           </span>
         )}
@@ -1039,7 +1039,7 @@ function GroupTable({
         <table className="w-full text-sm">
           <caption className="sr-only">IP groups with their address ranges and traffic in the selected window</caption>
           <thead>
-            <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-text2">
+            <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text2">
               <th scope="col" className="px-2 py-2 font-medium">Group</th>
               <th scope="col" className="px-2 py-2 font-medium">Addresses</th>
               <th scope="col" className="px-2 py-2 text-right font-medium">Hosts seen</th>
@@ -1055,7 +1055,7 @@ function GroupTable({
                 <td className="max-w-[18rem] px-2 py-2">{cidrCell(g)}</td>
                 <td className="px-2 py-2 text-right">{hosts(g)}</td>
                 <td className="px-2 py-2">{traffic(g)}</td>
-                <td className="whitespace-nowrap px-2 py-2 text-[11px] text-text2">
+                <td className="whitespace-nowrap px-2 py-2 text-xs text-text2">
                   <Who at={g.updated_at} by={g.updated_by} />
                 </td>
                 <td className="px-2 py-2">{actions(g)}</td>
@@ -1232,7 +1232,7 @@ function GroupEditorDialog({
               />
             </Field>
             {parsed.invalid > 0 && (
-              <ul className="space-y-0.5 text-[11px] text-danger-fg" aria-label="Invalid entries">
+              <ul className="space-y-0.5 text-xs text-danger-fg" aria-label="Invalid entries">
                 {parsed.lines.filter((l) => !l.ok).slice(0, 5).map((l, i) => (
                   <li key={i}>
                     <span className="font-mono">{l.raw}</span>: {l.error}
@@ -1269,7 +1269,7 @@ function GroupEditorDialog({
                   role="radio"
                   aria-checked={!color}
                   onClick={() => setColor('')}
-                  className={cn('h-7 rounded-md border px-2 text-[11px] text-text2', !color ? 'border-primary ring-2 ring-primary/40' : 'border-border')}
+                  className={cn('h-7 rounded-md border px-2 text-xs text-text2', !color ? 'border-primary ring-2 ring-primary/40' : 'border-border')}
                 >
                   None
                 </button>
@@ -1320,20 +1320,20 @@ function GroupEditorDialog({
                       <dd className="text-base font-semibold tabular-nums text-text" title={formatBytesExact(traffic.bytes)}>
                         {formatBytes(traffic.bytes)}
                       </dd>
-                      <dd className="text-[11px] text-text2">{formatPercent(shareOf(traffic.bytes, traffic.total_bytes))} of all</dd>
+                      <dd className="text-xs text-text2">{formatPercent(shareOf(traffic.bytes, traffic.total_bytes))} of all</dd>
                     </div>
                   </dl>
                 ) : (
                   <p className="text-text2">No traffic figures.</p>
                 )}
-                <p className="text-[11px] text-text2">In {w.label}{preview.meta?.restricted ? ', exporters you can access' : ''}.</p>
+                <p className="text-xs text-text2">In {w.label}{preview.meta?.restricted ? ', exporters you can access' : ''}.</p>
                 {traffic && traffic.top_hosts.length > 0 && (
                   <div>
                     <div className="mb-1 text-text2">Busiest hosts</div>
                     <ol className="space-y-0.5">
                       {traffic.top_hosts.slice(0, 5).map((h) => (
                         <li key={h.ip} className="flex justify-between gap-2">
-                          <span className="truncate font-mono text-[11px] text-text" title={h.ip}>{h.ip}</span>
+                          <span className="truncate font-mono text-xs text-text" title={h.ip}>{h.ip}</span>
                           <span className="shrink-0 tabular-nums text-text2">{formatBytes(h.bytes)}</span>
                         </li>
                       ))}
@@ -1343,7 +1343,7 @@ function GroupEditorDialog({
                 {foreign.length > 0 && (
                   <div className="space-y-1">
                     <div className="font-medium text-warning-fg">Overlaps other groups</div>
-                    <ul className="space-y-0.5 text-[11px] text-text">
+                    <ul className="space-y-0.5 text-xs text-text">
                       {foreign.slice(0, 5).map((o, i) => (
                         <li key={i}>
                           <span className="font-mono">{o.cidr}</span> {o.relation === 'inside' ? 'is inside' : o.relation === 'contains' ? 'contains' : o.relation === 'equal' ? 'equals' : 'overlaps'}{' '}
@@ -1351,11 +1351,11 @@ function GroupEditorDialog({
                         </li>
                       ))}
                     </ul>
-                    <p className="text-[11px] text-text2">Hosts in both count for both groups; host labels name the more specific range.</p>
+                    <p className="text-xs text-text2">Hosts in both count for both groups; host labels name the more specific range.</p>
                   </div>
                 )}
                 {preview.data.warnings.length > 0 && (
-                  <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-text">
+                  <ul className="list-disc space-y-0.5 pl-4 text-xs text-text">
                     {preview.data.warnings.map((x, i) => (
                       <li key={i}>{x}</li>
                     ))}
@@ -1375,7 +1375,7 @@ function GroupEditorDialog({
             <MutationError error={saveError} />
             <Warnings items={warnings} title="Saved with notes" />
             {group && (
-              <p className="text-[11px] text-text2">
+              <p className="text-xs text-text2">
                 Created <Who at={group.created_at} by={group.created_by} />
                 {group.updated_at !== group.created_at && (
                   <>
@@ -1425,7 +1425,7 @@ function HistoryList({ resource, id }: { resource: 'ip_group' | 'app_rule' | 'en
           {(r) => (
             <ol className="space-y-1">
               {r.data.items.map((h, i) => (
-                <li key={i} className="flex flex-wrap gap-x-2 text-[11px]">
+                <li key={i} className="flex flex-wrap gap-x-2 text-xs">
                   <span className="text-text2">{formatDateTime(h.at, displayTimeZone(), { seconds: false })}</span>
                   <span className="font-medium text-text">{h.actor ?? 'system'}</span>
                   <span className="text-text2">{h.action.replace(/^netflow\./, '').replace(/[._]/g, ' ')}</span>
@@ -1534,7 +1534,7 @@ function ImportDialog({ onClose, onApplied }: { onClose: () => void; onApplied: 
             </label>
             <span className="text-text2">{fileName ?? 'or paste the JSON below'}</span>
           </div>
-          <Textarea aria-label="Groups JSON" value={text} onChange={(e) => setText(e.target.value)} rows={6} spellCheck={false} className="font-mono text-[11px]" placeholder='{"groups": [{"name": "HQ", "cidrs": ["10.1.0.0/16"]}]}' />
+          <Textarea aria-label="Groups JSON" value={text} onChange={(e) => setText(e.target.value)} rows={6} spellCheck={false} className="font-mono text-xs" placeholder='{"groups": [{"name": "HQ", "cidrs": ["10.1.0.0/16"]}]}' />
           {parseError && <FieldError>{parseError}</FieldError>}
           <fieldset className="space-y-1">
             <legend className="font-medium text-text">Mode</legend>
@@ -1787,13 +1787,13 @@ function RulesTable({
         <Link to={buildNetflowLink('/netflow', { window: w, filter: { app: r.application } })} className="break-words font-medium text-text hover:underline">
           {r.application}
         </Link>
-        <div className="text-[11px] text-text2">
+        <div className="text-xs text-text2">
           {r.category ?? 'No category'}
           {r.service ? ` · service "${r.service}"` : ''}
         </div>
       </div>
     ),
-    match: <span className="break-all font-mono text-[11px] text-text">{describeRuleMatch(r)}</span>,
+    match: <span className="break-all font-mono text-xs text-text">{describeRuleMatch(r)}</span>,
     toggle: (
       <span className="inline-flex items-center gap-2">
         <Switch
@@ -1802,7 +1802,7 @@ function RulesTable({
           onCheckedChange={(v) => onToggle(r, v)}
           aria-label={`${r.enabled ? 'Disable' : 'Enable'} the ${r.application} rule`}
         />
-        <span className="text-[11px] text-text2">{r.enabled ? 'On' : 'Off'}</span>
+        <span className="text-xs text-text2">{r.enabled ? 'On' : 'Off'}</span>
       </span>
     ),
     actions: (
@@ -1830,7 +1830,7 @@ function RulesTable({
                 {c.actions}
               </div>
               <div className="mt-1">{c.match}</div>
-              <div className="mt-2 flex items-center justify-between text-[11px] text-text2">
+              <div className="mt-2 flex items-center justify-between text-xs text-text2">
                 <span>Priority {r.priority}</span>
                 {c.toggle}
               </div>
@@ -1842,7 +1842,7 @@ function RulesTable({
         <table className="w-full text-sm">
           <caption className="sr-only">Application rules in the order they apply</caption>
           <thead>
-            <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-text2">
+            <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text2">
               <th scope="col" className="px-2 py-2 text-right font-medium">Priority</th>
               <th scope="col" className="px-2 py-2 font-medium">Application</th>
               <th scope="col" className="px-2 py-2 font-medium">Matches</th>
@@ -1860,7 +1860,7 @@ function RulesTable({
                   <td className="max-w-[16rem] px-2 py-2">{c.app}</td>
                   <td className="max-w-[20rem] px-2 py-2">{c.match}</td>
                   <td className="px-2 py-2">{c.toggle}</td>
-                  <td className="whitespace-nowrap px-2 py-2 text-[11px] text-text2"><Who at={r.updated_at} by={r.updated_by} /></td>
+                  <td className="whitespace-nowrap px-2 py-2 text-xs text-text2"><Who at={r.updated_at} by={r.updated_by} /></td>
                   <td className="px-2 py-2">{c.actions}</td>
                 </tr>
               )
@@ -2073,7 +2073,7 @@ function RuleEditorDialog({
             ) : previewError ? (
               <p className="text-danger-fg">
                 Preview unavailable: {apiErrorMessage(previewError)}
-                {apiErrorRef(previewError) && <span className="ml-1 font-mono text-[11px]">(ref {apiErrorRef(previewError)})</span>}
+                {apiErrorRef(previewError) && <span className="ml-1 font-mono text-xs">(ref {apiErrorRef(previewError)})</span>}
               </p>
             ) : preview ? (
               <RulePreviewView preview={preview} />
@@ -2123,7 +2123,7 @@ function RulePreviewView({ preview }: { preview: RulePreview }) {
         )}
       </p>
       {p.already.application && p.already.flows > 0 && (
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           {formatCount(p.already.flows)} flow records are already {p.already.application}.
         </p>
       )}
@@ -2131,12 +2131,12 @@ function RulePreviewView({ preview }: { preview: RulePreview }) {
         <ul className="space-y-1.5">
           {p.changes.slice(0, 6).map((c, i) => (
             <li key={i} className="rounded border border-border bg-surface p-2">
-              <div className="flex flex-wrap items-center gap-1 text-[11px] text-text">
+              <div className="flex flex-wrap items-center gap-1 text-xs text-text">
                 <span className="text-text2">{c.from}</span>
                 <ArrowRight className="h-3 w-3 text-text2" aria-label="becomes" />
                 <span className="font-medium">{c.to}</span>
               </div>
-              <div className="text-[11px] text-text2">
+              <div className="text-xs text-text2">
                 {formatCount(c.flows)} flows · {formatBytes(c.bytes)}
                 {c.examples.length > 0 && ` · e.g. ${c.examples.map((e) => e.service ?? `${protocolLabel(e.protocol)}`).join(', ')}`}
               </div>
@@ -2144,7 +2144,7 @@ function RulePreviewView({ preview }: { preview: RulePreview }) {
           ))}
         </ul>
       )}
-      <p className="text-[11px] text-text2">{p.basis}</p>
+      <p className="text-xs text-text2">{p.basis}</p>
     </div>
   )
 }
@@ -2163,9 +2163,9 @@ function ClassificationView({ c, title }: { c: Classification; title: string }) 
   }
   return (
     <div className="min-w-0 rounded-md border border-border p-2">
-      <div className="text-[11px] text-text2">{title}</div>
+      <div className="text-xs text-text2">{title}</div>
       <div className="break-words text-sm font-semibold text-text">{c.application}</div>
-      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[11px]">
+      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
         <dt className="text-text2">Service</dt>
         <dd className="text-text">{c.port_applicable ? c.service ?? 'Unknown' : c.service ?? 'Not applicable (no ports)'}</dd>
         <dt className="text-text2">Direction</dt>
@@ -2367,9 +2367,9 @@ function ExporterNamesCard({ window: w, filter }: { window: NfWindow; filter: Fl
                           <span className="min-w-0 break-words font-medium text-text">{a.name ?? 'Unnamed'}</span>
                           <span className="shrink-0 tabular-nums" title={formatBytesExact(a.bytes)}>{formatBytes(a.bytes)}</span>
                         </div>
-                        {a.description && <div className="text-[11px] text-text2">{a.description}</div>}
-                        {a.application && a.application !== a.name && <div className="text-[11px] text-text2">Counted as {a.application}</div>}
-                        <div className="mt-0.5 flex flex-wrap gap-x-2 text-[11px] text-text2">
+                        {a.description && <div className="text-xs text-text2">{a.description}</div>}
+                        {a.application && a.application !== a.name && <div className="text-xs text-text2">Counted as {a.application}</div>}
+                        <div className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-text2">
                           <span className="font-mono">{a.engine}:{a.selector}</span>
                           {a.category && <span>{a.category}</span>}
                           <span>
@@ -2386,7 +2386,7 @@ function ExporterNamesCard({ window: w, filter }: { window: NfWindow; filter: Fl
                     <table className="w-full text-sm">
                       <caption className="sr-only">Application names announced by exporters and their traffic</caption>
                       <thead>
-                        <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-text2">
+                        <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text2">
                           <th scope="col" className="px-2 py-2 font-medium">Application</th>
                           <th scope="col" className="px-2 py-2 font-medium">Id</th>
                           <th scope="col" className="px-2 py-2 font-medium">Category</th>
@@ -2399,13 +2399,13 @@ function ExporterNamesCard({ window: w, filter }: { window: NfWindow; filter: Fl
                           <tr key={a.app_id} className="border-b border-border last:border-0">
                             <td className="px-2 py-1.5">
                               <div className="font-medium text-text">{a.name ?? 'Unnamed'}</div>
-                              {a.description && <div className="text-[11px] text-text2">{a.description}</div>}
-                              {a.application && a.application !== a.name && <div className="text-[11px] text-text2">Counted as {a.application}</div>}
+                              {a.description && <div className="text-xs text-text2">{a.description}</div>}
+                              {a.application && a.application !== a.name && <div className="text-xs text-text2">Counted as {a.application}</div>}
                             </td>
-                            <td className="px-2 py-1.5 font-mono text-[11px] text-text2">{a.engine}:{a.selector}</td>
+                            <td className="px-2 py-1.5 font-mono text-xs text-text2">{a.engine}:{a.selector}</td>
                             <td className="px-2 py-1.5 text-text2">{a.category ?? '—'}</td>
                             <td className="px-2 py-1.5 text-right tabular-nums" title={formatBytesExact(a.bytes)}>{formatBytes(a.bytes)}</td>
-                            <td className="px-2 py-1.5 text-[11px] text-text2">
+                            <td className="px-2 py-1.5 text-xs text-text2">
                               {a.exporter}
                               {a.exporters > 1 ? ` +${a.exporters - 1}` : ''} · {relativeTime(a.updated_at)}
                             </td>
@@ -2457,9 +2457,9 @@ function BuiltinCard({ catalogue }: { catalogue: ReturnType<typeof useNfQuery<Ca
                     <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-2">
                       <span className="min-w-0">
                         <span className="font-medium text-text">{a.application}</span>
-                        {a.category.toLowerCase() !== a.application.toLowerCase() && <span className="ml-1.5 text-[11px] text-text2">· {a.category}</span>}
+                        {a.category.toLowerCase() !== a.application.toLowerCase() && <span className="ml-1.5 text-xs text-text2">· {a.category}</span>}
                       </span>
-                      <span className="shrink-0 text-[11px] text-text2">
+                      <span className="shrink-0 text-xs text-text2">
                         {a.ports.length ? `${a.ports.length} port${a.ports.length === 1 ? '' : 's'}` : ''}
                         {a.protocols.length ? `${a.ports.length ? ' · ' : ''}${a.protocols.map((p) => p.name).join(', ')}` : ''}
                       </span>
@@ -2469,7 +2469,7 @@ function BuiltinCard({ catalogue }: { catalogue: ReturnType<typeof useNfQuery<Ca
                         {a.ports.map((p) => (
                           <li key={p.port} className="flex justify-between gap-2">
                             <span className="text-text">{p.service}</span>
-                            <span className="font-mono text-[11px] text-text2">
+                            <span className="font-mono text-xs text-text2">
                               {p.port}/{p.transports.join('+').toLowerCase()}
                             </span>
                           </li>
@@ -2681,7 +2681,7 @@ function RdnsCard({ status, canManage }: { status: ReturnType<typeof useNfQuery<
                     caption={`"No record" kept ${Math.round(d.cache.negative_ttl_s / 60)} min`}
                   />
                 </div>
-                <p className="text-[11px] text-text2">
+                <p className="text-xs text-text2">
                   Resolver{d.resolvers.length === 1 ? '' : 's'}: {d.resolvers.length ? <span className="font-mono">{d.resolvers.join(', ')}</span> : 'unknown'}
                   {d.updated_at && <> · changed <Who at={d.updated_at} by={null} /></>}
                 </p>
@@ -2740,7 +2740,7 @@ function RdnsCard({ status, canManage }: { status: ReturnType<typeof useNfQuery<
                     {testError && !responseFieldErrors(testError).ip ? <MutationError error={testError} /> : null}
                   </form>
                 )}
-                <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-text2">
+                <ul className="list-disc space-y-0.5 pl-4 text-xs text-text2">
                   {d.notes.map((n, i) => (
                     <li key={i}>{n}</li>
                   ))}
@@ -2826,8 +2826,8 @@ function GeoipCard({ status, canManage }: { status: ReturnType<typeof useNfQuery
                     />
                   ))}
                 </div>
-                <p className="text-[11px] text-text2">{g.refresh}</p>
-                <p className="text-[11px] text-text2">{g.attribution}</p>
+                <p className="text-xs text-text2">{g.refresh}</p>
+                <p className="text-xs text-text2">{g.attribution}</p>
                 {canManage && (
                   <form
                     className="space-y-2 rounded-md border border-border p-3"
@@ -2837,7 +2837,7 @@ function GeoipCard({ status, canManage }: { status: ReturnType<typeof useNfQuery
                     }}
                   >
                     <div className="text-xs font-medium text-text">Install a database file</div>
-                    <p className="text-[11px] text-text2">For appliances without internet access: a MaxMind DB (.mmdb), gzip'ed, or a .tar.gz containing one (DB-IP Lite or MaxMind GeoLite2/GeoIP2).</p>
+                    <p className="text-xs text-text2">For appliances without internet access: a MaxMind DB (.mmdb), gzip'ed, or a .tar.gz containing one (DB-IP Lite or MaxMind GeoLite2/GeoIP2).</p>
                     {!g.writable && <Note tone="warning">The GeoIP directory is not writable by the API service; uploads will fail.</Note>}
                     <div className="flex flex-wrap items-end gap-2">
                       <Field label="Database" htmlFor="geo-kind">
@@ -2959,7 +2959,7 @@ function VisibilityCard({ window: w, filter }: { window: NfWindow; filter: FlowF
                             <span className="break-all font-mono text-text">{e.exporter}</span>
                             <span className="shrink-0 tabular-nums text-text2">{formatCount(e.records)} records</span>
                           </div>
-                          <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
+                          <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
                             {(
                               [
                                 ['Tunnelled', shareOf(e.tunnel_bytes, e.bytes)],
@@ -2981,7 +2981,7 @@ function VisibilityCard({ window: w, filter }: { window: NfWindow; filter: FlowF
                       <table className="w-full text-xs">
                         <caption className="sr-only">Visibility limits per exporter</caption>
                         <thead>
-                          <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-text2">
+                          <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text2">
                             <th scope="col" className="px-2 py-1.5 font-medium">Exporter</th>
                             <th scope="col" className="px-2 py-1.5 text-right font-medium">Records</th>
                             <th scope="col" className="px-2 py-1.5 text-right font-medium">Tunnelled</th>
@@ -3056,8 +3056,8 @@ function RetentionItem({ label, days, earliest, tz, note }: { label: string; day
     <div className="rounded-md border border-border p-3">
       <dt className="text-text2">{label}</dt>
       <dd className="mt-1 text-lg font-semibold tabular-nums text-text">{days != null ? `${days} days` : 'Unknown'}</dd>
-      <dd className="text-[11px] text-text2">{earliest ? `Oldest data ${formatDateTime(earliest, tz, { seconds: false })}` : 'No data stored yet'}</dd>
-      <dd className="mt-1 text-[11px] text-text2">{note}</dd>
+      <dd className="text-xs text-text2">{earliest ? `Oldest data ${formatDateTime(earliest, tz, { seconds: false })}` : 'No data stored yet'}</dd>
+      <dd className="mt-1 text-xs text-text2">{note}</dd>
     </div>
   )
 }

@@ -622,7 +622,7 @@ interface DataQuality {
 function DqStat({ label, value, tone }: { label: string; value: React.ReactNode; tone?: 'danger' | 'warning' }) {
   return (
     <div className="rounded-lg border border-border bg-surface2/30 px-3 py-2">
-      <div className="text-[11px] text-muted">{label}</div>
+      <div className="text-xs text-muted">{label}</div>
       <div className={`mt-0.5 text-lg font-semibold tabular-nums ${
         tone === 'danger' ? 'text-danger' : tone === 'warning' ? 'text-warning' : 'text-text'}`}>
         {value}
@@ -681,7 +681,7 @@ function DataQualityCard() {
 
             {d.services.length > 0 && (
               <div>
-                <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+                <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-muted">
                   Service reporting freshness
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -705,7 +705,7 @@ function DataQualityCard() {
 
             {d.agent_forwarders.length > 0 && (
               <div>
-                <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+                <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-muted">
                   Agent APM forwarders
                 </div>
                 <Table>
@@ -1128,7 +1128,7 @@ function CopyOnceDialog({ value, lastUsedAt = null, onClose }: {
           <>
             <div className="mt-3">
               <div className="mb-1.5 flex items-center justify-between gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted">
                   Install snippet — paste before &lt;/head&gt;
                 </span>
                 <Button variant="outline" size="sm" className="h-7 shrink-0"
@@ -1290,7 +1290,7 @@ function KeyDetailsDialog({ keyRow, onClose, onEdit }: {
             ) : (
               <>
                 <div className="mb-1.5 flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted">
                     Install snippet — paste before &lt;/head&gt;
                   </span>
                   <Button variant="outline" size="sm" className="h-7 shrink-0"
@@ -1323,7 +1323,7 @@ function KeyDetailsDialog({ keyRow, onClose, onEdit }: {
         {canReveal && plaintext && (
           <div className="mt-3 rounded-md border border-border px-3 py-2.5">
             <div className="mb-1.5 flex items-center justify-between gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+              <span className="text-xs font-semibold uppercase tracking-wider text-muted">
                 Public key — for a config file or env var
               </span>
               <Button variant="outline" size="sm" className="h-7 shrink-0"
@@ -1536,7 +1536,7 @@ function SourceMapsTab() {
           </div>
           <details className="rounded-md border border-border px-3 py-2">
             <summary className="cursor-pointer text-xs font-medium text-text">Upload from a build pipeline</summary>
-            <pre className="mt-2 overflow-x-auto rounded-md bg-surface2/60 p-3 text-[11px] leading-relaxed text-text"><code>{`curl -X POST "${uploadUrl}" \\
+            <pre className="mt-2 overflow-x-auto rounded-md bg-surface2/60 p-3 text-xs leading-relaxed text-text"><code>{`curl -X POST "${uploadUrl}" \\
   -H "Authorization: Bearer $ZENPLUS_TOKEN" -H "Content-Type: application/json" \\
   --data-binary @dist/app.3f2a1c.js.map`}</code></pre>
             <p className="mt-2 text-xs text-muted">Re-uploading the same application, release and file replaces the earlier map. Maps up to 25 MB are accepted.</p>

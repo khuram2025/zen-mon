@@ -125,19 +125,19 @@ export function ContactMethodsCard() {
                 type={kind === 'email' ? 'email' : 'tel'}
                 maxLength={255}
               />
-              {touched && error && <p className="mt-1 text-[11px] text-danger">{error}</p>}
+              {touched && error && <p className="mt-1 text-xs text-danger">{error}</p>}
             </div>
             <Input aria-label="Label (optional)" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label, e.g. Work mobile" maxLength={100} />
             <Button type="submit" size="sm" className="h-9" disabled={busy || (touched && !!error)}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Plus className="h-3.5 w-3.5" aria-hidden />} Add
             </Button>
           </form>
-          <p className="text-[11px] text-muted">SMS uses the default SMS gateway. The same address listed by several targets is sent once per step.</p>
+          <p className="text-xs text-muted">SMS uses the default SMS gateway. The same address listed by several targets is sent once per step.</p>
         </div>
         <div className="space-y-2">
           <div className="text-xs font-medium uppercase tracking-wider text-muted">Your time zone</div>
           <TimezoneSelect value={zone} orgTz={orgTz} at={new Date()} onChange={setTz} />
-          <p className="text-[11px] text-muted">Used to show your on-call shifts and notification times. Audit records stay in UTC.</p>
+          <p className="text-xs text-muted">Used to show your on-call shifts and notification times. Audit records stay in UTC.</p>
           <div className="flex justify-end">
             <Button size="sm" disabled={busy || tz == null || tz === (data.timezone ?? '')} onClick={() => save.mutate({ methods, timezone: tz || null }, { onSuccess: () => setTz(null) })}>
               <Save className="h-3.5 w-3.5" aria-hidden /> Save time zone

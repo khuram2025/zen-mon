@@ -2096,8 +2096,8 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
                 </button>
                 <DeviceHoverCard node={liveFocusNode} nodeLive={nodesLive[liveFocusNode.id]} sk={statusKey(nodesLive[liveFocusNode.id]?.status ?? liveFocusNode.status)} />
                 <div className="mt-1 flex gap-1">
-                  <button type="button" onClick={() => openEntity(liveFocusNode)} className="flex-1 rounded-md border border-border bg-surface/95 px-2 py-1 text-[10px] font-semibold text-text2 shadow hover:border-primary/50 hover:text-text">{nodeKindOf(liveFocusNode) === 'device' ? 'Device page' : nodeKindOf(liveFocusNode) === 'server' ? 'Server page' : 'Check page'}</button>
-                  {nodeKindOf(liveFocusNode) === 'device' && <button type="button" onClick={() => window.open(`/alerts?device=${liveFocusNode.device_id}`, '_blank')} className="flex-1 rounded-md border border-border bg-surface/95 px-2 py-1 text-[10px] font-semibold text-text2 shadow hover:border-primary/50 hover:text-text">Alerts</button>}
+                  <button type="button" onClick={() => openEntity(liveFocusNode)} className="flex-1 rounded-md border border-border bg-surface/95 px-2 py-1 text-2xs font-semibold text-text2 shadow hover:border-primary/50 hover:text-text">{nodeKindOf(liveFocusNode) === 'device' ? 'Device page' : nodeKindOf(liveFocusNode) === 'server' ? 'Server page' : 'Check page'}</button>
+                  {nodeKindOf(liveFocusNode) === 'device' && <button type="button" onClick={() => window.open(`/alerts?device=${liveFocusNode.device_id}`, '_blank')} className="flex-1 rounded-md border border-border bg-surface/95 px-2 py-1 text-2xs font-semibold text-text2 shadow hover:border-primary/50 hover:text-text">Alerts</button>}
                 </div>
               </div>
             )}
@@ -2128,12 +2128,12 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
               <ToolBtn disabled={selCount < 1} active={selLocked} onClick={toggleLockSelected} title={selLocked ? 'Unlock selection (L)' : 'Lock selection (L)'}>{selLocked ? <Lock className="h-4 w-4" /> : <LockOpen className="h-4 w-4" />}</ToolBtn>
               <ToolBtn disabled={selCount < 1} onClick={copySelected} title="Copy (Ctrl+C)"><Copy className="h-4 w-4" /></ToolBtn>
               <ToolBtn disabled={selCount < 1} danger onClick={deleteSelected} title="Delete selected (Del)"><Trash2 className="h-4 w-4" /></ToolBtn>
-              {selCount > 0 && <span className="px-1.5 text-[11px] font-semibold text-muted">{selCount} sel</span>}
+              {selCount > 0 && <span className="px-1.5 text-xs font-semibold text-muted">{selCount} sel</span>}
               <div className="mx-0.5 h-5 w-px bg-border" />
               <FindBox nodes={detail.nodes} shapes={detail.shapes || []} onPick={(id) => focusNode(id, true)} compact />
               <div className="mx-0.5 h-5 w-px bg-border" />
               <span
-                className={cn('flex items-center gap-1 px-1.5 text-[10px] font-semibold', pendingMutations > 0 ? 'text-warning' : 'text-success/80')}
+                className={cn('flex items-center gap-1 px-1.5 text-2xs font-semibold', pendingMutations > 0 ? 'text-warning' : 'text-success/80')}
                 title={pendingMutations > 0 ? 'Saving changes…' : 'All changes saved automatically'}
               >
                 {pendingMutations > 0 ? <CloudUpload className="h-3.5 w-3.5 animate-pulse" /> : <Check className="h-3.5 w-3.5" />}
@@ -2316,7 +2316,7 @@ function FindBox({ nodes, shapes, onPick, compact }: { nodes: ManualMapNode[]; s
           {matches.map((n) => (
             <button key={n.id} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => pick(n.id)} className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-xs hover:bg-primary/10">
               <span className="truncate font-medium text-text">{n.label}</span>
-              <span className="shrink-0 font-mono text-[10px] text-muted">{n.sub}</span>
+              <span className="shrink-0 font-mono text-2xs text-muted">{n.sub}</span>
             </button>
           ))}
         </div>

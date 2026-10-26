@@ -13,7 +13,7 @@ import {
 import { Panel } from './PanelCard'
 import { ViewToggle, type ChartView } from './ViewToggle'
 
-const th = 'px-2 py-1.5 text-left text-[10.5px] font-semibold uppercase tracking-wider text-muted'
+const th = 'px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wider text-muted'
 const thRight = cn(th, 'text-right')
 
 /** A hatched swatch for "unknown", a coloured one for the five biggest families, a neutral one for the rest. */
@@ -63,7 +63,7 @@ export function OsFamilyPanel({ os, kind }: { os: OsResponse; kind: OsKindChoice
           <Donut
             slices={m.slices}
             label={donutSummary(m)}
-            centre={<><span className="text-xl font-bold tabular-nums leading-none text-text">{fmtInt(m.total)}</span><span className="mt-0.5 max-w-[5.5rem] text-[10px] uppercase leading-tight tracking-wider text-muted">{m.noun}</span></>}
+            centre={<><span className="text-xl font-bold tabular-nums leading-none text-text">{fmtInt(m.total)}</span><span className="mt-0.5 max-w-[5.5rem] text-2xs uppercase leading-tight tracking-wider text-muted">{m.noun}</span></>}
           />
           <ul role="list" aria-label="Operating system families" className="w-full min-w-0 flex-1 space-y-0.5">
             {m.legend.flatMap((l, i) => {
@@ -71,13 +71,13 @@ export function OsFamilyPanel({ os, kind }: { os: OsResponse; kind: OsKindChoice
                 <li key={l.key}>
                   <DrillTarget
                     drill={l.drill}
-                    className={cn('flex items-center gap-2 rounded-md py-1 pr-1.5 text-[13px] hover:bg-surface2 hover:no-underline', l.tail ? 'pl-5' : 'pl-1.5')}
+                    className={cn('flex items-center gap-2 rounded-md py-1 pr-1.5 text-sm hover:bg-surface2 hover:no-underline', l.tail ? 'pl-5' : 'pl-1.5')}
                     ariaLabel={`${l.label}${l.tail ? ' (in the grey Other slice)' : ''}: ${fmtInt(l.count)} ${nounFor(l.count, m.noun)}, ${fmtPct(l.pct)}`}
                   >
                     <Swatch color={l.color} unknown={l.unknown} />
                     <span className={cn('min-w-0 flex-1 break-words leading-tight', l.unknown && 'italic text-muted', l.tail && 'text-text2')}>{l.label}</span>
                     <span className="w-9 text-right font-medium tabular-nums">{fmtInt(l.count)}</span>
-                    <span className="w-12 text-right text-[11px] tabular-nums text-muted">{fmtPct(l.pct)}</span>
+                    <span className="w-12 text-right text-xs tabular-nums text-muted">{fmtPct(l.pct)}</span>
                   </DrillTarget>
                 </li>
               )
@@ -88,13 +88,13 @@ export function OsFamilyPanel({ os, kind }: { os: OsResponse; kind: OsKindChoice
                 <li key="__other__" data-legend-other="">
                   <DrillTarget
                     drill={m.other.drill}
-                    className="flex items-center gap-2 rounded-md px-1.5 py-1 text-[13px] hover:bg-surface2 hover:no-underline"
+                    className="flex items-center gap-2 rounded-md px-1.5 py-1 text-sm hover:bg-surface2 hover:no-underline"
                     ariaLabel={`${m.other.label}, the grey slice: ${fmtInt(m.other.count)} ${nounFor(m.other.count, m.noun)}, ${fmtPct(m.other.pct)}. Listed below.`}
                   >
                     <Swatch />
                     <span className="min-w-0 flex-1 break-words font-medium leading-tight">{m.other.label}</span>
                     <span className="w-9 text-right font-medium tabular-nums">{fmtInt(m.other.count)}</span>
-                    <span className="w-12 text-right text-[11px] tabular-nums text-muted">{fmtPct(m.other.pct)}</span>
+                    <span className="w-12 text-right text-xs tabular-nums text-muted">{fmtPct(m.other.pct)}</span>
                   </DrillTarget>
                 </li>,
                 row,
@@ -129,8 +129,8 @@ function CurrencyItem({ r }: { r: CurrencyRow }) {
   return (
     <li className="space-y-1.5" data-currency={r.key} title={currencySentence(r)}>
       <div className="flex items-baseline justify-between gap-3">
-        <span className="min-w-0 truncate text-[13px] font-medium" title={r.label}>{r.label}</span>
-        <span className="shrink-0 text-[11px] tabular-nums text-muted">{fmtInt(r.count)} {r.count === 1 ? 'asset' : 'assets'}</span>
+        <span className="min-w-0 truncate text-sm font-medium" title={r.label}>{r.label}</span>
+        <span className="shrink-0 text-xs tabular-nums text-muted">{fmtInt(r.count)} {r.count === 1 ? 'asset' : 'assets'}</span>
       </div>
       {r.currency && r.latest ? (
         <>
@@ -138,30 +138,30 @@ function CurrencyItem({ r }: { r: CurrencyRow }) {
           {/* Each cell is wide enough for a four-part Windows build (10.0.20348.2700): the one thing this card compares. */}
           <dl className="grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-x-3 gap-y-1.5 text-xs">
             <div className="min-w-0">
-              <dt className="text-[10.5px] uppercase tracking-wider text-muted">Latest observed</dt>
+              <dt className="text-xs uppercase tracking-wider text-muted">Latest observed</dt>
               <dd className="flex items-baseline gap-1.5">
                 <DrillTarget drill={r.latest.drill} className="text-sm font-semibold text-text" ariaLabel={`${r.label}, latest observed ${r.latest.version}: ${fmtInt(r.latest.count)} ${nounFor(r.latest.count, 'assets')}`}>{fmtInt(r.latest.count)}</DrillTarget>
-                <code className="break-all font-mono text-[11px] leading-4 text-text2" title={r.latest.version}>{r.latest.version}</code>
+                <code className="break-all font-mono text-xs leading-4 text-text2" title={r.latest.version}>{r.latest.version}</code>
               </dd>
             </div>
             {r.previous && (
               <div className="min-w-0">
-                <dt className="text-[10.5px] uppercase tracking-wider text-muted" title="One version behind the latest observed">N-1</dt>
+                <dt className="text-xs uppercase tracking-wider text-muted" title="One version behind the latest observed">N-1</dt>
                 <dd className="flex items-baseline gap-1.5">
                   <DrillTarget drill={r.previous.drill} className="text-sm font-semibold text-text" ariaLabel={`${r.label}, N-1 ${r.previous.version}: ${fmtInt(r.previous.count)} ${nounFor(r.previous.count, 'assets')}`}>{fmtInt(r.previous.count)}</DrillTarget>
-                  <code className="break-all font-mono text-[11px] leading-4 text-text2" title={r.previous.version}>{r.previous.version}</code>
+                  <code className="break-all font-mono text-xs leading-4 text-text2" title={r.previous.version}>{r.previous.version}</code>
                 </dd>
               </div>
             )}
             {r.older > 0 && (
               <div className="min-w-0">
-                <dt className="text-[10.5px] uppercase tracking-wider text-muted" title="Two or more versions behind: several versions, so no single list">Older</dt>
+                <dt className="text-xs uppercase tracking-wider text-muted" title="Two or more versions behind: several versions, so no single list">Older</dt>
                 <dd className="text-sm font-semibold tabular-nums text-text">{fmtInt(r.older)}</dd>
               </div>
             )}
             {r.unknown > 0 && (
               <div className="min-w-0">
-                <dt className="text-[10.5px] uppercase tracking-wider text-muted">No usable version</dt>
+                <dt className="text-xs uppercase tracking-wider text-muted">No usable version</dt>
                 <dd className="text-sm font-semibold tabular-nums text-text">{fmtInt(r.unknown)}</dd>
               </div>
             )}
@@ -202,13 +202,13 @@ export function OsCurrencyPanel({ os, kind }: { os: OsResponse; kind: OsKindChoi
               {all ? 'Show fewer releases' : `Show all ${fmtInt(rows.length)} releases`}
             </button>
           )}
-          <ul role="list" aria-label="Key" className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
+          <ul role="list" aria-label="Key" className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
             <li className="inline-flex items-center gap-1.5"><span aria-hidden className="h-2 w-2 rounded-sm" style={{ background: 'rgb(var(--primary) / 0.9)' }} />Latest observed</li>
             <li className="inline-flex items-center gap-1.5"><span aria-hidden className="h-2 w-2 rounded-sm" style={{ background: 'rgb(var(--primary) / 0.5)' }} />N-1</li>
             <li className="inline-flex items-center gap-1.5"><span aria-hidden className="h-2 w-2 rounded-sm" style={{ background: 'rgb(var(--muted) / 0.6)' }} />Older</li>
             <li className="inline-flex items-center gap-1.5"><Swatch unknown />No usable version</li>
           </ul>
-          <p className="border-t border-border pt-2.5 text-[11px] leading-4 text-muted" data-currency-note="">{CURRENCY_NOTE}</p>
+          <p className="border-t border-border pt-2.5 text-xs leading-4 text-muted" data-currency-note="">{CURRENCY_NOTE}</p>
         </div>
       )}
     </Panel>

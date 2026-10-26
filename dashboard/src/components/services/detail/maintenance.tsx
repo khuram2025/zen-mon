@@ -175,7 +175,7 @@ export function MaintenanceWindowList({ windows, supported, nowMs, onEnd, ending
 
   if (windows.length === 0) {
     return (
-      <p className="text-[12px] text-muted">
+      <p className="text-sm text-muted">
         The window covering this monitor could not be identified from here.{' '}
         <Link to="/services/maintenance" className="font-medium text-primary hover:underline">Open Maintenance</Link> to review it.
       </p>
@@ -186,8 +186,8 @@ export function MaintenanceWindowList({ windows, supported, nowMs, onEnd, ending
       {windows.map((w) => {
         const inherited = w.scope_type !== 'check'
         return (
-          <div key={w.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
-            <span className="rounded border border-info/40 bg-info/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-info">
+          <div key={w.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+            <span className="rounded border border-info/40 bg-info/10 px-1.5 py-px text-2xs font-semibold uppercase tracking-wider text-info">
               {scopeText(w)}
             </span>
             <span className="tabular-nums">
@@ -205,7 +205,7 @@ export function MaintenanceWindowList({ windows, supported, nowMs, onEnd, ending
                 </Button>
               ) : null}
               {inherited && (
-                <Link to="/services/maintenance" className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline">
+                <Link to="/services/maintenance" className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
                   Managed in Maintenance <ExternalLink className="h-3 w-3" />
                 </Link>
               )}
@@ -242,7 +242,7 @@ export function MaintenanceBanner({ windows, supported, slaExcludesMaintenance, 
         <div className="min-w-0 flex-1 space-y-2">
           <div>
             <span className="text-xs font-semibold uppercase tracking-wider text-info">In maintenance</span>
-            <p className="mt-0.5 text-[12.5px] leading-relaxed">
+            <p className="mt-0.5 text-sm leading-relaxed">
               Probes still run. Alerts are suppressed.
               {slaExcludesMaintenance ? ' Maintenance time is excluded from SLA and availability figures.' : ''}
             </p>
@@ -364,7 +364,7 @@ export function MaintenanceDialog({
         </DialogHeader>
         {activeWindows.length > 0 && (
           <div className="rounded-md border border-info/30 bg-info/5 p-2.5">
-            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-info">Active now</div>
+            <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-info">Active now</div>
             <MaintenanceWindowList windows={activeWindows} supported={supported} nowMs={nowMs} onEnd={onEnd} ending={ending} />
           </div>
         )}
@@ -375,7 +375,7 @@ export function MaintenanceDialog({
               type="button"
               aria-pressed={mode === m}
               onClick={() => setMode(m)}
-              className={cn('flex-1 rounded px-2 py-1 text-[11px] font-medium', mode === m ? 'bg-surface text-text' : 'text-muted')}
+              className={cn('flex-1 rounded px-2 py-1 text-xs font-medium', mode === m ? 'bg-surface text-text' : 'text-muted')}
             >
               {m === 'preset' ? 'Start now' : 'Schedule'}
             </button>
@@ -392,19 +392,19 @@ export function MaintenanceDialog({
         ) : (
           <div className="space-y-3">
             <div>
-              <label htmlFor="maint-start" className="mb-1 block text-[10px] uppercase tracking-wider text-muted">Starts at</label>
+              <label htmlFor="maint-start" className="mb-1 block text-2xs uppercase tracking-wider text-muted">Starts at</label>
               <input id="maint-start" type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)}
                 aria-invalid={!!error} aria-describedby={error ? 'maint-error' : 'maint-tz'}
                 className="w-full rounded-md border border-border bg-surface2 px-2 py-1.5 text-xs" />
             </div>
             <div>
-              <label htmlFor="maint-end" className="mb-1 block text-[10px] uppercase tracking-wider text-muted">Ends at</label>
+              <label htmlFor="maint-end" className="mb-1 block text-2xs uppercase tracking-wider text-muted">Ends at</label>
               <input id="maint-end" type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)}
                 aria-invalid={!!error} aria-describedby={error ? 'maint-error' : 'maint-tz'}
                 className="w-full rounded-md border border-border bg-surface2 px-2 py-1.5 text-xs" />
             </div>
-            <p id="maint-tz" className="text-[10px] text-muted">Times are in {browserTimezone()} ({utcOffsetLabel()}).</p>
-            {error && <div id="maint-error" role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-2 py-1.5 text-[11px] text-danger">{error}</div>}
+            <p id="maint-tz" className="text-2xs text-muted">Times are in {browserTimezone()} ({utcOffsetLabel()}).</p>
+            {error && <div id="maint-error" role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-2 py-1.5 text-xs text-danger">{error}</div>}
           </div>
         )}
         <DialogFooter>

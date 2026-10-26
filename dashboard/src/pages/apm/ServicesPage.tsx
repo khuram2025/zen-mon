@@ -252,7 +252,7 @@ export function ServicesPage() {
                   onClick={() => navigate(`/apm/services/${encodeURIComponent(s.name)}?range=${range}`)}>
                   <Td className="font-medium text-text">
                     <div>{s.name}</div>
-                    <div className="text-[10px] text-muted">{fmtCount(s.request_count)} requests</div>
+                    <div className="text-2xs text-muted">{fmtCount(s.request_count)} requests</div>
                   </Td>
                   <Td><HealthBadge health={s.health} /></Td>
                   <Td className="text-right"><ThroughputCell rps={s.rps} maxRps={maxRps} /></Td>
@@ -270,7 +270,7 @@ export function ServicesPage() {
                           onClick={() => set('tag', tagFilter.toLowerCase() === t.toLowerCase() ? '' : t)} />
                       ))}
                       {(s.tags ?? []).length > 3 && (
-                        <span className="text-[10px] text-muted">+{(s.tags ?? []).length - 3}</span>
+                        <span className="text-2xs text-muted">+{(s.tags ?? []).length - 3}</span>
                       )}
                       <Button variant="ghost" size="icon" className="h-6 w-6 text-muted hover:text-text"
                         title="Edit tags"

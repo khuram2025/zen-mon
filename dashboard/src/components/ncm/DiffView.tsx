@@ -204,7 +204,7 @@ export function DiffView({ diff, added, removed, identical, sensitiveChanged, re
       </div>
 
       <div ref={scrollRef} role="region" aria-label="Configuration differences" tabIndex={0}
-        className="max-h-[65vh] overflow-auto rounded-md border border-border bg-surface font-mono text-[12px] leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+        className="max-h-[65vh] overflow-auto rounded-md border border-border bg-surface font-mono text-sm leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
         {noDiff ? (
           <div className="px-4 py-8 text-center font-sans text-sm text-muted">
             {identical ? 'No differences after excluding known runtime metadata.' : 'Only redacted content differs. Secrets are hidden in this view, so no visible lines changed.'}
@@ -226,7 +226,7 @@ export function DiffView({ diff, added, removed, identical, sensitiveChanged, re
             <colgroup>
               <col className="w-12" /><col className="w-5" /><col /><col className="w-12" /><col className="w-5" /><col />
             </colgroup>
-            <thead className="sticky top-0 z-10 bg-surface2 font-sans text-[11px] uppercase tracking-wider text-muted">
+            <thead className="sticky top-0 z-10 bg-surface2 font-sans text-xs uppercase tracking-wider text-muted">
               <tr>
                 <th colSpan={3} className="px-2 py-1 text-left font-medium">Before</th>
                 <th colSpan={3} className="border-l border-border px-2 py-1 text-left font-medium">After</th>

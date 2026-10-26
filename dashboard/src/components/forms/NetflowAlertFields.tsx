@@ -123,9 +123,9 @@ function Field({
       )}
       {children(group ? labelId : id, hint || error ? hintId : undefined)}
       {error ? (
-        <p id={hintId} className="text-[11px] font-medium text-danger-fg">{error}</p>
+        <p id={hintId} className="text-xs font-medium text-danger-fg">{error}</p>
       ) : hint ? (
-        <p id={hintId} className="text-[11px] text-text2">{hint}</p>
+        <p id={hintId} className="text-xs text-text2">{hint}</p>
       ) : null}
     </div>
   )
@@ -208,7 +208,7 @@ export function NetflowConditionFields({
                 )}
               >
                 <div className="text-sm font-semibold text-text">{m.label}</div>
-                <div className="mt-0.5 text-[11px] leading-snug text-text2">{m.help}</div>
+                <div className="mt-0.5 text-xs leading-snug text-text2">{m.help}</div>
               </button>
             )
           })}
@@ -533,7 +533,7 @@ export function NetflowScopeFields({
           )
         })}
       </ul>
-      {errors.scope && <p className="text-[11px] font-medium text-danger-fg">{errors.scope}</p>}
+      {errors.scope && <p className="text-xs font-medium text-danger-fg">{errors.scope}</p>}
       {addable.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <label className="sr-only" htmlFor={`${listId}-add`}>Add a scope filter</label>
@@ -550,13 +550,13 @@ export function NetflowScopeFields({
             {addable.map((k) => <option key={k} value={k}>{FLOW_FILTER_LABELS[k]}</option>)}
           </select>
           {exporters.isError && (
-            <span className="text-[11px] text-text2">Exporter list unavailable — type the exporter address.</span>
+            <span className="text-xs text-text2">Exporter list unavailable — type the exporter address.</span>
           )}
         </div>
       )}
       {Object.keys(filter).length > 0 && (
         <div>
-          <div className="mb-1 text-[11px] font-medium text-text2">The rule will match</div>
+          <div className="mb-1 text-xs font-medium text-text2">The rule will match</div>
           <FilterChips filter={filter} />
         </div>
       )}
@@ -603,14 +603,14 @@ export function NetflowDryRun({ form }: { form: NetflowRuleForm }) {
           <h4 id="nf-dry-run" className="flex items-center gap-1.5 text-sm font-semibold text-text">
             <Radar className="h-4 w-4 text-primary" aria-hidden /> Test against live flow data
           </h4>
-          <p className="text-[11px] text-text2">What the evaluator would read right now, within your NetFlow visibility. Nothing is saved.</p>
+          <p className="text-xs text-text2">What the evaluator would read right now, within your NetFlow visibility. Nothing is saved.</p>
         </div>
         <Button type="button" variant="outline" size="sm" disabled={!valid || run.isPending} onClick={() => run.mutate()}>
           {run.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Activity className="h-3.5 w-3.5" aria-hidden />}
           {run.isPending ? 'Evaluating…' : 'Run test'}
         </Button>
       </div>
-      {!valid && <p className="text-[11px] text-text2">Fix the highlighted fields to run a test.</p>}
+      {!valid && <p className="text-xs text-text2">Fix the highlighted fields to run a test.</p>}
       {run.isError && (
         httpStatus(run.error) === 403 ? (
           <PanelMessage icon={CircleHelp} title="No NetFlow access" detail="Your role does not include netflow.view, so live readings cannot be shown." />
@@ -671,7 +671,7 @@ export function NetflowDryRun({ form }: { form: NetflowRuleForm }) {
             </div>
           )}
           {(data.truncated || data.readings.length > 25) && (
-            <p className="text-[11px] text-text2">Showing the first 25 subjects{data.truncated ? '; more hosts are above the threshold than one evaluation raises' : ''}.</p>
+            <p className="text-xs text-text2">Showing the first 25 subjects{data.truncated ? '; more hosts are above the threshold than one evaluation raises' : ''}.</p>
           )}
         </div>
       )}
@@ -684,7 +684,7 @@ export { validateNetflowForm }
 /** "Add a filter" affordance used by the wizard's empty state. */
 export function AddScopeHint() {
   return (
-    <p className="flex items-center gap-1 text-[11px] text-text2">
+    <p className="flex items-center gap-1 text-xs text-text2">
       <Plus className="h-3 w-3" aria-hidden /> Narrow the scope with exporter, interface, IP group, application, port or host filters.
     </p>
   )

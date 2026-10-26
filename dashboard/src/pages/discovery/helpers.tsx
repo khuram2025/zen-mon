@@ -183,7 +183,7 @@ const PROTOCOL_LABELS: Record<DiscoveryProtocol, string> = {
 export function ProtocolPill({ p }: { p: string }) {
   const k = (p as DiscoveryProtocol) || 'tcp'
   return (
-    <span className="inline-flex items-center rounded-md border border-border bg-surface2 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted">
+    <span className="inline-flex items-center rounded-md border border-border bg-surface2 px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wider text-muted">
       {PROTOCOL_LABELS[k] || p}
     </span>
   )
@@ -203,7 +203,7 @@ export function ProtocolStatusPill({
     <span
       title={error || (responsive ? `${label} responded` : `${label} no response`)}
       className={cn(
-        'inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+        'inline-flex items-center rounded-md border px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wider',
         responsive
           ? 'border-success/40 bg-success/15 text-success'
           : 'border-danger/40 bg-danger/15 text-danger',

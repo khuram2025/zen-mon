@@ -137,7 +137,7 @@ export function BrandHeader({
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-text">{company}</p>
               {!compact && (branding.company_website || branding.company_email) && (
-                <p className="truncate text-[11px] text-muted">
+                <p className="truncate text-xs text-muted">
                   {[branding.company_website, branding.company_email].filter(Boolean).join(' · ')}
                 </p>
               )}
@@ -146,7 +146,7 @@ export function BrandHeader({
           {classification && (
             <span
               className={cn(
-                'inline-flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em]',
+                'inline-flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-2xs font-bold uppercase tracking-[0.12em]',
                 CLASSIFICATION[classification],
               )}
               style={{ printColorAdjust: 'exact', WebkitPrintColorAdjust: 'exact' }}
@@ -166,7 +166,7 @@ export function BrandHeader({
             </h1>
             <span
               className={cn(
-                'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium',
+                'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium',
                 kind === 'custom' ? 'border-info/30 bg-info/10 text-info-fg' : 'border-border bg-surface2 text-text2',
               )}
             >
@@ -182,13 +182,13 @@ export function BrandHeader({
 
         <dl className={cn('grid gap-x-6 gap-y-2 text-xs', compact ? 'mt-3 sm:grid-cols-2' : 'mt-5 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)]')}>
           <div className="min-w-0">
-            <dt className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
+            <dt className="flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wide text-muted">
               <CalendarRange className="h-3 w-3" aria-hidden /> Period
             </dt>
             <dd className="mt-0.5 font-medium tabular-nums text-text">{period}</dd>
           </div>
           <div className="min-w-0">
-            <dt className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
+            <dt className="flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wide text-muted">
               <Globe2 className="h-3 w-3" aria-hidden /> Timezone
             </dt>
             <dd className="mt-0.5 truncate font-medium text-text">
@@ -197,7 +197,7 @@ export function BrandHeader({
             </dd>
           </div>
           <div className="min-w-0">
-            <dt className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
+            <dt className="flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wide text-muted">
               <Clock className="h-3 w-3" aria-hidden /> Generated
             </dt>
             <dd className="mt-0.5 font-medium tabular-nums text-text">{report.generated_label}</dd>
@@ -206,11 +206,11 @@ export function BrandHeader({
 
         {(scope || chips.length > 0) && (
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/70 pt-3">
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">Scope</span>
+            <span className="text-2xs font-semibold uppercase tracking-wide text-muted">Scope</span>
             {scope ?? (
               <ul role="list" className="flex flex-wrap gap-1.5">
                 {chips.map((c, i) => (
-                  <li key={i} className="rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-[11px] font-medium text-text2">
+                  <li key={i} className="rounded-md border border-border bg-surface2/70 px-2 py-0.5 text-xs font-medium text-text2">
                     {c}
                   </li>
                 ))}

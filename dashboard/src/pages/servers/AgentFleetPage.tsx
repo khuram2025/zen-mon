@@ -460,7 +460,7 @@ export function AgentFleetPage() {
               <ShieldAlert className="h-3.5 w-3.5" /> Awaiting authorization
             </div>
             <div className="mt-1 text-xl font-semibold text-warning">{pendingAuth}</div>
-            <div className="text-[11px] text-warning/80">click to review</div>
+            <div className="text-xs text-warning/80">click to review</div>
           </button>
         ) : (
           <KpiTile icon={UserCheck} label="Awaiting authorization" value={0} />
@@ -475,7 +475,7 @@ export function AgentFleetPage() {
               <AlertTriangle className="h-3.5 w-3.5" /> Registration conflicts
             </div>
             <div className="mt-1 text-xl font-semibold text-danger">{registrationConflicts}</div>
-            <div className="text-[11px] text-danger/80">click to review</div>
+            <div className="text-xs text-danger/80">click to review</div>
           </button>
         ) : (
           <KpiTile icon={RefreshCw} label="Registration conflicts" value={0} />
@@ -735,7 +735,7 @@ export function AgentFleetPage() {
                       </Td>
                       <Td>
                         <div className="text-xs tabular-nums">{agent.queue_depth.toLocaleString()}</div>
-                        <div className="text-[11px] tabular-nums text-muted">{formatBytes(agent.spool_bytes)}</div>
+                        <div className="text-xs tabular-nums text-muted">{formatBytes(agent.spool_bytes)}</div>
                       </Td>
                       <Td className="font-mono text-xs text-muted">{agent.last_ip || '—'}</Td>
                       <Td>
@@ -924,10 +924,10 @@ export function AgentFleetPage() {
               <div>
                 <label htmlFor="clone-display-name" className="mb-1 block text-xs font-medium text-text">Server display name</label>
                 <Input id="clone-display-name" value={cloneDisplayName} maxLength={255} onChange={(e) => setCloneDisplayName(e.target.value)} />
-                <p className="mt-1 text-[11px] text-muted">The appliance assigns the technical identity automatically. Rename the Windows clone separately when practical.</p>
+                <p className="mt-1 text-xs text-muted">The appliance assigns the technical identity automatically. Rename the Windows clone separately when practical.</p>
               </div>
               <div className="flex items-center justify-between gap-4">
-                <div><div className="text-xs font-medium text-text">Authorize immediately</div><div className="text-[11px] text-muted">Otherwise the new clone appears in Awaiting authorization.</div></div>
+                <div><div className="text-xs font-medium text-text">Authorize immediately</div><div className="text-xs text-muted">Otherwise the new clone appears in Awaiting authorization.</div></div>
                 <Switch checked={authorizeClone} onCheckedChange={setAuthorizeClone} aria-label="Authorize cloned machine immediately" />
               </div>
             </div>

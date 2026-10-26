@@ -67,8 +67,8 @@ function DrawerContent({ item, sections, branding }: { item: LibraryItem; sectio
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</dt>
-      <dd className="mt-0.5 text-[13px] text-text">{children}</dd>
+      <dt className="text-xs font-medium uppercase tracking-wide text-muted">{label}</dt>
+      <dd className="mt-0.5 text-sm text-text">{children}</dd>
     </div>
   )
 }
@@ -82,7 +82,7 @@ function DrawerBody({ item, sections, branding }: { item: LibraryItem; sections:
       <header className="flex items-start gap-3 border-b border-border px-5 py-4">
         <CategoryIcon icon={item.icon} category={item.category} size="lg" />
         <div className="min-w-0 flex-1">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted">{item.categoryTitle}</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-muted">{item.categoryTitle}</p>
           <DialogPrimitive.Title className="mt-0.5 break-words text-base font-semibold leading-snug text-text">
             {item.title}
           </DialogPrimitive.Title>
@@ -104,7 +104,7 @@ function DrawerBody({ item, sections, branding }: { item: LibraryItem; sections:
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-4">
         <section aria-labelledby="rt-purpose-h">
           <h3 id="rt-purpose-h" className="sr-only">Purpose</h3>
-          <DialogPrimitive.Description id="report-template-purpose" className="text-[13px] leading-5 text-text2">
+          <DialogPrimitive.Description id="report-template-purpose" className="text-sm leading-5 text-text2">
             {item.description || 'No description.'}
           </DialogPrimitive.Description>
         </section>
@@ -135,7 +135,7 @@ function DrawerBody({ item, sections, branding }: { item: LibraryItem; sections:
         {item.requires.length > 0 && (
           <section aria-labelledby="rt-data-h">
             <h3 id="rt-data-h" className="text-xs font-semibold text-text">Data it reads</h3>
-            <p className="mt-0.5 text-[11px] text-muted">Each section needs the matching permission; sections your role lacks are left out.</p>
+            <p className="mt-0.5 text-xs text-muted">Each section needs the matching permission; sections your role lacks are left out.</p>
             <ul className="mt-2 flex flex-wrap gap-1.5" role="list">
               {item.requires.map((p) => {
                 const ok = can(p)
@@ -143,7 +143,7 @@ function DrawerBody({ item, sections, branding }: { item: LibraryItem; sections:
                   <li
                     key={p}
                     className={cn(
-                      'inline-flex items-center gap-1 rounded border px-1.5 py-px text-[11px] font-medium',
+                      'inline-flex items-center gap-1 rounded border px-1.5 py-px text-xs font-medium',
                       ok ? 'border-success/30 bg-success/10 text-success-fg' : 'border-border bg-surface2 text-muted',
                     )}
                     title={p}
@@ -163,7 +163,7 @@ function DrawerBody({ item, sections, branding }: { item: LibraryItem; sections:
             <h3 id="rt-sections-h" className="text-xs font-semibold text-text">
               Sections <span className="font-normal tabular-nums text-muted">({item.entries.length})</span>
             </h3>
-            {hidden > 0 && <span className="text-[11px] text-warning-fg">{hidden} hidden for your role</span>}
+            {hidden > 0 && <span className="text-xs text-warning-fg">{hidden} hidden for your role</span>}
           </div>
           <ol className="mt-2 space-y-1.5">
             {item.entries.map((entry, i) => {
@@ -177,7 +177,7 @@ function DrawerBody({ item, sections, branding }: { item: LibraryItem; sections:
                 >
                   <span
                     className={cn(
-                      'mt-px flex h-5 min-w-5 shrink-0 items-center justify-center rounded px-1 text-[11px] font-semibold tabular-nums',
+                      'mt-px flex h-5 min-w-5 shrink-0 items-center justify-center rounded px-1 text-xs font-semibold tabular-nums',
                       unavailable ? 'bg-surface3 text-muted' : 'bg-primary/10 text-primary',
                     )}
                     aria-hidden
@@ -185,17 +185,17 @@ function DrawerBody({ item, sections, branding }: { item: LibraryItem; sections:
                     {i + 1}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className={cn('text-[13px] font-medium leading-5', unavailable ? 'text-muted' : 'text-text')}>
+                    <p className={cn('text-sm font-medium leading-5', unavailable ? 'text-muted' : 'text-text')}>
                       <span className="sr-only">{i + 1}. </span>
                       {entryTitle(entry, sections)}
                     </p>
                     {summary ? (
-                      <p className="truncate text-[11px] text-muted" title={summary}>{summary}</p>
+                      <p className="truncate text-xs text-muted" title={summary}>{summary}</p>
                     ) : def?.description ? (
-                      <p className="line-clamp-1 text-[11px] text-muted" title={def.description}>{def.description}</p>
+                      <p className="line-clamp-1 text-xs text-muted" title={def.description}>{def.description}</p>
                     ) : null}
                     {unavailable && (
-                      <p className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-warning-fg">
+                      <p className="mt-0.5 inline-flex items-center gap-1 text-xs text-warning-fg">
                         <Lock className="h-3 w-3" aria-hidden />
                         Hidden for your role{def?.requires?.length ? ` — needs ${def.requires.map(permissionLabel).join(', ')}` : ''}
                       </p>
@@ -208,7 +208,7 @@ function DrawerBody({ item, sections, branding }: { item: LibraryItem; sections:
         </section>
 
         {a.scheduleNote && (
-          <p className="flex items-start gap-1.5 rounded-md border border-border bg-surface2/50 px-3 py-2 text-[11px] text-text2">
+          <p className="flex items-start gap-1.5 rounded-md border border-border bg-surface2/50 px-3 py-2 text-xs text-text2">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info-fg" aria-hidden />
             {a.scheduleNote}
           </p>

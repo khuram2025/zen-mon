@@ -48,7 +48,7 @@ export function ClockSkewBanner() {
   if (!skewed) return null
   const t = sys.data
   return (
-    <div role="status" className="flex items-start gap-3 rounded-lg border border-info/40 bg-info/10 px-3 py-2.5 text-[12.5px]">
+    <div role="status" className="flex items-start gap-3 rounded-lg border border-info/40 bg-info/10 px-3 py-2.5 text-sm">
       <Clock className="mt-0.5 h-4 w-4 shrink-0 text-info" />
       <div className="min-w-0 flex-1">
         <div className="text-xs font-semibold uppercase tracking-wider text-info">Clock disagreement</div>
@@ -57,7 +57,7 @@ export function ClockSkewBanner() {
           appliance clock ({exactTime(serverNow(), false)}); this is not a monitoring fault.
         </p>
         {t && (
-          <p className="mt-1 text-[11px] text-muted">
+          <p className="mt-1 text-xs text-muted">
             {t.ntp_synchronized === false
               ? `The appliance reports its clock is not NTP-synchronized${t.ntp_service === 'inactive' ? ' (time synchronization is disabled)' : ''}. Correct the appliance time through a planned operational change; existing history is not rewritten.`
               : t.ntp_synchronized === true

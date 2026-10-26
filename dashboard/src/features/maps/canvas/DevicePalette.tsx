@@ -106,7 +106,7 @@ export function DevicePalette({
   return (
     <aside className="flex w-72 shrink-0 flex-col border-r border-border bg-surface">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <div className="flex items-center rounded-md border border-border bg-surface2/40 p-0.5 text-[11px] font-semibold">
+        <div className="flex items-center rounded-md border border-border bg-surface2/40 p-0.5 text-xs font-semibold">
           <button type="button" onClick={() => setTab('devices')} className={cn('rounded px-2 py-0.5 transition', tab === 'devices' ? 'bg-primary/15 text-primary' : 'text-muted hover:text-text')}>Devices</button>
           <button type="button" onClick={() => setTab('shapes')} className={cn('rounded px-2 py-0.5 transition', tab === 'shapes' ? 'bg-primary/15 text-primary' : 'text-muted hover:text-text')}>Shapes</button>
         </div>
@@ -123,7 +123,7 @@ export function DevicePalette({
       {tab === 'devices' ? (
         <>
           <div className="space-y-2 border-b border-border p-3">
-            <div className="flex items-center rounded-md border border-border bg-surface2/40 p-0.5 text-[10.5px] font-semibold">
+            <div className="flex items-center rounded-md border border-border bg-surface2/40 p-0.5 text-xs font-semibold">
               {ENTITY_TABS.map((t) => (
                 <button key={t.key} type="button" onClick={() => setEntity(t.key)} className={cn('flex-1 rounded px-2 py-0.5 transition', entity === t.key ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text')}>
                   {t.label}
@@ -154,7 +154,7 @@ export function DevicePalette({
                     type="button"
                     onClick={() => setStatus(s)}
                     className={cn(
-                      'rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide transition',
+                      'rounded px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide transition',
                       status === s ? activeCls : 'text-muted hover:bg-surface2 hover:text-text',
                     )}
                   >
@@ -162,11 +162,11 @@ export function DevicePalette({
                   </button>
                 )
               })}
-              <label className="ml-auto flex cursor-pointer items-center gap-1 text-[10px] text-muted" title="Hide devices already placed on this map">
+              <label className="ml-auto flex cursor-pointer items-center gap-1 text-2xs text-muted" title="Hide devices already placed on this map">
                 <input type="checkbox" checked={hideUsed} onChange={(e) => setHideUsed(e.target.checked)} className="accent-primary" /> hide placed
               </label>
             </div>
-            <div className="text-[10px] text-muted">Drag {entity === 'device' ? 'a device' : entity === 'server' ? 'a server' : 'a check'} onto the canvas to place it as a live node</div>
+            <div className="text-2xs text-muted">Drag {entity === 'device' ? 'a device' : entity === 'server' ? 'a server' : 'a check'} onto the canvas to place it as a live node</div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-2">
@@ -177,7 +177,7 @@ export function DevicePalette({
                 ))}
               </div>
             ) : devices.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border p-4 text-center text-[11px] text-muted">
+              <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted">
                 No {noun} match these filters
               </div>
             ) : (
@@ -213,9 +213,9 @@ export function DevicePalette({
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1">
                           <span className="truncate font-medium text-text">{d.hostname}</span>
-                          {used && <span className="rounded bg-primary/15 px-1 text-[9px] font-semibold text-primary">ON MAP</span>}
+                          {used && <span className="rounded bg-primary/15 px-1 text-2xs font-semibold text-primary">ON MAP</span>}
                         </div>
-                        <div className="flex items-center gap-1.5 text-[10px] text-muted">
+                        <div className="flex items-center gap-1.5 text-2xs text-muted">
                           <span className={cn('h-1.5 w-1.5 rounded-full', color.dot)} />
                           <span className="truncate">{d.ip_address}</span>
                           <span className="text-muted/70">·</span>
@@ -231,7 +231,7 @@ export function DevicePalette({
         </>
       ) : (
         <div className="flex-1 overflow-y-auto p-3">
-          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Text & shapes</div>
+          <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Text & shapes</div>
           <div className="mb-3 grid grid-cols-2 gap-1.5">
             {SHAPE_PRESETS.filter((p) => p.key !== 'conversations').map((p) => (
               <button
@@ -241,7 +241,7 @@ export function DevicePalette({
                 onDragStart={dragShape(p.spec)}
                 onClick={() => !disabled && onInsert?.(p.spec)}
                 disabled={disabled}
-                className="flex cursor-grab items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-left text-[11px] text-text transition hover:border-primary/45 hover:bg-primary/5 active:cursor-grabbing disabled:opacity-50"
+                className="flex cursor-grab items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-left text-xs text-text transition hover:border-primary/45 hover:bg-primary/5 active:cursor-grabbing disabled:opacity-50"
                 title="Drag onto the canvas, or click to insert at the centre"
               >
                 <span className="text-muted">{p.icon}</span>
@@ -250,7 +250,7 @@ export function DevicePalette({
             ))}
           </div>
 
-          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Network icons</div>
+          <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Network icons</div>
           <div className="mb-3 grid grid-cols-5 gap-1.5">
             {ICON_KEYS.map((key) => (
               <button
@@ -269,13 +269,13 @@ export function DevicePalette({
             ))}
           </div>
 
-          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Media & widgets</div>
+          <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Media & widgets</div>
           <div className="grid grid-cols-1 gap-1.5">
             <button
               type="button"
               onClick={() => setImgOpen(true)}
               disabled={disabled}
-              className="flex items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-left text-[11px] text-text transition hover:border-primary/45 hover:bg-primary/5 disabled:opacity-50"
+              className="flex items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-left text-xs text-text transition hover:border-primary/45 hover:bg-primary/5 disabled:opacity-50"
             >
               <span className="text-muted"><ImageIcon className="h-4 w-4" /></span> Image (URL or upload)…
             </button>
@@ -287,13 +287,13 @@ export function DevicePalette({
                 onDragStart={dragShape(p.spec)}
                 onClick={() => !disabled && onInsert?.(p.spec)}
                 disabled={disabled}
-                className="flex cursor-grab items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-left text-[11px] text-text transition hover:border-primary/45 hover:bg-primary/5 active:cursor-grabbing disabled:opacity-50"
+                className="flex cursor-grab items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-left text-xs text-text transition hover:border-primary/45 hover:bg-primary/5 active:cursor-grabbing disabled:opacity-50"
               >
                 <span className="text-muted">{p.icon}</span> {p.label}
               </button>
             ))}
           </div>
-          <p className="mt-3 text-[10px] leading-snug text-muted">
+          <p className="mt-3 text-2xs leading-snug text-muted">
             Tip: right-click an empty spot on the canvas to add a shape exactly there. Double-click any shape to type a caption.
           </p>
           {imgOpen && <ImageDialog onCancel={() => setImgOpen(false)} onPick={(src) => { setImgOpen(false); onInsert?.({ kind: 'image', w_pct: 16, h_pct: 12, metadata: { src } }) }} />}

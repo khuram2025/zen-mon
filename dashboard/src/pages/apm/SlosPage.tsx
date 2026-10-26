@@ -80,7 +80,7 @@ function BudgetCell({ slo, onDetail }: { slo: Slo; onDetail: (b: Budget) => void
     <button onClick={() => onDetail(b)} className="w-40 text-left group" title="Burn-rate details">
       <div className="flex items-center justify-between text-xs mb-1">
         <span style={{ color }} className="font-medium">{(remaining * 100).toFixed(1)}% left</span>
-        {breaching && <span className="text-[10px] font-semibold text-[#ef4444] uppercase">burning</span>}
+        {breaching && <span className="text-2xs font-semibold text-[#ef4444] uppercase">burning</span>}
       </div>
       <div className="h-1.5 rounded-full bg-surface2 overflow-hidden">
         <div className="h-full rounded-full transition-all" style={{ width: `${Math.max(2, remaining * 100)}%`, backgroundColor: color }} />
@@ -267,7 +267,7 @@ export function SlosPage() {
                   ))}
                 </TBody>
               </Table>
-              <p className="text-[11px] text-muted">
+              <p className="text-xs text-muted">
                 A tier alerts only when both its long and short windows burn faster than the threshold —
                 the short window makes the alert clear within minutes of recovery.
               </p>
@@ -439,7 +439,7 @@ function SloFormDialog({ open, onOpenChange, slo, onSaved }: {
           <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
             <div>
               <div className="text-sm font-medium text-text">Burn-rate alerts</div>
-              <div className="text-[11px] text-muted">
+              <div className="text-xs text-muted">
                 Page at 14.4× (1h) and 6× (6h); ticket at 1× (3d).
               </div>
             </div>
@@ -450,7 +450,7 @@ function SloFormDialog({ open, onOpenChange, slo, onSaved }: {
             <div className="space-y-2">
               <div className="text-xs font-semibold uppercase tracking-wider text-muted">Notify channels</div>
               {allChannels.length === 0 ? (
-                <p className="text-[11px] text-muted">
+                <p className="text-xs text-muted">
                   No channels configured — burn alerts will be recorded but not delivered.
                 </p>
               ) : (

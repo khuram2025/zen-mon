@@ -18,7 +18,7 @@ export function FlappingTag({ device, title, withKind = false, className }: {
   return (
     <span
       title={text}
-      className={cn('inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-dashed border-warning/50 bg-warning/10 px-1.5 text-[10px] font-medium text-warning', className)}
+      className={cn('inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-dashed border-warning/50 bg-warning/10 px-1.5 text-2xs font-medium text-warning', className)}
     >
       <Waves className="h-2.5 w-2.5" aria-hidden />
       {flapBadgeText(device.flap_kind, withKind)}

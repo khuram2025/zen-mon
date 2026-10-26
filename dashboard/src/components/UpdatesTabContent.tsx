@@ -88,7 +88,7 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span
       className={cn(
-        'rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase',
+        'rounded-full border px-2 py-0.5 text-2xs font-semibold uppercase',
         colors[status] || 'bg-surface2 text-muted border-border',
       )}
     >
@@ -283,7 +283,7 @@ export function UpdatesTabContent() {
                   {status.last_update.error}
                 </p>
               )}
-              <p className="mt-2 text-[10px] text-muted">{fmtDate(status.last_update.completed_at)}</p>
+              <p className="mt-2 text-2xs text-muted">{fmtDate(status.last_update.completed_at)}</p>
             </div>
           </div>
         </div>
@@ -296,7 +296,7 @@ export function UpdatesTabContent() {
             <p className="text-sm font-medium text-emerald-300">
               Last update successful: v{status.last_update.version}
             </p>
-            <p className="text-[10px] text-muted">{fmtDate(status.last_update.completed_at)}</p>
+            <p className="text-2xs text-muted">{fmtDate(status.last_update.completed_at)}</p>
           </div>
         </div>
       )}
@@ -321,12 +321,12 @@ export function UpdatesTabContent() {
               </p>
               <ul className="mt-2 space-y-1 rounded-lg bg-amber-500/5 p-2.5">
                 {status.schema_health.problems.map((problem, i) => (
-                  <li key={i} className="break-all font-mono text-[11px] text-amber-200/80">
+                  <li key={i} className="break-all font-mono text-xs text-amber-200/80">
                     {problem}
                   </li>
                 ))}
               </ul>
-              <p className="mt-2 text-[11px] text-amber-200/70">
+              <p className="mt-2 text-xs text-amber-200/70">
                 The next update retries automatically. To fix it now, run{' '}
                 <code className="rounded bg-amber-500/10 px-1">
                   sudo /opt/zenplus/scripts/sync-schema.py
@@ -334,7 +334,7 @@ export function UpdatesTabContent() {
                 on the appliance.
               </p>
               {status.schema_health.checked_at && (
-                <p className="mt-2 text-[10px] text-muted">
+                <p className="mt-2 text-2xs text-muted">
                   Checked {fmtDate(status.schema_health.checked_at)}
                 </p>
               )}
@@ -372,15 +372,15 @@ export function UpdatesTabContent() {
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-lg bg-surface2 p-4">
-            <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Current Version</p>
+            <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Current Version</p>
             <p className="text-lg font-bold text-primary">{status?.current_version || 'Unknown'}</p>
             {status?.installed_at && (
-              <p className="mt-0.5 text-[10px] text-muted">Installed {fmtDate(status.installed_at)}</p>
+              <p className="mt-0.5 text-2xs text-muted">Installed {fmtDate(status.installed_at)}</p>
             )}
             {status?.schema_health && (
               <p
                 className={cn(
-                  'mt-1 flex items-center gap-1 text-[10px]',
+                  'mt-1 flex items-center gap-1 text-2xs',
                   status.schema_health.ok === true && 'text-emerald-400',
                   status.schema_health.ok === false && 'text-amber-400',
                   status.schema_health.ok === null && 'text-muted',
@@ -398,16 +398,16 @@ export function UpdatesTabContent() {
             )}
           </div>
           <div className="rounded-lg bg-surface2 p-4">
-            <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Appliance ID</p>
+            <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Appliance ID</p>
             <p className="break-all font-mono text-xs">{status?.appliance_id || 'Not registered'}</p>
           </div>
           <div className="rounded-lg bg-surface2 p-4">
-            <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Update Server</p>
+            <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Update Server</p>
             <p className="text-xs">{status?.server_url || '—'}</p>
-            <p className="mt-0.5 text-[10px] text-muted">Next check: {fmtDate(status?.next_check)}</p>
+            <p className="mt-0.5 text-2xs text-muted">Next check: {fmtDate(status?.next_check)}</p>
           </div>
           <div className="rounded-lg bg-surface2 p-4">
-            <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Auto-Update Timer</p>
+            <p className="mb-1 text-2xs uppercase tracking-wider text-muted">Auto-Update Timer</p>
             <div className="flex items-center gap-2">
               <span
                 className={cn('h-2 w-2 rounded-full', status?.timer_active ? 'bg-emerald-400' : 'bg-red-400')}
@@ -419,7 +419,7 @@ export function UpdatesTabContent() {
               </p>
             </div>
             {status?.last_check && (
-              <p className="mt-0.5 text-[10px] text-muted">Last: {fmtDate(status.last_check)}</p>
+              <p className="mt-0.5 text-2xs text-muted">Last: {fmtDate(status.last_check)}</p>
             )}
           </div>
         </div>
@@ -457,7 +457,7 @@ export function UpdatesTabContent() {
                     </span>
                     <StatusBadge status={r.status} />
                     {r.severity && r.severity !== 'normal' && (
-                      <span className="text-[10px] font-semibold uppercase text-orange-400">
+                      <span className="text-2xs font-semibold uppercase text-orange-400">
                         {r.severity}
                       </span>
                     )}
@@ -471,7 +471,7 @@ export function UpdatesTabContent() {
                     </p>
                   )}
                 </div>
-                <div className="flex-shrink-0 whitespace-nowrap text-right text-[10px] text-muted">
+                <div className="flex-shrink-0 whitespace-nowrap text-right text-2xs text-muted">
                   <p>{fmtDate(r.started_at)}</p>
                 </div>
               </div>
@@ -536,7 +536,7 @@ export function UpdatesTabContent() {
                 setConfig((p) => ({ ...p, maintenance_window_start: e.target.value }))
               }
             />
-            <p className="mt-1 text-[10px] text-muted">Empty = anytime</p>
+            <p className="mt-1 text-2xs text-muted">Empty = anytime</p>
           </div>
 
           <div>
@@ -551,7 +551,7 @@ export function UpdatesTabContent() {
                 setConfig((p) => ({ ...p, maintenance_window_end: e.target.value }))
               }
             />
-            <p className="mt-1 text-[10px] text-muted">Updates only applied within window</p>
+            <p className="mt-1 text-2xs text-muted">Updates only applied within window</p>
           </div>
         </div>
 

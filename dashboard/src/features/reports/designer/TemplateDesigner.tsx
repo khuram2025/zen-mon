@@ -422,8 +422,8 @@ export function TemplateDesigner({ mode, initial, catalog, branding, template, b
                 nameError ? 'border-danger/60' : 'border-transparent',
               )}
             />
-            {nameError && <p id={`${FIELD_IDS.name}-err`} className="mt-0.5 text-[11px] font-medium text-danger-fg">{nameError}</p>}
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
+            {nameError && <p id={`${FIELD_IDS.name}-err`} className="mt-0.5 text-xs font-medium text-danger-fg">{nameError}</p>}
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
               <span className="inline-flex items-center gap-1.5">
                 <span aria-hidden className={cn('h-1.5 w-1.5 rounded-full', status.tone)} />
                 {status.text}
@@ -615,7 +615,7 @@ export function TemplateDesigner({ mode, initial, catalog, branding, template, b
                 <Plus aria-hidden /> Add sections
               </Button>
             ) : n > 0 && !outlineDense ? (
-              <span className="hidden text-[11px] text-muted 2xl:inline">Drag the grip or press Space on it to reorder</span>
+              <span className="hidden text-xs text-muted 2xl:inline">Drag the grip or press Space on it to reorder</span>
             ) : null}
           />
         </div>
@@ -780,7 +780,7 @@ function StartFromMenu({ templates, categories, onPick }: {
                 <DropdownMenuItem key={t.key} onSelect={() => onPick(t)} className="items-start">
                   <span className="min-w-0 flex-1">
                     <span className="block truncate">{t.title}</span>
-                    <span className="block text-[11px] text-muted">{count} section{count === 1 ? '' : 's'}</span>
+                    <span className="block text-xs text-muted">{count} section{count === 1 ? '' : 's'}</span>
                   </span>
                 </DropdownMenuItem>
               )
@@ -837,7 +837,7 @@ function SaveAsDialog({ open, onOpenChange, defaultName, busy, error, onSave }: 
               aria-invalid={(touched && !!nameError) || undefined}
               aria-describedby={idList(touched && nameError && 'dsn-saveas-err')}
             />
-            {touched && nameError && <p id="dsn-saveas-err" className="text-[11px] font-medium text-danger-fg">{nameError}</p>}
+            {touched && nameError && <p id="dsn-saveas-err" className="text-xs font-medium text-danger-fg">{nameError}</p>}
           </div>
           <div className="space-y-1.5">
             <span id="dsn-saveas-vis" className="block text-xs font-medium text-text">Who can see it</span>

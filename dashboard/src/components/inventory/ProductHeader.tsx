@@ -12,7 +12,7 @@ const focus = 'outline-none focus-visible:ring-2 focus-visible:ring-primary'
 function KpiTile({ kpi }: { kpi: ProductKpi }) {
   const body = (
     <>
-      <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted">{kpi.label}</div>
+      <div className="text-xs font-semibold uppercase tracking-wider text-muted">{kpi.label}</div>
       <div className={cn('mt-1 truncate font-bold leading-none tabular-nums text-text', kpi.mono ? 'font-mono text-xl' : 'text-2xl')} title={kpi.mono ? kpi.value : undefined}>
         {kpi.href ? (
           <Link
@@ -28,7 +28,7 @@ function KpiTile({ kpi }: { kpi: ProductKpi }) {
           kpi.value
         )}
       </div>
-      <div className="mt-1.5 text-[11px] leading-4 text-muted">{kpi.sub}</div>
+      <div className="mt-1.5 text-xs leading-4 text-muted">{kpi.sub}</div>
     </>
   )
   return (
@@ -55,14 +55,14 @@ export function ProductHeader({ data, historyStart }: { data: Pick<ProductRespon
       <div className="space-y-1">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{header.name}</h1>
-          <span title={status.meaning} className={cn('inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium', status.tone)}>{status.label}</span>
+          <span title={status.meaning} className={cn('inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium', status.tone)}>{status.label}</span>
         </div>
         <p className="text-sm text-text2">
           {header.publisher ?? <span className="italic text-muted">Unknown publisher</span>}
           <span aria-hidden className="mx-1.5 text-muted/60">·</span>
           {categoryLabel(header.category)}
           <span aria-hidden className="mx-1.5 text-muted/60">·</span>
-          <code className="rounded bg-surface2 px-1 py-0.5 font-mono text-[11px] text-text2" title="The product key: the address of this page and the value of the product filter">{header.product_key}</code>
+          <code className="rounded bg-surface2 px-1 py-0.5 font-mono text-xs text-text2" title="The product key: the address of this page and the value of the product filter">{header.product_key}</code>
         </p>
         <p className="text-xs text-muted">
           <span title={firstSeenTitle} data-first-seen={firstSeenTitle && historyStart ? 'note' : undefined}>{facts.firstSeen}</span> ·{' '}

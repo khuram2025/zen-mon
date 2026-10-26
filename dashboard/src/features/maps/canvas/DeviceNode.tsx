@@ -159,7 +159,7 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
           {alertCount > 0 && (
             <span
               className={cn(
-                'absolute -left-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-surface px-0.5 font-mono text-[9px] font-bold leading-none text-white shadow',
+                'absolute -left-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-surface px-0.5 font-mono text-2xs font-bold leading-none text-white shadow',
                 (alerts?.critical || 0) > 0 ? 'bg-danger' : 'bg-warning',
               )}
               style={{ transform: `scale(${ts})`, transformOrigin: 'top left' }}
@@ -254,12 +254,12 @@ export function DeviceHoverCard({ node, nodeLive, sk }: { node: ManualMapNode; n
     <div className="w-60 rounded-lg border border-border bg-surface/95 p-2.5 text-left shadow-xl backdrop-blur animate-fade-in">
       <div className="mb-1 flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-[11.5px] font-bold text-text">{node.label || node.hostname}</div>
-          <div className="truncate font-mono text-[10px] text-muted">{node.ip_address}</div>
+          <div className="truncate text-xs font-bold text-text">{node.label || node.hostname}</div>
+          <div className="truncate font-mono text-2xs text-muted">{node.ip_address}</div>
         </div>
-        <span className={cn('rounded px-1.5 py-0.5 text-[9px] font-bold uppercase leading-none', badge)}>{sk}</span>
+        <span className={cn('rounded px-1.5 py-0.5 text-2xs font-bold uppercase leading-none', badge)}>{sk}</span>
       </div>
-      <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 border-t border-border/60 pt-1.5 text-[9.5px] leading-snug">
+      <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 border-t border-border/60 pt-1.5 text-2xs leading-snug">
         <Field k="Type" v={nodeKindOf(node) === 'service_check' ? `check · ${node.model || ''}` : node.device_type} />
         {node.vendor ? <Field k="Vendor" v={node.vendor} /> : null}
         {node.model && nodeKindOf(node) !== 'service_check' ? <Field k={nodeKindOf(node) === 'server' ? 'OS' : 'Model'} v={node.model} /> : null}
@@ -276,7 +276,7 @@ export function DeviceHoverCard({ node, nodeLive, sk }: { node: ManualMapNode; n
         </div>
       )}
       {nodeLive && nodeLive.alerts.active > 0 && (
-        <div className="mt-1.5 flex items-center gap-1.5 border-t border-border/60 pt-1.5 text-[9.5px] font-semibold">
+        <div className="mt-1.5 flex items-center gap-1.5 border-t border-border/60 pt-1.5 text-2xs font-semibold">
           <span className={cn('h-1.5 w-1.5 rounded-full', nodeLive.alerts.critical > 0 ? 'bg-danger' : 'bg-warning')} />
           <span className="text-text2">
             {nodeLive.alerts.active} active alert{nodeLive.alerts.active > 1 ? 's' : ''}
@@ -305,7 +305,7 @@ function HoverGauge({ label, pct }: { label: string; pct: number }) {
       <div className="h-[5px] flex-1 overflow-hidden rounded-full bg-surface2">
         <div className="h-full rounded-full" style={{ width: `${Math.max(3, v)}%`, background: utilHex(v) }} />
       </div>
-      <span className="w-8 text-right font-mono text-[9px] font-semibold text-text2">{v.toFixed(0)}%</span>
+      <span className="w-8 text-right font-mono text-2xs font-semibold text-text2">{v.toFixed(0)}%</span>
     </div>
   )
 }

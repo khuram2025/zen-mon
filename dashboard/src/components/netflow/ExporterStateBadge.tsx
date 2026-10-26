@@ -39,7 +39,7 @@ export function ExporterStateBadge({ state, className }: { state: NfExporterStat
   const Icon = s.icon
   return (
     <span
-      className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold', s.cls, className)}
+      className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-semibold', s.cls, className)}
       title={s.hint}
     >
       <Icon className="h-3 w-3" aria-hidden />

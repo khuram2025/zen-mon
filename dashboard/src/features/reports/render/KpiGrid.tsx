@@ -58,7 +58,7 @@ export function KpiGrid({ kpis, compact }: { kpis: RenderKpi[]; compact?: boolea
             className="relative flex min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-surface px-3.5 pb-3 pt-3.5"
           >
             <span aria-hidden className={cn('absolute inset-x-0 top-0 h-[3px]', STRIPE[accent])} />
-            <dt className="truncate text-[11px] font-medium uppercase tracking-wide text-muted" title={kpi.label}>
+            <dt className="truncate text-xs font-medium uppercase tracking-wide text-muted" title={kpi.label}>
               {kpi.label}
             </dt>
             <dd className="mt-1 flex min-w-0 items-center gap-1.5">

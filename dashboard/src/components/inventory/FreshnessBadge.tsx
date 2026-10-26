@@ -41,7 +41,7 @@ export function FreshnessBadge({
     <span
       title={freshnessTitle(state, inventoryAt, lastSeen, clock)}
       data-freshness={state}
-      className={cn('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium leading-4', meta.tone, className)}
+      className={cn('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium leading-4', meta.tone, className)}
     >
       <span aria-hidden className={cn('h-1.5 w-1.5 shrink-0 rounded-full', meta.dot)} />
       {meta.label}

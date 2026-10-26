@@ -129,9 +129,9 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
             <span className={cn('absolute inline-flex h-full w-full animate-ping rounded-full opacity-60', stale ? 'bg-warning' : 'bg-success')} />
             <span className={cn('relative inline-flex h-2 w-2 rounded-full', stale ? 'bg-warning' : 'bg-success')} />
           </span>
-          <span className={cn('text-[10px] font-bold tracking-[0.18em]', stale ? 'text-warning' : 'text-success')}>{stale ? 'STALE' : 'LIVE'}</span>
+          <span className={cn('text-2xs font-bold tracking-[0.18em]', stale ? 'text-warning' : 'text-success')}>{stale ? 'STALE' : 'LIVE'}</span>
         </div>
-        <div className="font-mono text-[15px] font-semibold leading-tight text-text">{clock}</div>
+        <div className="font-mono text-base font-semibold leading-tight text-text">{clock}</div>
         <div className="text-[8.5px] leading-none text-muted">data {age < 2 ? 'now' : `${age}s ago`}</div>
       </div>
 
@@ -144,10 +144,10 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
           {STATUS_ORDER.filter((s) => stats.counts[s as string]).map((s) => (
             <span key={s as string} className="flex items-center gap-1" title={String(s)}>
               <span className={cn('h-1.5 w-1.5 rounded-full', STATUS_DOT[s as string])} />
-              <span className={cn('font-mono text-[13px] font-bold leading-none', STATUS_TEXT[s as string])}>{stats.counts[s as string]}</span>
+              <span className={cn('font-mono text-sm font-bold leading-none', STATUS_TEXT[s as string])}>{stats.counts[s as string]}</span>
             </span>
           ))}
-          <span className="font-mono text-[10px] text-muted">/ {detail.nodes.length}</span>
+          <span className="font-mono text-2xs text-muted">/ {detail.nodes.length}</span>
         </div>
       </div>
 
@@ -156,7 +156,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
       {/* Aggregate traffic */}
       <div className="flex flex-col justify-center gap-0.5">
         <div className="flex items-center gap-1 text-[8.5px] font-bold uppercase tracking-wider text-muted"><Activity className="h-2.5 w-2.5" /> Traffic</div>
-        <div className="font-mono text-[15px] font-bold leading-tight text-text">{formatBps(stats.totalBps)}</div>
+        <div className="font-mono text-base font-bold leading-tight text-text">{formatBps(stats.totalBps)}</div>
         <div className="text-[8.5px] leading-none text-muted">
           {stats.bound}/{stats.linkCount} links bound
           {stats.faulted > 0 ? <span className="text-danger"> · {stats.faulted} down</span> : ''}
@@ -169,8 +169,8 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
           <Divider />
           <div className="flex max-w-56 flex-col justify-center gap-0.5">
             <div className="flex items-center gap-1 text-[8.5px] font-bold uppercase tracking-wider text-muted"><Flame className="h-2.5 w-2.5" /> Busiest</div>
-            <div className="truncate text-[10.5px] font-semibold leading-tight text-text2" title={stats.hot.label}>{stats.hot.label}</div>
-            <div className="flex items-center gap-1.5 font-mono text-[9.5px] leading-none">
+            <div className="truncate text-xs font-semibold leading-tight text-text2" title={stats.hot.label}>{stats.hot.label}</div>
+            <div className="flex items-center gap-1.5 font-mono text-2xs leading-none">
               <span className="font-bold" style={{ color: utilHex(stats.hot.util) }}>{formatBps(stats.hot.bps)}</span>
               {stats.hot.util != null && <span className="text-muted">{stats.hot.util.toFixed(1)}%</span>}
             </div>
@@ -188,7 +188,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
         title="Open active alerts"
       >
         <div className="flex items-center gap-1 text-[8.5px] font-bold uppercase tracking-wider text-muted"><AlertTriangle className="h-2.5 w-2.5" /> Alerts</div>
-        <div className={cn('font-mono text-[15px] font-bold leading-tight', stats.critical > 0 ? 'text-danger' : stats.alerts > 0 ? 'text-warning' : 'text-success')}>
+        <div className={cn('font-mono text-base font-bold leading-tight', stats.critical > 0 ? 'text-danger' : stats.alerts > 0 ? 'text-warning' : 'text-success')}>
           {stats.alerts}
         </div>
         <div className="text-[8.5px] leading-none text-muted">{stats.critical > 0 ? `${stats.critical} critical` : 'active'}</div>
@@ -266,13 +266,13 @@ export function ProblemsPanel({ problems, onFocus }: { problems: Problem[]; onFo
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-muted transition hover:text-text"
+        className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-2xs font-bold uppercase tracking-wider text-muted transition hover:text-text"
       >
         <span className="flex items-center gap-1.5">
           {allClear ? <ShieldCheck className="h-3.5 w-3.5 text-success" /> : <AlertTriangle className={cn('h-3.5 w-3.5', crit ? 'text-danger' : 'text-warning')} />}
           {allClear ? 'All clear' : 'Attention'}
         </span>
-        <span className="flex items-center gap-1.5 font-mono text-[10px]">
+        <span className="flex items-center gap-1.5 font-mono text-2xs">
           {crit > 0 && <span className="rounded bg-danger/15 px-1 text-danger">{crit}</span>}
           {warn > 0 && <span className="rounded bg-warning/15 px-1 text-warning">{warn}</span>}
           {info > 0 && <span className="rounded bg-surface2 px-1 text-muted">{info}</span>}
@@ -293,15 +293,15 @@ export function ProblemsPanel({ problems, onFocus }: { problems: Problem[]; onFo
                 {p.kind === 'device' ? <ServerCrash className="h-3.5 w-3.5" /> : p.severity === 'info' ? <Unplug className="h-3.5 w-3.5" /> : <Link2Off className="h-3.5 w-3.5" />}
               </span>
               <span className="min-w-0">
-                <span className="block truncate text-[11px] font-semibold text-text">{p.title}</span>
-                <span className="block truncate text-[9.5px] text-muted">{p.detail}</span>
+                <span className="block truncate text-xs font-semibold text-text">{p.title}</span>
+                <span className="block truncate text-2xs text-muted">{p.detail}</span>
               </span>
             </button>
           ))}
         </div>
       )}
       {open && allClear && (
-        <div className="border-t border-border/60 px-2.5 py-2 text-[10px] text-muted">Every device is up, no link is faulted or saturated.</div>
+        <div className="border-t border-border/60 px-2.5 py-2 text-2xs text-muted">Every device is up, no link is faulted or saturated.</div>
       )}
     </div>
   )
@@ -315,7 +315,7 @@ export function MapLegend() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-3 px-2.5 py-1 text-[9.5px] font-bold uppercase tracking-wider text-muted transition hover:text-text"
+        className="flex w-full items-center justify-between gap-3 px-2.5 py-1 text-2xs font-bold uppercase tracking-wider text-muted transition hover:text-text"
       >
         Legend {open ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
       </button>
@@ -323,30 +323,30 @@ export function MapLegend() {
         <div className="flex flex-wrap items-center gap-4 border-t border-border/60 px-3 py-1.5">
           <div className="flex items-center gap-2.5">
             {(['up', 'degraded', 'down', 'maintenance', 'unknown'] as const).map((s) => (
-              <span key={s} className="flex items-center gap-1 text-[9px] capitalize text-text2">
+              <span key={s} className="flex items-center gap-1 text-2xs capitalize text-text2">
                 <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[s])} /> {s === 'maintenance' ? 'maint' : s}
               </span>
             ))}
           </div>
           <div className="h-4 w-px bg-border/70" />
           <div className="flex items-center gap-1.5">
-            <span className="text-[9px] text-muted">Load</span>
+            <span className="text-2xs text-muted">Load</span>
             <div className="h-2 w-24 rounded-full" style={{ background: 'linear-gradient(90deg, #22c55e 0%, #a3e635 35%, #f59e0b 65%, #ef4444 90%)' }} />
             <span className="font-mono text-[8.5px] text-muted">0→100%</span>
           </div>
           <div className="h-4 w-px bg-border/70" />
-          <span className="flex items-center gap-1.5 text-[9px] text-text2">
+          <span className="flex items-center gap-1.5 text-2xs text-text2">
             <svg width="26" height="8" className="overflow-visible">
               <line x1="0" y1="4" x2="26" y2="4" className="stroke-success/60" strokeWidth="2" />
               <circle cx="6" cy="4" r="2.4" fill="#22c55e"><animate attributeName="cx" values="2;24" dur="1.6s" repeatCount="indefinite" /></circle>
             </svg>
             traffic
           </span>
-          <span className="flex items-center gap-1.5 text-[9px] text-text2">
+          <span className="flex items-center gap-1.5 text-2xs text-text2">
             <svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" className="stroke-danger" strokeWidth="2" strokeDasharray="5 3" /></svg>
             iface down
           </span>
-          <span className="flex items-center gap-1.5 text-[9px] text-text2">
+          <span className="flex items-center gap-1.5 text-2xs text-text2">
             <svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" className="stroke-muted/70" strokeWidth="2" strokeDasharray="2 4" /></svg>
             unbound
           </span>

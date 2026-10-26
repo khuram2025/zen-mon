@@ -551,7 +551,7 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
         <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
           {SHORTCUTS.map(([k, v]) => (
             <div key={k} className="contents">
-              <kbd className="whitespace-nowrap rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-[10px] text-text">{k}</kbd>
+              <kbd className="whitespace-nowrap rounded border border-border bg-surface2/60 px-1.5 py-0.5 font-mono text-2xs text-text">{k}</kbd>
               <span className="text-text2">{v}</span>
             </div>
           ))}

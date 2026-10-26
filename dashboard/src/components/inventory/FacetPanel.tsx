@@ -139,7 +139,7 @@ function FacetGroup({
           <ChevronDown aria-hidden className={cn('h-3.5 w-3.5 shrink-0 transition-transform', !open && '-rotate-90')} />
           <span className="min-w-0 flex-1 truncate">{group.label}</span>
           {!open && selected.length > 0 && (
-            <span className="rounded-full bg-primary/15 px-1.5 text-[10px] font-bold tabular-nums text-primary" aria-label={`${selected.length} selected`}>
+            <span className="rounded-full bg-primary/15 px-1.5 text-2xs font-bold tabular-nums text-primary" aria-label={`${selected.length} selected`}>
               {selected.length}
             </span>
           )}
@@ -165,7 +165,7 @@ function FacetGroup({
                 const { patch, selected: isOn } = states.get(item) ?? facetItemState(group, item, filters)
                 const unavailable = isOn ? null : facetItemUnavailable(group, item)
                 const rowClass = cn(
-                  'group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] outline-none transition-colors',
+                  'group flex items-center gap-2 rounded-md px-2 py-1 text-sm outline-none transition-colors',
                   isOn ? 'bg-primary/10 font-semibold text-text' : 'text-text2',
                   item.unknown && !isOn && 'text-muted',
                 )
@@ -209,7 +209,7 @@ function FacetGroup({
             </ul>
             {needle && shown.length === 0 && <p className="px-2 py-1 text-xs text-muted">No match</p>}
             {(group.more ?? 0) > 0 && !needle && (
-              <p className="px-2 py-1 text-[11px] text-muted">{fmtInt(group.more)} more values not listed. Narrow the other filters to see them.</p>
+              <p className="px-2 py-1 text-xs text-muted">{fmtInt(group.more)} more values not listed. Narrow the other filters to see them.</p>
             )}
             {(hidden > 0 || (expanded && items.length > (group.limit ?? 8))) && !needle && (
               <button

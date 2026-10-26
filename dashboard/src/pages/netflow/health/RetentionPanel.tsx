@@ -62,7 +62,7 @@ function RetentionBody({ r }: { r: RetentionInfo }) {
                 <Td className="whitespace-nowrap text-xs">
                   {retentionText(x.days)}
                   {x.configured != null && x.configured !== x.days && (
-                    <div className="text-[11px] text-warning-fg">configured {x.configured} days, not applied</div>
+                    <div className="text-xs text-warning-fg">configured {x.configured} days, not applied</div>
                   )}
                 </Td>
                 <Td className="whitespace-nowrap text-xs tabular-nums">{x.earliest ? formatDateTime(x.earliest, tz, { seconds: false }) : 'No data yet'}</Td>
@@ -81,7 +81,7 @@ function RetentionBody({ r }: { r: RetentionInfo }) {
               <dt className="text-text2">Kept</dt><dd className="text-right text-text">{retentionText(x.days)}</dd>
               <dt className="text-text2">Oldest</dt><dd className="text-right tabular-nums text-text">{x.earliest ? formatDateTime(x.earliest, tz, { seconds: false }) : 'No data yet'}</dd>
             </dl>
-            <p className="mt-1 text-[11px] text-text2">{x.powers}</p>
+            <p className="mt-1 text-xs text-text2">{x.powers}</p>
           </li>
         ))}
       </ul>

@@ -152,12 +152,12 @@ function ExplainBody({
           <div>
             <div className="text-text2">This window</div>
             <div className="text-lg font-semibold tabular-nums text-text">{formatBytes(t.current_bytes)}</div>
-            <div className="text-[11px] text-text2">{period(data.window.from, data.window.to, tz)}</div>
+            <div className="text-xs text-text2">{period(data.window.from, data.window.to, tz)}</div>
           </div>
           <div>
             <div className="text-text2">{data.baseline === 'previous_equal' ? 'Previous period' : 'Same time last week'}</div>
             <div className="text-lg font-semibold tabular-nums text-text">{formatBytes(t.baseline_bytes)}</div>
-            <div className="text-[11px] text-text2">{period(data.baseline_window.from, data.baseline_window.to, tz)}</div>
+            <div className="text-xs text-text2">{period(data.baseline_window.from, data.baseline_window.to, tz)}</div>
           </div>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
@@ -175,7 +175,7 @@ function ExplainBody({
           </span>
         </div>
         {(meta?.warnings ?? []).filter((w) => w.code.startsWith('baseline')).map((w) => (
-          <p key={w.code} className="mt-2 text-[11px] text-warning-fg">{w.message}</p>
+          <p key={w.code} className="mt-2 text-xs text-warning-fg">{w.message}</p>
         ))}
       </section>
       {data.dimensions.map((d) => (
@@ -183,14 +183,14 @@ function ExplainBody({
           <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
             <h3 id={`nf-ex-${d.dimension}`} className="text-sm font-semibold text-text">{d.label}</h3>
             {d.items.length > 0 && t.delta_bytes !== 0 && (
-              <span className="text-[11px] text-text2" title="Net change of the listed items against the net change of all traffic">
+              <span className="text-xs text-text2" title="Net change of the listed items against the net change of all traffic">
                 Listed items net <b className="font-semibold tabular-nums text-text">{signedBytes(t.delta_bytes - d.other_delta_bytes)}</b> of{' '}
                 <span className="tabular-nums">{signedBytes(t.delta_bytes)}</span>
               </span>
             )}
           </div>
           {d.items.length === 0 ? (
-            <p className="text-[11px] text-text2">No traffic in either period.</p>
+            <p className="text-xs text-text2">No traffic in either period.</p>
           ) : (
             <ul className="space-y-1.5">
               {d.items.map((item) => (
@@ -200,7 +200,7 @@ function ExplainBody({
           )}
         </section>
       ))}
-      <p className="text-[11px] text-text2">{data.method}. A flow seen by several exporters counts at each of them.</p>
+      <p className="text-xs text-text2">{data.method}. A flow seen by several exporters counts at each of them.</p>
     </div>
   )
 }
@@ -235,7 +235,7 @@ function ExplainRow({
       <div className="mt-1 h-1.5 w-full rounded-full bg-surface2" aria-hidden>
         <div className="h-1.5 rounded-full" style={{ width: `${width}%`, background: up ? colors.up : colors.down }} />
       </div>
-      <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-text2">
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-text2">
         <span>
           {formatBytes(item.current_bytes)} now · {formatBytes(item.baseline_bytes)} before
           {shareOfChangeText(item.share_of_change_pct) && ` · ${shareOfChangeText(item.share_of_change_pct)}`}

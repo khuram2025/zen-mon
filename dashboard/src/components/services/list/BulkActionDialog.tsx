@@ -252,7 +252,7 @@ export function BulkActionDialog({
               {snapshot.map((i) => (
                 <li key={i.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5">
                   <span className="truncate">{i.name}</span>
-                  {!i.visible && <span className="shrink-0 text-[10.5px] text-muted">hidden by filters/page</span>}
+                  {!i.visible && <span className="shrink-0 text-xs text-muted">hidden by filters/page</span>}
                 </li>
               ))}
             </ul>

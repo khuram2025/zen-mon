@@ -39,7 +39,7 @@ function KpiTile({ icon: Icon, label, value, tone, onClick, active }: {
       </div>
       <div>
         <div className="text-lg font-semibold leading-tight tabular-nums">{value}</div>
-        <div className="text-[11px] text-muted">{label}</div>
+        <div className="text-xs text-muted">{label}</div>
       </div>
     </button>
   )

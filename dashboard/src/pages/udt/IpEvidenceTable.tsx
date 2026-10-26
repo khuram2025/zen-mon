@@ -27,7 +27,7 @@ export function IpEvidenceTable({ endpointId, ip }: { endpointId: string; ip: st
             <Td><Link className="font-mono text-xs text-primary hover:underline" to={`/udt/endpoints/${r.endpoint_id}`}>{r.mac}</Link><span className="block text-xs text-muted">{r.endpoint_name || (r.endpoint_id === endpointId ? 'This endpoint' : 'Unnamed endpoint')}</span></Td>
             <Td className="text-xs">{r.reporter || 'Unknown reporter'}{r.reporter_ip && r.reporter_ip !== r.reporter && <span className="block font-mono text-muted">{r.reporter_ip}</span>}</Td>
             <Td className="text-xs">{r.interface_name || (r.if_index ? `Interface ${r.if_index}` : 'Interface not recorded')}<span className="block uppercase text-muted">{r.source}</span></Td>
-            <Td><Badge variant="outline">{r.legacy ? 'Legacy record' : r.repeated ? 'Repeatedly observed' : 'Awaiting repeat evidence'}</Badge><span className="mt-1 block text-[11px] text-muted">{r.legacy ? 'Poll count unavailable' : `${r.observation_count} collected ${r.observation_count === 1 ? 'observation' : 'observations'}`}</span></Td>
+            <Td><Badge variant="outline">{r.legacy ? 'Legacy record' : r.repeated ? 'Repeatedly observed' : 'Awaiting repeat evidence'}</Badge><span className="mt-1 block text-xs text-muted">{r.legacy ? 'Poll count unavailable' : `${r.observation_count} collected ${r.observation_count === 1 ? 'observation' : 'observations'}`}</span></Td>
             <Td className="text-xs text-muted"><time dateTime={r.last_seen} title={fmtDate(r.last_seen)}>{relTime(r.last_seen)}</time><span className="block" title={fmtDate(r.first_seen)}>First: {fmtDate(r.first_seen)}</span></Td>
           </Tr>)}</TBody>
         </Table>

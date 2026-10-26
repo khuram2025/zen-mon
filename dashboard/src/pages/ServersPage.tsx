@@ -76,7 +76,7 @@ function OsBadge({ os }: { os: string }) {
   const label =
     os === 'windows' ? 'Windows' : os === 'linux' ? 'Linux' : os === 'macos' ? 'macOS' : os
   return (
-    <span className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">
+    <span className="rounded bg-surface2 px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted">
       {label}
     </span>
   )
@@ -393,10 +393,10 @@ export default function ServersPage() {
                         <div className="flex flex-col gap-0.5">
                           <span className="font-medium">{s.display_name}</span>
                           {s.hostname && s.hostname !== s.display_name ? (
-                            <span className="text-[11px] text-muted">{s.hostname}</span>
+                            <span className="text-xs text-muted">{s.hostname}</span>
                           ) : null}
                           {s.primary_ip ? (
-                            <span className="font-mono text-[10px] text-muted">{s.primary_ip}</span>
+                            <span className="font-mono text-2xs text-muted">{s.primary_ip}</span>
                           ) : null}
                         </div>
                       </Td>
@@ -404,7 +404,7 @@ export default function ServersPage() {
                         <div className="flex flex-col gap-0.5">
                           <OsBadge os={s.os_type} />
                           {s.os_version ? (
-                            <span className="text-[10px] text-muted">{s.os_version}</span>
+                            <span className="text-2xs text-muted">{s.os_version}</span>
                           ) : null}
                         </div>
                       </Td>

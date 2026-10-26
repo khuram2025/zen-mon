@@ -68,7 +68,7 @@ export function ConversationsCard({ ctx, compact }: OverviewCardProps) {
             Search all raw flows for {q.trim()} <ArrowRight className="h-3 w-3" aria-hidden />
           </Link>
         ) : q.trim() ? (
-          <span className="text-[11px] text-text2">Only the {limit} rows below are searched; enter an IP or CIDR to search all raw flows.</span>
+          <span className="text-xs text-text2">Only the {limit} rows below are searched; enter an IP or CIDR to search all raw flows.</span>
         ) : null}
       </div>
       <QueryPanel query={query} label="top conversations" skeleton="rows" compact coverage={coverage} isEmpty={(r) => r.data.items.length === 0}>
@@ -104,7 +104,7 @@ function ConversationList({ rows, ctx, mw, total, searched }: { rows: Conversati
                     <span className="sr-only">{labels.b}</span>
                     <HostLink ip={c.server} href={hostLink(c.server, ctx.filter, ctx.window, mw)} />
                   </div>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-text2">
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-text2">
                     <button
                       type="button"
                       className="font-medium text-text hover:text-primary hover:underline"
@@ -121,14 +121,14 @@ function ConversationList({ rows, ctx, mw, total, searched }: { rows: Conversati
                 </div>
                 <div className="shrink-0 text-right text-xs">
                   <Figure value={c.bytes} className="font-semibold text-text" />
-                  <div className="text-[11px] tabular-nums text-text2">{total ? formatPercent((100 * c.bytes) / total) : '—'}</div>
+                  <div className="text-xs tabular-nums text-text2">{total ? formatPercent((100 * c.bytes) / total) : '—'}</div>
                 </div>
               </div>
               <div className="mt-1 flex h-1.5 w-full gap-[2px] overflow-hidden rounded-full bg-surface2" aria-hidden>
                 {split && split.a > 0 && <div className={cn('h-full', BAR_CLASS)} style={{ flexGrow: split.a, flexBasis: 0 }} />}
                 {split && split.b > 0 && <div className={cn('h-full', BAR2_CLASS)} style={{ flexGrow: split.b, flexBasis: 0 }} />}
               </div>
-              <div className="mt-0.5 flex flex-wrap justify-between gap-x-2 text-[11px] tabular-nums text-text2">
+              <div className="mt-0.5 flex flex-wrap justify-between gap-x-2 text-xs tabular-nums text-text2">
                 <span>{labels.forward} {formatBytes(c.bytes_c2s)}</span>
                 <span>{labels.reverse} {formatBytes(c.bytes_s2c)}</span>
               </div>

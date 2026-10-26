@@ -66,9 +66,9 @@ function SpeedField({
         </select>
       </div>
       {error ? (
-        <p id={`${id}-err`} className="text-[11px] text-danger-fg">{error}</p>
+        <p id={`${id}-err`} className="text-xs text-danger-fg">{error}</p>
       ) : hint ? (
-        <p id={`${id}-hint`} className="text-[11px] text-text2">{hint}</p>
+        <p id={`${id}-hint`} className="text-xs text-text2">{hint}</p>
       ) : null}
     </div>
   )
@@ -201,7 +201,7 @@ export function SpeedDialog({
             </>
           )}
         </dl>
-        <p className="text-[11px] text-text2">
+        <p className="text-xs text-text2">
           Order used: configured circuit speed, then NetFlow override, then SNMP (or sFlow) ifSpeed.
         </p>
 

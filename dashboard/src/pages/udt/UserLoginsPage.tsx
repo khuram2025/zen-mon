@@ -84,7 +84,7 @@ export function UserLoginsPage() {
           ) : (
             <div className="divide-y divide-border">
               <div className="p-4">
-                <div className="mb-2 text-[11px] uppercase tracking-wide text-muted">Endpoints used</div>
+                <div className="mb-2 text-xs uppercase tracking-wide text-muted">Endpoints used</div>
                 {detail.data!.endpoints.length === 0 ? <div className="text-xs text-muted">None correlated.</div> : (
                   <ul className="space-y-1.5">
                     {detail.data!.endpoints.map((e: any) => (
@@ -99,7 +99,7 @@ export function UserLoginsPage() {
                 )}
               </div>
               <div className="p-4">
-                <div className="mb-2 text-[11px] uppercase tracking-wide text-muted">Recent logins</div>
+                <div className="mb-2 text-xs uppercase tracking-wide text-muted">Recent logins</div>
                 <ul className="space-y-1.5">
                   {detail.data!.logins.slice(0, 25).map((l: any, i: number) => (
                     <li key={i} className="flex items-center justify-between text-xs">

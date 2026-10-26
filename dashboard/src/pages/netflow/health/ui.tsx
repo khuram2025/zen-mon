@@ -45,7 +45,7 @@ export function ToneChip({ tone, children, icon, className, title }: {
   const Icon = icon === null ? null : icon ?? TONE_ICON[tone]
   return (
     <span
-      className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold', TONE_CHIP[tone], className)}
+      className={cn('inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-semibold', TONE_CHIP[tone], className)}
       title={title}
     >
       {Icon && <Icon className="h-3 w-3 shrink-0" aria-hidden />}
@@ -71,7 +71,7 @@ export function CheckIcon({ status }: { status: CheckStatus }) {
   const m = CHECK_META[status] ?? CHECK_META.pending
   const Icon = m.icon
   return (
-    <span className={cn('inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold uppercase tracking-wide', m.cls)}>
+    <span className={cn('inline-flex shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wide', m.cls)}>
       <Icon className="h-4 w-4" aria-hidden />
       <span className="w-[4.5rem]">{m.word}</span>
     </span>
@@ -88,9 +88,9 @@ export function Metric({ label, value, hint, title, className }: {
 }) {
   return (
     <div className={cn('min-w-0 rounded-md border border-border bg-surface2/40 px-3 py-2', className)} title={title}>
-      <div className="text-[11px] font-medium text-text2">{label}</div>
+      <div className="text-xs font-medium text-text2">{label}</div>
       <div className="mt-0.5 break-words text-sm font-semibold tabular-nums text-text">{value}</div>
-      {hint && <div className="mt-0.5 text-[11px] leading-snug text-text2">{hint}</div>}
+      {hint && <div className="mt-0.5 text-xs leading-snug text-text2">{hint}</div>}
     </div>
   )
 }

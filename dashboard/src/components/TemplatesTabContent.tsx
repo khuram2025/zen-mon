@@ -66,7 +66,7 @@ function VendorGlyph({ vendor, size = 'lg' }: { vendor?: string | null; size?: '
     <div
       className={cn(
         'flex shrink-0 items-center justify-center rounded-lg font-bold tracking-tight text-white',
-        size === 'lg' ? 'h-11 w-11 text-sm' : 'h-8 w-8 text-[10px]',
+        size === 'lg' ? 'h-11 w-11 text-sm' : 'h-8 w-8 text-2xs',
       )}
       style={{ background: `linear-gradient(135deg, ${t.accent}, ${t.accent}bb)` }}
     >
@@ -186,7 +186,7 @@ export function TemplatesTabContent() {
               <div className="rounded-md bg-primary/10 p-2"><Icon className="h-4 w-4 text-primary" /></div>
               <div>
                 <div className="text-lg font-bold tabular-nums">{value}</div>
-                <div className="text-[11px] text-muted">{label}</div>
+                <div className="text-xs text-muted">{label}</div>
               </div>
             </CardContent>
           </Card>
@@ -249,7 +249,7 @@ function TemplateCard({ t, onOpen, onClone, onEdit, onDelete }: {
             <button onClick={onOpen} className="block truncate text-left text-sm font-semibold hover:text-primary">
               {t.name}
             </button>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted">
+            <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted">
               {t.vendor || 'Custom'}
               {t.builtin
                 ? <Badge variant="info" className="gap-1"><Lock className="h-2.5 w-2.5" />Built-in</Badge>
@@ -264,17 +264,17 @@ function TemplateCard({ t, onOpen, onClone, onEdit, onDelete }: {
 
         <div className="flex flex-wrap gap-1.5">
           {groups.slice(0, 5).map((g) => (
-            <span key={g.key} className="rounded-full border border-border bg-surface2 px-2 py-0.5 text-[10px] text-text2">
+            <span key={g.key} className="rounded-full border border-border bg-surface2 px-2 py-0.5 text-2xs text-text2">
               {g.name}
             </span>
           ))}
           {groups.length > 5 && (
-            <span className="rounded-full px-2 py-0.5 text-[10px] text-muted">+{groups.length - 5} more</span>
+            <span className="rounded-full px-2 py-0.5 text-2xs text-muted">+{groups.length - 5} more</span>
           )}
         </div>
 
         <div className="mt-auto flex items-center justify-between border-t border-border pt-3">
-          <div className="flex items-center gap-3 text-[11px] text-muted">
+          <div className="flex items-center gap-3 text-xs text-muted">
             <span className="flex items-center gap-1"><Layers className="h-3 w-3" />{groups.length} groups</span>
             <span className="flex items-center gap-1"><Activity className="h-3 w-3" />{metricCount} metrics</span>
             <span className={cn('flex items-center gap-1', t.device_count > 0 && 'text-success')}>
@@ -370,14 +370,14 @@ function GroupAccordion({ group: g }: { group: TemplateGroup }) {
         className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-surface2">
         {open ? <ChevronDown className="h-3.5 w-3.5 text-muted" /> : <ChevronRight className="h-3.5 w-3.5 text-muted" />}
         <span className="text-sm font-medium">{g.name}</span>
-        <Badge variant={g.kind === 'table' ? 'warning' : 'default'} className="text-[10px]">
+        <Badge variant={g.kind === 'table' ? 'warning' : 'default'} className="text-2xs">
           {g.kind === 'table' ? 'table' : 'scalars'}
         </Badge>
-        <span className="ml-auto text-[11px] text-muted">{g.metrics.length} metrics</span>
+        <span className="ml-auto text-xs text-muted">{g.metrics.length} metrics</span>
       </button>
       {open && (
         <div className="border-t border-border px-3 pb-3">
-          {g.description && <p className="py-2 text-[11px] leading-relaxed text-muted">{g.description}</p>}
+          {g.description && <p className="py-2 text-xs leading-relaxed text-muted">{g.description}</p>}
           <Table>
             <THead>
               <Tr>
@@ -388,10 +388,10 @@ function GroupAccordion({ group: g }: { group: TemplateGroup }) {
               {g.metrics.map((m) => (
                 <Tr key={m.key}>
                   <Td className="whitespace-nowrap text-xs font-medium">{m.name}</Td>
-                  <Td className="max-w-[220px] truncate font-mono text-[10px] text-muted" title={m.oid}>{m.oid}</Td>
-                  <Td><span className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', typeBadge[m.type] || typeBadge.gauge)}>{m.type}</span></Td>
+                  <Td className="max-w-[220px] truncate font-mono text-2xs text-muted" title={m.oid}>{m.oid}</Td>
+                  <Td><span className={cn('rounded px-1.5 py-0.5 text-2xs font-medium', typeBadge[m.type] || typeBadge.gauge)}>{m.type}</span></Td>
                   <Td className="text-xs text-muted">{m.unit || '—'}</Td>
-                  <Td className="text-[11px] text-muted">
+                  <Td className="text-xs text-muted">
                     {m.thresholds && (m.thresholds.warn != null || m.thresholds.crit != null) ? (
                       <span>
                         {m.thresholds.warn != null && <span className="text-warning">warn {m.thresholds.op || '≥'} {m.thresholds.warn}</span>}
@@ -425,12 +425,12 @@ function MatchRulesView({ rules }: { rules: any }) {
       <div className="rounded-lg border border-border p-3">
         <div className="mb-1.5 font-semibold">sysObjectID prefixes</div>
         {prefixes.length ? prefixes.map((p) => (
-          <div key={p} className="font-mono text-[11px] text-muted">.{p}</div>
+          <div key={p} className="font-mono text-xs text-muted">.{p}</div>
         )) : <div className="text-muted">—</div>}
       </div>
       <div className="rounded-lg border border-border p-3">
         <div className="mb-1.5 font-semibold">sysDescr pattern</div>
-        <div className="font-mono text-[11px] text-muted">{rules?.sys_descr_regex || '—'}</div>
+        <div className="font-mono text-xs text-muted">{rules?.sys_descr_regex || '—'}</div>
       </div>
     </div>
   )
@@ -478,7 +478,7 @@ function TemplateDevices({ template: t }: { template: Template }) {
             {rows.map((d) => (
               <Tr key={d.id}>
                 <Td className="text-xs font-medium">{d.hostname}</Td>
-                <Td className="font-mono text-[11px] text-muted">{d.ip_address}</Td>
+                <Td className="font-mono text-xs text-muted">{d.ip_address}</Td>
                 <Td className="text-xs text-muted">{d.device_type}</Td>
                 <Td>
                   <Badge variant={d.status === 'up' || d.status === 'healthy' ? 'success' : d.status === 'unknown' ? 'outline' : 'danger'}>
@@ -552,9 +552,9 @@ function AssignDevicesDialog({ template: t, onOpenChange }: {
               <input type="checkbox" className="accent-[rgb(var(--primary))]"
                 checked={selected.has(d.id)} onChange={() => toggle(d.id)} />
               <span className="text-xs font-medium">{d.hostname}</span>
-              <span className="font-mono text-[10px] text-muted">{d.ip_address}</span>
+              <span className="font-mono text-2xs text-muted">{d.ip_address}</span>
               {d.profile_name && d.profile_id !== t.id && (
-                <Badge variant="outline" className="ml-auto text-[9px]">{d.profile_name}</Badge>
+                <Badge variant="outline" className="ml-auto text-2xs">{d.profile_name}</Badge>
               )}
               {d.profile_id === t.id && (
                 <CheckCircle2 className="ml-auto h-3.5 w-3.5 text-success" />
@@ -654,7 +654,7 @@ function TemplateEditorDialog({ open, template, onOpenChange }: {
           </FormField>
           <FormField label="OID groups (JSON)" className="col-span-2"
             hint='[{ "key", "name", "kind": "scalar|table", "table": {"label_oid"}, "metrics": [{ "key", "name", "oid", "type": "gauge|counter|enum|string", "unit", "scale", "value_map", "labels", "thresholds" }] }]'>
-            <Textarea rows={14} className="font-mono text-[11px] leading-relaxed"
+            <Textarea rows={14} className="font-mono text-xs leading-relaxed"
               value={groupsJson}
               onChange={(e) => { setGroupsJson(e.target.value); setJsonError(null) }} />
           </FormField>

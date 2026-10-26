@@ -333,7 +333,7 @@ function Segmented({ value, onChange, options }: {
           )}
         >
           {o.label}
-          {o.sub && <span className="ml-1.5 text-[10px] text-muted">{o.sub}</span>}
+          {o.sub && <span className="ml-1.5 text-2xs text-muted">{o.sub}</span>}
         </button>
       ))}
     </div>
@@ -515,7 +515,7 @@ function LogoSlot({ variant, meta, title, hint }: { variant: LogoVariant; meta: 
           <div className={cn('flex flex-col items-center gap-1.5 text-center text-xs', dark ? 'text-white/60' : 'text-slate-500')}>
             <Upload className="h-5 w-5" />
             <span><span className="font-medium">Click to upload</span> or drag and drop</span>
-            <span className="text-[10px] opacity-80">PNG · SVG · JPEG · WebP · max 2 MB</span>
+            <span className="text-2xs opacity-80">PNG · SVG · JPEG · WebP · max 2 MB</span>
           </div>
         )}
         <input
@@ -529,7 +529,7 @@ function LogoSlot({ variant, meta, title, hint }: { variant: LogoVariant; meta: 
       <div className="flex items-start justify-between gap-2 p-3">
         <div className="min-w-0">
           <p className="text-sm font-medium">{title}</p>
-          <p className="mt-0.5 text-[11px] text-muted">
+          <p className="mt-0.5 text-xs text-muted">
             {meta ? <>{meta.filename || 'Uploaded image'} · {fmtBytes(meta.size)} · {meta.content_type.replace('image/', '').replace('+xml', '').toUpperCase()}</> : hint}
           </p>
         </div>
@@ -579,7 +579,7 @@ function BrandPreview({ form, logos }: { form: CompanyForm; logos: Record<LogoVa
         </div>
         <div className="mt-auto">
           <p className="text-[5.5px] font-semibold uppercase tracking-widest" style={{ color }}>Operations</p>
-          <p className="mt-0.5 text-[10px] font-semibold leading-tight">Availability &amp; SLA Report</p>
+          <p className="mt-0.5 text-2xs font-semibold leading-tight">Availability &amp; SLA Report</p>
           <p className="mt-1 text-[5.5px] text-white/60">{formatPeriod(from, to, form)}</p>
         </div>
         <div className="mt-3 flex items-end justify-between border-t border-white/10 pt-1.5 text-[5px] text-white/50">

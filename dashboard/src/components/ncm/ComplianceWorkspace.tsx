@@ -219,7 +219,7 @@ function EvidenceLines({ evidence, emptyText = 'No evidence lines recorded for t
           </li>
         ))}
       </ol>
-      <p className="mt-1 text-[11px] text-muted">Line numbers refer to the assessed configuration version. Secrets are redacted before evidence is stored.</p>
+      <p className="mt-1 text-xs text-muted">Line numbers refer to the assessed configuration version. Secrets are redacted before evidence is stored.</p>
     </div>
   )
 }
@@ -464,7 +464,7 @@ function TrendChart({ points, note }: { points: TrendPoint[]; note?: string }) {
           )
         })}
       </div>
-      <div className="flex justify-between border-t border-border pt-1 text-[11px] tabular-nums text-muted">
+      <div className="flex justify-between border-t border-border pt-1 text-xs tabular-nums text-muted">
         <span>{points[0].day}</span>{points.length > 1 && <span>{last.day}</span>}
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
@@ -994,7 +994,7 @@ function PolicyEditor({ policy, onClose }: { policy: Policy | null; onClose: () 
 
         <fieldset className="min-w-0 space-y-1.5">
           <legend className="text-xs font-medium uppercase tracking-wider text-muted">Platforms</legend>
-          <p className="text-[11px] text-muted">Leave all unchecked to apply to every platform. {selected.length ? `${selected.length} selected.` : ''}</p>
+          <p className="text-xs text-muted">Leave all unchecked to apply to every platform. {selected.length ? `${selected.length} selected.` : ''}</p>
           {platforms.isLoading ? <Loading what="platform drivers" />
             : platforms.isError ? <SectionError what="Platform drivers" onRetry={() => platforms.refetch()} />
             : (

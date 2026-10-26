@@ -40,8 +40,8 @@ const SECTION_KEYS: readonly SystemSection[] = ['hardware', 'storage', 'network'
 
 /* ── Local helpers ───────────────────────────────────────────────── */
 
-const th = 'h-9 px-3 text-[11px]'
-const td = 'px-3 py-2 text-[13px]'
+const th = 'h-9 px-3 text-xs'
+const td = 'px-3 py-2 text-sm'
 const rowCls = 'border-border/60 hover:bg-surface2/40'
 
 /** Compact uptime from a boot timestamp, e.g. "12d 4h" / "3h 20m". */
@@ -263,9 +263,9 @@ function HardwareSection({ server }: { server: ServerItem }) {
         <Panel title="Host identity" icon={Fingerprint} subtitle={server.fqdn || hostname}>
           <KeyValues
             items={[
-              ['Hostname', <span key="h" className="font-mono text-[12px]" title={hostname}>{hostname}</span>],
-              ['FQDN', server.fqdn ? <span key="f" className="font-mono text-[12px]" title={server.fqdn}>{server.fqdn}</span> : null],
-              ['Primary IP', server.primary_ip ? <span key="ip" className="font-mono text-[12px]">{server.primary_ip}</span> : null],
+              ['Hostname', <span key="h" className="font-mono text-sm" title={hostname}>{hostname}</span>],
+              ['FQDN', server.fqdn ? <span key="f" className="font-mono text-sm" title={server.fqdn}>{server.fqdn}</span> : null],
+              ['Primary IP', server.primary_ip ? <span key="ip" className="font-mono text-sm">{server.primary_ip}</span> : null],
               domain ? ['Domain', <span key="d" title={domain}>{domain}</span>] : null,
               ['Site', server.site_name],
               ['Collection', server.collection_mode === 'agent' && server.agent_version
@@ -505,7 +505,7 @@ function StorageSection({ server, fsQ }: { server: ServerItem; fsQ: FsQuery }) {
                 return (
                   <Tr key={fs.mount} className={rowCls}>
                     <Td className={cn(td, 'max-w-[260px] pl-4')}>
-                      <div className="truncate font-mono text-[13px] font-medium text-text" title={fs.mount}>{fs.mount}</div>
+                      <div className="truncate font-mono text-sm font-medium text-text" title={fs.mount}>{fs.mount}</div>
                       <div className="truncate text-xs text-muted" title={`${fs.fs_type || '—'} · ${fs.device || '—'}`}>
                         {fs.fs_type || '—'} · {fs.device || '—'}
                       </div>
@@ -564,7 +564,7 @@ function InterfaceAddresses({ addresses }: { addresses: string[] }) {
       {shown.map((a) => (
         <span key={a} className={cn('truncate', a.includes(':') ? 'text-muted' : 'text-text')}>{a}</span>
       ))}
-      {extra > 0 && <span className="text-[11px] text-muted">+{extra} more</span>}
+      {extra > 0 && <span className="text-xs text-muted">+{extra} more</span>}
     </div>
   )
 }
@@ -739,7 +739,7 @@ function NetworkSection({ server, netQ }: { server: ServerItem; netQ: NetQuery }
                   <Td className={cn(td, 'max-w-[280px] pl-4')}>
                     <div className="flex min-w-0 items-center gap-1.5">
                       <span className="truncate font-medium text-text" title={nic.if_name}>{nic.if_name}</span>
-                      {virtual && <span className="shrink-0 rounded bg-surface2 px-1 text-[10px] font-medium uppercase text-muted">virtual</span>}
+                      {virtual && <span className="shrink-0 rounded bg-surface2 px-1 text-2xs font-medium uppercase text-muted">virtual</span>}
                     </div>
                     <div className="truncate font-mono text-xs text-muted">{nic.mac_address || '—'}</div>
                   </Td>
@@ -916,7 +916,7 @@ function SoftwareSection({ server, swQ }: { server: ServerItem; swQ: SwQuery }) 
             <div className="relative w-[260px] max-w-full">
               <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
               <Input
-                className="h-8 pl-8 text-[13px]"
+                className="h-8 pl-8 text-sm"
                 placeholder="Filter packages, vendors or versions…"
                 value={q}
                 onChange={(e) => { setQ(e.target.value); pager.reset() }}

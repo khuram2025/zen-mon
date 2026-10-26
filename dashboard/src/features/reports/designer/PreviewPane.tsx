@@ -124,12 +124,12 @@ export function PreviewPane({
         <h2 id={headingId} className="flex items-center gap-1.5 text-sm font-semibold text-text">
           <Eye className="h-4 w-4 text-primary" aria-hidden /> Live preview
         </h2>
-        <span className="text-[11px] text-muted">
+        <span className="text-xs text-muted">
           {blocked ? 'Paused' : pending ? 'Updating…' : updatedAt ? <>Updated {formatTime(updatedAt, branding)}</> : null}
         </span>
         <span role="status" className="sr-only">{srStatus}</span>
         <div className="ml-auto flex items-center gap-1.5">
-          <span id={periodLabelId} className="text-[11px] text-muted">Period</span>
+          <span id={periodLabelId} className="text-xs text-muted">Period</span>
           <PeriodSelect value={period} onChange={(p) => p && onPeriodChange(p)} labelledBy={periodLabelId} size="sm" className="w-[10.5rem]" />
           <Button
             type="button"
@@ -201,7 +201,7 @@ export function PreviewPane({
         )}
       </div>
 
-      <p className="border-t border-border px-3 py-1.5 text-[11px] text-muted">
+      <p className="border-t border-border px-3 py-1.5 text-xs text-muted">
         Rendered with your permissions and visibility scope. Other viewers see what their own access allows.
       </p>
     </section>

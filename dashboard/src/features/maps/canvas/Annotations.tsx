@@ -153,10 +153,10 @@ export function ImageDialog({ onCancel, onPick }: { onCancel: () => void; onPick
             autoFocus
           />
         </label>
-        <div className="flex items-center gap-2 text-[10px] text-muted"><div className="h-px flex-1 bg-border" /> or <div className="h-px flex-1 bg-border" /></div>
+        <div className="flex items-center gap-2 text-2xs text-muted"><div className="h-px flex-1 bg-border" /> or <div className="h-px flex-1 bg-border" /></div>
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
         <Button variant="outline" onClick={() => fileRef.current?.click()}>Upload from computer (≤ 1.5 MB)</Button>
-        {err && <p className="text-[11px] text-danger">{err}</p>}
+        {err && <p className="text-xs text-danger">{err}</p>}
         <DialogFooter>
           <Button variant="outline" onClick={onCancel}>Cancel</Button>
           <Button onClick={() => url.trim() && onPick(url.trim())} disabled={!url.trim()}>Insert</Button>
@@ -245,7 +245,7 @@ export function ShapeInspector({ shape, devices, onChange, onDelete, onZ, onLock
               {(devices || []).map((d) => <option key={d.ip} value={d.ip}>{d.hostname}{d.ip ? ` · ${d.ip}` : ''}</option>)}
             </select>
           </Field>
-          <p className="text-[10px] leading-snug text-muted">
+          <p className="text-2xs leading-snug text-muted">
             Live NetFlow data — refreshes every 30s. Bind to a device to show only conversations seen by that exporter.
           </p>
         </>
@@ -443,7 +443,7 @@ export function ColorInput({ value, onChange, allowClear, onClear, withAlpha }: 
           onTouchEnd={(e) => onChange(composeColor(hex, Number((e.target as HTMLInputElement).value)), true)}
           className="w-14 accent-primary" />
       )}
-      {allowClear && <button type="button" onClick={onClear} className="text-[10px] text-muted hover:text-text" title="Clear">none</button>}
+      {allowClear && <button type="button" onClick={onClear} className="text-2xs text-muted hover:text-text" title="Clear">none</button>}
     </div>
   )
 }

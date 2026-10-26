@@ -238,7 +238,7 @@ export function AlertMessagePreviewDialog({
                 rows={6}
                 className="font-mono text-xs"
               />
-              <p className="mt-1 text-[11px] text-muted">
+              <p className="mt-1 text-xs text-muted">
                 This is the sentence in the highlighted callout. The rule, severity, device and time
                 are added automatically by the email layout — no need to repeat them here.
               </p>
@@ -263,7 +263,7 @@ export function AlertMessagePreviewDialog({
             </div>
 
             <div className="rounded-lg border border-primary/20 bg-primary/5 p-3">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+              <p className="text-2xs font-semibold uppercase tracking-wider text-primary">
                 Variables — click to insert
               </p>
               <div className="mt-2 flex flex-wrap gap-1">
@@ -273,7 +273,7 @@ export function AlertMessagePreviewDialog({
                     type="button"
                     onClick={() => insertVar(v)}
                     title={msg?.variables?.[v.slice(1, -1)] ? `Sample: ${msg.variables[v.slice(1, -1)]}` : undefined}
-                    className="rounded bg-surface px-1.5 py-0.5 font-mono text-[10px] text-muted hover:text-primary"
+                    className="rounded bg-surface px-1.5 py-0.5 font-mono text-2xs text-muted hover:text-primary"
                   >
                     {v}
                   </button>
@@ -293,7 +293,7 @@ export function AlertMessagePreviewDialog({
                 </TabsList>
               </Tabs>
               {preview.isPending && (
-                <span className="flex items-center gap-1.5 text-[11px] text-muted">
+                <span className="flex items-center gap-1.5 text-xs text-muted">
                   <Loader2 className="h-3 w-3 animate-spin" />Rendering
                 </span>
               )}
@@ -314,7 +314,7 @@ export function AlertMessagePreviewDialog({
               {msg && view === 'email' && (
                 <div className="mx-auto max-w-[720px]">
                   <div className="rounded-t-md border border-b-0 border-border bg-surface px-4 py-3">
-                    <div className="text-[10px] uppercase tracking-wider text-muted">Subject</div>
+                    <div className="text-2xs uppercase tracking-wider text-muted">Subject</div>
                     <div className="mt-0.5 break-words text-sm font-medium">{msg.subject}</div>
                   </div>
                   {msg.email_html ? (
@@ -340,7 +340,7 @@ export function AlertMessagePreviewDialog({
               )}
               {msg && view === 'text' && (
                 <div className="mx-auto max-w-[720px] rounded-md border border-border bg-surface p-4">
-                  <div className="text-[10px] uppercase tracking-wider text-muted">Subject</div>
+                  <div className="text-2xs uppercase tracking-wider text-muted">Subject</div>
                   <div className="mb-3 mt-0.5 break-words text-sm font-medium">{msg.subject}</div>
                   <pre className="whitespace-pre-wrap font-mono text-xs text-muted">{msg.email_text}</pre>
                 </div>
@@ -350,7 +350,7 @@ export function AlertMessagePreviewDialog({
                   <div className="rounded-2xl bg-primary px-4 py-3 text-sm text-white shadow-sm">
                     {msg.sms_body}
                   </div>
-                  <div className="mt-2 text-center text-[11px] text-muted">
+                  <div className="mt-2 text-center text-xs text-muted">
                     {(msg.sms_body || '').length} characters · {Math.max(1, Math.ceil((msg.sms_body || '').length / 160))} SMS
                   </div>
                 </div>
@@ -366,7 +366,7 @@ export function AlertMessagePreviewDialog({
               {simulate.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5 text-amber-500" />}
               Send test
             </Button>
-            {dirty && <Badge variant="warning" className="text-[10px]">Unsaved changes</Badge>}
+            {dirty && <Badge variant="warning" className="text-2xs">Unsaved changes</Badge>}
           </div>
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="sm" disabled={!dirty}
@@ -388,11 +388,11 @@ export function AlertMessagePreviewDialog({
 function FieldState({ custom, onReset }: { custom: boolean; onReset: () => void }) {
   return (
     <div className="flex items-center gap-2">
-      <span className={cn('text-[10px] uppercase tracking-wider', custom ? 'text-primary' : 'text-muted')}>
+      <span className={cn('text-2xs uppercase tracking-wider', custom ? 'text-primary' : 'text-muted')}>
         {custom ? 'Custom' : 'Default'}
       </span>
       {custom && (
-        <button type="button" className="text-[10px] text-muted underline-offset-2 hover:text-primary hover:underline"
+        <button type="button" className="text-2xs text-muted underline-offset-2 hover:text-primary hover:underline"
           onClick={onReset}>
           Reset to default
         </button>

@@ -398,7 +398,7 @@ export function RumPage() {
     )
     if (state.tab === 'errors') return (
       <RumExplorerShell noun="issues" onExport={() => exportCsv('errors')} exporting={exporting} toolbar={(
-        <select aria-label="Issue state" value={state.issueStatus} onChange={(event) => state.setIssueStatus(event.target.value)} className="h-6 rounded border border-border bg-surface px-1.5 text-[10px] text-text2">
+        <select aria-label="Issue state" value={state.issueStatus} onChange={(event) => state.setIssueStatus(event.target.value)} className="h-6 rounded border border-border bg-surface px-1.5 text-2xs text-text2">
           <option value="">All states</option>
           {(Object.keys(ISSUE_STATUS_STYLE) as Array<keyof typeof ISSUE_STATUS_STYLE>).map((key) => <option key={key} value={key}>{ISSUE_STATUS_STYLE[key].label}</option>)}
         </select>
