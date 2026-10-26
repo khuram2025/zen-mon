@@ -107,6 +107,23 @@ html[data-density='compact'] { font-size: 14px; }
 html[data-density='large'] { font-size: 17px; }
 html[data-density='wall'] { font-size: 20px; }
 
+/* Breakpoints are viewport pixels, so they do not see the density: at Wall (and Large on screens under 2200px) the
+   6- and 7-column stat strips would squeeze their tiles. Reflow them to 3 / 4 columns instead. Only the responsive
+   xl:/2xl: column classes are matched, never plain calendar grids. */
+@media (min-width: 1280px) and (max-width: 2879px) {
+  html[data-density='wall'] .xl\:grid-cols-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  html[data-density='wall'] .xl\:grid-cols-7 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (min-width: 1536px) and (max-width: 2879px) {
+  html[data-density='wall'] .\32xl\:grid-cols-7 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (min-width: 1280px) and (max-width: 2199px) {
+  html[data-density='large'] .xl\:grid-cols-7 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (min-width: 1536px) and (max-width: 2199px) {
+  html[data-density='large'] .\32xl\:grid-cols-7 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
 body {
   @apply bg-bg text-text font-sans antialiased;
   /* Inter: single-storey a, open digits, square punctuation. */

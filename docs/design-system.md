@@ -38,7 +38,8 @@ screens read from across a room. One set of tokens serves both; the **display de
 
 **NOC wall mode** (kiosk) hides the sidebar and header and requests full screen. A wall browser can be set up by URL
 alone: `https://<appliance>/?density=wall&kiosk=1` (not saved, so it never changes an engineer's own browser). Sizes
-that must scale with the density are written in rem (the sidebar widths too).
+that must scale with the density are written in rem (the sidebar widths too). Breakpoints stay in viewport pixels, so
+`globals.css` reflows the 6- and 7-column stat strips to 3–4 columns at Wall (and Large under 2200px).
 
 ## Colour
 
