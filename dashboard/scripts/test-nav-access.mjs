@@ -30,7 +30,7 @@ async function load(entry) {
 
 const nav = await load('src/components/layout/navigation.ts')
 const access = await load('src/components/layout/navAccess.ts')
-const { NAV_GROUPS, trailForLocation } = nav
+const { NAV_GROUPS, NAV_ZONES, trailForLocation } = nav
 const { filterNavGroups, firstAllowedPath, trailAllows, gateAllows, gatePermissions, canFromPermissions } = access
 
 // ── the server's vocabulary ────────────────────────────────────────────────
@@ -114,19 +114,50 @@ const visible = (perms) => {
 // ── the reported bug: a narrow custom role sees only its areas ─────────────
 {
   const v = visible(['dashboard.view', 'devices.view'])
-  for (const hidden of ['servers', 'apm', 'device-tracker', 'nccm', 'reports', 'inventory']) assert(!v.groups.includes(hidden), `devices-only role sees ${hidden}`)
-  assert(v.labels.has('monitoring:Devices') && v.labels.has('monitoring:Link Utilization'))
+  for (const hidden of ['servers', 'apm', 'device-tracker', 'reports', 'inventory']) assert(!v.groups.includes(hidden), `devices-only role sees ${hidden}`)
+  assert(v.labels.has('network:Devices') && v.labels.has('network:Link Utilization'))
+  assert(v.labels.has('uptime:Availability & SLA'), 'availability spans devices, so a devices role sees it')
   // Device events are readable with devices.view (the server's "events" policy); alerts are not.
   assert(v.labels.has('alerting:SNMP Traps') && v.labels.has('alerting:Network Syslog'))
-  assert(!v.labels.has('alerting:Active Alerts') && !v.labels.has('alerting:Alert Rules') && !v.labels.has('alerting:Channels'))
-  for (const hidden of ['monitoring:NetFlow', 'monitoring:Services', 'monitoring:Discovery', 'monitoring:Network Maps', 'reports:Report Library', 'reports:Schedules', 'administration:Credentials', 'administration:Subscription'])
+  assert(!v.labels.has('alerting:Active Alerts') && !v.labels.has('alerting:Alert Rules') && !v.labels.has('alerting:Notification Channels'))
+  for (const hidden of ['network:NetFlow', 'network:Config Manager (NCCM)', 'uptime:Service Checks', 'network:Discovery', 'network:Network Maps', 'reports:Report Library', 'reports:Schedules', 'administration:Credentials', 'administration:Subscription'])
     assert(!v.labels.has(hidden), `devices-only role sees ${hidden}`)
 }
 
-// ── Reports: its own group between Alerting and Administration ─────────────
+// ── Menu layout: grouped by function into three bands ─────────────────────
+// Operations (what needs attention now), Monitoring (one estate area per group), Management (the estate record,
+// reports and the appliance). Alerts sit right under the dashboards; NCCM lives in Network beside the devices it
+// manages; setup pages close their group under a "Configuration" heading.
+{
+  assert.deepEqual(NAV_GROUPS.map((g) => g.id), [
+    'overview', 'alerting', 'network', 'device-tracker', 'servers', 'apm', 'uptime', 'inventory', 'reports', 'administration',
+  ])
+  assert.deepEqual(NAV_ZONES.map((z) => z.id), ['operate', 'monitor', 'manage'])
+  const zoneOrder = NAV_GROUPS.map((g) => NAV_ZONES.findIndex((z) => z.id === g.zone))
+  assert(zoneOrder.every((z) => z >= 0), 'every group belongs to a band')
+  assert(zoneOrder.every((z, i) => i === 0 || z >= zoneOrder[i - 1]), 'each band is one contiguous run of groups')
+  assert.deepEqual(NAV_GROUPS.filter((g) => g.zone === 'operate').map((g) => g.id), ['overview', 'alerting'])
+  assert.deepEqual(NAV_GROUPS.filter((g) => g.zone === 'manage').map((g) => g.id), ['inventory', 'reports', 'administration'])
+  assert(!NAV_GROUPS.some((g) => g.id === 'nccm' || g.id === 'monitoring'), 'the one-row NCCM group and the catch-all Monitoring group are gone')
+  const network = NAV_GROUPS.find((g) => g.id === 'network').items
+  assert(network.some((i) => i.to === '/ncm' && i.label === 'Config Manager (NCCM)'), 'NCCM is a Network row')
+  for (const g of NAV_GROUPS) {
+    const first = g.items.findIndex((i) => i.section === 'Configuration')
+    if (first < 0) continue
+    assert(first > 0, `${g.label}: Configuration is not the whole group`)
+    // Once a group reaches its Configuration part, no later row starts a different part.
+    assert(g.items.slice(first).every((i) => !i.section || i.section === 'Configuration'), `${g.label}: Configuration rows are last`)
+  }
+  for (const [group, to] of [['alerting', '/alert-rules'], ['network', '/ncm'], ['apm', '/apm/settings'], ['inventory', '/inventory/settings'], ['device-tracker', '/udt/settings']]) {
+    assert.equal(NAV_GROUPS.find((g) => g.id === group).items.find((i) => i.to === to)?.section, 'Configuration', `${to} opens the Configuration part of ${group}`)
+  }
+  // Operations first: alerts and events are the second group, the live alert list its first row.
+  assert.equal(NAV_GROUPS[1].items[0].to, '/alerts')
+}
+
+// ── Reports: its own group before Administration ─────────────────────────────
 {
   const ids = NAV_GROUPS.map((g) => g.id)
-  assert.equal(ids.indexOf('reports'), ids.indexOf('alerting') + 1, 'Reports follows Alerting')
   assert.equal(ids.indexOf('administration'), ids.indexOf('reports') + 1, 'Reports precedes Administration')
   assert(!NAV_GROUPS.find((g) => g.id === 'administration').items.some((i) => i.to.startsWith('/reports')), 'Reports left Administration')
   const viewer = visible(['reports.view'])
@@ -137,11 +168,10 @@ const visible = (perms) => {
   assert(!visible(['reports.manage']).labels.has('reports:Template Designer'), 'the designer also needs reports.view')
 }
 
-// ── Inventory & Compliance: after Servers, before Applications; every row (settings included) needs only view ──
+// ── Inventory & Compliance: opens the Management band; every row (settings included) needs only view ──
 {
   const ids = NAV_GROUPS.map((g) => g.id)
-  assert.equal(ids.indexOf('inventory'), ids.indexOf('servers') + 1, 'Inventory follows Servers')
-  assert.equal(ids.indexOf('apm'), ids.indexOf('inventory') + 1, 'Inventory precedes Applications')
+  assert.equal(ids.indexOf('reports'), ids.indexOf('inventory') + 1, 'Inventory precedes Reports')
   const group = NAV_GROUPS.find((g) => g.id === 'inventory')
   assert.equal(group.label, 'Inventory & Compliance')
   assert.equal(group.short, 'Inventory', 'UI-23: the collapsed rail names the module, not its first tab')
@@ -180,14 +210,14 @@ const teams = {
   security: visible(pyList('_SECURITY_TEAM')),
 }
 assert(teams.application.groups.includes('apm') && !teams.application.groups.includes('servers'), 'Application team is separate from Servers')
-assert(teams.application.labels.has('overview:Application Team') && !teams.application.labels.has('overview:Dashboard'))
-assert(!teams.application.labels.has('monitoring:Devices') && !teams.application.groups.includes('nccm'))
+assert(teams.application.labels.has('overview:Application Team') && !teams.application.labels.has('overview:Network Operations'))
+assert(!teams.application.labels.has('network:Devices') && !teams.application.labels.has('network:Config Manager (NCCM)'))
 assert(teams.systems.groups.includes('servers') && !teams.systems.groups.includes('apm'), 'Systems team is separate from APM')
-assert(teams.systems.labels.has('overview:Server Team') && !teams.systems.labels.has('monitoring:Devices'))
-assert(teams.network.labels.has('monitoring:Devices') && teams.network.groups.includes('nccm') && teams.network.groups.includes('device-tracker'))
+assert(teams.systems.labels.has('overview:Server Team') && !teams.systems.labels.has('network:Devices'))
+assert(teams.network.labels.has('network:Devices') && teams.network.labels.has('network:Config Manager (NCCM)') && teams.network.groups.includes('device-tracker'))
 assert(!teams.network.groups.includes('servers') && !teams.network.groups.includes('apm'))
 assert(!teams.network.labels.has('device-tracker:User Logins'), 'user activity is sensitive and not part of the network team')
-assert(teams.security.labels.has('device-tracker:User Logins') && teams.security.labels.has('monitoring:NetFlow'))
+assert(teams.security.labels.has('device-tracker:User Logins') && teams.security.labels.has('network:NetFlow'))
 assert(!teams.security.groups.includes('servers') && !teams.security.groups.includes('apm'))
 // Owner decision D9: network, systems and security teams see the inventory (view only); the application team does not.
 for (const name of ['network', 'systems', 'security']) {
@@ -200,7 +230,7 @@ for (const name of ['network', 'systems', 'security']) {
 assert(!teams.application.groups.includes('inventory'), 'the application team sees applications, not the estate')
 for (const [name, v] of Object.entries(teams)) {
   assert(!v.labels.has('administration:Settings:Users & Access'), `${name} team can open Users & Access`)
-  assert(!v.labels.has('alerting:Gateways'), `${name} team can open Gateways`)
+  assert(!v.labels.has('alerting:Delivery Gateways'), `${name} team can open Delivery Gateways`)
 }
 // Escalation & On-call (1.24.17): one Alerting row gated by alerts.view, so every team role sees the matrix, the
 // policies and who is on call read-only; changing them needs alerts.manage, which the page and the server enforce.
@@ -309,4 +339,4 @@ assert(allows('/sensors/abc', []))
   assert.equal(row.label, 'All Servers')
 }
 
-console.log('Navigation access: every entry gated by catalog permissions; children inherit; team roles (network, systems, application, security) see only their areas, Inventory included per D9, Escalation & On-call read-only; direct URLs follow the sidebar.')
+console.log('Navigation access: three bands (operations, monitoring, management) with Configuration last in each group; every entry gated by catalog permissions; children inherit; team roles (network, systems, application, security) see only their areas, Inventory included per D9, Escalation & On-call read-only; direct URLs follow the sidebar.')

@@ -66,11 +66,12 @@
   --success-fg: 134 239 172;
   --info-fg: 125 211 252;
 
-  --sidebar-bg: 3 7 14;
-  --sidebar-text: 203 213 225;
-  --sidebar-text-muted: 71 85 105;
-  --sidebar-border: 15 23 42;
-  --sidebar-hover: 15 23 42;
+  /* Muted sidebar text keeps 4.5:1 on the sidebar background (section labels were 2.4:1). */
+  --sidebar-bg: 9 13 20;
+  --sidebar-text: 214 222 233;
+  --sidebar-text-muted: 120 135 158;
+  --sidebar-border: 26 34 48;
+  --sidebar-hover: 22 30 44;
 }
 
 html, body, #root { height: 100%; }
