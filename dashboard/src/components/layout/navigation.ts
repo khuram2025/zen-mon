@@ -5,6 +5,7 @@ import {
   Bell,
   BellRing,
   Bot,
+  Cable,
   Boxes,
   Bug,
   Building2,
@@ -42,9 +43,11 @@ import {
   Palette,
   Plug,
   Radar,
+  RadioTower,
   Waypoints,
   Router,
   ScanSearch,
+  ScrollText,
   Server,
   Settings as SettingsIcon,
   Shapes,
@@ -83,10 +86,21 @@ export type NavNode = NavGate & {
   badge?: 'alerts'
   /** Extra path prefixes this node also owns (detail routes that have no row). */
   extra?: string[]
+  /** Small heading drawn above this row when it starts a new part of its group (e.g. "Configuration"). */
+  section?: string
   /** Overrides the default path matching — used by query-string routes. */
   match?: (loc: { pathname: string; params: URLSearchParams }) => boolean
   children?: NavNode[]
 }
+
+/** The three bands of the menu, top to bottom: watch what is happening now, look into one estate area, run the appliance. */
+export type NavZone = 'operate' | 'monitor' | 'manage'
+
+export const NAV_ZONES: { id: NavZone; label: string }[] = [
+  { id: 'operate', label: 'Operations' },
+  { id: 'monitor', label: 'Monitoring' },
+  { id: 'manage', label: 'Management' },
+]
 
 export type NavGroup = {
   id: string
@@ -94,6 +108,7 @@ export type NavGroup = {
   /** Fits under the icon on the collapsed rail. */
   short: string
   icon: NavIcon
+  zone: NavZone
   items: NavNode[]
 }
 
@@ -119,45 +134,54 @@ function rumTab(tab: string, label: string, icon: NavIcon): NavNode {
   }
 }
 
+// Grouped by function the way an operator works: what needs attention now (Operations), one estate area at a time
+// (Monitoring: network, endpoints, servers, applications, uptime), then the estate record, reports and the appliance
+// itself (Management). Inside a group the day-to-day pages come first and setup pages sit under "Configuration".
 export const NAV_GROUPS: NavGroup[] = [
   {
     id: 'overview',
-    label: 'Overview',
+    label: 'Dashboards',
     short: 'Home',
     icon: LayoutDashboard,
+    zone: 'operate',
     items: [
-      { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true, hint: 'Network operations at a glance', requireAll: ['dashboard.view'], permission: 'devices.view' },
+      { to: '/', label: 'Network Operations', icon: LayoutDashboard, end: true, hint: 'Network operations at a glance', requireAll: ['dashboard.view'], permission: 'devices.view' },
       { to: '/dashboards/network', label: 'Network & Security', icon: ShieldCheck, hint: 'Reachability, traffic, WAN paths and threat signals', requireAll: ['dashboard.view'], permission: ['devices.view', 'netflow.view'] },
       { to: '/dashboards/servers', label: 'Server Team', icon: Server, hint: 'Fleet health, resource pressure and agents', requireAll: ['dashboard.view'], permission: 'servers.view' },
       { to: '/dashboards/apps', label: 'Application Team', icon: Layers, hint: 'Golden signals, SLOs and user journeys', requireAll: ['dashboard.view'], permission: 'apm.view' },
     ],
   },
   {
-    id: 'monitoring',
-    label: 'Monitoring',
-    short: 'Monitor',
-    icon: Radar,
+    id: 'alerting',
+    label: 'Alerts & Events',
+    short: 'Alerts',
+    icon: Siren,
+    zone: 'operate',
+    items: [
+      { to: '/alerts', label: 'Active Alerts', icon: AlertTriangle, badge: 'alerts', hint: 'Everything firing right now', permission: 'alerts.view' },
+      { to: '/traps', label: 'SNMP Traps', icon: RadioTower, hint: 'Unsolicited device events', permission: ['alerts.view', 'devices.view'] },
+      { to: '/network-events', label: 'Network Syslog', icon: ScrollText, hint: 'Device log events and alert rules', permission: ['alerts.view', 'devices.view'] },
+      { to: '/alert-rules', label: 'Alert Rules', icon: Bell, section: 'Configuration', hint: 'Thresholds and escalation', permission: 'alerts.view' },
+      // Read-only with alerts.view (team roles see who is on call); every change needs alerts.manage.
+      { to: '/escalation', label: 'Escalation & On-call', icon: ChevronsUp, hint: 'Priority matrix, escalation policies, on-call, grouping', permission: 'alerts.view' },
+      { to: '/channels', label: 'Notification Channels', icon: BellRing, hint: 'Where notifications are delivered', permission: ['alerts.manage', 'settings.manage'] },
+      { to: '/gateways', label: 'Delivery Gateways', icon: Mail, hint: 'SMTP, SMS and webhook transports', permission: 'settings.manage' },
+    ],
+  },
+  {
+    // Everything about the network estate, NCCM included: it manages the same devices this group monitors.
+    id: 'network',
+    label: 'Network',
+    short: 'Network',
+    icon: Network,
+    zone: 'monitor',
     items: [
       { to: '/devices', label: 'Devices', icon: Router, hint: 'Inventory, health and interfaces', permission: 'devices.view' },
       { to: '/link-utilization', label: 'Link Utilization', icon: Gauge, hint: 'Interface bandwidth and errors', permission: 'devices.view' },
-      { to: '/availability', label: 'Availability', icon: HeartPulse, hint: 'Uptime and SLA compliance', permission: ['devices.view', 'service_checks.view', 'servers.view'] },
-      {
-        to: '/services',
-        label: 'Services',
-        icon: Activity,
-        hint: 'HTTP, TCP and DNS service checks',
-        permission: 'service_checks.view',
-        children: [
-          { to: '/services', label: 'All Checks', icon: Activity, end: true },
-          { to: '/services/groups', label: 'Check Groups', icon: Boxes },
-          { to: '/services/maintenance', label: 'Maintenance', icon: Wrench },
-          { to: '/services/templates', label: 'Check Templates', icon: LayoutTemplate },
-        ],
-      },
       {
         to: '/netflow',
         label: 'NetFlow',
-        icon: Network,
+        icon: Activity,
         hint: 'Traffic analysis and conversations',
         permission: 'netflow.view',
         children: [
@@ -179,6 +203,8 @@ export const NAV_GROUPS: NavGroup[] = [
         permission: 'netpath.view',
         end: false,
       },
+      { to: '/maps/manual', label: 'Network Maps', icon: MapPinned, hint: 'Hand-drawn topology views', permission: 'maps.view', extra: ['/maps'] },
+      { to: '/ncm', label: 'Config Manager (NCCM)', icon: FileCode, section: 'Configuration', hint: 'NCCM configuration backups, change tracking and compliance', permission: 'ncm.view' },
       {
         to: '/discovery',
         label: 'Discovery',
@@ -194,16 +220,6 @@ export const NAV_GROUPS: NavGroup[] = [
           { to: '/discovery/credentials', label: 'Credentials', icon: Key, permission: ['devices.manage', 'service_checks.manage'] },
         ],
       },
-      { to: '/maps/manual', label: 'Network Maps', icon: MapPinned, hint: 'Hand-drawn topology views', permission: 'maps.view', extra: ['/maps'] },
-    ],
-  },
-  {
-    id: 'nccm',
-    label: 'Network Configuration & Compliance Manager (NCCM)',
-    short: 'NCCM',
-    icon: FileCode,
-    items: [
-      { to: '/ncm', label: 'NCCM Overview', icon: FileCode, hint: 'NCM configuration backups, change tracking and compliance', permission: 'ncm.view' },
     ],
   },
   {
@@ -211,14 +227,15 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Device Tracker',
     short: 'Tracker',
     icon: ScanSearch,
+    zone: 'monitor',
     items: [
       { to: '/udt', label: 'Endpoints', icon: ScanSearch, end: true, extra: ['/udt/endpoints/'], hint: 'Track endpoints, IP history, switches and ports', permission: 'udt.view' },
-      { to: '/udt/ports', label: 'Switch Ports', icon: Server, permission: 'udt.view' },
-      { to: '/udt/users', label: 'User Logins', icon: UserRound, requireAll: ['udt.view'], permission: ['udt.view_users', 'udt.manage'] },
-      { to: '/udt/classification', label: 'Classification', icon: Shapes, permission: 'udt.view' },
-      { to: '/udt/watch-lists', label: 'Watch Lists', icon: ListChecks, permission: 'udt.view' },
-      { to: '/udt/activity', label: 'Activity', icon: Activity, permission: 'udt.view' },
-      { to: '/udt/settings', label: 'Tracker Settings', icon: SlidersHorizontal, permission: 'udt.manage' },
+      { to: '/udt/ports', label: 'Switch Ports', icon: Cable, hint: 'Who is connected to each access port', permission: 'udt.view' },
+      { to: '/udt/users', label: 'User Logins', icon: UserRound, hint: 'Which user signed in on which endpoint', requireAll: ['udt.view'], permission: ['udt.view_users', 'udt.manage'] },
+      { to: '/udt/activity', label: 'Activity', icon: Activity, hint: 'Moves, new endpoints and address changes', permission: 'udt.view' },
+      { to: '/udt/watch-lists', label: 'Watch Lists', icon: ListChecks, hint: 'Endpoints you are tracking closely', permission: 'udt.view' },
+      { to: '/udt/classification', label: 'Classification', icon: Shapes, hint: 'Endpoint types and vendors', permission: 'udt.view' },
+      { to: '/udt/settings', label: 'Tracker Settings', icon: SlidersHorizontal, section: 'Configuration', permission: 'udt.manage' },
     ],
   },
   {
@@ -226,34 +243,15 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Servers',
     short: 'Servers',
     icon: Server,
+    zone: 'monitor',
     items: [
       { to: '/servers', label: 'Server Overview', icon: Gauge, end: true, hint: 'Fleet CPU, memory and disk', permission: 'servers.view' },
       // `/servers/:id` detail pages have no row of their own — All Servers owns them. ("Inventory"
       // now means the Inventory & Compliance module below, so this row is not called that.)
       { to: '/servers/inventory', label: 'All Servers', icon: Server, hint: 'Every monitored host', extra: ['/servers/'], permission: 'servers.view' },
-      { to: '/server-agents', label: 'Agent Fleet', icon: Bot, hint: 'Installed agents and versions', permission: 'servers.view' },
-      { to: '/agent-policies', label: 'Agent Policies', icon: SlidersHorizontal, hint: 'What each agent collects', permission: 'servers.view' },
       { to: '/server-baselines', label: 'Baselines', icon: ClipboardCheck, hint: 'Config drift and compliance', permission: 'servers.view' },
-    ],
-  },
-  {
-    // One module for what the estate is made of: operating systems, software and hardware across
-    // servers and network devices (Documentation/Inventory/03-UI-UX-SPEC.md section 1.1). Rows ship
-    // with their phase; Lifecycle (P4) and Compliance (P5) join this group when their pages exist.
-    id: 'inventory',
-    label: 'Inventory & Compliance',
-    short: 'Inventory',
-    icon: PackageSearch,
-    items: [
-      { to: '/inventory', label: 'Overview', icon: Gauge, end: true, hint: 'Every OS, software title and hardware model at a glance', permission: 'inventory.view' },
-      { to: '/inventory/assets', label: 'Assets', icon: Boxes, hint: 'Servers and network devices in one list', permission: 'inventory.view' },
-      { to: '/inventory/os', label: 'Operating Systems', icon: MonitorCog, hint: 'OS and firmware releases, versions and builds', permission: 'inventory.view' },
-      { to: '/inventory/software', label: 'Software', icon: Package, extra: ['/inventory/software/'], hint: 'Installed software catalog and versions', permission: 'inventory.view' },
-      { to: '/inventory/hardware', label: 'Hardware', icon: Cpu, hint: 'Vendors, models, modules and server hardware', permission: 'inventory.view' },
-      { to: '/inventory/changes', label: 'Changes', icon: History, hint: 'Installs, removals, upgrades and firmware changes', permission: 'inventory.view' },
-      // inventory.view opens the page; without inventory.manage it is read-only (a note names the permission). A role
-      // that holds manage WITHOUT view sees nothing: the API refuses the settings read without view (review finding RG-06).
-      { to: '/inventory/settings', label: 'Inventory Settings', icon: SlidersHorizontal, hint: 'Freshness targets and change retention', permission: 'inventory.view' },
+      { to: '/server-agents', label: 'Agent Fleet', icon: Bot, section: 'Configuration', hint: 'Installed agents and versions', permission: 'servers.view' },
+      { to: '/agent-policies', label: 'Agent Policies', icon: SlidersHorizontal, hint: 'What each agent collects', permission: 'servers.view' },
     ],
   },
   {
@@ -261,14 +259,14 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Applications',
     short: 'Apps',
     icon: Layers,
+    zone: 'monitor',
     items: [
       { to: '/apm', label: 'APM Overview', icon: Layers, end: true, hint: 'Golden signals across services', permission: 'apm.view' },
       { to: '/apm/services', label: 'Services', icon: Boxes, hint: 'Latency, throughput and errors', permission: 'apm.view' },
       { to: '/apm/service-map', label: 'Service Map', icon: Network, hint: 'Dependencies between services', permission: 'apm.view' },
-      { to: '/apm/slos', label: 'SLOs', icon: Target, hint: 'Objectives and error budgets', permission: 'apm.view' },
-      { to: '/apm/synthetics', label: 'Synthetics', icon: Workflow, hint: 'Scripted uptime journeys', permission: 'apm.view' },
-      { to: '/apm/errors', label: 'Errors', icon: Bug, hint: 'Grouped exception inbox', permission: 'apm.view' },
       { to: '/apm/traces', label: 'Traces', icon: GitBranch, hint: 'Distributed trace explorer', permission: 'apm.view' },
+      { to: '/apm/errors', label: 'Errors', icon: Bug, hint: 'Grouped exception inbox', permission: 'apm.view' },
+      { to: '/apm/slos', label: 'SLOs', icon: Target, hint: 'Objectives and error budgets', permission: 'apm.view' },
       {
         to: '/apm/rum',
         label: 'RUM',
@@ -285,24 +283,54 @@ export const NAV_GROUPS: NavGroup[] = [
           rumTab('actions', 'Actions', MousePointerClick),
         ],
       },
+      { to: '/apm/synthetics', label: 'Synthetics', icon: Workflow, hint: 'Scripted uptime journeys', permission: 'apm.view' },
       { to: '/apm/usage', label: 'Usage', icon: BarChart3, hint: 'Pages, users and span volume', permission: 'apm.view' },
-      { to: '/apm/settings', label: 'APM Settings', icon: SlidersHorizontal, permission: 'apm.manage' },
+      { to: '/apm/settings', label: 'APM Settings', icon: SlidersHorizontal, section: 'Configuration', permission: 'apm.manage' },
     ],
   },
   {
-    id: 'alerting',
-    label: 'Alerting',
-    short: 'Alerts',
-    icon: Siren,
+    // HTTP/TCP/DNS probes and the availability (SLA) view that spans devices, servers and checks.
+    id: 'uptime',
+    label: 'Uptime & SLA',
+    short: 'Uptime',
+    icon: HeartPulse,
+    zone: 'monitor',
     items: [
-      { to: '/alerts', label: 'Active Alerts', icon: AlertTriangle, badge: 'alerts', hint: 'Everything firing right now', permission: 'alerts.view' },
-      { to: '/alert-rules', label: 'Alert Rules', icon: Bell, hint: 'Thresholds and escalation', permission: 'alerts.view' },
-      // Read-only with alerts.view (team roles see who is on call); every change needs alerts.manage.
-      { to: '/escalation', label: 'Escalation & On-call', icon: ChevronsUp, hint: 'Priority matrix, escalation policies, on-call, grouping', permission: 'alerts.view' },
-      { to: '/traps', label: 'SNMP Traps', icon: Inbox, hint: 'Unsolicited device events', permission: ['alerts.view', 'devices.view'] },
-      { to: '/network-events', label: 'Network Syslog', icon: Inbox, hint: 'Device log events and alert rules', permission: ['alerts.view', 'devices.view'] },
-      { to: '/channels', label: 'Channels', icon: BellRing, hint: 'Where notifications are delivered', permission: ['alerts.manage', 'settings.manage'] },
-      { to: '/gateways', label: 'Gateways', icon: Mail, hint: 'SMTP, SMS and webhook transports', permission: 'settings.manage' },
+      {
+        to: '/services',
+        label: 'Service Checks',
+        icon: Activity,
+        hint: 'HTTP, TCP and DNS service checks',
+        permission: 'service_checks.view',
+        children: [
+          { to: '/services', label: 'All Checks', icon: Activity, end: true },
+          { to: '/services/groups', label: 'Check Groups', icon: Boxes },
+          { to: '/services/maintenance', label: 'Maintenance', icon: Wrench },
+          { to: '/services/templates', label: 'Check Templates', icon: LayoutTemplate },
+        ],
+      },
+      { to: '/availability', label: 'Availability & SLA', icon: HeartPulse, hint: 'Uptime and SLA compliance', permission: ['devices.view', 'service_checks.view', 'servers.view'] },
+    ],
+  },
+  {
+    // One module for what the estate is made of: operating systems, software and hardware across
+    // servers and network devices (Documentation/Inventory/03-UI-UX-SPEC.md section 1.1). Rows ship
+    // with their phase; Lifecycle (P4) and Compliance (P5) join this group when their pages exist.
+    id: 'inventory',
+    label: 'Inventory & Compliance',
+    short: 'Inventory',
+    icon: PackageSearch,
+    zone: 'manage',
+    items: [
+      { to: '/inventory', label: 'Overview', icon: Gauge, end: true, hint: 'Every OS, software title and hardware model at a glance', permission: 'inventory.view' },
+      { to: '/inventory/assets', label: 'Assets', icon: Boxes, hint: 'Servers and network devices in one list', permission: 'inventory.view' },
+      { to: '/inventory/os', label: 'Operating Systems', icon: MonitorCog, hint: 'OS and firmware releases, versions and builds', permission: 'inventory.view' },
+      { to: '/inventory/software', label: 'Software', icon: Package, extra: ['/inventory/software/'], hint: 'Installed software catalog and versions', permission: 'inventory.view' },
+      { to: '/inventory/hardware', label: 'Hardware', icon: Cpu, hint: 'Vendors, models, modules and server hardware', permission: 'inventory.view' },
+      { to: '/inventory/changes', label: 'Changes', icon: History, hint: 'Installs, removals, upgrades and firmware changes', permission: 'inventory.view' },
+      // inventory.view opens the page; without inventory.manage it is read-only (a note names the permission). A role
+      // that holds manage WITHOUT view sees nothing: the API refuses the settings read without view (review finding RG-06).
+      { to: '/inventory/settings', label: 'Inventory Settings', icon: SlidersHorizontal, section: 'Configuration', hint: 'Freshness targets and change retention', permission: 'inventory.view' },
     ],
   },
   {
@@ -314,6 +342,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Reports',
     short: 'Reports',
     icon: FileBarChart,
+    zone: 'manage',
     items: [
       { to: '/reports', label: 'Report Library', icon: LibraryBig, end: true, extra: ['/reports/view/'], hint: 'Built-in and custom report templates', permission: 'reports.view' },
       { to: '/reports/builder', label: 'Template Designer', icon: LayoutTemplate, hint: 'Build and customize report templates', requireAll: ['reports.view'], permission: 'reports.manage' },
@@ -325,8 +354,8 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Administration',
     short: 'Admin',
     icon: SettingsIcon,
+    zone: 'manage',
     items: [
-      { to: '/credentials', label: 'Credentials', icon: KeyRound, hint: 'SNMP, Windows, and service credentials', permission: ['devices.manage', 'service_checks.manage'] },
       {
         to: '/settings/general',
         label: 'Settings',
@@ -351,6 +380,7 @@ export const NAV_GROUPS: NavGroup[] = [
           settingsTab('profile', 'My Profile', UserRound),
         ],
       },
+      { to: '/credentials', label: 'Credentials', icon: KeyRound, hint: 'SNMP, Windows, and service credentials', permission: ['devices.manage', 'service_checks.manage'] },
       { to: '/subscription', label: 'Subscription', icon: CreditCard, hint: 'Plan, seats and billing', permission: 'settings.view' },
     ],
   },

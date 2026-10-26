@@ -26,7 +26,7 @@ export function MenuPreview({ permissions, compact, className }: { permissions: 
             <li key={g.id}>
               <div className="flex items-center gap-1.5 text-[11px] font-semibold text-text">
                 <g.icon className="h-3.5 w-3.5 text-primary" aria-hidden />
-                <span className="truncate">{g.short === 'NCCM' ? 'NCCM' : g.label}</span>
+                <span className="truncate">{g.label}</span>
               </div>
               {!compact && (
                 <div className="ml-5 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10.5px] text-muted">
@@ -39,7 +39,7 @@ export function MenuPreview({ permissions, compact, className }: { permissions: 
       )}
       {hidden.length > 0 && groups.length > 0 && (
         <p className="text-[10.5px] text-muted">
-          Hidden: {hidden.map((g) => (g.short === 'NCCM' ? 'NCCM' : g.label)).join(', ')}
+          Hidden: {hidden.map((g) => g.label).join(', ')}
         </p>
       )}
     </div>
