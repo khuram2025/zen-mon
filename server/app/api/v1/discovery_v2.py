@@ -516,7 +516,9 @@ async def start_run(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("discovery.run")),
 ):
-    p = await db.get(DiscoveryProfile, profile_id)
+    p = (await db.execute(select(DiscoveryProfile).where(
+        DiscoveryProfile.id == profile_id
+    ).with_for_update())).scalar_one_or_none()
     if not p:
         raise HTTPException(404, "Profile not found")
 
@@ -527,7 +529,7 @@ async def start_run(
                 DiscoveryRun.status.in_(("queued", "running")),
             )
         )
-    ).scalar_one_or_none()
+    ).scalars().first()
     if in_flight:
         raise HTTPException(409, "A scan is already running for this profile")
 
@@ -606,17 +608,20 @@ async def cancel_run_endpoint(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("discovery.run")),
 ):
-    r = await db.get(DiscoveryRun, run_id)
+    r = (await db.execute(select(DiscoveryRun).where(
+        DiscoveryRun.id == run_id
+    ).with_for_update())).scalar_one_or_none()
     if not r:
         raise HTTPException(404, "Run not found")
     if r.status not in ("running", "queued"):
         raise HTTPException(400, f"Cannot cancel run in status {r.status}")
-    cancelled = cancel_run(run_id)
-    if not cancelled:
-        r.status = "cancelled"
-        r.phase = "done"
-        r.completed_at = datetime.now(timezone.utc)
-        await db.commit()
+    # Persist revocation before cancelling a local task. Another worker observes
+    # it through its heartbeat or the next guarded result transaction.
+    r.status = "cancelled"
+    r.phase = "done"
+    r.completed_at = datetime.now(timezone.utc)
+    await db.commit()
+    cancel_run(run_id)
     await write_audit_log(
         db, actor=user, action="discovery.run.cancel",
         resource_type="discovery_run", resource_id=str(run_id),
