@@ -51,6 +51,11 @@ PUBLIC_ROUTES: frozenset[str] = frozenset({
     "/api/v1/auth/oidc/callback",
     "/api/v1/auth/oidc/exchange",
     "/api/v1/system/health",
+    # Machine endpoints require the scoped, revocable peer credential in
+    # notification_sites.principal; dashboard JWTs do not authorize them.
+    "/api/v1/notification-site-runtime/health",
+    "/api/v1/notification-site-runtime/deliver",
+    "/api/v1/notification-site-runtime/receipts/{delivery_id}",
     "/api/v1/settings/company/logo",
     "/api/v1/settings/timezone",
     "/api/v1/reports/shared/{token}",

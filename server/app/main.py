@@ -17,6 +17,7 @@ from app.api.v1.ssh_terminal import router as ssh_terminal_router
 from app.api.v1 import management_access
 from app.api.v1 import network_events
 from app.api.v1 import notification_grouping as notification_grouping_api
+from app.api.v1 import notification_sites as notification_sites_api
 from app.api.v1 import escalation_policies as escalation_policies_api
 from app.api.v1 import oncall as oncall_api
 from app.api.v1 import sensors as sensors_admin_api
@@ -168,6 +169,8 @@ def create_app() -> FastAPI:
     app.include_router(netpath.router, prefix="/api/v1", dependencies=[policy("netpath")])
     app.include_router(manual_maps.router, prefix="/api/v1", dependencies=[policy("maps")])
     app.include_router(sensors_admin_api.router, prefix="/api/v1")
+    app.include_router(notification_sites_api.router, prefix="/api/v1")
+    app.include_router(notification_sites_api.runtime, prefix="/api/v1")
     app.include_router(sensors_admin_api.sites_router, prefix="/api/v1")
     app.include_router(sensor_api.router, prefix="/api/v1")
     app.include_router(agents_runtime_api.router, prefix="/api/v1")

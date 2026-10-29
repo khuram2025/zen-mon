@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
+import { NotificationSites } from '@/components/settings/NotificationSites'
 
 type GatewayType = 'smtp' | 'sms'
 
@@ -122,6 +123,7 @@ export function GatewaysPage() {
         />
       </div>
 
+      <NotificationSites />
       <GatewayFormDialog open={formOpen} onOpenChange={setFormOpen} initial={editing} />
 
       <ConfirmDialog

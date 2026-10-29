@@ -4,8 +4,9 @@ This directory introduces a fresh PostgreSQL and etcd cell and an explicitly
 commissioned active/standby controller supervisor. See
 [controller validation](../../docs/controller-ha-validation.md) for installation
 requirements, measured tests and the remaining qualification boundaries. It does
-not enable autonomous sites, remote notification senders or a customer appliance
-release. Do not adopt an installed database with these files.
+not by itself enable a customer appliance release. Independent cells and remote
+notification senders now have separate [lab implementation evidence](../../docs/notification-sites.md).
+Do not adopt an installed database with these files.
 
 ## Profiles
 
