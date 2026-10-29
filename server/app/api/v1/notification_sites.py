@@ -35,6 +35,13 @@ class Trust(BaseModel):
     name:str=Field(min_length=1,max_length=100)
     site_id:UUID
     channel_map:dict[UUID,UUID]=Field(min_length=1,max_length=128)
+    valid_days:int=Field(default=90,ge=1,le=365)
+
+
+class Rotation(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    valid_days:int=Field(default=90,ge=1,le=365)
+    overlap_seconds:int=Field(default=300,ge=0,le=3600)
 
 
 class Peer(BaseModel):
@@ -78,11 +85,11 @@ class ChannelMap(BaseModel):
 async def config(db:AsyncSession=Depends(get_db),user=Depends(view)):
     if not get_settings().NOTIFICATION_SITE_ROUTING_ENABLED:
         return {'enabled':False,'site_id':None,'peers':[],'policies':[]}
-    rows=(await db.execute(text('SELECT id,name,site_id,direction,enabled,config,channel_map FROM notification_site_peers ORDER BY name'))).mappings().all()
+    rows=(await db.execute(text('SELECT id,name,site_id,direction,enabled,config,channel_map,credential_expires_at,previous_valid_until,credential_revoked_at FROM notification_site_peers ORDER BY name'))).mappings().all()
     peers=[]
     for row in rows:
         data=dict(row);private=decrypt_config(data.pop('config')) if row['direction']=='outbound' else {}
-        data['url']=private.get('url');peers.append(data)
+        data['url']=private.get('url');data['ca_pem']=private.get('ca_pem');peers.append(data)
     policies=(await db.execute(text('SELECT channel_id,senders,mode,revision,updated_at FROM notification_site_policies'))).mappings().all()
     return {'enabled':True,'site_id':await service.identity(db),'peers':peers,'policies':policies,
             'uncertain_outcome_policy':'hold_for_reconciliation'}
@@ -102,8 +109,8 @@ async def trust(data:Trust,db:AsyncSession=Depends(get_db),user=Depends(manage))
     if (await db.execute(text("SELECT id FROM notification_site_peers WHERE site_id=:id AND direction='inbound'"),{'id':data.site_id})).first():
         raise HTTPException(409,'This origin is already paired')
     pid=uuid4();token=str(pid)+'.'+secrets.token_urlsafe(48)
-    await db.execute(text("INSERT INTO notification_site_peers(id,name,site_id,direction,token_hash,channel_map) VALUES(:id,:name,:site,'inbound',:hash,CAST(:mapping AS jsonb))"),
-                     {'id':pid,'name':data.name,'site':data.site_id,'hash':hashlib.sha256(token.encode()).hexdigest(),
+    await db.execute(text("INSERT INTO notification_site_peers(id,name,site_id,direction,token_hash,channel_map,credential_expires_at) VALUES(:id,:name,:site,'inbound',:hash,CAST(:mapping AS jsonb),clock_timestamp()+make_interval(days=>:days))"),
+                     {'days':data.valid_days,'id':pid,'name':data.name,'site':data.site_id,'hash':hashlib.sha256(token.encode()).hexdigest(),
                       'mapping':json.dumps({str(k):str(v) for k,v in data.channel_map.items()})})
     await audit(db,user,'notification_site.trust',pid);await db.commit()
     return {'id':pid,'site_id':await service.identity(db),'token':token}
@@ -127,6 +134,57 @@ async def peer(data:Peer,db:AsyncSession=Depends(get_db),user=Depends(manage)):
                      {'id':pid,'name':data.name,'site':data.site_id,'config':json.dumps(encrypt_config(config))})
     await audit(db,user,'notification_site.pair',pid);await db.commit()
     return {'id':pid,'name':data.name,'site_id':data.site_id}
+
+
+@router.post('/trust/{peer_id}/rotate')
+async def rotate(peer_id:UUID,data:Rotation,db:AsyncSession=Depends(get_db),user=Depends(manage)):
+    commissioned()
+    token=str(peer_id)+'.'+secrets.token_urlsafe(48)
+    row=(await db.execute(text("""UPDATE notification_site_peers SET
+        previous_token_hash=CASE WHEN credential_revoked_at IS NULL AND
+            (credential_expires_at IS NULL OR credential_expires_at>clock_timestamp())
+            THEN token_hash ELSE NULL END,
+        previous_valid_until=LEAST(COALESCE(credential_expires_at,'infinity'::timestamptz),
+            clock_timestamp()+make_interval(secs=>:overlap)),
+        token_hash=:hash,credential_expires_at=clock_timestamp()+make_interval(days=>:days),
+        credential_revoked_at=NULL
+        WHERE id=:id AND direction='inbound' RETURNING credential_expires_at,previous_valid_until"""),
+        {'id':peer_id,'hash':hashlib.sha256(token.encode()).hexdigest(),
+         'days':data.valid_days,'overlap':data.overlap_seconds})).first()
+    if not row:raise HTTPException(404,'Origin not found')
+    await audit(db,user,'notification_site.rotate',peer_id);await db.commit()
+    return {'id':peer_id,'token':token,'expires_at':row[0],'previous_valid_until':row[1]}
+
+
+@router.post('/trust/{peer_id}/revoke')
+async def revoke(peer_id:UUID,db:AsyncSession=Depends(get_db),user=Depends(manage)):
+    commissioned()
+    row=(await db.execute(text("""UPDATE notification_site_peers SET enabled=false,
+        token_hash=NULL,previous_token_hash=NULL,previous_valid_until=NULL,
+        credential_revoked_at=clock_timestamp() WHERE id=:id AND direction='inbound' RETURNING id"""),{'id':peer_id})).first()
+    if not row:raise HTTPException(404,'Origin not found')
+    await audit(db,user,'notification_site.revoke',peer_id);await db.commit()
+    return {'revoked':True}
+
+
+@router.put('/peers/{peer_id}/connection')
+async def connection(peer_id:UUID,data:Peer,db:AsyncSession=Depends(get_db),user=Depends(manage)):
+    commissioned()
+    # Keep the row and its policy references; require the same commissioned site.
+    row=(await db.execute(text("SELECT site_id FROM notification_site_peers WHERE id=:id AND direction='outbound' FOR UPDATE"),{'id':peer_id})).first()
+    if not row:raise HTTPException(404,'Sender not found')
+    if row.site_id!=data.site_id:raise HTTPException(400,'Sender site identity cannot change')
+    config={'url':data.url,'token':data.token,'ca_pem':data.ca_pem}
+    try:
+        async with service.transport(config) as client:
+            response=await client.get(data.url+'/api/v1/notification-site-runtime/health',headers={'Authorization':'Bearer '+data.token},timeout=5)
+            valid=response.status_code==200 and response.json().get('site_id')==str(data.site_id)
+    except Exception:valid=False
+    if not valid:raise HTTPException(400,'Sender identity or authenticated TLS connection could not be verified')
+    await db.execute(text("UPDATE notification_site_peers SET name=:name,config=CAST(:config AS jsonb) WHERE id=:id"),
+                     {'id':peer_id,'name':data.name,'config':json.dumps(encrypt_config(config))})
+    await audit(db,user,'notification_site.connection',peer_id);await db.commit()
+    return {'saved':True}
 
 
 @router.put('/policies/{channel_id}')
@@ -184,8 +242,15 @@ async def principal(request:Request,db:AsyncSession=Depends(get_db)):
     token=header[7:]
     try:pid=UUID(token.split('.',1)[0])
     except ValueError:raise HTTPException(401,'Invalid peer credential') from None
-    row=(await db.execute(text("SELECT id,site_id,token_hash,channel_map FROM notification_site_peers WHERE id=:id AND direction='inbound' AND enabled"),{'id':pid})).first()
-    if not row or not hmac.compare_digest(row.token_hash or '',hashlib.sha256(token.encode()).hexdigest()):
+    row=(await db.execute(text("""SELECT id,site_id,token_hash,channel_map,previous_token_hash,
+        previous_valid_until>clock_timestamp() AS previous_live,
+        credential_expires_at IS NULL OR credential_expires_at>clock_timestamp() AS current_live
+        FROM notification_site_peers WHERE id=:id AND direction='inbound' AND enabled
+        AND credential_revoked_at IS NULL"""),{'id':pid})).first()
+    digest=hashlib.sha256(token.encode()).hexdigest()
+    current=hmac.compare_digest(row.token_hash or '',digest) if row else False
+    previous=hmac.compare_digest(row.previous_token_hash or '',digest) if row else False
+    if not row or not ((current and row.current_live) or (previous and row.previous_live)):
         raise HTTPException(401,'Invalid peer credential')
     return row
 
