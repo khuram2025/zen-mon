@@ -1,0 +1,22 @@
+[Unit]
+Description=ZenPlus operational database consensus
+Wants=network-online.target
+Requires=zenplus-ha-clock.service
+After=network-online.target zenplus-ha-clock.service
+
+[Service]
+User=etcd
+Group=etcd
+ExecStart=/usr/local/bin/etcd --config-file=/etc/zenplus-ha/etcd.json
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/zenplus-ha/etcd
+
+[Install]
+WantedBy=multi-user.target
