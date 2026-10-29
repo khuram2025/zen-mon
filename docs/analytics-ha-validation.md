@@ -107,6 +107,14 @@ controller crashes, preserve identity across regrouping, and qualify the finite
 deduplication window. Existing in-memory buffers and raw-presence verification
 are release gates. An uncertain insert must not be reported as definitively absent.
 
+The host telemetry batcher now refuses presence-based acknowledgement for
+replicated tables and tables with dependent views. Unknown metadata also refuses
+that shortcut. A lost-response injection against the replicated lab store
+verified that an existing raw row did not cause a false acknowledgement.
+The guard prevents premature success; it does not persist grouped batch identity
+across crashes or close the durable-replay gate. The expanded focused suite
+passed 78 tests.
+
 Runtime commissioning also caught and corrected missing Keeper storage roots,
 a required default ClickHouse settings profile, explicit-engine-argument
 restrictions and the HTTPS-specific advertised host setting. These findings

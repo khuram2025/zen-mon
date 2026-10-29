@@ -16,8 +16,9 @@ Retry identity: a batch of one upload keeps that upload's own deduplication
 token, exactly as before. A combined batch gets a token derived from its
 members and is retried, for up to RETRY_WINDOW_S, as the identical block with
 that token, so ClickHouse deduplicates a retry of a block that did land. If
-the outcome is still unknown after that, each upload is acknowledged only
-when all of its rows are verified stored; the rest replay from their spools.
+the outcome is still unknown after that, raw-row verification is allowed only
+for an unreplicated table with no dependent views. Replicated writes and view
+completion require a successful insert response; the rest replay from spools.
 Residual window: a combined block that landed but could neither be confirmed
 nor verified (ClickHouse unreachable) can be stored twice when its uploads
 replay under their own tokens, as can an upload replayed to another worker
@@ -30,6 +31,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 import weakref
@@ -122,6 +124,27 @@ def rows_present(client, table: str, columns: list[str], rows: list[list]) -> bo
         parameters={"a": next(iter(agents)), "ts": stamps},
     ).result_rows
     return bool(result) and int(result[0][0]) >= len(rows)
+
+
+def presence_can_confirm(client, table: str) -> bool:
+    """Raw presence cannot prove replication quorum or dependent-view completion.
+
+    A timed-out quorum insert can later leave a raw row without its materialized
+    view contribution. Returning success in that state discards the producer's
+    retry opportunity. Metadata errors or unknown engines conservatively refuse
+    presence-based acknowledgement.
+    """
+    if not re.fullmatch(r'(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?[a-zA-Z_][a-zA-Z0-9_]*',table):
+        return False
+    database,_,name=table.rpartition('.')
+    result=client.query(
+        "SELECT engine,length(dependencies_table) FROM system.tables "
+        "WHERE database=if(%(database)s='',currentDatabase(),%(database)s) "
+        "AND name=%(name)s",
+        parameters={'database':database,'name':name or table},
+    ).result_rows
+    return (len(result)==1 and result[0][0] in {'MergeTree','ReplacingMergeTree'}
+            and int(result[0][1])==0)
 
 
 # ─── Batcher ─────────────────────────────────────────────────────────────────
@@ -220,9 +243,9 @@ class HostInsertBatcher:
         stored: set[int] = set()
         if error is not None:
             # Outcome unknown (e.g. the response was lost after the write).
-            # Acknowledge exactly the uploads whose rows are stored; each
-            # upload's rows were always written in one block, so one probe
-            # row per upload decides it. The rest replay from their spools.
+            # Only plain stores without dependent views can use raw presence
+            # as confirmation. Quorum and materialized-view completion need a
+            # successful retry; leave other uploads available for replay.
             try:
                 stored = await asyncio.to_thread(self._stored_members, batch)
             except Exception:
@@ -268,6 +291,8 @@ class HostInsertBatcher:
 
     def _stored_members(self, batch: _Batch) -> set[int]:
         client = self.client_factory()
+        if not presence_can_confirm(client,batch.table):
+            return set()
         return {i for i, m in enumerate(batch.members)
                 if rows_present(client, batch.table, batch.columns, m.rows)}
 
