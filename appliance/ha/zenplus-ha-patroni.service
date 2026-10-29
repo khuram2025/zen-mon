@@ -19,7 +19,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/zenplus-ha /var/run/postgresql
+ReadWritePaths=/var/lib/zenplus-ha/postgresql /var/lib/zenplus-ha/patroni /var/run/postgresql
 
 [Install]
 WantedBy=multi-user.target

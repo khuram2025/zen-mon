@@ -58,8 +58,10 @@ Supply per-node SAN certificates for the configured IPs at
 keys and configuration files, and a root-owned public certificate directory.
 Install etcd at `/usr/local/bin/etcd`, Patroni in `/opt/zenplus-ha/venv`, and
 PostgreSQL 16 binaries under `/usr/lib/postgresql/16/bin`. The data directories
-are `/var/lib/zenplus-ha/etcd` and `/var/lib/zenplus-ha/postgresql`. Provision fresh
-empty directories with the matching service owners. Do not run the distribution
+are `/var/lib/zenplus-ha/etcd` and `/var/lib/zenplus-ha/postgresql`; Patroni also
+needs `/var/lib/zenplus-ha/patroni` for its private password file. Keep the common
+parent root-owned so neither service account can rename the other's directory.
+Provision fresh empty subdirectories with the matching service owners. Do not run the distribution
 PostgreSQL service concurrently with Patroni.
 
 The clock unit reuses `appliance/vmware/clock.py`, installed at

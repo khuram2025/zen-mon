@@ -35,6 +35,7 @@ def test_strict_requires_sync_copy_and_watchdog_and_tls():
     assert "trust" not in " ".join(patroni["postgresql"]["pg_hba"])
     assert not files["profile.json"]["controller_ha_qualified"]
     assert not files["profile.json"]["lab_only"]
+    assert patroni["postgresql"]["pgpass"] == "/var/lib/zenplus-ha/patroni/pgpass"
 
 
 def test_economy_witness_has_no_database_or_passwords():

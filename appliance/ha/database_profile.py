@@ -98,7 +98,7 @@ def render(inventory, node_name, passwords, *, lab=False):
             },
             "postgresql": {"listen": f"{ip}:5432", "connect_address": f"{ip}:5432",
                 "data_dir": "/var/lib/zenplus-ha/postgresql", "bin_dir": "/usr/lib/postgresql/16/bin",
-                "pgpass": "/var/lib/zenplus-ha/pgpass",
+                "pgpass": "/var/lib/zenplus-ha/patroni/pgpass",
                 "authentication": {
                     "superuser": {"username": "postgres", "password": passwords["superuser"],
                         "sslmode": "verify-full", "sslrootcert": f"{tls}/ca.crt"},
