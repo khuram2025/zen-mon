@@ -11,7 +11,7 @@ import { Textarea } from '@/components/ui/Textarea'
 import { FormField } from '@/components/ui/FormField'
 import { toast } from '@/components/ui/Toast'
 
-type Peer = { id: string; name: string; site_id: string; direction: string; enabled: boolean; url?: string; channel_map: Record<string, string> }
+type Peer = { id: string; name: string; site_id: string; direction: string; enabled: boolean; url?: string; ca_pem?: string; credential_expires_at?: string; credential_revoked_at?: string; channel_map: Record<string, string> }
 type Config = { enabled: boolean; site_id: string; peers: Peer[]; policies: { channel_id: string; senders: (string | null)[]; mode: 'strict_selected' | 'local_safety' }[] }
 type Channel = { id: string; name: string }
 const base = '/settings/notification-sites'
@@ -40,6 +40,11 @@ export function NotificationSites() {
   const [ca, setCa] = useState('')
   const [issued, setIssued] = useState('')
   const [busy, setBusy] = useState(false)
+  const [editingPeer, setEditingPeer] = useState('')
+  const [rotatePeer, setRotatePeer] = useState('')
+  const [revokePeer, setRevokePeer] = useState('')
+  const [validDays, setValidDays] = useState(90)
+  const [overlap, setOverlap] = useState(300)
   useEffect(() => {
     const policy = data?.policies.find(p => p.channel_id === channel)
     setOrder(policy?.senders.map(s => s ?? 'local') ?? ['local'])
@@ -97,16 +102,33 @@ export function NotificationSites() {
         <h3 className="text-sm font-semibold">Paired sites</h3>
         {data.peers.length === 0 && <p className="text-sm text-muted">No sites paired yet.</p>}
         {data.peers.map(p => <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
-          <span>{p.name} · {p.direction === 'inbound' ? 'Allowed origin' : 'Sender'} · {p.enabled ? 'Enabled' : 'Disabled'}</span>
-          <Button variant="outline" size="sm" disabled={!editable || busy} onClick={() => work(async () => {
+          <span>{p.name} · {p.direction === 'inbound' ? 'Allowed origin' : 'Sender'} · {p.enabled ? 'Enabled' : 'Disabled'}{p.credential_revoked_at ? ' · Credential revoked' : p.credential_expires_at ? ` · Expires ${new Date(p.credential_expires_at).toLocaleString()}` : p.direction === 'inbound' ? ' · Legacy credential needs rotation' : ''}</span>
+          {p.direction === 'inbound' ? <>
+            <Button variant="outline" size="sm" disabled={!editable || busy} onClick={() => { setRotatePeer(p.id); setRevokePeer(''); setIssued('') }}>Rotate credential</Button>
+            <Button variant="outline" size="sm" disabled={!editable || busy} onClick={() => { setRevokePeer(p.id); setRotatePeer(''); setIssued('') }}>Revoke credential</Button>
+          </> : <Button variant="outline" size="sm" disabled={!editable || busy} onClick={() => { setEditingPeer(p.id); setName(p.name); setSiteId(p.site_id); setUrl(p.url || ''); setCa(p.ca_pem || ''); setToken(''); setForm('sender'); setIssued('') }}>Update connection</Button>}
+          <Button variant="outline" size="sm" disabled={!editable || busy || !!p.credential_revoked_at} onClick={() => work(async () => {
             await api.post(`${base}/peers/${p.id}/${p.enabled ? 'disable' : 'enable'}`)
           })}>{p.enabled ? 'Disable' : 'Enable'}</Button>
         </div>)}
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" disabled={!editable || busy} onClick={() => { setForm('trust'); setIssued(''); setToken('') }}>Allow another origin</Button>
-          <Button variant="outline" disabled={!editable || busy} onClick={() => { setForm('sender'); setIssued(''); setToken('') }}>Add a sender site</Button>
+          <Button variant="outline" disabled={!editable || busy} onClick={() => { setEditingPeer(''); setRotatePeer(''); setRevokePeer(''); setForm('trust'); setIssued(''); setToken('') }}>Allow another origin</Button>
+          <Button variant="outline" disabled={!editable || busy} onClick={() => { setEditingPeer(''); setRotatePeer(''); setRevokePeer(''); setForm('sender'); setIssued(''); setToken('') }}>Add a sender site</Button>
         </div>
       </div>
+      {rotatePeer && <div className="space-y-3">
+        <p className="text-sm">Rotate the credential for {data.peers.find(p => p.id === rotatePeer)?.name}. Update the origin connection before the overlap ends. A second rotation replaces the previous overlap.</p>
+        <FormField label="Credential lifetime in days"><Input type="number" min={1} max={365} value={validDays} onChange={e => setValidDays(Number(e.target.value))} /></FormField>
+        <FormField label="Previous credential overlap in seconds"><Input type="number" min={0} max={3600} value={overlap} onChange={e => setOverlap(Number(e.target.value))} /></FormField>
+        <Button disabled={busy || !editable} onClick={() => work(async () => { const r = await api.post(`${base}/trust/${rotatePeer}/rotate`, { valid_days: validDays, overlap_seconds: overlap }); setIssued(r.data.token) })}>Issue replacement</Button>
+        <Button variant="outline" onClick={() => { setRotatePeer(''); setIssued('') }}>Close</Button>
+        {issued && <FormField label="Replacement credential shown once"><PasswordInput value={issued} readOnly autoComplete="off" /></FormField>}
+      </div>}
+      {revokePeer && <div className="space-y-2 text-sm">
+        <p>Revoke both credentials for {data.peers.find(p => p.id === revokePeer)?.name}. Re-enabling alone cannot restore access. Issue and configure a new credential to pair again. An already started provider call may still finish.</p>
+        <Button disabled={busy || !editable} onClick={() => work(async () => { await api.post(`${base}/trust/${revokePeer}/revoke`); setRevokePeer(''); setIssued('') })}>Confirm revocation</Button>
+        <Button variant="outline" onClick={() => setRevokePeer('')}>Cancel</Button>
+      </div>}
       {form !== 'none' && <div className="space-y-3">
         <p className="text-sm">{form === 'trust' ? 'Allow a remote site to use a local channel. Its notifications remain owned by that origin. Reuse an origin site ID to add another channel mapping.' : 'First authorize this site on the sender. Enter the sender’s site ID, HTTPS address, and the credential it issued.'}</p>
         <FormField label="Site name"><Input value={name} onChange={e => setName(e.target.value)} maxLength={100} /></FormField>
@@ -125,7 +147,7 @@ export function NotificationSites() {
               const existing = data.peers.find(p => p.direction === 'inbound' && p.site_id === siteId)
               if (existing) { await api.put(`${base}/trust/${existing.id}/channels`, { channel_map: { ...existing.channel_map, [remoteChannel]: localChannel } }); setIssued(''); toast.success('Channel permission saved') }
               else { const result = await api.post(`${base}/trust`, { name, site_id: siteId, channel_map: { [remoteChannel]: localChannel } }); setIssued(result.data.token) }
-            } else { await api.post(`${base}/peers`, { name, site_id: siteId, url, token, ca_pem: ca }); setToken(''); setForm('none'); toast.success('Sender identity verified and paired') }
+            } else { const body = { name, site_id: siteId, url, token, ca_pem: ca }; if (editingPeer) await api.put(`${base}/peers/${editingPeer}/connection`, body); else await api.post(`${base}/peers`, body); setToken(''); setForm('none'); toast.success('Sender identity verified and paired') }
           })}>{form === 'trust' ? 'Save origin permission' : 'Verify and pair'}</Button>
           <Button variant="outline" onClick={() => { setForm('none'); setIssued(''); setToken('') }}>Close</Button>
         </div>
