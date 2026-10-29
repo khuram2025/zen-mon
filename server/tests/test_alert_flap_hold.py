@@ -50,7 +50,7 @@ def run(monkeypatch):
 
 @pytest.fixture
 def sent(monkeypatch):
-    """Webhook dispatches of the status path, as (ctx) per accepted send."""
+    """Record status notification intents in these in-memory engine tests."""
     calls: list[dict] = []
 
     async def dispatch(ch_type, cfg, ctx):
@@ -60,6 +60,12 @@ def sent(monkeypatch):
     monkeypatch.setattr(alert_engine, "_dispatch_channel_result", dispatch)
     monkeypatch.setattr(alert_engine, "decrypt_config", lambda cfg: cfg)
     monkeypatch.setattr(alert_engine.dl, "record", AsyncMock())
+    from app.services import notification_outbox
+    async def enqueue(db,channels,ctx):
+        assert isinstance(db,AlertsDB)
+        if channels:calls.append(ctx)
+        return int(bool(channels))
+    monkeypatch.setattr(notification_outbox,'enqueue',enqueue)
     return calls
 
 
@@ -275,7 +281,7 @@ async def test_a_new_hold_still_replaces_an_older_hold(run):
 
 
 @pytest.mark.asyncio
-async def test_a_trigger_that_is_not_held_still_supersedes_a_paged_one(run):
+async def test_a_trigger_that_is_not_held_still_supersedes_a_paged_one(run, sent):
     db = AlertsDB([_loss_rule()])
     await run(db, "up", "down", packet_loss=1.0)
     paged = db.alerts[-1]

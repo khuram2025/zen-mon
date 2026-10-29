@@ -42,6 +42,8 @@ Grouping membership, the envelope and incident changes share the caller's commit
 """
     from app.services import host_alert_service as has, notification_grouping as ng
 
+    if not channel_ids and not any(has._direct_targets(ctx).values()):
+        return 0
     aid = str(UUID(str(ctx.get("alert_id"))))
     event = str(ctx.get("delivery_event") or "").strip()
     if not event or len(event) > 64:

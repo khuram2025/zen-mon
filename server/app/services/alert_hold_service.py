@@ -198,6 +198,7 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         "rule_id": str(row.rule_id),
         "is_recovery": False,
         "alert_id": str(row.id),
+        "_enqueue_notification": True,
         # A confirmed hold is the incident's first page: label it New and
         # claim it once (alert_delivery_keys) however many workers sweep.
         "delivery_event": "trigger",
@@ -251,8 +252,8 @@ async def sweep_pending_holds(db: AsyncSession) -> dict[str, int]:
                 await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:device_id))"),
                                  {"device_id": str(row.device_id)})
 
-            # Condition held: the alert becomes real. Settle the row first so
-            # a crashed dispatch never re-pages on the next sweep.
+            # Settle the row and stage its notification in the same transaction.
+            # A failed enqueue rolls both back so the next sweep can retry.
             if not await _settle(db, row.id, status="active", extra={
                 "hold_confirmed_at": now.isoformat(),
                 # Escalation anchor (see the module docstring).
