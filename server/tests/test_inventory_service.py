@@ -362,11 +362,6 @@ def test_loop_defaults_match_the_design():
     assert (svc.NORMALIZE_LOCK_KEY, svc.SNAPSHOT_LOCK_KEY) == (1515074397, 1515074398)
 
 
-# Tasks that main.py starts but has never listed for cancellation. Both predate the
-# inventory loops. The test fails when one of them is fixed, so the entry gets removed.
-KNOWN_NOT_STOPPED_AT_SHUTDOWN = {"alert_escalation_sweeper", "agent_package_sync"}
-
-
 def _main_tasks() -> tuple[dict[str, int], set[str]]:
     tree = ast.parse((SERVER_ROOT / "app" / "main.py").read_text())
     started: dict[str, int] = {}
@@ -397,10 +392,8 @@ def test_inventory_loops_are_started_and_stopped_in_main():
 def test_every_started_background_task_is_in_the_shutdown_tuple():
     started, stopped = _main_tasks()
     assert len(started) > 15, "the parser stopped recognising app.state.<name> = asyncio.create_task(...)"
-    leaked = sorted(set(started) - stopped - KNOWN_NOT_STOPPED_AT_SHUTDOWN)
+    leaked = sorted(set(started) - stopped)
     assert not leaked, f"started in startup but never cancelled in _stop_background_tasks: {leaked}"
-    fixed = sorted(KNOWN_NOT_STOPPED_AT_SHUTDOWN & stopped)
-    assert not fixed, f"now stopped at shutdown, drop them from KNOWN_NOT_STOPPED_AT_SHUTDOWN: {fixed}"
     typos = sorted(stopped - set(started))
     assert not typos, f"cancelled at shutdown but never started: {typos}"
 
