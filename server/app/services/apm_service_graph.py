@@ -32,10 +32,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
+from app.services.job_lock_keys import JOB_LOCK_KEYS
 
 logger = logging.getLogger("zenplus.apm.service_graph")
 
-SERVICE_GRAPH_ADVISORY_LOCK = 1515074393
+SERVICE_GRAPH_ADVISORY_LOCK = JOB_LOCK_KEYS["apm.service_graph"]
 
 BUCKET_S = 300
 EVAL_INTERVAL_S = 60

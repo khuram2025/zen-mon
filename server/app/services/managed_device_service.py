@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import text
+from app.services.job_lock_keys import JOB_LOCK_KEYS
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
@@ -47,8 +48,8 @@ SYNC_INTERVAL_S = 60
 # A child unreported for this long goes 'unknown'. Template polls default to
 # 60 s, so this rides out ~10 missed polls or a controller reboot.
 STALE_AFTER_MINUTES = 10
-# udt_sweeper uses ...391; any distinct constant works.
-CHILD_SYNC_ADVISORY_LOCK = 1515074392
+# Shared registry prevents unrelated background jobs from blocking this pass.
+CHILD_SYNC_ADVISORY_LOCK = JOB_LOCK_KEYS["managed_device.child_sync"]
 
 _ALERTABLE = ("down", "degraded")
 
