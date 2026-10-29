@@ -14,16 +14,19 @@ hook=importlib.util.module_from_spec(spec);spec.loader.exec_module(hook)
 @pytest.fixture
 def gate(tmp_path,monkeypatch):
     program=tmp_path/'fence';program.write_text('#!/bin/false\n');program.chmod(0o755)
-    cfg={'cell_id':'lab','node_id':'b','system_identifier':'12345678901','database':'lab','fence_program':str(program)}
+    cfg={'cell_id':'lab','node_id':'b','system_identifier':'12345678901','database':'lab','fence_program':str(program),'dependencies':['redis-server.service']}
     path=tmp_path/'promotion.json';path.write_text(json.dumps(cfg));path.chmod(0o644)
     original=Path.stat
     def stat(p,*a,**kw):
         s=original(p,*a,**kw)
         return SimpleNamespace(st_mode=s.st_mode,st_uid=0)
     monkeypatch.setattr(Path,'stat',stat)
-    state=SimpleNamespace(owner='a',system_id=cfg['system_identifier'],states='inactive\ninactive\ninactive',receipt='off',requests=[])
+    monkeypatch.setattr(hook,'WITHDRAWN',tmp_path/'withdrawn.json')
+    state=SimpleNamespace(owner='a',system_id=cfg['system_identifier'],states='inactive\ninactive\ninactive',receipt='off',requests=[],dependency='active')
     def run(args,**kw):
-        if args[:2]==['systemctl','list-unit-files']:
+        if args[:2]==['systemctl','is-active']:
+            return SimpleNamespace(stdout=state.dependency+'\n',returncode=0 if state.dependency=='active' else 3)
+        elif args[:2]==['systemctl','list-unit-files']:
             out='zenplus-api.service disabled\nzenplus-poller.service disabled\nzenplus-ncm-backup.timer disabled'
         elif args[:2]==['systemctl','show']:
             out=state.states if 'ActiveState' in args else ('' if args[2].endswith('.timer') else 'MainPID=0\nControlGroup=\n')
@@ -56,4 +59,16 @@ def test_no_positive_poweroff_receipt_blocks_promotion(gate):
 
 def test_same_controller_does_not_power_off_itself(gate):
     path,state=gate;state.owner='b';hook.run(path)
+    assert not state.requests
+
+
+def test_unhealthy_local_dependency_blocks_promotion_before_fencing(gate):
+    path,state=gate;state.dependency='inactive'
+    with pytest.raises(RuntimeError,match='dependencies'):hook.run(path)
+    assert not state.requests
+
+
+def test_quarantined_node_cannot_promote_after_reboot(gate):
+    path,state=gate;hook.WITHDRAWN.write_text('{}')
+    with pytest.raises(RuntimeError,match='quarantined'):hook.run(path)
     assert not state.requests

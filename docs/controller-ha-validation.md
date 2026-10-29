@@ -65,6 +65,21 @@ ARP. All frontends need certificates covering that address. This is a same-subne
 endpoint; it does not implement WAN address mobility or DNS failover. Use the
 stable URL as `APP_BASE_URL` when commissioning application links.
 
+The private controller configuration and root-controlled promotion configuration
+must list the same nonempty `dependencies` array. A promotion candidate refuses
+leadership while one of those local units is inactive. Persistent dependency or
+core-consumer unavailability on the verified writer withdraws ingress and stops
+all managed consumers before asking Patroni to relinquish leadership. The default
+`dependency_failure_seconds` is 120; commissioned values must be 30–900 seconds.
+Database connectivity loss and consensus failure do not trigger this local
+dependency mechanism. The replacement still requires positive predecessor fencing.
+
+Withdrawal creates `/etc/zenplus-ha/controller-withdrawn.json`, which survives
+reboot and blocks both application admission and database promotion. After
+repairing and verifying the dependencies, an operator may remove this root-owned
+marker and restart `zenplus-ha-controller.service`. The node may rejoin as a
+replica while quarantined. Do not clear the marker merely to force leadership.
+
 ## Measured lab results
 
 Tests on 29 October 2026 used three disposable Ubuntu 24.04 VMs, PostgreSQL
@@ -82,6 +97,7 @@ remained running throughout these tests.
 | HTTP outage followed by active VM power loss | Same incident survived; replacement sent recovery; SMTP capture received exactly one trigger and one recovery in this run | 45.94 seconds to authenticated replacement API |
 | Active VM power loss through the fixed TLS service address | The client reused the same address and login session; exactly one address holder after rejoin | 48.84 seconds |
 | Power loss after incident and notification enqueue, before send | Replacement drained the committed job; isolated SMTP accepted one trigger | 46.59 seconds |
+| Persistent Redis failure on the active writer | With a 30-second commissioned grace, replacement retained the session, positively fenced the predecessor and restored the fixed endpoint; quarantine survived reboot | 49.09 seconds |
 
 Recovery measurements include test polling and are observations, not an SLA or a
 maximum bound. Three VMs on one workstation do not provide independent physical
@@ -100,8 +116,10 @@ power and saved-state semantics.
 The current fixtures have separate local ClickHouse instances and no replicated
 analytics store. The fixed HTTPS endpoint has passed an authenticated API power
 loss test; full browser, WebSocket and sensor reconnection qualification remains.
-Local dependency failure stops admission but does not yet automatically migrate
-the database role. Device/service transitions and flap settlement now enqueue
+Persistent local dependency failure now withdraws the database role with a
+durable repair quarantine; the measured test covers a stopped Redis service.
+Functional failures in every collector and provider still need qualification.
+Device/service transitions and flap settlement now enqueue
 within the incident transaction, alongside migrated metric producers. The
 explicit post-enqueue power-loss test covers that crash boundary. Escalations,
 digests, reports and other legacy producers still require separate qualification.
