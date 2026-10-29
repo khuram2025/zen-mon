@@ -1,0 +1,23 @@
+[Unit]
+Description=ZenPlus fenced active controller supervisor
+After=network-online.target zenplus-ha-patroni.service
+Requires=zenplus-ha-patroni.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=8
+WatchdogSignal=SIGKILL
+User=root
+Environment=PYTHONPATH=/opt/zenplus/server
+ExecStart=/opt/zenplus/venv/bin/python /usr/local/lib/zenplus-ha/controller.py --config /etc/zenplus-ha/controller.json
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=zenplus-controller
+RuntimeDirectoryMode=0755
+KillMode=control-group
+TimeoutStopSec=45
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

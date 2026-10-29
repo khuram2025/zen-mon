@@ -1,8 +1,11 @@
 # Operational database HA profile
 
-This directory introduces a fresh PostgreSQL and etcd cell. It does not enable
-ZenPlus controller HA, autonomous sites, remote notification senders, or a
-customer appliance release. Do not adopt an installed database with these files.
+This directory introduces a fresh PostgreSQL and etcd cell and an explicitly
+commissioned active/standby controller supervisor. See
+[controller validation](../../docs/controller-ha-validation.md) for installation
+requirements, measured tests and the remaining qualification boundaries. It does
+not enable autonomous sites, remote notification senders or a customer appliance
+release. Do not adopt an installed database with these files.
 
 ## Profiles
 
