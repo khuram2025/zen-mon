@@ -262,6 +262,8 @@ def create_app() -> FastAPI:
         app.state.alert_escalation_sweeper = asyncio.create_task(escalation_sweeper_loop())
         from app.services.notification_outbox import notification_outbox_loop
         app.state.notification_outbox = asyncio.create_task(notification_outbox_loop())
+        from app.services.service_transition_inbox import service_transition_loop
+        app.state.service_transition_inbox = asyncio.create_task(service_transition_loop())
         from app.services.host_ingest_journal import enabled as journal_enabled, recovery_loop
         if journal_enabled():
             app.state.host_ingest_recovery = asyncio.create_task(recovery_loop())
@@ -349,7 +351,7 @@ def create_app() -> FastAPI:
             if task:
                 task.cancel()
                 stopping.append(task)
-        for attr in ("alert_escalation_sweeper", "agent_package_sync", "notification_outbox", "host_ingest_recovery"):
+        for attr in ("alert_escalation_sweeper", "agent_package_sync", "notification_outbox", "host_ingest_recovery", "service_transition_inbox"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

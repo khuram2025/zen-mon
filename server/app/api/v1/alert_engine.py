@@ -1467,13 +1467,18 @@ async def evaluate_service_status_change(
     event: ServiceStatusChangeEvent,
     db: AsyncSession = Depends(get_db),
 ):
+    return await evaluate_service_transition(event, db, commit=True)
+
+
+async def evaluate_service_transition(event: ServiceStatusChangeEvent, db: AsyncSession,
+                                      *, commit: bool, observed_at=None):
     """
     Called by the Go poller when a service check status changes.
     Evaluates alert rules scoped to this check (by id, service group, or tag
     via metric='service_status') and fires notifications. Mirrors
     /evaluate for devices; internal endpoint, no auth.
     """
-    now = datetime.now(timezone.utc)
+    now = observed_at or datetime.now(timezone.utc)
     # As on the device path: arriving at 'up' never opens a problem alert.
     into_up = event.new_status == "up"
     is_recovery = into_up and event.old_status in ("down", "degraded", "warning")
@@ -1779,7 +1784,8 @@ async def evaluate_service_status_change(
     notifications_queued = 0
     for channel_ids, ctx in planned:
         notifications_queued += await _enqueue_planned(db, channel_ids, ctx)
-    await db.commit()
+    if commit:
+        await db.commit()
 
     return {
         "evaluated_rules": len(rules),
