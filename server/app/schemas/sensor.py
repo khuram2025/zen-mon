@@ -509,4 +509,6 @@ class EventItem(BaseModel):
 
 
 class EventsBatch(BaseModel):
+    # Legacy clients may omit the key; current WAL uploaders always provide it.
+    idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
     items: List[EventItem] = Field(default_factory=list, max_length=200)

@@ -1120,7 +1120,12 @@ func drainSpool(ctx context.Context, uploadEvery time.Duration, c *client, spool
 		if batches > 0 && time.Now().After(turnDeadline) {
 			return 0, nil
 		}
-		batch, err := spool.NextBatch(uploadBatchSize)
+		// Leave envelope headroom below nginx's 32 MiB request limit. Events
+		// have a stricter schema limit than result endpoints. Persisted retries
+		// retain their original membership and use the rejection/split path.
+		batch, err := spool.NextBatchWithLimits(uploadBatchSize, 8*1024*1024-1024, map[string]int{
+			"/api/v1/sensor/events": 200,
+		})
 		if err != nil {
 			return 0, err
 		}

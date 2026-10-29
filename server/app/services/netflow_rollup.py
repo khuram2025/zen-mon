@@ -81,6 +81,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from sqlalchemy import text
+from app.services.job_lock_keys import JOB_LOCK_KEYS
 
 from app.core.database import AsyncSessionLocal, engine, get_ch_client
 from app.services.netflow_census import RawCensusCache, FORMAT as CENSUS_FORMAT
@@ -120,8 +121,8 @@ HEAL_PAUSE_S = 2.0
 BACKFILL_PAUSE_S = 0.5
 HEALER_MAX_THREADS = 4
 
-NETFLOW_ROLLUP_ADVISORY_LOCK = 1515074392
-NETFLOW_SWEEP_ADVISORY_LOCK = 1515074393
+NETFLOW_ROLLUP_ADVISORY_LOCK = JOB_LOCK_KEYS["netflow.rollup"]
+NETFLOW_SWEEP_ADVISORY_LOCK = JOB_LOCK_KEYS["netflow.sweep"]
 CENSUS_SETTINGS_KEY = "netflow_rollup_census"
 SWEEP_PROCESS_STARTED_AT = time.time()
 REPAIR_SETTINGS_KEY = "netflow_rollup_repair"
