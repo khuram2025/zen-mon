@@ -394,9 +394,9 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                 return targets, False
             fresh, already = [], False
             for key, addr in targets:
-                key_id, state = await dl.claim_key(db, keyed[0], keyed[1], self.id, key)
-                if key_id:
-                    self.claimed.append(key_id)
+                claim_token, state = await dl.claim_key(db, keyed[0], keyed[1], self.id, key)
+                if claim_token:
+                    self.claimed.append(claim_token)
                     fresh.append((key, addr))
                 elif state is None:
                     fresh.append((key, addr))      # keys unavailable: send as before

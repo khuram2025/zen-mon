@@ -37,6 +37,9 @@ Concurrent workers, retries and restarts therefore never re-send a known
 accepted (or possibly accepted) transition, while a genuinely new event — a new
 incident, a recovery, the next escalation step — has a new key and is sent.
 Exactly-once SMTP delivery is not promised; the outcome stays auditable here.
+Migration 170 adds a fresh claim token for each attempt. A late completion from
+an attempt taken over by another worker cannot overwrite the current receipt.
+This protects database outcomes, not an external send already in progress.
 """
 
 from __future__ import annotations
@@ -226,7 +229,7 @@ async def delivered_recipients(db: AsyncSession, alert_id, event: str) -> dict[s
 
 async def claim_key(db: AsyncSession, alert_id, event: str, channel_id, recipient: str = ""
                     ) -> tuple[str | None, str | None]:
-    """Claim one delivery. Returns (key id, None) when this caller now owns it,
+    """Claim one delivery. Returns (attempt token, None) when this caller owns it,
     (None, existing state) when it is already claimed/accepted/uncertain, and
     (None, None) when keys are unavailable (no table, the alert row is gone),
     in which case the caller sends without a key as before.
@@ -244,11 +247,12 @@ async def claim_key(db: AsyncSession, alert_id, event: str, channel_id, recipien
                 "INSERT INTO alert_delivery_keys (alert_id, event, channel_id, recipient)"
                 " VALUES (CAST(:aid AS uuid), :ev, CAST(:cid AS uuid), :rcpt)"
                 " ON CONFLICT (alert_id, event, channel_id, recipient) DO UPDATE"
-                " SET state = 'claimed', claimed_at = now(), finished_at = NULL, error = NULL"
+                " SET state = 'claimed', claimed_at = now(), finished_at = NULL, error = NULL,"
+                " claim_token = gen_random_uuid()"
                 " WHERE alert_delivery_keys.state = 'failed'"
                 " OR (alert_delivery_keys.state = 'claimed'"
                 "     AND alert_delivery_keys.claimed_at < now() - interval '10 minutes')"
-                " RETURNING id"
+                " RETURNING claim_token"
             ), params)).first()
             if row:
                 return str(row[0]), None
@@ -264,18 +268,20 @@ async def claim_key(db: AsyncSession, alert_id, event: str, channel_id, recipien
         return None, None
 
 
-async def finish_keys(db: AsyncSession, key_ids: list[str], state: str,
+async def finish_keys(db: AsyncSession, claim_tokens: list[str], state: str,
                       error: BaseException | str | None = None) -> None:
-    """Record a claimed delivery's outcome (accepted / failed / uncertain)."""
-    if not key_ids or _keys_disabled:
+    """Complete only the current, still-claimed attempt; ignore stale tokens."""
+    if state not in ("accepted", "failed", "uncertain"):
+        raise ValueError("Invalid delivery completion state")
+    if not claim_tokens or _keys_disabled:
         return
     err = sanitize_error(error) if not isinstance(error, str) else error
     try:
         async with db.begin_nested():
             await db.execute(text(
                 "UPDATE alert_delivery_keys SET state = :st, error = :err, finished_at = now()"
-                " WHERE id::text = ANY(CAST(:ids AS text[]))"
-            ), {"st": state, "err": err, "ids": list(key_ids)})
+                " WHERE claim_token = ANY(CAST(:tokens AS uuid[])) AND state = 'claimed'"
+            ), {"st": state, "err": err, "tokens": list(claim_tokens)})
     except Exception as exc:
         if not _keys_missing(exc):
             logger.warning("delivery keys: could not record outcome %s: %s", state, exc)
