@@ -588,9 +588,7 @@ func (e *Engine) evaluateTrapAlert(t snmp.TrapRecord) {
 // evaluateServiceAlerts fires the API-side alert engine when a service check
 // transitions status (and is not muted by a maintenance window — that's
 // already filtered upstream in processServiceStatusChange).
-func (e *Engine) evaluateServiceAlerts(ctx context.Context, sc *checker.ServiceCheck, oldStatus, newStatus string, result *checker.ServiceCheckResult) {
-	apiURL := "http://localhost:8000/api/v1/alert-engine/evaluate-service"
-
+func serviceAlertPayload(sc *checker.ServiceCheck, oldStatus, newStatus string, result *checker.ServiceCheckResult) ([]byte, error) {
 	payload := map[string]interface{}{
 		"service_check_id": sc.ID.String(),
 		"check_name":       sc.Name,
@@ -615,7 +613,12 @@ func (e *Engine) evaluateServiceAlerts(ctx context.Context, sc *checker.ServiceC
 		payload["target"] = sc.TargetHost
 	}
 
-	body, err := json.Marshal(payload)
+	return json.Marshal(payload)
+}
+
+func (e *Engine) evaluateServiceAlerts(ctx context.Context, sc *checker.ServiceCheck, oldStatus, newStatus string, result *checker.ServiceCheckResult) {
+	apiURL := "http://localhost:8000/api/v1/alert-engine/evaluate-service"
+	body, err := serviceAlertPayload(sc, oldStatus, newStatus, result)
 	if err != nil {
 		e.logger.Errorf("Failed to marshal service alert payload: %v", err)
 		return
@@ -932,12 +935,33 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 
 	// Update PG with latest state
 	responseMs := float64(result.ResponseTime.Microseconds()) / 1000.0
-	go func() {
-		if err := e.svcLoader.UpdateServiceCheckStatus(ctx, sc.ID, newStatus, result.Timestamp, responseMs, result.Error,
-			result.TLSExpiry, result.TLSDaysRemaining, result.TLSIssuer, result.TLSSubject, 0); err != nil {
-			e.logger.Errorf("Failed to update service check status in PG: %v", err)
+	_, muted := maintIDs[sc.ID]
+	durablyQueued := false
+	if newStatus != oldStatus && !muted {
+		if recorder, ok := e.svcLoader.(interface {
+			RecordServiceTransition(context.Context, *checker.ServiceCheck, *checker.ServiceCheckResult, string, string, []byte) (bool, error)
+		}); ok {
+			payload, err := serviceAlertPayload(sc, oldStatus, newStatus, result)
+			if err != nil {
+				e.logger.Errorf("Cannot encode service transition: %v", err)
+				return
+			}
+			committed, err := recorder.RecordServiceTransition(ctx, sc, result, oldStatus, newStatus, payload)
+			if err != nil || !committed {
+				e.logger.Warnf("Service transition not committed; retaining confirmed state: %v", err)
+				return
+			}
+			durablyQueued = true
 		}
-	}()
+	}
+	if !durablyQueued {
+		go func() {
+			if err := e.svcLoader.UpdateServiceCheckStatus(ctx, sc.ID, newStatus, result.Timestamp, responseMs, result.Error,
+				result.TLSExpiry, result.TLSDaysRemaining, result.TLSIssuer, result.TLSSubject, 0); err != nil {
+				e.logger.Errorf("Failed to update service check status in PG: %v", err)
+			}
+		}()
+	}
 
 	if newStatus != oldStatus {
 		sc.Status = newStatus
@@ -997,7 +1021,9 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 		}()
 
 		// Fire alert engine (muted checks were already returned above).
-		go e.evaluateServiceAlerts(ctx, sc, oldStatus, newStatus, result)
+		if !durablyQueued {
+			go e.evaluateServiceAlerts(ctx, sc, oldStatus, newStatus, result)
+		}
 	}
 }
 
