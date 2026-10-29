@@ -20,6 +20,11 @@ VCPU="${ZENPLUS_SENSOR_VCPU:-1}"
 VERSION="${ZENPLUS_SENSOR_VERSION:-0.1.0}"
 SENSOR_COMMIT="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 SENSOR_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+: "${ZENPLUS_SENSOR_BASE_SHA256:?Set the SHA-256 from the verified Ubuntu cloud-image manifest}"
+if [[ ! "$ZENPLUS_SENSOR_BASE_SHA256" =~ ^[[:xdigit:]]{64}$ ]]; then
+  echo 'ZENPLUS_SENSOR_BASE_SHA256 must be a 64-character SHA-256 digest' >&2
+  exit 2
+fi
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -38,8 +43,11 @@ mkdir -p "$OUT_DIR" "$BASE_DIR"
 
 if [[ ! -f "$BASE_IMG" ]]; then
   echo "Downloading Ubuntu cloud image: $BASE_URL"
-  curl -L --fail --continue-at - --output "$BASE_IMG" "$BASE_URL"
+  curl -L --fail --continue-at - --output "$BASE_IMG.partial" "$BASE_URL"
+  printf '%s  %s\n' "$ZENPLUS_SENSOR_BASE_SHA256" "$BASE_IMG.partial" | sha256sum --check -
+  mv "$BASE_IMG.partial" "$BASE_IMG"
 fi
+printf '%s  %s\n' "$ZENPLUS_SENSOR_BASE_SHA256" "$BASE_IMG" | sha256sum --check -
 
 echo "Building zenplus-sensor runtime"
 if [[ -n "${ZENPLUS_SENSOR_BINARY:-}" ]]; then
@@ -62,6 +70,16 @@ virt-customize -a "$WORK_QCOW2" \
   --copy-in "$APPLIANCE_DIR/scripts/sensor-config:/usr/local/sbin" \
   --run-command 'chmod 0755 /usr/local/sbin/sensor-config' \
   --copy-in "$APPLIANCE_DIR/systemd/zenplus-sensor.service:/etc/systemd/system" \
+  --copy-in "$APPLIANCE_DIR/systemd/zenplus-sensor-clock.service:/etc/systemd/system" \
+  --mkdir /usr/local/lib/zenplus-sensor \
+  --copy-in "$ROOT/appliance/vmware/clock.py:/usr/local/lib/zenplus-sensor" \
+  --run-command 'mv /usr/local/lib/zenplus-sensor/clock.py /usr/local/lib/zenplus-sensor/appliance_clock.py' \
+  --copy-in "$APPLIANCE_DIR/scripts/initialize-clock.py:/usr/local/lib/zenplus-sensor" \
+  --mkdir /etc/systemd/system/cloud-init-local.service.d \
+  --copy-in "$APPLIANCE_DIR/systemd/require-clock.conf:/etc/systemd/system/cloud-init-local.service.d" \
+  --mkdir /etc/systemd/system/zenplus-sensor.service.d \
+  --copy-in "$APPLIANCE_DIR/systemd/require-clock.conf:/etc/systemd/system/zenplus-sensor.service.d" \
+  --run-command 'chmod 0644 /usr/local/lib/zenplus-sensor/*.py /etc/systemd/system/zenplus-sensor-clock.service /etc/systemd/system/cloud-init-local.service.d/require-clock.conf /etc/systemd/system/zenplus-sensor.service.d/require-clock.conf && systemctl enable zenplus-sensor-clock.service' \
   --mkdir /etc/zenplus-sensor \
   --mkdir /var/lib/zenplus-sensor \
   --mkdir /var/lib/zenplus-sensor/bin \
@@ -78,7 +96,8 @@ virt-customize -a "$WORK_QCOW2" \
   --run-command 'chown root:zenplus-sensor /etc/zenplus-sensor/sensor.env.example' \
   --run-command 'chmod 0640 /etc/zenplus-sensor/sensor.env.example' \
   --run-command 'systemctl enable cloud-init.service cloud-config.service cloud-final.service || true' \
-  --run-command 'cloud-init clean --logs || true'
+  --run-command 'cloud-init clean --logs' \
+  --run-command 'truncate -s 0 /etc/machine-id && chmod 0644 /etc/machine-id && mkdir -p /var/lib/dbus && rm -f /var/lib/dbus/machine-id && ln -s /etc/machine-id /var/lib/dbus/machine-id'
 
 echo "Converting disk to stream-optimized VMDK"
 qemu-img convert -O vmdk -o subformat=streamOptimized "$WORK_QCOW2" "$VMDK"

@@ -149,11 +149,13 @@ cp "$BASE_QCOW2" "$WORK_QCOW2"
 
 export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
 VIRT_ARGS=(
+  --run-command 'test -f /etc/systemd/system/zenplus-sensor-clock.service && test -f /usr/local/lib/zenplus-sensor/appliance_clock.py || { echo "Rebuild the generic sensor image with clock initialization before configuring it" >&2; exit 1; }' \
   --copy-in "$TMP/sensor.env:/etc/zenplus-sensor" \
   --run-command 'chown root:zenplus-sensor /etc/zenplus-sensor && chmod 0770 /etc/zenplus-sensor' \
   --run-command 'chown zenplus-sensor:zenplus-sensor /etc/zenplus-sensor/sensor.env' \
   --run-command 'chmod 0600 /etc/zenplus-sensor/sensor.env' \
-  --run-command 'systemctl enable zenplus-sensor.service'
+  --run-command 'systemctl enable zenplus-sensor.service' \
+  --run-command 'truncate -s 0 /etc/machine-id && chmod 0644 /etc/machine-id && mkdir -p /var/lib/dbus && rm -f /var/lib/dbus/machine-id && ln -s /etc/machine-id /var/lib/dbus/machine-id'
 )
 if [[ -f "$TMP/configure-console.sh" ]]; then
   VIRT_ARGS+=(
