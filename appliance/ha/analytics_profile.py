@@ -143,6 +143,10 @@ def render(inventory, node_name, credentials):
     # Replicated parts must also reach durable media before acceptance.
     mt = element(server, 'merge_tree')
     element(mt, 'fsync_after_insert', 1); element(mt, 'fsync_part_directory', 1)
+    # Insert flushing does not cover background merges or replica fetches.
+    # A whole-cell power loss must not leave every copy of a merged part empty.
+    element(mt, 'min_compressed_bytes_to_fsync_after_merge', 1)
+    element(mt, 'min_compressed_bytes_to_fsync_after_fetch', 1)
     element(mt, 'replicated_deduplication_window', 10000)
     tls_config(server)
     result['clickhouse.xml'] = xml(server)

@@ -41,6 +41,8 @@ def test_transport_and_witness_boundaries():
     assert ch.find('profiles/default') is not None
     assert ch.findtext('merge_tree/fsync_after_insert') == '1'
     assert ch.findtext('merge_tree/fsync_part_directory') == '1'
+    assert ch.findtext('merge_tree/min_compressed_bytes_to_fsync_after_merge') == '1'
+    assert ch.findtext('merge_tree/min_compressed_bytes_to_fsync_after_fetch') == '1'
     inv = inventory(); inv['profile']='economy'; inv['nodes'][2]['data']=False
     witness = profile.render(inv,'node-3',credentials())
     assert set(witness) == {'keeper.xml'}
