@@ -165,3 +165,4 @@ ec1c52e31ea28874a3b5b7c0f94bd7e37e311b23f00270f29402862c44e8e71f  migrate-164-es
 252c972893eec3aaa947983ebd0dc4e58d439ac0239b1ae267a7ba478a86ea79  migrate-166-report-delivery.sql
 51dc92eee495a07a040b537832de01d618213a733082b0e9e4546377609b9e31  migrate-167-map-entity-nodes-and-versions.sql
 c00ba7cc89f441d7682e0b52348a2ac923739dec07cd677b8345fdd68f2bfe73  migrate-168-sensor-version-width.sql
+3c0b4b8c1394492095561d79a7010bb2ec0313d2d23c661b57940c0a510fc7cf  migrate-169-discovery-ownership.sql

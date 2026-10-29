@@ -125,6 +125,9 @@ class DiscoveryRun(Base):
     )
     trigger_type: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    executor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     phase: Mapped[str] = mapped_column(String(40), default="preparing")
     progress_pct: Mapped[int] = mapped_column(Integer, default=0)
 
