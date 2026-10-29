@@ -1,0 +1,20 @@
+[Unit]
+Description=Initialize ZenPlus database appliance UTC from its hypervisor
+DefaultDependencies=no
+Wants=local-fs.target
+After=local-fs.target
+Before=cloud-init-local.service network-pre.target time-sync.target zenplus-ha-etcd.service zenplus-ha-patroni.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/zenplus-ha/clock.py
+RemainAfterExit=yes
+TimeoutStartSec=75
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+CapabilityBoundingSet=CAP_SYS_TIME CAP_SYS_MODULE
+
+[Install]
+WantedBy=sysinit.target
