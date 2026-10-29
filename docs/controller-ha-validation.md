@@ -113,8 +113,9 @@ power and saved-state semantics.
 
 ## Qualification boundaries
 
-The current fixtures have separate local ClickHouse instances and no replicated
-analytics store. The fixed HTTPS endpoint has passed an authenticated API power
+Site A now has a [replicated analytics profile](analytics-ha-validation.md).
+Site B still uses separate local stores. Durable replay of uncertain analytics
+inserts remains a release gate. The fixed HTTPS endpoint has passed an authenticated API power
 loss test; full browser, WebSocket and sensor reconnection qualification remains.
 Persistent local dependency failure now withdraws the database role with a
 durable repair quarantine; the measured test covers a stopped Redis service.

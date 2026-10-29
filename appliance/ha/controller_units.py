@@ -14,6 +14,7 @@ START = ('zenplus-api.service', 'zenplus-poller.service', 'zenplus-netflow-colle
 # Local management, clock, storage-pressure watchdog and infrastructure services
 # remain node-local. OTA automation must be disabled for this commissioning mode.
 LOCAL = ('zenplus-ha-controller.service', 'zenplus-ha-etcd.service', 'zenplus-ha-patroni.service',
+         'zenplus-ha-keeper.service', 'zenplus-ha-clickhouse.service',
          'zenplus-ha-clock.service', 'zenplus-ha-watchdog.service', 'zenplus-storage-watchdog.service',
          'zenplus-management-access.service', 'zenplus-ha-firewall.service', 'zenplus-updater.service',
          'zenplus-updater.timer', 'zenplus-wait-deps.service')

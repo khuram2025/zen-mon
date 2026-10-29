@@ -1,0 +1,21 @@
+[Unit]
+Description=ZenPlus replicated analytics store
+After=network-online.target zenplus-ha-keeper.service
+Wants=network-online.target zenplus-ha-keeper.service
+
+[Service]
+User=zenplus
+Group=zenplus
+ExecStart=/usr/local/bin/clickhouse server --config-file=/etc/zenplus-ha/analytics/clickhouse.xml
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/zenplus-ha/analytics
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
