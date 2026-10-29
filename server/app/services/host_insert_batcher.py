@@ -19,10 +19,13 @@ that token, so ClickHouse deduplicates a retry of a block that did land. If
 the outcome is still unknown after that, raw-row verification is allowed only
 for an unreplicated table with no dependent views. Replicated writes and view
 completion require a successful insert response; the rest replay from spools.
-Residual window: a combined block that landed but could neither be confirmed
+Without the opt-in PostgreSQL journal, a combined block that landed but could neither be confirmed
 nor verified (ClickHouse unreachable) can be stored twice when its uploads
 replay under their own tokens, as can an upload replayed to another worker
 while its first write is still in flight.
+
+The commissioned journal path retains the original grouping across processes
+and restarts. See host_ingest_journal for its bounded replay and capacity gates.
 """
 
 from __future__ import annotations
@@ -167,15 +170,16 @@ class _Batch:
 
 class HostInsertBatcher:
     def __init__(self, client_factory: Callable[[], Any], *, max_rows: int = MAX_ROWS,
-                 max_delay_s: float = MAX_DELAY_S):
+                 max_delay_s: float = MAX_DELAY_S, journal=None):
         self.client_factory = client_factory
         self.max_rows = max_rows
         self.max_delay_s = max_delay_s
+        self.journal = journal
         self._open: dict[tuple[str, tuple[str, ...]], _Batch] = {}
         # token -> (outcome future, monotonic time): a replay of an upload that
         # is still being written, or was stored recently, reuses that outcome
         # instead of writing its rows a second time under a different block.
-        self._recent: "OrderedDict[str, tuple[asyncio.Future, float]]" = OrderedDict()
+        self._recent: "OrderedDict[tuple[str, str], tuple[asyncio.Future, float]]" = OrderedDict()
         self.stats = {"inserts": 0, "rows": 0, "members": 0, "failures": 0, "verified": 0,
                       "replays_joined": 0}
 
@@ -196,7 +200,8 @@ class HostInsertBatcher:
         loop = asyncio.get_running_loop()
         now = loop.time()
         self._prune_recent(now)
-        prior = self._recent.get(token)
+        identity = (table, token)
+        prior = self._recent.get(identity)
         if prior is not None:
             fut = prior[0]
             if not fut.done() or (not fut.cancelled() and fut.exception() is None):
@@ -213,8 +218,8 @@ class HostInsertBatcher:
         member.future.add_done_callback(lambda f: f.cancelled() or f.exception())
         batch.members.append(member)
         batch.rows += len(rows)
-        self._recent[token] = (member.future, now)
-        self._recent.move_to_end(token)
+        self._recent[identity] = (member.future, now)
+        self._recent.move_to_end(identity)
         if batch.rows >= self.max_rows:
             self._flush_soon(key, batch)
         await asyncio.shield(member.future)
@@ -237,7 +242,11 @@ class HostInsertBatcher:
                 .encode()).hexdigest()
         error: Optional[BaseException] = None
         try:
-            await asyncio.to_thread(self._write, batch.table, batch.columns, rows, token)
+            if self.journal is not None:
+                await self.journal.submit(batch.table, batch.columns,
+                                          [(m.token, m.rows) for m in batch.members])
+            else:
+                await asyncio.to_thread(self._write, batch.table, batch.columns, rows, token)
         except BaseException as exc:  # noqa: BLE001 — delivered to the members
             error = exc
         stored: set[int] = set()
@@ -246,10 +255,11 @@ class HostInsertBatcher:
             # Only plain stores without dependent views can use raw presence
             # as confirmation. Quorum and materialized-view completion need a
             # successful retry; leave other uploads available for replay.
-            try:
-                stored = await asyncio.to_thread(self._stored_members, batch)
-            except Exception:
-                stored = set()
+            if self.journal is None:
+                try:
+                    stored = await asyncio.to_thread(self._stored_members, batch)
+                except Exception:
+                    stored = set()
             self.stats["verified"] += len(stored)
             self.stats["failures"] += 1
             logger.warning("host telemetry batch insert into %s failed (%d uploads, %d verified "
@@ -307,4 +317,8 @@ def batcher_for_loop(client_factory: Callable[[], Any]) -> HostInsertBatcher:
     b = _batchers.get(loop)
     if b is None:
         b = _batchers[loop] = HostInsertBatcher(client_factory)
+        from app.services.host_ingest_journal import enabled, HostIngestJournal
+        if enabled():
+            from app.core.database import engine
+            b.journal = HostIngestJournal(engine, b._write)
     return b
