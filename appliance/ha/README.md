@@ -8,6 +8,10 @@ not by itself enable a customer appliance release. Independent cells and remote
 notification senders now have separate [lab implementation evidence](../../docs/notification-sites.md).
 Do not adopt an installed database with these files.
 
+The separate [analytics profile](../../docs/analytics-ha-validation.md) adds
+ClickHouse/Keeper replication and analytics-aware controller admission. It has
+its own conversion, durable-ingestion and release qualification gates.
+
 ## Profiles
 
 | Profile | Data members | Consensus voters | Behavior without a synchronous replica |

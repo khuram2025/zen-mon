@@ -31,6 +31,7 @@ GRANT = RUNTIME/'grant.json'
 WITHDRAWN = Path('/etc/zenplus-ha/controller-withdrawn.json')
 from controller_units import MANAGED, START, LOCAL
 import controller_endpoint
+import analytics_health
 
 
 class LocalDependencyUnavailable(authority.AuthorityUnavailable):
@@ -246,6 +247,13 @@ class Supervisor:
         _, states = await command('systemctl','is-active',*self.config['dependencies'],timeout=3,check=False)
         if states.splitlines() != ['active'] * len(self.config['dependencies']):
             raise LocalDependencyUnavailable('A commissioned local dependency is unavailable')
+        if 'zenplus-ha-clickhouse.service' in self.config['dependencies']:
+            try:
+                await asyncio.to_thread(analytics_health.check,caught_up=self.generation is None)
+            except Exception:
+                # Quorum loss can affect every member. Withhold admission without
+                # quarantining all database voters as locally defective.
+                raise authority.AuthorityUnavailable('Analytics admission unavailable') from None
         async with self.sessions() as db:
             row=(await db.execute(text('SELECT pg_is_in_recovery(),system_identifier::text FROM pg_control_system()'))).one()
             if row[0] or row[1]!=self.config['system_identifier']:
