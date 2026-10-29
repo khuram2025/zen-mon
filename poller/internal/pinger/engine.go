@@ -639,8 +639,8 @@ func (e *Engine) evaluateServiceAlerts(ctx context.Context, sc *checker.ServiceC
 	var result2 map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&result2)
 	sent := result2["notifications_sent"]
-	e.logger.Infof("Service alert evaluation: %s %s→%s, notifications sent: %v",
-		sc.Name, oldStatus, newStatus, sent)
+	e.logger.Infof("Service alert evaluation: %s %s→%s, notifications sent: %v, queued: %v",
+		sc.Name, oldStatus, newStatus, sent, result2["notifications_queued"])
 }
 
 // --- Service Check Logic ---

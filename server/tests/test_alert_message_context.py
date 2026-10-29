@@ -191,13 +191,18 @@ def mail(monkeypatch):
     monkeypatch.setattr(alert_engine, "_PENDING_STATUS_SUPPORTED", True)
     # The status path sends through the shared dispatcher (1.24.17), which
     # resolves the gateway and renders the mail itself.
-    from app.services import email_render, host_alert_service
+    from app.services import email_render, host_alert_service, notification_outbox
     monkeypatch.setattr(host_alert_service, "_gateway_config", AsyncMock(return_value={"host": "smtp.invalid"}))
     monkeypatch.setattr(host_alert_service, "decrypt_config", lambda cfg: cfg)
     monkeypatch.setattr(alert_engine, "_dashboard_url", AsyncMock(return_value=""))
     monkeypatch.setattr(alert_engine, "decrypt_config", lambda cfg: cfg)
     monkeypatch.setattr(alert_engine.dl, "record", AsyncMock())
     sent: list[dict] = []
+    pending=[]
+    async def enqueue(db,channels,ctx):
+        pending.append((db,channels,{k:v for k,v in ctx.items() if k!='_enqueue_notification'}))
+        return len(channels)
+    monkeypatch.setattr(notification_outbox,'enqueue',enqueue)
     contexts: list[dict] = []
     real_build = email_render.build_alert_email_html
 
@@ -219,9 +224,13 @@ def mail(monkeypatch):
         return db
 
     async def run(db, old, new, **kw):
-        return await evaluate_status_change(StatusChangeEvent(
+        result=await evaluate_status_change(StatusChangeEvent(
             device_id=DEVICE, hostname="edge-1", ip_address="10.0.0.1",
             old_status=old, new_status=new, **kw), db=db)
+        while pending:
+            session,channels,ctx=pending.pop(0)
+            await host_alert_service.dispatch_to_channels(session,channels,ctx)
+        return result
 
     return NS(sent=sent, world=world, run=run)
 
@@ -266,7 +275,7 @@ def test_an_rtt_rule_never_reads_no_reply_as_zero_ms():
 async def test_complete_loss_never_shows_as_excellent_latency(mail):
     db = mail.world(_loss_rule())
     out = await mail.run(db, "up", "down", rtt_ms=0.0, packet_loss=1.0)
-    assert out["notifications_sent"] == 1
+    assert out["notifications_sent"] == 0 and out['notifications_queued']==1
     [m] = mail.sent
     ctx = m["ctx"]
     # The headline leads with reachability evidence: 100% loss, no latency.

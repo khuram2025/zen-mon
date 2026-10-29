@@ -6,7 +6,8 @@ run their own per-channel send loops: no recipient dedupe, no durable delivery
 keys, nothing a grouping gate or a per-recipient budget could ever see. They
 now hand the dispatcher one ctx per rule carrying the incident (``alert_id``),
 the lifecycle event (``delivery_event``), the priority and whether the send may
-be held for a digest (``groupable``), after their own state is committed.
+be held for a digest (``groupable``). Their envelopes are staged before the
+incident transaction commits, and a separate worker performs provider I/O.
 
 What recipients receive is unchanged: the same subject, plain body, HTML
 fields, SMS text and webhook keys as before.
@@ -34,7 +35,7 @@ from app.api.v1.alert_engine import (
 from app.services import alert_delivery_log as dl
 from app.services import alert_funnel
 from app.services import alert_phrasing as ap
-from app.services import email_render, host_alert_service
+from app.services import email_render, host_alert_service, notification_outbox
 
 from pg_fixture import pg_cluster, pg_db  # noqa: F401  (fixtures are used by name)
 from test_alert_status_into_up import DEVICE, AlertsDB, device_down_rule
@@ -99,10 +100,12 @@ async def test_a_device_trigger_is_sent_through_the_dispatcher_with_its_keys(eng
     assert ctx["alert_id"] == str(row["id"]) and ctx["delivery_event"] == "trigger"
     # Critical derives P2: never held.
     assert ctx["priority"] == "P2" and ctx["groupable"] is False
-    # The incident row and its notified stamp were committed before the send.
-    assert seen[-1][0] == "COMMIT"
+    # The envelope is staged before committing the incident; no provider send.
+    assert ctx['_enqueue_notification'] is True
+    assert not any(s == 'COMMIT' for s, _ in seen)
+    assert any(s == 'COMMIT' for s, _ in db.statements[len(seen):])
     assert row["metadata"]["notified"] is True
-    assert out["notifications_sent"] == 1
+    assert out["notifications_sent"] == 0 and out['notifications_queued'] == 1
 
 
 @pytest.mark.asyncio
@@ -354,11 +357,16 @@ def world(pg_db, monkeypatch):
     return NS(db=db, device=device, rule=rule, mails=mails, hooks=hooks, rendered=rendered)
 
 
-async def _evaluate(w, old, new, **kw):
+async def _evaluate(w, old, new, *, drain=True, **kw):
     async with session(w.db) as s:
-        return await evaluate_status_change(StatusChangeEvent(
+        result = await evaluate_status_change(StatusChangeEvent(
             device_id=w.device, hostname="edge-1", ip_address="10.88.0.1",
             old_status=old, new_status=new, **kw), db=s)
+    if drain:
+        engine=create_async_engine(w.db.url,poolclass=NullPool)
+        try:await notification_outbox.deliver_due(async_sessionmaker(engine,expire_on_commit=False))
+        finally:await engine.dispose()
+    return result
 
 
 def _keys(w, alert_id):
@@ -383,7 +391,7 @@ async def test_postgres_device_status_pages_once_per_recipient_with_durable_keys
     assert recipients == ["mgr@example.test", "noc@example.test", "ops@example.test"]
     assert len(w.hooks) == 1 and w.hooks[0]["alert_id"] == str(alert_id)
     assert {(e, s) for e, _, s in _keys(w, alert_id)} == {("trigger", "accepted")}
-    assert out["notifications_sent"] >= 2
+    assert out["notifications_sent"] == 0 and out['notifications_queued'] >= 2
 
     # The rendered mail is the one the per-channel loop built.
     [first, *_] = w.mails
@@ -422,7 +430,7 @@ async def test_postgres_a_replayed_recovery_of_the_same_incident_is_not_resent(w
     w.mails.clear(); w.hooks.clear()
     out = await _evaluate(w, "down", "up", rtt_ms=1.2)
     assert w.mails == [] and w.hooks == []
-    assert out["notifications_sent"] >= 1
+    assert out["notifications_sent"] == 0 and out['notifications_queued'] >= 1
 
 
 @pytest.mark.asyncio
@@ -433,9 +441,73 @@ async def test_postgres_a_second_dispatch_of_the_same_trigger_sends_nothing(worl
     sent = len(w.mails)
     channels = w.db.scalar("SELECT notify_channels FROM alert_rules WHERE id = $1", w.rule)
     async with session(w.db) as s:
-        n = await alert_engine._dispatch_planned(s, channels, {
+        n = await alert_engine._enqueue_planned(s, channels, {
             "subject": "x", "body": "x", "message": "x", "hostname": "edge-1",
             "severity": "warning", "status": "DOWN", "rule_name": "Device Down",
             "alert_id": str(alert_id), "delivery_event": "trigger"})
     assert len(w.mails) == sent and len(w.hooks) == 1
     assert n >= 1
+
+
+@pytest.mark.asyncio
+async def test_status_commit_survives_before_any_sender_runs(world):
+    w=world
+    result=await _evaluate(w,'up','down',drain=False)
+    assert result['notifications_sent']==0 and result['notifications_queued']>0
+    assert w.mails==[] and w.hooks==[]
+    assert w.db.scalar("SELECT count(*) FROM notification_outbox WHERE status='pending'")==1
+    [(aid,_,_)]=_open_alert(w)
+    assert w.db.scalar('SELECT alert_id FROM notification_outbox')==aid
+    engine=create_async_engine(w.db.url,poolclass=NullPool)
+    try:await notification_outbox.deliver_due(async_sessionmaker(engine,expire_on_commit=False))
+    finally:await engine.dispose()
+    assert w.mails and w.hooks
+
+
+@pytest.mark.asyncio
+async def test_status_enqueue_failure_cannot_commit_incident(world,monkeypatch):
+    async def fail(*_):raise RuntimeError('injected queue storage failure')
+    monkeypatch.setattr(notification_outbox,'enqueue',fail)
+    with pytest.raises(RuntimeError):await _evaluate(world,'up','down',drain=False)
+    assert _open_alert(world)==[] and world.mails==[] and world.hooks==[]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('queue_failure',[False,True])
+async def test_service_transition_and_intent_share_commit(world,monkeypatch,queue_failure):
+    w=world
+    check=w.db.scalar("INSERT INTO service_checks(name,check_type,target_host) VALUES('Portal','http','example.invalid') RETURNING id")
+    w.db.execute("UPDATE alert_rules SET device_id=NULL,service_check_id=$1,metric='service_status',trigger_on='down' WHERE id=$2",check,w.rule)
+    async def evaluate():
+        async with session(w.db) as db:
+            return await evaluate_service_status_change(ServiceStatusChangeEvent(service_check_id=str(check),check_name='Portal',check_type='http',old_status='up',new_status='down',target='https://example.invalid',error='HTTP 503'),db=db)
+    if queue_failure:
+        async def fail(*_):raise RuntimeError('injected queue storage failure')
+        monkeypatch.setattr(notification_outbox,'enqueue',fail)
+        with pytest.raises(RuntimeError):await evaluate()
+        assert w.db.scalar('SELECT count(*) FROM alerts WHERE service_check_id=$1',check)==0
+    else:
+        result=await evaluate()
+        assert result['notifications_sent']==0 and result['notifications_queued']>0
+        assert w.db.scalar('SELECT count(*) FROM notification_outbox q JOIN alerts a ON a.id=q.alert_id WHERE a.service_check_id=$1',check)==1
+    assert not w.mails and not w.hooks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('queue_failure',[False,True])
+async def test_confirmed_hold_and_notification_share_commit(world,monkeypatch,queue_failure):
+    from app.services import alert_hold_service
+    w=world
+    w.db.execute('UPDATE alert_rules SET min_duration=1 WHERE id=$1',w.rule)
+    w.db.execute("UPDATE devices SET status='down' WHERE id=$1",w.device)
+    await _evaluate(w,'up','down',drain=False)
+    aid=w.db.scalar("SELECT id FROM alerts WHERE device_id=$1",w.device)
+    assert w.db.scalar('SELECT status FROM alerts WHERE id=$1',aid)=='pending'
+    w.db.execute("UPDATE alerts SET metadata=metadata || jsonb_build_object('hold_until',(clock_timestamp()-interval '1 second')::text) WHERE id=$1",aid)
+    if queue_failure:
+        async def fail(*_):raise RuntimeError('injected queue storage failure')
+        monkeypatch.setattr(notification_outbox,'enqueue',fail)
+    async with session(w.db) as db:await alert_hold_service.sweep_pending_holds(db)
+    assert w.db.scalar('SELECT status FROM alerts WHERE id=$1',aid)==('pending' if queue_failure else 'active')
+    assert w.db.scalar('SELECT count(*) FROM notification_outbox WHERE alert_id=$1',aid)==(0 if queue_failure else 1)
+    assert not w.mails and not w.hooks

@@ -434,28 +434,15 @@ async def _dispatch_channel(ch_type: str, ch_config: dict, ctx: dict) -> bool:
     return ok
 
 
-async def _dispatch_planned(db: AsyncSession, channel_ids: list, ctx: dict) -> int:
-    """Send one rule's notification through the shared dispatcher.
+async def _enqueue_planned(db: AsyncSession, channel_ids: list, ctx: dict) -> int:
+    """Stage notification work in the incident transaction without provider I/O.
 
-    The status and service paths announce through
-    ``host_alert_service.dispatch_to_channels`` like every other source, so
-    recipient dedupe, the durable delivery keys (``alert_id`` +
-    ``delivery_event``), grouping and budgets apply to them too. The
-    dispatcher commits the session when the send is keyed, so callers run
-    this only after their own state changes are committed. Never raises:
-    one rule's failed send must not cost the next rule its page.
+    An enqueue error must abort the transaction. Returning success after a
+    failed enqueue would acknowledge an incident whose notification was lost.
+    The queue worker later uses the shared dispatcher and durable delivery keys.
     """
     from app.services.host_alert_service import dispatch_to_channels
-
-    try:
-        return int(await dispatch_to_channels(db, channel_ids, ctx) or 0)
-    except Exception as exc:
-        print(f"ERROR sending notification for rule {ctx.get('rule_id')}: {exc}")
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-        return 0
+    return int(await dispatch_to_channels(db, channel_ids, {**ctx, "_enqueue_notification": True}) or 0)
 
 
 async def _find_suppressing_dependency(db: AsyncSession, device_id: str):
@@ -1415,9 +1402,10 @@ async def evaluate_status_change(
             **incident,
         }))
 
-    await db.commit()
+    notifications_queued = 0
     for channel_ids, ctx in planned:
-        notifications_sent += await _dispatch_planned(db, channel_ids, ctx)
+        notifications_queued += await _enqueue_planned(db, channel_ids, ctx)
+    await db.commit()
 
     # Per-map webhook fan-out: if the device sits on any manual map with a
     # webhook configured, POST a compact transition event. We do this OUT
@@ -1464,6 +1452,7 @@ async def evaluate_status_change(
     return {
         "evaluated_rules": len(rules),
         "notifications_sent": notifications_sent,
+        "notifications_queued": notifications_queued,
         "device": event.hostname,
         "old_status": event.old_status,
         "new_status": event.new_status,
@@ -1787,13 +1776,15 @@ async def evaluate_service_status_change(
                                          trigger=not is_recovery),
         }))
 
-    await db.commit()
+    notifications_queued = 0
     for channel_ids, ctx in planned:
-        notifications_sent += await _dispatch_planned(db, channel_ids, ctx)
+        notifications_queued += await _enqueue_planned(db, channel_ids, ctx)
+    await db.commit()
 
     return {
         "evaluated_rules": len(rules),
         "notifications_sent": notifications_sent,
+        "notifications_queued": notifications_queued,
         "check": event.check_name,
         "old_status": event.old_status,
         "new_status": event.new_status,

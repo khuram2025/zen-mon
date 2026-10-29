@@ -248,3 +248,28 @@ recommended*.
 Every notification source now goes through one dispatcher: device status, service
 checks, metrics, traps, syslog, APM, NetFlow, Device Tracker and NetPath. Grouping,
 budgets, recipient de-duplication and delivery keys therefore apply to all of them.
+
+## Transactional status notification work
+
+Device transitions, service transitions and confirmed duration/flapping holds
+stage their notification envelopes in the incident transaction. An enqueue error
+rolls back the incident change. Provider I/O begins later in the durable queue
+worker, through the same dispatcher and recipient delivery keys used by metric
+alerts. Replaying an incident event reuses its envelope and accepted delivery keys.
+
+The internal status-evaluation responses now expose `notifications_queued` and
+retain `notifications_sent` as zero for these asynchronous paths. Queue acceptance
+does not mean SMTP or another provider accepted the notification. The delivery
+log and notification-work status show that later outcome. Existing hold,
+confirmation, recovery, quiet-hours and customer threshold settings are retained.
+
+A disposable VMware test committed a service incident and its pending envelope
+with all controller consumers stopped, then powered off the database/controller
+VM before any send. The replacement accepted the existing login session, retained
+the same incident/work identities, and delivered one captured trigger in 46.59
+seconds after power loss. This is a measured run, not an SLA or an exactly-once
+external-delivery guarantee. The test recipient was `lab@acceptance.invalid`.
+
+This extends transactional coverage beyond metrics. It does not yet migrate every
+escalation, digest, report or other producer, and it does not implement remote
+notification-site delegation. Those remain separate commissioning gates.
