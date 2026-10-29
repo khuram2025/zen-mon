@@ -320,7 +320,7 @@ def _bootstrap_cloud_init(
     content: |
 {ca_content}
 """
-        ca_command = "  - [ update-ca-certificates ]\n"
+        ca_command = "      update-ca-certificates\n"
     return f"""#cloud-config
 {console_user}ssh_pwauth: {ssh_password_auth}
 disable_root: true
@@ -343,9 +343,12 @@ write_files:
     content: |
 {env}
 runcmd:
-{ca_command}  - [ /usr/sbin/sshd, -t ]
-  - [ systemctl, reload, ssh ]
-  - [ systemctl, enable, --now, zenplus-sensor.service ]
+  - |
+      set -eu
+{ca_command}      install -d -m 0755 /run/sshd
+      /usr/sbin/sshd -t
+      systemctl reload-or-restart ssh
+      systemctl enable --now zenplus-sensor.service
 """
 
 
