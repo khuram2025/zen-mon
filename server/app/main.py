@@ -93,6 +93,8 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
+    from app.core.controller_admission import ControllerAdmissionMiddleware
+    app.add_middleware(ControllerAdmissionMiddleware)
 
     # Agents compress uploads once the heartbeat advertises accepts_gzip.
     app.add_middleware(GzipRequestMiddleware)
@@ -212,6 +214,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_background_tasks():
+        from app.core.controller_admission import permitted
+        if not permitted():
+            raise RuntimeError("Controller authority is required before worker startup")
         # Built-in roles: reconcile persisted definitions with the code (versioned).
         try:
             from app.core.database import AsyncSessionLocal as _RoleSession

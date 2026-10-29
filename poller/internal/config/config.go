@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -108,11 +109,13 @@ type PollerConfig struct {
 }
 
 type PostgresConfig struct {
-	Host     string
-	Port     int
-	Database string
-	User     string
-	Password string
+	Host        string
+	Port        int
+	Database    string
+	User        string
+	Password    string
+	SSLMode     string
+	SSLRootCert string
 }
 
 type ClickHouseConfig struct {
@@ -137,8 +140,17 @@ type HealthConfig struct {
 }
 
 func (p PostgresConfig) DSN() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		p.User, p.Password, p.Host, p.Port, p.Database)
+	mode := p.SSLMode
+	if mode == "" {
+		mode = "disable"
+	}
+	u := url.URL{Scheme: "postgres", User: url.UserPassword(p.User, p.Password), Host: fmt.Sprintf("%s:%d", p.Host, p.Port), Path: "/" + p.Database}
+	q := url.Values{"sslmode": {mode}}
+	if p.SSLRootCert != "" {
+		q.Set("sslrootcert", p.SSLRootCert)
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // Load reads the poller configuration from the environment. It refuses
@@ -167,11 +179,13 @@ func Load() (*Config, error) {
 			Privileged:         getEnv("POLLER_PRIVILEGED", "false") == "true",
 		},
 		Postgres: PostgresConfig{
-			Host:     getEnv("POSTGRES_HOST", "localhost"),
-			Port:     getEnvInt("POSTGRES_PORT", 5432),
-			Database: getEnv("POSTGRES_DB", "zenplus"),
-			User:     getEnv("POSTGRES_USER", "zenplus"),
-			Password: getEnv("POSTGRES_PASSWORD", DevPostgresPassword),
+			Host:        getEnv("POSTGRES_HOST", "localhost"),
+			Port:        getEnvInt("POSTGRES_PORT", 5432),
+			Database:    getEnv("POSTGRES_DB", "zenplus"),
+			User:        getEnv("POSTGRES_USER", "zenplus"),
+			Password:    getEnv("POSTGRES_PASSWORD", DevPostgresPassword),
+			SSLMode:     getEnv("POSTGRES_SSLMODE", "disable"),
+			SSLRootCert: getEnv("POSTGRES_SSLROOTCERT", ""),
 		},
 		ClickHouse: ClickHouseConfig{
 			Host:          getEnv("CLICKHOUSE_HOST", "localhost"),
@@ -193,6 +207,9 @@ func Load() (*Config, error) {
 		},
 	}
 
+	if os.Getenv("ZENPLUS_CONTROLLER_GRANT") != "" && (cfg.Postgres.SSLMode != "verify-full" || cfg.Postgres.SSLRootCert == "") {
+		return nil, fmt.Errorf("HA poller requires POSTGRES_SSLMODE=verify-full and POSTGRES_SSLROOTCERT")
+	}
 	return cfg, nil
 }
 

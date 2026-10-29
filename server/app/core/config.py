@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # PostgreSQL
     DATABASE_URL: str = "postgresql+asyncpg://zenplus:changeme@localhost:5432/zenplus"
+    DATABASE_SSL_ROOT_CERT: str = ""
 
     # ClickHouse
     CLICKHOUSE_HOST: str = "localhost"
