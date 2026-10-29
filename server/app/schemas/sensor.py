@@ -291,9 +291,9 @@ class AssignmentResponse(BaseModel):
 
 class EnrollRequest(BaseModel):
     enrollment_token: str
-    hostname: Optional[str] = None
-    os_info: Optional[str] = None
-    version: Optional[str] = None
+    hostname: Optional[str] = Field(default=None, max_length=255)
+    os_info: Optional[str] = Field(default=None, max_length=255)
+    version: Optional[str] = Field(default=None, max_length=128)
 
 
 class EnrollResponse(BaseModel):
@@ -305,12 +305,12 @@ class EnrollResponse(BaseModel):
 
 
 class HeartbeatRequest(BaseModel):
-    version: Optional[str] = None
+    version: Optional[str] = Field(default=None, max_length=128)
     uptime_seconds: Optional[int] = Field(default=None, ge=0)
     queue_depth: int = Field(default=0, ge=0)
     queue_dropped_count: int = Field(default=0, ge=0)
-    hostname: Optional[str] = None
-    os_info: Optional[str] = None
+    hostname: Optional[str] = Field(default=None, max_length=255)
+    os_info: Optional[str] = Field(default=None, max_length=255)
     config_etag: Optional[str] = Field(default=None, max_length=128)
 
 

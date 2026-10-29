@@ -33,7 +33,7 @@ exec runuser -u "$build_user" -- env \
     (cd poller && go test -race ./internal/sensorspool ./cmd/sensor)
     "$HA_PYTHON" -m pytest server/tests/test_sensor_event_replay.py \
       server/tests/test_sensor_fabric_contract.py server/tests/test_sensor_service_checks.py \
-      server/tests/test_sensor_appliance_api.py server/tests/test_sensor_appliance_clock.py server/tests/test_sensor_snmp.py \
+      server/tests/test_sensor_appliance_api.py server/tests/test_sensor_appliance_clock.py server/tests/test_sensor_runtime_metadata.py server/tests/test_sensor_snmp.py \
       server/tests/test_sensor_device_status_machine.py \
       server/tests/test_job_lock_keys.py server/tests/test_evaluator_worker_locks.py \
       server/tests/test_netflow_rollup.py server/tests/test_udt_gateway_collection.py \

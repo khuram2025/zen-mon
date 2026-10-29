@@ -324,6 +324,7 @@ def _bootstrap_cloud_init(
     return f"""#cloud-config
 {console_user}ssh_pwauth: {ssh_password_auth}
 disable_root: true
+manage_etc_hosts: true
 write_files:
   - path: /etc/ssh/sshd_config.d/00-zenplus-security.conf
     owner: root:root
