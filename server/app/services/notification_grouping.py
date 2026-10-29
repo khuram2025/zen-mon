@@ -143,12 +143,14 @@ def clean_settings(raw: Any) -> dict[str, Any]:
     return out
 
 
-async def load_settings(db: AsyncSession) -> dict[str, Any]:
+async def load_settings(db: AsyncSession, *, strict=False) -> dict[str, Any]:
     try:
         async with db.begin_nested():
             row = (await db.execute(text("SELECT value FROM system_settings WHERE key = :k"),
                                     {"k": SETTINGS_KEY})).first()
     except Exception as exc:
+        if strict:
+            raise
         logger.warning("grouping settings unreadable, grouping off: %s", exc)
         return clean_settings(None)
     return clean_settings(row[0] if row else None)
@@ -416,7 +418,8 @@ class Gate:
 
     async def route(self, db: AsyncSession, *, channel_id: str, channel_name: str | None,
                     channel_type: str, targets: list[tuple[str, str]],
-                    direct_kind: str | None = None) -> tuple[list[tuple[str, str]], list[Routed]]:
+                    direct_kind: str | None = None, commit: bool = True,
+                    strict: bool = False) -> tuple[list[tuple[str, str]], list[Routed]]:
         """(targets to send now, holds made). ``targets`` are (dedupe key,
         address); a webhook-style channel passes [("", "")]."""
         if not targets:
@@ -434,11 +437,13 @@ class Gate:
                                            channel_type=channel_type, targets=targets,
                                            direct_kind=direct_kind)
         except Exception as exc:
+            if strict:
+                raise
             # Never lose a notification to the gate: send it as before.
             logger.warning("grouping: hold failed for alert %s on channel %s, sending now: %s",
                            self.alert_id, channel_id, exc)
             return targets, []
-        if result[1]:
+        if result[1] and commit:
             await db.commit()
         return result
 
@@ -664,7 +669,7 @@ def _is_holdable_trigger(ctx: dict) -> bool:
     return ev == "trigger" or ev.startswith("trigger:")
 
 
-async def gate_for(db: AsyncSession, ctx: dict, keyed) -> Gate | None:
+async def gate_for(db: AsyncSession, ctx: dict, keyed, *, strict=False) -> Gate | None:
     """The grouping/budget gate for one dispatch, or None when every send of
     it goes out as before (the common case costs no query unless the caller
     marked the send groupable or it is a recovery)."""
@@ -676,6 +681,8 @@ async def gate_for(db: AsyncSession, ctx: dict, keyed) -> Gate | None:
     if not recovery and not holdable:
         return None
     if not await available(db):
+        if strict:
+            raise RuntimeError("Notification grouping storage unavailable")
         return None
     if recovery:
         try:
@@ -686,12 +693,14 @@ async def gate_for(db: AsyncSession, ctx: dict, keyed) -> Gate | None:
                     "  WHERE i.digest_id = d.id AND i.alert_id = CAST(:aid AS uuid))"
                     " FOR SHARE"), {"aid": alert_id})).all()
         except Exception as exc:
+            if strict:
+                raise
             logger.warning("grouping: open digest lookup failed: %s", exc)
             return None
         return Gate("fold", alert_id, event, fold_digests=list(rows)) if rows else None
     if str(ctx.get("severity") or "").lower() == "critical":
         return None
-    settings = await load_settings(db)
+    settings = await load_settings(db, strict=strict)
     if not settings["enabled"]:
         return None
     if not (int(settings["group_wait_seconds"]) > 0 or int(settings["budget_per_recipient_per_hour"]) > 0):
@@ -700,6 +709,8 @@ async def gate_for(db: AsyncSession, ctx: dict, keyed) -> Gate | None:
         async with db.begin_nested():
             info = (await db.execute(text(_INFO_SQL), {"id": alert_id})).first()
     except Exception as exc:
+        if strict:
+            raise
         logger.warning("grouping: alert lookup failed, sending: %s", exc)
         return None
     if info is None or info.status == "resolved":

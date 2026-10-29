@@ -252,6 +252,8 @@ def create_app() -> FastAPI:
         # active and unacknowledged past each level's deadline.
         from app.services.alert_escalation_service import escalation_sweeper_loop
         app.state.alert_escalation_sweeper = asyncio.create_task(escalation_sweeper_loop())
+        from app.services.notification_outbox import notification_outbox_loop
+        app.state.notification_outbox = asyncio.create_task(notification_outbox_loop())
         # Scheduled reports: fire due report schedules (render + email delivery).
         from app.services.report_scheduler import report_scheduler_loop
         app.state.report_scheduler = asyncio.create_task(report_scheduler_loop())
@@ -336,7 +338,7 @@ def create_app() -> FastAPI:
             if task:
                 task.cancel()
                 stopping.append(task)
-        for attr in ("alert_escalation_sweeper", "agent_package_sync"):
+        for attr in ("alert_escalation_sweeper", "agent_package_sync", "notification_outbox"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

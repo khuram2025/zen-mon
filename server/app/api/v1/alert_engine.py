@@ -194,6 +194,14 @@ async def _send_sms(gw_config: dict, phones: str, message: str,
 
 async def _send_email(gw_config: dict, recipients: str, subject: str, body: str,
                       html_body: str | None = None) -> bool:
+    # smtplib is synchronous. Keep network waits off the API event loop so
+    # notification ownership heartbeats and other requests can continue.
+    import asyncio
+    return await asyncio.to_thread(_send_email_sync, gw_config, recipients, subject, body, html_body)
+
+
+def _send_email_sync(gw_config: dict, recipients: str, subject: str, body: str,
+                     html_body: str | None = None) -> bool:
     """Send email via SMTP gateway.
 
     When ``html_body`` is provided the message is sent as multipart/alternative
