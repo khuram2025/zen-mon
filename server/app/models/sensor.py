@@ -58,8 +58,8 @@ class Sensor(Base):
 
     status: Mapped[str] = mapped_column(String(20), default="pending")
     status_reason: Mapped[str] = mapped_column(Text, nullable=True)
-    version: Mapped[str] = mapped_column(String(32), nullable=True)
-    min_supported_version: Mapped[str] = mapped_column(String(32), nullable=True)
+    version: Mapped[str] = mapped_column(String(128), nullable=True)
+    min_supported_version: Mapped[str] = mapped_column(String(128), nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     last_ip: Mapped[str] = mapped_column(INET, nullable=True)
