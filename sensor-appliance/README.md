@@ -66,11 +66,14 @@ SHA256SUMS
 
 ## Build Workflow
 
-Build the OVA/OVF on a Linux build host with Packer and QEMU tools installed:
+Build the OVA/OVF in a Linux source checkout with QEMU and libguestfs installed.
+Verify the Ubuntu image's signed checksum manifest first, then provide its digest:
 
 ```bash
-cd /opt/zenplus
-sensor-appliance/scripts/build-ova.sh
+cd /path/to/zenplus-source
+export ZENPLUS_SENSOR_BASE_SHA256=<digest-from-verified-manifest>
+export ZENPLUS_SENSOR_BASE_URL=<immutable-Ubuntu-image-URL>
+sensor-appliance/scripts/build-real-ova.sh
 ```
 
 Publish the resulting artifacts into the controller download directory:
@@ -81,7 +84,9 @@ sudo sensor-appliance/scripts/publish-artifacts.sh \
   --ovf /path/to/zenplus-sensor.ovf
 ```
 
-After publish, the controller manifest will report the artifacts as available.
+Normalize the VMware disk with `scripts/finalize-vmware-ova.ps1`, then complete
+the fresh-import and signed release gates below before publication. After
+publication, the controller manifest reports availability; it does not certify HA.
 
 ### Boot qualification for rebuilt images
 
@@ -126,7 +131,7 @@ poller/cmd/sensor
 Build it directly:
 
 ```bash
-cd /opt/zenplus/poller
+cd /path/to/zenplus-source/poller
 /usr/local/go/bin/go build -o /tmp/zenplus-sensor ./cmd/sensor
 ```
 
