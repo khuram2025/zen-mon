@@ -11,11 +11,13 @@ from app.services import host_metric_service as metrics
 
 
 class FakeClickHouse:
-    def __init__(self, fail_times=0, land_despite_failure=False):
+    def __init__(self, fail_times=0, land_despite_failure=False,engine='MergeTree',dependencies=0):
         self.inserts: list[dict] = []
         self.describes = 0
         self.fail_times = fail_times
         self.land_despite_failure = land_despite_failure
+        self.engine=engine
+        self.dependencies=dependencies
         self.stored: list[tuple] = []
 
     class _R:
@@ -23,6 +25,8 @@ class FakeClickHouse:
             self.result_rows = rows
 
     def query(self, sql, parameters=None):
+        if sql.startswith('SELECT engine,length(dependencies_table)'):
+            return self._R([[self.engine,self.dependencies]])
         if sql.startswith("DESCRIBE"):
             self.describes += 1
             return self._R([["server_id", "String"], ["agent_id", "String"],
@@ -129,6 +133,29 @@ def test_lost_response_acknowledges_only_uploads_whose_rows_are_stored():
         return await asyncio.gather(*(b.insert("t", COLS, [row(f"a{i}")], f"tok{i}")
                                       for i in range(3)), return_exceptions=True)
     assert run(main()) == [None, None, None]
+
+
+@pytest.mark.parametrize('engine,dependencies',[
+    ('ReplicatedMergeTree',0),('ReplicatedMergeTree',1),('MergeTree',1)])
+def test_unknown_quorum_or_view_outcome_is_not_acknowledged_from_raw_rows(engine,dependencies):
+    ch=FakeClickHouse(fail_times=100,land_despite_failure=True,
+                     engine=engine,dependencies=dependencies)
+    async def main():
+        b=B.HostInsertBatcher(lambda:ch,max_delay_s=0.01)
+        with pytest.raises(ConnectionError):
+            await b.insert('host_cpu_metrics',COLS,[row('a')],'same-upload-token')
+        assert ch.stored,'Raw rows must exist to exercise the false acknowledgement'
+        assert b.stats['verified']==0
+    run(main())
+
+
+def test_presence_confirmation_is_bound_to_the_actual_database_and_unknown_metadata_refuses():
+    class Client:
+        def query(self,sql,parameters):
+            assert parameters=={'database':'zenplus','name':'host_cpu_metrics'}
+            return FakeClickHouse._R([])
+    assert not B.presence_can_confirm(Client(),'zenplus.host_cpu_metrics')
+    assert not B.presence_can_confirm(Client(),'host_cpu_metrics; SELECT 1')
 
 
 def test_previously_stored_row_does_not_vouch_for_other_uploads():
