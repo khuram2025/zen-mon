@@ -28,8 +28,13 @@ from app.services import controller_authority as authority
 LOG = logging.getLogger('zenplus.controller')
 RUNTIME = Path('/run/zenplus-controller')
 GRANT = RUNTIME/'grant.json'
+WITHDRAWN = Path('/etc/zenplus-ha/controller-withdrawn.json')
 from controller_units import MANAGED, START, LOCAL
 import controller_endpoint
+
+
+class LocalDependencyUnavailable(authority.AuthorityUnavailable):
+    """The pinned local writer cannot provide its application dependencies."""
 
 
 def private_root_file(path, *, executable=False):
@@ -45,7 +50,7 @@ def private_root_file(path, *, executable=False):
 def load_config(path):
     value = json.loads(private_root_file(path).read_text())
     required = {'cell_id','node_id','database_url','system_identifier','patroni_url','ca','cert','key','fence_program','dependencies'}
-    if set(value)-{'service_address'} != required:
+    if set(value)-{'service_address','dependency_failure_seconds'} != required:
         raise ValueError('Controller configuration keys do not match the supported schema')
     for key in ('cell_id','node_id'):
         if not re.fullmatch(r'[a-z][a-z0-9-]{0,47}', value[key]):
@@ -67,6 +72,9 @@ def load_config(path):
         raise ValueError('Commissioned local dependency units are required')
     if any(not re.fullmatch(r'[a-z][a-z0-9-]*\.service',v) or v in MANAGED for v in value['dependencies']):
         raise ValueError('Invalid local dependency unit')
+    delay=value.get('dependency_failure_seconds',120)
+    if type(delay) is not int or not 30<=delay<=900:
+        raise ValueError('Dependency failure grace must be 30 to 900 seconds')
     return value
 
 
@@ -119,6 +127,7 @@ class Supervisor:
         self.endpoint_announced = False
         self.health_failure_since = None
         self.ever_ready = False
+        self.dependency_failure_since = None
         self.tls = ssl.create_default_context(cafile=config['ca'])
         self.tls.load_cert_chain(config['cert'], config['key'])
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=self.tls))
@@ -138,6 +147,9 @@ class Supervisor:
         patroni=json.loads(Path('/etc/zenplus-ha/patroni.json').read_text())
         if patroni.get('postgresql',{}).get('pre_promote')!='/usr/bin/python3 /usr/local/lib/zenplus-ha/pre_promote.py':
             raise RuntimeError('The commissioned pre-promotion fencing hook is required')
+        promotion=json.loads(Path('/etc/zenplus-ha/promotion.json').read_text())
+        if promotion.get('dependencies')!=self.config['dependencies']:
+            raise RuntimeError('Promotion and controller dependency inventories must match')
         _, out = await command('systemctl','list-unit-files','--no-legend','--no-pager','zenplus*')
         installed = {line.split()[0] for line in out.splitlines() if line.strip()}
         unknown = installed - set(MANAGED) - set(LOCAL)
@@ -207,17 +219,18 @@ class Supervisor:
             now=time.monotonic()
             if self.health_failure_since is None:self.health_failure_since=now
             if now-self.health_failure_since>(10 if self.ever_ready else 30):
-                raise authority.AuthorityUnavailable('Core controller consumers unavailable')
+                raise LocalDependencyUnavailable('Core controller consumers unavailable')
             return
         self.health_failure_since=None
         self.ever_ready=True
+        self.dependency_failure_since=None
         if self.endpoint and not self.endpoint_announced:
             address,interface=self.endpoint
             await command('ip','address','replace',address,'dev',interface)
             controller_endpoint.announce(interface,address)
             self.endpoint_announced=True
 
-    async def eligible(self):
+    async def local_primary(self):
         def check():
             with self.opener.open(self.config['patroni_url'].rstrip('/')+'/primary',timeout=2) as r:
                 body=json.load(r)
@@ -226,13 +239,46 @@ class Supervisor:
                     or str(body.get('database_system_identifier'))!=self.config['system_identifier']):
                 raise authority.AuthorityUnavailable('Local database is not the commissioned primary')
         await asyncio.to_thread(check)
-        _, states = await command('systemctl','is-active',*self.config['dependencies'],timeout=3)
+    async def eligible(self):
+        if WITHDRAWN.exists():
+            raise authority.AuthorityUnavailable('Controller is quarantined for operator repair')
+        await self.local_primary()
+        _, states = await command('systemctl','is-active',*self.config['dependencies'],timeout=3,check=False)
         if states.splitlines() != ['active'] * len(self.config['dependencies']):
-            raise authority.AuthorityUnavailable('A commissioned local dependency is unavailable')
+            raise LocalDependencyUnavailable('A commissioned local dependency is unavailable')
         async with self.sessions() as db:
             row=(await db.execute(text('SELECT pg_is_in_recovery(),system_identifier::text FROM pg_control_system()'))).one()
             if row[0] or row[1]!=self.config['system_identifier']:
                 raise authority.AuthorityUnavailable('Database endpoint is not the pinned local writer')
+
+    async def dependency_failure(self):
+        """Withdraw a confirmed local writer only after sustained app failure.
+
+        Quarantine survives a power fence or reboot. Patroni performs its normal
+        consensus election; the replacement still has to positively fence us.
+        A lost database connection or loss of quorum never calls this method.
+        """
+        now=time.monotonic()
+        if self.dependency_failure_since is None:self.dependency_failure_since=now
+        if now-self.dependency_failure_since < self.config.get('dependency_failure_seconds',120):
+            return False
+        await self.local_primary()  # Do not demote from a stale health observation.
+        await self.stop()  # Withdraw client ingress and verify consumers stopped.
+        value={'cell_id':self.config['cell_id'],'node_id':self.config['node_id'],
+               'boot_id':self.boot,'reason':'persistent_local_dependency_failure'}
+        temporary=WITHDRAWN.with_suffix('.tmp')
+        fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as stream:
+            json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary,WITHDRAWN)
+        fd=os.open(WITHDRAWN.parent,os.O_DIRECTORY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        LOG.error('Persistent dependency failure: controller quarantined; requesting database withdrawal')
+        # Stopping Patroni also stops this Requires-bound supervisor. Queue the
+        # request so systemd does not wait on a child of the unit it is stopping.
+        await command('systemctl','--no-block','stop','zenplus-ha-patroni.service')
+        return True
 
     async def fence(self,node,boot):
         request=str(uuid4())
@@ -293,6 +339,8 @@ class Supervisor:
                 if self.generation is not None or self.running or self.starting:
                     await self.stop()
                 self.generation=None
+                if isinstance(error,LocalDependencyUnavailable):
+                    await self.dependency_failure()
             try:
                 await asyncio.wait_for(self.stop_event.wait(),timeout=1)
             except asyncio.TimeoutError:

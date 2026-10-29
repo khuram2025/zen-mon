@@ -8,14 +8,24 @@ import sys
 from uuid import uuid4
 from controller_units import MANAGED
 
+WITHDRAWN = Path('/etc/zenplus-ha/controller-withdrawn.json')
+
 
 def run(config):
     path=Path(config);st=path.stat()
     if not path.is_file() or path.is_symlink() or st.st_uid!=0 or st.st_mode&0o022:
         raise ValueError('Promotion configuration must be root controlled')
     cfg=json.loads(path.read_text())
-    if set(cfg)!={'cell_id','node_id','system_identifier','database','fence_program'}:
+    if set(cfg)!={'cell_id','node_id','system_identifier','database','fence_program','dependencies'}:
         raise ValueError('Unexpected promotion configuration')
+    if WITHDRAWN.exists():raise RuntimeError('Controller quarantined pending operator repair')
+    dependencies=cfg['dependencies']
+    if (not isinstance(dependencies,list) or not dependencies
+            or any(not isinstance(v,str) or not re.fullmatch(r'[a-z][a-z0-9-]*\.service',v) or v in MANAGED for v in dependencies)):
+        raise ValueError('Invalid commissioned dependency inventory')
+    active=subprocess.run(['systemctl','is-active',*dependencies],capture_output=True,text=True,timeout=5,check=False)
+    if active.returncode or active.stdout.splitlines()!=['active']*len(dependencies):
+        raise RuntimeError('Local dependencies are not ready for promotion')
     for key in ('cell_id','node_id','database'):
         if not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}',cfg[key]):raise ValueError('Invalid promotion identity')
     program=Path(cfg['fence_program']);st=program.stat()
