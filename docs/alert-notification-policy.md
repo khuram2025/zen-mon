@@ -1,7 +1,7 @@
 # Alert notification policy: metric incidents, delivery and reports
 
 This page describes how ZenPlus turns metric readings into incidents and
-notifications, and how it guarantees that one incident event is sent once. It
+notifications, and how delivery keys reduce repeated incident notifications. It
 answers a field review of 196 notifications over 48 hours (October 2026). In that
 review, 121 memory warnings came from readings between 90.1% and 91.5% against a
 90% rule. Interface-error emails arrived twice, seconds apart. Daily reports
@@ -51,7 +51,7 @@ total duration). The subject keeps the severity first:
   reply)*, never 0.0 ms. Latency rules never fire on an unreachable device. The
   banner shows reachability (e.g. DOWN) and the rule's severity separately.
 
-## Each event is sent once
+## Delivery identity and retry ownership
 
 Both API workers run the evaluators. Each evaluator pass, and the escalation
 sweeper, now takes a cross-worker lock and skips the tick if the other worker
@@ -71,6 +71,20 @@ Every send for a known incident claims a **delivery key** before it goes out:
 Channels and recipients are de-duplicated across the channels of one dispatch.
 Duplicate channels are removed when a rule is saved. Exactly-once SMTP delivery
 is not promised; every outcome is auditable in the delivery log.
+
+Migration 170 gives every claim a separate attempt token, rotated when a failed
+or stale claim is taken over. A completion can change only the current token in
+the `claimed` state. A resumed old worker therefore cannot overwrite a newer
+receipt, and repeated completion calls cannot reverse a terminal result. This
+does not stop a paused worker from finishing a provider request, or prevent a
+duplicate when a provider accepted before a worker crashed. Stale claims remain
+eligible for retry under the existing ten-minute policy.
+
+Stop all legacy notification senders before this upgrade or rollback. Apply the
+additive migration before starting new senders and retain its column on rollback.
+Mixed old/new senders cannot enforce attempt ownership because old code updates
+receipts by logical row ID. Transactional notification intents, automatic due-work
+retries and cross-site sender grants remain separate HA implementation work.
 
 ## Scheduled reports
 

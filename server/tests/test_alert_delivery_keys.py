@@ -318,3 +318,110 @@ async def test_an_interrupted_trigger_claim_can_be_taken_over_when_stale(world):
         await s.commit()
     async with session(w.db) as s:
         assert await ns.claim_pending(s, alert_id) is False      # the new claim is fresh
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_state", ["claimed", "accepted", "failed", "uncertain"])
+async def test_a_stale_attempt_cannot_overwrite_its_replacement(world, replacement_state):
+    w = world
+    alert_id = w.alert()
+    async with session(w.db) as s:
+        old, _ = await dl.claim_key(s, alert_id, "trigger", w.ch.hook)
+        await s.commit()
+    logical_id = w.db.scalar("SELECT id FROM alert_delivery_keys WHERE alert_id=$1", alert_id)
+    w.db.execute("UPDATE alert_delivery_keys SET claimed_at=now()-interval '11 minutes'"
+                 " WHERE alert_id=$1", alert_id)
+    async with session(w.db) as s:
+        current, _ = await dl.claim_key(s, alert_id, "trigger", w.ch.hook)
+        assert old and current and old != current
+        if replacement_state != "claimed":
+            await dl.finish_keys(s, [current], replacement_state, "replacement outcome")
+        await s.commit()
+    before = w.db.query("SELECT id,claim_token,state,error,finished_at FROM alert_delivery_keys"
+                        " WHERE alert_id=$1", alert_id)
+    async with session(w.db) as s:
+        await dl.finish_keys(s, [old], "failed", "late old worker")
+        await s.commit()
+    assert w.db.query("SELECT id,claim_token,state,error,finished_at FROM alert_delivery_keys"
+                      " WHERE alert_id=$1", alert_id) == before
+    assert before[0][0] == logical_id
+    assert before[0][2] == replacement_state
+
+
+@pytest.mark.asyncio
+async def test_failed_retry_rotates_token_and_terminal_completion_is_immutable(world):
+    w = world
+    alert_id = w.alert()
+    async with session(w.db) as s:
+        first, _ = await dl.claim_key(s, alert_id, "trigger", w.ch.hook)
+        await dl.finish_keys(s, [first], "failed")
+        await s.commit()
+        second, _ = await dl.claim_key(s, alert_id, "trigger", w.ch.hook)
+        assert first != second
+        await s.commit()
+        await dl.finish_keys(s, [first], "uncertain")
+        await dl.finish_keys(s, [second], "accepted")
+        await s.commit()
+        accepted = w.db.query("SELECT state,finished_at FROM alert_delivery_keys WHERE alert_id=$1", alert_id)
+        await dl.finish_keys(s, [second], "failed", "duplicate completion")
+        await s.commit()
+        assert w.db.query("SELECT state,finished_at FROM alert_delivery_keys WHERE alert_id=$1", alert_id) == accepted
+        assert accepted[0][0] == "accepted"
+        with pytest.raises(ValueError, match="Invalid delivery completion state"):
+            await dl.finish_keys(s, [second], "claimed")
+
+
+@pytest.mark.asyncio
+async def test_paused_dispatch_cannot_replace_a_newer_provider_receipt(world, monkeypatch):
+    w = world
+    alert_id = w.alert()
+    entered, resume = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def provider(kind, cfg, context):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await resume.wait()
+            return False, ConnectionRefusedError("old attempt failed")
+        return True, None
+
+    monkeypatch.setattr(alert_engine, "_dispatch_channel_result", provider)
+    old = asyncio.create_task(dispatch(w, [w.ch.hook], ctx(alert_id)))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        w.db.execute("UPDATE alert_delivery_keys SET claimed_at=now()-interval '11 minutes'"
+                     " WHERE alert_id=$1", alert_id)
+        assert await dispatch(w, [w.ch.hook], ctx(alert_id)) == 1
+        resume.set()
+        assert await asyncio.wait_for(old, 5) == 0
+        assert {r[3] for r in keys(w, alert_id)} == {"accepted"}
+        # This deliberately permits the existing stale retry policy. It does
+        # not claim to fence either provider request or deliver exactly once.
+        assert calls == 2
+    finally:
+        resume.set()
+        if not old.done():
+            old.cancel()
+        await asyncio.gather(old, return_exceptions=True)
+
+
+def test_attempt_migration_preserves_legacy_identity_outcomes_and_is_repeatable(world):
+    from pathlib import Path
+
+    w = world
+    alert_id = w.alert()
+    # Recreate the N-1 table shape inside this disposable database only.
+    w.db.execute("ALTER TABLE alert_delivery_keys DROP COLUMN claim_token")
+    for state in ("claimed", "accepted", "failed", "uncertain"):
+        w.db.execute("INSERT INTO alert_delivery_keys(alert_id,event,channel_id,state,error)"
+                     " VALUES($1,$2,$3,$2,'preserve')", alert_id, state, w.ch.hook)
+    before = w.db.query("SELECT id,event,state,error,claimed_at,finished_at FROM alert_delivery_keys ORDER BY event")
+    migration = Path(__file__).resolve().parents[2] / "scripts/migrate-170-notification-attempt-ownership.sql"
+    w.db.psql_file(migration)
+    tokens = w.db.query("SELECT claim_token FROM alert_delivery_keys ORDER BY event")
+    assert len({t[0] for t in tokens}) == 4 and all(t[0] for t in tokens)
+    assert w.db.query("SELECT id,event,state,error,claimed_at,finished_at FROM alert_delivery_keys ORDER BY event") == before
+    w.db.psql_file(migration)
+    assert w.db.query("SELECT claim_token FROM alert_delivery_keys ORDER BY event") == tokens
