@@ -24,7 +24,10 @@ Do not clear replication queues, discard broken parts or bypass admission to
 make the site appear healthy. Preserve the stopped data and Keeper state first.
 The lab retained complete constituent parts for the missing merged ranges;
 operator reconstruction must validate complete, non-overlapping block ranges,
-part checksums and full-row digests before restoring their original identities.
+part checksums and full-row digests before a supported partition replacement.
+Include every retained part in the affected partition, not just the missing
+merged range. Copying reconstructed parts directly into a replica data directory
+does not establish their Keeper ownership and is not a supported repair path.
 That forensic repair is not a general automatic recovery contract. Where the
 retained data cannot prove completeness, restore a verified backup and report
 the actual data loss and recovery point.
