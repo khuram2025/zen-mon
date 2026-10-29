@@ -107,9 +107,9 @@ explicit post-enqueue power-loss test covers that crash boundary. Escalations,
 digests, reports and other legacy producers still require separate qualification.
 
 Independent critical-site cells, sender delegation, administrator-ordered remote
-notification failover, local-safety versus strict policy, independent provider
-egress and cross-site receipts are separate required implementation work. None
-is established by the same-cell tests above. Support/artifact storage, collector
+notification failover and optional local-safety delivery now have separate
+[cross-site lab evidence](notification-sites.md). The same-cell tests above do
+not establish those properties by themselves. Support/artifact storage, collector
 traffic redirection, client endpoint failover, full role inventory, upgrade and
 rollback qualification, clean-image sanitization and signing remain release
 gates. Do not advertise these files as a completed customer HA appliance.

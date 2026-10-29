@@ -318,7 +318,8 @@ def _mail_ctx(ctx: dict) -> dict:
 
 
 async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict, *,
-                               delivery_guard=None, route_guard=None) -> int:
+                               delivery_guard=None, route_guard=None, delivery_ledger=None,
+                               site_routing=True) -> int:
     """Send an alert to notification channels. Best-effort; returns how many
     channels (and direct recipients) accepted it — or hold it in a digest.
     Every outcome is written to the delivery log (accepted / failed / skipped
@@ -358,12 +359,16 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict, *
         return await enqueue(db, channel_ids, ctx)
     from app.api.v1.alert_engine import _send_email, _send_sms, _dispatch_channel_result
     from app.services import alert_delivery_log as dl
+    if delivery_ledger is not None:
+        dl = delivery_ledger
     from app.services import notification_grouping as ng
     from app.services.email_render import alert_subject, build_alert_email_html
 
     kind = dl.kind_from_ctx(ctx)
     keyed = _key_context(ctx)
-    strict = bool(ctx.get("_require_delivery_key"))
+    from app.core.config import get_settings
+    site_enabled = bool(site_routing and keyed and get_settings().NOTIFICATION_SITE_ROUTING_ENABLED)
+    strict = bool(ctx.get("_require_delivery_key")) or site_enabled
     if strict and not keyed:
         raise RuntimeError("Durable dispatch requires delivery key storage")
     # Recipients this dispatch has already handled (or found already
@@ -441,18 +446,24 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict, *
             if delivery_guard is not None:
                 await delivery_guard()
             self.in_flight = [k for k, _ in targets]
-            if ctype == "email":
-                mail_ctx = _mail_ctx(ctx)
-                ok = await _send_email(gw, rcpt, alert_subject(ctx["subject"], ctx),
-                                       mail_ctx["message"],
-                                       html_body=ctx.get("html_body") or build_alert_email_html(mail_ctx))
-                skip_reason = "config: SMTP gateway has no host"
+            async def local_send(safety=False):
+                delivery_ctx = dict(ctx)
+                if safety:
+                    delivery_ctx['subject'] = '[Local safety copy] ' + ctx['subject']
+                    delivery_ctx['message'] = '[Local safety copy; remote delivery unconfirmed] ' + ctx['message']
+                if ctype == "email":
+                    mail_ctx = _mail_ctx(delivery_ctx)
+                    return await _send_email(gw, rcpt, alert_subject(delivery_ctx["subject"], delivery_ctx),
+                                           mail_ctx["message"],
+                                           html_body=(None if safety else ctx.get("html_body")) or build_alert_email_html(mail_ctx))
+                return await _send_sms(gw, rcpt, delivery_ctx["message"], values=ctx.get("sms_template_values"))
+            if site_enabled:
+                from app.services.notification_sites import route as site_route
+                ok = await site_route(db, self.id, targets[0][0], ctx, local_send, delivery_guard)
             else:
-                # Gateway template placeholders the sender offers
-                # (device path: {hostname}, {ip_address}, {status}).
-                ok = await _send_sms(gw, rcpt, ctx["message"],
-                                     values=ctx.get("sms_template_values"))
-                skip_reason = "config: SMS gateway is not a usable HTTP gateway"
+                ok = await local_send()
+            skip_reason = ("config: SMTP gateway has no host" if ctype == "email"
+                           else "config: SMS gateway is not a usable HTTP gateway")
             # Log first: the key's commit then makes both durable.
             if ok:
                 self.provider_accepted = True
@@ -507,11 +518,13 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict, *
                         await route.log("skipped", "config: the held recipients are no longer on this channel")
                         continue
                 gw = await _gateway_config(db, ch, "smtp" if ch.type == "email" else "sms")
-                if not listed or not gw:
+                if not listed or (not gw and not site_enabled):
                     what = "recipients" if ch.type == "email" else "phone numbers"
                     await route.log("skipped", f"config: no {what}" if not listed
                                     else f"config: no enabled {'SMTP' if ch.type == 'email' else 'SMS'} gateway")
                     continue
+                if site_enabled and not gw:
+                    gw = {}
                 # A recipient counts as covered only once a channel accepted
                 # the message (or possibly did): a backup channel on another
                 # gateway still reaches them when this one fails.
@@ -566,7 +579,21 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict, *
                 if delivery_guard is not None:
                     await delivery_guard()
                 provider_ctx = {k: v for k, v in ctx.items() if not k.startswith("_")}
-                ok, err = await _dispatch_channel_result(ch.type, cfg, provider_ctx)
+                if site_enabled:
+                    from app.services.notification_sites import route as site_route
+                    async def local_send(safety=False):
+                        delivery_ctx = dict(provider_ctx)
+                        if safety:
+                            delivery_ctx['subject'] = '[Local safety copy] ' + ctx['subject']
+                            delivery_ctx['message'] = '[Local safety copy; remote delivery unconfirmed] ' + ctx['message']
+                        accepted, failure = await _dispatch_channel_result(ch.type, cfg, delivery_ctx)
+                        if failure is not None:
+                            raise failure
+                        return accepted
+                    ok = await site_route(db, ch_id, '', ctx, local_send, delivery_guard)
+                    err = None
+                else:
+                    ok, err = await _dispatch_channel_result(ch.type, cfg, provider_ctx)
                 if ok:
                     route.provider_accepted = True
                     credited.add(ch_id)

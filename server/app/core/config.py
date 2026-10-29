@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # absolute links in outbound emails (e.g. scheduled-report share links).
     # Falls back to the company system-setting 'base_url' when empty.
     APP_BASE_URL: str = ""
+    NOTIFICATION_SITE_ROUTING_ENABLED: bool = False
 
     # PostgreSQL
     DATABASE_URL: str = "postgresql+asyncpg://zenplus:changeme@localhost:5432/zenplus"
