@@ -206,11 +206,13 @@ def _keys_missing(exc: BaseException) -> bool:
     return False
 
 
-async def delivered_recipients(db: AsyncSession, alert_id, event: str) -> dict[str, str]:
+async def delivered_recipients(db: AsyncSession, alert_id, event: str, *, strict=False) -> dict[str, str]:
     """{recipient: state} already claimed for this incident event on any channel
     (claimed / accepted / uncertain). Webhook-style keys (no recipient) are
     per channel and are left out."""
     if _keys_disabled:
+        if strict:
+            raise RuntimeError("Delivery key storage unavailable")
         return {}
     try:
         async with db.begin_nested():
@@ -221,13 +223,15 @@ async def delivered_recipients(db: AsyncSession, alert_id, event: str) -> dict[s
                 "      OR (state = 'claimed' AND claimed_at >= now() - interval '10 minutes'))"
             ), {"aid": str(alert_id), "ev": event})).all()
     except Exception as exc:
+        if strict:
+            raise
         if not _keys_missing(exc):
             logger.warning("delivery keys: lookup failed: %s", exc)
         return {}
     return {str(r[0]): str(r[1]) for r in rows}
 
 
-async def claim_key(db: AsyncSession, alert_id, event: str, channel_id, recipient: str = ""
+async def claim_key(db: AsyncSession, alert_id, event: str, channel_id, recipient: str = "", *, strict=False
                     ) -> tuple[str | None, str | None]:
     """Claim one delivery. Returns (attempt token, None) when this caller owns it,
     (None, existing state) when it is already claimed/accepted/uncertain, and
@@ -238,6 +242,8 @@ async def claim_key(db: AsyncSession, alert_id, event: str, channel_id, recipien
     The caller commits before sending.
     """
     if _keys_disabled:
+        if strict:
+            raise RuntimeError("Delivery key storage unavailable")
         return None, None
     params = {"aid": str(alert_id), "ev": event[:64], "cid": str(channel_id),
               "rcpt": recipient or ""}
@@ -262,6 +268,8 @@ async def claim_key(db: AsyncSession, alert_id, event: str, channel_id, recipien
             ), params)).scalar()
             return None, (str(state) if state else "claimed")
     except Exception as exc:
+        if strict:
+            raise
         if not _keys_missing(exc):
             logger.warning("delivery keys: claim failed for alert %s (%s): %s",
                            alert_id, event, exc)
@@ -269,11 +277,13 @@ async def claim_key(db: AsyncSession, alert_id, event: str, channel_id, recipien
 
 
 async def finish_keys(db: AsyncSession, claim_tokens: list[str], state: str,
-                      error: BaseException | str | None = None) -> None:
+                      error: BaseException | str | None = None, *, strict=False) -> None:
     """Complete only the current, still-claimed attempt; ignore stale tokens."""
     if state not in ("accepted", "failed", "uncertain"):
         raise ValueError("Invalid delivery completion state")
     if not claim_tokens or _keys_disabled:
+        if strict:
+            raise RuntimeError("Delivery key storage unavailable")
         return
     err = sanitize_error(error) if not isinstance(error, str) else error
     try:
@@ -283,6 +293,8 @@ async def finish_keys(db: AsyncSession, claim_tokens: list[str], state: str,
                 " WHERE claim_token = ANY(CAST(:tokens AS uuid[])) AND state = 'claimed'"
             ), {"st": state, "err": err, "tokens": list(claim_tokens)})
     except Exception as exc:
+        if strict:
+            raise
         if not _keys_missing(exc):
             logger.warning("delivery keys: could not record outcome %s: %s", state, exc)
 

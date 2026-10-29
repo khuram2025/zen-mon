@@ -22,6 +22,7 @@ and a fake ClickHouse history.
 from __future__ import annotations
 
 import bisect
+import asyncio
 import contextlib
 import random
 from datetime import datetime, timezone
@@ -467,19 +468,28 @@ async def test_snmp_trigger_in_flight_is_not_resent_by_the_next_pass(snmp):
     n = snmp
     n.db.execute("UPDATE alert_rules SET min_duration = 0 WHERE id = $1", n.rule)
     stamps = []
+    rivals = []
     real_stamp = ns.stamp
 
+    async def rival_pass():
+        async with session(n.db) as other:
+            await n.worker.evaluate_network_rules(other, now=T0 + 6)
+
     async def slow_stamp(db, alert_id, sent):
-        # Another pass runs while the first is between its send and its stamp.
+        # The incident and intent now hold the dimension lock until commit.
+        # Run the contender concurrently; awaiting it here would deadlock the
+        # test by withholding the first transaction's commit from both passes.
         if not stamps:
             stamps.append(alert_id)
-            async with session(n.db) as other:
-                await n.worker.evaluate_network_rules(other, now=T0 + 6)
+            rivals.append(asyncio.create_task(rival_pass()))
+            await asyncio.sleep(.05)
+            assert not rivals[0].done()
         await real_stamp(db, alert_id, sent)
 
     from unittest.mock import patch
     with patch.object(n.worker.ns, "stamp", slow_stamp):
         await snmp_replay(n, [96])
+        await asyncio.wait_for(asyncio.gather(*rivals), 10)
     assert len(snmp_incidents(n)) == 1 and len(n.sent) == 1
 
 

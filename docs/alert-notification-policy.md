@@ -83,8 +83,85 @@ eligible for retry under the existing ten-minute policy.
 Stop all legacy notification senders before this upgrade or rollback. Apply the
 additive migration before starting new senders and retain its column on rollback.
 Mixed old/new senders cannot enforce attempt ownership because old code updates
-receipts by logical row ID. Transactional notification intents, automatic due-work
-retries and cross-site sender grants remain separate HA implementation work.
+receipts by logical row ID. Cross-site sender grants remain separate HA work.
+
+## Durable metric notification work (migration 171)
+
+Host and SNMP metric evaluators now insert `notification_outbox` work in the
+same PostgreSQL transaction as the incident change. They do not contact a
+provider. Grouping membership also shares that transaction; a failed enqueue
+rolls back the incident change so a subsequent evaluation can try again. The
+existing `metadata.notified` flag means notification intent was handled, not
+that a provider accepted or a person read a message.
+
+A background worker claims due work using `FOR UPDATE SKIP LOCKED`, a fresh
+execution token, a 120-second lease and a 20-second heartbeat. Only its current
+live token can complete the job. A separate ownership check runs immediately
+before each provider request. Earlier unresolved work for an incident keeps
+later events waiting. Definite failures retry after 30 seconds, with exponential
+backoff capped at 15 minutes; the worker scans every five seconds and processes
+up to 20 envelopes per pass. Actual timing also depends on queue load and
+provider latency. PostgreSQL commit durability depends on the installed
+database's WAL, replication and storage configuration; this change does not
+make a standalone database highly available.
+
+Queue states are distinct from transport receipts:
+
+- `pending`: retained for delivery or retry; no acceptance is implied.
+- `processing`: a worker owns execution; no acceptance is implied.
+- `accepted`: all intended destination groups have provider acceptance receipts.
+- `uncertain`: every destination is accepted or uncertain, with at least one
+  ambiguous result. No automatic resend is made for an uncertain recipient.
+- `held`: work was delegated to the existing digest system. Digest status and
+  receipts determine subsequent delivery; this state is not acceptance.
+- `blocked`: channel configuration differs from the saved destination plan.
+  Restore the original configuration before retrying. Retry never silently
+  adopts a new destination or adds recipients.
+- `cancelled`: the incident was removed before delivery.
+
+The envelope keeps the original event content and resolved recipient plan.
+It has a 256 KiB payload limit, at most 128 channels and 1,024 recipient-route
+entries. Limit violations fail the transaction instead of dropping work.
+Channel configuration is compared through a digest of canonical decrypted
+values; no credentials are copied into the queue. Gateway credentials remain
+in their existing store and are read at execution. Accepted recipients are
+not resent when another recipient or channel fails. Durable email and SMS
+dispatch uses separate provider requests per recipient for accurate partial
+acceptance receipts. SMTP network waits run off the API event loop so lease
+renewal can continue. High fan-out throughput still needs load qualification.
+
+Alert detail displays durable work independently of delivery attempts.
+`GET /alerts/{alert_id}` exposes state, attempts, timestamps and a generic
+failure category, without message payloads, destination lists or hashes.
+`POST /alerts/{alert_id}/notification-work/{work_id}/retry` requires
+`alerts.manage`, enforces the incident's visibility scope and requires an audit
+record in the same transaction. It only schedules pending/blocked work;
+accepted, processing, uncertain, held and cancelled jobs cannot be retried
+through this action. Provider logs should be reviewed for uncertain outcomes.
+
+Exactly-once external delivery is not guaranteed. A process killed after a
+provider accepts but before a receipt commits leaves an ambiguous claimed key.
+The inherited ten-minute stale-key policy can retry it, potentially duplicating
+the message. A lease or cancellation cannot revoke an SMTP request already in
+progress. This is not cross-site fencing. Resolved incidents can still have
+queued trigger and recovery history; the worker preserves event order and
+original event timestamps.
+
+Cutover: stop legacy metric evaluators and notification senders, take the
+required backup, apply the complete migration set including 171, then start
+the new workers. Do not run mixed old/new metric evaluators. Before a binary
+rollback, stop new producers, drain or explicitly reconcile pending,
+processing, blocked and digest work, and stop the outbox workers. Preserve the
+outbox and delivery keys; older binaries do not consume this queue. Never
+delete queued work merely to make rollback appear complete.
+
+This increment covers host/SNMP metric triggers and recoveries. Device/service
+status, other alert families, escalations, reports and NCM retain their current
+delivery paths; digest retry policy is unchanged. Unified lifecycle ordering
+across those producers, queue retention and capacity policy, independent sender
+service deployment, provider idempotency, admin-selected site failover and
+autonomous critical sites are not delivered by this migration. It is a draft
+HA foundation, not multisite release qualification.
 
 ## Scheduled reports
 

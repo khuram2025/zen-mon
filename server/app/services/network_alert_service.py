@@ -546,6 +546,7 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         "triggered_at": now.isoformat(),
         "rule_id": str(rule.id),
         "alert_id": str(alert_id) if alert_id else None,
+        "_enqueue_notification": True,
         "delivery_event": event or ("recovery" if is_recovery else "trigger"),
         "is_recovery": is_recovery,
         **funnel.notification_fields(sev, getattr(rule, "priority", None), trigger=not is_recovery),
@@ -776,7 +777,6 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             alert_id = await _raise(db, rule, device_id, msg, value, if_index, extra)
             if alert_id is not None:
                 raised += 1
-                await db.commit()
                 sent = await _notify(db, rule, hostname, alert_id=alert_id,
                                      first_seen=datetime.now(timezone.utc), **notify)
                 await ns.stamp(db, alert_id, sent)
@@ -788,9 +788,7 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             # still breaching. Without this the breach is never announced at
             # all: the alert row already exists, so the branch above never
             # runs again, and the only mail ever sent is the all-clear. The
-            # claim (false -> sending, only while active) is committed before
-            # the send, so a second pass or worker cannot send it as well.
-            await db.commit()
+            # claim and durable notification work commit together.
             sent = await _notify(db, rule, hostname, alert_id=existing[0],
                                  first_seen=existing[1], checked=True, **notify)
             await ns.stamp(db, existing[0], sent)
@@ -802,13 +800,13 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             # they never heard of, so it follows the trigger's fate.
             notified = await ns.was_notified(db, alert_id)
             resolved += await _resolve(db, alert_id)
-            await db.commit()
             # Metric rules used to close silently, so whoever got the 2am page
             # never learned it had cleared — let alone after how long.
             if notified and getattr(rule, "recovery_alert", True):
                 await _notify(db, rule, hostname, is_recovery=True,
                               duration=ap.duration_between(started_at),
                               alert_id=alert_id, first_seen=started_at, **notify)
+            await db.commit()
     return raised, resolved
 
 

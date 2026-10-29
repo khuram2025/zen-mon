@@ -266,6 +266,10 @@ export type AlertDetail = AlertRow & {
   related_alerts?: AlertRow[]
   events: AlertEvent[]
   deliveries: AlertDelivery[]
+  notification_work?: Array<{
+    id: string; event: string; status: 'pending' | 'processing' | 'accepted' | 'uncertain' | 'held' | 'blocked' | 'cancelled'
+    attempts: number; created_at: string; due_at: string; finished_at: string | null; last_error: string | null
+  }>
   /** Notifications for this incident held in a digest (grouping / recipient budget), with why and when they go out. */
   notification_holds?: Array<{ digest_id: string | null; reason: string; release_condition: string; release_at: string | null; status: string }>
 }
