@@ -102,7 +102,7 @@ export function NotificationSites() {
         <h3 className="text-sm font-semibold">Paired sites</h3>
         {data.peers.length === 0 && <p className="text-sm text-muted">No sites paired yet.</p>}
         {data.peers.map(p => <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
-          <span>{p.name} · {p.direction === 'inbound' ? 'Allowed origin' : 'Sender'} · {p.enabled ? 'Enabled' : 'Disabled'}{p.credential_revoked_at ? ' � Credential revoked' : p.credential_expires_at ? ` � Expires ${new Date(p.credential_expires_at).toLocaleString()}` : p.direction === 'inbound' ? ' � Legacy credential needs rotation' : ''}</span>
+          <span>{p.name} · {p.direction === 'inbound' ? 'Allowed origin' : 'Sender'} · {p.enabled ? 'Enabled' : 'Disabled'}{p.credential_revoked_at ? ' · Credential revoked' : p.credential_expires_at ? ` · Expires ${new Date(p.credential_expires_at).toLocaleString()}` : p.direction === 'inbound' ? ' · Legacy credential needs rotation' : ''}</span>
           {p.direction === 'inbound' ? <>
             <Button variant="outline" size="sm" disabled={!editable || busy} onClick={() => { setRotatePeer(p.id); setRevokePeer(''); setIssued('') }}>Rotate credential</Button>
             <Button variant="outline" size="sm" disabled={!editable || busy} onClick={() => { setRevokePeer(p.id); setRotatePeer(''); setIssued('') }}>Revoke credential</Button>
