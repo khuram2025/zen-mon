@@ -29,6 +29,7 @@ LOG = logging.getLogger('zenplus.controller')
 RUNTIME = Path('/run/zenplus-controller')
 GRANT = RUNTIME/'grant.json'
 from controller_units import MANAGED, START, LOCAL
+import controller_endpoint
 
 
 def private_root_file(path, *, executable=False):
@@ -44,7 +45,7 @@ def private_root_file(path, *, executable=False):
 def load_config(path):
     value = json.loads(private_root_file(path).read_text())
     required = {'cell_id','node_id','database_url','system_identifier','patroni_url','ca','cert','key','fence_program','dependencies'}
-    if set(value) != required:
+    if set(value)-{'service_address'} != required:
         raise ValueError('Controller configuration keys do not match the supported schema')
     for key in ('cell_id','node_id'):
         if not re.fullmatch(r'[a-z][a-z0-9-]{0,47}', value[key]):
@@ -114,6 +115,10 @@ class Supervisor:
         self.units = []
         self.stop_event = asyncio.Event()
         self.last_reason = None
+        self.endpoint = None
+        self.endpoint_announced = False
+        self.health_failure_since = None
+        self.ever_ready = False
         self.tls = ssl.create_default_context(cafile=config['ca'])
         self.tls.load_cert_chain(config['cert'], config['key'])
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=self.tls))
@@ -128,6 +133,8 @@ class Supervisor:
         local = {a['local'] for interface in json.loads(addresses) for a in interface.get('addr_info',[])}
         if urlsplit(self.config['patroni_url']).hostname not in local:
             raise RuntimeError('Controller authority must use a local node address')
+        if self.config.get('service_address'):
+            self.endpoint=controller_endpoint.select(self.config['service_address'],urlsplit(self.config['patroni_url']).hostname,json.loads(addresses))
         patroni=json.loads(Path('/etc/zenplus-ha/patroni.json').read_text())
         if patroni.get('postgresql',{}).get('pre_promote')!='/usr/bin/python3 /usr/local/lib/zenplus-ha/pre_promote.py':
             raise RuntimeError('The commissioned pre-promotion fencing hook is required')
@@ -151,6 +158,7 @@ class Supervisor:
 
     async def stop(self):
         GRANT.unlink(missing_ok=True)
+        await self.withdraw_endpoint()
         if self.starting:
             self.starting.cancel()
             await asyncio.gather(self.starting,return_exceptions=True)
@@ -172,6 +180,42 @@ class Supervisor:
                     if file.read_text().strip():
                         raise RuntimeError('Controller child remains alive')
         self.running=False
+        self.health_failure_since=None
+        self.ever_ready=False
+
+    async def withdraw_endpoint(self):
+        if self.endpoint:
+            address,interface=self.endpoint
+            _,out=await command('ip','-json','address','show','dev',interface)
+            if any(a.get('local')==address.split('/')[0] for item in json.loads(out) for a in item.get('addr_info',[])):
+                await command('ip','address','del',address,'dev',interface)
+        self.endpoint_announced=False
+
+    async def publish_endpoint(self):
+        def ready():
+            opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open('http://127.0.0.1:8000/api/v1/system/health',timeout=2) as response:
+                return json.load(response).get('status')=='ok'
+        try:
+            healthy=await asyncio.to_thread(ready)
+            _,out=await command('systemctl','is-active','zenplus-api.service','zenplus-poller.service')
+            healthy=healthy and out.splitlines()==['active','active']
+        except Exception:
+            healthy=False
+        if not healthy:
+            await self.withdraw_endpoint()
+            now=time.monotonic()
+            if self.health_failure_since is None:self.health_failure_since=now
+            if now-self.health_failure_since>(10 if self.ever_ready else 30):
+                raise authority.AuthorityUnavailable('Core controller consumers unavailable')
+            return
+        self.health_failure_since=None
+        self.ever_ready=True
+        if self.endpoint and not self.endpoint_announced:
+            address,interface=self.endpoint
+            await command('ip','address','replace',address,'dev',interface)
+            controller_endpoint.announce(interface,address)
+            self.endpoint_announced=True
 
     async def eligible(self):
         def check():
@@ -229,6 +273,8 @@ class Supervisor:
                     await db.commit()
                 self.publish(start)
                 self.last_reason=None
+                if self.running:
+                    await self.publish_endpoint()
                 if not self.running:
                     if self.starting is None:
                         self.starting=asyncio.create_task(command('systemctl','start',*[u for u in START if u in self.units],timeout=60))

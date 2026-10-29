@@ -1,6 +1,7 @@
 """System update status, storage, and control endpoints for the dashboard."""
 
 import configparser
+import asyncio
 import json
 import os
 import shutil
@@ -888,14 +889,7 @@ async def system_health():
     checks = {}
     checks["api"] = "ok"
 
-    try:
-        result = subprocess.run(
-            ["pg_isready", "-h", "127.0.0.1", "-p", "5432"],
-            capture_output=True, text=True, timeout=5,
-        )
-        checks["postgresql"] = "ok" if result.returncode == 0 else "error"
-    except Exception:
-        checks["postgresql"] = "error"
+    checks["postgresql"] = "ok" if await _database_healthy() else "error"
 
     try:
         import httpx as _httpx
@@ -930,6 +924,18 @@ async def system_health():
     version, _ = _get_version_info()
 
     return {"status": overall, "version": version, "checks": checks}
+
+
+async def _database_healthy():
+    """Check the configured authenticated connection, including its TLS policy."""
+    from app.core.database import AsyncSessionLocal
+    from sqlalchemy import text
+    try:
+        async with asyncio.timeout(2):
+            async with AsyncSessionLocal() as db:
+                return (await db.execute(text('SELECT 1'))).scalar()==1
+    except Exception:
+        return False
 
 
 # Storage status and disk/volume management moved to storage_management.py

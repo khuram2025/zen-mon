@@ -56,6 +56,15 @@ the poller uses that local endpoint; an HTTPS frontend provides external access.
 PostgreSQL connections from both Python and Go verify the commissioned CA and
 server identity. Never copy a lab enrollment or private CA into a generic image.
 
+For a single LAN, the optional `service_address` is an unused IPv4 host/prefix
+on the same subnet as the node address. The supervisor requires one matching
+interface and publishes that address only after the API reports its configured
+database and dependencies healthy and the API/poller units are active. It removes
+the address on readiness or authority loss and announces ownership with gratuitous
+ARP. All frontends need certificates covering that address. This is a same-subnet
+endpoint; it does not implement WAN address mobility or DNS failover. Use the
+stable URL as `APP_BASE_URL` when commissioning application links.
+
 ## Measured lab results
 
 Tests on 29 October 2026 used three disposable Ubuntu 24.04 VMs, PostgreSQL
@@ -71,6 +80,8 @@ remained running throughout these tests.
 | Suspended active VM | Saved execution state invalidated by the external fence; replacement activated; old VM rejoined as a replica | 40.05 seconds |
 | Two consensus voters stopped | Every API and poller stopped; no writable PostgreSQL primary; recovered after majority returned | 23.94 seconds to stop |
 | HTTP outage followed by active VM power loss | Same incident survived; replacement sent recovery; SMTP capture received exactly one trigger and one recovery in this run | 45.94 seconds to authenticated replacement API |
+| Active VM power loss through the fixed TLS service address | The client reused the same address and login session; exactly one address holder after rejoin | 48.84 seconds |
+| Power loss after incident and notification enqueue, before send | Replacement drained the committed job; isolated SMTP accepted one trigger | 46.59 seconds |
 
 Recovery measurements include test polling and are observations, not an SLA or a
 maximum bound. Three VMs on one workstation do not provide independent physical
@@ -86,14 +97,14 @@ power and saved-state semantics.
 
 ## Qualification boundaries
 
-The current fixtures have separate local ClickHouse instances, no replicated
-analytics store and no stable HA client endpoint. Tests explicitly discovered the
-active node; they do not prove transparent browser or sensor endpoint failover.
+The current fixtures have separate local ClickHouse instances and no replicated
+analytics store. The fixed HTTPS endpoint has passed an authenticated API power
+loss test; full browser, WebSocket and sensor reconnection qualification remains.
 Local dependency failure stops admission but does not yet automatically migrate
-the database role. The tested HTTP incident path still uses its existing
-post-commit notification send, so that run does not close the crash window between
-incident commit and enqueue. The existing transactional outbox covers migrated
-metric producers only.
+the database role. Device/service transitions and flap settlement now enqueue
+within the incident transaction, alongside migrated metric producers. The
+explicit post-enqueue power-loss test covers that crash boundary. Escalations,
+digests, reports and other legacy producers still require separate qualification.
 
 Independent critical-site cells, sender delegation, administrator-ordered remote
 notification failover, local-safety versus strict policy, independent provider

@@ -21,12 +21,12 @@ def gate(tmp_path,monkeypatch):
         s=original(p,*a,**kw)
         return SimpleNamespace(st_mode=s.st_mode,st_uid=0)
     monkeypatch.setattr(Path,'stat',stat)
-    state=SimpleNamespace(owner='a',system_id=cfg['system_identifier'],states='inactive\ninactive',receipt='off',requests=[])
+    state=SimpleNamespace(owner='a',system_id=cfg['system_identifier'],states='inactive\ninactive\ninactive',receipt='off',requests=[])
     def run(args,**kw):
         if args[:2]==['systemctl','list-unit-files']:
-            out='zenplus-api.service disabled\nzenplus-poller.service disabled'
+            out='zenplus-api.service disabled\nzenplus-poller.service disabled\nzenplus-ncm-backup.timer disabled'
         elif args[:2]==['systemctl','show']:
-            out=state.states if 'ActiveState' in args else 'MainPID=0\nControlGroup=\n'
+            out=state.states if 'ActiveState' in args else ('' if args[2].endswith('.timer') else 'MainPID=0\nControlGroup=\n')
         elif args[0]=='/usr/bin/psql':out=state.system_id+'\n'+state.owner+'|00000000-0000-0000-0000-000000000001\n'
         else:
             r=json.loads(kw['input']);state.requests.append(r)

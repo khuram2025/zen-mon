@@ -31,7 +31,7 @@ def run(config):
     for unit in present:
         output=subprocess.run(['systemctl','show',unit,'-p','MainPID','-p','ControlGroup'],capture_output=True,text=True,timeout=5,check=True).stdout
         values=dict(line.split('=',1) for line in output.splitlines() if '=' in line)
-        if values.get('MainPID')!='0':raise RuntimeError('Local consumer process remains')
+        if unit.endswith('.service') and values.get('MainPID')!='0':raise RuntimeError('Local consumer process remains')
         group=values.get('ControlGroup')
         if group:
             for item in (Path('/sys/fs/cgroup')/group.lstrip('/')).rglob('cgroup.procs'):
