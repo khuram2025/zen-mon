@@ -560,7 +560,12 @@ func runCollection(ctx context.Context, cfg config.Config, paths runtime.Paths, 
 	timeout := config.Duration(cfg.CollectorTimeoutSeconds, 20*time.Second)
 	collectCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result := collectors.Collect(collectCtx, cfg)
+	cursors, cursorErr := store.EventCursors()
+	if cursorErr != nil {
+		logf("event cursor state unavailable: %v", cursorErr)
+		return
+	}
+	result := collectors.CollectWithEventCursors(collectCtx, cfg, cursors)
 	now := time.Now().UTC()
 	st, _ := store.Stats()
 	health := model.Health{
@@ -610,13 +615,21 @@ func runCollection(ctx context.Context, cfg config.Config, paths runtime.Paths, 
 		logf("collection payload too large: %d bytes", len(payload))
 		return
 	}
-	if _, err := store.Enqueue(batch.BatchID, payload, cfg.Spool.MaxBytes); err != nil {
+	if result.EventCursors != nil {
+		cursors = result.EventCursors
+	}
+	if _, err := store.EnqueueWithEventCursors(batch.BatchID, payload, cfg.Spool.MaxBytes, cursors); err != nil {
 		logf("spool enqueue failed: %v", err)
 		return
 	}
 	status.LastCollection = &now
 	status.CollectorErrors = result.Errors
-	_ = store.Prune(time.Duration(cfg.Spool.MaxAgeHours)*time.Hour, cfg.Spool.MaxBytes)
+	// Detail checkpoints promise that queued events survive until acknowledgement.
+	// Capacity is bounded by rejecting new collection, rather than expiring data
+	// behind a checkpoint during an extended controller outage.
+	if !cfg.Collectors.EventLog.DetailsEnabled {
+		_ = store.Prune(time.Duration(cfg.Spool.MaxAgeHours)*time.Hour, cfg.Spool.MaxBytes)
+	}
 	st, _ = store.Stats()
 	status.QueueDepth = st.Depth
 	status.SpoolBytes = st.Bytes

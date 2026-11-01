@@ -959,6 +959,65 @@ async def server_network(
     return {"items": [dict(r) for r in rows]}
 
 
+async def _require_event_server(db, server_id, user):
+    head = (await db.execute(text("SELECT tags FROM servers WHERE id=:sid"), {"sid":server_id})).mappings().first()
+    if not head or not scoping.entity_visible(head["tags"], await scoping.visible_tags(db,user)):
+        raise HTTPException(404,"Server not found")
+
+
+def _event_window(hours, from_, to):
+    if (from_ is None) != (to is None):
+        raise HTTPException(422,"Provide both from and to")
+    end = (to.replace(tzinfo=timezone.utc) if to and to.tzinfo is None else to) or datetime.now(timezone.utc)
+    start = (from_.replace(tzinfo=timezone.utc) if from_ and from_.tzinfo is None else from_) or end-timedelta(hours=hours)
+    if start>=end or end-start>timedelta(days=31):
+        raise HTTPException(422,"Event window must be positive and at most 31 days")
+    return start,end
+
+
+@router.get("/{server_id}/event-groups")
+async def server_event_groups(server_id: UUID, hours: int=Query(24,ge=1,le=744),
+    from_: Optional[datetime]=Query(None,alias="from"),to: Optional[datetime]=None,
+    level: Optional[str]=Query(None,pattern="^(critical|error|warning|information|verbose|audit)$"),
+    channel: Optional[str]=Query(None,max_length=128),search: str=Query("",max_length=256),
+    limit: int=Query(50,ge=1,le=100),offset: int=Query(0,ge=0,le=100000),
+    db: AsyncSession=Depends(get_db),user: User=Depends(get_current_user)):
+    await _require_event_server(db,server_id,user)
+    start,end=_event_window(hours,from_,to)
+    from app.core.database import get_ch_client
+    from app.services.server_event_service import query_groups
+    try:
+        result=await asyncio.to_thread(lambda:query_groups(get_ch_client(),str(server_id),start,end,
+            level=level,channel=channel,search=search,limit=limit,offset=offset))
+    except Exception as exc:
+        logger.warning("grouped event query failed: %s",type(exc).__name__)
+        raise HTTPException(503,"Event detail store unavailable") from exc
+    state=(await db.execute(text("SELECT checked_at,received_at,gap_at,status FROM server_event_collection WHERE server_id=:sid"),
+                            {"sid":server_id})).mappings().first()
+    agent=(await db.execute(text("SELECT version,platform,capabilities FROM agents WHERE server_id=:sid AND status<>'disabled' ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1"),
+                            {"sid":server_id})).mappings().first()
+    result.update({"collection":dict(state) if state else None,"agent_version":agent["version"] if agent else None,
+                   "details_capable":bool(agent and agent["platform"]=="windows" and "event_details_v1" in (agent["capabilities"] or [])),
+                   "from":start,"to":end})
+    return result
+
+
+@router.get("/{server_id}/event-groups/{group_key}")
+async def server_event_occurrences(server_id: UUID,group_key: str,hours: int=Query(24,ge=1,le=744),
+    from_: Optional[datetime]=Query(None,alias="from"),to: Optional[datetime]=None,
+    limit: int=Query(25,ge=1,le=100),offset: int=Query(0,ge=0,le=100000),
+    db: AsyncSession=Depends(get_db),user: User=Depends(get_current_user)):
+    await _require_event_server(db,server_id,user)
+    if not re.fullmatch(r"[a-f0-9]{64}",group_key):raise HTTPException(422,"Invalid event group")
+    start,end=_event_window(hours,from_,to)
+    from app.core.database import get_ch_client
+    from app.services.server_event_service import query_occurrences
+    try:
+        return await asyncio.to_thread(lambda:query_occurrences(get_ch_client(),str(server_id),group_key,start,end,limit,offset))
+    except Exception as exc:
+        raise HTTPException(503,"Event detail store unavailable") from exc
+
+
 @router.get("/{server_id}/events")
 async def server_events(
     server_id: UUID,
@@ -2384,6 +2443,10 @@ async def create_policy(
     user: User = Depends(require_permission("servers.manage")),
 ):
     event_log_filters = _event_log_filters_or_422(data.event_log_filters)
+    try:
+        event_log_policy.validated_limits(data.cardinality_limits)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     row = (await db.execute(
         text("""INSERT INTO agent_policies
                   (name, description, platform, metric_interval_s, upload_interval_s, process_top_n,
@@ -2457,6 +2520,11 @@ async def update_policy(
         if v is not None:
             if field == "event_log_filters":
                 v = _event_log_filters_or_422(v)
+            if field == "cardinality_limits":
+                try:
+                    event_log_policy.validated_limits(v)
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from exc
             sets.append(f"{field} = :{field}")
             params[field] = json.dumps(v)
     if not sets:
