@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 LEVELS = {"critical", "error", "warning", "information", "verbose", "audit"}
+CHANNEL_NAMES = {c.casefold():c for c in ("System", "Application", "Security", "Directory Service", "DNS Server", "DFS Replication")}
 EVENT_COLUMNS = ["server_id", "agent_id", "timestamp", "received_at", "event_uid", "group_key",
                  "log_name", "provider", "event_id", "record_id", "level", "component", "message",
                  "fields", "message_truncated"]
@@ -32,10 +33,10 @@ def normalize(row: dict) -> dict:
         raise ValueError("event time is outside the supported range")
     record = int(row.get("record_id") or 0)
     event_id = int(row.get("event_id") or 0)
-    if not 0 < record < 2**64 or not 0 < event_id < 2**31:
+    if not 0 < record < 2**64 or not 0 <= event_id < 2**31:
         raise ValueError("event identifiers are invalid")
     channel = str(row.get("log_name") or "")[:128]
-    channel = {c.casefold():c for c in ("System","Application","Security","Directory Service","DNS Server","DFS Replication")}.get(channel.casefold(),channel.casefold())
+    channel = CHANNEL_NAMES.get(channel.casefold(),channel.casefold())
     provider = str(row.get("provider") or "")[:256]
     if not channel or not provider:
         raise ValueError("event channel and provider are required")

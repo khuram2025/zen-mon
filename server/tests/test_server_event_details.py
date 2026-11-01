@@ -37,6 +37,10 @@ def test_reused_record_id_after_log_clear_has_new_identity():
     assert events.normalize(event(event_time=now))["event_uid"] != events.normalize(event(event_time=now-timedelta(hours=1)))["event_uid"]
 
 
+def test_classic_provider_event_id_zero_is_valid():
+    assert events.normalize(event(event_id=0))["event_id"] == 0
+
+
 def test_source_is_required_for_lifecycle_classification():
     assert events.lifecycle_kind(events.normalize(event(event_id=41))) is None
     assert events.lifecycle_kind(events.normalize(event(provider="Microsoft-Windows-Kernel-Power",event_id=41))) == "unexpected_restart"
