@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.apm import authenticate_ingest_key
 from app.core.database import get_ch_client, get_db
 from app.services import storage_backpressure
+from app.services import apm_ingest_journal
 from app.core.security import require_permission
 
 logger = logging.getLogger("zenplus.apm.ingest")
@@ -178,6 +179,8 @@ def runtime_status(*, checked_at: datetime | None = None) -> dict:
         "state": state,
         "managed_by": "appliance",
         "ingest_path": "/v1/traces",
+        "admission": "postgresql_journal" if apm_ingest_journal.configured() else "analytics_commit",
+        "analytics_visibility": "asynchronous" if apm_ingest_journal.configured() else "after_commit",
         "queue_depth": queue_depth,
         "queue_capacity": QUEUE_MAXSIZE,
         "accepted_spans_total": max(0, int(STATS["accepted_spans"])),
@@ -532,6 +535,7 @@ async def _writer_loop() -> None:
 
 async def start_batch_writer() -> None:
     global _queue, _writer_task
+    apm_ingest_journal.validate_configuration()
     if _writer_task is not None:
         return
     _queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
@@ -589,7 +593,27 @@ async def otlp_traces(
 
     span_rows, res_rows, exc_rows, rejected, skewed = decode_otlp_traces_json(payload, key.get("env_name"))
 
-    if span_rows:
+    if span_rows and apm_ingest_journal.configured():
+        from app.core.database import engine
+        from app.services.host_ingest_journal import JournalLimitExceeded
+        try:
+            await asyncio.wait_for(apm_ingest_journal.admit(
+                engine, key['id'], raw, span_rows, res_rows, exc_rows),
+                timeout=INGEST_COMMIT_TIMEOUT_S)
+        except JournalLimitExceeded as exc:
+            raise HTTPException(413, 'APM journal batch limit exceeded; reduce exporter batch size') from exc
+        except ValueError as exc:
+            raise HTTPException(400, 'Invalid immutable APM span identities or telemetry values') from exc
+        except Exception as exc:
+            logger.warning('APM journal admission deferred (%s)', type(exc).__name__)
+            raise HTTPException(503, 'APM durable admission unavailable; retry shortly',
+                                headers={'Retry-After': '1'}) from exc
+        _last_received_at = datetime.now(timezone.utc)
+        STATS['accepted_spans'] += len(span_rows)
+        STATS['flushes'] += 1
+        _PENDING_STATS['accepted'] += len(span_rows)
+        _PENDING_STATS['flushes'] += 1
+    elif span_rows:
         if _queue is None:
             raise HTTPException(503, "APM ingest not ready")
         try:
