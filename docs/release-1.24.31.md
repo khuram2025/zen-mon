@@ -1,4 +1,4 @@
-# ZenPlus 1.24.30 — Servers that go down now page
+# ZenPlus 1.24.31 — Servers that go down now page
 
 A Windows server monitored only by its agent went down for about 80 minutes overnight and nobody was paged. "Device Down" only watched ping-monitored devices, and the "Agent offline" alert raised 10 minutes later had no rule, so it had no email channel and no escalation policy.
 
@@ -11,3 +11,9 @@ A Windows server monitored only by its agent went down for about 80 minutes over
 Schema: migration 168 adds the `host_agent_offline` metric and seeds the Agent offline rule.
 
 Appliance-only release, minimum version 1.23.9.
+
+## Security
+
+- **Dashboard dependency update.** `follow-redirects` (used by `axios`) is updated from 1.16.1 to 1.16.2 for a high-severity advisory (GHSA-mrwp-f3q8-3g9p): custom credentials could follow redirects. Only the lockfile changes.
+
+Version 1.24.30 was tagged but never built or published; its changes ship in this release.
