@@ -951,7 +951,7 @@ export function DevicesPage() {
               >
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
                 <span>
-                  Showing the {coverage.text} devices that match{statusFilter || locationFilter ? ' the other filters' : ''}, in name order. Narrow the list with the search or a filter to see the others.
+                  Showing the {coverage.text} devices that match{statusFilter || locationFilter ? ' the other filters' : ''}, in the current sort order. Narrow the list with the search or a filter to see the others.
                   {(statusFilter || locationFilter) && ' The status and location filters are applied to these devices only.'}
                   {!serverMenus && ' With a status or location filter on, the Vendor and OS version menus count only the devices shown here.'}
                 </span>

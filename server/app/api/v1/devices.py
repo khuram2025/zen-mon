@@ -151,7 +151,10 @@ async def list_devices(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """The devices the caller may see, 50 per page (at most 200), ordered by hostname.
+    """The devices the caller may see, 50 per page (at most 200), with stable ordering before paging.
+
+    Automatic ordering prefers exact/prefix identity matches, then natural names
+    or numeric IPs for an IP query. An explicit sort column overrides match order.
 
     Identity filters ``vendor``, ``model`` and ``os_version`` (Inventory & Compliance). They are exact, case-insensitive,
     trimmed (``%`` and ``_`` are literal), narrow what the tag scope already allows and are ignored when blank.
