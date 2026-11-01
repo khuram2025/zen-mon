@@ -38,6 +38,7 @@ from app.core.security import get_current_user
 from app.services import geoip
 from app.services.rum_routes import apply_route_rules, rules_from_options
 from app.services import rum_symbolicate
+from app.services import rum_ingest_journal
 from app.core.security import require_permission
 
 router = APIRouter(tags=["APM RUM"])
@@ -825,6 +826,39 @@ async def _ingest_rum(request: Request, db: AsyncSession):
     # Validate timestamps and construct every row before reserving event IDs.
     # A single bad event must never make valid retry IDs look accepted.
     prepared = {id(event): _row(event, key, request) for event in events}
+    if rum_ingest_journal.configured():
+        from app.core.database import engine
+        from app.services import storage_backpressure
+        from app.services.host_ingest_journal import JournalLimitExceeded
+        storage_backpressure.raise_if_paused('Browser RUM')
+        identities = [_dedupe_identity(key['id'], event) for event in events]
+        rows = [prepared[id(event)] for event in events]
+        for identity, row in zip(identities, rows, strict=True):
+            row[-1] = hashlib.sha256(identity.encode()).hexdigest()
+        try:
+            fresh_hashes = await asyncio.wait_for(
+                rum_ingest_journal.admit(engine, identities, rows), timeout=20)
+        except JournalLimitExceeded as exc:
+            raise HTTPException(413, 'RUM journal batch limit exceeded') from exc
+        except ValueError as exc:
+            raise HTTPException(400, 'Invalid immutable RUM journal operation') from exc
+        except Exception as exc:
+            _HEALTH['storage_errors'] += len(events)
+            raise HTTPException(503, 'RUM durable admission unavailable; retry shortly',
+                                headers={'Retry-After': '1'}) from exc
+        remaining = set(fresh_hashes); fresh = []
+        for event, identity in zip(events, identities, strict=True):
+            digest = hashlib.sha256(identity.encode()).digest()
+            if digest in remaining:
+                fresh.append(event); remaining.remove(digest)
+        duplicates = len(events)-len(fresh)
+        _HEALTH['accepted'] += len(fresh); _HEALTH['duplicates'] += duplicates
+        _HEALTH['batches'] += 1
+        _HEALTH_META['last_event_at'] = datetime.now(timezone.utc)
+        _HEALTH_META['sdk_versions'].update(event.sdk_version or 'legacy' for event in fresh)
+        return Response(status_code=202, headers={**_cors(origin),
+            'X-RUM-Accepted': str(len(fresh)), 'X-RUM-Duplicate': str(duplicates),
+            'X-RUM-Admission': 'durable-journal'})
     fresh = await _dedupe(key["id"], events)
     duplicates = len(events) - len(fresh)
     _HEALTH["duplicates"] += duplicates

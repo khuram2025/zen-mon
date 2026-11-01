@@ -152,10 +152,15 @@ class HostIngestJournal:
         Replays reuse the first payload even if clock correction is recomputed.
         A client must never reuse that identity for a different logical upload.
         """
+        ids, _ = await self.stage_with_receipts(table, columns, members)
+        return ids
+
+    async def stage_with_receipts(self, table, columns, members):
+        """Return admitted block IDs and freshly committed member hashes."""
         async with self._locked(table) as conn:
-            ids = await self._stage(conn, table, columns, members)
+            ids, fresh = await self._stage(conn, table, columns, members)
             await conn.commit()  # Must precede every possible external write.
-            return ids
+            return ids, frozenset(fresh)
 
     async def stage_many(self, blocks):
         """Admit a bounded related table set in one PostgreSQL transaction.
@@ -175,7 +180,7 @@ class HostIngestJournal:
                     raise JournalUnavailable('journal table is busy; retry upload')
             result = {}
             for table, columns, members in blocks:
-                result[table] = await self._stage(conn, table, columns, members)
+                result[table], _ = await self._stage(conn, table, columns, members)
             return result
 
     async def _stage(self, conn, table, columns, members):
@@ -215,7 +220,7 @@ class HostIngestJournal:
                     receipts=receipts+:count WHERE singleton
             '''), {'bytes': payload_bytes, 'count': len(fresh)})
             identities.update({token: batch_id for token in fresh})
-        return sorted(set(identities.values()))
+        return sorted(set(identities.values())), fresh
 
     async def drain(self, table, *, limit=8):
         async with self._locked(table) as conn:
@@ -298,7 +303,13 @@ class HostIngestJournal:
 async def recovery_loop():
     from app.core.database import engine, get_clickhouse_client
     from app.services.host_insert_batcher import HostInsertBatcher
-    journal = HostIngestJournal(engine, HostInsertBatcher(get_clickhouse_client)._write)
+    from app.services import rum_ingest_journal
+    ordinary_write = HostInsertBatcher(get_clickhouse_client)._write
+    def writer(table, columns, rows, token):
+        if table == rum_ingest_journal.WORK_KIND:
+            return rum_ingest_journal.write(get_clickhouse_client, columns, rows, token)
+        return ordinary_write(table, columns, rows, token)
+    journal = HostIngestJournal(engine, writer)
     while True:
         try:
             from app.core.controller_admission import permitted
