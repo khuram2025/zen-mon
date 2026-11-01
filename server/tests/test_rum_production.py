@@ -21,6 +21,13 @@ from app.api.v1.rum_sdk import RUM_SDK
 from app.main import _DynamicRumCORSMiddleware
 
 
+def _recent(days_ago: float, plus_hours: float = 0) -> str:
+    """An ISO bound relative to today. Fixed calendar dates age past the
+    90-day retention guard and start failing by themselves."""
+    base = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (base - timedelta(days=days_ago) + timedelta(hours=plus_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _request(body: bytes = b"{}", *, origin: str = "https://portal.example.com",
              user_agent: str = "Mozilla/5.0 Chrome/126.0.0.0") -> Request:
     sent = False
@@ -784,10 +791,10 @@ def test_windows_resolve_presets_custom_bounds_and_previous_period():
     prev = preset.previous()
     assert prev.to == preset.frm and abs(prev.seconds - preset.seconds) < 1
 
-    custom = rum._resolve_window("custom", "2026-09-01T00:00:00Z", "2026-09-01T06:00:00Z")
+    custom = rum._resolve_window("custom", _recent(60), _recent(60, 6))
     assert custom.range == "custom" and custom.seconds == 6 * 3600 and custom.bucket_seconds == 900
     assert not custom.rollup
-    long = rum._resolve_window("custom", "2026-08-01T00:00:00Z", "2026-08-31T00:00:00Z")
+    long = rum._resolve_window("custom", _recent(60), _recent(30))
     assert long.rollup and long.bucket_seconds == 86400
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - 60_000
     epoch = rum._resolve_window("7d", str(end_ms - 6 * 3_600_000), str(end_ms))   # epoch ms wins over the preset
@@ -795,9 +802,9 @@ def test_windows_resolve_presets_custom_bounds_and_previous_period():
     with pytest.raises(HTTPException):
         rum._resolve_window("custom")                       # needs both bounds
     with pytest.raises(HTTPException):
-        rum._resolve_window("custom", "2026-09-02T00:00:00Z", "2026-09-01T00:00:00Z")
+        rum._resolve_window("custom", _recent(59), _recent(60))
     with pytest.raises(HTTPException):
-        rum._resolve_window("custom", "2026-05-01T00:00:00Z", "2026-08-30T00:00:00Z")   # > 90 days
+        rum._resolve_window("custom", _recent(150), _recent(30))   # > 90 days
     # FastAPI FieldInfo defaults (direct calls) are treated as "not supplied".
     from fastapi import Query
     assert rum._resolve_window("24h", Query(default=None), Query(default=None)).range == "24h"
@@ -1006,8 +1013,8 @@ def test_retention_is_parsed_from_table_ttl_and_drives_coverage(monkeypatch, upt
     assert coverage["raw_retention_days"] == 21 and coverage["rollup_retention_days"] == 180
     assert "21 days" in coverage["message"]
     # A custom window longer than the raw retention reads the rollup.
-    long = rum._resolve_window("custom", "2026-08-01T00:00:00Z", "2026-08-25T00:00:00Z")
+    long = rum._resolve_window("custom", _recent(40), _recent(16))
     assert long.rollup is True
-    short = rum._resolve_window("custom", "2026-08-10T00:00:00Z", "2026-08-25T00:00:00Z")
+    short = rum._resolve_window("custom", _recent(31), _recent(16))
     assert short.rollup is False
     rum._RETENTION_CACHE.update({"raw": 14, "rollup": 90, "loaded": 0.0})
