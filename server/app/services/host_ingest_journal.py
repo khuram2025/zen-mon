@@ -9,7 +9,8 @@ pruned, old uncertain writes are held, and capacity exhaustion returns an error
 to the producer spool. Commissioning must qualify the ClickHouse deduplication
 window and forbid other writers to these tables. It is not an unlimited
 exactly-once contract. The commissioned Go poller can stage its supported
-analytics batches here; APM and flow producers remain outside this contract.
+analytics batches here. Opt-in APM, RUM and flow handoffs use the same recovery
+loop; each producer has its own identity and acknowledgement boundary.
 """
 from __future__ import annotations
 

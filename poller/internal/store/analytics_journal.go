@@ -27,16 +27,22 @@ type analyticsBatch interface {
 	Send() error
 	Abort() error
 }
+
+// AnalyticsBatch and AnalyticsBatchStager expose the bounded handoff to the
+// native flow collector. They do not perform a ClickHouse write.
+type AnalyticsBatch = analyticsBatch
+type AnalyticsBatchStager = batchStager
 type batchStager interface {
 	StageAnalytics(context.Context, string, string, []byte) error
 }
 type journalBatch struct {
-	ctx     context.Context
-	table   string
-	columns []string
-	rows    []any
-	stage   batchStager
-	aborted bool
+	ctx      context.Context
+	table    string
+	columns  []string
+	rows     []any
+	stage    batchStager
+	aborted  bool
+	identity string
 }
 
 var journalInsert = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+([a-z_][a-z0-9_]*)\s*\(([^)]+)\)\s*$`)
@@ -53,11 +59,24 @@ func (s *ClickHouseStore) prepareBatch(ctx context.Context, sql string) (analyti
 	if s.journal == nil {
 		return s.conn.PrepareBatch(ctx, sql)
 	}
+	return prepareJournalBatch(ctx, s.journal, sql, "", map[string]bool{"ping_metrics": true, "service_metrics": true, "snmp_metrics": true, "snmp_if_metrics": true, "snmp_traps": true, "device_status_log": true, "service_status_log": true})
+}
+
+// NewFlowJournalBatch accepts only the collector's five static insert targets.
+// A supplied identity freezes the first payload even if a retry is reconstructed.
+// Registries without a batch identity use their complete immutable content.
+func NewFlowJournalBatch(ctx context.Context, stage AnalyticsBatchStager, sql, identity string) (AnalyticsBatch, error) {
+	if stage == nil {
+		return nil, fmt.Errorf("flow journal storage unavailable")
+	}
+	return prepareJournalBatch(ctx, stage, sql, identity, map[string]bool{"flow_records": true, "flow_collector_stats": true, "flow_templates": true, "flow_app_names": true, "flow_if_counters": true})
+}
+
+func prepareJournalBatch(ctx context.Context, stage batchStager, sql, identity string, allowed map[string]bool) (analyticsBatch, error) {
 	match := journalInsert.FindStringSubmatch(sql)
 	if match == nil {
 		return nil, fmt.Errorf("unsupported journal insert")
 	}
-	allowed := map[string]bool{"ping_metrics": true, "service_metrics": true, "snmp_metrics": true, "snmp_if_metrics": true, "snmp_traps": true, "device_status_log": true, "service_status_log": true}
 	if !allowed[match[1]] {
 		return nil, fmt.Errorf("unsupported journal table")
 	}
@@ -68,7 +87,7 @@ func (s *ClickHouseStore) prepareBatch(ctx context.Context, sql string) (analyti
 			return nil, fmt.Errorf("invalid journal column")
 		}
 	}
-	return &journalBatch{ctx: ctx, table: match[1], columns: columns, stage: s.journal}, nil
+	return &journalBatch{ctx: ctx, table: match[1], columns: columns, stage: stage, identity: identity}, nil
 }
 
 func journalValue(v any) (any, error) {
@@ -91,6 +110,16 @@ func journalValue(v any) (any, error) {
 		return journalValue(r.Elem().Interface())
 	}
 	switch r.Kind() {
+	case reflect.Slice, reflect.Array:
+		items := make([]any, r.Len())
+		for i := 0; i < r.Len(); i++ {
+			encoded, err := journalValue(r.Index(i).Interface())
+			if err != nil {
+				return nil, err
+			}
+			items[i] = encoded
+		}
+		return []any{"list", items}, nil
 	case reflect.String, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32, reflect.Float64:
 		return []any{"scalar", v}, nil
 	}
@@ -130,6 +159,10 @@ func (b *journalBatch) Send() error {
 	}
 	digest := sha256.Sum256(append(append([]byte(b.table), 0), raw...))
 	token := "poller-journal-v1-" + hex.EncodeToString(digest[:])
+	if b.identity != "" {
+		identityHash := sha256.Sum256([]byte(b.table + "\x00" + b.identity))
+		token = "flow-journal-v1-" + hex.EncodeToString(identityHash[:])
+	}
 	var compressed bytes.Buffer
 	z := zlib.NewWriter(&compressed)
 	if _, err = z.Write(raw); err != nil {
