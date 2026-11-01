@@ -91,6 +91,22 @@ assert.equal(S.serverRuleCondition({ metric: 'host_process_down', target: 'nginx
 assert.equal(S.serverAutoReset('gt', 90), 88)
 assert.equal(S.serverAutoReset('<', 10), 12)
 
+// Lifecycle closing notices are optional; the selected value must survive Save and Duplicate.
+for (const metric of ['host_restart', 'host_shutdown']) {
+  const life = W.ruleToState({ ...seeded, metric, recovery_alert: false })
+  assert.equal(S.serverRulePayload(life).recovery_alert, false)
+  assert.equal(S.serverRulePayload({ ...life, reset_mode: 'auto' }).recovery_alert, true)
+  assert.equal(S.serverRuleCopy({ ...seeded, metric, recovery_alert: true }).recovery_alert, true)
+}
+const zero = { ...W.ruleToState({ ...seeded, metric: 'host_cpu_pct', threshold: 0, operator: 'eq', min_duration: 0 }) }
+const memory = S.serverWatchChange(zero, 'host_memory_pct')
+assert.equal(memory.conditions[0].threshold, 0, 'changing percent metrics preserves a valid zero threshold')
+assert.equal(memory.conditions[0].operator, '==', 'changing percent metrics preserves equality')
+assert.equal(memory.min_duration, 0, 'changing percent metrics preserves an immediate hold')
+const shutdown = S.serverWatchChange(zero, 'host_shutdown')
+assert.equal(shutdown.reset_mode, 'none', 'new lifecycle notices default to silent closing')
+assert.equal(S.serverWatchChange({ ...zero, ...shutdown, reset_mode: 'auto' }, 'host_restart').reset_mode, 'auto')
+
 // Duplicate copies a server rule through the server API, disabled.
 const copy = S.serverRuleCopy({ ...seeded, conditions: null })
 assert.equal(copy.name, 'Agent offline (copy)'); assert.equal(copy.enabled, false); assert.equal(copy.metric, 'host_agent_offline')

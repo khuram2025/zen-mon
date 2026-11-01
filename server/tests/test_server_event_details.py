@@ -149,6 +149,37 @@ async def test_shutdown_and_restart_have_separate_rules(world):
     assert len(world.sent)==1 and world.sent[0]["rule_name"]=="host_shutdown"
 
 
+@pytest.mark.parametrize('metric,event_id', [('host_restart',12),('host_shutdown',13)])
+@pytest.mark.asyncio
+async def test_optional_lifecycle_closing_notice_is_not_a_power_or_health_confirmation(world,metric,event_id):
+    now=datetime.now(timezone.utc).timestamp()
+    sid=add_server(world,'closing-notice',heartbeat=now)
+    aid=str(world.db.scalar('SELECT id FROM agents WHERE server_id=$1',sid))
+    add_rule(world,metric,recovery=True)
+    async with session(world.db) as db:
+        await events.ingest_state(db,sid,aid,[event(provider='Microsoft-Windows-Kernel-General',event_id=event_id)],None)
+        await db.commit()
+    await run(world,now+1)
+    await run(world,now+1000)
+    assert len(incidents(world,sid))==1 and incidents(world,sid)[0].status=='resolved'
+    assert len(world.sent)==2 and world.sent[1]['is_recovery'] is True
+    assert 'observation window' in world.sent[1]['body']
+    assert 'does not confirm its current power or health state' in world.sent[1]['body']
+
+
+@pytest.mark.parametrize('metric',['host_restart','host_shutdown'])
+def test_lifecycle_closing_notification_choice_round_trips_through_the_api(world,metric):
+    with api_client(world.db,role='admin',persist_user=True,username='lifecycle-rule-admin') as client:
+        response=client.post('/api/v1/host-alert-rules',json={'name':metric,'metric':metric,'enabled':False,'recovery_alert':False})
+        assert response.status_code in (200,201),response.text
+        rid=response.json()['id']
+        for enabled in (True,False):
+            updated=client.put(f'/api/v1/host-alert-rules/{rid}',json={'recovery_alert':enabled})
+            assert updated.status_code==200,updated.text
+            assert updated.json()['recovery_alert'] is enabled
+            assert world.db.scalar('SELECT recovery_alert FROM alert_rules WHERE id=$1',rid) is enabled
+
+
 @pytest.mark.asyncio
 async def test_maintenance_restart_stays_quiet_after_maintenance_ends(world):
     now=datetime.now(timezone.utc).timestamp()

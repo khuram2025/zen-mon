@@ -2,13 +2,12 @@
  * Alert rule wizard — properties, trigger, reset, scope, trigger actions,
  * escalation, reset actions, schedule, and review.
  */
-import { FormEvent, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
+import { FormEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Bell,
   Check,
   CheckCircle2,
-  ChevronLeft,
   ChevronRight,
   ChevronsUp,
   Clock,
@@ -39,6 +38,7 @@ import {
   SelectValue,
 } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
+import { AlertWizardFooter, isExplicitWizardSave } from './AlertWizardFooter'
 import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
 import { NetflowConditionFields, NetflowDryRun, NetflowScopeFields } from './NetflowAlertFields'
 import {
@@ -61,6 +61,7 @@ import {
   serverMetricKind,
   serverRuleCondition,
   serverRulePayload,
+  serverWatchChange,
 } from './serverAlertRule'
 import { usePolicies } from '@/features/escalation/api'
 import {
@@ -514,6 +515,7 @@ export function AlertRuleWizardDialog({
   const flapHold = flapHoldApplies(s)
   const isServer = s.source === 'server'
   const serverKind = isServer ? serverMetricKind(s.conditions[0]?.metric) : null
+  const isLifecycle = isServer && serverKind === 'event'
   const nfErrors = useMemo(() => (s.source === 'netflow' ? validateNetflowForm(s.nf) : {}), [s.source, s.nf])
 
   // Which default wording this rule's notifications are built from. Service
@@ -623,7 +625,7 @@ export function AlertRuleWizardDialog({
     (rumScopeRows?.items || []).map((item: any) => `${item.application_id} @ ${item.env || 'unknown'}`),
   ))
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return
     setStep('properties')
     setPreview(null)
@@ -785,8 +787,9 @@ export function AlertRuleWizardDialog({
     return { condText }
   }, [s])
 
-  function submit(e?: FormEvent) {
-    e?.preventDefault()
+  function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    if (!isExplicitWizardSave(stepIdx, STEPS.length, save.isPending, (e.nativeEvent as SubmitEvent).submitter)) return
     if (!s.name.trim()) {
       toast.error('Name required')
       setStep('properties')
@@ -881,7 +884,8 @@ export function AlertRuleWizardDialog({
     if (!panel || !panel.contains(e.target as Node)) return
     if (e.key === 'Escape') {
       e.stopPropagation()
-      onOpenChange(false)
+      e.preventDefault()
+      if (!save.isPending) onOpenChange(false)
       return
     }
     if (e.key !== 'Tab') return
@@ -902,13 +906,14 @@ export function AlertRuleWizardDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" aria-hidden onClick={() => onOpenChange(false)} />
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" aria-hidden onClick={() => { if (!save.isPending) onOpenChange(false) }} />
       <div
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descId}
+        aria-busy={save.isPending}
         tabIndex={-1}
         onKeyDown={onPanelKeyDown}
         className="relative ml-auto flex h-full w-full max-w-3xl flex-col border-l border-border bg-surface shadow-2xl focus:outline-none"
@@ -919,7 +924,7 @@ export function AlertRuleWizardDialog({
             <h2 id={titleId} className="text-lg font-semibold">{isEdit ? 'Edit Alert' : 'Create Alert'}</h2>
             <p id={descId} className="text-xs text-muted">Alert wizard — step {stepIdx + 1} of {STEPS.length}</p>
           </div>
-          <button type="button" aria-label="Close the alert wizard" onClick={() => onOpenChange(false)} className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-text">
+          <button type="button" aria-label="Close the alert wizard" disabled={save.isPending} onClick={() => onOpenChange(false)} className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-text disabled:opacity-50">
             <X className="h-5 w-5" aria-hidden />
           </button>
         </div>
@@ -935,6 +940,7 @@ export function AlertRuleWizardDialog({
                 <button
                   key={st.id}
                   type="button"
+                  disabled={save.isPending}
                   onClick={() => setStep(st.id)}
                   className={cn(
                     'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors',
@@ -1170,13 +1176,7 @@ export function AlertRuleWizardDialog({
                     <div className="space-y-3 rounded-lg border border-border/60 bg-surface2/30 p-3">
                       <div className={cn('grid gap-2', serverKind === 'pct' ? 'grid-cols-3' : 'grid-cols-1')}>
                         <FormField label="Watch">
-                          <Select value={c.metric} onValueChange={(v) => setS({
-                            ...s,
-                            target: '',
-                            // Agent offline's hold is the heartbeat silence; 0 keeps the 3-minute default.
-                            min_duration: serverMetricKind(v) === 'flag' ? 0 : serverMetricKind(v) === 'pct' ? (s.min_duration || 300) : 0,
-                            conditions: [{ metric: v, operator: c.operator === '==' ? '>' : c.operator, threshold: serverMetricKind(v) === 'pct' ? (c.threshold || 90) : 0, reset_threshold: null }],
-                          })}>
+                          <Select value={c.metric} onValueChange={(v) => setS({ ...s, ...serverWatchChange(s, v) })}>
                             <SelectTrigger><SelectValue /></SelectTrigger>
                             <SelectContent>
                               {SERVER_METRICS.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
@@ -1189,7 +1189,7 @@ export function AlertRuleWizardDialog({
                               <Select value={c.operator} onValueChange={(v) => updateCond(0, { operator: v })}>
                                 <SelectTrigger><SelectValue /></SelectTrigger>
                                 <SelectContent>
-                                  {['>', '>=', '<', '<='].map((op) => <SelectItem key={op} value={op}>{op}</SelectItem>)}
+                                  {['>', '>=', '<', '<=', '==', '!='].map((op) => <SelectItem key={op} value={op}>{op}</SelectItem>)}
                                 </SelectContent>
                               </Select>
                             </FormField>
@@ -1313,11 +1313,18 @@ export function AlertRuleWizardDialog({
 
             {step === 'reset' && (
               <div className="space-y-4">
-                <SectionTitle title="Reset Conditions" hint="When should this alert clear from Active Alerts and optionally notify recovery?" />
+                <SectionTitle title="Reset Conditions" hint="How the notice closes, and whether a closing notification is sent." />
+                {s.source !== 'syslog' && s.source !== 'trap' && (
+                  <p className="text-sm text-muted">
+                    {isLifecycle
+                      ? 'Lifecycle notices close 15 minutes after the last matching event. Closing a notice does not confirm that the server is powered off, back online, or healthy.'
+                      : 'Alerts resolve according to their clear conditions, even when recovery notifications are off. These options control the notification only.'}
+                  </p>
+                )}
                 <div className="space-y-2">
                   {s.source === 'syslog' || s.source === 'trap' ? <p className="text-sm text-muted">Event alerts require manual resolution. No automatic recovery notification is sent.</p> : [
-                    { id: 'auto' as const, title: 'Reset when trigger condition is no longer true', desc: 'Alert auto-resolves when metrics recover or device comes back up.' },
-                    { id: 'none' as const, title: 'No reset notification', desc: 'Alert still resolves in the system but no recovery message is sent.' },
+                    { id: 'auto' as const, title: isLifecycle ? 'Notify when the observation window ends' : 'Send a recovery notification', desc: isLifecycle ? 'Notify the configured routes when the event notice closes; this is not a server recovery confirmation.' : 'Notify the configured routes after the alert condition clears.' },
+                    { id: 'none' as const, title: isLifecycle ? 'No end-of-window notification' : 'No recovery notification', desc: 'The alert still closes in the system; no closing notification is sent.' },
                   ].map((opt) => (
                     <button
                       key={opt.id}
@@ -1708,7 +1715,7 @@ export function AlertRuleWizardDialog({
             {step === 'reset_actions' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <SectionTitle title="Reset Actions" hint="Notifications when alert clears (recovery)." />
+                  <SectionTitle title="Reset Actions" hint={isLifecycle ? 'Optional notification when the event observation window ends.' : 'Notifications when the alert clears (recovery).'} />
                   {!isServer && (
                     <Button type="button" variant="outline" size="sm" onClick={copyTriggerToReset}>
                       <Copy className="h-3.5 w-3.5" />Copy from trigger
@@ -1717,9 +1724,13 @@ export function AlertRuleWizardDialog({
                 </div>
                 {isServer ? (
                   <p className="rounded-lg border border-border bg-surface2/40 p-3 text-xs text-muted">
-                    {s.reset_mode === 'auto'
-                      ? 'When the condition clears, the trigger channels get a recovery notice in the built-in wording, stating how long the problem lasted.'
-                      : 'Recovery notices are off — enable "Reset when trigger condition is no longer true" on the Reset step.'}
+                    {isLifecycle
+                      ? s.reset_mode === 'auto'
+                        ? 'The configured routes receive a notice when the 15-minute observation window ends. The built-in wording does not claim that the server has recovered or powered off.'
+                        : 'Closing notices are off. Select "Notify when the observation window ends" on the Reset step to enable them.'
+                      : s.reset_mode === 'auto'
+                        ? 'When the condition clears, the configured routes receive a recovery notice in the built-in wording, stating how long the condition lasted.'
+                        : 'Recovery notices are off. Select "Send a recovery notification" on the Reset step to enable them.'}
                   </p>
                 ) : !hasResetTemplates ? (
                   <p className="rounded-lg border border-border bg-surface2 p-3 text-xs text-muted">
@@ -1728,7 +1739,7 @@ export function AlertRuleWizardDialog({
                   </p>
                 ) : s.reset_mode !== 'auto' ? (
                   <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-                    Reset notifications are disabled — enable &quot;Reset when trigger clears&quot; on the Reset step.
+                    Recovery notifications are disabled. Select &quot;Send a recovery notification&quot; on the Reset step.
                   </p>
                 ) : (
                   <>
@@ -1800,8 +1811,10 @@ export function AlertRuleWizardDialog({
                   <ReviewRow label="Clear after" value={s.clear_duration === 0 ? 'First healthy reading' : `${s.clear_duration ?? DEFAULT_CLEAR_SECONDS}s${s.clear_duration == null ? ' (default)' : ''}`} />
                 )}
                 {flapHold && <ReviewRow label="While flapping" value={s.notify_while_flapping ? 'Notify immediately' : 'Held until a status lasts the flap stability time'} />}
-                <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution' : s.reset_mode === 'auto' ? 'Auto + recovery notify' : 'No recovery notify'} />
-                <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None (alert only)'} />
+                <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution'
+                  : isLifecycle ? `Auto-close after 15 minutes; ${s.reset_mode === 'auto' ? 'notify when the window ends' : 'no closing notification'}`
+                  : s.reset_mode === 'auto' ? 'Auto-resolve + recovery notification' : 'Auto-resolve without recovery notification'} />
+                <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None selected (escalation may still notify)'} />
                 <ReviewRow label="Priority" value={<span className="inline-flex items-center gap-1.5"><PriorityBadge priority={effPriority} />{s.priority ? '' : <span className="text-xs text-muted">auto from severity</span>}</span>} />
                 <ReviewRow
                   label="Escalation"
@@ -1848,25 +1861,9 @@ export function AlertRuleWizardDialog({
           </div>
 
           {/* Footer */}
-          <div className="flex shrink-0 items-center justify-between border-t border-border px-5 py-4">
-            <Button type="button" variant="outline" onClick={() => stepIdx > 0 ? setStep(STEPS[stepIdx - 1].id) : onOpenChange(false)}>
-              <ChevronLeft className="h-4 w-4" />
-              {stepIdx > 0 ? 'Back' : 'Cancel'}
-            </Button>
-            <div className="flex gap-2">
-              {stepIdx < STEPS.length - 1 ? (
-                <Button type="button" onClick={() => setStep(STEPS[stepIdx + 1].id)}>
-                  Next
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-              ) : (
-                <Button type="submit" disabled={save.isPending}>
-                  {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {isEdit ? 'Save alert' : 'Create alert'}
-                </Button>
-              )}
-            </div>
-          </div>
+          <AlertWizardFooter stepIndex={stepIdx} stepCount={STEPS.length} editing={isEdit} pending={save.isPending}
+            onPrevious={() => stepIdx > 0 ? setStep(STEPS[stepIdx - 1].id) : onOpenChange(false)}
+            onNext={() => setStep(STEPS[stepIdx + 1].id)} />
         </form>
       </div>
     </div>

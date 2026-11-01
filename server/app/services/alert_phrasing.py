@@ -144,12 +144,12 @@ METRICS: dict[str, dict] = {
                            "state_label": {"down": "Agent offline (server still answers ping)",
                                            "up": "Agent reporting"}},
 
-    "host_restart": {"noun": "Server restart", "subject": "the server",
-                     "narrative": {"down": "reported a new boot or restart event", "up": "has no recent restart event"},
+    "host_restart": {"noun": "Server restart", "subject": "the server", "event": True,
+                     "narrative": {"down": "reported a new boot or restart event", "up": "has reached the end of the 15-minute restart observation window; this does not confirm its current power or health state"},
                      "state": {"down": "reports a boot or restart event", "up": "has no recent restart event"},
                      "state_label": {"down": "Restart event detected", "up": "Restart observation window ended"}},
-    "host_shutdown": {"noun": "Server shutdown", "subject": "the server",
-                      "narrative": {"down": "reported a shutdown or power transition request", "up": "has no recent shutdown event"},
+    "host_shutdown": {"noun": "Server shutdown", "subject": "the server", "event": True,
+                      "narrative": {"down": "reported a shutdown or power transition request", "up": "has reached the end of the 15-minute shutdown observation window; this does not confirm its current power or health state"},
                       "state": {"down": "reports a shutdown or power transition request", "up": "has no recent shutdown event"},
                       "state_label": {"down": "Shutdown event detected", "up": "Shutdown observation window ended"}},
 
@@ -845,6 +845,10 @@ def effective_templates(rule, kind: Optional[str] = None) -> dict:
         return getattr(rule, name, None)
 
     defaults = default_templates(kind or template_kind(rule))
+    # Host rules use the built-in templates in host_alert_service, including
+    # older rules that happen to carry unused custom template columns.
+    if str(field('metric') or '').startswith('host_'):
+        return defaults
     out = {}
     for name in TEMPLATE_FIELDS:
         default = defaults.get(name)

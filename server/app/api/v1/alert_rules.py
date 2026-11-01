@@ -374,6 +374,11 @@ class AlertRulePreview(BaseModel):
     recovery_sms_template: Optional[str] = None
 
 
+class AlertRuleSimulation(AlertRulePreview):
+    """Send the selected preview, including unsaved wording, without saving it."""
+    is_recovery: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -494,6 +499,7 @@ def _with_templates(rule: dict) -> dict:
     rule["template_kind"] = kind
     rule["default_templates"] = ap.default_templates(kind)
     rule["effective_templates"] = ap.effective_templates(rule, kind)
+    rule["templates_editable"] = not str(rule.get("metric") or "").startswith("host_")
     return rule
 
 
@@ -1043,6 +1049,8 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
     now = datetime.now(timezone.utc)
     trigger = rule_dict.get("trigger_on", "any")
     metric = rule_dict.get("metric") or "ping_status"
+    if metric.startswith('host_'):
+        rule_dict = {**rule_dict, **{key: None for key in _TEMPLATE_FIELDS}}
     operator = rule_dict.get("operator") or "=="
     threshold = rule_dict.get("threshold", 0)
 
@@ -1245,6 +1253,7 @@ async def _preview_payload(db: AsyncSession, rule: dict, stored: dict) -> dict:
             "kind": kind,
             "defaults": ap.default_templates(kind),
             "effective": ap.effective_templates(rule, kind),
+            "editable": not str(rule.get("metric") or "").startswith("host_"),
         },
     }
 
@@ -1301,6 +1310,7 @@ async def preview_alert_rule(
 @router.post("/{rule_id}/simulate")
 async def simulate_alert_rule(
     rule_id: UUID,
+    options: Optional[AlertRuleSimulation] = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_rule_manager),
 ):
@@ -1319,7 +1329,13 @@ async def simulate_alert_rule(
         raise HTTPException(status_code=404, detail="Alert rule not found")
 
     rule = _row_to_dict(row)
-    alert_msg = _build_alert_message(rule)
+    is_recovery = bool(options and options.is_recovery)
+    if is_recovery and not ap.default_templates(ap.template_kind(rule))["recovery_email_body"]:
+        raise HTTPException(status_code=400, detail="This event rule has no recovery notification")
+    if options is not None:
+        for key, value in options.model_dump(exclude_unset=True, exclude={'is_recovery'}).items():
+            rule[key] = value or None
+    alert_msg = _build_alert_message(rule, is_recovery=is_recovery)
     notify_channels = rule.get("notify_channels", [])
     results = []
 
@@ -1414,7 +1430,7 @@ async def simulate_alert_rule(
                 sim_ctx = {
                     "product_name": "ZenPlus",
                     "severity": (rule.get("severity") or "warning"),
-                    "resolved": False,
+                    "resolved": is_recovery,
                     "status": f"TEST · {alert_msg['device_status']}",
                     "title": rule.get("name") or "Alert rule test",
                     "hostname": alert_msg["sim_hostname"],
@@ -1423,9 +1439,8 @@ async def simulate_alert_rule(
                     # No headline value: a test has no measurement, and showing
                     # the bare condition ("== 0") in the slot reserved for a
                     # reading reads as a broken number rather than a threshold.
-                    "notice": "Test notification — this is what the alert will look like when it "
-                              "fires. The device and readings below are sample values; no alert "
-                              "has been raised.",
+                    "notice": f"Test {'recovery' if is_recovery else 'trigger'} notification. "
+                              "The device and readings below are sample values; no alert has been raised or resolved.",
                     "details": [
                         ("Alert rule", rule.get("name")),
                         ("Condition", " ".join(str(x) for x in (
