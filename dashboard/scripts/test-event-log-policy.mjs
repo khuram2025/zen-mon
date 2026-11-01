@@ -42,8 +42,11 @@ assert.equal(E.eventLogSummary({ event_log_filters: [{ channel: 'Security' }], f
 assert.equal(E.eventLogSummary({ event_log_filters: [], feature_flags: { event_log: false } }), 'Off')
 assert.equal(E.eventLogSummary({ feature_flags: { event_log: false, collect_event_log: true } }), 'Default (System, Application)', 'the agent applies collect_event_log last')
 
-const page = fs.readFileSync('src/pages/AgentPoliciesPage.tsx', 'utf8')
-assert(page.includes('feature_flags: { ...f.other_flags, event_log: f.event_log_enabled }'), 'the switch writes the event_log flag and keeps other flags')
+// The page /agent-policies actually renders (an older, unrouted copy lives at src/pages/AgentPoliciesPage.tsx).
+const app = fs.readFileSync('src/App.tsx', 'utf8')
+assert(app.includes("import { AgentPoliciesPage } from '@/pages/servers/AgentPoliciesPage'"), '/agent-policies renders pages/servers/AgentPoliciesPage')
+const page = fs.readFileSync('src/pages/servers/AgentPoliciesPage.tsx', 'utf8')
+assert(page.includes('feature_flags: { ...s.other_flags, event_log: s.event_log_enabled }'), 'the switch writes the event_log flag and keeps other flags')
 assert(page.includes("event_log_filters: 'filters' in parsedEventLog ? parsedEventLog.filters : []"), 'filters are sent')
 
 const tab = fs.readFileSync('src/pages/servers/detail/tabs/EventsTab.tsx', 'utf8')

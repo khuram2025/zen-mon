@@ -27,8 +27,6 @@ import { SkeletonTable } from '@/components/ui/Skeleton'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import type { AgentPolicy } from '@/types/server'
-import { Switch } from '@/components/ui/Switch'
-import { DEFAULT_EVENT_LOG_TEXT, eventLogSummary, formatEventLogFilters, parseEventLogFilters } from '@/lib/eventLogFilters'
 
 type FormState = {
   name: string
@@ -40,12 +38,6 @@ type FormState = {
   service_watchlist: string
   process_watchlist: string
   update_ring: 'canary' | 'beta' | 'stable' | 'pinned'
-  /** The policy's `event_log` feature flag: the agent's on/off switch for the collector. */
-  event_log_enabled: boolean
-  /** One channel per line; blank = the default channels. */
-  event_log_text: string
-  /** Flags the form does not edit, kept as they are. */
-  other_flags: Record<string, unknown>
 }
 
 const emptyForm = (): FormState => ({
@@ -58,9 +50,6 @@ const emptyForm = (): FormState => ({
   service_watchlist: '',
   process_watchlist: '',
   update_ring: 'stable',
-  event_log_enabled: true,
-  event_log_text: '',
-  other_flags: {},
 })
 
 export default function AgentPoliciesPage() {
@@ -81,10 +70,6 @@ export default function AgentPoliciesPage() {
     setCreating(true)
   }
   const openEdit = (p: AgentPolicy) => {
-    // The form writes `event_log`; the alias the agent also reads is folded into it.
-    const other_flags = { ...(p.feature_flags || {}) }
-    delete other_flags.event_log
-    delete other_flags.collect_event_log
     setForm({
       name: p.name,
       description: p.description ?? '',
@@ -95,21 +80,12 @@ export default function AgentPoliciesPage() {
       service_watchlist: (p.service_watchlist || []).join('\n'),
       process_watchlist: (p.process_watchlist || []).join('\n'),
       update_ring: p.update_ring,
-      event_log_enabled: eventLogSummary(p) !== 'Off',
-      event_log_text: formatEventLogFilters(p.event_log_filters),
-      other_flags,
     })
     setEditing(p)
     setCreating(false)
   }
 
-  const parsedEventLog = parseEventLogFilters(form.event_log_text)
-  const eventLogError = 'error' in parsedEventLog ? parsedEventLog.error : null
-
   const toBody = (f: FormState) => ({
-    // [] = the default channels; turning collection off is the flag, never an empty list.
-    event_log_filters: 'filters' in parsedEventLog ? parsedEventLog.filters : [],
-    feature_flags: { ...f.other_flags, event_log: f.event_log_enabled },
     name: f.name,
     description: f.description || null,
     platform: f.platform,
@@ -181,7 +157,6 @@ export default function AgentPoliciesPage() {
                   <Th>Collection</Th>
                   <Th>Upload</Th>
                   <Th>Ring</Th>
-                  <Th>Event log</Th>
                   <Th>Agents</Th>
                   <Th />
                 </Tr>
@@ -206,7 +181,6 @@ export default function AgentPoliciesPage() {
                     <Td>{p.metric_interval_s}s</Td>
                     <Td>{p.upload_interval_s}s</Td>
                     <Td className="capitalize">{p.update_ring}</Td>
-                    <Td className="text-xs">{p.platform === 'linux' ? <span className="text-muted">n/a</span> : eventLogSummary(p)}</Td>
                     <Td>
                       <Badge variant={p.agent_count > 0 ? 'success' : 'outline'}>
                         <Activity className="h-3 w-3" />
@@ -341,34 +315,6 @@ export default function AgentPoliciesPage() {
                 />
               </FormField>
             </div>
-            {form.platform !== 'linux' && (
-              <div className="space-y-2 rounded-md border border-border p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <Label htmlFor="policy-event-log">Windows Event Log</Label>
-                    <p className="text-xs text-muted">Counts events per channel and level every minute; shown on the server&apos;s Events tab.</p>
-                  </div>
-                  <Switch id="policy-event-log" checked={form.event_log_enabled}
-                    onCheckedChange={(v) => setForm({ ...form, event_log_enabled: v })} aria-label="Collect Windows Event Log" />
-                </div>
-                {form.event_log_enabled && (
-                  <FormField
-                    label="Channels (one per line)"
-                    hint={'Channel: levels, optionally "| event IDs". Leave empty for the default: System and Application, critical, error and warning.'}
-                  >
-                    <Textarea
-                      value={form.event_log_text}
-                      onChange={(e) => setForm({ ...form, event_log_text: e.target.value })}
-                      rows={4}
-                      placeholder={`${DEFAULT_EVENT_LOG_TEXT}\nSecurity: information | 4625, 4740`}
-                      className="font-mono text-xs"
-                      aria-invalid={!!eventLogError}
-                    />
-                  </FormField>
-                )}
-                {form.event_log_enabled && eventLogError && <p role="alert" className="text-xs text-danger">{eventLogError}</p>}
-              </div>
-            )}
           </div>
           <DialogFooter>
             <Button
@@ -380,7 +326,7 @@ export default function AgentPoliciesPage() {
             >
               Cancel
             </Button>
-            <Button onClick={() => saveM.mutate()} disabled={!form.name || saveM.isPending || (form.event_log_enabled && !!eventLogError)}>
+            <Button onClick={() => saveM.mutate()} disabled={!form.name || saveM.isPending}>
               <CheckCircle2 className="h-3.5 w-3.5" />
               {editing ? 'Save changes' : 'Create policy'}
             </Button>
