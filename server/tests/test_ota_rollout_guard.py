@@ -203,3 +203,10 @@ def test_catalog_bridge_must_be_available_valid_and_cover_the_audience(guard, pr
 def test_higher_future_minimum_preserves_required_catalog_chain(guard):
     target = guard.build(chain=[*CATALOG_CHAIN, ("1.25.0", "1.24.38")])
     assert guard.module.validate_rollout_path(target, {}) == ["1.24.36", "1.24.38", "1.25.0"]
+
+
+def test_higher_minimum_cannot_route_through_legacy_37_and_skip_catalog_bridge(guard):
+    target = guard.build(chain=[("1.24.36", "1.23.9"), ("1.24.37", "1.23.9"),
+                               ("1.24.39", "1.24.37")])
+    with pytest.raises(ValueError, match="path bypasses catalog bridge 1.24.36"):
+        guard.module.validate_rollout_path(target, {})

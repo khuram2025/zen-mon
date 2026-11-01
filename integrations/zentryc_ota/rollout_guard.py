@@ -26,7 +26,8 @@ def validate_rollout_path(release, data):
     # fresh release. Everything the promoted path contains is still fully verified below. Set
     # ZENPLUS_OTA_VALIDATE_FULL_CHAIN = True to verify the whole chain from 0.0.0 as before.
     start = "0.0.0" if getattr(settings, "ZENPLUS_OTA_VALIDATE_FULL_CHAIN", False) else (release.min_version or "0.0.0")
-    if version_key(release.version) >= version_key(FIRST_CATALOG_DEPENDENT):
+    requires_catalog = version_key(release.version) >= version_key(FIRST_CATALOG_DEPENDENT)
+    if requires_catalog:
         if not release.min_version or version_key(release.min_version) < version_key(CATALOG_BRIDGE):
             raise ValueError(f"Release {release.version} must require catalog bridge {CATALOG_BRIDGE} or later")
         # Include the catalog bridge itself, not just releases after the
@@ -35,6 +36,8 @@ def validate_rollout_path(release, data):
         if not getattr(settings, "ZENPLUS_OTA_VALIDATE_FULL_CHAIN", False):
             start = CATALOG_BRIDGE_ENTRY
     path = plan_upgrade(start, release, catalog)
+    if requires_catalog and not any(step.version == CATALOG_BRIDGE for step in path):
+        raise ValueError(f"Required path bypasses catalog bridge {CATALOG_BRIDGE}")
     key_path = Path(getattr(settings, "ZENPLUS_RELEASE_PUBLIC_KEY", Path(settings.BASE_DIR) / "keys" / "zenplus-release.pub"))
     key = load_pem_public_key(key_path.read_bytes())
     for step in path:

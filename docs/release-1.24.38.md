@@ -18,6 +18,8 @@ The appliance also checks the signed prerequisite before applying a package.
 The portal promotion guard must also be deployed from this release: for
 1.24.38 and later it rejects lower minimums and verifies the catalog bridge's
 signed package, age, publication and rollout coverage before promotion.
+The build refuses 1.24.37 as a prerequisite, and the portal rejects any higher
+minimum whose dependency chain skips the catalog bridge.
 
 Includes all 1.24.37 search, column sorting and stable selection improvements.
 This is an appliance-only package that preserves existing Windows installers.

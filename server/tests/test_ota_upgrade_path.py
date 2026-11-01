@@ -152,10 +152,17 @@ def test_future_releases_cannot_bypass_windows_catalog_bridge(target):
     sys.path.insert(0, str(ROOT / "scripts"))
     from release_policy import validate_policy
     assert validate_policy(ROOT, target, None) == "1.24.36"
-    assert validate_policy(ROOT, target, "1.24.37") == "1.24.37"
+    with pytest.raises(ValueError, match="cannot be used as a required bridge"):
+        validate_policy(ROOT, target, "1.24.37")
     for minimum in ("1.23.9", "1.24.29", "1.24.35"):
         with pytest.raises(ValueError, match="bridge floor"):
             validate_policy(ROOT, target, minimum)
+
+
+def test_higher_minimum_can_require_a_catalog_dependent_release():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from release_policy import validate_policy
+    assert validate_policy(ROOT, "1.25.0", "1.24.38") == "1.24.38"
 
 
 @pytest.mark.parametrize("current,expected", [

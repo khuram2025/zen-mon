@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "minimum_supported_upgrade_base": "1.24.36",
+  "blocked_prerequisite_versions": ["1.24.37"],
   "reason": "Require the cumulative 1.24.36 bridge, which provisions the signed Windows agent 1.14.4 core/full EXE and MSI catalog, before subsequent appliance-only updates. Raise this floor when a required bridge is introduced; do not lower it without an audited cumulative replacement that includes the required artifacts.",
   "required_payload_files": [
     "scripts/ota-preflight.py",

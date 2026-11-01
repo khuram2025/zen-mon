@@ -18,6 +18,9 @@ Raising the minimum in the portal alone is invalid because it must match the
 signed manifest. Existing 1.24.37 canaries already provisioned with the catalog
 can proceed to 1.24.38. Keep the bridge available and validate its eligibility,
 signature, hash and age for supported older cohorts before promotion.
+Do not use 1.24.37 as a future prerequisite: its legacy dependency skips the
+catalog. The builder blocks that minimum and the portal checks that higher
+prerequisite chains actually include 1.24.36.
 
 Historical chain: **1.23.3 -> 1.23.7 -> 1.23.8 -> 1.23.9 -> 1.23.10**.
 An appliance already at a later point begins after that point. v1.23.7 is the
