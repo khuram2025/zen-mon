@@ -1,5 +1,5 @@
 import { formatDeviceAvailability } from '@/components/devices/availability'
-import { compareIpAddresses, compareListValues, isIpQuery, searchRank } from '@/lib/listOrdering'
+import { compareIpAddresses, compareListValues, isIpQuery, nextListSort, searchRank } from '@/lib/listOrdering'
 import { useStableListRows } from '@/hooks/useStableListRows'
 import { FLAP_HOLD_FLEET_TEXT, isFlapping, type DeviceFlapFields } from '@/components/devices/deviceStatus'
 import { FlappingTag } from '@/components/devices/FlappingTag'
@@ -692,8 +692,7 @@ export function DevicesPage() {
   }
 
   function onSortClick(key: SortKey) {
-    if (sortKey === key) patchParams({ order: sortOrder === 'asc' ? 'desc' : 'asc' })
-    else patchParams({ sort: key, order: 'asc' })
+    patchParams(nextListSort(sortKey, sortOrder, key))
   }
 
   function clearFilters() {

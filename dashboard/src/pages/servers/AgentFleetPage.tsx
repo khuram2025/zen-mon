@@ -21,6 +21,7 @@ import {
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { SortableTh } from '@/components/ui/SortableTh'
 import { useStableListRows } from '@/hooks/useStableListRows'
+import { nextListSort } from '@/lib/listOrdering'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
@@ -141,10 +142,11 @@ export function AgentFleetPage() {
   const sort = sortColumns.includes(params.get('sort') || '') ? params.get('sort')! : 'match'
   const order = params.get('order') === 'desc' ? 'desc' : 'asc'
   const changeSort = (column: string) => {
+    const chosen = nextListSort(sort === 'match' && !q ? 'hostname' : sort, order, column)
     setParams(prev => {
       const next = new URLSearchParams(prev)
-      next.set('sort', column)
-      next.set('order', sort === column && order === 'asc' ? 'desc' : 'asc')
+      next.set('sort', chosen.sort)
+      next.set('order', chosen.order)
       return next
     }, { replace: true })
   }

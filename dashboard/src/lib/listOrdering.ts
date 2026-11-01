@@ -1,5 +1,9 @@
 const collator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
 
+export function nextListSort(current: string, order: string, column: string): { sort: string; order: 'asc' | 'desc' } {
+  return { sort: column, order: current === column && order === 'asc' ? 'desc' : 'asc' }
+}
+
 export function isIpQuery(query: string): boolean {
   const q = query.trim()
   return /^[0-9]{1,3}(?:\.[0-9]{0,3}){1,3}\.?$/.test(q) || (q.includes(':') && /^[0-9a-f:]+$/i.test(q))

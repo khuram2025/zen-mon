@@ -53,7 +53,8 @@ async function compile(entry) {
   await writeFile(file, compiled.outputFiles[0].text)
   return import(pathToFileURL(file).href)
 }
-const { compareListValues, compareIpAddresses, searchRank } = await compile('src/lib/listOrdering.ts')
+const { compareListValues, compareIpAddresses, nextListSort, searchRank } = await compile('src/lib/listOrdering.ts')
+assert.deepEqual(nextListSort('ip_address','asc','ip_address'),{sort:'ip_address',order:'desc'}, 'Toggling a default column writes its key as well as direction before server pagination')
 assert.deepEqual(['server10','Server2','server1'].sort(compareListValues), ['server1','Server2','server10'])
 assert(compareIpAddresses('10.0.0.2','192.168.8.1') < 0, 'IPv4 addresses above 127 must not become negative')
 assert(compareIpAddresses('192.168.8.2','192.168.8.10') < 0)
@@ -102,6 +103,11 @@ try {
   assert.equal(document.querySelectorAll('button[aria-label^="Sort by "]').length,11)
   await render('/server-agents?sort=hostname&order=desc&q=server')
   assert.equal(requests.at(-1).order,'desc', 'The sort and search survive reopening the URL')
+  await render('/server-agents')
+  await act(async () => sortButton('Hostname').click())
+  await act(async () => { await new Promise(r => setTimeout(r,30)) })
+  assert.equal(requests.at(-1).sort,'hostname')
+  assert.equal(requests.at(-1).order,'desc', 'The first click reverses the visible default ascending sort')
   assert.equal(writes,0)
   console.log('List ordering: natural names, numeric IPv4/IPv6, match priority, column sorting, URL persistence and ID-based selection passed.')
 } finally {
