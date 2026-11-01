@@ -1,6 +1,6 @@
 /**
- * SolarWinds-style alert rule wizard — properties, trigger, reset, scope,
- * trigger actions, reset actions, schedule, and review.
+ * Alert rule wizard — properties, trigger, reset, scope, trigger actions,
+ * escalation, reset actions, schedule, and review.
  */
 import { FormEvent, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -51,6 +51,17 @@ import {
   validateNetflowForm,
   type NetflowRuleForm,
 } from './netflowAlertRule'
+import {
+  DEFAULT_SILENCE_SECONDS,
+  MIN_SILENCE_SECONDS,
+  SERVER_METRICS,
+  downRuleCoversServers,
+  serverAutoReset,
+  serverDraftProblem,
+  serverMetricKind,
+  serverRuleCondition,
+  serverRulePayload,
+} from './serverAlertRule'
 import { usePolicies } from '@/features/escalation/api'
 import {
   PRIORITIES, PRIORITY_META, autoPriorityText, derivePriority, disabledPolicyText, effectivePriority, fmtMinutes, legacyTiersText,
@@ -86,7 +97,7 @@ type WizardState = {
   priority: '' | Priority
   escalation_mode: EscalationMode
   escalation_policy_id: string
-  source: 'device' | 'service' | 'trap' | 'syslog' | 'apm' | 'netflow'
+  source: 'device' | 'server' | 'service' | 'trap' | 'syslog' | 'apm' | 'netflow'
   conditions: Cond[]
   condition_logic: 'AND' | 'OR'
   trigger_on: 'any' | 'down' | 'up' | 'degraded'
@@ -102,6 +113,8 @@ type WizardState = {
   device_type: string
   location: string
   scope_tag: string
+  /** Server rules: one server, '' = all servers, '__pick__' = "one server" chosen but none picked yet. */
+  server_id: string
   service_check_id: string
   service_check_group_id: string
   trap_oid: string
@@ -234,6 +247,7 @@ const DEFAULT_STATE: WizardState = {
   device_type: '',
   location: '',
   scope_tag: '',
+  server_id: '',
   service_check_id: '',
   service_check_group_id: '',
   trap_oid: '',
@@ -303,9 +317,22 @@ function ruleToState(rule: any): WizardState {
       ? 'trap'
       : String(rule.metric || '').startsWith('apm_')
       ? 'apm'
+      : String(rule.metric || '').startsWith('host_')
+      ? 'server'
       : rule.service_check_id || rule.service_check_group_id || rule.metric === 'service_status'
       ? 'service'
       : 'device'
+  // Server rules store word operators (gt); the editor's operator list uses symbols.
+  const symbol = (op: any) => ({ gt: '>', gte: '>=', lt: '<', lte: '<=', eq: '==', neq: '!=' } as Record<string, string>)[op] || op
+  const loaded: Cond[] =
+    Array.isArray(rule.conditions) && rule.conditions.length
+      ? rule.conditions.map((c: any) => ({
+          metric: c.metric,
+          operator: c.operator,
+          threshold: c.threshold ?? 0,
+          reset_threshold: c.reset_threshold ?? null,
+        }))
+      : [{ metric: rule.metric || 'ping_status', operator: rule.operator || '==', threshold: rule.threshold ?? 0 }]
   return {
     ...DEFAULT_STATE,
     name: rule.name || '',
@@ -317,15 +344,15 @@ function ruleToState(rule: any): WizardState {
     escalation_mode: rule.escalation_policy_id ? 'policy' : Array.isArray(rule.escalation_levels) && rule.escalation_levels.length ? 'legacy' : 'default',
     escalation_policy_id: rule.escalation_policy_id || '',
     source,
-    conditions:
-      Array.isArray(rule.conditions) && rule.conditions.length
-        ? rule.conditions.map((c: any) => ({
-            metric: c.metric,
-            operator: c.operator,
-            threshold: c.threshold ?? 0,
-            reset_threshold: c.reset_threshold ?? null,
-          }))
-        : [{ metric: rule.metric || 'ping_status', operator: rule.operator || '==', threshold: rule.threshold ?? 0 }],
+    // A server rule is one condition: the flat columns, plus the reset level its stored condition carries.
+    conditions: source === 'server'
+      ? [{
+          metric: rule.metric,
+          operator: symbol(rule.operator || 'gt'),
+          threshold: rule.threshold ?? 0,
+          reset_threshold: loaded.find((c) => c.metric === rule.metric)?.reset_threshold ?? null,
+        }]
+      : loaded,
     condition_logic: rule.condition_logic === 'OR' ? 'OR' : 'AND',
     trigger_on: rule.trigger_on || 'down',
     min_duration: rule.min_duration ?? rule.duration ?? 0,
@@ -338,6 +365,7 @@ function ruleToState(rule: any): WizardState {
     device_type: rule.device_type || '',
     location: rule.location || '',
     scope_tag: rule.scope_tag || '',
+    server_id: rule.server_id || '',
     service_check_id: rule.service_check_id || '',
     service_check_group_id: rule.service_check_group_id || '',
     trap_oid: rule.trap_oid || '',
@@ -470,6 +498,9 @@ export function AlertRuleWizardDialog({
   rule?: any
 }) {
   const isEdit = !!rule?.id
+  // A saved rule keeps its family: a server rule is saved through /host-alert-rules, every other kind through
+  // /alert-rules, so switching between them would need a new rule rather than an edit.
+  const editingServerRule = isEdit && String(rule?.metric || '').startsWith('host_')
   const qc = useQueryClient()
   const [step, setStep] = useState<StepId>('properties')
   const [s, setS] = useState<WizardState>(DEFAULT_STATE)
@@ -481,6 +512,8 @@ export function AlertRuleWizardDialog({
   // alerts are held while the device flaps.
   const statusRule = isStatusRule(s)
   const flapHold = flapHoldApplies(s)
+  const isServer = s.source === 'server'
+  const serverKind = isServer ? serverMetricKind(s.conditions[0]?.metric) : null
   const nfErrors = useMemo(() => (s.source === 'netflow' ? validateNetflowForm(s.nf) : {}), [s.source, s.nf])
 
   // Which default wording this rule's notifications are built from. Service
@@ -549,6 +582,13 @@ export function AlertRuleWizardDialog({
   })
   const serviceChecks = serviceChecksResp?.data || []
 
+  const { data: serversResp } = useQuery<any>({
+    queryKey: ['servers', 'list-min'],
+    queryFn: async () => (await api.get('/servers?page_size=200&sort=display_name')).data,
+    enabled: open && isServer,
+  })
+  const servers: any[] = serversResp?.items || []
+
   const { data: serviceGroups = [] } = useQuery<any[]>({
     queryKey: ['service-check-groups'],
     queryFn: async () => (await api.get('/service-check-groups')).data,
@@ -606,9 +646,10 @@ export function AlertRuleWizardDialog({
   }, [open, rule])
 
   const save = useMutation({
-    mutationFn: async (payload: any) => {
-      if (isEdit) return (await api.put(`/alert-rules/${rule.id}`, payload)).data
-      return (await api.post('/alert-rules', payload)).data
+    mutationFn: async ({ payload, server }: { payload: any; server: boolean }) => {
+      const base = server ? '/host-alert-rules' : '/alert-rules'
+      if (isEdit) return (await api.put(`${base}/${rule.id}`, payload)).data
+      return (await api.post(base, payload)).data
     },
     onSuccess: () => {
       toast.success(isEdit ? 'Alert rule updated' : 'Alert rule created')
@@ -707,14 +748,15 @@ export function AlertRuleWizardDialog({
     [s, tplDefaultsKey],
   )
   useEffect(() => {
-    if (!open || !onMessageStep) return
+    // Server rules send the built-in wording, so their message steps have no templates to render.
+    if (!open || !onMessageStep || isServer) return
     const t = setTimeout(() => {
       api.post('/alert-rules/preview', JSON.parse(draftPayload))
         .then((r) => setLivePreview(r.data))
         .catch(() => {})
     }, 400)
     return () => clearTimeout(t)
-  }, [open, onMessageStep, draftPayload])
+  }, [open, onMessageStep, draftPayload, isServer])
 
   const copyTriggerToReset = () => {
     setS((st) => ({
@@ -731,6 +773,8 @@ export function AlertRuleWizardDialog({
     const condText =
       s.source === 'netflow'
         ? summarizeNetflowForm(s.nf)
+        : s.source === 'server'
+        ? serverRuleCondition({ ...first, target: s.target, min_duration: s.min_duration })
         : s.source === 'trap'
         ? s.trap_oid ? `Trap OID prefix ${s.trap_oid}` : 'Any SNMP trap'
         : s.source === 'service'
@@ -769,7 +813,15 @@ export function AlertRuleWizardDialog({
         return
       }
     }
-    if (!isService && s.source !== 'apm' && s.source !== 'netflow' && scopeEmpty) {
+    if (s.source === 'server') {
+      const problem = serverDraftProblem(s)
+      if (problem) {
+        toast.error('Server rule incomplete', problem.message)
+        setStep(problem.step)
+        return
+      }
+    }
+    if (!isService && s.source !== 'apm' && s.source !== 'netflow' && s.source !== 'server' && scopeEmpty) {
       toast.error('Scope incomplete', `Select a ${scopeMode === 'type' ? 'device type' : scopeMode}, or choose "All devices".`)
       setStep('scope')
       return
@@ -779,7 +831,7 @@ export function AlertRuleWizardDialog({
       setStep('escalation')
       return
     }
-    const legacyLevels = s.escalation_mode === 'legacy' ? s.escalation_levels : []
+    const legacyLevels = s.escalation_mode === 'legacy' && !isServer ? s.escalation_levels : []
     if (legacyLevels.length > MAX_ESC_LEVELS) {
       toast.error(`At most ${MAX_ESC_LEVELS} escalation levels`)
       setStep('escalation')
@@ -803,7 +855,9 @@ export function AlertRuleWizardDialog({
         return
       }
     }
-    save.mutate(stateToPayload(s, tplDefaults))
+    save.mutate(isServer
+      ? { payload: serverRulePayload(s), server: true }
+      : { payload: stateToPayload(s, tplDefaults), server: false })
   }
   const isService = s.source === 'service'
 
@@ -863,7 +917,7 @@ export function AlertRuleWizardDialog({
         <div className="flex shrink-0 items-center justify-between border-b border-border px-5 py-4">
           <div>
             <h2 id={titleId} className="text-lg font-semibold">{isEdit ? 'Edit Alert' : 'Create Alert'}</h2>
-            <p id={descId} className="text-xs text-muted">SolarWinds-style alert wizard — step {stepIdx + 1} of {STEPS.length}</p>
+            <p id={descId} className="text-xs text-muted">Alert wizard — step {stepIdx + 1} of {STEPS.length}</p>
           </div>
           <button type="button" aria-label="Close the alert wizard" onClick={() => onOpenChange(false)} className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-text">
             <X className="h-5 w-5" aria-hidden />
@@ -900,7 +954,7 @@ export function AlertRuleWizardDialog({
           <div className="flex-1 overflow-y-auto px-5 py-5">
             {step === 'properties' && (
               <div className="space-y-4">
-                <SectionTitle title="Alert Properties" hint="Name, severity, and enable/disable — like SolarWinds alert definition properties." />
+                <SectionTitle title="Alert Properties" hint="Name, severity, priority, and whether the rule is enabled." />
                 <FormField label="Alert name" required>
                   <Input required value={s.name} onChange={(e) => setS({ ...s, name: e.target.value })} placeholder="Email me when a core router goes down" />
                 </FormField>
@@ -963,31 +1017,39 @@ export function AlertRuleWizardDialog({
             {step === 'trigger' && (
               <div className="space-y-4">
                 <SectionTitle title="Trigger Conditions" hint="Define when this alert fires. Add multiple child conditions with AND/OR logic." />
-                <div className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-surface2 p-1 text-xs sm:flex">
-                  {(['device', 'service', 'trap', 'syslog', 'apm', 'netflow'] as const).map((src) => (
+                <div className="grid grid-cols-4 gap-1 rounded-lg border border-border bg-surface2 p-1 text-xs sm:flex">
+                  {(['device', 'server', 'service', 'trap', 'syslog', 'apm', 'netflow'] as const).map((src) => (
                     <button
                       key={src}
                       type="button"
+                      disabled={isEdit && (src === 'server') !== editingServerRule}
+                      title={isEdit && (src === 'server') !== editingServerRule
+                        ? (editingServerRule ? 'A server rule stays a server rule. Create a new rule to watch something else.' : 'Create a new rule to watch servers.')
+                        : undefined}
                       onClick={() => {
                         if (src === s.source) return
                         // Entering/leaving APM swaps the condition metric domain,
                         // and `target` changes meaning (service name vs interface).
-                        if (src === 'syslog') {
+                        if (src === 'server') {
+                          setS({ ...s, source: src, target: '', server_id: '', min_duration: 300, clear_duration: null, reset_mode: 'auto', recovery_alert: true,
+                            escalation_mode: s.escalation_mode === 'legacy' ? 'default' : s.escalation_mode,
+                            conditions: [{ metric: 'host_cpu_pct', operator: '>', threshold: 90, reset_threshold: null }] })
+                        } else if (src === 'syslog') {
                           setS({ ...s, source: src, target: '', reset_mode: 'none', conditions: [{ metric: 'syslog', operator: '<=', threshold: 4 }] })
                         } else if (src === 'apm') {
                           setS({ ...s, source: src, target: '', conditions: [{ metric: 'apm_latency_p95', operator: '>', threshold: 800 }] })
                         } else if (src === 'netflow') {
                           setS({ ...s, source: src, target: '', reset_mode: 'auto', recovery_alert: true })
-                        } else if (s.source === 'apm' || s.source === 'syslog' || s.source === 'netflow') {
-                          setS({ ...s, source: src, target: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
+                        } else if (s.source === 'apm' || s.source === 'syslog' || s.source === 'netflow' || s.source === 'server') {
+                          setS({ ...s, source: src, target: '', server_id: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
                         } else {
                           setS({ ...s, source: src })
                         }
                       }}
                       aria-pressed={s.source === src}
-                      className={cn('flex-1 rounded-md px-1 py-2 font-medium', s.source === src ? 'bg-primary text-white' : 'text-muted')}
+                      className={cn('flex-1 rounded-md px-1 py-2 font-medium disabled:cursor-not-allowed disabled:opacity-40', s.source === src ? 'bg-primary text-white' : 'text-muted')}
                     >
-                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : src === 'syslog' ? 'Syslog' : src === 'apm' ? 'APM & RUM' : 'NetFlow'}
+                      {src === 'device' ? 'Device / SNMP' : src === 'server' ? 'Server' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : src === 'syslog' ? 'Syslog' : src === 'apm' ? 'APM & RUM' : 'NetFlow'}
                     </button>
                   ))}
                 </div>
@@ -1101,6 +1163,66 @@ export function AlertRuleWizardDialog({
                   </>
                 )}
 
+                {isServer && (() => {
+                  const c = s.conditions[0]
+                  const auto = serverKind === 'pct' ? serverAutoReset(c.operator, Number(c.threshold)) : null
+                  return (
+                    <div className="space-y-3 rounded-lg border border-border/60 bg-surface2/30 p-3">
+                      <div className={cn('grid gap-2', serverKind === 'pct' ? 'grid-cols-3' : 'grid-cols-1')}>
+                        <FormField label="Watch">
+                          <Select value={c.metric} onValueChange={(v) => setS({
+                            ...s,
+                            target: '',
+                            // Agent offline's hold is the heartbeat silence; 0 keeps the 3-minute default.
+                            min_duration: serverMetricKind(v) === 'flag' ? 0 : serverMetricKind(v) === 'pct' ? (s.min_duration || 300) : 0,
+                            conditions: [{ metric: v, operator: c.operator === '==' ? '>' : c.operator, threshold: serverMetricKind(v) === 'pct' ? (c.threshold || 90) : 0, reset_threshold: null }],
+                          })}>
+                            <SelectTrigger><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              {SERVER_METRICS.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                        </FormField>
+                        {serverKind === 'pct' && (
+                          <>
+                            <FormField label="Operator">
+                              <Select value={c.operator} onValueChange={(v) => updateCond(0, { operator: v })}>
+                                <SelectTrigger><SelectValue /></SelectTrigger>
+                                <SelectContent>
+                                  {['>', '>=', '<', '<='].map((op) => <SelectItem key={op} value={op}>{op}</SelectItem>)}
+                                </SelectContent>
+                              </Select>
+                            </FormField>
+                            <FormField label="Value (%)">
+                              <Input type="number" min={0} max={100} step="any" value={c.threshold} onChange={(e) => updateCond(0, { threshold: Number(e.target.value) })} />
+                            </FormField>
+                          </>
+                        )}
+                      </div>
+                      {serverKind === 'pct' && (
+                        <FormField label="Reset value (optional)" hint={auto != null ? `Empty = auto: clears ${c.operator.startsWith('>') ? 'below' : 'above'} ${auto}%` : undefined}>
+                          <Input type="number" step="any" className="w-40" placeholder={auto != null ? `auto (${auto}%)` : 'Same as trigger'} value={c.reset_threshold ?? ''}
+                            onChange={(e) => updateCond(0, { reset_threshold: e.target.value === '' ? null : Number(e.target.value) })} />
+                        </FormField>
+                      )}
+                      {(serverKind === 'svc' || serverKind === 'proc') && (
+                        <FormField label={serverKind === 'svc' ? 'Service name' : 'Process name'} required
+                          hint={serverKind === 'svc' ? 'The Windows service or systemd unit name, as the agent reports it.' : 'The executable name, as the agent reports it.'}>
+                          <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder={serverKind === 'svc' ? 'e.g. MSSQLSERVER' : 'e.g. nginx.exe'} />
+                        </FormField>
+                      )}
+                      {serverKind === 'flag' && (
+                        <p className="text-xs text-muted">
+                          Fires when a server&apos;s agent stops reporting but the server still answers ping: the server is up and
+                          its monitoring is lost. This needs the server to be ping-monitored as well (a device with the same IP,
+                          or linked to it). A server that is silent and does not answer ping, or has no ping monitoring, is
+                          paged by <span className="font-medium text-text">Device Down</span> instead.
+                        </p>
+                      )}
+                    </div>
+                  )
+                })()}
+
                 {s.source === 'apm' && (
                   <div className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
                     <div className="grid flex-1 grid-cols-3 gap-2">
@@ -1142,15 +1264,26 @@ export function AlertRuleWizardDialog({
                   <NetflowConditionFields form={s.nf} errors={nfErrors} onChange={(nf) => setS((st) => ({ ...st, nf }))} />
                 )}
 
-                {s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && <FormField label="Condition must exist for" hint={statusRule
-                  ? `Counted from the confirmed status change. Device status already needs several checks before it changes (Settings → Monitoring), so a hold here adds to that${flapHold ? '; while a device\'s up/down or latency/loss changes flap, its status alerts for that kind of change are also held automatically until a status lasts the flap stability time' : ''}.`
-                  : "Hold time before firing: the condition must persist this long (SolarWinds 'condition must exist for more than')."}>
-                  <div className="flex items-center gap-3">
-                    <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
-                    <span className="text-sm text-muted">seconds (0 = fire immediately)</span>
-                  </div>
-                </FormField>}
-                {usesMetricLifecycle(s) && (
+                {s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && !(isServer && serverKind !== 'pct' && serverKind !== 'flag') && (
+                  serverKind === 'flag' ? (
+                    <FormField label="Agent silent for" hint={`How long the agent may miss its heartbeats (every 30 seconds) before the alert is raised. 0 = the default ${DEFAULT_SILENCE_SECONDS} seconds; never less than ${MIN_SILENCE_SECONDS}.`}>
+                      <div className="flex items-center gap-3">
+                        <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
+                        <span className="text-sm text-muted">seconds (0 = {DEFAULT_SILENCE_SECONDS})</span>
+                      </div>
+                    </FormField>
+                  ) : (
+                    <FormField label="Condition must exist for" hint={statusRule
+                      ? `Counted from the confirmed status change. Device status already needs several checks before it changes (Settings → Monitoring), so a hold here adds to that${flapHold ? '; while a device\'s up/down or latency/loss changes flap, its status alerts for that kind of change are also held automatically until a status lasts the flap stability time' : ''}.`
+                      : 'Hold time before firing: the condition must persist this long before the alert is raised.'}>
+                      <div className="flex items-center gap-3">
+                        <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
+                        <span className="text-sm text-muted">seconds (0 = fire immediately)</span>
+                      </div>
+                    </FormField>
+                  )
+                )}
+                {(usesMetricLifecycle(s) || serverKind === 'pct') && (
                   <FormField
                     label="Clear after"
                     hint={`The cleared condition must hold this long before the alert resolves; a breach in the meantime continues the same alert without a new notification. Missing data never counts as cleared. Empty = ${DEFAULT_CLEAR_SECONDS} seconds.`}
@@ -1234,6 +1367,35 @@ export function AlertRuleWizardDialog({
                       </SelectContent>
                     </Select>
                   </FormField>
+                ) : isServer ? (
+                  <>
+                    <FormField label="Apply to" hint="All servers covers every agent-monitored server, including servers added later.">
+                      <Select value={s.server_id ? 'one' : 'all'} onValueChange={(v) => setS({ ...s, server_id: v === 'one' ? '__pick__' : '' })}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All servers</SelectItem>
+                          <SelectItem value="one">Specific server</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </FormField>
+                    {s.server_id && (
+                      <FormField label="Server">
+                        <Select value={s.server_id} onValueChange={(v) => setS({ ...s, server_id: v })}>
+                          <SelectTrigger><SelectValue placeholder="Select server" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__pick__" disabled>Select server</SelectItem>
+                            {/* A rule scoped to a server that is not in the first page still shows as chosen. */}
+                            {s.server_id !== '__pick__' && !servers.some((x: any) => x.id === s.server_id) && (
+                              <SelectItem value={s.server_id}>Server {s.server_id.slice(0, 8)}</SelectItem>
+                            )}
+                            {servers.map((x: any) => (
+                              <SelectItem key={x.id} value={x.id}>{x.display_name || x.hostname}{x.primary_ip ? ` · ${x.primary_ip}` : ''}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                    )}
+                  </>
                 ) : s.source === 'service' ? (
                   <div className="grid grid-cols-2 gap-3">
                     <FormField label="Service check">
@@ -1264,7 +1426,7 @@ export function AlertRuleWizardDialog({
                       }}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="all">All devices</SelectItem>
+                          <SelectItem value="all">{downCoversServers(s) ? 'All devices and servers' : 'All devices'}</SelectItem>
                           <SelectItem value="device">Specific device</SelectItem>
                           <SelectItem value="group">Device group</SelectItem>
                           <SelectItem value="type">Device type</SelectItem>
@@ -1273,6 +1435,13 @@ export function AlertRuleWizardDialog({
                         </SelectContent>
                       </Select>
                     </FormField>
+                    {downCoversServers(s) && (scopeMode === 'all' || scopeMode === 'tag') && (
+                      <p className="rounded-lg border border-border bg-surface2/40 px-3 py-2 text-xs text-muted">
+                        This rule also pages for agent-monitored servers{scopeMode === 'tag' ? ' carrying the tag' : ''}: a server whose
+                        agent stops reporting, and that ping cannot show is up, counts as down. Limiting it to a device, group,
+                        type or location makes it a device-only rule.
+                      </p>
+                    )}
                     {scopeMode === 'device' && (
                       <FormField label="Device">
                         <Select value={s.device_id || '__pick__'} onValueChange={(v) => setS({ ...s, device_id: v === '__pick__' ? '' : v })}>
@@ -1364,10 +1533,18 @@ export function AlertRuleWizardDialog({
                   <FormField label="Cooldown (seconds)" hint="Anti-flap: after a notification goes out, repeat triggers for the same object stay quiet this long">
                     <Input type="number" min={0} value={s.cooldown} onChange={(e) => setS({ ...s, cooldown: Number(e.target.value) })} />
                   </FormField>
-                  <FormField label="Max escalation repeats" hint="Cap on repeat pages from an escalation level (0 = unlimited)">
-                    <Input type="number" min={0} value={s.max_repeat} onChange={(e) => setS({ ...s, max_repeat: Number(e.target.value) })} />
-                  </FormField>
+                  {!isServer && (
+                    <FormField label="Max escalation repeats" hint="Cap on repeat pages from an escalation level (0 = unlimited)">
+                      <Input type="number" min={0} value={s.max_repeat} onChange={(e) => setS({ ...s, max_repeat: Number(e.target.value) })} />
+                    </FormField>
+                  )}
                 </div>
+                {isServer ? (
+                  <p className="rounded-lg border border-border bg-surface2/40 p-3 text-xs text-muted">
+                    Server alerts are sent in the built-in wording: it names the server, what was measured and the rule&apos;s
+                    condition. After saving, use <span className="text-text">Preview message</span> on the rule list to see it.
+                  </p>
+                ) : (<>
                 <TemplateVars />
                 <p className="text-xs text-muted">
                   This is the wording that will be sent. Edit any field to word it yourself; a field
@@ -1383,6 +1560,7 @@ export function AlertRuleWizardDialog({
                 <TemplateField label="SMS template" field="sms_template" rows={2}
                   value={s.sms_template} defaults={tplDefaults} onChange={setTemplate} />
                 <LiveMail msg={livePreview?.alert} label="Trigger email" />
+                </>)}
               </div>
             )}
 
@@ -1392,12 +1570,12 @@ export function AlertRuleWizardDialog({
                   title="Escalation Policy"
                   hint="Who is paged when the incident stays active and nobody acknowledges it. Acknowledging stops escalation; resolving sends an all-clear to everyone who was notified."
                 />
-                <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="How this rule escalates">
+                <div className={cn('grid gap-2', isServer ? 'sm:grid-cols-2' : 'sm:grid-cols-3')} role="radiogroup" aria-label="How this rule escalates">
                   {([
                     { v: 'default', label: 'Use priority default', hint: `The policy that is the default for ${effPriority}` },
                     { v: 'policy', label: 'Choose a policy', hint: 'Always this policy, whatever the priority' },
                     { v: 'legacy', label: 'Legacy tiers', hint: 'Channel tiers on this rule; they override the priority default' },
-                  ] as const).map((o) => (
+                  ] as const).filter((o) => !(isServer && o.v === 'legacy')).map((o) => (
                     <button
                       key={o.v}
                       type="button"
@@ -1530,11 +1708,19 @@ export function AlertRuleWizardDialog({
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <SectionTitle title="Reset Actions" hint="Notifications when alert clears (recovery)." />
-                  <Button type="button" variant="outline" size="sm" onClick={copyTriggerToReset}>
-                    <Copy className="h-3.5 w-3.5" />Copy from trigger
-                  </Button>
+                  {!isServer && (
+                    <Button type="button" variant="outline" size="sm" onClick={copyTriggerToReset}>
+                      <Copy className="h-3.5 w-3.5" />Copy from trigger
+                    </Button>
+                  )}
                 </div>
-                {!hasResetTemplates ? (
+                {isServer ? (
+                  <p className="rounded-lg border border-border bg-surface2/40 p-3 text-xs text-muted">
+                    {s.reset_mode === 'auto'
+                      ? 'When the condition clears, the trigger channels get a recovery notice in the built-in wording, stating how long the problem lasted.'
+                      : 'Recovery notices are off — enable "Reset when trigger condition is no longer true" on the Reset step.'}
+                  </p>
+                ) : !hasResetTemplates ? (
                   <p className="rounded-lg border border-border bg-surface2 p-3 text-xs text-muted">
                     An SNMP trap is an event, not a state — nothing ever clears it, so there is no
                     reset notification to word.
@@ -1600,10 +1786,16 @@ export function AlertRuleWizardDialog({
                     <ReviewRow label="Scope" value={describeScopeDraft(s.nf)} />
                     <ReviewRow label="Noise control" value={`Raise after ${s.nf.hold}, resolve after ${s.nf.clear_hold} evaluation(s)${Number(s.nf.flap_max) ? `; hold open after ${s.nf.flap_max} changes in ${s.nf.flap_window_min} min` : ''}`} />
                   </>
+                ) : isServer ? (
+                  <>
+                    <ReviewRow label="Scope" value={!s.server_id ? 'All servers'
+                      : (() => { const x = servers.find((v: any) => v.id === s.server_id); return x ? (x.display_name || x.hostname) : 'One server' })()} />
+                    {serverKind === 'pct' && <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />}
+                  </>
                 ) : (
                   <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
                 )}
-                {usesMetricLifecycle(s) && (
+                {(usesMetricLifecycle(s) || serverKind === 'pct') && (
                   <ReviewRow label="Clear after" value={s.clear_duration === 0 ? 'First healthy reading' : `${s.clear_duration ?? DEFAULT_CLEAR_SECONDS}s${s.clear_duration == null ? ' (default)' : ''}`} />
                 )}
                 {flapHold && <ReviewRow label="While flapping" value={s.notify_while_flapping ? 'Notify immediately' : 'Held until a status lasts the flap stability time'} />}
@@ -1626,7 +1818,7 @@ export function AlertRuleWizardDialog({
                         })}
                 />
                 <ReviewRow label="Enabled" value={s.enabled ? 'Yes' : 'No'} />
-                <div className="flex gap-2 pt-2">
+                {!isServer && <div className="flex gap-2 pt-2">
                   <Button type="button" variant="outline" size="sm" onClick={() => previewMut.mutate()} disabled={previewMut.isPending}>
                     {previewMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
                     Preview message
@@ -1637,8 +1829,8 @@ export function AlertRuleWizardDialog({
                       Send test
                     </Button>
                   )}
-                </div>
-                {preview && (
+                </div>}
+                {preview && !isServer && (
                   <div className="space-y-3">
                     <EmailPreviewCard title="Alert email" msg={preview.alert} />
                     {preview.recovery && (
@@ -1678,6 +1870,15 @@ export function AlertRuleWizardDialog({
       </div>
     </div>
   )
+}
+
+/** A device rule that, left unscoped, also pages for agent servers (the Device Down rules). */
+function downCoversServers(s: WizardState): boolean {
+  const first = s.conditions[0]
+  return s.source === 'device' && downRuleCoversServers({
+    metric: first?.metric, trigger_on: s.trigger_on,
+    conditions: s.conditions.length > 1 ? s.conditions : null, operator: first?.operator, threshold: first?.threshold,
+  })
 }
 
 function SectionTitle({ title, hint }: { title: string; hint?: string }) {
