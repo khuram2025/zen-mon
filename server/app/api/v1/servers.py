@@ -32,7 +32,7 @@ from app.api.v1.apm import invalidate_ingest_key_cache
 from app.core import scoping
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.services import license_capacity, package_digest
+from app.services import event_log_policy, license_capacity, package_digest
 from app.services.agent_package_names import (
     FLAVOR_FULL,
     FLAVOR_PATTERN,
@@ -964,15 +964,36 @@ async def server_events(
     server_id: UUID,
     limit: int = Query(200, ge=1, le=1000),
     hours: int = Query(24, ge=1, le=720),
+    from_: Optional[datetime] = Query(None, alias="from"),
+    to: Optional[datetime] = None,
     level: Optional[str] = Query(None, regex="^(critical|error|warning|information|verbose)$"),
     include_empty: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Return Event Log summary aggregated from ClickHouse."""
+    """Return Event Log summary aggregated from ClickHouse.
+
+    The window is ``from``/``to`` when both are given (the page's time range,
+    custom ranges included), else the last ``hours``."""
     from app.core.database import get_ch_client
-    conditions = ["server_id = %(sid)s", "timestamp >= now() - INTERVAL %(hrs)s HOUR"]
-    params: dict[str, Any] = {"sid": str(server_id), "lim": limit, "hrs": hours}
+    if from_ is not None and to is not None:
+        start = from_ if from_.tzinfo else from_.replace(tzinfo=timezone.utc)
+        end = to if to.tzinfo else to.replace(tzinfo=timezone.utc)
+        if start >= end:
+            raise HTTPException(422, "from must be before to")
+        if end - start > timedelta(days=31):
+            raise HTTPException(422, "The event log window is at most 31 days")
+        window = "timestamp >= %(t0)s AND timestamp < %(t1)s"
+        params: dict[str, Any] = {
+            "t0": start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "t1": end.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        hours = max(1, round((end - start).total_seconds() / 3600))
+    else:
+        window = "timestamp >= now() - INTERVAL %(hrs)s HOUR"
+        params = {"hrs": hours}
+    conditions = ["server_id = %(sid)s", window]
+    params.update({"sid": str(server_id), "lim": limit})
     if not include_empty:
         conditions.append("event_count > 0")
     if level:
@@ -989,9 +1010,9 @@ async def server_events(
             parameters=params,
         ).result_rows
         checked = client.query(
-            """SELECT DISTINCT log_name FROM zenplus.host_event_log_summary
-               WHERE server_id = %(sid)s AND timestamp >= now() - INTERVAL %(hrs)s HOUR""",
-            parameters={"sid": str(server_id), "hrs": hours},
+            f"""SELECT DISTINCT log_name FROM zenplus.host_event_log_summary
+               WHERE server_id = %(sid)s AND {window}""",
+            parameters=params,
         ).result_rows
         return res, checked
 
@@ -2322,6 +2343,15 @@ async def revoke_enrollment_token(
 
 # ── Agent policies CRUD ─────────────────────────────────────────────
 
+def _event_log_filters_or_422(raw) -> list:
+    """A policy's event-log filters as stored; [] = the default channels. The agent drops the whole list when one
+    entry is invalid, so an invalid list is refused here."""
+    try:
+        return event_log_policy.validated_filters(raw)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @policies_router.get("")
 async def list_policies(
     platform: Optional[str] = None,
@@ -2353,6 +2383,7 @@ async def create_policy(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("servers.manage")),
 ):
+    event_log_filters = _event_log_filters_or_422(data.event_log_filters)
     row = (await db.execute(
         text("""INSERT INTO agent_policies
                   (name, description, platform, metric_interval_s, upload_interval_s, process_top_n,
@@ -2370,7 +2401,7 @@ async def create_policy(
             "ptn": data.process_top_n,
             "sw": json.dumps(data.service_watchlist),
             "pw": json.dumps(data.process_watchlist),
-            "elf": json.dumps(data.event_log_filters),
+            "elf": json.dumps(event_log_filters),
             "di": json.dumps(data.disk_ignore),
             "ni": json.dumps(data.network_ignore),
             "cl": json.dumps(data.cardinality_limits),
@@ -2424,6 +2455,8 @@ async def update_policy(
     for field in json_fields:
         v = getattr(data, field)
         if v is not None:
+            if field == "event_log_filters":
+                v = _event_log_filters_or_422(v)
             sets.append(f"{field} = :{field}")
             params[field] = json.dumps(v)
     if not sets:
