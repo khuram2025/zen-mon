@@ -8,7 +8,22 @@ A release's signed min_version names its minimum installed prerequisite. If an a
 
 Cumulative releases ship the full migration set. Installing every historic release is unnecessary: migration runners use scripts/migrations.lock in original release order and the PostgreSQL/ClickHouse ledgers to apply pending work. Required one-time OS, updater, data-transform or trust-key transitions must be represented by min_version and retained as a published, accessible bridge. Severity alone does not make a release a bridge. Future cumulative releases include earlier security fixes; never omit a required one-time operation without retaining its prerequisite.
 
-Current tested chain: **1.23.3 -> 1.23.7 -> 1.23.8 -> 1.23.9 -> 1.23.10**. An appliance already at a later point begins after that point. v1.23.7 is the cumulative entry for this chain; v1.23.8 and v1.23.9 keep their immutable signed minimums. Unknown or corrupt version markers require operator repair, not a guessed upgrade or downgrade.
+For releases from 1.24.38, the required Windows installer catalog bridge is
+**1.24.36**. The build policy defaults to this minimum and rejects lower values.
+A 1.24.29 appliance follows **1.24.29 -> 1.24.36 -> 1.24.38**. The bridge
+contains the signed Windows agent 1.14.4 core/full EXE and MSI installers;
+subsequent appliance-only packages preserve that catalog. Do not promote
+1.24.37 beyond its existing canary: its immutable minimum predates this bridge.
+Raising the minimum in the portal alone is invalid because it must match the
+signed manifest. Existing 1.24.37 canaries already provisioned with the catalog
+can proceed to 1.24.38. Keep the bridge available and validate its eligibility,
+signature, hash and age for supported older cohorts before promotion.
+
+Historical chain: **1.23.3 -> 1.23.7 -> 1.23.8 -> 1.23.9 -> 1.23.10**.
+An appliance already at a later point begins after that point. v1.23.7 is the
+cumulative entry for this chain; v1.23.8 and v1.23.9 keep their immutable signed
+minimums. Unknown or corrupt version markers require operator repair, not a
+guessed upgrade or downgrade.
 
 ## Required safeguards
 
