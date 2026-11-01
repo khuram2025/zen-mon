@@ -847,7 +847,8 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
             # One incident may cover several lifecycle signals in the observation
             # window. Keep its text aligned with the newest signal, without
             # changing its identity, acknowledgement or notification state.
-            await db.execute(text("UPDATE alerts SET message=:message WHERE id=:id"),
+            await db.execute(text("""UPDATE alerts SET message=:message
+                WHERE id=:id AND message IS DISTINCT FROM :message"""),
                              {"id": opened.id, "message": _message(rule, hostname, detail)})
         await _stamp_state(db, opened.id, {"value": round(value, 2) if value is not None else None,
                                            "data_state": "current", **(extra or {})})
