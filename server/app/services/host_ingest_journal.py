@@ -8,7 +8,8 @@ This is deliberately bounded and fail-closed: receipts are not automatically
 pruned, old uncertain writes are held, and capacity exhaustion returns an error
 to the producer spool. Commissioning must qualify the ClickHouse deduplication
 window and forbid other writers to these tables. It is not an unlimited
-exactly-once contract, nor a journal for the Go/APM/flow producers.
+exactly-once contract. The commissioned Go poller can stage its supported
+analytics batches here; APM and flow producers remain outside this contract.
 """
 from __future__ import annotations
 

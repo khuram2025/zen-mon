@@ -49,3 +49,16 @@ Commission with disposable data, compare raw and derived results, test a lost
 response and controller power loss, and verify a returned replica. Run full
 poller tests, cross-language PostgreSQL contracts and normal release CI before
 using a build for appliance acceptance.
+
+## VMware qualification on 1 November 2026
+
+Both isolated three-node cells passed a hard power-off after ClickHouse accepted
+the ping block but before the journal completion committed. All seven persisted
+blocks recovered on a replacement controller with their original identities.
+Recovery through data verification took 60.72 seconds in site A and 61.14 seconds
+in site B; these are observations, not availability SLAs. The original login
+session worked after each takeover. Every returned replica contained exactly one
+raw row per marker, with one ping and one service rollup sample. Full unsigned
+64-bit counters, nullable service fields and the IPv6 trap source were preserved.
+The primary was read only and its API process remained unchanged during both
+tests. These lab overlays and synthetic probes are not customer appliances.
