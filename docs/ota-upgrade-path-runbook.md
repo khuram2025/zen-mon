@@ -8,7 +8,25 @@ A release's signed min_version names its minimum installed prerequisite. If an a
 
 Cumulative releases ship the full migration set. Installing every historic release is unnecessary: migration runners use scripts/migrations.lock in original release order and the PostgreSQL/ClickHouse ledgers to apply pending work. Required one-time OS, updater, data-transform or trust-key transitions must be represented by min_version and retained as a published, accessible bridge. Severity alone does not make a release a bridge. Future cumulative releases include earlier security fixes; never omit a required one-time operation without retaining its prerequisite.
 
-Current tested chain: **1.23.3 -> 1.23.7 -> 1.23.8 -> 1.23.9 -> 1.23.10**. An appliance already at a later point begins after that point. v1.23.7 is the cumulative entry for this chain; v1.23.8 and v1.23.9 keep their immutable signed minimums. Unknown or corrupt version markers require operator repair, not a guessed upgrade or downgrade.
+For releases from 1.24.38, the required Windows installer catalog bridge is
+**1.24.36**. The build policy defaults to this minimum and rejects lower values.
+A 1.24.29 appliance follows **1.24.29 -> 1.24.36 -> 1.24.38**. The bridge
+contains the signed Windows agent 1.14.4 core/full EXE and MSI installers;
+subsequent appliance-only packages preserve that catalog. Do not promote
+1.24.37 beyond its existing canary: its immutable minimum predates this bridge.
+Raising the minimum in the portal alone is invalid because it must match the
+signed manifest. Existing 1.24.37 canaries already provisioned with the catalog
+can proceed to 1.24.38. Keep the bridge available and validate its eligibility,
+signature, hash and age for supported older cohorts before promotion.
+Do not use 1.24.37 as a future prerequisite: its legacy dependency skips the
+catalog. The builder blocks that minimum and the portal checks that higher
+prerequisite chains actually include 1.24.36.
+
+Historical chain: **1.23.3 -> 1.23.7 -> 1.23.8 -> 1.23.9 -> 1.23.10**.
+An appliance already at a later point begins after that point. v1.23.7 is the
+cumulative entry for this chain; v1.23.8 and v1.23.9 keep their immutable signed
+minimums. Unknown or corrupt version markers require operator repair, not a
+guessed upgrade or downgrade.
 
 ## Required safeguards
 
@@ -35,6 +53,14 @@ Current tested chain: **1.23.3 -> 1.23.7 -> 1.23.8 -> 1.23.9 -> 1.23.10**. An ap
 ## Promotion guard scope (changed 2026-10-10)
 
 The promotion guard (`integrations/zentryc_ota/rollout_guard.py`) verifies the hash, the signature, the signed version, minimum and architecture, and the 30-day manifest age of **the path that the promoted release's supported appliances take**. By default that path starts at the release's own signed `min_version` (the builder forces it to be at least `minimum_supported_upgrade_base`), so for a release whose minimum is the floor the path is the release alone. Bridge releases older than the floor are not part of it: before this change the guard planned from `0.0.0`, which made the oldest bridge's signing date the limit for every rollout, and from 2026-10-09 (30 days after 1.23.7 to 1.23.9 were signed) no rollout of any release could be created.
+
+From 1.24.38, promotion requires a minimum of 1.24.36 or higher and the guard
+plans from 1.24.35 so it verifies the 1.24.36 catalog bridge itself, including
+publication and full audience coverage. The older 1.23.9 prerequisite remains
+outside this scope. A missing, expired, modified or ineligible catalog bridge
+blocks promotion as well as appliance selection. Keep the deployed portal guard
+synchronized with this source; increasing a future bridge floor requires review
+of both the builder policy and portal guard.
 
 - Appliances below the floor are unsupported for direct updates. Take them to the floor first. The owner confirmed on 2026-10-10 that no appliance is below 1.23.9.
 - Every step the guard does plan is still fully verified, including the bridge checks (active rollout, 100%, group coverage) if a release ever names a minimum above the planning start.

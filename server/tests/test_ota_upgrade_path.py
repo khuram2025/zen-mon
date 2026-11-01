@@ -142,9 +142,50 @@ def test_next_hop_reloads_new_updater_and_preserves_config(tmp_path, monkeypatch
 def test_release_policy_preserves_bridge_floor():
     sys.path.insert(0, str(ROOT / "scripts"))
     from release_policy import validate_policy
-    assert validate_policy(ROOT, "1.23.10", None) == "1.23.9"
+    assert validate_policy(ROOT, "1.24.38", None) == "1.24.36"
     with pytest.raises(ValueError, match="bridge floor"):
-        validate_policy(ROOT, "1.23.10", "1.23.7")
+        validate_policy(ROOT, "1.24.38", "1.24.35")
+
+
+@pytest.mark.parametrize("target", ["1.24.38", "1.24.99", "1.25.0", "2.0.0"])
+def test_future_releases_cannot_bypass_windows_catalog_bridge(target):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from release_policy import validate_policy
+    assert validate_policy(ROOT, target, None) == "1.24.36"
+    with pytest.raises(ValueError, match="cannot be used as a required bridge"):
+        validate_policy(ROOT, target, "1.24.37")
+    for minimum in ("1.23.9", "1.24.29", "1.24.35"):
+        with pytest.raises(ValueError, match="bridge floor"):
+            validate_policy(ROOT, target, minimum)
+
+
+def test_higher_minimum_can_require_a_catalog_dependent_release():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from release_policy import validate_policy
+    assert validate_policy(ROOT, "1.25.0", "1.24.38") == "1.24.38"
+
+
+@pytest.mark.parametrize("current,expected", [
+    ("1.24.29", ["1.24.36", "1.24.38"]),
+    ("1.24.35", ["1.24.36", "1.24.38"]),
+    ("1.24.36", ["1.24.38"]),
+    ("1.24.37", ["1.24.38"]),
+])
+def test_windows_catalog_bridge_precedes_appliance_only_target(current, expected):
+    bridge = release("1.24.36", "1.23.9")
+    target = release("1.24.38", "1.24.36")
+    catalog = [release("1.24.35", "1.23.9"), bridge,
+               release("1.24.37", "1.23.9"), target]
+    assert [r.version for r in plan_upgrade(current, target, catalog)] == expected
+    if current < "1.24.36":
+        with pytest.raises(VersionPolicyError, match="requires 1.24.36 first"):
+            validate_transition(dict(version=target.version, min_version=target.min_version), current)
+
+
+def test_windows_catalog_bridge_missing_does_not_fall_back_to_appliance_only_release():
+    target = release("1.24.38", "1.24.36")
+    with pytest.raises(UpgradePathError, match="Required bridge 1.24.36"):
+        plan_upgrade("1.24.29", target, [release("1.24.37", "1.23.9"), target])
 
 
 def test_failure_stops_before_checking_for_another_hop(monkeypatch):

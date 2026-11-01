@@ -11,6 +11,8 @@ def validate_policy(root: Path, version: str, minimum: str | None) -> str:
     minimum = minimum or floor
     if version_key(minimum) < version_key(floor):
         raise ValueError(f"Minimum version cannot bypass the recorded bridge floor {floor}")
+    if minimum in policy.get("blocked_prerequisite_versions", []):
+        raise ValueError(f"Minimum version {minimum} cannot be used as a required bridge; its signed path omits the installer catalog")
     if version_key(minimum) >= version_key(version):
         raise ValueError("Minimum version must precede the new release")
     for name in policy["required_payload_files"]:

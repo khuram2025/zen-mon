@@ -6,7 +6,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
-from ota.upgrade_path import plan_upgrade
+from ota.upgrade_path import plan_upgrade, version_key
+
+# 1.24.37 omitted the Windows installer catalog. Subsequent releases must not
+# repeat that path, including releases published with older build tooling.
+CATALOG_BRIDGE = "1.24.36"
+CATALOG_BRIDGE_ENTRY = "1.24.35"
+FIRST_CATALOG_DEPENDENT = "1.24.38"
 
 
 def validate_rollout_path(release, data):
@@ -20,7 +26,18 @@ def validate_rollout_path(release, data):
     # fresh release. Everything the promoted path contains is still fully verified below. Set
     # ZENPLUS_OTA_VALIDATE_FULL_CHAIN = True to verify the whole chain from 0.0.0 as before.
     start = "0.0.0" if getattr(settings, "ZENPLUS_OTA_VALIDATE_FULL_CHAIN", False) else (release.min_version or "0.0.0")
+    requires_catalog = version_key(release.version) >= version_key(FIRST_CATALOG_DEPENDENT)
+    if requires_catalog:
+        if not release.min_version or version_key(release.min_version) < version_key(CATALOG_BRIDGE):
+            raise ValueError(f"Release {release.version} must require catalog bridge {CATALOG_BRIDGE} or later")
+        # Include the catalog bridge itself, not just releases after the
+        # declared minimum. Retired, pre-catalog prerequisites remain outside
+        # this scope; full-chain mode continues to verify those too.
+        if not getattr(settings, "ZENPLUS_OTA_VALIDATE_FULL_CHAIN", False):
+            start = CATALOG_BRIDGE_ENTRY
     path = plan_upgrade(start, release, catalog)
+    if requires_catalog and not any(step.version == CATALOG_BRIDGE for step in path):
+        raise ValueError(f"Required path bypasses catalog bridge {CATALOG_BRIDGE}")
     key_path = Path(getattr(settings, "ZENPLUS_RELEASE_PUBLIC_KEY", Path(settings.BASE_DIR) / "keys" / "zenplus-release.pub"))
     key = load_pem_public_key(key_path.read_bytes())
     for step in path:
