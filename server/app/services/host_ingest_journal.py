@@ -304,11 +304,13 @@ class HostIngestJournal:
 async def recovery_loop():
     from app.core.database import engine, get_clickhouse_client
     from app.services.host_insert_batcher import HostInsertBatcher
-    from app.services import rum_ingest_journal
+    from app.services import rum_ingest_journal, flow_ingest_journal
     ordinary_write = HostInsertBatcher(get_clickhouse_client)._write
     def writer(table, columns, rows, token):
         if table == rum_ingest_journal.WORK_KIND:
             return rum_ingest_journal.write(get_clickhouse_client, columns, rows, token)
+        if table in flow_ingest_journal.TABLES:
+            return flow_ingest_journal.write(get_clickhouse_client, table, columns, rows, token)
         return ordinary_write(table, columns, rows, token)
     journal = HostIngestJournal(engine, writer)
     while True:
