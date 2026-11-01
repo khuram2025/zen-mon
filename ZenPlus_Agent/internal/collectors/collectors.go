@@ -25,10 +25,11 @@ import (
 )
 
 type Result struct {
-	Metrics   []model.Metric
-	Inventory map[string]any
-	Events    []model.EventSummary
-	Errors    map[string]string
+	Metrics      []model.Metric
+	Inventory    map[string]any
+	Events       []model.EventSummary
+	Errors       map[string]string
+	EventCursors map[string]string
 }
 
 var rateState = struct {
@@ -114,6 +115,11 @@ type serviceInfo struct {
 }
 
 func Collect(ctx context.Context, cfg config.Config) Result {
+	return CollectWithEventCursors(ctx, cfg, nil)
+}
+
+// Cursors are advanced only by the caller's successful durable spool enqueue.
+func CollectWithEventCursors(ctx context.Context, cfg config.Config, cursors map[string]string) Result {
 	now := time.Now().UTC()
 	r := Result{
 		Metrics:   []model.Metric{},
@@ -154,7 +160,11 @@ func Collect(ctx context.Context, cfg config.Config) Result {
 		collectServices(ctx, cfg.Collectors.Services.Watchlist, add, r.Errors, r.Inventory)
 	}
 	if cfg.Collectors.EventLog.Enabled && due("event_log", cfg.Collectors.EventLog.IntervalSeconds, now) {
-		collectEventLog(ctx, cfg.Collectors.EventLog, add, r.Errors)
+		if cfg.Collectors.EventLog.DetailsEnabled {
+			collectEventDetails(ctx, cfg.Collectors.EventLog, cursors, &r)
+		} else {
+			collectEventLog(ctx, cfg.Collectors.EventLog, add, r.Errors)
+		}
 	}
 	if cfg.Collectors.Inventory.Enabled && due("inventory", cfg.Collectors.Inventory.IntervalSeconds, now) {
 		collectInventory(ctx, &r)
@@ -874,6 +884,7 @@ const (
 )
 
 var supportedEventLogLevels = map[string]bool{
+	"audit":       true,
 	"critical":    true,
 	"error":       true,
 	"warning":     true,

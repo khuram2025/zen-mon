@@ -7,7 +7,7 @@
  * columns. The server's own Alerts tab writes the same rules.
  */
 
-export type ServerMetricKind = 'pct' | 'svc' | 'proc' | 'flag'
+export type ServerMetricKind = 'pct' | 'svc' | 'proc' | 'flag' | 'event'
 
 export const SERVER_METRICS: ReadonlyArray<{ value: string; label: string; kind: ServerMetricKind }> = [
   { value: 'host_cpu_pct', label: 'CPU usage (%)', kind: 'pct' },
@@ -17,6 +17,8 @@ export const SERVER_METRICS: ReadonlyArray<{ value: string; label: string; kind:
   { value: 'host_service_down', label: 'Service stopped', kind: 'svc' },
   { value: 'host_process_down', label: 'Process not running', kind: 'proc' },
   { value: 'host_agent_offline', label: 'Agent offline', kind: 'flag' },
+  { value: 'host_restart', label: 'Server restart / unexpected shutdown', kind: 'event' },
+  { value: 'host_shutdown', label: 'Server shutdown requested / reported', kind: 'event' },
 ]
 
 /** Heartbeat silence before an Agent offline rule fires when it sets none (server_availability.DOWN_AFTER_S). */
@@ -43,6 +45,7 @@ export function serverRuleCondition(r: { metric: string; operator?: string | nul
   const kind = serverMetricKind(r.metric)
   if (kind === 'svc') return `Service ${r.target || '?'} stopped`
   if (kind === 'proc') return `Process ${r.target || '?'} not running`
+  if (kind === 'event') return serverMetricLabel(r.metric)
   if (kind === 'flag') {
     const after = Math.max(Number(r.min_duration) || DEFAULT_SILENCE_SECONDS, MIN_SILENCE_SECONDS)
     return `Agent silent for ${after >= 120 ? `${Math.round(after / 60)} min` : `${after}s`}, server still answers ping`
@@ -140,7 +143,7 @@ export function serverRulePayload(s: ServerDraft): Record<string, unknown> {
     min_duration: pct || kind === 'flag' ? Math.max(0, Math.round(Number(s.min_duration) || 0)) : 0,
     clear_duration: pct ? s.clear_duration : null,
     reset_threshold: pct && c.reset_threshold != null ? Number(c.reset_threshold) : null,
-    recovery_alert: s.reset_mode === 'auto',
+    recovery_alert: kind === 'event' ? false : s.reset_mode === 'auto',
     cooldown: s.cooldown,
     notify_channels: s.notify_channels,
     server_id: s.server_id && s.server_id !== '__pick__' ? s.server_id : null,

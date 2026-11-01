@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Common ───────────────────────────────────────────────────────────
@@ -444,9 +444,16 @@ class AgentConfigResponse(BaseModel):
 class MetricSample(BaseModel):
     """Generic batched metric envelope."""
     kind: Literal["cpu", "memory", "filesystem", "disk_io", "network",
-                  "process", "service_state", "event_log", "agent_health", "inventory"]
+                  "process", "service_state", "event_log", "event_detail", "agent_health", "inventory"]
     timestamp: datetime
     data: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_event_detail(self):
+        if self.kind == "event_detail":
+            from app.services.server_event_service import normalize
+            normalize(self.data)
+        return self
 
 
 class AgentResultsBatch(BaseModel):
@@ -460,6 +467,17 @@ class AgentResultsBatch(BaseModel):
     collected_at: datetime
     sent_at: datetime
     metrics: List[MetricSample] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_event_budget(self):
+        details = [m.data for m in self.metrics if m.kind == "event_detail"]
+        if len(details) > 1000:
+            raise ValueError("at most 1000 event details per envelope")
+        if details:
+            import json
+            if len(json.dumps(details, ensure_ascii=False).encode()) > 1048576:
+                raise ValueError("event details exceed the 1 MiB envelope budget")
+        return self
     inventory: Dict[str, Any] = Field(default_factory=dict)
     events: List[Dict[str, Any]] = Field(default_factory=list)
     health: Optional[Dict[str, Any]] = None

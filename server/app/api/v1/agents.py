@@ -354,6 +354,7 @@ async def _config_etag_for_agent(agent_row: dict, db: AsyncSession) -> tuple[str
         # What the appliance derives from the policy (event_log_policy), so a
         # fix there reaches agents that already hold this policy's ETag.
         event_log_policy.CONFIG_REVISION,
+        str("event_details_v1" in _capability_list(agent_row.get("capabilities"))),
     ]
     etag = _sha256("|".join(parts))
     return etag, dict(policy)
@@ -1081,6 +1082,17 @@ async def get_config(
                 return {}
         return {}
 
+    supports_details = "event_details_v1" in _capability_list(agent.get("capabilities"))
+    detailed = supports_details and agent.get("platform") == "windows"
+    limits = _obj("cardinality_limits")
+    filters = event_log_policy.effective_filters(_arr("event_log_filters"), int(limits.get("event_profile", 0)) if detailed else None)
+    if not detailed:
+        filters = [dict(f, levels=[lv for lv in f["levels"] if lv != "audit"]) for f in filters if any(lv != "audit" for lv in f["levels"])]
+        filters = filters or event_log_policy.effective_filters([])
+    flags = _obj("feature_flags")
+    flags["event_details"] = detailed and flags.get("event_details", True)
+    if supports_details and agent.get("platform") != "windows":
+        flags["event_log"] = flags["collect_event_log"] = False
     return AgentConfigResponse(
         config_version=policy.get("config_version") or 1,
         policy_id=str(policy["id"]),
@@ -1091,11 +1103,11 @@ async def get_config(
         service_watchlist=_arr("service_watchlist"),
         process_watchlist=_arr("process_watchlist"),
         # Never an empty list: the agent would read it as "query no channels".
-        event_log_filters=event_log_policy.effective_filters(_arr("event_log_filters")),
+        event_log_filters=filters,
         disk_ignore=_arr("disk_ignore"),
         network_ignore=_arr("network_ignore"),
-        cardinality_limits=_obj("cardinality_limits"),
-        feature_flags=_obj("feature_flags"),
+        cardinality_limits=limits,
+        feature_flags=flags,
         update_ring=agent.get("update_ring") or "stable",
         signed_at=datetime.now(timezone.utc),
     )

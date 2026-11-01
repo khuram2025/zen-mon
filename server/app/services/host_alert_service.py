@@ -963,6 +963,7 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
     now = datetime.now(timezone.utc).timestamp() if now is None else now
 
     history_cache: dict[tuple[str, int], dict | None] = {}
+    lifecycle = None
     signals: dict | None = None
     since = 0.0
     counts = {"raised": 0, "resolved": 0}
@@ -974,6 +975,25 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
         targets = [str(rule.server_id)] if rule.server_id else list(servers)
 
         opened = await _open_incidents(db, rule)
+
+        if rule.metric in {"host_restart", "host_shutdown"}:
+            from app.services.server_event_service import recent_lifecycle, lifecycle_value
+            if lifecycle is None:
+                if signals is None:
+                    signals = await sa.load_signals(db)
+                    since = await sa.paging_since(db)
+                maintained = [s.server_id for s in signals.values() if s.ping == "maintenance"]
+                if maintained:
+                    await db.execute(text("""UPDATE server_lifecycle_events SET maintenance_suppressed=TRUE
+                        WHERE server_id=ANY(CAST(:ids AS uuid[])) AND event_time>=:since"""),
+                        {"ids":maintained,"since":datetime.fromtimestamp(now-900,timezone.utc)})
+                lifecycle = await recent_lifecycle(db, now)
+            for sid in targets:
+                breach,value,detail = lifecycle_value(rule.metric,lifecycle.get(sid,[]))
+                await _apply_state(db,rule,sid,servers.get(sid,"server"),None,breach,value,detail,
+                                   allowed=allowed,counts=counts,opened=opened.get((sid,_dedupe(rule,None))))
+            await db.commit()
+            continue
 
         if sa.is_availability_rule(rule):
             if signals is None:

@@ -408,6 +408,14 @@ func applyControllerConfig(current config.Config, remote model.AgentConfigRespon
 			next.Collectors.Processes.TopN = maxProcesses
 		}
 	}
+	applyFeatureFlag(remote.FeatureFlags, "event_details", &next.Collectors.EventLog.DetailsEnabled)
+	if next.Collectors.EventLog.DetailsEnabled {
+		// Event collection has its own traffic budget, independent of a fast CPU policy.
+		next.Collectors.EventLog.IntervalSeconds = max(60, remote.CardinalityLimits["event_interval_s"])
+		next.Collectors.EventLog.MaxEvents = remote.CardinalityLimits["event_max_events"]
+		next.Collectors.EventLog.MaxBytes = remote.CardinalityLimits["event_max_bytes"]
+		next.Collectors.EventLog.MaxMessageBytes = remote.CardinalityLimits["event_message_bytes"]
+	}
 	applyFeatureFlag(remote.FeatureFlags, "cpu", &next.Collectors.CPU.Enabled)
 	applyFeatureFlag(remote.FeatureFlags, "collect_cpu", &next.Collectors.CPU.Enabled)
 	applyFeatureFlag(remote.FeatureFlags, "memory", &next.Collectors.Memory.Enabled)

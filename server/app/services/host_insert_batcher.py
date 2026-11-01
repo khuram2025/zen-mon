@@ -109,6 +109,16 @@ def rows_present(client, table: str, columns: list[str], rows: list[list]) -> bo
     partially stored upload (e.g. an insert spanning partitions that failed
     half-way) is not acknowledged and replays.
     """
+    if table.split(".")[-1] == "host_event_details" and "event_uid" in columns and rows:
+        si, ui = columns.index("server_id"), columns.index("event_uid")
+        servers = {r[si] for r in rows}
+        if len(servers) != 1:
+            return False
+        identities = sorted({r[ui] for r in rows})
+        result = client.query(f"SELECT uniqExact(event_uid) FROM {table} "
+                              "WHERE server_id=%(sid)s AND event_uid IN %(uids)s",
+                              parameters={"sid":next(iter(servers)),"uids":identities}).result_rows
+        return bool(result) and int(result[0][0]) == len(identities)
     if "agent_id" not in columns or "timestamp" not in columns or not rows:
         return False
     ai, ti = columns.index("agent_id"), columns.index("timestamp")

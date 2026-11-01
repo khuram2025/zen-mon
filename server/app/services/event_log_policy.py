@@ -29,9 +29,9 @@ DEFAULT_FILTERS: list[dict[str, Any]] = [
 # Part of every agent's config ETag. Changing what /agents/config sends for an
 # unchanged policy must change the ETag too, or agents holding the old one get
 # 304 Not Modified and never see it. Bump this whenever that happens.
-CONFIG_REVISION = "event-log-defaults-1"
+CONFIG_REVISION = "event-details-role-profiles-2"
 
-LEVELS = ("critical", "error", "warning", "information", "verbose")
+LEVELS = ("critical", "error", "warning", "information", "verbose", "audit")
 
 # collectors.go limits.
 MAX_FILTERS = 32
@@ -101,7 +101,7 @@ def validated_filters(raw: Iterable[Any] | None) -> list[dict[str, Any]]:
     return out
 
 
-def effective_filters(stored: Iterable[Any] | None) -> list[dict[str, Any]]:
+def effective_filters(stored: Iterable[Any] | None, profile: int | None = None) -> list[dict[str, Any]]:
     """What /agents/config sends: the policy's own filters, or the defaults when
     it has none. A stored list the agent would reject (written before
     validation existed) also falls back to the defaults rather than silencing
@@ -110,4 +110,39 @@ def effective_filters(stored: Iterable[Any] | None) -> list[dict[str, Any]]:
         filters = validated_filters(stored)
     except ValueError:
         filters = []
-    return filters or [dict(f, levels=list(f["levels"])) for f in DEFAULT_FILTERS]
+    if filters:
+        return filters
+    if profile is not None:
+        return role_filters(profile)
+    return [dict(f, levels=list(f["levels"])) for f in DEFAULT_FILTERS]
+
+
+def role_filters(profile: int) -> list[dict[str, Any]]:
+    """Explicitly assigned server roles; never infer a role from its hostname.
+
+    Details-capable agents always collect OS lifecycle evidence separately.
+    Busy audit success/process creation streams are intentionally opt-in.
+    """
+    base = [{"channel": "System", "levels": ["critical", "error"]},
+            {"channel": "Application", "levels": ["critical", "error"]}]
+    if profile == 1:  # Domain controller
+        base += [{"channel": "Security", "levels": ["audit"],
+                  "ids": [4625, 4740, 4720, 4726, 4728, 4732, 4756, 1102]},
+                 {"channel": "Directory Service", "levels": ["critical", "error", "warning"]},
+                 {"channel": "DNS Server", "levels": ["critical", "error", "warning"]},
+                 {"channel": "DFS Replication", "levels": ["critical", "error"]}]
+    elif profile == 2:  # IIS
+        base += [{"channel": "Microsoft-Windows-IIS-Configuration/Operational", "levels": ["critical", "error", "warning"]}]
+    elif profile == 3:  # SQL Server; selected warnings in addition to errors
+        base += [{"channel": "Application", "levels": ["warning"], "ids": [825, 17883, 17884, 17887, 17888]}]
+    return base
+
+
+def validated_limits(raw: dict) -> dict:
+    bounds = {"event_profile": (0, 3), "event_interval_s": (60, 3600),
+              "event_max_events": (50, 1000), "event_max_bytes": (16384, 1048576),
+              "event_message_bytes": (256, 8192)}
+    for key, (lo, hi) in bounds.items():
+        if key in raw and (isinstance(raw[key], bool) or not isinstance(raw[key], int) or not lo <= raw[key] <= hi):
+            raise ValueError(f"{key} must be an integer between {lo} and {hi}")
+    return raw

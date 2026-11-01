@@ -11,7 +11,7 @@
 
 export type EventLogFilter = { channel: string; levels: string[]; ids?: number[] }
 
-export const EVENT_LOG_LEVELS = ['critical', 'error', 'warning', 'information', 'verbose'] as const
+export const EVENT_LOG_LEVELS = ['critical', 'error', 'warning', 'information', 'verbose', 'audit'] as const
 
 export const DEFAULT_EVENT_LOG_TEXT = 'System: critical, error, warning\nApplication: critical, error, warning'
 
@@ -63,11 +63,15 @@ export function parseEventLogFilters(text: string): { filters: EventLogFilter[] 
 }
 
 /** One line for the policy list: Off, Default, or the channels. */
-export function eventLogSummary(policy: { event_log_filters?: ReadonlyArray<Record<string, unknown>> | null; feature_flags?: Record<string, unknown> | null }): string {
+export function eventLogSummary(policy: { event_log_filters?: ReadonlyArray<Record<string, unknown>> | null; feature_flags?: Record<string, unknown> | null; cardinality_limits?: Record<string, unknown> | null }): string {
   const flags = policy.feature_flags || {}
   const flag = 'collect_event_log' in flags ? flags.collect_event_log : flags.event_log
   if (flag === false) return 'Off'
   const filters = policy.event_log_filters || []
-  if (!filters.length) return 'Default (System, Application)'
+  if (!filters.length) {
+    const role = policy.cardinality_limits?.event_profile
+    if (role != null) return ['General server', 'Domain controller / DNS', 'IIS web server', 'SQL Server'][Number(role)] || 'General server'
+    return 'Default (System, Application)'
+  }
   return filters.map((f) => String(f.channel)).join(', ')
 }

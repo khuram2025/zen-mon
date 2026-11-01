@@ -191,7 +191,7 @@ def describe(rule: Any, state: str, signals: ServerSignals, after_s: int) -> str
     if state == "up":
         return "agent reporting again"
     if state == "agent_offline":
-        return f"agent silent for over {mins} min; server still answers ping"
+        return f"agent unresponsive for over {mins} min; server still answers ping (possible agent failure or system hang; cause unconfirmed)"
     if state == "down":
         how = "ping not monitored" if signals.ping is None else "ping status unknown"
         return f"agent silent for over {mins} min; {how}"

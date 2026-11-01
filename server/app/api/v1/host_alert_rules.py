@@ -42,7 +42,7 @@ from app.models.user import User
 
 router = APIRouter(prefix="/host-alert-rules", tags=["Host Alert Rules"])
 
-_METRIC = "^(host_cpu_pct|host_memory_pct|host_filesystem_pct|host_disk_util_pct|host_service_down|host_process_down|host_agent_offline)$"
+_METRIC = "^(host_cpu_pct|host_memory_pct|host_filesystem_pct|host_disk_util_pct|host_service_down|host_process_down|host_agent_offline|host_restart|host_shutdown)$"
 _OPERATOR = "^(gt|gte|lt|lte|eq|neq|>|<|>=|<=|==|!=)$"
 _HHMM = "^([01][0-9]|2[0-3]):[0-5][0-9]$"
 

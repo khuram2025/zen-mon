@@ -144,6 +144,15 @@ METRICS: dict[str, dict] = {
                            "state_label": {"down": "Agent offline (server still answers ping)",
                                            "up": "Agent reporting"}},
 
+    "host_restart": {"noun": "Server restart", "subject": "the server",
+                     "narrative": {"down": "reported a new boot or restart event", "up": "has no recent restart event"},
+                     "state": {"down": "reports a boot or restart event", "up": "has no recent restart event"},
+                     "state_label": {"down": "Restart event detected", "up": "Restart observation window ended"}},
+    "host_shutdown": {"noun": "Server shutdown", "subject": "the server",
+                      "narrative": {"down": "reported a shutdown or power transition request", "up": "has no recent shutdown event"},
+                      "state": {"down": "reports a shutdown or power transition request", "up": "has no recent shutdown event"},
+                      "state_label": {"down": "Shutdown event detected", "up": "Shutdown observation window ended"}},
+
     # Application monitoring
     "apm_latency_p50": {"noun": "Median (p50) latency", "unit": " ms", "decimals": 0},
     "apm_latency_p95": {"noun": "p95 latency", "unit": " ms", "decimals": 0},

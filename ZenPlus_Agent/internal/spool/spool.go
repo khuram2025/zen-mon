@@ -198,16 +198,56 @@ func (s *Store) withReplayGeneration(generation uint64, mutate func() error) err
 }
 
 func (s *Store) Enqueue(batchID string, payload []byte, maxBytes int64) (uint64, error) {
+	return s.enqueue(batchID, payload, maxBytes, nil)
+}
+
+func (s *Store) EventCursors() (map[string]string, error) {
+	cursors := map[string]string{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		value := tx.Bucket(bucketMeta).Get([]byte("event_cursors_v1"))
+		if value == nil {
+			return nil
+		}
+		return json.Unmarshal(value, &cursors)
+	})
+	return cursors, err
+}
+
+// Checkpoints and their events commit in one transaction. A full spool applies
+// backpressure instead of deleting unacknowledged event batches.
+func (s *Store) EnqueueWithEventCursors(batchID string, payload []byte, maxBytes int64, cursors map[string]string) (uint64, error) {
+	if cursors == nil {
+		cursors = map[string]string{}
+	}
+	return s.enqueue(batchID, payload, maxBytes, cursors)
+}
+
+func (s *Store) enqueue(batchID string, payload []byte, maxBytes int64, cursors map[string]string) (uint64, error) {
 	if maxBytes > 0 && int64(len(payload)) > maxBytes {
 		return 0, fmt.Errorf("payload size %d exceeds spool limit %d", len(payload), maxBytes)
 	}
 	s.indexMu.Lock()
 	defer s.indexMu.Unlock()
+	if cursors != nil && maxBytes > 0 && s.indexBytes+int64(len(payload)) > maxBytes {
+		return 0, fmt.Errorf("event spool full: collection checkpoint retained for retry")
+	}
 	var seq uint64
 	var rec Record
 	var pruned []uint64
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		meta := tx.Bucket(bucketMeta)
+		if cursors != nil {
+			encoded, err := json.Marshal(cursors)
+			if err != nil {
+				return err
+			}
+			if len(cursors) > 256 || len(encoded) > 512*1024 {
+				return fmt.Errorf("event cursor state exceeds limit")
+			}
+			if err := meta.Put([]byte("event_cursors_v1"), encoded); err != nil {
+				return err
+			}
+		}
 		seq = btoi(meta.Get(keySequence)) + 1
 		if err := meta.Put(keySequence, itob(seq)); err != nil {
 			return err

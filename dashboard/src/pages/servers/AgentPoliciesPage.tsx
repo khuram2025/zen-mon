@@ -251,6 +251,11 @@ type PolicyFormState = {
   event_log_text: string
   /** Flags the form does not edit, kept as they are. */
   other_flags: Record<string, unknown>
+  event_profile: number
+  event_max_events: number
+  event_max_bytes: number
+  event_message_bytes: number
+  event_interval_s: number
 }
 
 const EMPTY_FORM: PolicyFormState = {
@@ -268,6 +273,8 @@ const EMPTY_FORM: PolicyFormState = {
   event_log_enabled: true,
   event_log_text: '',
   other_flags: {},
+  event_profile: 0, event_max_events: 200, event_max_bytes: 262144,
+  event_message_bytes: 2048, event_interval_s: 60,
 }
 
 const splitLines = (v: string) => v.split('\n').map((x) => x.trim()).filter(Boolean)
@@ -309,6 +316,11 @@ function PolicyFormDialog({
         event_log_enabled: eventLogSummary(policy) !== 'Off',
         event_log_text: formatEventLogFilters(policy.event_log_filters),
         other_flags,
+        event_profile: Number(policy.cardinality_limits?.event_profile ?? 0),
+        event_max_events: Number(policy.cardinality_limits?.event_max_events ?? 200),
+        event_max_bytes: Number(policy.cardinality_limits?.event_max_bytes ?? 262144),
+        event_message_bytes: Number(policy.cardinality_limits?.event_message_bytes ?? 2048),
+        event_interval_s: Number(policy.cardinality_limits?.event_interval_s ?? 60),
       })
     } else {
       setS(EMPTY_FORM)
@@ -324,6 +336,9 @@ function PolicyFormDialog({
         // [] = the default channels; turning collection off is the flag, never an empty list.
         event_log_filters: 'filters' in parsedEventLog ? parsedEventLog.filters : [],
         feature_flags: { ...s.other_flags, event_log: s.event_log_enabled },
+        cardinality_limits: { ...(policy?.cardinality_limits || {}), event_profile: s.event_profile,
+          event_max_events: s.event_max_events, event_max_bytes: s.event_max_bytes,
+          event_message_bytes: s.event_message_bytes, event_interval_s: s.event_interval_s },
         name: s.name.trim(),
         description: s.description.trim() || null,
         platform: s.platform,
@@ -445,22 +460,40 @@ function PolicyFormDialog({
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div id="policy-event-log" className="text-sm font-medium">Windows Event Log</div>
-                  <p className="text-xs text-muted">Counts events per channel and level every minute; shown on the server&apos;s Events tab.</p>
+                  <p className="text-xs text-muted">Collects selected event details in bounded batches; repeats are grouped on the server&apos;s Events tab.</p>
                 </div>
                 <Switch checked={s.event_log_enabled} onCheckedChange={(v) => setS({ ...s, event_log_enabled: v })}
                   aria-labelledby="policy-event-log" />
               </div>
+              {s.event_log_enabled && <div className="space-y-3">
+                <FormField label="Server role">
+                  <Select value={String(s.event_profile)} onValueChange={v => setS({ ...s, event_profile: Number(v) })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger><SelectContent>
+                      <SelectItem value="0">General server</SelectItem><SelectItem value="1">Domain controller / DNS</SelectItem>
+                      <SelectItem value="2">IIS web server</SelectItem><SelectItem value="3">SQL Server</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FormField>
+                <p className="text-xs text-muted">Leave Channels empty to use the role preset. Custom filters override the preset. OS restart/shutdown evidence has a separate collection allowance. Requires agent 1.14.4 or later.</p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <FormField label="Event interval (seconds)"><Input type="number" required min={60} max={3600} value={s.event_interval_s} onChange={e => setS({ ...s, event_interval_s: Number(e.target.value) })} /></FormField>
+                  <FormField label="Events per collection"><Input type="number" required min={50} max={1000} value={s.event_max_events} onChange={e => setS({ ...s, event_max_events: Number(e.target.value) })} /></FormField>
+                  <FormField label="Event payload limit (KB)"><Input type="number" required min={16} max={1024} value={s.event_max_bytes / 1024} onChange={e => setS({ ...s, event_max_bytes: Number(e.target.value) * 1024 })} /></FormField>
+                  <FormField label="Message limit (bytes)"><Input type="number" required min={256} max={8192} value={s.event_message_bytes} onChange={e => setS({ ...s, event_message_bytes: Number(e.target.value) })} /></FormField>
+                </div>
+                <p className="text-xs text-muted">Uploads are compressed. Batch limits defer remaining events; backlog, stale collection and log coverage gaps stay visible. Detailed history is kept for 14 days.</p>
+              </div>}
               {s.event_log_enabled && (
                 <FormField
                   label="Channels"
-                  hint={'One per line: "Channel: levels", optionally "| event IDs". Leave empty for the default: System and Application, critical, error and warning.'}
+                  hint={'One per line: "Channel: levels", optionally "| event IDs". Leave empty for the selected role. Security audit events use the audit level (for example Security: audit | 4625, 4740).'}
                 >
                   <Textarea
                     rows={3}
                     className="font-mono text-xs"
                     value={s.event_log_text}
                     onChange={(e) => setS({ ...s, event_log_text: e.target.value })}
-                    placeholder={`${DEFAULT_EVENT_LOG_TEXT}\nSecurity: information | 4625, 4740`}
+                    placeholder={`${DEFAULT_EVENT_LOG_TEXT}\nSecurity: audit | 4625, 4740`}
                     aria-invalid={!!eventLogError}
                   />
                 </FormField>

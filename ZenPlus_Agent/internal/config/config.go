@@ -99,6 +99,10 @@ type WatchConfig struct {
 }
 
 type EventLogConfig struct {
+	DetailsEnabled  bool              `yaml:"details_enabled" json:"details_enabled"`
+	MaxEvents       int               `yaml:"max_events,omitempty" json:"max_events,omitempty"`
+	MaxBytes        int               `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+	MaxMessageBytes int               `yaml:"max_message_bytes,omitempty" json:"max_message_bytes,omitempty"`
 	Enabled         bool              `yaml:"enabled" json:"enabled"`
 	IntervalSeconds int               `yaml:"interval_seconds,omitempty" json:"interval_seconds,omitempty"`
 	Filters         *[]EventLogFilter `yaml:"filters,omitempty" json:"filters,omitempty"`

@@ -85,6 +85,8 @@ export const HOST_METRICS = [
   { value: 'host_service_down', label: 'Service stopped', kind: 'svc' },
   { value: 'host_process_down', label: 'Process not running', kind: 'proc' },
   { value: 'host_agent_offline', label: 'Agent offline', kind: 'flag' },
+  { value: 'host_restart', label: 'Server restart / unexpected shutdown', kind: 'event' },
+  { value: 'host_shutdown', label: 'Server shutdown requested / reported', kind: 'event' },
 ] as const
 
 /** Heartbeat silence before an availability rule counts a server as gone (server_availability.DOWN_AFTER_S). */
@@ -103,6 +105,7 @@ export function ruleCondition(r: HostRule): string {
   const m = HOST_METRICS.find((x) => x.value === r.metric)
   if (m?.kind === 'svc') return `Service ${r.target || '?'} stopped`
   if (m?.kind === 'proc') return `Process ${r.target || '?'} not running`
+  if (m?.kind === 'event') return metricLabel(r.metric)
   if (m?.kind === 'flag') return 'Agent silent, server still answers ping'
   return `${metricLabel(r.metric)} ${OP_SYMBOL[r.operator] || r.operator} ${r.threshold}%`
 }
@@ -668,7 +671,7 @@ export function CreateHostRuleDialog({
         // Empty = the evaluator defaults: clear after 5 minutes, 2 points on the healthy side.
         clear_duration: kind === 'pct' && clearMinutes.trim() !== '' ? Math.round(Number(clearMinutes) * 60) : null,
         reset_threshold: kind === 'pct' && resetLevel.trim() !== '' ? Number(resetLevel) : null,
-        recovery_alert: recovery,
+        recovery_alert: kind === 'event' ? false : recovery,
         target: (kind === 'svc' || kind === 'proc') ? target.trim() : null,
         server_id: allServers ? null : serverId,
         notify_channels: channels,
@@ -688,7 +691,7 @@ export function CreateHostRuleDialog({
     ? `Service ${target.trim() || '…'} stopped`
     : kind === 'proc'
       ? `Process ${target.trim() || '…'} not running`
-      : kind === 'flag'
+      : kind === 'event' ? metricLabel(metric) : kind === 'flag'
         ? `the agent is silent for ${fmtDuration(Math.round(Number(minutes || DEFAULT_SILENCE_MINUTES) * 60))} while the server still answers ping`
         : `${metricLabel(metric)} ${OP_SYMBOL[operator]} ${threshold || '…'}% ${fmtDuration(Math.round(Number(minutes || 0) * 60))}`
   const clearPreview = kind === 'pct'
@@ -811,6 +814,8 @@ export function CreateHostRuleDialog({
                 <span className="text-sm">Recovery notice</span>
               </label>
             </div>
+          ) : kind === 'event' ? (
+            <p className="text-xs text-muted">Notifies on new OS lifecycle evidence. Repeated evidence is grouped into one incident for 15 minutes. Historical backfill does not page. A shutdown notification may arrive after the next boot.</p>
           ) : kind === 'flag' ? (
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">

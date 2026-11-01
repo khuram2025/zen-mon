@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_ch_client
 from app.schemas.agent import AgentResultsBatch, MetricPoint, MetricSeries
 from app.services import inventory_normalize, versioning
+from app.services import server_event_service
 from app.services.filesystem_monitoring import ch_capacity_filter
 
 logger = logging.getLogger("zenplus.host_metric_service")
@@ -1156,6 +1157,12 @@ async def _upsert_inventory(
             boot_dt = datetime.now(timezone.utc) - timedelta(
                 seconds=_i(os_info.get("uptime_seconds")))
         if boot_dt is not None:
+            previous_boot = (await db.execute(text("SELECT boot_time FROM servers WHERE id=:sid FOR UPDATE"),
+                                              {"sid": server_id})).scalar()
+            if previous_boot and (server_event_service.utc(boot_dt)-server_event_service.utc(previous_boot)).total_seconds() > 120:
+                uid = hashlib.sha256(f"boot:{server_id}:{server_event_service.utc(boot_dt).isoformat()}".encode()).hexdigest()
+                await server_event_service.record_lifecycle(db, server_id, uid, "restart", server_event_service.utc(boot_dt),
+                                                            {"source": "OS boot time changed", "previous_boot": str(previous_boot)})
             await db.execute(text(
                 """UPDATE servers SET boot_time = :bt, updated_at = NOW()
                    WHERE id = :sid
@@ -1312,6 +1319,7 @@ KIND_INSERTERS = {
     "process": _insert_process,
     "service_state": _insert_service_state,
     "event_log": _insert_event_log,
+    "event_detail": server_event_service.insert_details,
     "agent_health": _insert_agent_health,
 }
 
@@ -1486,6 +1494,12 @@ async def ingest_host_metric_batch(
     # rejection: the Windows agent deliberately acknowledges and removes every
     # batch that receives a successful HTTP response with rejected samples.
     accepted = await _persist_metric_groups(agent_id, server_id, batch.batch_id, by_kind)
+
+    if by_kind.get("event_detail") or (batch.inventory or {}).get("event_collection"):
+        try:
+            await server_event_service.ingest_state(db, server_id, agent_id, by_kind.get("event_detail", []), batch.inventory)
+        except Exception as exc:
+            raise HostMetricStorageError("event_state") from exc
 
     if by_kind.get("process"):
         try:

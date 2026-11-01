@@ -1211,6 +1211,7 @@ export function AlertRuleWizardDialog({
                           <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder={serverKind === 'svc' ? 'e.g. MSSQLSERVER' : 'e.g. nginx.exe'} />
                         </FormField>
                       )}
+                      {serverKind === 'event' && <p className="text-xs text-muted">Notifies on new OS lifecycle evidence, grouped into one incident for 15 minutes. Historical backfill does not page. Shutdown evidence may arrive after the next boot.</p>}
                       {serverKind === 'flag' && (
                         <p className="text-xs text-muted">
                           Fires when a server&apos;s agent stops reporting but the server still answers ping: the server is up and

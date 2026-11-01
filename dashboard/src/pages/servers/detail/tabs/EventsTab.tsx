@@ -30,6 +30,7 @@ import {
   C, EmptyState, Panel, Pill, SYNC_ID, Segmented, StatTile, fmtNum, type Tone,
 } from '../ui'
 import { chartFont } from '@/lib/chartTheme'
+import { GroupedEventsTab } from './GroupedEventsTab'
 
 /* ── Constants ───────────────────────────────────────────────────── */
 
@@ -81,6 +82,17 @@ type SortKey = 'timestamp' | 'log_name' | 'level' | 'count'
 /* ── Tab ─────────────────────────────────────────────────────────── */
 
 export function EventsTab({ server }: { server: ServerItem }) {
+  const [legacy, setLegacy] = useState(false)
+  return <div className="space-y-4">
+    <div className="flex items-center gap-2">
+      <button className={cn('rounded-md border px-3 py-1.5 text-sm', !legacy && 'border-primary text-primary')} onClick={() => setLegacy(false)}>Grouped events</button>
+      <button className={cn('rounded-md border px-3 py-1.5 text-sm', legacy && 'border-primary text-primary')} onClick={() => setLegacy(true)}>Legacy summaries</button>
+    </div>
+    {legacy ? <LegacyEventsTab server={server} /> : <GroupedEventsTab server={server} />}
+  </div>
+}
+
+function LegacyEventsTab({ server }: { server: ServerItem }) {
   const serverId = server.id
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
   const [level, setLevel] = useState<LevelFilter>('all')
