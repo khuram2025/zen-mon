@@ -173,6 +173,7 @@ type eventXML struct {
 			Value string `xml:"SystemTime,attr"`
 		} `xml:"TimeCreated"`
 		Computer string `xml:"Computer"`
+		Channel  string `xml:"Channel"`
 	} `xml:"System"`
 	Data []struct {
 		Name  string `xml:"Name,attr"`
@@ -184,6 +185,9 @@ func decodeDetailedEvent(channel, raw, message string, messageBytes int) (map[st
 	var ev eventXML
 	if err := xml.Unmarshal([]byte(raw), &ev); err != nil {
 		return nil, err
+	}
+	if ev.System.Channel != "" {
+		channel = ev.System.Channel
 	}
 	if ev.System.RecordID == 0 || ev.System.Time.Value == "" || ev.System.Provider.Name == "" {
 		return nil, fmt.Errorf("event system fields missing")
@@ -213,6 +217,6 @@ func decodeDetailedEvent(channel, raw, message string, messageBytes int) (map[st
 	if level == "" {
 		level = "information"
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", channel, ev.System.RecordID, ev.System.Time.Value)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", strings.ToLower(channel), ev.System.RecordID, ev.System.Time.Value)))
 	return map[string]any{"event_uid": hex.EncodeToString(sum[:]), "log_name": channel, "event_id": ev.System.ID, "record_id": ev.System.RecordID, "event_time": ev.System.Time.Value, "provider": truncateUTF8(ev.System.Provider.Name, 256), "level": level, "computer": truncateUTF8(ev.System.Computer, 255), "message": truncateUTF8(message, messageBytes), "message_truncated": len(message) > messageBytes, "fields": fields}, nil
 }

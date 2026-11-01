@@ -24,6 +24,10 @@ func TestDecodeDetailedEventPreservesIdentityAndObject(t *testing.T) {
 	if one["event_uid"] != two["event_uid"] {
 		t.Fatal("identity depends on rendered message")
 	}
+	lower, err := decodeDetailedEvent("system", sampleEventXML, "", 100)
+	if err != nil || lower["event_uid"] != one["event_uid"] {
+		t.Fatal("channel casing changed event identity")
+	}
 	if one["fields"].(map[string]string)["ServiceName"] != "SQL & Reports" {
 		t.Fatal(one)
 	}

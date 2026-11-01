@@ -28,6 +28,8 @@ def test_event_identity_does_not_depend_on_language_and_groups_keep_component():
     assert a["event_uid"] == b["event_uid"] and a["group_key"] == b["group_key"]
     assert a["group_key"] != c["group_key"]
     assert a["event_uid"] != d["event_uid"] and a["group_key"] == d["group_key"]
+    lower = events.normalize({**row,"log_name":"system"})
+    assert lower["event_uid"] == a["event_uid"] and lower["group_key"] == a["group_key"]
 
 
 def test_reused_record_id_after_log_clear_has_new_identity():
