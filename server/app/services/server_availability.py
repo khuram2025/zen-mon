@@ -28,10 +28,12 @@ Which rules apply to a server is decided here too, so the evaluator and the
 staleness sweep's fallback agree:
 
 * ``host_agent_offline`` rules: every agent server, or the rule's one server.
-* ``ping_status`` rules triggered on *down* whose scope is not tied to a
-  device (no device, group, type or location filter): every agent server,
-  narrowed by ``scope_tag`` like devices are. These are the "Device Down"
-  rules, and they now cover servers as well as devices.
+* ``ping_status`` rules that fire on *down* — ``trigger_on = 'down'``, or an
+  'any' rule whose only condition is ``ping_status == 0`` (the seeded Device
+  Down) — whose scope is not tied to a device (no device, group, type or
+  location filter): every agent server, narrowed by ``scope_tag`` like
+  devices are. These are the "Device Down" rules, and they now cover servers
+  as well as devices.
 """
 
 from __future__ import annotations
@@ -91,11 +93,56 @@ def judge(signals: ServerSignals, now: float, after_s: int) -> str:
     return "down"
 
 
+_CMP = {
+    "eq": lambda v, t: v == t, "==": lambda v, t: v == t,
+    "neq": lambda v, t: v != t, "!=": lambda v, t: v != t,
+    "lt": lambda v, t: v < t, "<": lambda v, t: v < t,
+    "lte": lambda v, t: v <= t, "<=": lambda v, t: v <= t,
+    "gt": lambda v, t: v > t, ">": lambda v, t: v > t,
+    "gte": lambda v, t: v >= t, ">=": lambda v, t: v >= t,
+}
+
+
+def _fires_on_down_only(operator, threshold) -> bool:
+    """Is this ping_status condition true at 0 (down) and false at 1 (up)?"""
+    cmp = _CMP.get((operator or "").strip().lower())
+    try:
+        t = float(threshold)
+    except (TypeError, ValueError):
+        return False
+    return cmp is not None and cmp(0.0, t) and not cmp(1.0, t)
+
+
+def _selects_down(rule: Any) -> bool:
+    """Does the rule's trigger mean "goes down"? Explicitly (trigger_on
+    down), or as the alert engine reads an 'any' rule: its ping_status
+    condition is the only thing selecting the state, so ``ping_status == 0``
+    (the seeded Device Down) means down. A condition on another metric
+    (latency, loss) makes it a different rule."""
+    trigger = (_get(rule, "trigger_on") or "any").strip().lower()
+    if trigger == "down":
+        return True
+    if trigger != "any":
+        return False
+    conditions = _get(rule, "conditions")
+    if isinstance(conditions, str):
+        import json
+        try:
+            conditions = json.loads(conditions)
+        except ValueError:
+            conditions = None
+    if conditions:
+        return all(isinstance(c, dict) and c.get("metric") == "ping_status"
+                   and _fires_on_down_only(c.get("operator"), c.get("threshold"))
+                   for c in conditions)
+    return _fires_on_down_only(_get(rule, "operator"), _get(rule, "threshold"))
+
+
 def is_down_rule(rule: Any) -> bool:
-    """A ping_status rule triggered on down that is not tied to a device."""
+    """A ping_status rule that fires on down and is not tied to a device."""
     if (_get(rule, "metric") or "") != "ping_status":
         return False
-    if (_get(rule, "trigger_on") or "any") != "down":
+    if not _selects_down(rule):
         return False
     if _get(rule, "service_check_id") or _get(rule, "service_check_group_id"):
         return False
@@ -190,10 +237,10 @@ async def load_signals(db: AsyncSession) -> dict[str, ServerSignals]:
 
 
 _COVER_RULES_SQL = """
-SELECT id, metric, trigger_on, server_id, device_id, group_id, device_type, location,
-       scope_tag, service_check_id, service_check_group_id
+SELECT id, metric, trigger_on, operator, threshold, conditions, server_id, device_id,
+       group_id, device_type, location, scope_tag, service_check_id, service_check_group_id
 FROM alert_rules
-WHERE enabled = TRUE AND (metric = :agent OR (metric = 'ping_status' AND trigger_on = 'down'))
+WHERE enabled = TRUE AND metric IN (:agent, 'ping_status')
 """
 
 

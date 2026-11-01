@@ -41,9 +41,34 @@ function scopeLabel(r: any): string {
   if (r.scope_tag) return `#${r.scope_tag}`
   if (r.device_id) return 'Device'
   if (r.metric === 'trap') return 'Traps'
-  // An unscoped Device Down rule also pages for agent servers (server_availability.py).
-  if (r.metric === 'ping_status' && r.trigger_on === 'down') return 'All + servers'
+  if (coversServers(r)) return 'All + servers'
   return 'All'
+}
+
+const PING_CMP: Record<string, (v: number, t: number) => boolean> = {
+  eq: (v, t) => v === t, '==': (v, t) => v === t, neq: (v, t) => v !== t, '!=': (v, t) => v !== t,
+  lt: (v, t) => v < t, '<': (v, t) => v < t, lte: (v, t) => v <= t, '<=': (v, t) => v <= t,
+  gt: (v, t) => v > t, '>': (v, t) => v > t, gte: (v, t) => v >= t, '>=': (v, t) => v >= t,
+}
+
+function firesOnDownOnly(operator: any, threshold: any): boolean {
+  const cmp = PING_CMP[String(operator || '').trim().toLowerCase()]
+  const t = Number(threshold)
+  return !!cmp && Number.isFinite(t) && cmp(0, t) && !cmp(1, t)
+}
+
+/**
+ * An unscoped Device Down rule also pages for agent servers. Mirrors server_availability.is_down_rule:
+ * trigger "down", or an "any" rule whose only condition is ping_status == 0 (the seeded Device Down).
+ */
+function coversServers(r: any): boolean {
+  if (r.metric !== 'ping_status') return false
+  const trigger = String(r.trigger_on || 'any').toLowerCase()
+  if (trigger === 'down') return true
+  if (trigger !== 'any') return false
+  const conds = Array.isArray(r.conditions) ? r.conditions : []
+  if (conds.length) return conds.every((c: any) => c?.metric === 'ping_status' && firesOnDownOnly(c.operator, c.threshold))
+  return firesOnDownOnly(r.operator, r.threshold)
 }
 
 /**

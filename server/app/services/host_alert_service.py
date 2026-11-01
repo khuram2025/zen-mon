@@ -895,8 +895,7 @@ _RULES_SQL = (
     "schedule_start, schedule_end, schedule_days, {prio}, "
     "trigger_on, device_id, group_id, device_type, location, scope_tag, "
     "service_check_id, service_check_group_id "
-    "FROM alert_rules WHERE enabled = true AND (metric LIKE 'host\\_%' "
-    "OR (metric = 'ping_status' AND trigger_on = 'down'))"
+    "FROM alert_rules WHERE enabled = true AND (metric LIKE 'host\\_%' OR metric = 'ping_status')"
 )
 _warned_missing_clear_duration = False
 

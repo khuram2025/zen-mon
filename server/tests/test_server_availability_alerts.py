@@ -48,6 +48,7 @@ def sig(*, age=None, ping=None, tags=()):
 
 
 DOWN = {"metric": "ping_status", "trigger_on": "down"}
+SEEDED = {"metric": "ping_status", "trigger_on": "any", "operator": "eq", "threshold": 0}
 AGENT = {"metric": "host_agent_offline"}
 
 
@@ -86,6 +87,17 @@ def test_silence_allowance_is_min_duration_else_three_minutes_with_a_floor():
     ({**DOWN, "location": "Riyadh"}, False),
     ({**DOWN, "service_check_id": "c"}, False),
     ({"metric": "rtt", "trigger_on": "down"}, False),
+    # The seeded Device Down is an 'any' rule selecting down by ping_status == 0.
+    (SEEDED, True),
+    ({**SEEDED, "operator": "=="}, True),
+    ({**SEEDED, "trigger_on": None}, True),
+    ({**SEEDED, "operator": "lt", "threshold": 1}, True),
+    ({**SEEDED, "threshold": 1}, False),                    # "comes up"
+    ({**SEEDED, "operator": "neq"}, False),
+    ({**SEEDED, "conditions": [{"metric": "ping_status", "operator": "eq", "threshold": 0}]}, True),
+    ({**SEEDED, "conditions": [{"metric": "ping_status", "operator": "eq", "threshold": 0},
+                               {"metric": "rtt", "operator": "gt", "threshold": 100}]}, False),
+    ({**SEEDED, "group_id": "g"}, False),
 ])
 def test_which_device_rules_also_cover_servers(rule, covers):
     assert sa.is_down_rule(rule) is covers
@@ -180,7 +192,8 @@ def add_device(w, ip, status):
         " VALUES ($1, $2::inet, $3, TRUE) RETURNING id", f"dev-{ip}", ip, status))
 
 
-def add_rule(w, metric, *, name=None, severity="critical", min_duration=0, recovery=True, **scope):
+def add_rule(w, metric, *, name=None, severity="critical", min_duration=0, recovery=True,
+             trigger=None, **scope):
     ping = metric == "ping_status"
     cols = "".join(f", {c}" for c in scope)
     vals = "".join(f", ${i + 9}" for i in range(len(scope)))
@@ -189,7 +202,7 @@ def add_rule(w, metric, *, name=None, severity="critical", min_duration=0, recov
         f" recovery_alert, notify_channels, trigger_on{cols})"
         f" VALUES ($1, $2, $3, 0, $4, $5, $6, $7::jsonb, $8{vals}) RETURNING id",
         name or metric, metric, "eq" if ping else "gt", severity, min_duration, recovery,
-        [CHANNEL], "down" if ping else "any", *scope.values()))
+        [CHANNEL], trigger or ("down" if ping else "any"), *scope.values()))
 
 
 async def run(w, now):
@@ -234,6 +247,18 @@ async def test_field_replay_agent_only_server_down_pages_device_down_once(world)
     [inc] = incidents(w, db3)
     assert inc.status == "resolved"
     assert len(w.sent) == 2 and w.sent[1]["is_recovery"]
+
+
+@pytest.mark.asyncio
+async def test_the_seeded_any_change_device_down_also_pages_for_servers(world):
+    # seed-devices.sql creates Device Down as trigger 'any' + ping_status == 0,
+    # which is how the dev appliance still has it.
+    w = world
+    down = add_rule(w, "ping_status", name="Device Down", trigger="any")
+    srv = add_server(w, "seeded1", heartbeat=T0)
+    await run(w, T0 + 200)
+    [inc] = incidents(w, srv)
+    assert inc.rule_id == down and inc.status == "active"
 
 
 @pytest.mark.asyncio
