@@ -12,12 +12,18 @@ hold before the incident resolves (null = the 300 s default, 0 = at once);
 metrics: 2 points on the healthy side, returned as ``auto_reset_threshold``);
 ``recovery_alert`` whether a recovery notice is sent. The reset level is
 stored as the rule's single condition, like network rules.
+
+The schedule (``schedule_start``/``schedule_end`` as HH:MM, ``schedule_days``
+1-7 for Mon-Sun) limits when notifications go out, as on every other rule;
+an update may move a rule between one server and all servers (``server_id``
+null = all).
 """
 
 from __future__ import annotations
 
 import json
-from typing import Optional
+from datetime import time
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -38,11 +44,13 @@ router = APIRouter(prefix="/host-alert-rules", tags=["Host Alert Rules"])
 
 _METRIC = "^(host_cpu_pct|host_memory_pct|host_filesystem_pct|host_disk_util_pct|host_service_down|host_process_down|host_agent_offline)$"
 _OPERATOR = "^(gt|gte|lt|lte|eq|neq|>|<|>=|<=|==|!=)$"
+_HHMM = "^([01][0-9]|2[0-3]):[0-5][0-9]$"
 
 _COLUMNS = (
     "id, name, description, enabled, metric, operator, threshold, "
     "severity, min_duration, clear_duration, cooldown, notify_channels, server_id, target, "
-    "recovery_alert, conditions, priority, escalation_policy_id, created_at, updated_at"
+    "recovery_alert, conditions, priority, escalation_policy_id, "
+    "schedule_start, schedule_end, schedule_days, created_at, updated_at"
 )
 # Threshold metrics: the ones a reset threshold and clear hold apply to.
 _PCT_METRICS = ("host_cpu_pct", "host_memory_pct", "host_filesystem_pct", "host_disk_util_pct")
@@ -70,6 +78,10 @@ class HostRuleCreate(BaseModel):
     priority: Optional[str] = Field(None, pattern="^P[1-4]$")
     # None = the priority's default escalation policy.
     escalation_policy_id: Optional[UUID] = None
+    # None = notify at any time / on every day.
+    schedule_start: Optional[str] = Field(None, pattern=_HHMM)
+    schedule_end: Optional[str] = Field(None, pattern=_HHMM)
+    schedule_days: Optional[list[Annotated[int, Field(ge=1, le=7)]]] = None
 
 
 class HostRuleUpdate(BaseModel):
@@ -89,6 +101,22 @@ class HostRuleUpdate(BaseModel):
     target: Optional[str] = None
     priority: Optional[str] = Field(None, pattern="^P[1-4]$")
     escalation_policy_id: Optional[UUID] = None
+    # An explicit null moves the rule to all servers.
+    server_id: Optional[UUID] = None
+    schedule_start: Optional[str] = Field(None, pattern=_HHMM)
+    schedule_end: Optional[str] = Field(None, pattern=_HHMM)
+    schedule_days: Optional[list[Annotated[int, Field(ge=1, le=7)]]] = None
+
+
+def _clock(value: Optional[str]) -> Optional[time]:
+    """A validated HH:MM as the time the column stores (asyncpg binds time, not text)."""
+    return time.fromisoformat(value) if value else None
+
+
+def _days(value) -> Optional[str]:
+    """schedule_days as stored: the distinct days in order, or NULL for every day."""
+    days = sorted(set(value or []))
+    return json.dumps(days) if days else None
 
 
 async def _policy_or_422(db: AsyncSession, policy_id) -> Optional[UUID]:
@@ -167,6 +195,9 @@ def _row(r) -> dict:
         "priority": r.priority,
         "effective_priority": priority_for(r.priority, r.severity),
         "escalation_policy_id": str(r.escalation_policy_id) if r.escalation_policy_id else None,
+        "schedule_start": r.schedule_start.strftime("%H:%M") if r.schedule_start else None,
+        "schedule_end": r.schedule_end.strftime("%H:%M") if r.schedule_end else None,
+        "schedule_days": r.schedule_days or [],
         "created_at": r.created_at,
         "updated_at": r.updated_at,
     }
@@ -207,10 +238,12 @@ async def create_host_rule(
         "INSERT INTO alert_rules "
         "(name, description, enabled, metric, operator, threshold, severity, "
         " min_duration, clear_duration, cooldown, notify_channels, server_id, target, "
-        " recovery_alert, conditions, priority, escalation_policy_id, created_by) "
+        " recovery_alert, conditions, priority, escalation_policy_id, "
+        " schedule_start, schedule_end, schedule_days, created_by) "
         "VALUES (:name, :description, :enabled, :metric, :operator, :threshold, :severity, "
         " :min_duration, :clear_duration, :cooldown, CAST(:notify_channels AS jsonb), :server_id, :target, "
-        " :recovery_alert, CAST(:conditions AS jsonb), :priority, :escalation_policy_id, :created_by) "
+        " :recovery_alert, CAST(:conditions AS jsonb), :priority, :escalation_policy_id, "
+        " :schedule_start, :schedule_end, CAST(:schedule_days AS jsonb), :created_by) "
         f"RETURNING {_COLUMNS}"
     ), {
         "name": data.name, "description": data.description, "enabled": data.enabled,
@@ -222,6 +255,8 @@ async def create_host_rule(
         "recovery_alert": data.recovery_alert, "conditions": conditions,
         "priority": data.priority,
         "escalation_policy_id": await _policy_or_422(db, data.escalation_policy_id),
+        "schedule_start": _clock(data.schedule_start), "schedule_end": _clock(data.schedule_end),
+        "schedule_days": _days(data.schedule_days),
         "created_by": user.id,
     })).first()
     await write_audit_log(db, actor=user, action="alert_rule.create", resource_type="alert_rule",
@@ -276,6 +311,12 @@ async def update_host_rule(
         elif k == "escalation_policy_id":
             sets.append("escalation_policy_id = :escalation_policy_id")
             params[k] = await _policy_or_422(db, v)
+        elif k in ("schedule_start", "schedule_end"):
+            sets.append(f"{k} = :{k}")
+            params[k] = _clock(v)
+        elif k == "schedule_days":
+            sets.append("schedule_days = CAST(:schedule_days AS jsonb)")
+            params[k] = _days(v)
         else:
             sets.append(f"{k} = :{k}")
             params[k] = v
