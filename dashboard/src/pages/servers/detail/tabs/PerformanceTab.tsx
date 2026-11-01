@@ -8,7 +8,7 @@
 
 import { useMemo, useState } from 'react'
 import { Activity, CheckCircle2, Cpu, Gauge, HardDrive, MemoryStick, Network as NetworkIcon, Timer } from 'lucide-react'
-import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
+import { TimeRangePicker, longDateTime, useTimeRange } from '@/components/TimeRangePicker'
 import { cn, formatBps, formatBytes, timeAxisTickFormatter } from '@/lib/utils'
 import type { ServerItem } from '@/types/servers'
 import { isPseudoInterface, toRows, useMetricDetail, type MetricDetail } from '../data'
@@ -169,12 +169,23 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
       <div className="space-y-4">
         {toolbar}
         <Panel>
+          {/* Only a recent preset says anything about the agent: an empty past or future custom range does not. */}
           <EmptyState
             icon={Activity}
-            title={`No metrics for ${range.label.toLowerCase()}`}
-            hint={server.agent_status === 'online'
-              ? 'The agent is online but is not reporting server metrics. Check that server monitoring is enabled in its monitoring profile.'
-              : 'Metrics appear once an authorized agent reports. Try a longer time range.'}
+            title={range.future ? 'This time range is in the future' : `No metrics for ${range.label.toLowerCase()}`}
+            hint={range.future
+              ? `${longDateTime(Date.parse(range.fromISO))} has not happened yet, so there is no data. Check the month in the Custom dates.`
+              : isCustom
+                ? 'No metrics were stored for this period. The agent may not have been installed or reporting yet, or the period is older than the data kept.'
+                : server.agent_status === 'online'
+                  ? 'The agent is online but is not reporting server metrics. Check that server monitoring is enabled in its monitoring profile.'
+                  : 'Metrics appear once an authorized agent reports. Try a longer time range.'}
+            action={isCustom ? (
+              <button type="button" onClick={() => setPreset(1)}
+                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-text hover:bg-surface2">
+                Show the last 24 hours
+              </button>
+            ) : undefined}
           />
         </Panel>
       </div>
