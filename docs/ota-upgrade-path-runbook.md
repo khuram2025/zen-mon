@@ -51,6 +51,14 @@ guessed upgrade or downgrade.
 
 The promotion guard (`integrations/zentryc_ota/rollout_guard.py`) verifies the hash, the signature, the signed version, minimum and architecture, and the 30-day manifest age of **the path that the promoted release's supported appliances take**. By default that path starts at the release's own signed `min_version` (the builder forces it to be at least `minimum_supported_upgrade_base`), so for a release whose minimum is the floor the path is the release alone. Bridge releases older than the floor are not part of it: before this change the guard planned from `0.0.0`, which made the oldest bridge's signing date the limit for every rollout, and from 2026-10-09 (30 days after 1.23.7 to 1.23.9 were signed) no rollout of any release could be created.
 
+From 1.24.38, promotion requires a minimum of 1.24.36 or higher and the guard
+plans from 1.24.35 so it verifies the 1.24.36 catalog bridge itself, including
+publication and full audience coverage. The older 1.23.9 prerequisite remains
+outside this scope. A missing, expired, modified or ineligible catalog bridge
+blocks promotion as well as appliance selection. Keep the deployed portal guard
+synchronized with this source; increasing a future bridge floor requires review
+of both the builder policy and portal guard.
+
 - Appliances below the floor are unsupported for direct updates. Take them to the floor first. The owner confirmed on 2026-10-10 that no appliance is below 1.23.9.
 - Every step the guard does plan is still fully verified, including the bridge checks (active rollout, 100%, group coverage) if a release ever names a minimum above the planning start.
 - Setting `ZENPLUS_OTA_VALIDATE_FULL_CHAIN = True` in the Django settings restores the previous behaviour (whole chain from `0.0.0`).

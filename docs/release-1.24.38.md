@@ -15,6 +15,9 @@ defaults to this floor and rejects explicit lower minimums for future releases.
 The OTA planner offers the required bridge first; each hop must complete before
 the next offer. Missing, ineligible or repeatedly failed bridges block the path.
 The appliance also checks the signed prerequisite before applying a package.
+The portal promotion guard must also be deployed from this release: for
+1.24.38 and later it rejects lower minimums and verifies the catalog bridge's
+signed package, age, publication and rollout coverage before promotion.
 
 Includes all 1.24.37 search, column sorting and stable selection improvements.
 This is an appliance-only package that preserves existing Windows installers.

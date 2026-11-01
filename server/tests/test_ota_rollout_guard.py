@@ -59,6 +59,7 @@ def guard(monkeypatch, tmp_path):
     models.Release = Release
     ota_path = types.ModuleType("ota.upgrade_path")
     ota_path.plan_upgrade = upgrade_path.plan_upgrade
+    ota_path.version_key = upgrade_path.version_key
     for name, module in (("django", django), ("django.conf", conf), ("ota", ota), ("ota.models", models),
                          ("ota.upgrade_path", ota_path)):
         monkeypatch.setitem(sys.modules, name, module)
@@ -163,3 +164,42 @@ def test_an_unpublished_minimum_is_still_an_error_in_full_chain_mode_only(guard)
     guard.settings.ZENPLUS_OTA_VALIDATE_FULL_CHAIN = True
     with pytest.raises(Exception, match="missing or unpublished"):
         guard.module.validate_rollout_path(target, {})
+
+
+CATALOG_CHAIN = [("1.24.36", "1.23.9"), ("1.24.38", "1.24.36")]
+
+
+def test_catalog_bridge_is_verified_without_requiring_retired_bridges(guard):
+    target = guard.build(chain=CATALOG_CHAIN)
+    assert guard.module.validate_rollout_path(target, {}) == ["1.24.36", "1.24.38"]
+
+
+@pytest.mark.parametrize("minimum", [None, "1.23.9", "1.24.29", "1.24.35"])
+@pytest.mark.parametrize("version", ["1.24.38", "1.25.0", "2.0.0"])
+def test_future_promotion_cannot_bypass_catalog_floor(guard, minimum, version):
+    target = guard.build(chain=[("1.24.36", "1.23.9"), (version, minimum)])
+    with pytest.raises(ValueError, match="must require catalog bridge 1.24.36"):
+        guard.module.validate_rollout_path(target, {})
+
+
+@pytest.mark.parametrize("problem", ["missing", "unpublished", "expired", "tampered", "paused", "partial", "wrong_group"])
+def test_catalog_bridge_must_be_available_valid_and_cover_the_audience(guard, problem):
+    target = guard.build(chain=CATALOG_CHAIN, old_age_days=31 if problem == "expired" else 0)
+    bridge = guard.releases[0]
+    if problem == "missing":
+        guard.releases.remove(bridge)
+    elif problem == "unpublished":
+        bridge.is_published = False
+    elif problem == "tampered":
+        (guard.dir / "update-1.24.36.zup").write_bytes(b"modified")
+    elif problem in ("paused", "partial", "wrong_group"):
+        bridge.rollout_policies = Policies([NS(stage="paused" if problem == "paused" else "full",
+            target_pct=50 if problem == "partial" else 100,
+            target_group="other" if problem == "wrong_group" else None, completed_at=None)])
+    with pytest.raises(ValueError):
+        guard.module.validate_rollout_path(target, {})
+
+
+def test_higher_future_minimum_preserves_required_catalog_chain(guard):
+    target = guard.build(chain=[*CATALOG_CHAIN, ("1.25.0", "1.24.38")])
+    assert guard.module.validate_rollout_path(target, {}) == ["1.24.36", "1.24.38", "1.25.0"]
