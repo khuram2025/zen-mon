@@ -52,6 +52,44 @@ export function isValidRange(from: string | null | undefined, to: string | null 
   return Number.isFinite(a) && Number.isFinite(b) && a < b
 }
 
+/** A date with the month spelled out ("27 Oct 2026, 15:21"), so a day/month mix-up is visible. */
+export function longDateTime(ms: number): string {
+  return new Date(ms).toLocaleString([], { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+/** A datetime-local input value ("2026-10-27T15:21") for an instant, in browser time. */
+export function toLocalInput(ms: number): string {
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+export type CustomRangeCheck =
+  | { ok: true; fromISO: string; toISO: string; clipped: boolean }
+  | { ok: false; field: 'from' | 'to' | 'both'; message: string }
+
+/**
+ * Validate the two custom inputs against the appliance clock. A start in the future can hold no data: the inputs open
+ * on today's date and show day/month, so changing only the day to "27" asks for the 27th of this month, which may not
+ * have happened yet. That used to apply silently and the page then blamed the agent. An end after now is cut to now.
+ */
+export function checkCustomRange(fromInput: string, toInput: string, nowMs: number): CustomRangeCheck {
+  if (!fromInput && !toInput) return { ok: false, field: 'both', message: 'Enter a start and an end time.' }
+  if (!fromInput) return { ok: false, field: 'from', message: 'Enter a start time.' }
+  if (!toInput) return { ok: false, field: 'to', message: 'Enter an end time.' }
+  const from = new Date(fromInput).getTime()
+  const to = new Date(toInput).getTime()
+  if (Number.isNaN(from)) return { ok: false, field: 'from', message: 'The start time is not a valid date.' }
+  if (Number.isNaN(to)) return { ok: false, field: 'to', message: 'The end time is not a valid date.' }
+  if (from >= to) return { ok: false, field: 'both', message: 'The end time must be after the start time.' }
+  if (from >= nowMs) {
+    return { ok: false, field: 'from', message: `The start time (${longDateTime(from)}) is in the future. Choose a time before now.` }
+  }
+  const end = Math.min(to, nowMs)
+  return { ok: true, fromISO: new Date(from).toISOString(), toISO: new Date(end).toISOString(), clipped: end < to }
+}
+
 /** The browser timezone shown next to custom inputs, e.g. "Asia/Riyadh (UTC+03:00)". */
 export function timezoneLabel(at: number = Date.now()): string {
   let zone = 'local time'
@@ -90,6 +128,8 @@ export interface TimeRange {
    * clears (the first API response, or `CALIBRATION_WAIT_MS` without any).
    */
   pending?: boolean
+  /** A custom range (e.g. from a shared link) that starts after now: there is no data for it yet. */
+  future?: boolean
 }
 
 /** How long a calendar range waits for the appliance clock before falling back to the browser's. */
@@ -191,7 +231,10 @@ export function useTimeRange(): {
   }
 
   return {
-    range: { hours, fromISO, toISO, isCustom, label, key: activeKey, pending: awaitingClock },
+    range: {
+      hours, fromISO, toISO, isCustom, label, key: activeKey, pending: awaitingClock,
+      future: isCustom && Date.parse(fromISO) >= nowMs,
+    },
     // -1 while a calendar preset is active so no rolling preset shows selected.
     rangeIdx: calendarKey ? -1 : idx,
     isCustom,
@@ -222,24 +265,28 @@ export function TimeRangePicker({
 }: PickerProps) {
   const [open, setOpen] = useState(false)
   const uid = useId()
-  const toLocal = (iso: string) => {
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return ''
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-  }
+  const toLocal = (iso: string) => toLocalInput(Date.parse(iso))
   const [fromInput, setFromInput] = useState(() => toLocal(customFrom))
   const [toInput, setToInput] = useState(() => toLocal(customTo))
   const [error, setError] = useState<{ field: 'from' | 'to' | 'both'; message: string } | null>(null)
+  // The latest selectable minute (appliance clock), refreshed each time the popover opens.
+  const [maxInput, setMaxInput] = useState(() => toLocalInput(serverNow()))
   // Re-seed the inputs only when the popover opens; edits survive a failed Apply.
   useEffect(() => {
     if (open) {
       setFromInput(toLocal(customFrom))
       setToInput(toLocal(customTo))
+      setMaxInput(toLocalInput(serverNow()))
       setError(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+  // What the inputs mean with the month spelled out: the inputs show day/month or month/day by locale.
+  const preview = (() => {
+    const a = Date.parse(fromInput)
+    const b = Date.parse(toInput)
+    return Number.isFinite(a) && Number.isFinite(b) ? `${longDateTime(a)} → ${longDateTime(b)}` : ''
+  })()
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
@@ -248,16 +295,10 @@ export function TimeRangePicker({
   }, [open])
 
   const apply = () => {
-    if (!fromInput && !toInput) { setError({ field: 'both', message: 'Enter a start and an end time.' }); return }
-    if (!fromInput) { setError({ field: 'from', message: 'Enter a start time.' }); return }
-    if (!toInput) { setError({ field: 'to', message: 'Enter an end time.' }); return }
-    const from = new Date(fromInput)
-    const to = new Date(toInput)
-    if (Number.isNaN(from.getTime())) { setError({ field: 'from', message: 'The start time is not a valid date.' }); return }
-    if (Number.isNaN(to.getTime())) { setError({ field: 'to', message: 'The end time is not a valid date.' }); return }
-    if (from.getTime() >= to.getTime()) { setError({ field: 'both', message: 'The end time must be after the start time.' }); return }
+    const check = checkCustomRange(fromInput, toInput, serverNow())
+    if (!check.ok) { setError({ field: check.field, message: check.message }); return }
     setError(null)
-    onCustom(from.toISOString(), to.toISOString())
+    onCustom(check.fromISO, check.toISO)
     setOpen(false)
   }
 
@@ -336,6 +377,7 @@ export function TimeRangePicker({
                   id={`${uid}-from`}
                   type="datetime-local"
                   value={fromInput}
+                  max={maxInput}
                   required
                   aria-invalid={error?.field === 'from' || error?.field === 'both'}
                   aria-describedby={error ? `${errId} ${tzId}` : tzId}
@@ -349,6 +391,7 @@ export function TimeRangePicker({
                   id={`${uid}-to`}
                   type="datetime-local"
                   value={toInput}
+                  max={maxInput}
                   required
                   aria-invalid={error?.field === 'to' || error?.field === 'both'}
                   aria-describedby={error ? `${errId} ${tzId}` : tzId}
@@ -356,7 +399,8 @@ export function TimeRangePicker({
                   className="mt-1 w-full rounded border border-border bg-transparent px-2 py-1 text-xs text-text aria-[invalid=true]:border-danger"
                 />
               </div>
-              <p id={tzId} className="text-2xs text-muted">Times are in {timezoneLabel()}.</p>
+              {preview && <p className="text-xs font-medium text-text">{preview}</p>}
+              <p id={tzId} className="text-2xs text-muted">Times are in {timezoneLabel()}. A range ending after now stops at now.</p>
               {error && <p id={errId} role="alert" className="text-xs text-danger">{error.message}</p>}
               <div className="flex justify-end gap-2 pt-1">
                 <button
