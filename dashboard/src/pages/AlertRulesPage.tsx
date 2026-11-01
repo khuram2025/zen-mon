@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Bell, Copy, Eye, Pencil, Plus, Trash2, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -13,6 +13,7 @@ import { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 import { AlertMessagePreviewDialog } from '@/components/alerts/AlertMessagePreviewDialog'
 import { toast } from '@/components/ui/Toast'
 import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
+import { downRuleCoversServers, isServerMetric, serverMetricLabel, serverRuleCondition, serverRuleCopy } from '@/components/forms/serverAlertRule'
 import { effectivePriority, policyForPriority, ruleEscalationSummary, ruleRouteSource } from '@/features/escalation/model'
 import { usePolicies } from '@/features/escalation/api'
 import type { EscalationPolicy } from '@/features/escalation/types'
@@ -25,7 +26,11 @@ const TRIGGER_LABELS: Record<string, string> = {
   any: 'Any change',
 }
 
-function scopeLabel(r: any): string {
+function scopeLabel(r: any, serverNames: Map<string, string>): string {
+  if (isServerMetric(r.metric)) {
+    if (!r.server_id) return 'All servers'
+    return serverNames.get(r.server_id) || 'One server'
+  }
   if (r.family === 'netflow' || isNetflowMetric(r.metric)) {
     const scope = r.flow_scope && typeof r.flow_scope === 'object' ? r.flow_scope : {}
     const exporter = scope.exporter || String(scope.iface || '').split('@')[1]
@@ -41,34 +46,9 @@ function scopeLabel(r: any): string {
   if (r.scope_tag) return `#${r.scope_tag}`
   if (r.device_id) return 'Device'
   if (r.metric === 'trap') return 'Traps'
-  if (coversServers(r)) return 'All + servers'
+  // An unscoped Device Down rule also pages for agent servers (server_availability.is_down_rule).
+  if (downRuleCoversServers(r)) return 'All + servers'
   return 'All'
-}
-
-const PING_CMP: Record<string, (v: number, t: number) => boolean> = {
-  eq: (v, t) => v === t, '==': (v, t) => v === t, neq: (v, t) => v !== t, '!=': (v, t) => v !== t,
-  lt: (v, t) => v < t, '<': (v, t) => v < t, lte: (v, t) => v <= t, '<=': (v, t) => v <= t,
-  gt: (v, t) => v > t, '>': (v, t) => v > t, gte: (v, t) => v >= t, '>=': (v, t) => v >= t,
-}
-
-function firesOnDownOnly(operator: any, threshold: any): boolean {
-  const cmp = PING_CMP[String(operator || '').trim().toLowerCase()]
-  const t = Number(threshold)
-  return !!cmp && Number.isFinite(t) && cmp(0, t) && !cmp(1, t)
-}
-
-/**
- * An unscoped Device Down rule also pages for agent servers. Mirrors server_availability.is_down_rule:
- * trigger "down", or an "any" rule whose only condition is ping_status == 0 (the seeded Device Down).
- */
-function coversServers(r: any): boolean {
-  if (r.metric !== 'ping_status') return false
-  const trigger = String(r.trigger_on || 'any').toLowerCase()
-  if (trigger === 'down') return true
-  if (trigger !== 'any') return false
-  const conds = Array.isArray(r.conditions) ? r.conditions : []
-  if (conds.length) return conds.every((c: any) => c?.metric === 'ping_status' && firesOnDownOnly(c.operator, c.threshold))
-  return firesOnDownOnly(r.operator, r.threshold)
 }
 
 /**
@@ -115,6 +95,18 @@ export function AlertRulesPage() {
     },
   })
 
+  // Names for the Scope column of rules that watch one server.
+  const hasServerScoped = (rules || []).some((r) => isServerMetric(r.metric) && r.server_id)
+  const { data: serversResp } = useQuery<any>({
+    queryKey: ['servers', 'list-min'],
+    queryFn: async () => (await api.get('/servers?page_size=200&sort=display_name')).data,
+    enabled: hasServerScoped,
+  })
+  const serverNames = useMemo(
+    () => new Map<string, string>((serversResp?.items || []).map((x: any) => [x.id, x.display_name || x.hostname])),
+    [serversResp],
+  )
+
   const del = useMutation({
     mutationFn: async (id: string) => api.delete(`/alert-rules/${id}`),
     onSuccess: () => {
@@ -133,6 +125,8 @@ export function AlertRulesPage() {
 
   const duplicate = useMutation({
     mutationFn: async (rule: any) => {
+      // Server rules are written through their own API, which takes a server scope and no device columns.
+      if (isServerMetric(rule.metric)) return api.post('/host-alert-rules', serverRuleCopy(rule))
       const { id, created_at, updated_at, created_by, ...rest } = rule
       return api.post('/alert-rules', {
         ...rest,
@@ -166,8 +160,8 @@ export function AlertRulesPage() {
           </h1>
           <p className="mt-1 max-w-2xl text-xs text-muted">
             Define trigger conditions, reset behavior, notification actions, SLA escalation
-            tiers, and schedules — professional alert definitions for devices, services,
-            applications, and SNMP traps.
+            tiers, and schedules — professional alert definitions for devices, servers,
+            services, applications, and SNMP traps.
           </p>
         </div>
         <Button onClick={() => { setEditing(null); setFormOpen(true) }}>
@@ -219,6 +213,11 @@ export function AlertRulesPage() {
                           <div className="font-medium text-text">{NETFLOW_METRIC_BY_KEY[r.metric as NetflowMetric].label}</div>
                           <div className="max-w-[16rem] text-2xs text-muted">{summarizeNetflowForm(formFromRule(r))}</div>
                         </>
+                      ) : isServerMetric(r.metric) ? (
+                        <>
+                          <div className="font-medium text-text">{serverMetricLabel(r.metric)}</div>
+                          <div className="max-w-[16rem] text-2xs text-muted">{serverRuleCondition(r)}</div>
+                        </>
                       ) : (
                         <>
                           <div className="font-medium text-text">{TRIGGER_LABELS[r.trigger_on] || r.trigger_on || '—'}</div>
@@ -233,7 +232,7 @@ export function AlertRulesPage() {
                       )}
                     </Td>
                     <Td>
-                      <Badge variant="outline" className="text-2xs">{scopeLabel(r)}</Badge>
+                      <Badge variant="outline" className="text-2xs">{scopeLabel(r, serverNames)}</Badge>
                     </Td>
                     <Td>
                       <div className="flex flex-wrap items-center gap-1">

@@ -4,7 +4,7 @@ from app.core.crypto import encrypt_config, decrypt_config
 import ssl
 import json
 from uuid import UUID
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -390,7 +390,7 @@ _RULE_COLUMNS = (
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
     "conditions, condition_logic, trap_oid, target, flow_scope, flow_params, "
-    "created_at, updated_at, created_by"
+    "server_id, created_at, updated_at, created_by"
 )
 
 
@@ -447,6 +447,8 @@ def _row_to_dict(row) -> dict:
         "target": getattr(row, "target", None),
         "flow_scope": getattr(row, "flow_scope", None),
         "flow_params": getattr(row, "flow_params", None),
+        # Server (host_*) rules: the one server they watch, None = every server.
+        "server_id": str(row.server_id) if getattr(row, "server_id", None) else None,
         "family": rs.family({"metric": row.metric,
                              "service_check_id": row.service_check_id,
                              "service_check_group_id": row.service_check_group_id}),
@@ -454,6 +456,18 @@ def _row_to_dict(row) -> dict:
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "created_by": str(row.created_by) if row.created_by else None,
     }
+
+
+def _clock(value) -> Optional[time]:
+    """A schedule time as the column stores it. asyncpg binds a time, not text,
+    so passing the editor's "08:00" string straight through failed every save
+    that set a schedule."""
+    if value in (None, ""):
+        return None
+    try:
+        return time.fromisoformat(str(value))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Schedule times are HH:MM (00:00-23:59)")
 
 
 def _normalized_templates(submitted: dict, kind: str) -> dict:
@@ -658,8 +672,8 @@ async def create_alert_rule(
                              if data.escalation_levels else None,
         "priority": data.priority,
         "escalation_policy_id": await _validated_policy(db, data.escalation_policy_id),
-        "schedule_start": data.schedule_start,
-        "schedule_end": data.schedule_end,
+        "schedule_start": _clock(data.schedule_start),
+        "schedule_end": _clock(data.schedule_end),
         "schedule_days": json.dumps(data.schedule_days) if data.schedule_days else None,
         # The editors show the default as real, editable text, so text that
         # matches it is posted back untouched — store NULL for those so the
@@ -702,7 +716,7 @@ async def create_alert_rule(
             ":device_type, :location, :scope_tag, :trigger_on, :recovery_alert, "
             ":min_duration, :clear_duration, :max_repeat, :notify_while_flapping, CAST(:escalation_levels AS jsonb), "
             ":priority, :escalation_policy_id, "
-            "CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
+            ":schedule_start, :schedule_end, "
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
             ":recovery_email_subject, :recovery_email_body, :recovery_sms_template, "
@@ -862,8 +876,8 @@ async def update_alert_rule(
             set_parts.append(f"{key} = CAST(:{key} AS jsonb)")
             params[key] = json.dumps(value) if value is not None else None
         elif key in _time_cols:
-            set_parts.append(f"{key} = CAST(:{key} AS time)")
-            params[key] = value
+            set_parts.append(f"{key} = :{key}")
+            params[key] = _clock(value)
         elif key == "device_id" or key == "group_id":
             set_parts.append(f"{key} = :{key}")
             params[key] = value
