@@ -169,7 +169,13 @@ def world(pg_db, monkeypatch):
         return len(channel_ids)
 
     monkeypatch.setattr(has, "dispatch_to_channels", dispatch)
+    paging_since(pg_db, T0 - 86_400)   # paging began a day before the synthetic clock
     return NS(db=pg_db, sent=sent)
+
+
+def paging_since(db, epoch):
+    db.execute("INSERT INTO system_settings (key, value) VALUES ($1, to_jsonb($2::float8))"
+               " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", sa.SINCE_KEY, epoch)
 
 
 def add_server(w, name, *, heartbeat=T0, ip=None, tags=()):
@@ -259,6 +265,59 @@ async def test_the_seeded_any_change_device_down_also_pages_for_servers(world):
     await run(w, T0 + 200)
     [inc] = incidents(w, srv)
     assert inc.rule_id == down and inc.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_an_outage_older_than_paging_is_recorded_but_never_paged(world):
+    # Upgrade day: lab boxes silent for months must not all page at once.
+    w = world
+    add_rule(w, "ping_status", name="Device Down")
+    old = add_server(w, "lab-dead", heartbeat=T0 - 90 * 86_400)
+    paging_since(w.db, T0)
+    await run(w, T0 + 60)
+    [inc] = incidents(w, old)
+    assert inc.status == "active" and inc.metadata["paging"].startswith("held")
+    assert str(inc.metadata["notified"]).lower() == "false"      # suppressed, not sent
+    await run(w, T0 + 3600)                      # no late send while it stays silent
+    assert w.sent == []
+    beat(w, old, T0 + 7200)
+    await run(w, T0 + 7210)                      # back: resolved, no orphan all-clear
+    assert incidents(w, old)[0].status == "resolved" and w.sent == []
+    await run(w, T0 + 7210 + 600)                # a new outage after paging began pages
+    assert len(w.sent) == 1 and not w.sent[0]["is_recovery"]
+
+
+@pytest.mark.asyncio
+async def test_paging_since_is_recorded_once():
+    from types import SimpleNamespace
+
+    class DB:
+        def __init__(self):
+            self.value, self.calls = None, 0
+
+        async def execute(self, stmt, params=None):
+            self.calls += 1
+            if str(stmt).startswith("INSERT") and self.value is None:
+                self.value = 1234.5
+            return SimpleNamespace(scalar=lambda: self.value)
+
+    db = DB()
+    assert await sa.paging_since(db) == 1234.5
+    db.value = 1234.5
+    assert await sa.paging_since(db) == 1234.5
+
+
+@pytest.mark.asyncio
+async def test_a_rule_incident_replaces_the_open_builtin_alert(world):
+    w = world
+    add_rule(w, "ping_status", name="Device Down")
+    srv = add_server(w, "had-builtin", heartbeat=T0)
+    w.db.execute("INSERT INTO alerts (server_id, severity, message, status, metadata)"
+                 " VALUES ($1, 'critical', 'Agent offline', 'active',"
+                 " '{\"source\":\"agent_offline\",\"dedupe\":\"agent_offline\"}'::jsonb)", srv)
+    await run(w, T0 + 200)
+    rows = {(i.rule_id is None, i.status) for i in incidents(w, srv)}
+    assert rows == {(True, "resolved"), (False, "active")}
 
 
 @pytest.mark.asyncio

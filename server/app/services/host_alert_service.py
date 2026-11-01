@@ -923,7 +923,7 @@ async def _load_rules(db: AsyncSession) -> list:
 
 
 async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: dict, *,
-                                 now: float, allowed: bool, counts: dict) -> None:
+                                 now: float, since: float, allowed: bool, counts: dict) -> None:
     """Raise or resolve one availability rule against every server it covers."""
     after_s = sa.down_after_seconds(rule)
     for sid, sig in signals.items():
@@ -933,10 +933,19 @@ async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: 
         breach = sa.breach_for(rule, state)
         if breach is None:
             continue
+        extra = {"availability": state, "down_after_s": after_s}
+        held = breach and sa.predates_paging(sig, since)
+        if held:
+            # Silent since before paging began: recorded, never sent (the
+            # trigger stays suppressed, and so does its recovery).
+            extra["paging"] = "held: silent since before server availability paging began"
         await _apply_state(db, rule, sid, sig.hostname, None, breach, None,
-                           sa.describe(rule, state, sig, after_s), allowed=allowed,
-                           counts=counts, opened=opened.get((sid, _dedupe(rule, None))),
-                           extra={"availability": state, "down_after_s": after_s})
+                           sa.describe(rule, state, sig, after_s),
+                           allowed=allowed and not held, counts=counts,
+                           opened=opened.get((sid, _dedupe(rule, None))), extra=extra)
+        if breach:
+            # This incident replaces the sweep's built-in, unrouted alert.
+            await resolve_server_alerts(db, sid, "agent_offline")
 
 
 async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> dict[str, int]:
@@ -955,6 +964,7 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
 
     history_cache: dict[tuple[str, int], dict | None] = {}
     signals: dict | None = None
+    since = 0.0
     counts = {"raised": 0, "resolved": 0}
     for rule in rules:
         allowed = notifications_allowed(
@@ -968,7 +978,9 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
         if sa.is_availability_rule(rule):
             if signals is None:
                 signals = await sa.load_signals(db)
-            await _evaluate_availability(db, rule, signals, opened, now=now,
+                since = await sa.paging_since(db)
+                await db.commit()
+            await _evaluate_availability(db, rule, signals, opened, now=now, since=since,
                                          allowed=allowed, counts=counts)
             await db.commit()
             continue

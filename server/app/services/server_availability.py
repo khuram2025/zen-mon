@@ -236,6 +236,30 @@ async def load_signals(db: AsyncSession) -> dict[str, ServerSignals]:
             for r in rows}
 
 
+SINCE_KEY = "alerts.server_availability_since"
+
+
+async def paging_since(db: AsyncSession) -> float:
+    """When availability paging began on this appliance (epoch seconds),
+    recorded the first time it is asked. A server already silent before then
+    — a lab box or a decommissioned host that stopped reporting months ago —
+    is recorded but not paged, so upgrading does not page for every old
+    outage at once. A later outage of the same server pages as usual."""
+    await db.execute(text(
+        "INSERT INTO system_settings (key, value) VALUES (:k, to_jsonb(extract(epoch FROM now())))"
+        " ON CONFLICT (key) DO NOTHING"), {"k": SINCE_KEY})
+    value = (await db.execute(text("SELECT value FROM system_settings WHERE key = :k"),
+                              {"k": SINCE_KEY})).scalar()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def predates_paging(signals: ServerSignals, since: float) -> bool:
+    return signals.heartbeat_at is not None and signals.heartbeat_at.timestamp() < since
+
+
 _COVER_RULES_SQL = """
 SELECT id, metric, trigger_on, operator, threshold, conditions, server_id, device_id,
        group_id, device_type, location, scope_tag, service_check_id, service_check_group_id
