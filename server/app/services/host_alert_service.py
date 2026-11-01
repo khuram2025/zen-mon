@@ -843,6 +843,12 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
             await ns.stamp(db, new_id, allowed)
             await db.commit()
             return
+        if rule.metric in {"host_restart", "host_shutdown"}:
+            # One incident may cover several lifecycle signals in the observation
+            # window. Keep its text aligned with the newest signal, without
+            # changing its identity, acknowledgement or notification state.
+            await db.execute(text("UPDATE alerts SET message=:message WHERE id=:id"),
+                             {"id": opened.id, "message": _message(rule, hostname, detail)})
         await _stamp_state(db, opened.id, {"value": round(value, 2) if value is not None else None,
                                            "data_state": "current", **(extra or {})})
         if (opened.status == "active" and allowed and await ns.is_pending(db, opened.id)
@@ -989,7 +995,7 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                         {"ids":maintained,"since":datetime.fromtimestamp(now-900,timezone.utc)})
                 lifecycle = await recent_lifecycle(db, now)
             for sid in targets:
-                breach,value,detail = lifecycle_value(rule.metric,lifecycle.get(sid,[]))
+                breach,value,detail = lifecycle_value(rule.metric,lifecycle.get(sid,[]),_tz)
                 await _apply_state(db,rule,sid,servers.get(sid,"server"),None,breach,value,detail,
                                    allowed=allowed,counts=counts,opened=opened.get((sid,_dedupe(rule,None))))
             await db.commit()

@@ -138,15 +138,31 @@ async def recent_lifecycle(db, now: float) -> dict:
     return result
 
 
-def lifecycle_value(metric: str, events: list) -> tuple:
+def lifecycle_value(metric: str, events: list, timezone_name: str = "UTC") -> tuple:
     wanted = {"restart", "unexpected_restart", "restart_requested"} if metric == "host_restart" else {"shutdown", "shutdown_requested"}
     selected = [(k,t,n) for k,t,n in events if k in wanted]
     if not selected:
         return False, 0.0, "no recent lifecycle event"
     latest = max(selected,key=lambda x:x[1])
-    descriptions = {"restart":"OS boot detected", "unexpected_restart":"unexpected shutdown/restart detected",
-                    "restart_requested":"restart requested", "shutdown":"OS shutdown reported", "shutdown_requested":"shutdown or restart requested"}
-    return True, float(sum(n for _,_,n in selected)), f"{descriptions[latest[0]]} at {latest[1].isoformat()}"
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        zone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError, TypeError):
+        timezone_name, zone = "UTC", timezone.utc
+    stamp = utc(latest[1]).astimezone(zone)
+    when = stamp.strftime("%d %b %Y at %I:%M:%S %p")
+    descriptions = {
+        "restart": "The server started",
+        "unexpected_restart": "Windows reported an unexpected shutdown or restart",
+        "restart_requested": "A server restart was requested",
+        "shutdown": "The server began shutting down",
+        "shutdown_requested": "A server shutdown was requested",
+    }
+    detail = f"{descriptions[latest[0]]} on {when} ({timezone_name})."
+    if latest[0] in {"shutdown", "shutdown_requested"}:
+        detail += " This event does not confirm that the server is powered off."
+    return True, float(sum(n for _,_,n in selected)), detail
 
 
 QUERY_SETTINGS = {"max_execution_time": 8, "max_memory_usage": 268435456}

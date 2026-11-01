@@ -49,6 +49,31 @@ def test_source_is_required_for_lifecycle_classification():
     assert events.lifecycle_kind(events.normalize(event(provider="User32",event_id=1074,fields={"param5":"restart"}))) == "restart_requested"
 
 
+@pytest.mark.parametrize("metric,kind,phrase", [
+    ("host_restart", "restart", "The server started"),
+    ("host_restart", "restart_requested", "A server restart was requested"),
+    ("host_restart", "unexpected_restart", "Windows reported an unexpected shutdown or restart"),
+    ("host_shutdown", "shutdown", "The server began shutting down"),
+    ("host_shutdown", "shutdown_requested", "A server shutdown was requested"),
+])
+def test_lifecycle_wording_is_readable_and_uses_configured_timezone(metric, kind, phrase):
+    stamp = datetime(2026, 11, 1, 15, 30, 5, tzinfo=timezone.utc)
+    breach, count, detail = events.lifecycle_value(metric, [(kind, stamp, 2)], "Asia/Riyadh")
+    assert breach and count == 2
+    assert detail.startswith(f"{phrase} on 01 Nov 2026 at 06:30:05 PM (Asia/Riyadh).")
+    assert "T15:" not in detail
+    assert ("does not confirm" in detail) == (metric == "host_shutdown")
+
+
+def test_lifecycle_time_handles_dst_and_unknown_timezone():
+    stamp = datetime(2026, 7, 1, 15, 30, tzinfo=timezone.utc)
+    _, _, detail = events.lifecycle_value("host_restart", [("restart", stamp, 1)], "Europe/London")
+    assert "04:30:00 PM (Europe/London)" in detail
+    _, _, fallback = events.lifecycle_value("host_restart", [("restart", stamp, 1)], "Unknown/Zone")
+    assert "03:30:00 PM (UTC)" in fallback
+    assert events.lifecycle_value("host_restart", [("shutdown", stamp, 1)])[:2] == (False, 0.0)
+
+
 def test_role_profiles_select_audit_failures_without_success_logon_stream():
     dc = policy.role_filters(1)
     security = next(f for f in dc if f["channel"] == "Security")
@@ -92,6 +117,14 @@ async def test_replayed_lifecycle_batch_notifies_once_and_backfill_stays_quiet(w
     assert len(incidents(world,sid))==1 and len(world.sent)==1
     assert "unexpected" in incidents(world,sid)[0].message
     assert world.sent[0]["rule_name"]=="host_restart"
+    async with session(world.db) as db:
+        await events.ingest_state(db,sid,aid,[event(provider="Microsoft-Windows-Kernel-General",event_id=12,
+                            record_id=100,event_time=datetime.fromtimestamp(now+70,timezone.utc))],None)
+        await db.commit()
+    await run(world,now+71)
+    assert len(incidents(world,sid))==1 and len(world.sent)==1
+    assert "The server started on" in incidents(world,sid)[0].message
+    assert "unexpected" not in incidents(world,sid)[0].message
     await run(world,now+1000)
     assert incidents(world,sid)[0].status=="resolved" and len(world.sent)==1
     async with session(world.db) as db:
