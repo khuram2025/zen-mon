@@ -146,6 +146,13 @@ func (p PostgresConfig) DSN() string {
 	}
 	u := url.URL{Scheme: "postgres", User: url.UserPassword(p.User, p.Password), Host: fmt.Sprintf("%s:%d", p.Host, p.Port), Path: "/" + p.Database}
 	q := url.Values{"sslmode": {mode}}
+	// Unix sockets belong in query parameters, not a percent-escaped URL
+	// authority. This also keeps disposable integration fixtures off TCP.
+	if strings.HasPrefix(p.Host, "/") {
+		u.Host = ""
+		q.Set("host", p.Host)
+		q.Set("port", fmt.Sprint(p.Port))
+	}
 	if p.SSLRootCert != "" {
 		q.Set("sslrootcert", p.SSLRootCert)
 	}

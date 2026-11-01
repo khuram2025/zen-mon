@@ -21,6 +21,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/zenplus/poller/internal/config"
 	"github.com/zenplus/poller/internal/netflow"
+	"github.com/zenplus/poller/internal/store"
 )
 
 type clockPolicy string
@@ -52,6 +53,7 @@ type collectorConfig struct {
 type collector struct {
 	cfg            collectorConfig
 	store          *chStore
+	journalStore   *store.PostgresStore
 	queue          *batchQueue
 	spool          *diskSpool
 	stats          *statsRegistry
@@ -132,6 +134,13 @@ func main() {
 	if err != nil {
 		fatalf("netflow collector: %v", err)
 	}
+	if os.Getenv("NETFLOW_INSERT_JOURNAL_ENABLED") == "1" {
+		if err := c.enableJournal(ctx); err != nil {
+			fatalf("netflow journal commissioning failed (%T)", err)
+		}
+		defer c.journalStore.Close()
+		fmt.Println("INFO: flow writes acknowledge replicated PostgreSQL admission; analytics visibility is asynchronous")
+	}
 
 	// Listen first: ClickHouse being down or restarting must not make the
 	// kernel refuse flows (X-14); they are queued/spooled until it is back.
@@ -203,6 +212,23 @@ func main() {
 	totals, _, _ := c.stats.snapshot()
 	fmt.Printf("INFO: netflow collector stopped: %d records written, %d dropped from the queue, %d spooled for the next start\n",
 		totals.RecordsWritten, totals.RecordsDroppedQueue, spoolRecords(c.spool))
+}
+
+func (c *collector) enableJournal(ctx context.Context) error {
+	if os.Getenv("HOST_INSERT_JOURNAL_ENABLED") != "1" || os.Getenv("ZENPLUS_CONTROLLER_GRANT") == "" || strings.TrimSpace(os.Getenv("NETFLOW_COLLECTOR_ID")) == "" || c.cfg.BatchSize < 1 || c.cfg.BatchSize > 20000 {
+		return fmt.Errorf("flow journal requires API recovery, controller admission, stable collector identity and bounded batching")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	pg, err := store.NewPostgresStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	c.journalStore = pg
+	c.store.journal = pg
+	return nil
 }
 
 func newCollector(cfg collectorConfig, now time.Time) (*collector, error) {

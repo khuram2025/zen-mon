@@ -9,7 +9,8 @@ pruned, old uncertain writes are held, and capacity exhaustion returns an error
 to the producer spool. Commissioning must qualify the ClickHouse deduplication
 window and forbid other writers to these tables. It is not an unlimited
 exactly-once contract. The commissioned Go poller can stage its supported
-analytics batches here; APM and flow producers remain outside this contract.
+analytics batches here. Opt-in APM, RUM and flow handoffs use the same recovery
+loop; each producer has its own identity and acknowledgement boundary.
 """
 from __future__ import annotations
 
@@ -303,11 +304,13 @@ class HostIngestJournal:
 async def recovery_loop():
     from app.core.database import engine, get_clickhouse_client
     from app.services.host_insert_batcher import HostInsertBatcher
-    from app.services import rum_ingest_journal
+    from app.services import rum_ingest_journal, flow_ingest_journal
     ordinary_write = HostInsertBatcher(get_clickhouse_client)._write
     def writer(table, columns, rows, token):
         if table == rum_ingest_journal.WORK_KIND:
             return rum_ingest_journal.write(get_clickhouse_client, columns, rows, token)
+        if table in flow_ingest_journal.TABLES:
+            return flow_ingest_journal.write(get_clickhouse_client, table, columns, rows, token)
         return ordinary_write(table, columns, rows, token)
     journal = HostIngestJournal(engine, writer)
     while True:
