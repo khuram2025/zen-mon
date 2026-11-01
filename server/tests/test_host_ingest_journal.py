@@ -59,6 +59,25 @@ def test_encoding_preserves_exact_values_and_rejects_bad_values():
 
 
 @pytest.mark.asyncio
+async def test_recovery_stops_between_blocks_when_controller_admission_expires(pg_db, monkeypatch):
+    from app.core import controller_admission
+    admitted = [True]
+    calls = []
+    monkeypatch.setattr(controller_admission, 'permitted', lambda: admitted[0])
+    def writer(*args):
+        calls.append(args)
+        admitted[0] = False
+    async with fixture(pg_db, writer) as journal:
+        await journal.stage('host_cpu_metrics', COLS, [member('first')])
+        await journal.stage('host_cpu_metrics', COLS, [member('second')])
+        with pytest.raises(J.JournalUnavailable):
+            await journal.drain('host_cpu_metrics')
+    assert len(calls) == 1
+    assert pg_db.scalar("SELECT count(*) FROM host_ingest_batches WHERE state='pending'") == 1
+    assert pg_db.scalar("SELECT count(*) FROM host_ingest_batches WHERE state='committed'") == 1
+
+
+@pytest.mark.asyncio
 async def test_crash_after_group_insert_replays_original_group_from_new_process(pg_db):
     store = Store()
     store.lose_response = True

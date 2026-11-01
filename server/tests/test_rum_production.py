@@ -21,6 +21,18 @@ from app.api.v1.rum_sdk import RUM_SDK
 from app.main import _DynamicRumCORSMiddleware
 
 
+@pytest.fixture
+def rum_window_clock(monkeypatch):
+    """Keep the fixed custom-window examples inside their retention horizon."""
+    class WindowDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instant = cls(2026, 9, 15, 12, tzinfo=timezone.utc)
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(rum, "datetime", WindowDateTime)
+
+
 def _request(body: bytes = b"{}", *, origin: str = "https://portal.example.com",
              user_agent: str = "Mozilla/5.0 Chrome/126.0.0.0") -> Request:
     sent = False
@@ -777,7 +789,7 @@ def test_rollup_insert_writes_vital_band_counters():
 
 # ── Phase 1: custom windows, search, comparison, export ──────────────────────
 
-def test_windows_resolve_presets_custom_bounds_and_previous_period():
+def test_windows_resolve_presets_custom_bounds_and_previous_period(rum_window_clock):
     preset = rum._resolve_window("7d")
     assert preset.range == "7d" and not preset.rollup and preset.bucket_seconds == 21600
     assert abs(preset.seconds - 7 * 86400) < 5
@@ -789,7 +801,7 @@ def test_windows_resolve_presets_custom_bounds_and_previous_period():
     assert not custom.rollup
     long = rum._resolve_window("custom", "2026-08-01T00:00:00Z", "2026-08-31T00:00:00Z")
     assert long.rollup and long.bucket_seconds == 86400
-    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - 60_000
+    end_ms = int(rum.datetime.now(timezone.utc).timestamp() * 1000) - 60_000
     epoch = rum._resolve_window("7d", str(end_ms - 6 * 3_600_000), str(end_ms))   # epoch ms wins over the preset
     assert epoch.range == "custom" and abs(epoch.seconds - 6 * 3600) < 1
     with pytest.raises(HTTPException):
@@ -798,6 +810,8 @@ def test_windows_resolve_presets_custom_bounds_and_previous_period():
         rum._resolve_window("custom", "2026-09-02T00:00:00Z", "2026-09-01T00:00:00Z")
     with pytest.raises(HTTPException):
         rum._resolve_window("custom", "2026-05-01T00:00:00Z", "2026-08-30T00:00:00Z")   # > 90 days
+    with pytest.raises(HTTPException, match="retained for 90 days"):
+        rum._resolve_window("custom", "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z")
     # FastAPI FieldInfo defaults (direct calls) are treated as "not supplied".
     from fastapi import Query
     assert rum._resolve_window("24h", Query(default=None), Query(default=None)).range == "24h"
@@ -987,7 +1001,7 @@ def test_session_paths_collapse_repeated_routes_and_read_view_starts():
 
 
 @pytest.mark.parametrize("uptime", [1.0, 30.0, 601.0, 30000.0])
-def test_retention_is_parsed_from_table_ttl_and_drives_coverage(monkeypatch, uptime):
+def test_retention_is_parsed_from_table_ttl_and_drives_coverage(monkeypatch, uptime, rum_window_clock):
     class Result:
         result_rows = [
             ("apm_rum_events", "MergeTree ORDER BY x TTL toDateTime(timestamp) + toIntervalDay(21) SETTINGS a = 1"),
