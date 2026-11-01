@@ -180,6 +180,9 @@ class HostIngestJournal:
     async def drain(self, table, *, limit=8):
         async with self._locked(table) as conn:
             for _ in range(limit):
+                from app.core.controller_admission import permitted
+                if not permitted():
+                    raise JournalUnavailable('controller admission unavailable')
                 row = (await conn.execute(text('''
                     SELECT id,write_token,payload,state,attempted_at,
                            clock_timestamp() AS db_now
