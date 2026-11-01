@@ -255,7 +255,7 @@ export function AlertRulesPage() {
                     <Td className="text-xs text-muted">{relativeTime(r.created_at)}</Td>
                     <Td>
                       <div className="flex justify-end gap-0.5">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" title="Preview & edit message"
+                        <Button variant="ghost" size="icon" className="h-7 w-7" title={isServerMetric(r.metric) ? 'Preview message' : 'Preview & edit message'}
                           onClick={() => setPreviewing(r)}>
                           <Eye className="h-3.5 w-3.5" />
                         </Button>

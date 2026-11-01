@@ -104,12 +104,29 @@ export type ServerDraft = {
   server_id: string
   min_duration: number
   clear_duration: number | null
-  reset_mode: string
+  reset_mode: 'auto' | 'none'
   notify_channels: string[]
   cooldown: number
   schedule_start: string
   schedule_end: string
   schedule_days: number[]
+}
+
+/** Defaults when changing what a server rule watches; preserve valid zero values between percent metrics. */
+export function serverWatchChange(s: Pick<ServerDraft, 'conditions' | 'min_duration' | 'reset_mode'>, metric: string) {
+  const current = s.conditions[0]
+  const previousKind = serverMetricKind(current?.metric)
+  const nextKind = serverMetricKind(metric)
+  const resetMode = nextKind === 'event' && previousKind !== 'event' ? 'none' : s.reset_mode
+  return {
+    target: '',
+    min_duration: nextKind === 'pct' ? (previousKind === 'pct' ? s.min_duration : 300) : 0,
+    conditions: [{ metric, operator: previousKind === 'pct' ? current.operator : '>',
+      threshold: nextKind === 'pct' ? (previousKind === 'pct' ? current.threshold : 90) : 0,
+      reset_threshold: null }],
+    reset_mode: resetMode,
+    recovery_alert: resetMode === 'auto',
+  }
 }
 
 /** What is missing before the draft can be saved, or null. */
@@ -143,7 +160,7 @@ export function serverRulePayload(s: ServerDraft): Record<string, unknown> {
     min_duration: pct || kind === 'flag' ? Math.max(0, Math.round(Number(s.min_duration) || 0)) : 0,
     clear_duration: pct ? s.clear_duration : null,
     reset_threshold: pct && c.reset_threshold != null ? Number(c.reset_threshold) : null,
-    recovery_alert: kind === 'event' ? false : s.reset_mode === 'auto',
+    recovery_alert: s.reset_mode === 'auto',
     cooldown: s.cooldown,
     notify_channels: s.notify_channels,
     server_id: s.server_id && s.server_id !== '__pick__' ? s.server_id : null,

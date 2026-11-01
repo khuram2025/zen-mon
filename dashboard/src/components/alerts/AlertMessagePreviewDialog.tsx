@@ -7,7 +7,7 @@
  * accepts unsaved template overrides, so what is on screen always matches what
  * the alert engine would build for those templates.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Mail, MessageSquare, RotateCcw, Save, Type, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -19,6 +19,7 @@ import { Textarea } from '@/components/ui/Textarea'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/Dialog'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
+import { isServerMetric, serverMetricKind } from '@/components/forms/serverAlertRule'
 
 // Ordered by how often a template needs them. The phrasing variables at the
 // top render finished English ("Interface utilisation on core-router-01 rose
@@ -57,7 +58,7 @@ const EMPTY: Edits = {
  * every field blank behind a grey placeholder, so the text an operator wanted
  * to adjust was never actually on screen to adjust. */
 function editsFromRule(rule: any): Edits {
-  const eff = rule?.effective_templates || rule || {}
+  const eff = isServerMetric(rule?.metric) ? rule?.default_templates || {} : rule?.effective_templates || rule || {}
   return {
     email_subject: eff.email_subject || '',
     email_body: eff.email_body || '',
@@ -82,6 +83,7 @@ export function AlertMessagePreviewDialog({
   rule: any
 }) {
   const qc = useQueryClient()
+  const fieldId = useId()
   const [edits, setEdits] = useState<Edits>(EMPTY)
   const [data, setData] = useState<any>(null)
   const [mode, setMode] = useState<'alert' | 'recovery'>('alert')
@@ -89,8 +91,10 @@ export function AlertMessagePreviewDialog({
   const lastFocused = useRef<keyof Edits | null>(null)
   const fieldRefs = useRef<Partial<Record<keyof Edits, HTMLTextAreaElement | HTMLInputElement | null>>>({})
 
-  const hasRecovery = !!rule?.recovery_alert
-  const dirty = JSON.stringify(edits) !== JSON.stringify(editsFromRule(rule))
+  const hasRecovery = !!data?.recovery || !!rule?.recovery_alert
+  const serverRule = isServerMetric(rule?.metric)
+  const lifecycleRule = serverRule && serverMetricKind(rule?.metric) === 'event'
+  const dirty = !serverRule && JSON.stringify(edits) !== JSON.stringify(editsFromRule(rule))
 
   const preview = useMutation({
     mutationFn: async (body: Edits) => (await api.post(`/alert-rules/${rule.id}/preview`, body)).data,
@@ -114,7 +118,9 @@ export function AlertMessagePreviewDialog({
   })
 
   const simulate = useMutation({
-    mutationFn: async () => (await api.post(`/alert-rules/${rule.id}/simulate`)).data,
+    mutationFn: async () => (await api.post(`/alert-rules/${rule.id}/simulate`, {
+      ...(!serverRule ? edits : {}), is_recovery: mode === 'recovery',
+    })).data,
     onSuccess: (d: any) => {
       const details = (d.results || []).map((r: any) => `${r.channel}: ${r.status}`).join(', ')
       toast.success(d.message || 'Test notification sent', details)
@@ -187,7 +193,7 @@ export function AlertMessagePreviewDialog({
             </DialogTitle>
             <p className="mt-1 text-xs text-muted">
               How <span className="font-medium text-text">{rule.name}</span> will look when it notifies.
-              Sample device and readings — nothing is sent until you click Send test.
+              Sample {serverRule ? 'server and event' : 'device and readings'} — nothing is sent until you click Send test.
             </p>
           </div>
           <div className="flex items-center gap-2 pr-8">
@@ -195,25 +201,34 @@ export function AlertMessagePreviewDialog({
               <Tabs value={mode} onValueChange={(v) => setMode(v as any)}>
                 <TabsList className="h-8">
                   <TabsTrigger value="alert" className="py-1 text-xs">Trigger</TabsTrigger>
-                  <TabsTrigger value="recovery" className="py-1 text-xs">Recovery</TabsTrigger>
+                  <TabsTrigger value="recovery" className="py-1 text-xs">{lifecycleRule ? 'Window ended' : 'Recovery'}{rule.recovery_alert ? '' : ' (off)'}</TabsTrigger>
                 </TabsList>
               </Tabs>
             )}
           </div>
         </div>
 
+        {mode === 'recovery' && !rule.recovery_alert && <p className="border-b border-border bg-surface2 px-5 py-2 text-xs text-muted">
+          This is a sample only. Recovery or closing notifications are off until enabled on the rule&apos;s Reset step.
+        </p>}
+
         <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
           {/* Editor */}
           <div className="min-h-0 space-y-4 overflow-y-auto border-r border-border p-5">
+            {serverRule && <p className="rounded-md border border-border bg-surface2 p-3 text-sm text-muted">
+              Server rules use built-in notification wording. This preview is read-only. Use Edit on the rule list to change channels, closing notifications, escalation, or schedule.
+            </p>}
             <div>
               <div className="mb-1.5 flex items-center justify-between">
-                <label className="text-xs font-medium text-muted">
+                <label htmlFor={`${fieldId}-${subjectKey}`} className="text-xs font-medium text-muted">
                   {mode === 'recovery' ? 'Recovery subject' : 'Email subject'}
                 </label>
-                <FieldState custom={isCustom(subjectKey)}
-                  onReset={() => setField(subjectKey, (defaults[subjectKey] as string) || '')} />
+                {!serverRule && <FieldState custom={isCustom(subjectKey)}
+                  onReset={() => setField(subjectKey, (defaults[subjectKey] as string) || '')} />}
               </div>
               <Input
+                id={`${fieldId}-${subjectKey}`}
+                readOnly={serverRule}
                 ref={(el) => { fieldRefs.current[subjectKey] = el }}
                 value={edits[subjectKey]}
                 onFocus={() => { lastFocused.current = subjectKey }}
@@ -224,13 +239,15 @@ export function AlertMessagePreviewDialog({
 
             <div>
               <div className="mb-1.5 flex items-center justify-between">
-                <label className="text-xs font-medium text-muted">
+                <label htmlFor={`${fieldId}-${bodyKey}`} className="text-xs font-medium text-muted">
                   {mode === 'recovery' ? 'Recovery message' : 'Email message'}
                 </label>
-                <FieldState custom={isCustom(bodyKey)}
-                  onReset={() => setField(bodyKey, (defaults[bodyKey] as string) || '')} />
+                {!serverRule && <FieldState custom={isCustom(bodyKey)}
+                  onReset={() => setField(bodyKey, (defaults[bodyKey] as string) || '')} />}
               </div>
               <Textarea
+                id={`${fieldId}-${bodyKey}`}
+                readOnly={serverRule}
                 ref={(el) => { fieldRefs.current[bodyKey] = el }}
                 value={edits[bodyKey]}
                 onFocus={() => { lastFocused.current = bodyKey }}
@@ -246,13 +263,15 @@ export function AlertMessagePreviewDialog({
 
             <div>
               <div className="mb-1.5 flex items-center justify-between">
-                <label className="text-xs font-medium text-muted">
+                <label htmlFor={`${fieldId}-${smsKey}`} className="text-xs font-medium text-muted">
                   {mode === 'recovery' ? 'Recovery SMS' : 'SMS'}
                 </label>
-                <FieldState custom={isCustom(smsKey)}
-                  onReset={() => setField(smsKey, (defaults[smsKey] as string) || '')} />
+                {!serverRule && <FieldState custom={isCustom(smsKey)}
+                  onReset={() => setField(smsKey, (defaults[smsKey] as string) || '')} />}
               </div>
               <Textarea
+                id={`${fieldId}-${smsKey}`}
+                readOnly={serverRule}
                 ref={(el) => { fieldRefs.current[smsKey] = el }}
                 value={edits[smsKey]}
                 onFocus={() => { lastFocused.current = smsKey }}
@@ -262,7 +281,7 @@ export function AlertMessagePreviewDialog({
               />
             </div>
 
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-3">
+            {!serverRule && <div className="rounded-lg border border-primary/20 bg-primary/5 p-3">
               <p className="text-2xs font-semibold uppercase tracking-wider text-primary">
                 Variables — click to insert
               </p>
@@ -279,7 +298,7 @@ export function AlertMessagePreviewDialog({
                   </button>
                 ))}
               </div>
-            </div>
+            </div>}
           </div>
 
           {/* Rendered preview */}
@@ -362,22 +381,22 @@ export function AlertMessagePreviewDialog({
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-5 py-3">
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" disabled={simulate.isPending}
-              onClick={() => { if (confirm(`Send a test notification for "${rule.name}"?`)) simulate.mutate() }}>
+              onClick={() => { if (confirm(`Send the current ${mode === 'recovery' ? 'recovery' : 'trigger'} preview as a test notification for "${rule.name}"?`)) simulate.mutate() }}>
               {simulate.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5 text-amber-500" />}
               Send test
             </Button>
             {dirty && <Badge variant="warning" className="text-2xs">Unsaved changes</Badge>}
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" disabled={!dirty}
+            {!serverRule && <Button variant="ghost" size="sm" disabled={!dirty}
               onClick={() => setEdits(editsFromRule(rule))}>
               <RotateCcw className="h-3.5 w-3.5" />Discard edits
-            </Button>
+            </Button>}
             <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
-            <Button size="sm" disabled={!dirty || save.isPending} onClick={() => save.mutate(edits)}>
+            {!serverRule && <Button size="sm" disabled={!dirty || save.isPending} onClick={() => save.mutate(edits)}>
               {save.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
               Save templates
-            </Button>
+            </Button>}
           </div>
         </div>
       </DialogContent>

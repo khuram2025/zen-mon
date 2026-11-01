@@ -240,3 +240,72 @@ def test_preview_unknown_rule_is_404(preview_client):
     db.row = None
     resp = client.post(f"/api/v1/alert-rules/{uuid4()}/preview")
     assert resp.status_code == 404
+
+
+def test_server_preview_uses_the_built_in_wording_that_the_host_sender_uses(preview_client):
+    from app.services import alert_phrasing as ap
+    client, db = preview_client
+    db.row = _rule_row(metric='host_shutdown', trigger_on='any', email_body='UNUSED STORED TEXT')
+    response=client.post(f'/api/v1/alert-rules/{RULE_ID}/preview',json={'email_body':'UNSUPPORTED EDIT'})
+    assert response.status_code==200
+    data=response.json()
+    assert data['templates']['editable'] is False
+    assert data['templates']['effective']==ap.default_templates('device')
+    assert 'UNUSED STORED TEXT' not in data['alert']['email_body']
+    assert 'UNSUPPORTED EDIT' not in data['alert']['email_body']
+    assert 'shutdown' in data['alert']['email_body'].lower()
+    assert 'observation window' in data['recovery']['email_body']
+    assert db.writes==[]
+
+
+@pytest.mark.parametrize('recovery', [False,True])
+def test_send_test_uses_the_selected_preview_and_unsaved_wording_without_saving(preview_client,monkeypatch,recovery):
+    from app.api.v1 import alert_rules as rules_api
+    from app.services import email_render
+    import smtplib
+    client,db=preview_client
+    channel=str(uuid4())
+    db.row=_rule_row(notify_channels=[channel],recovery_alert=False)
+    original_execute=db.execute
+    async def execute(statement,params=None):
+        sql=str(statement)
+        if 'FROM notification_channels' in sql:
+            return SimpleNamespace(first=lambda:SimpleNamespace(id=channel,name='Test only',type='email',config={'recipients':'test@example.invalid'},enabled=True,gateway_id=str(uuid4())))
+        if 'FROM notification_gateways' in sql:
+            return SimpleNamespace(first=lambda:SimpleNamespace(config={'host':'smtp.invalid','from_email':'test@example.invalid','encryption':'none'}))
+        return await original_execute(statement,params)
+    monkeypatch.setattr(db,'execute',execute)
+    monkeypatch.setattr(rules_api,'decrypt_config',lambda value:value)
+    contexts=[]
+    monkeypatch.setattr(email_render,'build_alert_email_html',lambda ctx:contexts.append(ctx) or '<html>Test only</html>')
+    monkeypatch.setattr(email_render,'build_alert_email_text',lambda ctx:ctx['message'])
+    sent=[]
+    class FakeSMTP:
+        def __init__(self,*args,**kwargs):pass
+        def ehlo(self):return 250,b'OK'
+        def ehlo_or_helo_if_needed(self):pass
+        def has_extn(self,name):return False
+        def sendmail(self,sender,recipients,message):sent.append(message);return {}
+        def quit(self):pass
+    monkeypatch.setattr(smtplib,'SMTP',FakeSMTP)
+    body={'is_recovery':recovery,'email_body':'Unsaved trigger for {hostname}',
+          'recovery_email_body':'Unsaved recovery for {hostname}'}
+    response=client.post(f'/api/v1/alert-rules/{RULE_ID}/simulate',json=body)
+    assert response.status_code==200,response.text
+    data=response.json()
+    assert data['results'][0]['status']=='sent',data
+    assert contexts[0]['resolved'] is recovery
+    assert contexts[0]['message']==f"Unsaved {'recovery' if recovery else 'trigger'} for core-router-01"
+    from email import message_from_string
+    from email.header import decode_header,make_header
+    assert len(sent)==1 and '[TEST]' in str(make_header(decode_header(message_from_string(sent[0])['Subject'])))
+    assert db.row.email_body is None and db.row.recovery_email_body is None
+    assert db.writes==[]
+
+
+def test_send_test_rejects_recovery_for_an_event_source_without_recovery(preview_client):
+    client,db=preview_client
+    db.row=_rule_row(metric='trap',trap_oid='1.3.6.1',recovery_alert=False)
+    response=client.post(f'/api/v1/alert-rules/{RULE_ID}/simulate',json={'is_recovery':True})
+    assert response.status_code==400
+    assert 'no recovery notification' in response.json()['detail']
