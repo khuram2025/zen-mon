@@ -27,6 +27,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useStableListRows } from '@/hooks/useStableListRows'
 import { serverNow, useClockOffset } from '@/lib/serverClock'
 import { apiErrorMessage, cn } from '@/lib/utils'
 import { useAuth } from '@/stores/auth'
@@ -184,7 +185,9 @@ export function ServicesPage() {
       return (await api.get(`/service-checks?${qs.toString()}`)).data
     },
     placeholderData: (prev) => prev,
-    refetchInterval: 15_000,
+    refetchInterval: selected.size ? false : 15_000,
+    refetchOnWindowFocus: selected.size === 0,
+    refetchOnReconnect: selected.size === 0,
   })
   const listData = listQ.data
 
@@ -233,7 +236,7 @@ export function ServicesPage() {
 
   /* ── Rows ────────────────────────────────────────────────────────────── */
 
-  const checks: ListRow[] = useMemo(() => {
+  const liveChecks: ListRow[] = useMemo(() => {
     let rows = listData?.data || []
     if (legacyApi) {
       // The appliance ignored the newer filters/sort: apply them within this page.
@@ -250,6 +253,7 @@ export function ServicesPage() {
     }
     return rows
   }, [listData, legacyApi, statusFilter, enabledFilter, staleFilter, maintFilter, authFilter, sort, nowMs]) // eslint-disable-line react-hooks/exhaustive-deps
+  const checks = useStableListRows(liveChecks, row => row.id, selected.size > 0, params.toString())
 
   const totalRecords = listData?.meta?.total || 0
   const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize))

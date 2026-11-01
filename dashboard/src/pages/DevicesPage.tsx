@@ -1,8 +1,10 @@
 import { formatDeviceAvailability } from '@/components/devices/availability'
+import { compareIpAddresses, compareListValues, isIpQuery, searchRank } from '@/lib/listOrdering'
+import { useStableListRows } from '@/hooks/useStableListRows'
 import { FLAP_HOLD_FLEET_TEXT, isFlapping, type DeviceFlapFields } from '@/components/devices/deviceStatus'
 import { FlappingTag } from '@/components/devices/FlappingTag'
 import {
-  ADDED_COLUMNS, buildDevicesCsv, cellText, deviceListFiltersFromParams, deviceListParams, facetMenu, identitySortValue, identityValue, isUnknownValue,
+  ADDED_COLUMNS, buildDevicesCsv, cellText, deviceListRequestParams, facetMenu, identitySortValue, identityValue, isUnknownValue,
   listCoverage, matchesIdentity, resolveColumnVisibility, selectedValue, without,
   type IdentityFilters, type ServerFacet,
 } from '@/components/devices/deviceInventory'
@@ -278,7 +280,7 @@ export function DevicesPage() {
   const tagMode: 'any' | 'all' = params.get('tagmode') === 'all' ? 'all' : 'any'
   // Set when navigating from a controller's "managed devices" link.
   const managedByFilter = params.get('managed_by') || ''
-  const sortKey = (params.get('sort') as SortKey) || 'hostname'
+  const sortKey = (params.get('sort') as SortKey) || (isIpQuery(search) ? 'ip_address' : 'hostname')
   const sortOrder = (params.get('order') as SortOrder) || 'asc'
   const page = Math.max(1, Number(params.get('page') || '1') || 1)
 
@@ -322,7 +324,7 @@ export function DevicesPage() {
 
   // Everything the API applies exactly goes into the request, so the (at most 200) devices that come back are the right
   // ones and `meta.total` and the menus' `facets` count ALL devices, not just the first page (RG-03).
-  const listParams = useMemo(() => deviceListParams(deviceListFiltersFromParams(params)), [params])
+  const listParams = useMemo(() => deviceListRequestParams(params), [params])
   const { data, isLoading, isFetching, refetch } = useQuery<{
     data: Device[]
     meta: { total?: number; skip?: number; limit?: number } | null
@@ -331,7 +333,9 @@ export function DevicesPage() {
     queryKey: ['devices', 'list', listParams],
     queryFn: async () => (await api.get('/devices', { params: listParams })).data,
     placeholderData: keepPreviousData,
-    refetchInterval: 15_000,
+    refetchInterval: selected.size ? false : 15_000,
+    refetchOnWindowFocus: selected.size === 0,
+    refetchOnReconnect: selected.size === 0,
   })
 
   const { data: groups } = useQuery<Group[]>({
@@ -493,19 +497,22 @@ export function DevicesPage() {
   const vendorOptions = vendorMenu.options
   const osVersionOptions = osVersionMenu.options
 
-  const sorted = useMemo(() => {
+  const liveSorted = useMemo(() => {
     const arr = [...filtered]
     const dir = sortOrder === 'asc' ? 1 : -1
     arr.sort((a, b) => {
+      if (!params.has('sort') && search.trim()) {
+        const rank = searchRank(search, [a.device.hostname, a.device.ip_address]) - searchRank(search, [b.device.hostname, b.device.ip_address])
+        if (rank) return rank
+      }
       const va = extractSortVal(a.device, sortKey)
       const vb = extractSortVal(b.device, sortKey)
-      if (va === vb) return 0
-      if (va == null) return 1
-      if (vb == null) return -1
-      return va < vb ? -1 * dir : 1 * dir
+      return (sortKey === 'ip_address' ? compareIpAddresses(a.device.ip_address, b.device.ip_address, dir) : compareListValues(va, vb, dir, !['vendor','model','os_version'].includes(sortKey))) || compareListValues(a.device.hostname, b.device.hostname)
+        || compareListValues(a.device.ip_address, b.device.ip_address) || a.device.id.localeCompare(b.device.id)
     })
     return arr
-  }, [filtered, sortKey, sortOrder])
+  }, [filtered, sortKey, sortOrder, search, params])
+  const sorted = useStableListRows(liveSorted, row => row.device.id, selected.size > 0, params.toString())
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(sorted.length / prefs.pageSize))
@@ -1026,6 +1033,7 @@ export function DevicesPage() {
                 <div className="flex items-center gap-2 text-sm">
                   <span className="font-semibold text-primary">{selected.size}</span>
                   <span className="text-muted">selected</span>
+                  <span className="text-xs text-muted">Row order held while selecting.</span>
                   <button
                     type="button"
                     onClick={() => setSelected(new Set())}
@@ -2893,7 +2901,7 @@ function extractSortVal(d: Device, k: SortKey): string | number | null {
 function ipToInt(ip: string): number {
   const parts = ip.split('.').map(Number)
   if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return Number.MAX_SAFE_INTEGER
-  return (parts[0] << 24) + (parts[1] << 16) + (parts[2] << 8) + parts[3]
+  return parts[0] * 16777216 + parts[1] * 65536 + parts[2] * 256 + parts[3]
 }
 function buildAvailabilityRows(
   rows: Array<{ device: Device; health: HealthKind; uptimePct?: number }>,

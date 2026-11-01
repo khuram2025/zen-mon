@@ -317,7 +317,7 @@ DEVICES.find((d) => d.id === 'd7').os_version_display = '17.1.1'
 Object.assign(DEVICES.find((d) => d.id === 'd1'), { os_version: 'Cisco IOS XE Software, Version 17.9.4a', os_version_display: '17.9.4a' })
 
 // The query key of the list for an address: the request the page makes for it (the page and this test share the parser).
-const listKey = (url) => ['devices', 'list', DI.deviceListParams(DI.deviceListFiltersFromParams(new URL(url, 'http://x').searchParams))]
+const listKey = (url) => ['devices', 'list', DI.deviceListRequestParams(new URL(url, 'http://x').searchParams)]
 
 function devicesPage(url, { devices = DEVICES, permissions = ['devices.view'], stored, total, facets } = {}) {
   setUser(USER(permissions))

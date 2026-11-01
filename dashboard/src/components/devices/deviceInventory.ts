@@ -334,6 +334,14 @@ export function deviceListParams(f: DeviceListFilters): Record<string, string> {
   return out
 }
 
+/** Include the active ordering before the API's result cap is applied. */
+export function deviceListRequestParams(params: URLSearchParams): Record<string, string> {
+  const out = deviceListParams(deviceListFiltersFromParams(params))
+  if (params.get('sort')) out.sort = params.get('sort')!
+  if (params.get('order')) out.order = params.get('order')!
+  return out
+}
+
 /** "first 200 of 284" when the list holds fewer devices than match; null when it holds them all. */
 export function listCoverage(loaded: number, total: number | null | undefined): { truncated: boolean; text: string | null } {
   if (typeof total !== 'number' || !Number.isFinite(total) || total <= loaded) return { truncated: false, text: null }

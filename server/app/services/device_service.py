@@ -7,6 +7,7 @@ from app.core import crypto, scoping
 from app.models.device import Device, DeviceGroup
 from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceSummary, DeviceBulkImportItem, BulkImportResult
 from app.services import tag_service
+from app.services import list_ordering as ordering
 
 
 async def apply_credential(db: AsyncSession, device: Device, credential_id: UUID) -> None:
@@ -148,10 +149,11 @@ def _device_conditions(
         if wanted and name != omit:
             conds.append(_identity_condition(expr, wanted))
     if search:
+        search = ordering.patterns(search)["list_contains"]
         conds.append(
-            Device.hostname.ilike(f"%{search}%")
-            | cast(Device.ip_address, String).ilike(f"%{search}%")
-            | cast(Device.tags, String).ilike(f"%{search}%")
+            Device.hostname.ilike(search, escape="\\")
+            | func.host(Device.ip_address).ilike(search, escape="\\")
+            | cast(Device.tags, String).ilike(search, escape="\\")
         )
     if tags:
         # Case-insensitive element match; jsonb_exists()/@> would miss rows
@@ -185,6 +187,8 @@ async def get_devices(
     model: str | None = None,
     os_version: str | None = None,
     flapping: bool | None = None,
+    sort: str = "match",
+    order: str = "asc",
 ) -> tuple[list[Device], int]:
     query = select(Device).options(selectinload(Device.group))
     for cond in _device_conditions(status, group_id, device_type, location, search, tags, tags_match, managed_by,
@@ -196,7 +200,26 @@ async def get_devices(
     total = (await db.execute(count_query)).scalar()
 
     # Paginate
-    query = query.order_by(Device.hostname).offset(skip).limit(limit)
+    columns = {
+        "hostname": ordering.natural("devices.hostname"),
+        "ip_address": Device.ip_address,
+        "device_type": Device.device_type,
+        "vendor": ordering.natural("devices.vendor"),
+        "model": ordering.natural("devices.model"),
+        "os_version": ordering.natural(os_version_display_expr()),
+        "location": Device.location,
+        "group_name": select(DeviceGroup.name).where(DeviceGroup.id == Device.group_id).scalar_subquery(),
+        "status": Device.status,
+        "last_rtt_ms": Device.last_rtt_ms,
+        "last_seen": Device.last_seen,
+    }
+    automatic = sort not in columns
+    chosen = columns.get(sort, Device.ip_address if search and ordering.ip_query(search) else ordering.natural("devices.hostname"))
+    ordered = []
+    if automatic and search and search.strip():
+        ordered.append(ordering.rank(("devices.hostname", "host(devices.ip_address)"), search))
+    ordered.append((chosen.desc() if order == "desc" and not automatic else chosen.asc()).nulls_last())
+    query = query.order_by(*ordered, ordering.natural("devices.hostname"), Device.ip_address, Device.id).offset(skip).limit(limit)
     result = await db.execute(query)
     devices = result.scalars().all()
 

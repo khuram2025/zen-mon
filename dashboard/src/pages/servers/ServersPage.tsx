@@ -23,6 +23,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useStableListRows } from '@/hooks/useStableListRows'
 import { apiErrorMessage, cn, formatBps, relativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -109,7 +110,7 @@ export function ServerInventoryPage() {
   const mode = params.get('mode') || ''
   const tag = params.get('tag') || ''
   const search = params.get('search') || ''
-  const sort = params.get('sort') || 'display_name'
+  const sort = params.get('sort') || 'match'
   const order = params.get('order') || 'asc'
   const page = Math.max(1, Number(params.get('page') || 1))
   const pageSize = 50
@@ -132,7 +133,7 @@ export function ServerInventoryPage() {
       else next.delete(key)
       if (key === 'page') pageChange = true
     }
-    if (!pageChange) next.delete('page')
+    if (!pageChange && Object.keys(entries).some(key => key !== 'sort' && key !== 'order')) next.delete('page')
     setParams(next, { replace: true })
   }
   const setParam = (key: string, value: string) => setQuery({ [key]: value })
@@ -166,7 +167,9 @@ export function ServerInventoryPage() {
       q.set('page', String(page)); q.set('page_size', String(pageSize))
       return (await api.get(`/servers?${q}`)).data
     },
-    refetchInterval: 15_000,
+    refetchInterval: selected.size ? false : 15_000,
+    refetchOnWindowFocus: selected.size === 0,
+    refetchOnReconnect: selected.size === 0,
   })
 
   const { data: facets } = useQuery<ServerFacets>({
@@ -203,7 +206,7 @@ export function ServerInventoryPage() {
     onError: (e) => toast.error('Delete failed', apiErrorMessage(e)),
   })
 
-  const items = data?.items || []
+  const items = useStableListRows(data?.items || [], row => row.id, selected.size > 0, params.toString())
   const total = data?.total || 0
   const pages = Math.max(1, Math.ceil(total / pageSize))
   const liveById = live?.servers || {}
@@ -393,6 +396,7 @@ export function ServerInventoryPage() {
       {selected.size > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
           <span className="text-sm font-medium">{selected.size} selected</span>
+          <span className="text-xs text-muted">Live refresh paused while servers are selected.</span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <div className="w-56">
               <TagPicker value={bulkTags} onChange={setBulkTags} placeholder="Pick tags…" />
@@ -436,7 +440,7 @@ export function ServerInventoryPage() {
                     <Th className="w-8 pl-4">
                       <input type="checkbox" className="accent-primary" checked={allChecked} onChange={toggleAll} />
                     </Th>
-                    <Th>{sortHeader('display_name', SORTABLE.display_name)}</Th>
+                    <Th><div className="flex gap-3">{sortHeader('display_name', SORTABLE.display_name)}{sortHeader('primary_ip', 'IP')}</div></Th>
                     <Th>{sortHeader('status', SORTABLE.status)}</Th>
                     <Th>{sortHeader('os_type', SORTABLE.os_type)}</Th>
                     <Th>CPU</Th>

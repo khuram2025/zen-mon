@@ -2,7 +2,7 @@
  *  (policy / update ring changes, diagnostics, certificate rotation). */
 
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle, Ban, Bot, CheckCircle2, ChevronLeft, ChevronRight, Clock, CloudOff, CopyPlus,
@@ -19,6 +19,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/Select'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
+import { SortableTh } from '@/components/ui/SortableTh'
+import { useStableListRows } from '@/hooks/useStableListRows'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
@@ -132,8 +134,21 @@ const PAGE_SIZE = 50
 
 export function AgentFleetPage() {
   const qc = useQueryClient()
-  const [qDraft, setQDraft] = useState('')
-  const [q, setQ] = useState('')
+  const [params, setParams] = useSearchParams()
+  const [qDraft, setQDraft] = useState(params.get('q') || '')
+  const q = params.get('q') || ''
+  const sortColumns = ['hostname', 'platform', 'version', 'status', 'authorization', 'policy', 'update_ring', 'last_heartbeat_at', 'monitoring', 'queue_depth', 'spool_bytes', 'last_ip']
+  const sort = sortColumns.includes(params.get('sort') || '') ? params.get('sort')! : 'match'
+  const order = params.get('order') === 'desc' ? 'desc' : 'asc'
+  const changeSort = (column: string) => {
+    setParams(prev => {
+      const next = new URLSearchParams(prev)
+      next.set('sort', column)
+      next.set('order', sort === column && order === 'asc' ? 'desc' : 'asc')
+      return next
+    }, { replace: true })
+  }
+  useEffect(() => { setQDraft(q) }, [q])
   const [status, setStatus] = useState('all')
   const [platform, setPlatform] = useState('all')
   const [ring, setRing] = useState('all')
@@ -176,9 +191,16 @@ export function AgentFleetPage() {
 
   // Debounce the search box so we don't fire a request per keystroke.
   useEffect(() => {
-    const t = setTimeout(() => setQ(qDraft), 300)
+    if (qDraft.trim() === q) return
+    const t = setTimeout(() => {
+      setParams(prev => {
+        const next = new URLSearchParams(prev)
+        if (qDraft.trim()) next.set('q', qDraft.trim()); else next.delete('q')
+        return next
+      }, { replace: true })
+    }, 300)
     return () => clearTimeout(t)
-  }, [qDraft])
+  }, [qDraft, q, setParams])
   // Filters change the result set — page and selection no longer apply.
   useEffect(() => {
     setPage(1)
@@ -194,7 +216,7 @@ export function AgentFleetPage() {
   }, [conflictTarget])
 
   const { data, isLoading, isError, error } = useQuery<AgentFleetResponse>({
-    queryKey: ['agent-fleet', q, status, platform, ring, authFilter, page],
+    queryKey: ['agent-fleet', q, status, platform, ring, authFilter, page, sort, order],
     queryFn: async () =>
       (await api.get('/agent-fleet', {
         params: {
@@ -203,11 +225,15 @@ export function AgentFleetPage() {
           update_ring: ring === 'all' ? '' : ring,
           authorization: authFilter === 'all' ? '' : authFilter,
           q,
+          sort,
+          order,
           page,
           page_size: PAGE_SIZE,
         },
       })).data,
-    refetchInterval: 15_000,
+    refetchInterval: selected.size ? false : 15_000,
+    refetchOnWindowFocus: selected.size === 0,
+    refetchOnReconnect: selected.size === 0,
   })
 
   const { data: policies } = useQuery<AgentPolicy[]>({
@@ -215,7 +241,7 @@ export function AgentFleetPage() {
     queryFn: async () => (await api.get('/agent-policies')).data.items,
   })
 
-  const items = data?.items || []
+  const items = useStableListRows(data?.items || [], row => row.id, selected.size > 0, JSON.stringify([q, status, platform, ring, authFilter, page, sort, order]))
   const total = data?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const hasFilters = q !== '' || status !== 'all' || platform !== 'all'
@@ -493,6 +519,7 @@ export function AgentFleetPage() {
               <Input
                 className="pl-8"
                 placeholder="Search hostname, server, IP…"
+                aria-label="Search agents"
                 value={qDraft}
                 onChange={(e) => setQDraft(e.target.value)}
               />
@@ -524,6 +551,10 @@ export function AgentFleetPage() {
           </div>
 
           {/* bulk action bar */}
+          <div className="flex items-center gap-3 text-xs text-muted" role="status">
+            {selected.size > 0 && <span>Live refresh paused while agents are selected.</span>}
+            {sort !== 'match' && <button type="button" className="text-primary hover:underline" onClick={() => setParams(prev => { const next = new URLSearchParams(prev); next.delete('sort'); next.delete('order'); return next }, { replace: true })}>Reset sort</button>}
+          </div>
           {selected.size > 0 && (
             <div className="sticky top-2 z-10 flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-surface px-3 py-2 text-xs shadow-sm">
               <span className="font-medium text-primary">{selected.size} selected</span>
@@ -624,17 +655,17 @@ export function AgentFleetPage() {
                         title="Select all"
                       />
                     </Th>
-                    <Th>Hostname</Th>
-                    <Th>Platform</Th>
-                    <Th>Version</Th>
-                    <Th>Status</Th>
-                    <Th>Authorization</Th>
-                    <Th>Policy</Th>
-                    <Th>Ring</Th>
-                    <Th>Heartbeat</Th>
-                    <Th>Monitoring</Th>
-                    <Th>Queue</Th>
-                    <Th>Last IP</Th>
+                    <SortableTh column="hostname" label="Hostname" sort={sort === 'match' && !q ? 'hostname' : sort} order={order} onSort={changeSort} />
+                    <SortableTh column="platform" label="Platform" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="version" label="Version" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="status" label="Status" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="authorization" label="Authorization" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="policy" label="Policy" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="update_ring" label="Ring" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="last_heartbeat_at" label="Heartbeat" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="monitoring" label="Monitoring" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="queue_depth" label="Queue" sort={sort} order={order} onSort={changeSort} />
+                    <SortableTh column="last_ip" label="Last IP" sort={sort} order={order} onSort={changeSort} />
                     <Th className="w-28 text-right">Actions</Th>
                   </Tr>
                 </THead>
@@ -666,6 +697,7 @@ export function AgentFleetPage() {
                           type="checkbox"
                           className="h-3.5 w-3.5 cursor-pointer accent-primary"
                           checked={selected.has(agent.id)}
+                          aria-label={`Select ${agent.hostname || agent.id}`}
                           onChange={() => toggleOne(agent.id)}
                         />
                       </Td>
