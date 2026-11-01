@@ -103,7 +103,11 @@ def describe_scope(rule, names: dict | None = None) -> dict:
     if _get(rule, "scope_tag"):
         parts.append(f"tagged {_get(rule, 'scope_tag')}")
         kind = "tag" if kind == "global" else kind
-    label = "All devices" + ((" " + ", ".join(parts)) if parts else "")
+    # A Device Down rule not tied to a device also pages for agent servers
+    # (server_availability), so say so where the rule's reach is shown.
+    from app.services.server_availability import is_down_rule
+    noun = "All devices and servers" if is_down_rule(rule) else "All devices"
+    label = noun + ((" " + ", ".join(parts)) if parts else "")
     if target:
         label += f" — interface {target}"
     return {"kind": kind, "label": label, "target": target}
@@ -214,6 +218,17 @@ async def affected(db: AsyncSession, rule) -> dict:
             params["tag"] = str(_get(rule, "scope_tag")).strip()
         sql = "SELECT count(*) FROM devices d" + (" WHERE " + " AND ".join(where) if where else "")
         n = (await db.execute(text(sql), params)).scalar() or 0
+        from app.services.server_availability import is_down_rule
+        if is_down_rule(rule):
+            # Device Down also covers agent servers (scope_tag is the only
+            # filter such a rule can carry).
+            s_sql = ("SELECT count(*) FROM servers s WHERE s.collection_mode = 'agent'"
+                     " AND s.status <> 'disabled'")
+            if _get(rule, "scope_tag"):
+                s_sql += (" AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("
+                          "COALESCE(s.tags, '[]'::jsonb)) _t WHERE LOWER(_t) = LOWER(:tag))")
+            n += (await db.execute(text(s_sql), params)).scalar() or 0
+            return {"count": int(n), "noun": "devices and servers", "shared": n != 1}
         return {"count": int(n), "noun": "devices", "shared": n != 1}
     except Exception:
         await db.rollback()

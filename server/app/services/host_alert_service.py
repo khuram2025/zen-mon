@@ -28,8 +28,13 @@ dimension with a transaction advisory lock, and the whole pass runs in one
 API worker at a time (``alert_worker_lock``).
 
 A rule with ``server_id IS NULL`` applies to every agent server; a rule with a
-``server_id`` applies only to that one. Agent-offline is handled by the
-staleness sweep.
+``server_id`` applies only to that one.
+
+Availability (server_availability): ``host_agent_offline`` rules, and the
+device-wide "Device Down" rules (``ping_status`` triggered on down), are
+judged here against each server's agent heartbeat and linked ping device, so
+one Down rule pages for devices and servers alike. The staleness sweep's
+built-in agent-offline alert is now only a fallback for uncovered servers.
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_phrasing as ap
 from app.services import alert_notify_state as ns
+from app.services import server_availability as sa
 from app.services.server_health_service import (
     create_server_alert, resolve_server_alerts, server_condition_silenced,
 )
@@ -701,7 +707,7 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
     now = datetime.now(timezone.utc)
     incident = ap.incident_context(alert_id=alert_id, first_seen=first_seen, now=now,
                                    lifecycle="recovered" if is_recovery else "new") if alert_id else {}
-    v = ap.rule_phrasing(rule, hostname=hostname, is_recovery=is_recovery,
+    v = ap.rule_phrasing(_phrasing_rule(rule), hostname=hostname, is_recovery=is_recovery,
                          reading=reading, duration=duration,
                          value=value if numeric else None)
     v.update({"rule_name": rule.name or "Alert", "hostname": hostname,
@@ -733,6 +739,15 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
         **_funnel_fields(sev, getattr(rule, "priority", None), trigger=not is_recovery),
         **incident,
     })
+
+
+def _phrasing_rule(rule):
+    """A Device Down rule paging for a server is about the server, not ICMP:
+    phrase it as server availability (its stored ping_status condition would
+    say "stops responding to ping", which nobody measured)."""
+    if getattr(rule, "metric", None) != "ping_status":
+        return rule
+    return {"metric": "host_unreachable", "operator": "eq", "threshold": 0, "conditions": None}
 
 
 def _funnel_fields(severity, rule_priority, *, trigger: bool) -> dict:
@@ -877,19 +892,22 @@ async def _adopt_legacy_mount_incident(db: AsyncSession, rule, sid: str,
 _RULES_SQL = (
     "SELECT id, name, metric, operator, threshold, severity, min_duration, {clear}, "
     "notify_channels, server_id, target, recovery_alert, conditions, condition_logic, "
-    "schedule_start, schedule_end, schedule_days, {prio} "
-    "FROM alert_rules WHERE enabled = true AND metric LIKE 'host\\_%'"
+    "schedule_start, schedule_end, schedule_days, {prio}, "
+    "trigger_on, device_id, group_id, device_type, location, scope_tag, "
+    "service_check_id, service_check_group_id "
+    "FROM alert_rules WHERE enabled = true AND (metric LIKE 'host\\_%' OR metric = 'ping_status')"
 )
 _warned_missing_clear_duration = False
 
 
 async def _load_rules(db: AsyncSession) -> list:
-    """Enabled host rules. Before migrate-162 the clear hold is the default."""
+    """Enabled host rules, plus the Device Down rules that also cover
+    servers. Before migrate-162 the clear hold is the default."""
     global _warned_missing_clear_duration
     from app.services import alert_funnel
     prio = await alert_funnel.rule_priority_column(db)
     try:
-        return (await db.execute(text(_RULES_SQL.format(clear="clear_duration", prio=prio)))).all()
+        rows = (await db.execute(text(_RULES_SQL.format(clear="clear_duration", prio=prio)))).all()
     except Exception as exc:
         if "clear_duration" not in str(exc):
             raise
@@ -898,7 +916,36 @@ async def _load_rules(db: AsyncSession) -> list:
             logger.warning("alert_rules.clear_duration missing — run migrate-162; "
                            "using the default clear hold")
             _warned_missing_clear_duration = True
-        return (await db.execute(text(_RULES_SQL.format(clear="NULL AS clear_duration", prio=prio)))).all()
+        rows = (await db.execute(text(_RULES_SQL.format(clear="NULL AS clear_duration", prio=prio)))).all()
+    # A ping_status rule scoped to a device, group, type or location stays a
+    # device-only rule.
+    return [r for r in rows if r.metric.startswith("host_") or sa.is_down_rule(r)]
+
+
+async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: dict, *,
+                                 now: float, since: float, allowed: bool, counts: dict) -> None:
+    """Raise or resolve one availability rule against every server it covers."""
+    after_s = sa.down_after_seconds(rule)
+    for sid, sig in signals.items():
+        if not sa.rule_covers(rule, sig):
+            continue
+        state = sa.judge(sig, now, after_s)
+        breach = sa.breach_for(rule, state)
+        if breach is None:
+            continue
+        extra = {"availability": state, "down_after_s": after_s}
+        held = breach and sa.predates_paging(sig, since)
+        if held:
+            # Silent since before paging began: recorded, never sent (the
+            # trigger stays suppressed, and so does its recovery).
+            extra["paging"] = "held: silent since before server availability paging began"
+        await _apply_state(db, rule, sid, sig.hostname, None, breach, None,
+                           sa.describe(rule, state, sig, after_s),
+                           allowed=allowed and not held, counts=counts,
+                           opened=opened.get((sid, _dedupe(rule, None))), extra=extra)
+        if breach:
+            # This incident replaces the sweep's built-in, unrouted alert.
+            await resolve_server_alerts(db, sid, "agent_offline")
 
 
 async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> dict[str, int]:
@@ -916,6 +963,8 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
     now = datetime.now(timezone.utc).timestamp() if now is None else now
 
     history_cache: dict[tuple[str, int], dict | None] = {}
+    signals: dict | None = None
+    since = 0.0
     counts = {"raised": 0, "resolved": 0}
     for rule in rules:
         allowed = notifications_allowed(
@@ -925,6 +974,16 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
         targets = [str(rule.server_id)] if rule.server_id else list(servers)
 
         opened = await _open_incidents(db, rule)
+
+        if sa.is_availability_rule(rule):
+            if signals is None:
+                signals = await sa.load_signals(db)
+                since = await sa.paging_since(db)
+                await db.commit()
+            await _evaluate_availability(db, rule, signals, opened, now=now, since=since,
+                                         allowed=allowed, counts=counts)
+            await db.commit()
+            continue
 
         if rule.metric not in THRESHOLD_METRICS:
             for sid in targets:

@@ -65,7 +65,7 @@ BEGIN
 
     -- Create default alert rules
     INSERT INTO alert_rules (name, description, metric, operator, threshold, duration, severity, cooldown, created_by) VALUES
-        ('Device Down', 'Alert when any device goes down', 'ping_status', 'eq', 0, 180, 'critical', 300, admin_id),
+        ('Device Down', 'Alert when any device or server goes down', 'ping_status', 'eq', 0, 180, 'critical', 300, admin_id),
         ('High Latency', 'Alert when RTT exceeds 100ms', 'rtt', 'gt', 100, 300, 'warning', 600, admin_id),
         ('Packet Loss', 'Alert when packet loss exceeds 5%', 'packet_loss', 'gt', 5, 300, 'warning', 600, admin_id);
 

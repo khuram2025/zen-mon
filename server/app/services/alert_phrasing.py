@@ -127,6 +127,22 @@ METRICS: dict[str, dict] = {
                                     "up": "restarts the monitored process"},
                           "state_label": {"down": "Monitored process not running",
                                           "up": "Monitored process running"}},
+    # Server availability (server_availability.py). host_unreachable phrases a
+    # Device Down rule firing for an agent server: it is not a stored metric.
+    "host_unreachable": {"noun": "Server availability", "healthy": 1.0, "subject": "the server",
+                         "narrative": {"down": "has stopped reporting and cannot be reached",
+                                       "up": "is reporting again"},
+                         "state": {"down": "stops reporting and cannot be reached",
+                                   "up": "reports again"},
+                         "state_label": {"down": "Server down (agent silent, no ping response)",
+                                         "up": "Server reachable"}},
+    "host_agent_offline": {"noun": "Server agent", "subject": "the server",
+                           "narrative": {"down": "has a silent agent but still answers ping",
+                                         "up": "has its agent reporting again"},
+                           "state": {"down": "loses its agent while still answering ping",
+                                     "up": "has its agent reporting again"},
+                           "state_label": {"down": "Agent offline (server still answers ping)",
+                                           "up": "Agent reporting"}},
 
     # Application monitoring
     "apm_latency_p50": {"noun": "Median (p50) latency", "unit": " ms", "decimals": 0},
