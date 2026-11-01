@@ -40,6 +40,10 @@ class JournalUnavailable(RuntimeError):
     pass
 
 
+class JournalLimitExceeded(JournalUnavailable):
+    pass
+
+
 def enabled() -> bool:
     return os.environ.get('HOST_INSERT_JOURNAL_ENABLED') == '1'
 
@@ -51,6 +55,10 @@ def _encode(value):
         return ['uuid', str(value)]
     if isinstance(value, (tuple, list)):
         return ['list', [_encode(v) for v in value]]
+    if isinstance(value, dict):
+        if any(not isinstance(k, str) for k in value):
+            raise ValueError('journal map keys must be strings')
+        return ['dict', [[k, _encode(v)] for k, v in sorted(value.items())]]
     if value is None or isinstance(value, (str, int, float, bool)):
         return ['scalar', value]
     raise ValueError('unsupported telemetry value type')
@@ -64,6 +72,8 @@ def _decode(value):
         return UUID(data)
     if kind == 'list':
         return [_decode(v) for v in data]
+    if kind == 'dict':
+        return {k: _decode(v) for k, v in data}
     if kind == 'scalar':
         return data
     raise ValueError('unsupported journal encoding')
@@ -71,11 +81,11 @@ def _decode(value):
 
 def pack(columns, rows):
     if len(rows) > MAX_ROWS:
-        raise JournalUnavailable('host journal batch row limit exceeded')
+        raise JournalLimitExceeded('host journal batch row limit exceeded')
     raw = json.dumps(_encode([columns, rows]), ensure_ascii=False, allow_nan=False,
                      separators=(',', ':')).encode()
     if len(raw) > MAX_PAYLOAD:
-        raise JournalUnavailable('host journal batch byte limit exceeded')
+        raise JournalLimitExceeded('host journal batch byte limit exceeded')
     return zlib.compress(raw)
 
 
@@ -142,41 +152,70 @@ class HostIngestJournal:
         Replays reuse the first payload even if clock correction is recomputed.
         A client must never reuse that identity for a different logical upload.
         """
+        async with self._locked(table) as conn:
+            ids = await self._stage(conn, table, columns, members)
+            await conn.commit()  # Must precede every possible external write.
+            return ids
+
+    async def stage_many(self, blocks):
+        """Admit a bounded related table set in one PostgreSQL transaction.
+
+        The same advisory key space excludes the recovery worker and Go
+        producers. A busy table or any failed receipt rolls the whole set back.
+        No external write happens on this path.
+        """
+        if not blocks or len(blocks) > 8 or len({b[0] for b in blocks}) != len(blocks):
+            raise JournalUnavailable('invalid related journal table set')
+        async with self.engine.begin() as conn:
+            for key in sorted({_key(b[0]) for b in blocks}):
+                locked = (await conn.execute(text(
+                    'SELECT pg_try_advisory_xact_lock(:namespace,:key)'),
+                    {'namespace': LOCK_NAMESPACE, 'key': key})).scalar()
+                if not locked:
+                    raise JournalUnavailable('journal table is busy; retry upload')
+            result = {}
+            for table, columns, members in blocks:
+                result[table] = await self._stage(conn, table, columns, members)
+            return result
+
+    async def _stage(self, conn, table, columns, members):
         if not members or len(members) > MAX_MEMBERS:
-            raise JournalUnavailable('host journal member limit exceeded')
+            raise JournalLimitExceeded('host journal member limit exceeded')
         unique = {}
         for token, rows in members:
             unique.setdefault(_token(token), rows)
-        async with self._locked(table) as conn:
-            existing = (await conn.execute(text('''
+        existing = (await conn.execute(text('''
                 SELECT token_hash,batch_id FROM host_ingest_receipts
                 WHERE table_name=:table AND token_hash=ANY(:tokens)
-            '''), {'table': table, 'tokens': list(unique)})).all()
-            identities = {bytes(row[0]): row[1] for row in existing}
-            fresh = sorted(set(unique) - identities.keys())
-            if fresh:
-                payload = pack(columns, [r for token in fresh for r in unique[token]])
-                capacity = (await conn.execute(text('''
+        '''), {'table': table, 'tokens': list(unique)})).all()
+        identities = {bytes(row[0]): row[1] for row in existing}
+        fresh = sorted(set(unique) - identities.keys())
+        if fresh:
+            rows = [r for token in fresh for r in unique[token]]
+            payload = pack(columns, rows) if rows else None
+            payload_bytes = len(payload) if payload else 0
+            capacity = (await conn.execute(text('''
                     SELECT payload_bytes,receipts FROM host_ingest_capacity
                     WHERE singleton FOR UPDATE
-                '''))).one()
-                if capacity[0] + len(payload) > self.max_bytes or capacity[1] + len(fresh) > self.max_receipts:
-                    raise JournalUnavailable('host journal capacity exhausted; producer must retain upload')
-                batch_id = (await conn.execute(text('''
-                    INSERT INTO host_ingest_batches(table_name,write_token,payload)
-                    VALUES(:table,:token,:payload) RETURNING id
-                '''), {'table': table, 'token': 'host-journal-v1-' + str(uuid4()), 'payload': payload})).scalar_one()
-                await conn.execute(text('''
+            '''))).one()
+            if capacity[0] + payload_bytes > self.max_bytes or capacity[1] + len(fresh) > self.max_receipts:
+                raise JournalUnavailable('host journal capacity exhausted; producer must retain upload')
+            batch_id = (await conn.execute(text('''
+                INSERT INTO host_ingest_batches(table_name,write_token,payload,state,committed_at)
+                VALUES(:table,:token,:payload,:state,
+                       CASE WHEN :state='committed' THEN clock_timestamp() END) RETURNING id
+            '''), {'table': table, 'token': 'host-journal-v1-' + str(uuid4()), 'payload': payload,
+                  'state': 'pending' if rows else 'committed'})).scalar_one()
+            await conn.execute(text('''
                     INSERT INTO host_ingest_receipts(table_name,token_hash,batch_id)
                     VALUES(:table,:token,:batch)
-                '''), [{'table': table, 'token': token, 'batch': batch_id} for token in fresh])
-                await conn.execute(text('''
+            '''), [{'table': table, 'token': token, 'batch': batch_id} for token in fresh])
+            await conn.execute(text('''
                     UPDATE host_ingest_capacity SET payload_bytes=payload_bytes+:bytes,
                     receipts=receipts+:count WHERE singleton
-                '''), {'bytes': len(payload), 'count': len(fresh)})
-                identities.update({token: batch_id for token in fresh})
-            await conn.commit()  # Must precede every possible external write.
-            return sorted(set(identities.values()))
+            '''), {'bytes': payload_bytes, 'count': len(fresh)})
+            identities.update({token: batch_id for token in fresh})
+        return sorted(set(identities.values()))
 
     async def drain(self, table, *, limit=8):
         async with self._locked(table) as conn:
