@@ -217,6 +217,8 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_background_tasks():
+        from app.services.rum_ingest_journal import validate_configuration as validate_rum_journal
+        validate_rum_journal()
         from app.core.controller_admission import permitted
         if not permitted():
             raise RuntimeError("Controller authority is required before worker startup")
