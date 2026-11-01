@@ -236,12 +236,12 @@ One page of the asset union, filtered, sorted and paged on the server. Permissio
 | Parameter | Type · default | Notes |
 |---|---|---|
 | every filter of section 2 | | |
-| `sort` | one of `name`, `kind`, `ip`, `asset_type`, `status`, `vendor`, `model`, `serial`, `os_family`, `os_product`, `os_release`, `os_version`, `os`, `site`, `last_seen`, `inventory_at`, `freshness` · default `name` | `os` = OS product, then version. `os_release`, `os_version` and `os` are numeric-aware (`7.2` before `7.10` before `17.9`, missing values last). `freshness` orders fresh, aging, stale, never, not_applicable. `name`, `vendor`, `model`, `os_product` and `site` sort case-insensitively. A value outside the list is `422`. |
+| `sort` | one of `match`, `name`, `kind`, `ip`, `asset_type`, `status`, `vendor`, `model`, `serial`, `os_family`, `os_product`, `os_release`, `os_version`, `os`, `site`, `last_seen`, `inventory_at`, `freshness` · default `name` | `os` = OS product, then version. `os_release`, `os_version` and `os` are numeric-aware (`7.2` before `7.10` before `17.9`, missing values last). `freshness` orders fresh, aging, stale, never, not_applicable. `name`, `vendor`, `model`, `os_product` and `site` sort case-insensitively. A value outside the list is `422`. |
 | `order` | `asc` \| `desc` · default `asc` | |
 | `page` | integer ≥ 1 · default `1` | |
 | `page_size` | integer 1–500 · default `50` | |
 
-The order is **total**: the requested key (nulls always last, in both directions), then `kind`, then `id`. Paging a list whose rows do not change never repeats or skips a row.
+The order is **total**: the requested key (nulls always last, in both directions), then `kind`, then `id`. Paging a list whose rows do not change never repeats or skips a row. `name` uses natural case-insensitive ordering (`server2` before `server10`). `match` puts exact name/IP matches first, then prefixes, then other matching rows; IP queries use numeric IP order and other queries use natural name order. The Assets page selects `match` by default; choosing a column explicitly uses that column's order instead.
 
 ```ts
 interface AssetList { generated_at: string; items: AssetRow[]; total: number; page: number; page_size: number; sort: string; order: 'asc' | 'desc' }

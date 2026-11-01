@@ -175,7 +175,7 @@ One page of the asset union, filtered, sorted and paged on the server. Permissio
 | `page` | integer ≥ 1 · default `1` | |
 | `page_size` | integer 1–500 · default `50` | |
 
-The order is **total**: the requested key (nulls always last, in both directions), then `kind`, then `id`. Paging a list whose rows do not change never repeats or skips a row.
+The order is **total**: the requested key (nulls always last, in both directions), then `kind`, then `id`. Paging a list whose rows do not change never repeats or skips a row. `name` uses natural case-insensitive ordering (`server2` before `server10`). `match` puts exact name/IP matches first, then prefixes, then other matching rows; IP queries use numeric IP order and other queries use natural name order. The Assets page selects `match` by default; choosing a column explicitly uses that column's order instead.
 
 ```ts
 interface AssetList { generated_at: string; items: AssetRow[]; total: number; page: number; page_size: number; sort: string; order: 'asc' | 'desc' }
