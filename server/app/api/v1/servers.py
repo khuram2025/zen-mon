@@ -361,7 +361,7 @@ async def list_servers(
     environment: Optional[str] = None,
     tag: Optional[str] = None,
     q: Optional[str] = None,
-    sort: str = "display_name",
+    sort: str = "match",
     order: str = "asc",
     page: int = 1,
     page_size: int = 50,
@@ -372,17 +372,23 @@ async def list_servers(
     page_size = max(1, min(200, page_size))
     offset = (page - 1) * page_size
 
+    from app.services.list_ordering import contains_sql, ip_query, natural_sql, patterns, rank_sql
     sort_map = {
-        "display_name": "s.display_name",
-        "hostname": "s.hostname",
+        "display_name": natural_sql("s.display_name"),
+        "hostname": natural_sql("s.hostname"),
+        "primary_ip": "s.primary_ip",
         "status": "s.status",
         "os_type": "s.os_type",
         "environment": "s.environment",
         "last_seen": "s.last_seen",
         "created_at": "s.created_at",
     }
-    sort_col = sort_map.get(sort, "s.display_name")
+    q = (q or "").strip()
+    automatic = sort not in sort_map
+    sort_col = sort_map.get(sort, "s.primary_ip" if q and ip_query(q) else natural_sql("s.display_name"))
     sort_dir = "DESC" if order.lower() == "desc" else "ASC"
+    if automatic:
+        sort_dir = "ASC"
 
     where = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
@@ -405,15 +411,14 @@ async def list_servers(
         where.append("s.tags @> CAST(:tag_json AS jsonb)")
         params["tag_json"] = json.dumps([tag])
     if q:
-        where.append("""(s.display_name ILIKE :q OR s.hostname ILIKE :q OR s.fqdn ILIKE :q
-                         OR host(s.primary_ip)::text ILIKE :q OR s.owner ILIKE :q
-                         OR s.tags::text ILIKE :q)""")
-        params["q"] = f"%{q}%"
+        where.append(contains_sql(("s.display_name", "s.hostname", "s.fqdn", "host(s.primary_ip)", "s.owner", "s.tags")))
+        params.update(patterns(q))
 
     where_sql = " AND ".join(where)
     sql_total = f"SELECT COUNT(*) FROM servers s WHERE {where_sql}"
     total_row = (await db.execute(text(sql_total), params)).first()
     total = total_row[0] if total_row else 0
+    relevance = rank_sql(("s.display_name", "s.hostname", "s.fqdn", "host(s.primary_ip)")) + ", " if q and automatic else ""
 
     sql = f"""
         SELECT s.*, st.name AS site_name,
@@ -431,7 +436,7 @@ async def list_servers(
             ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
         ) a ON TRUE
         WHERE {where_sql}
-        ORDER BY {sort_col} {sort_dir} NULLS LAST
+        ORDER BY {relevance}{sort_col} {sort_dir} NULLS LAST, {natural_sql('s.display_name')} ASC NULLS LAST, s.primary_ip ASC NULLS LAST, s.id ASC
         LIMIT :limit OFFSET :offset
     """
     rows = (await db.execute(text(sql), params)).mappings().all()
@@ -2572,8 +2577,8 @@ async def list_fleet(
     update_ring: Optional[str] = None,
     authorization: Optional[str] = None,
     q: Optional[str] = None,
-    sort: str = "last_heartbeat_at",
-    order: str = "desc",
+    sort: str = "match",
+    order: str = "asc",
     page: int = 1,
     page_size: int = 50,
     db: AsyncSession = Depends(get_db),
@@ -2582,18 +2587,27 @@ async def list_fleet(
     page = max(1, page); page_size = max(1, min(500, page_size))
     offset = (page - 1) * page_size
 
+    from app.services.list_ordering import contains_sql, ip_query, natural_sql, patterns, rank_sql
     sort_map = {
-        "hostname": "a.hostname",
+        "hostname": natural_sql("a.hostname"),
         "status": "a.status",
-        "version": "a.version",
+        "version": natural_sql("a.version"),
         "last_heartbeat_at": "a.last_heartbeat_at",
         "queue_depth": "a.queue_depth",
         "spool_bytes": "a.spool_bytes",
         "update_ring": "a.update_ring",
         "platform": "a.platform",
+        "last_ip": "a.last_ip",
+        "policy": natural_sql("p.name"),
+        "monitoring": "a.monitoring_profile",
+        "authorization": "CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.authorized_at IS NOT NULL OR a.api_key_hash IS NOT NULL THEN 'authorized' ELSE 'pending' END",
     }
-    sort_col = sort_map.get(sort, "a.last_heartbeat_at")
+    q = (q or "").strip()
+    automatic = sort not in sort_map
+    sort_col = sort_map.get(sort, "a.last_ip" if q and ip_query(q) else natural_sql("a.hostname"))
     sort_dir = "DESC" if order.lower() == "desc" else "ASC"
+    if automatic:
+        sort_dir = "ASC"
 
     where = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
@@ -2616,11 +2630,12 @@ async def list_fleet(
     elif authorization == "conflict":
         where.append("a.pending_conflict_secret_hash IS NOT NULL")
     if q:
-        where.append("(a.hostname ILIKE :q OR a.agent_uid ILIKE :q OR a.version ILIKE :q)")
-        params["q"] = f"%{q}%"
+        where.append(contains_sql(("a.hostname", "a.agent_uid", "a.version", "s.display_name", "s.hostname", "host(a.last_ip)", "host(s.primary_ip)")))
+        params.update(patterns(q))
 
     where_sql = " AND ".join(where)
-    total = (await db.execute(text(f"SELECT COUNT(*) FROM agents a WHERE {where_sql}"), params)).first()[0]
+    total = (await db.execute(text(f"SELECT COUNT(*) FROM agents a LEFT JOIN servers s ON s.id = a.server_id WHERE {where_sql}"), params)).first()[0]
+    relevance = rank_sql(("a.hostname", "s.display_name", "s.hostname", "host(a.last_ip)", "host(s.primary_ip)")) + ", " if q and automatic else ""
 
     rows = (await db.execute(
         text(f"""SELECT a.*, p.name AS policy_name, st.name AS site_name,
@@ -2647,7 +2662,7 @@ async def list_fleet(
                       ORDER BY r.approved_at DESC LIMIT 1
                  ) clone_src ON TRUE
                  WHERE {where_sql}
-                 ORDER BY {sort_col} {sort_dir} NULLS LAST
+                 ORDER BY {relevance}{sort_col} {sort_dir} NULLS LAST, {natural_sql('a.hostname')} ASC NULLS LAST, a.last_ip ASC NULLS LAST, a.id ASC
                  LIMIT :limit OFFSET :offset"""),
         params,
     )).mappings().all()

@@ -552,7 +552,7 @@ def vnum(value):
 
 
 SORT_VALUE = {
-    "name": lambda r: r["name"].lower(), "kind": lambda r: r["kind"], "asset_type": lambda r: r["asset_type"],
+    "name": lambda r: iq._natural_key(r["name"].lower()), "kind": lambda r: r["kind"], "asset_type": lambda r: r["asset_type"],
     "status": lambda r: r["status"], "vendor": lambda r: (r["vendor"] or "").lower() if r["vendor"] else None,
     "model": lambda r: r["model"].lower() if r["model"] else None, "serial": lambda r: r["serial"],
     "os_family": lambda r: r["os_family"], "os_product": lambda r: r["os_product"].lower() if r["os_product"] else None,

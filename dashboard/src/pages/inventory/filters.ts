@@ -99,6 +99,7 @@ export type SortOrder = (typeof SORT_ORDERS)[number]
 
 /** Sortable asset columns: the keys the API accepts for `sort` (inventory_query.SORT_KEYS). */
 export const ASSET_SORT_KEYS = [
+  'match',
   'name',
   'kind',
   'ip',
@@ -260,6 +261,7 @@ export const MODULE_CLASS_LABELS: Record<ModuleClass, string> = {
 }
 
 export const SORT_LABELS: Record<AssetSortKey, string> = {
+  match: 'Best match',
   name: 'Name',
   kind: 'Kind',
   ip: 'IP address',

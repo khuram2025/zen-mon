@@ -16,6 +16,7 @@ The oracle is plain SQL over the seeded fleet (tests/inventory_fleet.py), indepe
 from __future__ import annotations
 
 from typing import Any
+import re
 
 import pytest
 
@@ -121,13 +122,15 @@ def test_blank_values_leave_the_list_unchanged(fleet_db):
             assert hostnames(body) == hostnames(whole), params
 
 
-def test_unfiltered_response_shape_and_order_are_unchanged(fleet_db):
+def test_unfiltered_response_shape_and_natural_order(fleet_db):
     with device_client(fleet_db) as c:
         body = list_devices(c)
         filtered = list_devices(c, vendor="Cisco")
     assert set(body) == {"data", "meta"} and set(body["meta"]) == {"total", "skip", "limit"}
     names = [d["hostname"] for d in body["data"]]
-    assert names == sorted(names), "still ordered by hostname"
+    natural_key = lambda name: tuple((0, int(part)) if part.isdigit() else (1, part.lower())
+                                     for part in re.findall(r"[0-9]+|[^0-9]+", name))
+    assert names == sorted(names, key=natural_key), "hostname numbers sort naturally (c9 before c29)"
     # the filtered rows are the same rows, in the same order
     assert [d["hostname"] for d in filtered["data"]] == [n for n in names if n in hostnames(filtered)]
     assert {"vendor", "model", "os_version"} <= set(body["data"][0])

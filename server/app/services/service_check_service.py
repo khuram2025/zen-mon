@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.services import tag_service
+from app.services import list_ordering as ordering
 
 from datetime import datetime, timedelta, timezone
 
@@ -244,10 +245,11 @@ async def get_service_checks(
         elif maint_ids:
             query = query.where(ServiceCheck.id.notin_(list(maint_ids)))
     if search:
+        pattern = ordering.patterns(search)["list_contains"]
         query = query.where(
-            ServiceCheck.name.ilike(f"%{search}%") |
-            ServiceCheck.target_host.ilike(f"%{search}%") |
-            ServiceCheck.target_url.ilike(f"%{search}%")
+            ServiceCheck.name.ilike(pattern, escape="\\") |
+            ServiceCheck.target_host.ilike(pattern, escape="\\") |
+            ServiceCheck.target_url.ilike(pattern, escape="\\")
         )
 
     # Count
@@ -263,15 +265,17 @@ async def get_service_checks(
             (or_(ServiceCheck.status.is_(None), ServiceCheck.status == "unknown", stale_expr), 2),
             else_=3,
         )
-        order = [rank, ServiceCheck.name, ServiceCheck.id]
+        order = [rank, ordering.natural("service_checks.name"), ServiceCheck.id]
     elif sort == "-name":
-        order = [ServiceCheck.name.desc(), ServiceCheck.id]
+        order = [ordering.natural("service_checks.name").desc(), ServiceCheck.id]
     elif sort == "last_check":
-        order = [ServiceCheck.last_check_at.asc().nulls_first(), ServiceCheck.name, ServiceCheck.id]
+        order = [ServiceCheck.last_check_at.asc().nulls_first(), ordering.natural("service_checks.name"), ServiceCheck.id]
     elif sort == "type":
-        order = [ServiceCheck.check_type, ServiceCheck.name, ServiceCheck.id]
+        order = [ServiceCheck.check_type, ordering.natural("service_checks.name"), ServiceCheck.id]
     else:
-        order = [ServiceCheck.name, ServiceCheck.id]
+        order = [ordering.natural("service_checks.name"), ServiceCheck.id]
+    if search and search.strip():
+        order.insert(0 if sort in ("name", "-name") else 1, ordering.rank(("service_checks.name", "service_checks.target_host", "service_checks.target_url"), search))
     query = query.order_by(*order).offset(skip).limit(limit)
     result = await db.execute(query)
     checks = list(result.scalars().all())

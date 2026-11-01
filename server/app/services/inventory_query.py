@@ -898,6 +898,7 @@ def _num_order(column: str) -> str:
 
 
 _SORTS: dict[str, tuple[str, ...]] = {
+    "match": ("lower(a.name)",),
     "name": ("lower(a.name)",),
     "kind": ("a.kind",),
     "ip": ("a.ip",),
@@ -926,7 +927,9 @@ def _order_sql(sort: str, order: str) -> str:
         raise InvalidFilter("order must be asc or desc")
     direction = "DESC" if order == "desc" else "ASC"
     # NULLS LAST in both directions, then the asset address: a total order, so pages never overlap.
-    cols = [f"{c} {direction} NULLS LAST" for c in _SORTS[sort]]
+    from app.services.list_ordering import natural_sql
+    expressions = (natural_sql("a.name"),) if sort in ("name", "match") else _SORTS[sort]
+    cols = [f"{c} {direction} NULLS LAST" for c in expressions]
     return ", ".join(cols + ["a.kind ASC", "a.id ASC"])
 
 
@@ -962,6 +965,12 @@ async def list_assets(db: AsyncSession, filters: AssetFilters, *, scope: Optiona
     await _tune(db)
     settings = await _settings(db, settings)
     p: dict[str, Any] = {**time_params(settings, now), **_scope_params(scope)}
+    if f.q and sort == "match":
+        from app.services.list_ordering import ip_query, patterns, rank_sql
+        p.update(patterns(f.q))
+        if ip_query(f.q):
+            order_sql = f"a.ip {'DESC' if order == 'desc' else 'ASC'} NULLS LAST, " + order_sql
+        order_sql = rank_sql(("a.name", "host(a.ip)")) + ", " + order_sql
     conds = _conditions(f, p)
     p["limit"], p["offset"] = page_size, (page - 1) * page_size
     security = _needs_security(f)

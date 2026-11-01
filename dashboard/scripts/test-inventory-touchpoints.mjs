@@ -317,7 +317,7 @@ DEVICES.find((d) => d.id === 'd7').os_version_display = '17.1.1'
 Object.assign(DEVICES.find((d) => d.id === 'd1'), { os_version: 'Cisco IOS XE Software, Version 17.9.4a', os_version_display: '17.9.4a' })
 
 // The query key of the list for an address: the request the page makes for it (the page and this test share the parser).
-const listKey = (url) => ['devices', 'list', DI.deviceListParams(DI.deviceListFiltersFromParams(new URL(url, 'http://x').searchParams))]
+const listKey = (url) => ['devices', 'list', DI.deviceListRequestParams(new URL(url, 'http://x').searchParams)]
 
 function devicesPage(url, { devices = DEVICES, permissions = ['devices.view'], stored, total, facets } = {}) {
   setUser(USER(permissions))
@@ -438,7 +438,7 @@ const hostnames = (html) => [...html.matchAll(/<a ([^>]*)>([^<]*)<\/a>/g)]
   assert(narrowed.includes(`Filtered: ${(3).toLocaleString()} devices`) && !narrowed.includes(`Filtered: ${(3).toLocaleString()} of ${(3).toLocaleString()}`), narrowed.slice(0, 400))
   // The status chip is the browser's: the cut-short notice says the status filter applies to the loaded rows only.
   const statusCut = strip(devicesPage('/devices?vendor=cisco&status=healthy', { total: 284 }))
-  assert(statusCut.includes(`devices that match the other filters, in name order`) && statusCut.includes('status and location filters are applied to these devices only'), statusCut.slice(0, 600))
+  assert(statusCut.includes(`devices that match the other filters, in the current sort order`) && statusCut.includes('status and location filters are applied to these devices only'), statusCut.slice(0, 600))
   // NF-EP-02: a controller's children are listed without the controller; the banner still names it.
   const wlcKids = [device('k1', 'ap-1', { managed_by_device_id: 'c1', managed_by_hostname: 'wlc-main' }), device('k2', 'ap-2', { managed_by_device_id: 'c1', managed_by_hostname: 'wlc-main' })]
   const bannerOf = (html) => html.match(/Showing devices managed by<\/span><a [^>]*href="\/devices\/c1"[^>]*>([^<]*)<\/a>/)?.[1]
@@ -467,7 +467,7 @@ const hostnames = (html) => [...html.matchAll(/<a ([^>]*)>([^<]*)<\/a>/g)]
   const open = (query, over = {}) => devicesPage(`/devices?${query}`, { devices: DEVICES, total: 284, facets, ...over })
   const cut = open('vendor=cisco')
   assert(cut.includes('data-list-coverage'), 'the list says it is cut short')
-  assert(strip(cut).includes(`Showing the first ${DEVICES.length.toLocaleString()} of ${(284).toLocaleString()} devices that match, in name order.`), 'first N of M')
+  assert(strip(cut).includes(`Showing the first ${DEVICES.length.toLocaleString()} of ${(284).toLocaleString()} devices that match, in the current sort order.`), 'first N of M')
   assert(strip(cut).includes(`Filtered: ${(3).toLocaleString()} of ${DEVICES.length.toLocaleString()} devices that match the other filters (first ${DEVICES.length.toLocaleString()} of ${(284).toLocaleString()} loaded)`))
   assert(!strip(cut).includes('count only the devices shown here'), 'with nothing but identity filters the menus are exact: no caveat')
   // A status chip is derived in the browser: the menus fall back to the loaded rows and say so.

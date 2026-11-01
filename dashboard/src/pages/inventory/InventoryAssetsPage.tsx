@@ -38,7 +38,7 @@ export function InventoryAssetsPage() {
   const access = useInventoryAccess()
   const allowed = access === 'allowed'
   const can = useCan()
-  const url = useInventoryUrlState()
+  const url = useInventoryUrlState({ defaultSort: { sort: 'match', order: 'asc' } })
   const { pathname } = useLocation()
   const wide = useMediaQuery('(min-width: 1024px)')
   const [prefs, setPrefs] = useAssetPrefs()
@@ -189,7 +189,7 @@ export function InventoryAssetsPage() {
               hrefFor={hrefForAsset}
               activeAddress={url.asset}
               now={now}
-              caption={`Assets, ${rangeText(data.page, data.page_size, data.total)}, sorted by ${url.sort} ${url.order === 'asc' ? 'ascending' : 'descending'}`}
+              caption={`Assets, ${rangeText(data.page, data.page_size, data.total)}, sorted by ${url.sort === 'match' ? 'best match' : url.sort} ${url.order === 'asc' ? 'ascending' : 'descending'}`}
             />
           </div>
         </div>

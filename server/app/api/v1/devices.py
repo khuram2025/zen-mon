@@ -146,10 +146,15 @@ async def list_devices(
                                   description="Only devices flagged as flapping (true) or not flapping (false); combines with status"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
+    sort: str = "match",
+    order: str = "asc",
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """The devices the caller may see, 50 per page (at most 200), ordered by hostname.
+    """The devices the caller may see, 50 per page (at most 200), with stable ordering before paging.
+
+    Automatic ordering prefers exact/prefix identity matches, then natural names
+    or numeric IPs for an IP query. An explicit sort column overrides match order.
 
     Identity filters ``vendor``, ``model`` and ``os_version`` (Inventory & Compliance). They are exact, case-insensitive,
     trimmed (``%`` and ``_`` are literal), narrow what the tag scope already allows and are ignored when blank.
@@ -174,6 +179,7 @@ async def list_devices(
         tags=tag_list, tags_match=tags_match, managed_by=managed_by,
         visible_tags=visible,
         vendor=vendor, model=model, os_version=os_version, flapping=flapping,
+        sort=sort, order=order,
     )
     profile_names = await _profile_name_map(db)
     parent_names, child_counts = await _managed_maps(db, devices)
