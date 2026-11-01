@@ -21,8 +21,10 @@ import {
 } from '@/components/ui/Select'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
+import { Switch } from '@/components/ui/Switch'
 import { Textarea } from '@/components/ui/Textarea'
 import { toast } from '@/components/ui/Toast'
+import { DEFAULT_EVENT_LOG_TEXT, eventLogSummary, formatEventLogFilters, parseEventLogFilters } from '@/lib/eventLogFilters'
 import type { AgentPolicy, UpdateRing } from '@/types/servers'
 
 type Platform = AgentPolicy['platform']
@@ -116,6 +118,7 @@ export function AgentPoliciesPage() {
                   <Th>Collection</Th>
                   <Th>Top processes</Th>
                   <Th>Watchlists</Th>
+                  <Th>Event log</Th>
                   <Th>Ring</Th>
                   <Th>Agents</Th>
                   <Th>Updated</Th>
@@ -126,19 +129,19 @@ export function AgentPoliciesPage() {
                 {isLoading &&
                   [...Array(3)].map((_, i) => (
                     <Tr key={i}>
-                      <Td colSpan={9}><Skeleton className="h-8 w-full" /></Td>
+                      <Td colSpan={10}><Skeleton className="h-8 w-full" /></Td>
                     </Tr>
                   ))}
                 {isError && (
                   <Tr>
-                    <Td colSpan={9} className="py-8 text-center text-sm text-danger">
+                    <Td colSpan={10} className="py-8 text-center text-sm text-danger">
                       {apiErrorMessage(error)}
                     </Td>
                   </Tr>
                 )}
                 {!isLoading && !isError && policies.length === 0 && (
                   <Tr>
-                    <Td colSpan={9}>
+                    <Td colSpan={10}>
                       <div className="flex flex-col items-center gap-2 py-10 text-center">
                         <SlidersHorizontal className="h-8 w-8 text-muted/50" />
                         <div className="text-sm font-medium">No policies yet</div>
@@ -168,6 +171,9 @@ export function AgentPoliciesPage() {
                     <Td className="tabular-nums">{p.process_top_n}</Td>
                     <Td className="text-xs">
                       {watchlistSummary(p) || <span className="text-muted">—</span>}
+                    </Td>
+                    <Td className="text-xs">
+                      {p.platform === 'linux' ? <span className="text-muted">n/a</span> : eventLogSummary(p)}
                     </Td>
                     <Td>
                       <Badge variant={RING_VARIANT[p.update_ring]}>{p.update_ring}</Badge>
@@ -239,6 +245,12 @@ type PolicyFormState = {
   disk_ignore: string
   network_ignore: string
   update_ring: UpdateRing
+  /** The policy's `event_log` feature flag: the agent's on/off switch for the collector. */
+  event_log_enabled: boolean
+  /** One channel per line; blank = the default channels. */
+  event_log_text: string
+  /** Flags the form does not edit, kept as they are. */
+  other_flags: Record<string, unknown>
 }
 
 const EMPTY_FORM: PolicyFormState = {
@@ -253,6 +265,9 @@ const EMPTY_FORM: PolicyFormState = {
   disk_ignore: '',
   network_ignore: '',
   update_ring: 'stable',
+  event_log_enabled: true,
+  event_log_text: '',
+  other_flags: {},
 }
 
 const splitLines = (v: string) => v.split('\n').map((x) => x.trim()).filter(Boolean)
@@ -275,6 +290,10 @@ function PolicyFormDialog({
   useEffect(() => {
     if (!open) return
     if (policy) {
+      // The form writes `event_log`; the alias the agent also reads is folded into it.
+      const other_flags = { ...(policy.feature_flags || {}) }
+      delete other_flags.event_log
+      delete other_flags.collect_event_log
       setS({
         name: policy.name,
         description: policy.description || '',
@@ -287,15 +306,24 @@ function PolicyFormDialog({
         disk_ignore: policy.disk_ignore.join(', '),
         network_ignore: policy.network_ignore.join(', '),
         update_ring: policy.update_ring,
+        event_log_enabled: eventLogSummary(policy) !== 'Off',
+        event_log_text: formatEventLogFilters(policy.event_log_filters),
+        other_flags,
       })
     } else {
       setS(EMPTY_FORM)
     }
   }, [open, policy])
 
+  const parsedEventLog = parseEventLogFilters(s.event_log_text)
+  const eventLogError = s.event_log_enabled && 'error' in parsedEventLog ? parsedEventLog.error : null
+
   const save = useMutation({
     mutationFn: async () => {
       const body = {
+        // [] = the default channels; turning collection off is the flag, never an empty list.
+        event_log_filters: 'filters' in parsedEventLog ? parsedEventLog.filters : [],
+        feature_flags: { ...s.other_flags, event_log: s.event_log_enabled },
         name: s.name.trim(),
         description: s.description.trim() || null,
         platform: s.platform,
@@ -323,6 +351,7 @@ function PolicyFormDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    if (eventLogError) return
     save.mutate()
   }
 
@@ -411,6 +440,34 @@ function PolicyFormDialog({
               placeholder="One process name per line"
             />
           </FormField>
+          {s.platform !== 'linux' && (
+            <div className="space-y-2 rounded-md border border-border p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div id="policy-event-log" className="text-sm font-medium">Windows Event Log</div>
+                  <p className="text-xs text-muted">Counts events per channel and level every minute; shown on the server&apos;s Events tab.</p>
+                </div>
+                <Switch checked={s.event_log_enabled} onCheckedChange={(v) => setS({ ...s, event_log_enabled: v })}
+                  aria-labelledby="policy-event-log" />
+              </div>
+              {s.event_log_enabled && (
+                <FormField
+                  label="Channels"
+                  hint={'One per line: "Channel: levels", optionally "| event IDs". Leave empty for the default: System and Application, critical, error and warning.'}
+                >
+                  <Textarea
+                    rows={3}
+                    className="font-mono text-xs"
+                    value={s.event_log_text}
+                    onChange={(e) => setS({ ...s, event_log_text: e.target.value })}
+                    placeholder={`${DEFAULT_EVENT_LOG_TEXT}\nSecurity: information | 4625, 4740`}
+                    aria-invalid={!!eventLogError}
+                  />
+                </FormField>
+              )}
+              {eventLogError && <p role="alert" className="text-xs text-danger">{eventLogError}</p>}
+            </div>
+          )}
           <FormField label="Disk ignore" hint="Comma-separated mount points to skip">
             <Input
               value={s.disk_ignore}
@@ -446,7 +503,7 @@ function PolicyFormDialog({
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={save.isPending}>
+            <Button type="submit" disabled={save.isPending || !!eventLogError}>
               {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               {editing ? 'Save changes' : 'Create policy'}
             </Button>

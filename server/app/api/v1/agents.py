@@ -62,7 +62,7 @@ from app.schemas.agent import (
     NetworkCaptureUpload,
 )
 from app.services import license_capacity, package_digest
-from app.services import storage_backpressure
+from app.services import event_log_policy, storage_backpressure
 from app.services.agent_package_names import (
     FLAVOR_FULL,
     FLAVOR_PATTERN,
@@ -351,6 +351,9 @@ async def _config_etag_for_agent(agent_row: dict, db: AsyncSession) -> tuple[str
         str(policy.get("config_version") or 1),
         policy["updated_at"].isoformat() if policy.get("updated_at") else "",
         agent_row["update_ring"] or "stable",
+        # What the appliance derives from the policy (event_log_policy), so a
+        # fix there reaches agents that already hold this policy's ETag.
+        event_log_policy.CONFIG_REVISION,
     ]
     etag = _sha256("|".join(parts))
     return etag, dict(policy)
@@ -1087,7 +1090,8 @@ async def get_config(
         process_top_n=policy.get("process_top_n") or 25,
         service_watchlist=_arr("service_watchlist"),
         process_watchlist=_arr("process_watchlist"),
-        event_log_filters=_arr("event_log_filters"),
+        # Never an empty list: the agent would read it as "query no channels".
+        event_log_filters=event_log_policy.effective_filters(_arr("event_log_filters")),
         disk_ignore=_arr("disk_ignore"),
         network_ignore=_arr("network_ignore"),
         cardinality_limits=_obj("cardinality_limits"),

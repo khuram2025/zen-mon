@@ -79,6 +79,7 @@ jobs:
       - run: node scripts/test-escalation-ui.mjs
       - run: node scripts/test-custom-time-range.mjs
       - run: node scripts/test-server-alert-rules.mjs
+      - run: node scripts/test-event-log-policy.mjs
       - run: node scripts/test-role-model.mjs
       - run: node scripts/test-inventory-ui.mjs
       - run: node scripts/test-inventory-os-hardware-changes.mjs

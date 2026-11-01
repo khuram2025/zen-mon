@@ -2,7 +2,9 @@
  *
  *  The agent reports per-interval event counts by channel (Application,
  *  System, …) and level. The tab summarises the window, charts the volume
- *  by level over time, breaks it down by channel, and lists the raw rows. */
+ *  by level over time, breaks it down by channel, and lists the raw rows.
+ *  The window is the page's time range (shared with Performance), custom
+ *  ranges included. */
 
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -13,6 +15,7 @@ import {
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '@/lib/api'
 import { cn, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
+import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { Input } from '@/components/ui/Input'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -29,13 +32,6 @@ import {
 import { chartFont } from '@/lib/chartTheme'
 
 /* ── Constants ───────────────────────────────────────────────────── */
-
-const EVENT_WINDOWS = [
-  { value: '1', label: 'Last hour' },
-  { value: '6', label: 'Last 6 hours' },
-  { value: '24', label: 'Last 24 hours' },
-  { value: '168', label: 'Last 7 days' },
-] as const
 
 /** The API's row cap; asking for the maximum keeps the chart honest over 7 days. */
 const ROW_LIMIT = 1000
@@ -86,37 +82,40 @@ type SortKey = 'timestamp' | 'log_name' | 'level' | 'count'
 
 export function EventsTab({ server }: { server: ServerItem }) {
   const serverId = server.id
-  const [hours, setHours] = useState('24')
+  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
   const [level, setLevel] = useState<LevelFilter>('all')
   const [channel, setChannel] = useState('all')
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'timestamp', dir: 'desc' })
 
+  // A preset rolls with the appliance clock (hours back from now); a custom range is fixed.
+  const windowParams = isCustom ? { from: range.fromISO, to: range.toISO } : { hours: range.hours }
+  const windowKey = isCustom ? `${range.fromISO}/${range.toISO}` : `last-${range.hours}h`
   const fetchEvents = (lv: LevelFilter) => async (): Promise<ServerEventsResponse> =>
     (await api.get(`/servers/${serverId}/events`, {
-      params: { hours: Number(hours), limit: ROW_LIMIT, ...(lv !== 'all' ? { level: lv } : {}) },
+      params: { ...windowParams, limit: ROW_LIMIT, ...(lv !== 'all' ? { level: lv } : {}) },
     })).data
 
   // The whole window drives the tiles and chart. When no level is picked the
   // table shares this query (identical key), so there is one request.
   const summaryQ = useQuery<ServerEventsResponse>({
-    queryKey: ['servers', serverId, 'events', hours, 'all', ROW_LIMIT],
+    queryKey: ['servers', serverId, 'events', windowKey, 'all', ROW_LIMIT],
     queryFn: fetchEvents('all'),
-    refetchInterval: 60_000,
+    refetchInterval: isCustom ? false : 60_000,
     placeholderData: (prev) => prev,
   })
   // Level is filtered server-side: filtering the most recent N rows
   // client-side could miss critical events that fell outside that slice.
   const tableQ = useQuery<ServerEventsResponse>({
-    queryKey: ['servers', serverId, 'events', hours, level, ROW_LIMIT],
+    queryKey: ['servers', serverId, 'events', windowKey, level, ROW_LIMIT],
     queryFn: fetchEvents(level),
-    refetchInterval: 60_000,
+    refetchInterval: isCustom ? false : 60_000,
     placeholderData: (prev) => prev,
   })
 
   const channels = summaryQ.data?.channels ?? tableQ.data?.channels ?? []
-  const windowLabel = EVENT_WINDOWS.find((w) => w.value === hours)?.label ?? `Last ${hours}h`
-  const rangeHours = Number(hours)
+  const windowLabel = range.label
+  const rangeHours = range.hours
 
   /* Summary over the whole window (channel filter applies, level does not). */
   const summaryRows = useMemo(() => {
@@ -135,8 +134,8 @@ export function EventsTab({ server }: { server: ServerItem }) {
   /* Chart rows: fixed buckets across the window, zero-filled. */
   const bucket = bucketMs(rangeHours)
   const chart = useMemo(() => {
-    const end = Math.ceil(Date.now() / bucket) * bucket
-    const start = end - rangeHours * 3_600_000
+    const end = Math.ceil((isCustom ? Date.parse(range.toISO) : Date.now()) / bucket) * bucket
+    const start = isCustom ? Math.floor(Date.parse(range.fromISO) / bucket) * bucket : end - rangeHours * 3_600_000
     const map = new Map<number, Record<string, number>>()
     for (let t = start; t < end; t += bucket) {
       map.set(t, { ts: t, critical: 0, error: 0, warning: 0, information: 0, verbose: 0 })
@@ -151,7 +150,7 @@ export function EventsTab({ server }: { server: ServerItem }) {
     const rows = [...map.values()]
     const present = LEVELS.filter((l) => rows.some((r) => r[l.key] > 0))
     return { rows, present, start, end }
-  }, [summaryRows, bucket, rangeHours])
+  }, [summaryRows, bucket, rangeHours, isCustom, range.fromISO, range.toISO])
 
   const peakBucket = useMemo(
     () => chart.rows.reduce((best, r) => {
@@ -227,12 +226,12 @@ export function EventsTab({ server }: { server: ServerItem }) {
               {channels.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
             </SelectContent>
           </Select>
-          <Select value={hours} onValueChange={(v) => { setHours(v); pager.reset() }}>
-            <SelectTrigger className="h-8 w-[150px] text-sm" aria-label="Time window"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {EVENT_WINDOWS.map((w) => <SelectItem key={w.value} value={w.value}>{w.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <TimeRangePicker
+            rangeIdx={rangeIdx} isCustom={isCustom}
+            customFrom={range.fromISO} customTo={range.toISO}
+            onPreset={(i) => { setPreset(i); pager.reset() }}
+            onCustom={(f, t) => { setCustom(f, t); pager.reset() }}
+          />
         </div>
       </div>
 
@@ -270,20 +269,25 @@ export function EventsTab({ server }: { server: ServerItem }) {
           icon={Layers}
           label="Channels checked"
           value={channels.length || '—'}
-          sub={<span title={channels.join(', ')}>{channels.length ? channels.join(', ') : 'collector not reporting'}</span>}
+          sub={<span title={channels.join(', ')}>{channels.length ? channels.join(', ') : 'none reported in this period'}</span>}
         />
       </div>
 
       {noData ? (
         <Panel icon={ScrollText} title="Event log">
+          {/* What actually decides this: the OS, the period, and the agent policy's Windows Event Log section. */}
           <EmptyState
             icon={ScrollText}
-            title="No event log data collected"
-            hint={(
+            title={server.os_type !== 'windows'
+              ? 'Windows Event Log is collected from Windows servers only'
+              : `No event log summaries for ${windowLabel.toLowerCase()}`}
+            hint={server.os_type !== 'windows' ? undefined : (
               <>
-                Enable the event log collector in this server’s{' '}
+                Every minute the agent counts the events in the channels its{' '}
                 <Link to="/agent-policies" className="font-medium text-primary hover:underline">agent policy</Link>
-                {' '}to collect Windows Event Log summaries.
+                {' '}lists (by default System and Application: critical, error and warning). None arrived for this
+                period: the agent may not have been reporting yet, collection may be switched off in its policy, or
+                the period is older than the data kept.
               </>
             )}
           />
