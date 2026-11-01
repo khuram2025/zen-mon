@@ -84,7 +84,11 @@ export const HOST_METRICS = [
   { value: 'host_disk_util_pct', label: 'Disk I/O utilization', kind: 'pct' },
   { value: 'host_service_down', label: 'Service stopped', kind: 'svc' },
   { value: 'host_process_down', label: 'Process not running', kind: 'proc' },
+  { value: 'host_agent_offline', label: 'Agent offline', kind: 'flag' },
 ] as const
+
+/** Heartbeat silence before an availability rule counts a server as gone (server_availability.DOWN_AFTER_S). */
+const DEFAULT_SILENCE_MINUTES = 3
 
 const OP_SYMBOL: Record<string, string> = {
   gt: '>', gte: '≥', lt: '<', lte: '≤', eq: '=', neq: '≠',
@@ -99,6 +103,7 @@ export function ruleCondition(r: HostRule): string {
   const m = HOST_METRICS.find((x) => x.value === r.metric)
   if (m?.kind === 'svc') return `Service ${r.target || '?'} stopped`
   if (m?.kind === 'proc') return `Process ${r.target || '?'} not running`
+  if (m?.kind === 'flag') return 'Agent silent, server still answers ping'
   return `${metricLabel(r.metric)} ${OP_SYMBOL[r.operator] || r.operator} ${r.threshold}%`
 }
 
@@ -658,7 +663,8 @@ export function CreateHostRuleDialog({
         metric, operator,
         threshold: kind === 'pct' ? Number(threshold) : 0,
         severity,
-        min_duration: kind === 'pct' ? Math.round(Number(minutes) * 60) : 0,
+        // flag: heartbeat silence before it fires; 0 = the 3-minute default.
+        min_duration: kind === 'pct' || kind === 'flag' ? Math.round(Number(minutes || 0) * 60) : 0,
         // Empty = the evaluator defaults: clear after 5 minutes, 2 points on the healthy side.
         clear_duration: kind === 'pct' && clearMinutes.trim() !== '' ? Math.round(Number(clearMinutes) * 60) : null,
         reset_threshold: kind === 'pct' && resetLevel.trim() !== '' ? Number(resetLevel) : null,
@@ -682,7 +688,9 @@ export function CreateHostRuleDialog({
     ? `Service ${target.trim() || '…'} stopped`
     : kind === 'proc'
       ? `Process ${target.trim() || '…'} not running`
-      : `${metricLabel(metric)} ${OP_SYMBOL[operator]} ${threshold || '…'}% ${fmtDuration(Math.round(Number(minutes || 0) * 60))}`
+      : kind === 'flag'
+        ? `the agent is silent for ${fmtDuration(Math.round(Number(minutes || DEFAULT_SILENCE_MINUTES) * 60))} while the server still answers ping`
+        : `${metricLabel(metric)} ${OP_SYMBOL[operator]} ${threshold || '…'}% ${fmtDuration(Math.round(Number(minutes || 0) * 60))}`
   const clearPreview = kind === 'pct'
     ? ruleClearing({
         operator, threshold: Number(threshold),
@@ -707,7 +715,11 @@ export function CreateHostRuleDialog({
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Metric</Label>
-              <Select value={metric} onValueChange={(v) => { setMetric(v); if (v === 'host_filesystem_pct') setThreshold('85') }}>
+              <Select value={metric} onValueChange={(v) => {
+                setMetric(v)
+                if (v === 'host_filesystem_pct') setThreshold('85')
+                if (v === 'host_agent_offline') setMinutes('')
+              }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {HOST_METRICS.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
@@ -798,6 +810,24 @@ export function CreateHostRuleDialog({
                 <Switch checked={recovery} onCheckedChange={setRecovery} />
                 <span className="text-sm">Recovery notice</span>
               </label>
+            </div>
+          ) : kind === 'flag' ? (
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Agent silent for (min)</Label>
+                <Input
+                  type="number" min={2} value={minutes}
+                  onChange={(e) => setMinutes(e.target.value)}
+                  placeholder={`${DEFAULT_SILENCE_MINUTES} (default)`}
+                />
+              </div>
+              <label className="flex cursor-pointer items-end gap-2 pb-2">
+                <Switch checked={recovery} onCheckedChange={setRecovery} />
+                <span className="text-sm">Recovery notice</span>
+              </label>
+              <p className="col-span-2 text-xs text-muted">
+                Fires only when ping proves the server is still up. A server that cannot be reached is paged by Device Down.
+              </p>
             </div>
           ) : (
             <div className="space-y-1.5">

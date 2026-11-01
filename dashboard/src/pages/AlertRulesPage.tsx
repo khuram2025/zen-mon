@@ -41,6 +41,8 @@ function scopeLabel(r: any): string {
   if (r.scope_tag) return `#${r.scope_tag}`
   if (r.device_id) return 'Device'
   if (r.metric === 'trap') return 'Traps'
+  // An unscoped Device Down rule also pages for agent servers (server_availability.py).
+  if (r.metric === 'ping_status' && r.trigger_on === 'down') return 'All + servers'
   return 'All'
 }
 

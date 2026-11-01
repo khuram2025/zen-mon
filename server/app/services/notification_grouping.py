@@ -205,6 +205,7 @@ _FAMILY_EXACT = {
     "memory": "memory", "host_memory_pct": "memory",
     "host_filesystem_pct": "storage", "host_disk_util_pct": "storage",
     "ping_status": "reachability", "device_status": "reachability",
+    "host_agent_offline": "reachability",
     "rtt": "latency", "packet_loss": "latency", "jitter": "latency",
     "service_status": "service",
     "temperature": "hardware", "fan_state": "hardware", "psu_state": "hardware",

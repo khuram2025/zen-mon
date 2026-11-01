@@ -6,9 +6,11 @@ Three jobs:
   human-readable ``status_reasons`` from the freshest telemetry, every time a
   metric batch is ingested.
 * Periodically sweep agents/servers whose heartbeats stopped — agents roll
-  ``online → stale → offline`` and their server rolls to ``stale``; an
-  *agent offline* alert is raised on the offline transition and resolved on
-  the next successful heartbeat.
+  ``online → stale → offline`` and their server rolls to ``stale``. Paging
+  for a silent agent belongs to the availability rules (Device Down, Agent
+  offline) in host_alert_service; a built-in *agent offline* alert is raised
+  on the offline transition only for a server none of them covers, and
+  resolved on the next successful heartbeat.
 * Small helpers to raise/resolve alerts scoped to a server (used here and by
   the baseline compliance engine).
 
@@ -22,6 +24,7 @@ import asyncio
 import json
 import re
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -339,9 +342,20 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
     )
     servers_n = len(servers_stale.fetchall())
 
+    # The built-in alert has no rule, so no channel or escalation policy: it is
+    # only raised for a server no availability rule pages for (Device Down
+    # covers a server that cannot be reached, Agent offline one that still
+    # answers ping — see server_availability).
+    from app.services import server_availability as sa
+    rules = await sa.covering_rules(db) if offline_rows else []
+    signals = await sa.load_signals(db) if rules else {}
+    now = datetime.now(timezone.utc).timestamp()
     for row in offline_rows:
         agent_id, server_id, hostname, last_hb = row
         if not server_id:
+            continue
+        sig = signals.get(str(server_id))
+        if sig is not None and sa.covered(rules, sig, sa.judge(sig, now, AGENT_OFFLINE_AFTER_S)):
             continue
         await create_server_alert(
             db,
