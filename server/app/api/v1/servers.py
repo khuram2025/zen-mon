@@ -17,7 +17,7 @@ import secrets
 import shlex
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -33,6 +33,7 @@ from app.core import scoping
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.services import event_log_policy, license_capacity, package_digest
+from app.services.baseline_report import VALID_RESULTS_SQL, scope_params
 from app.services.agent_package_names import (
     FLAVOR_FULL,
     FLAVOR_PATTERN,
@@ -3792,7 +3793,7 @@ def _baseline_row(row: dict, rules: list[dict] | None = None) -> BaselineRespons
         site_name=row.get("site_name"),
         match_tags=[str(t) for t in _json_list(row.get("match_tags"))],
         alerting=bool(row.get("alerting", True)),
-        rule_count=row.get("rule_count") or 0,
+        rule_count=len(rules) if rules is not None else row.get("rule_count") or 0,
         servers_evaluated=row.get("servers_evaluated") or 0,
         servers_compliant=row.get("servers_compliant") or 0,
         violations=row.get("violations") or 0,
@@ -3802,26 +3803,28 @@ def _baseline_row(row: dict, rules: list[dict] | None = None) -> BaselineRespons
     )
 
 
-_BASELINE_STATS_SQL = """
+_BASELINE_STATS_SQL = "WITH valid_results AS (" + VALID_RESULTS_SQL + ")" + """
     SELECT b.*, st.name AS site_name,
            (SELECT COUNT(*) FROM software_baseline_rules r WHERE r.baseline_id = b.id) AS rule_count,
-           (SELECT COUNT(DISTINCT res.server_id) FROM server_baseline_results res
+           (SELECT COUNT(DISTINCT res.server_id) FROM valid_results res
              WHERE res.baseline_id = b.id) AS servers_evaluated,
-           (SELECT COUNT(DISTINCT res.server_id) FROM server_baseline_results res
-             WHERE res.baseline_id = b.id
-               AND res.server_id NOT IN (
-                   SELECT server_id FROM server_baseline_results
-                   WHERE baseline_id = b.id AND status != 'compliant')) AS servers_compliant,
-           (SELECT COUNT(*) FROM server_baseline_results res
+           (SELECT COUNT(*) FROM (
+               SELECT res.server_id FROM valid_results res WHERE res.baseline_id = b.id
+               GROUP BY res.server_id HAVING bool_and(res.status = 'compliant')
+                 AND COUNT(*) = (SELECT COUNT(*) FROM software_baseline_rules br WHERE br.baseline_id = b.id)
+           ) complete) AS servers_compliant,
+           (SELECT COUNT(*) FROM valid_results res
              WHERE res.baseline_id = b.id AND res.status != 'compliant') AS violations
     FROM software_baselines b
     LEFT JOIN sites st ON st.id = b.site_id
 """
 
 
-async def _load_baseline(db: AsyncSession, baseline_id: UUID) -> BaselineResponse:
+async def _load_baseline(db: AsyncSession, baseline_id: UUID, user: User, *, include_stats: bool = True) -> BaselineResponse:
+    scope = await scoping.visible_tags(db, user) if include_stats else None
+    query = _BASELINE_STATS_SQL if include_stats else "SELECT b.*, st.name AS site_name FROM software_baselines b LEFT JOIN sites st ON st.id=b.site_id"
     row = (await db.execute(
-        text(_BASELINE_STATS_SQL + " WHERE b.id = :id"), {"id": baseline_id},
+        text(query + " WHERE b.id = :id"), {"id": baseline_id, **scope_params(scope)},
     )).mappings().first()
     if not row:
         raise HTTPException(404, "Baseline not found")
@@ -3837,7 +3840,8 @@ async def list_baselines(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    rows = (await db.execute(text(_BASELINE_STATS_SQL + " ORDER BY b.name"))).mappings().all()
+    scope = await scoping.visible_tags(db, user)
+    rows = (await db.execute(text(_BASELINE_STATS_SQL + " ORDER BY b.name"), scope_params(scope))).mappings().all()
     items = []
     for row in rows:
         rules = (await db.execute(
@@ -3886,7 +3890,7 @@ async def create_baseline(
 
     from app.services.baseline_service import evaluate_baseline
     await evaluate_baseline(db, baseline_id)
-    return await _load_baseline(db, UUID(baseline_id))
+    return await _load_baseline(db, UUID(baseline_id), user)
 
 
 @baselines_router.get("/{baseline_id}", response_model=BaselineResponse)
@@ -3895,7 +3899,36 @@ async def get_baseline(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await _load_baseline(db, baseline_id)
+    return await _load_baseline(db, baseline_id, user)
+
+
+@baselines_router.get("/{baseline_id}/coverage")
+async def baseline_coverage(
+    baseline_id: UUID,
+    q: str = Query('', max_length=255),
+    status: Literal['all', 'compliant', 'violated', 'not_evaluated'] = 'all',
+    sort: Literal['status', 'server_name', 'primary_ip', 'violations', 'checked', 'evaluated_at'] = 'status',
+    order: Literal['asc', 'desc'] = 'asc',
+    page: int = Query(1, ge=1, le=1_000_000),
+    page_size: int = Query(50, ge=1, le=250),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission('servers.view')),
+):
+    from app.services.baseline_report import coverage_report
+    baseline = await _load_baseline(db, baseline_id, user, include_stats=False)
+    return await coverage_report(db, baseline.model_dump(mode='json'), await scoping.visible_tags(db, user),
+                                 q=q, status=status, sort=sort, order=order, page=page, page_size=page_size)
+
+
+@baselines_router.get("/{baseline_id}/servers/{server_id}/checks")
+async def baseline_server_checks(
+    baseline_id: UUID,
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission('servers.view')),
+):
+    from app.services.baseline_report import server_checks
+    return await server_checks(db, baseline_id, server_id, await scoping.visible_tags(db, user))
 
 
 @baselines_router.patch("/{baseline_id}", response_model=BaselineResponse)
@@ -3940,7 +3973,7 @@ async def update_baseline(
 
     from app.services.baseline_service import evaluate_baseline
     await evaluate_baseline(db, str(baseline_id))
-    return await _load_baseline(db, baseline_id)
+    return await _load_baseline(db, baseline_id, user)
 
 
 @baselines_router.delete("/{baseline_id}")
@@ -3985,16 +4018,17 @@ async def baseline_results(
     """Per-server outcomes for one baseline, violations first."""
     where = "res.baseline_id = :bid"
     params: dict[str, Any] = {"bid": baseline_id}
+    params.update(scope_params(await scoping.visible_tags(db, user)))
     if status:
         where += " AND res.status = :st"
         params["st"] = status
     rows = (await db.execute(
-        text(f"""SELECT res.server_id, res.rule_id, res.status, res.found_package,
+        text("WITH valid_results AS (" + VALID_RESULTS_SQL + ")" + f"""SELECT res.server_id, res.rule_id, res.status, res.found_package,
                         res.found_version, res.expected, res.severity,
                         res.first_failed_at, res.evaluated_at,
                         s.display_name AS server_name, s.hostname, s.os_type,
                         br.rule_type, br.package_match, br.match_type, br.min_version
-                 FROM server_baseline_results res
+                 FROM valid_results res
                  JOIN servers s ON s.id = res.server_id
                  JOIN software_baseline_rules br ON br.id = res.rule_id
                  WHERE {where}

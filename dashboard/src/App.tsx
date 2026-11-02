@@ -4,6 +4,7 @@ import { useAuth } from '@/stores/auth'
 import { AccountGate } from '@/components/security/AccountGate'
 import { Layout } from '@/components/Layout'
 import { LoginPage } from '@/pages/LoginPage'
+import { BaselineDetailPage } from '@/pages/servers/BaselineDetailPage'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { NetworkSecurityDashboard } from '@/pages/dashboards/NetworkSecurityDashboard'
 import { ServerTeamDashboard } from '@/pages/dashboards/ServerTeamDashboard'
@@ -171,6 +172,7 @@ export default function App() {
         <Route path="server-agents" element={<AgentFleetPage />} />
         <Route path="agent-policies" element={<AgentPoliciesPage />} />
         <Route path="server-baselines" element={<BaselinesPage />} />
+        <Route path="server-baselines/:baselineId" element={<BaselineDetailPage />} />
         {/* Inventory & Compliance: one denied state without inventory.view (InventoryAccess.tsx). */}
         <Route element={<InventoryAccessGate />}>
           <Route path="inventory" element={<InventoryLayout />}>
