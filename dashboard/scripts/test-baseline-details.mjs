@@ -9,8 +9,8 @@ import React, { act } from 'react'
 const cache = path.resolve('node_modules/.cache')
 await mkdir(cache, { recursive: true })
 const temporary = await mkdtemp(path.join(cache, 'baseline-details-'))
-const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' })
-Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, MutationObserver: dom.window.MutationObserver, IS_REACT_ACT_ENVIRONMENT: true })
+const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost', pretendToBeVisual: true })
+Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle.bind(dom.window), requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window), cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window), IS_REACT_ACT_ENVIRONMENT: true })
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator })
 const { createRoot } = await import('react-dom/client')
 const { QueryClient, QueryClientProvider } = await import('@tanstack/react-query')
@@ -75,7 +75,7 @@ async function render(url) {
   await settle()
 }
 const button = label => [...document.querySelectorAll('button')].find(element => element.textContent.trim() === label)
-const click = async element => { assert(element, 'Expected control'); await act(async () => element.click()); await settle() }
+const click = async element => { assert(element, 'Expected control'); await act(async () => { element.dispatchEvent(new dom.window.MouseEvent('mousedown', { button: 0, bubbles: true })); element.click() }); await settle() }
 function fill(input, value) {
   Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(input, value)
   input.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
