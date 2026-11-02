@@ -29,6 +29,7 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Textarea } from '@/components/ui/Textarea'
 import { toast } from '@/components/ui/Toast'
 import { KpiTile, TagList } from '@/components/servers/shared'
+import { QueryError } from '@/components/servers/tables'
 import type {
   Baseline, BaselineMatchType, BaselineRule, BaselineRuleInput, BaselineRuleType,
   Severity,
@@ -47,7 +48,7 @@ export function BaselinesPage() {
   const [editing, setEditing] = useState<Baseline | null>(null)
   const [deleting, setDeleting] = useState<Baseline | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['server-baselines'],
     queryFn: async () => (await api.get('/server-baselines')).data as { items: Baseline[] },
     refetchInterval: 30_000,
@@ -89,6 +90,8 @@ export function BaselinesPage() {
   })
 
   const openCreate = () => { setEditing(null); setFormOpen(true) }
+
+  if (isError) return <QueryError error={error} onRetry={() => refetch()} />
 
   return (
     <div className="space-y-4">

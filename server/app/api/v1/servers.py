@@ -3820,10 +3820,11 @@ _BASELINE_STATS_SQL = "WITH valid_results AS (" + VALID_RESULTS_SQL + ")" + """
 """
 
 
-async def _load_baseline(db: AsyncSession, baseline_id: UUID, user: User) -> BaselineResponse:
-    scope = await scoping.visible_tags(db, user)
+async def _load_baseline(db: AsyncSession, baseline_id: UUID, user: User, *, include_stats: bool = True) -> BaselineResponse:
+    scope = await scoping.visible_tags(db, user) if include_stats else None
+    query = _BASELINE_STATS_SQL if include_stats else "SELECT b.*, st.name AS site_name FROM software_baselines b LEFT JOIN sites st ON st.id=b.site_id"
     row = (await db.execute(
-        text(_BASELINE_STATS_SQL + " WHERE b.id = :id"), {"id": baseline_id, **scope_params(scope)},
+        text(query + " WHERE b.id = :id"), {"id": baseline_id, **scope_params(scope)},
     )).mappings().first()
     if not row:
         raise HTTPException(404, "Baseline not found")
@@ -3914,7 +3915,7 @@ async def baseline_coverage(
     user: User = Depends(require_permission('servers.view')),
 ):
     from app.services.baseline_report import coverage_report
-    baseline = await _load_baseline(db, baseline_id, user)
+    baseline = await _load_baseline(db, baseline_id, user, include_stats=False)
     return await coverage_report(db, baseline.model_dump(mode='json'), await scoping.visible_tags(db, user),
                                  q=q, status=status, sort=sort, order=order, page=page, page_size=page_size)
 

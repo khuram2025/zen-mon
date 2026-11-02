@@ -284,27 +284,25 @@ export function ComplianceTab({ server }: { server: ServerItem }) {
               const pct = (b.compliant / b.total) * 100
               const active = baseline === b.id
               return (
-                <button
+                <div
                   key={b.id}
-                  type="button"
-                  onClick={() => setBaseline(active ? null : b.id)}
-                  title={active ? 'Show all baselines' : `Show only ${b.name}`}
                   className={cn(
                     'flex min-w-0 flex-col gap-1.5 border-border/60 px-4 py-2.5 text-left transition-colors hover:bg-surface2/40 md:border-b',
                     active && 'bg-primary/5',
                   )}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className={cn('truncate text-sm font-medium', active ? 'text-primary' : 'text-text')} title={b.name}>
+                    <Link to={`/server-baselines/${b.id}`} className="truncate text-sm font-medium text-primary hover:underline" title={b.name}>
                       {b.name}
-                    </span>
+                    </Link>
                     <span className="shrink-0 text-xs tabular-nums text-muted">
                       {b.critical > 0 && <span className="mr-2 font-medium text-danger">{b.critical} critical</span>}
                       <span className={cn('font-semibold', pct >= 100 ? 'text-success' : 'text-text')}>{b.compliant}/{b.total}</span>
                     </span>
                   </div>
                   <Meter pct={pct} warn={101} crit={101} thin />
-                </button>
+                  <button type="button" className="text-left text-xs text-muted hover:text-primary" onClick={() => setBaseline(active ? null : b.id)}>{active ? 'Show all rules on this server' : 'Filter this server’s rules'}</button>
+                </div>
               )
             })}
           </div>
@@ -395,7 +393,7 @@ export function ComplianceTab({ server }: { server: ServerItem }) {
                     <div className="truncate font-medium text-text" title={r.package_match}>{r.package_match}</div>
                     <div className="truncate text-xs text-muted" title={r.notes || ruleSub}>{ruleSub}</div>
                   </Td>
-                  <Td className="max-w-[180px] truncate py-2 text-xs text-text2" title={r.baseline_name}>{r.baseline_name || '—'}</Td>
+                  <Td className="max-w-[180px] truncate py-2 text-xs text-text2" title={r.baseline_name}><Link to={`/server-baselines/${r.baseline_id}`} className="text-primary hover:underline">{r.baseline_name || 'Baseline'}</Link></Td>
                   <Td className="max-w-[220px] py-2 text-xs">
                     {r.found_package ? (
                       <div className="truncate" title={`${r.found_package} ${r.found_version ?? ''}`}>

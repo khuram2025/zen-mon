@@ -428,6 +428,7 @@ export interface BaselineServerCoverage {
   server_status: string
   last_seen: string | null
   compliance_status: BaselineServerStatus
+  inventory_updated_at: string | null
   checked: number
   compliant: number
   violations: number

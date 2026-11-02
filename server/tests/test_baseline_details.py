@@ -1,5 +1,4 @@
 """Baseline policy reports on a fully migrated disposable PostgreSQL cluster."""
-import json
 from uuid import uuid4
 
 import pytest
@@ -10,7 +9,7 @@ from pg_fixture import pg_cluster, pg_db  # noqa: F401
 def policy(db, **over):
     bid=uuid4()
     db.execute("""INSERT INTO software_baselines(id,name,os_type,match_tags,updated_at)
-        VALUES($1,$2,'windows',$3::jsonb,now()-interval '1 day')""",bid,'Core '+str(bid),json.dumps(over.get('tags',[])))
+        VALUES($1,$2,'windows',$3::jsonb,now()-interval '1 day')""",bid,'Core '+str(bid),list(over.get('tags',[])))
     rules=[]
     for name,kind in [('Chrome','required'),('Remote tool','prohibited')]:
         rid=uuid4();rules.append(rid)
@@ -21,14 +20,14 @@ def policy(db, **over):
 
 def server(db,name='server2',ip='192.168.8.2',*,tags=(),os='windows',status='healthy'):
     sid=uuid4()
-    db.execute("INSERT INTO servers(id,display_name,hostname,primary_ip,os_type,status,tags) VALUES($1,$2,$2,$3::inet,$4,$5,$6::jsonb)",sid,name,ip,os,status,json.dumps(tags))
+    db.execute("INSERT INTO servers(id,display_name,hostname,primary_ip,os_type,status,tags) VALUES($1,$2,$2,$3::inet,$4,$5,$6::jsonb)",sid,name,ip,os,status,list(tags))
     return sid
 
 
 def outcome(db,bid,rid,sid,status='compliant',age='1 hour'):
     db.execute("""INSERT INTO server_baseline_results(server_id,rule_id,baseline_id,status,found_package,found_version,expected,severity,evaluated_at,first_failed_at)
-        VALUES($1,$2,$3,$4,$5,'149','Chrome >= 150','critical',now()-$6::interval,
-               CASE WHEN $4='compliant' THEN NULL ELSE now()-interval '3 days' END)""",sid,rid,bid,status,'Chrome' if status!='missing' else None,age)
+        VALUES($1,$2,$3,$4,$5,'149','Chrome >= 150','critical',now()-$6::text::interval,
+               CASE WHEN $4::varchar='compliant' THEN NULL ELSE now()-interval '3 days' END)""",sid,rid,bid,status,'Chrome' if status!='missing' else None,age)
 
 
 def read(client,bid,suffix='coverage',**params):

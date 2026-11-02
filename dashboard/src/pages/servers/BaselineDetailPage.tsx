@@ -77,6 +77,16 @@ export function BaselineDetailPage() {
   const data = query.data
   const baseline = data?.baseline
   const summary = data?.summary
+  useEffect(() => {
+    if (!data) return
+    const last = Math.max(1, Math.ceil(data.total / pageSize))
+    if (page <= last) return
+    setParams(previous => {
+      const next = new URLSearchParams(previous)
+      next.set('page', String(last)); next.delete('server')
+      return next
+    }, { replace: true })
+  }, [data, page, pageSize, setParams])
   const items = useStableListRows(data?.items || [], r => r.server_id, !!expanded, JSON.stringify([baselineId, q, status, sort, order, page, pageSize]))
   const evaluate = useMutation({
     mutationFn: async () => (await api.post(`/server-baselines/${baselineId}/evaluate`)).data,
@@ -135,7 +145,7 @@ export function BaselineDetailPage() {
             <Td className="text-xs tabular-nums"><div>{row.checked}/{baseline.rules.length} evaluated · {row.compliant} passed</div>{row.not_evaluated > 0 && <div className="text-muted">{row.not_evaluated} not evaluated</div>}</Td>
             <Td className="text-xs text-muted" title={dateTitle(row.evaluated_at)}>{when(row.evaluated_at)}</Td>
           </Tr>
-          {expanded === row.server_id && <Tr className="hover:bg-transparent"><Td colSpan={6} className="bg-surface2/30 p-0"><div id={`checks-${row.server_id}`} className="space-y-3 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold">{row.server_name} — rule checks</h2><Button asChild size="sm" variant="ghost"><Link to={`/servers/${row.server_id}?tab=compliance`}>Open server <ExternalLink className="h-3.5 w-3.5" /></Link></Button></div><ServerChecks baselineId={baselineId} serverId={row.server_id} /></div></Td></Tr>}
+          {expanded === row.server_id && <Tr className="hover:bg-transparent"><Td colSpan={6} className="bg-surface2/30 p-0"><div id={`checks-${row.server_id}`} className="space-y-3 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><h2 className="text-base font-semibold">{row.server_name} — rule checks</h2><p className="text-xs text-muted" title={dateTitle(row.inventory_updated_at)}>{row.inventory_updated_at ? `Inventory received ${relativeTime(row.inventory_updated_at)}` : 'Inventory time unavailable'}</p></div><Button asChild size="sm" variant="ghost"><Link to={`/servers/${row.server_id}?tab=compliance`}>Open server <ExternalLink className="h-3.5 w-3.5" /></Link></Button></div><ServerChecks baselineId={baselineId} serverId={row.server_id} /></div></Td></Tr>}
         </Fragment>)}</TBody>
       </Table></div>
       <TablePager page={page} pageCount={Math.max(1, Math.ceil(data.total / pageSize))} pageSize={pageSize} total={data.total} noun="servers" setPage={value => update({ page: String(value), server: null }, false)} setPageSize={value => update({ size: String(value) })} />

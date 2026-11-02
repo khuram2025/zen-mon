@@ -13,7 +13,7 @@ from app.core.scoping import jsonb_tags_visible
 from app.services.list_ordering import natural_sql, patterns
 
 
-SCOPE_SQL = f"""b.enabled AND s.status != 'disabled'
+SCOPE_SQL = f"""b.enabled AND s.status IS DISTINCT FROM 'disabled'
     AND (b.os_type IS NULL OR b.os_type = s.os_type)
     AND (b.site_id IS NULL OR b.site_id = s.site_id)
     AND COALESCE(s.tags, '[]'::jsonb) @> b.match_tags
@@ -35,7 +35,7 @@ def coverage_cte() -> str:
     rules AS (SELECT r.* FROM software_baseline_rules r WHERE r.baseline_id = :bid),
     scoped AS MATERIALIZED (
         SELECT s.id AS server_id, s.display_name AS server_name, s.hostname,
-               s.primary_ip, s.os_type, s.status AS server_status, s.last_seen
+               s.primary_ip, s.os_type, COALESCE(s.status, 'unknown') AS server_status, s.last_seen, s.inventory_updated_at
         FROM servers s CROSS JOIN policy b WHERE {SCOPE_SQL}
     ), current_results AS MATERIALIZED (
         SELECT res.* FROM server_baseline_results res
@@ -54,7 +54,7 @@ def coverage_cte() -> str:
                MIN(res.evaluated_at) AS evaluated_at,
                MIN(res.first_failed_at) FILTER (WHERE res.status != 'compliant') AS first_failed_at
         FROM scoped s LEFT JOIN current_results res ON res.server_id = s.server_id
-        GROUP BY s.server_id, s.server_name, s.hostname, s.primary_ip, s.os_type, s.server_status, s.last_seen
+        GROUP BY s.server_id, s.server_name, s.hostname, s.primary_ip, s.os_type, s.server_status, s.last_seen, s.inventory_updated_at
     ), classified AS MATERIALIZED (
         SELECT *, GREATEST(:rule_count - checked, 0)::int AS not_evaluated,
                CASE WHEN violations > 0 THEN 'violated'
