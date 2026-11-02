@@ -29,6 +29,7 @@ const calls = []
 let writes = 0
 let fail = false
 let mockTotal = null
+let pendingCoverage = null
 globalThis.__baselineCanManage = true
 globalThis.__baselineApi = {
   get: async (url, config) => {
@@ -36,6 +37,7 @@ globalThis.__baselineApi = {
     if (fail) throw new Error('Report unavailable')
     if (url === '/server-baselines') return { data: { items: [baseline] } }
     if (url.endsWith('/checks')) return { data: { items: rules.map((rule, i) => ({ ...rule, rule_id: rule.id, status: i ? 'not_evaluated' : 'outdated', found_package: i ? null : 'Chrome Enterprise', found_version: i ? null : '149', expected: null, first_failed_at: i ? null : '2026-10-30T10:00:00Z', evaluated_at: i ? null : '2026-11-01T10:00:00Z' })) } }
+    if (pendingCoverage) await pendingCoverage
     const p = config.params
     let items = servers.filter(row => (p.status === 'all' || p.status === row.compliance_status) && (!p.q || `${row.server_name} ${row.primary_ip}`.includes(p.q)))
     if (p.order === 'desc') items = [...items].reverse()
@@ -118,6 +120,25 @@ try {
   assert.equal(calls.at(-1).params.page, 1)
   assert.equal(calls.at(-1).params.sort, 'primary_ip')
   await eventually(() => document.body.textContent.includes('No servers match these filters'), 'An empty search must show the filtered empty state')
+  await render('/server-baselines/b?sort=server_name&order=asc&size=25')
+  const searchControl = document.querySelector('input[aria-label="Search baseline servers"]')
+  searchControl.focus()
+  let releaseCoverage
+  pendingCoverage = new Promise(resolve => { releaseCoverage = resolve })
+  await act(async () => fill(searchControl, 'server'))
+  await settle(400)
+  assert.equal(document.querySelector('input[aria-label="Search baseline servers"]'), searchControl, 'Search controls must remain mounted while a report refresh is pending')
+  assert.equal(document.activeElement, searchControl, 'A debounced search must retain keyboard focus')
+  await click(document.querySelector('button[aria-label="Sort by IP address"]'))
+  const pendingLocation = new URL(document.querySelector('#location').textContent, 'http://localhost')
+  assert.equal(pendingLocation.searchParams.get('q'), 'server')
+  assert.equal(pendingLocation.searchParams.get('sort'), 'primary_ip')
+  assert.equal(pendingLocation.searchParams.get('size'), '25')
+  pendingCoverage = null
+  await act(async () => releaseCoverage())
+  await settle()
+  assert.equal(calls.at(-1).params.sort, 'primary_ip')
+  assert.equal(calls.at(-1).params.q, 'server')
   globalThis.__baselineCanManage = false
   await render('/server-baselines/b')
   assert(!button('Evaluate now') && !button('Edit policy'), 'Read-only users must not see mutation controls')

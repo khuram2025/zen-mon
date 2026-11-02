@@ -71,6 +71,7 @@ export function BaselineDetailPage() {
   const query = useQuery<BaselineCoverageReport>({
     queryKey: ['server-baselines', baselineId, 'coverage', q, status, sort, order, page, pageSize],
     queryFn: async () => (await api.get(`/server-baselines/${baselineId}/coverage`, { params: { q, status, sort, order, page, page_size: pageSize } })).data,
+    placeholderData: previous => previous?.baseline.id === baselineId ? previous : undefined,
     refetchInterval: expanded ? false : 60_000,
     refetchOnWindowFocus: !expanded,
     refetchOnReconnect: !expanded,
@@ -79,7 +80,7 @@ export function BaselineDetailPage() {
   const baseline = data?.baseline
   const summary = data?.summary
   useEffect(() => {
-    if (!data) return
+    if (!data || query.isPlaceholderData) return
     const last = Math.max(1, Math.ceil(data.total / pageSize))
     if (page <= last) return
     setParams(previous => {
@@ -87,11 +88,11 @@ export function BaselineDetailPage() {
       next.set('page', String(last)); next.delete('server')
       return next
     }, { replace: true })
-  }, [data, page, pageSize, setParams])
+  }, [data, page, pageSize, setParams, query.isPlaceholderData])
   useEffect(() => {
-    if (!data || !expanded || data.items.some(row => row.server_id === expanded)) return
+    if (!data || query.isPlaceholderData || !expanded || data.items.some(row => row.server_id === expanded)) return
     setParams(previous => { const next = new URLSearchParams(previous); next.delete('server'); return next }, { replace: true })
-  }, [data, expanded, setParams])
+  }, [data, expanded, setParams, query.isPlaceholderData])
   const items = useStableListRows(data?.items || [], r => r.server_id, !!expanded, JSON.stringify([baselineId, q, status, sort, order, page, pageSize]))
   const evaluate = useMutation({
     mutationFn: async () => (await api.post(`/server-baselines/${baselineId}/evaluate`)).data,
@@ -136,13 +137,14 @@ export function BaselineDetailPage() {
     <Tabs value={view} onValueChange={value => update({ view: value }, false)}>
     <TabsList aria-label="Baseline detail views"><TabsTrigger value="servers">Server compliance</TabsTrigger><TabsTrigger value="rules">Policy rules ({baseline.rules.length})</TabsTrigger></TabsList>
     <TabsContent value="rules"><RulesTable baseline={baseline} summary={data.rule_summary} /></TabsContent>
-    <TabsContent value="servers"><Card>
+    <TabsContent value="servers"><Card aria-busy={query.isFetching}>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-4">
         <div className="flex flex-wrap gap-1" aria-label="Server compliance filters">{Object.entries(SERVER_STATES).map(([key, label]) => <Button key={key} size="sm" variant={status === key ? 'secondary' : 'ghost'} aria-pressed={status === key} onClick={() => update({ status: key === 'all' ? null : key })}>{label}</Button>)}</div>
         <div className="relative w-full sm:w-72"><Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><Input aria-label="Search baseline servers" placeholder="Search server name or IP…" value={search} onChange={event => setSearch(event.target.value)} className="pl-8" /></div>
       </div>
       {expanded && <div className="border-b border-border bg-info/5 px-4 py-2 text-xs text-muted">Automatic refresh is paused while server checks are open. Refresh updates findings while keeping the row order.</div>}
-      <div className="overflow-x-auto"><Table>
+      <div className="overflow-x-auto"><Table className="min-w-[56rem] table-fixed">
+        <colgroup><col className="w-[34%]" /><col className="w-[13%]" /><col className="w-[12%]" /><col className="w-[10%]" /><col className="w-[21%]" /><col className="w-[10%]" /></colgroup>
         <THead><Tr>{heading('server_name', 'Server')}{heading('primary_ip', 'IP address')}{heading('status', 'Compliance')}{heading('violations', 'Violations')}{heading('checked', 'Checks')}{heading('evaluated_at', 'Evaluated')}</Tr></THead>
         <TBody>{items.length === 0 ? <Tr><Td colSpan={6}><EmptyState title={q || status !== 'all' ? 'No servers match these filters' : 'No servers in scope'} hint={q || status !== 'all' ? 'Clear the search or change the compliance filter.' : 'Check the policy OS, site and tags, and your server visibility.'} /></Td></Tr> : items.map(row => <Fragment key={row.server_id}>
           <Tr className={cn(expanded === row.server_id && 'bg-primary/5')}>
