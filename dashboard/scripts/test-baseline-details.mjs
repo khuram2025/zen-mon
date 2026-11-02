@@ -62,6 +62,10 @@ const root = createRoot(document.getElementById('root'))
 let counter = 0
 function Location() { return React.createElement('output', { id: 'location' }, useLocation().pathname + useLocation().search) }
 async function settle(ms = 30) { await act(async () => { await new Promise(resolve => setTimeout(resolve, ms)) }) }
+async function eventually(predicate, message) {
+  for (let i = 0; i < 50; i++) { await settle(20); if (predicate()) return }
+  assert(predicate(), message)
+}
 async function render(url) {
   client?.clear()
   client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } })
@@ -113,7 +117,7 @@ try {
   assert.equal(calls.at(-1).params.q, 'no-match')
   assert.equal(calls.at(-1).params.page, 1)
   assert.equal(calls.at(-1).params.sort, 'primary_ip')
-  assert(document.body.textContent.includes('No servers match these filters'))
+  await eventually(() => document.body.textContent.includes('No servers match these filters'), 'An empty search must show the filtered empty state')
   globalThis.__baselineCanManage = false
   await render('/server-baselines/b')
   assert(!button('Evaluate now') && !button('Edit policy'), 'Read-only users must not see mutation controls')

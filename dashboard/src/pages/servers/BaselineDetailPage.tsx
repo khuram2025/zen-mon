@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ArrowUpDown, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, Clock3, ExternalLink, ListChecks, Pencil, RefreshCw, Search, Server, ShieldAlert } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowUp, ArrowUpDown, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, Clock3, ExternalLink, ListChecks, Pencil, RefreshCw, Search, Server, ShieldAlert } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import { useCan } from '@/stores/auth'
@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
 import { KpiTile, TagList } from '@/components/servers/shared'
 import { EmptyState, QueryError, TablePager, usePagedRows } from '@/components/servers/tables'
@@ -87,6 +88,10 @@ export function BaselineDetailPage() {
       return next
     }, { replace: true })
   }, [data, page, pageSize, setParams])
+  useEffect(() => {
+    if (!data || !expanded || data.items.some(row => row.server_id === expanded)) return
+    setParams(previous => { const next = new URLSearchParams(previous); next.delete('server'); return next }, { replace: true })
+  }, [data, expanded, setParams])
   const items = useStableListRows(data?.items || [], r => r.server_id, !!expanded, JSON.stringify([baselineId, q, status, sort, order, page, pageSize]))
   const evaluate = useMutation({
     mutationFn: async () => (await api.post(`/server-baselines/${baselineId}/evaluate`)).data,
@@ -98,7 +103,10 @@ export function BaselineDetailPage() {
     onError: error => toast.error('Evaluation failed', apiErrorMessage(error)),
   })
   const changeSort = (key: Sort) => update({ sort: key, order: sort === key && order === 'asc' ? 'desc' : 'asc' })
-  const heading = (key: Sort, label: string) => <Th aria-sort={sort === key ? order === 'asc' ? 'ascending' : 'descending' : 'none'}><button type="button" className="inline-flex items-center gap-1 hover:text-primary" aria-label={`Sort by ${label}`} onClick={() => changeSort(key)}>{label}<ArrowUpDown className={cn('h-3 w-3', sort === key ? 'text-primary' : 'text-muted')} /></button></Th>
+  const heading = (key: Sort, label: string) => {
+    const Icon = sort !== key ? ArrowUpDown : order === 'asc' ? ArrowUp : ArrowDown
+    return <Th aria-sort={sort === key ? order === 'asc' ? 'ascending' : 'descending' : 'none'}><button type="button" className="inline-flex items-center gap-1 hover:text-primary" aria-label={`Sort by ${label}`} onClick={() => changeSort(key)}>{label}<Icon className={cn('h-3 w-3', sort === key ? 'text-primary' : 'text-muted')} /></button></Th>
+  }
   const back = <Button asChild variant="ghost" size="sm"><Link to="/server-baselines"><ArrowLeft className="h-4 w-4" /> All baselines</Link></Button>
   if (query.isError) return <div className="space-y-4">{back}<Card><CardContent><QueryError error={query.error} onRetry={() => query.refetch()} /></CardContent></Card></div>
   if (!data || !baseline || !summary) return <div className="space-y-4">{back}<Skeleton className="h-24 w-full" /><div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{[0, 1, 2, 3].map(i => <Skeleton key={i} className="h-24" />)}</div><Skeleton className="h-80 w-full" /></div>
@@ -125,10 +133,10 @@ export function BaselineDetailPage() {
       <KpiTile icon={Clock3} label="Needs evaluation" value={summary.not_evaluated} sub="missing or incomplete current checks" tone={summary.not_evaluated ? 'warning' : 'default'} />
     </div>
     <p className="text-xs text-muted">Results use the latest received software inventory. Offline servers can have older findings. Re-evaluation does not collect new inventory. {summary.last_evaluated && <span title={dateTitle(summary.last_evaluated)}>Last evaluated {when(summary.last_evaluated)}.</span>}</p>
-    <div role="tablist" aria-label="Baseline detail views" className="flex gap-1 border-b border-border">
-      {(['servers', 'rules'] as const).map(key => <button key={key} role="tab" aria-selected={view === key} className={cn('border-b-2 px-4 py-2 text-sm font-medium', view === key ? 'border-primary text-primary' : 'border-transparent text-muted hover:text-text')} onClick={() => update({ view: key }, false)}>{key === 'servers' ? 'Server compliance' : `Policy rules (${baseline.rules.length})`}</button>)}
-    </div>
-    {view === 'rules' ? <RulesTable baseline={baseline} summary={data.rule_summary} /> : <Card>
+    <Tabs value={view} onValueChange={value => update({ view: value }, false)}>
+    <TabsList aria-label="Baseline detail views"><TabsTrigger value="servers">Server compliance</TabsTrigger><TabsTrigger value="rules">Policy rules ({baseline.rules.length})</TabsTrigger></TabsList>
+    <TabsContent value="rules"><RulesTable baseline={baseline} summary={data.rule_summary} /></TabsContent>
+    <TabsContent value="servers"><Card>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-4">
         <div className="flex flex-wrap gap-1" aria-label="Server compliance filters">{Object.entries(SERVER_STATES).map(([key, label]) => <Button key={key} size="sm" variant={status === key ? 'secondary' : 'ghost'} aria-pressed={status === key} onClick={() => update({ status: key === 'all' ? null : key })}>{label}</Button>)}</div>
         <div className="relative w-full sm:w-72"><Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><Input aria-label="Search baseline servers" placeholder="Search server name or IP…" value={search} onChange={event => setSearch(event.target.value)} className="pl-8" /></div>
@@ -149,7 +157,8 @@ export function BaselineDetailPage() {
         </Fragment>)}</TBody>
       </Table></div>
       <TablePager page={page} pageCount={Math.max(1, Math.ceil(data.total / pageSize))} pageSize={pageSize} total={data.total} noun="servers" setPage={value => update({ page: String(value), server: null }, false)} setPageSize={value => update({ size: String(value) })} />
-    </Card>}
+    </Card></TabsContent>
+    </Tabs>
     <BaselineFormDialog open={editing} onOpenChange={setEditing} baseline={baseline} />
   </div>
 }

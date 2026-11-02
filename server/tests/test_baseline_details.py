@@ -52,6 +52,7 @@ def test_policy_groups_servers_and_includes_unassessed_checks(pg_db):
         assert r['items'][0]['server_id']==str(bad)
         assert r['items'][0]['critical']==2
         assert r['baseline']['servers_compliant']==1
+        assert r['baseline']['rule_count']==len(rules)
         checks=read(client,bid,f'servers/{partial}/checks')['items']
         assert {x['status'] for x in checks}=={'compliant','not_evaluated'}
         assert checks[0]['status']=='not_evaluated'
