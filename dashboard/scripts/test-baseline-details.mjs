@@ -134,10 +134,22 @@ try {
   assert.equal(pendingLocation.searchParams.get('q'), 'server')
   assert.equal(pendingLocation.searchParams.get('sort'), 'primary_ip')
   assert.equal(pendingLocation.searchParams.get('size'), '25')
+  await act(async () => {
+    document.querySelector('button[aria-label="Sort by Server"]').click()
+    const size = document.querySelector('select[aria-label="servers per page"]')
+    size.value = '100'
+    size.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+  })
+  await settle()
+  const combinedLocation = new URL(document.querySelector('#location').textContent, 'http://localhost')
+  assert.equal(combinedLocation.searchParams.get('sort'), 'server_name', 'Rapid sort and page-size changes must retain both updates')
+  assert.equal(combinedLocation.searchParams.get('size'), '100')
+  assert.equal(combinedLocation.searchParams.get('q'), 'server')
   pendingCoverage = null
   await act(async () => releaseCoverage())
   await settle()
-  assert.equal(calls.at(-1).params.sort, 'primary_ip')
+  assert.equal(calls.at(-1).params.sort, 'server_name')
+  assert.equal(calls.at(-1).params.page_size, 100)
   assert.equal(calls.at(-1).params.q, 'server')
   globalThis.__baselineCanManage = false
   await render('/server-baselines/b')
