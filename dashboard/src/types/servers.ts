@@ -417,6 +417,52 @@ export interface ComplianceSummary {
   prohibited: number
 }
 
+export type BaselineServerStatus = 'compliant' | 'violated' | 'not_evaluated'
+
+export interface BaselineServerCoverage {
+  server_id: string
+  server_name: string
+  hostname: string | null
+  primary_ip: string | null
+  os_type: string
+  server_status: string
+  last_seen: string | null
+  compliance_status: BaselineServerStatus
+  checked: number
+  compliant: number
+  violations: number
+  critical: number
+  missing: number
+  outdated: number
+  prohibited: number
+  not_evaluated: number
+  evaluated_at: string | null
+  first_failed_at: string | null
+}
+
+export interface BaselineCoverageReport {
+  baseline: Baseline
+  summary: {
+    servers_in_scope: number
+    compliant: number
+    violated: number
+    not_evaluated: number
+    evaluated: number
+    violations: number
+    last_evaluated: string | null
+  }
+  items: BaselineServerCoverage[]
+  rule_summary: { rule_id: string; compliant: number; violated: number; not_evaluated: number }[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export type BaselineRuleCheck = Omit<ComplianceResult, 'status' | 'evaluated_at'> & {
+  status: ComplianceStatus | 'not_evaluated'
+  evaluated_at: string | null
+}
+
 export type MonitoringProfile = 'infrastructure' | 'apm' | 'combined'
 
 export interface AgentUpdateStatus {

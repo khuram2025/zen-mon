@@ -106,6 +106,7 @@ const requiredRoutes = [
   '/server-agents',
   '/agent-policies',
   '/server-baselines',
+  '/server-baselines/:baselineId',
   '/inventory',
   '/inventory/assets',
   '/inventory/os',

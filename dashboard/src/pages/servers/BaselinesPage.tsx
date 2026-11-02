@@ -3,11 +3,13 @@
  *  alerts on violations; this page manages baselines and shows compliance. */
 
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ClipboardCheck, ListChecks, Pencil, Plus, RefreshCw, Server, ShieldAlert, Trash2, X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useCan } from '@/stores/auth'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -29,7 +31,7 @@ import { toast } from '@/components/ui/Toast'
 import { KpiTile, TagList } from '@/components/servers/shared'
 import type {
   Baseline, BaselineMatchType, BaselineRule, BaselineRuleInput, BaselineRuleType,
-  ComplianceResult, ComplianceStatus, Severity,
+  Severity,
 } from '@/types/servers'
 
 const OS_SCOPE_LABELS: Record<string, string> = {
@@ -38,19 +40,12 @@ const OS_SCOPE_LABELS: Record<string, string> = {
   macos: 'macOS',
 }
 
-const RESULT_STATUS_META: Record<ComplianceStatus, { label: string; variant: 'success' | 'warning' | 'danger' }> = {
-  compliant: { label: 'Compliant', variant: 'success' },
-  missing: { label: 'Missing', variant: 'danger' },
-  outdated: { label: 'Outdated', variant: 'warning' },
-  prohibited: { label: 'Prohibited', variant: 'danger' },
-}
-
 export function BaselinesPage() {
   const qc = useQueryClient()
+  const canManage = useCan()('servers.manage')
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Baseline | null>(null)
   const [deleting, setDeleting] = useState<Baseline | null>(null)
-  const [resultsFor, setResultsFor] = useState<Baseline | null>(null)
 
   const { data, isLoading } = useQuery({
     queryKey: ['server-baselines'],
@@ -107,10 +102,10 @@ export function BaselinesPage() {
             Declare required or prohibited software per server class — violations raise alerts automatically
           </p>
         </div>
-        <Button onClick={openCreate}>
+        {canManage && <Button onClick={openCreate}>
           <Plus className="h-4 w-4" />
           New baseline
-        </Button>
+        </Button>}
       </div>
 
       {isLoading ? (
@@ -159,7 +154,7 @@ export function BaselinesPage() {
                     {items.map((b) => (
                       <Tr key={b.id}>
                         <Td>
-                          <div className="font-medium">{b.name}</div>
+                          <Link to={`/server-baselines/${b.id}`} className="font-medium text-primary hover:underline">{b.name}</Link>
                           {b.description && <div className="text-xs text-muted">{b.description}</div>}
                         </Td>
                         <Td>
@@ -202,6 +197,7 @@ export function BaselinesPage() {
                         <Td>
                           <Switch
                             checked={b.enabled}
+                            disabled={!canManage || toggleEnabled.isPending}
                             onCheckedChange={(v) => toggleEnabled.mutate({ id: b.id, enabled: v })}
                           />
                         </Td>
@@ -210,11 +206,12 @@ export function BaselinesPage() {
                           <div className="flex justify-end gap-0.5">
                             <Button
                               variant="ghost" size="icon" className="h-7 w-7"
-                              onClick={() => setResultsFor(b)}
-                              title="Results"
+                              asChild
+                              title="View policy details"
                             >
-                              <ListChecks className="h-3.5 w-3.5" />
+                              <Link to={`/server-baselines/${b.id}`} aria-label={`View ${b.name} details`}><ListChecks className="h-3.5 w-3.5" /></Link>
                             </Button>
+                            {canManage && <>
                             <Button
                               variant="ghost" size="icon" className="h-7 w-7"
                               onClick={() => evaluate.mutate(b)}
@@ -240,6 +237,7 @@ export function BaselinesPage() {
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
+                            </>}
                           </div>
                         </Td>
                       </Tr>
@@ -252,10 +250,10 @@ export function BaselinesPage() {
                             <div className="text-sm text-muted">
                               No baselines yet — declare your first software baseline
                             </div>
-                            <Button size="sm" onClick={openCreate}>
+                            {canManage && <Button size="sm" onClick={openCreate}>
                               <Plus className="h-4 w-4" />
                               New baseline
-                            </Button>
+                            </Button>}
                           </div>
                         </Td>
                       </Tr>
@@ -269,7 +267,6 @@ export function BaselinesPage() {
       )}
 
       <BaselineFormDialog open={formOpen} onOpenChange={setFormOpen} baseline={editing} />
-      <ResultsDialog baseline={resultsFor} onOpenChange={(o) => !o && setResultsFor(null)} />
       <ConfirmDialog
         open={!!deleting}
         onOpenChange={(o) => !o && setDeleting(null)}
@@ -315,7 +312,7 @@ const toDraft = (r: BaselineRule): RuleDraft => ({
 
 const RULES_GRID = 'grid grid-cols-[96px_minmax(0,1fr)_100px_104px_100px_28px] items-center gap-2'
 
-function BaselineFormDialog({
+export function BaselineFormDialog({
   open,
   onOpenChange,
   baseline,
@@ -520,104 +517,6 @@ function BaselineFormDialog({
             {save.isPending ? 'Saving…' : editing ? 'Save changes' : 'Create baseline'}
           </Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ── Results dialog ───────────────────────────────────────────────────
-
-function ResultsDialog({
-  baseline,
-  onOpenChange,
-}: {
-  baseline: Baseline | null
-  onOpenChange: (open: boolean) => void
-}) {
-  const { data, isLoading } = useQuery({
-    queryKey: ['server-baselines', baseline?.id, 'results'],
-    queryFn: async () =>
-      (await api.get(`/server-baselines/${baseline?.id}/results`)).data as { items: ComplianceResult[] },
-    enabled: !!baseline,
-  })
-  const results = data?.items || []
-
-  const counts: Record<ComplianceStatus, number> = { compliant: 0, missing: 0, outdated: 0, prohibited: 0 }
-  for (const r of results) counts[r.status] = (counts[r.status] ?? 0) + 1
-
-  return (
-    <Dialog open={!!baseline} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <ListChecks className="h-4 w-4 text-primary" />
-            {baseline?.name} — compliance results
-          </DialogTitle>
-          <div className="flex flex-wrap items-center gap-1.5 pt-1">
-            {(Object.keys(RESULT_STATUS_META) as ComplianceStatus[])
-              .filter((s) => counts[s] > 0)
-              .map((s) => (
-                <Badge key={s} variant={RESULT_STATUS_META[s].variant}>
-                  {counts[s]} {RESULT_STATUS_META[s].label.toLowerCase()}
-                </Badge>
-              ))}
-          </div>
-        </DialogHeader>
-
-        {isLoading ? (
-          <div className="space-y-2">
-            {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}
-          </div>
-        ) : results.length === 0 ? (
-          <div className="py-10 text-center text-sm text-muted">
-            No servers evaluated yet — check the baseline scope or wait for the next inventory upload
-          </div>
-        ) : (
-          <div className="max-h-[60vh] overflow-auto rounded-md border border-border">
-            <Table>
-              <THead className="bg-surface2/50">
-                <Tr>
-                  <Th>Server</Th>
-                  <Th>Rule</Th>
-                  <Th>Status</Th>
-                  <Th>Found</Th>
-                  <Th>Expected</Th>
-                  <Th>Since</Th>
-                </Tr>
-              </THead>
-              <TBody>
-                {results.map((r, i) => {
-                  const meta = RESULT_STATUS_META[r.status]
-                  return (
-                    <Tr key={`${r.server_id || i}-${r.rule_id}`}>
-                      <Td>
-                        <div className="font-medium">{r.server_name || r.hostname || '—'}</div>
-                      </Td>
-                      <Td>
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-mono text-xs">{r.package_match}</span>
-                          <Badge variant={r.rule_type === 'prohibited' ? 'outline' : 'info'}>
-                            {r.rule_type}
-                          </Badge>
-                        </div>
-                      </Td>
-                      <Td><Badge variant={meta.variant}>{meta.label}</Badge></Td>
-                      <Td className="text-xs">
-                        {r.found_package
-                          ? `${r.found_package}${r.found_version ? ` ${r.found_version}` : ''}`
-                          : '—'}
-                      </Td>
-                      <Td className="text-xs text-muted">{r.expected || '—'}</Td>
-                      <Td className="text-xs text-muted">
-                        {r.first_failed_at ? relativeTime(r.first_failed_at) : '—'}
-                      </Td>
-                    </Tr>
-                  )
-                })}
-              </TBody>
-            </Table>
-          </div>
-        )}
       </DialogContent>
     </Dialog>
   )
