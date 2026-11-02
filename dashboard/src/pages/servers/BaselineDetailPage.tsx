@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowDown, ArrowLeft, ArrowUp, ArrowUpDown, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, Clock3, ExternalLink, ListChecks, Pencil, RefreshCw, Search, Server, ShieldAlert } from 'lucide-react'
@@ -36,6 +36,16 @@ function expectation(rule: Pick<BaselineRule, 'rule_type' | 'package_match' | 'm
 export function BaselineDetailPage() {
   const { baselineId = '' } = useParams()
   const [params, setParams] = useSearchParams()
+  // Router functional setters do not queue like React state setters. Compose
+  // rapid controls and pending searches against the most recently chosen URL.
+  const latestParams = useRef(params)
+  useLayoutEffect(() => { latestParams.current = params }, [params])
+  const editParams = useCallback((edit: (next: URLSearchParams) => void, replace = false) => {
+    const next = new URLSearchParams(latestParams.current)
+    edit(next)
+    latestParams.current = next
+    setParams(next, { replace })
+  }, [setParams])
   const qc = useQueryClient()
   const canManage = useCan()('servers.manage')
   const [editing, setEditing] = useState(false)
@@ -50,23 +60,19 @@ export function BaselineDetailPage() {
   const pageSize = [25, 50, 100, 250].includes(Number(params.get('size'))) ? Number(params.get('size')) : 50
   const view = params.get('view') === 'rules' ? 'rules' : 'servers'
   const expanded = params.get('server')
-  const update = (values: Record<string, string | null>, resetPage = true) => setParams(previous => {
-    const next = new URLSearchParams(previous)
+  const update = (values: Record<string, string | null>, resetPage = true) => editParams(next => {
     if (resetPage) { next.delete('page'); next.delete('server') }
     for (const [key, value] of Object.entries(values)) value == null ? next.delete(key) : next.set(key, value)
-    return next
   })
   useEffect(() => setSearch(q), [q])
   useEffect(() => {
     if (search === q) return
-    const timer = setTimeout(() => setParams(previous => {
-      const next = new URLSearchParams(previous)
+    const timer = setTimeout(() => editParams(next => {
       search ? next.set('q', search) : next.delete('q')
       next.delete('page'); next.delete('server')
-      return next
-    }, { replace: true }), 300)
+    }, true), 300)
     return () => clearTimeout(timer)
-  }, [search, q, setParams])
+  }, [search, q, editParams])
 
   const query = useQuery<BaselineCoverageReport>({
     queryKey: ['server-baselines', baselineId, 'coverage', q, status, sort, order, page, pageSize],
@@ -83,16 +89,14 @@ export function BaselineDetailPage() {
     if (!data || query.isPlaceholderData) return
     const last = Math.max(1, Math.ceil(data.total / pageSize))
     if (page <= last) return
-    setParams(previous => {
-      const next = new URLSearchParams(previous)
+    editParams(next => {
       next.set('page', String(last)); next.delete('server')
-      return next
-    }, { replace: true })
-  }, [data, page, pageSize, setParams, query.isPlaceholderData])
+    }, true)
+  }, [data, page, pageSize, editParams, query.isPlaceholderData])
   useEffect(() => {
     if (!data || query.isPlaceholderData || !expanded || data.items.some(row => row.server_id === expanded)) return
-    setParams(previous => { const next = new URLSearchParams(previous); next.delete('server'); return next }, { replace: true })
-  }, [data, expanded, setParams, query.isPlaceholderData])
+    editParams(next => { next.delete('server') }, true)
+  }, [data, expanded, editParams, query.isPlaceholderData])
   const items = useStableListRows(data?.items || [], r => r.server_id, !!expanded, JSON.stringify([baselineId, q, status, sort, order, page, pageSize]))
   const evaluate = useMutation({
     mutationFn: async () => (await api.post(`/server-baselines/${baselineId}/evaluate`)).data,
