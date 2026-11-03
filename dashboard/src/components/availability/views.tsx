@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Domain views for the Availability page.
  *
@@ -470,7 +471,7 @@ export function ServicesOperations({
             key: t.service_check_id,
             cells: [
               <Link to={`/services/${t.service_check_id}`} className="font-medium text-primary hover:underline">{t.name}</Link>,
-              <span className="text-text2">{t.tls_expiry_date ? new Date(t.tls_expiry_date).toLocaleDateString() : 'Unknown'}</span>,
+              <span className="text-text2">{t.tls_expiry_date ? regionalDate(new Date(t.tls_expiry_date), 'date') : 'Unknown'}</span>,
               t.days_remaining,
               <SeverityPill severity={t.severity} />,
             ],

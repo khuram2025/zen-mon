@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Confirmed device status, recovery limits and flapping, as the operator reads them (docs/device-status-policy.md).
  *
@@ -229,7 +230,7 @@ export function statusForText(statusChangedAt: string | null | undefined, nowMs:
 }
 
 export type TimeFormatter = (epochMs: number) => string
-const defaultTime: TimeFormatter = (ms) => new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+const defaultTime: TimeFormatter = (ms) => regionalDate(new Date(ms), 'datetime', undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 
 const plural = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`
 

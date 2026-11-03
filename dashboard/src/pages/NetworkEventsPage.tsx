@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
@@ -32,7 +33,7 @@ export function NetworkEventsPage() {
       </div>
       {events.isError && <p className="text-danger text-sm">Unable to load network events. Try again or contact your administrator.</p>}
       <div className="overflow-auto"><Table><THead><Tr><Th>Received</Th><Th>Source</Th><Th>Severity</Th><Th>Message</Th></Tr></THead><TBody>
-        {(events.data?.data || []).map((e: any) => <Tr key={e.id}><Td className="text-xs whitespace-nowrap">{new Date(e.received_at).toLocaleString()}</Td><Td className="text-xs">{e.device_hostname || e.source_ip}</Td><Td>{severityNames[e.severity]}</Td><Td className="text-xs break-all">{e.message}{e.metadata?.suppressed && <span className="ml-2 text-muted">Alert suppressed</span>}</Td></Tr>)}
+        {(events.data?.data || []).map((e: any) => <Tr key={e.id}><Td className="text-xs whitespace-nowrap">{regionalDate(new Date(e.received_at), 'datetime')}</Td><Td className="text-xs">{e.device_hostname || e.source_ip}</Td><Td>{severityNames[e.severity]}</Td><Td className="text-xs break-all">{e.message}{e.metadata?.suppressed && <span className="ml-2 text-muted">Alert suppressed</span>}</Td></Tr>)}
         {!events.isLoading && !events.data?.data?.length && <Tr><Td colSpan={4} className="text-center text-muted py-10">No matching syslog events received.</Td></Tr>}
       </TBody></Table></div>
     </CardContent></Card>

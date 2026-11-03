@@ -1,3 +1,5 @@
+import { regionalInput, regionalInputMs } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 import type { RumFilters, RumRange, RumTab, RumTimeseries, RumTimeseriesPoint, RumVitalMetric } from '@/types/apm'
 
 export type RumVitalName = 'lcp' | 'inp' | 'cls' | 'fcp' | 'ttfb' | 'load'
@@ -28,7 +30,7 @@ export interface RumCustomBounds {
 
 /** `datetime-local` input value (viewer's zone, no seconds) → ISO with offset. */
 export function localInputToIso(value: string): string {
-  const date = new Date(value)
+  const date = new Date(regionalInputMs(value))
   return Number.isNaN(date.getTime()) ? '' : date.toISOString()
 }
 
@@ -36,8 +38,7 @@ export function localInputToIso(value: string): string {
 export function isoToLocalInput(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return ''
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return regionalInput(date)
 }
 
 export function formatWindowLabel(bounds: RumCustomBounds | undefined): string {
@@ -45,9 +46,9 @@ export function formatWindowLabel(bounds: RumCustomBounds | undefined): string {
   const from = new Date(bounds.from)
   const to = new Date(bounds.to)
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return 'Custom'
-  const sameDay = from.toDateString() === to.toDateString()
-  const day = (d: Date) => d.toLocaleDateString([], { month: 'short', day: 'numeric' })
-  const time = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const sameDay = regionalInput(from).slice(0, 10) === regionalInput(to).slice(0, 10)
+  const day = (d: Date) => regionalDate(d, 'date', [], { month: 'short', day: 'numeric' })
+  const time = (d: Date) => regionalDate(d, 'time', [], { hour: '2-digit', minute: '2-digit' })
   return sameDay ? `${day(from)} ${time(from)} → ${time(to)}` : `${day(from)} ${time(from)} → ${day(to)} ${time(to)}`
 }
 
@@ -246,6 +247,6 @@ export function volumeBuckets(
 
 function formatBucketLabel(startMs: number, bucketMs: number): string {
   const date = new Date(startMs)
-  if (bucketMs >= 86_400_000) return date.toLocaleDateString([], { month: 'short', day: 'numeric' })
-  return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  if (bucketMs >= 86_400_000) return regionalDate(date, 'date', [], { month: 'short', day: 'numeric' })
+  return regionalDate(date, 'datetime', [], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }

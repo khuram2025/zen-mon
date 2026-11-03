@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { transformWithEsbuild } from 'vite'
+import { build } from 'esbuild'
+import path from 'node:path'
 
-const source = fs.readFileSync('src/components/storage/storageMath.ts', 'utf8')
-const compiled = await transformWithEsbuild(source, 'storageMath.ts', { loader: 'ts', format: 'esm' })
-const m = await import(`data:text/javascript;base64,${Buffer.from(compiled.code).toString('base64')}`)
+const compiled = await build({ entryPoints: ['src/components/storage/storageMath.ts'],
+  bundle: true, write: false, format: 'esm', platform: 'browser',
+  alias: { '@': path.resolve('src') }, define: { 'process.env.NODE_ENV': '"production"' } })
+const m = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`)
 const GIB = 1024 ** 3
 const EXTENT = 4 * 1024 ** 2
 

@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Agent tab: the installed agent (health, updates, monitoring profile,
  *  details, on-demand actions and command history) and the server record
  *  (edit, decommission, delete). Merges the former Agent and Settings tabs. */
@@ -148,7 +149,7 @@ function relativeEither(iso: string | null | undefined): string {
 
 function fmtDateTime(iso: string | null | undefined): string {
   const t = parseTs(iso)
-  return Number.isNaN(t) ? '—' : new Date(t).toLocaleString()
+  return Number.isNaN(t) ? '—' : regionalDate(new Date(t), 'datetime')
 }
 
 function fmtSkew(skew: number): string {
@@ -946,7 +947,7 @@ function DetailsPanel({ agent, capabilities, className }: {
               <span key="cert" title={fmtDateTime(agent.certificate_expires_at)} className={cn(
                 certTone === 'danger' && 'text-danger', certTone === 'warning' && 'text-warning',
               )}>
-                {new Date(certMs).toLocaleDateString()} <span className="text-muted">· {certDays != null && certDays < 0 ? `expired ${relativeTime(agent.certificate_expires_at)}` : relativeEither(agent.certificate_expires_at)}</span>
+                {regionalDate(new Date(certMs), 'date')} <span className="text-muted">· {certDays != null && certDays < 0 ? `expired ${relativeTime(agent.certificate_expires_at)}` : relativeEither(agent.certificate_expires_at)}</span>
               </span>
             )
             : '—'],
@@ -1232,7 +1233,7 @@ function SettingsSection({ server, onEdit, onDecommission, onDelete }: {
             ['Owner', server.owner || '—'],
             ['Site', server.site_name || '—'],
             ['Collection mode', COLLECTION_MODE_LABEL[server.collection_mode] ?? server.collection_mode],
-            ['Registered', <span key="reg" title={fmtDateTime(server.created_at)}>{new Date(parseTs(server.created_at)).toLocaleDateString()}</span>],
+            ['Registered', <span key="reg" title={fmtDateTime(server.created_at)}>{regionalDate(new Date(parseTs(server.created_at)), 'date')}</span>],
             ['Hostname', server.hostname || '—'],
             ['FQDN', server.fqdn || '—'],
             ['Primary IP', server.primary_ip ? <Mono key="ip">{server.primary_ip}</Mono> : '—'],

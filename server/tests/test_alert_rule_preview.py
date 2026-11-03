@@ -121,7 +121,7 @@ def test_preview_returns_rendered_email(preview_client):
     assert alert["sms_body"].startswith("ZenPlus CRITICAL — Core router down:")
 
     for message in (alert, body["recovery"]):
-        stamp = datetime.fromisoformat(message["iso_timestamp"]).strftime("%d %b %Y %H:%M UTC")
+        stamp = datetime.fromisoformat(message["iso_timestamp"]).strftime("%Y-%m-%d %H:%M UTC")
         assert message["sms_body"].endswith("\n" + stamp)
 
     assert "100%" in alert["email_text"]
@@ -134,6 +134,35 @@ def test_preview_returns_rendered_email(preview_client):
     # those defaults resolve to.
     assert body["templates"]["stored"]["email_body"] is None
     assert "{event_sentence}" in body["templates"]["effective"]["email_body"]
+
+
+@pytest.mark.parametrize('zone,expected', [
+    ('Asia/Riyadh', '2026-11-03 16:00 GMT+3'),
+    ('Asia/Kolkata', '2026-11-03 18:30 GMT+5:30'),
+    ('UTC', '2026-11-03 13:00 UTC'),
+])
+def test_preview_endpoint_applies_configured_timezone(preview_client, monkeypatch, zone, expected):
+    from unittest.mock import AsyncMock
+    from app.api.v1 import alert_rules as rules_api
+    from app.services.branding import Branding
+    from app.services import regional_time
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 3, 13, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(rules_api, 'datetime', Clock)
+    monkeypatch.setattr(regional_time, 'notification_branding', AsyncMock(return_value=Branding(timezone=zone)))
+    client, db = preview_client
+    response = client.post(f'/api/v1/alert-rules/{RULE_ID}/preview')
+    assert response.status_code == 200, response.text
+    for message in (response.json()['alert'], response.json()['recovery']):
+        assert message['iso_timestamp'] == '2026-11-03T13:00:00+00:00'
+        assert message['sms_body'].endswith('\n' + expected)
+        assert expected in message['email_html']
+        assert expected in message['email_text']
+    assert db.writes == []
 
 
 @pytest.mark.parametrize("threshold,expected_status,packet_loss,reply", [

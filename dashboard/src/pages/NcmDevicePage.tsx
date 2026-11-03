@@ -21,7 +21,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
 import { NcmReadiness, type ReadinessAction } from '@/components/ncm/NcmReadiness'
 import { Ago, EmptyState, Fact, Pagination, SectionError, StaleBanner, StateBadge, ToneIcon } from '@/components/ncm/ui'
-import { HELP, absoluteUtc, categoryLabel, download, errorDetail, ncmError, scheduleSummary, stateOf } from '@/components/ncm/model'
+import { HELP, absoluteTime, categoryLabel, download, errorDetail, ncmError, scheduleSummary, stateOf } from '@/components/ncm/model'
 import { DayPicker, TimezoneSelect } from '@/components/ncm/BulkDialogs'
 import { DiffView } from '@/components/ncm/DiffView'
 import { DeviceCompliance } from '@/components/ncm/ComplianceWorkspace'
@@ -177,7 +177,7 @@ function SummaryStrip({ device: d, onTab }: { device: any; onTab: (t: string) =>
       <button type="button" className={card} onClick={() => onTab('settings')}>
         <div className="text-xs text-muted">Schedule</div>
         <div className="mt-1 text-sm font-medium">{d.enrolled ? scheduleSummary(d) : 'Not enrolled'}</div>
-        <div className={cn('mt-0.5 text-xs', d.overdue ? 'text-warning' : 'text-muted')}>{!d.enrolled || !d.ncm_enabled ? (d.enrolled ? 'Collection disabled' : '') : d.next_due ? <>{d.overdue ? 'Overdue since ' : 'Next run '}<Ago iso={d.next_due} /> ({absoluteUtc(d.next_due)})</> : 'Manual backups only'}</div>
+        <div className={cn('mt-0.5 text-xs', d.overdue ? 'text-warning' : 'text-muted')}>{!d.enrolled || !d.ncm_enabled ? (d.enrolled ? 'Collection disabled' : '') : d.next_due ? <>{d.overdue ? 'Overdue since ' : 'Next run '}<Ago iso={d.next_due} /> ({absoluteTime(d.next_due)})</> : 'Manual backups only'}</div>
         {d.clock_anomaly && <div className="mt-0.5 text-xs text-warning">Last scheduled run is in the future — the appliance clock was corrected.</div>}
       </button>
       <div className={cn(card, 'hover:border-border')}>
@@ -255,7 +255,7 @@ function VersionsTab({ device }: { device: any }) {
                   const prev = vlist[i + 1]
                   return (
                     <li key={v.id} className={cn('flex flex-wrap items-center gap-3 px-3 py-2', pick.includes(v.id) && 'bg-primary/5')}>
-                      <input type="checkbox" className="h-4 w-4 accent-primary" aria-label={`Select version captured ${absoluteUtc(v.captured_at)} for comparison`} checked={pick.includes(v.id)} onChange={() => togglePick(v.id)} />
+                      <input type="checkbox" className="h-4 w-4 accent-primary" aria-label={`Select version captured ${absoluteTime(v.captured_at)} for comparison`} checked={pick.includes(v.id)} onChange={() => togglePick(v.id)} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5 text-sm">
                           <Ago iso={v.captured_at} className="font-medium" />
@@ -267,7 +267,7 @@ function VersionsTab({ device }: { device: any }) {
                           {v.restore_test && <Badge variant={v.restore_test.result === 'passed' ? 'success' : 'warning'}>Restore {v.restore_test.result}</Badge>}
                           {v.change_events > 0 && <Badge variant="outline">{v.change_events} change event{v.change_events === 1 ? '' : 's'}</Badge>}
                         </div>
-                        <div className="text-xs text-muted">{absoluteUtc(v.captured_at)} · {v.line_count} lines · {v.size_bytes.toLocaleString()} B · {v.platform || v.captured_by} · {v.artifact_format === 'cli_text' ? 'CLI text' : 'manual import'} · {v.hash}</div>
+                        <div className="text-xs text-muted">{absoluteTime(v.captured_at)} · {v.line_count} lines · {v.size_bytes.toLocaleString()} B · {v.platform || v.captured_by} · {v.artifact_format === 'cli_text' ? 'CLI text' : 'manual import'} · {v.hash}</div>
                       </div>
                       <div className="flex flex-wrap items-center gap-0.5">
                         <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="View configuration" title="View" onClick={() => setViewing(v)}><Eye className="h-4 w-4" /></Button>
@@ -309,7 +309,7 @@ function ConfigViewer({ device, version, onClose, onDownload }: { device: any; v
     <Card>
       <CardContent className="space-y-2 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="text-sm font-medium">{TYPE_LABEL[version.config_type]} · {absoluteUtc(version.captured_at)} <span className="text-xs text-muted">({version.line_count} lines, redacted view)</span></div>
+          <div className="text-sm font-medium">{TYPE_LABEL[version.config_type]} · {absoluteTime(version.captured_at)} <span className="text-xs text-muted">({version.line_count} lines, redacted view)</span></div>
           <div className="flex flex-wrap gap-2">
             <Input aria-label="Find in configuration" placeholder="Find…" value={find} onChange={(e) => setFind(e.target.value)} className="h-8 w-40" />
             {find && <span className="self-center text-xs text-muted">{matches} line{matches === 1 ? '' : 's'}</span>}
@@ -348,7 +348,7 @@ function CompareDialog({ deviceId, pair, onClose }: { deviceId: string; pair: { 
       <DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><GitCompare className="h-4 w-4" aria-hidden /> Configuration changes</DialogTitle>
-          {pair && <DialogDescription>{pair.a.label || absoluteUtc(pair.a.captured_at)} → {absoluteUtc(pair.b.captured_at)}</DialogDescription>}
+          {pair && <DialogDescription>{pair.a.label || absoluteTime(pair.a.captured_at)} → {absoluteTime(pair.b.captured_at)}</DialogDescription>}
         </DialogHeader>
         <label className="flex items-center gap-2 text-sm"><Switch aria-label="Ignore runtime noise" checked={normalized} onCheckedChange={setNormalized} />Ignore runtime noise (timestamps, counters)</label>
         {diff.isError ? <SectionError what="The comparison" onRetry={() => diff.refetch()} /> : diff.isPending ? <p className="text-sm text-muted">Comparing…</p> : (
@@ -373,7 +373,7 @@ function BaselineDialog({ deviceId, version, onClose }: { deviceId: string; vers
   return (
     <Dialog open={!!version} onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
-        <DialogHeader><DialogTitle>Approve protected baseline</DialogTitle><DialogDescription>The version captured {version && absoluteUtc(version.captured_at)} becomes the approved reference; drift is measured against it. The previous active baseline is retired and stays protected.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>Approve protected baseline</DialogTitle><DialogDescription>The version captured {version && absoluteTime(version.captured_at)} becomes the approved reference; drift is measured against it. The previous active baseline is retired and stays protected.</DialogDescription></DialogHeader>
         <FormField label="Name" required><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Post-change 2026-Q4" /></FormField>
         <FormField label="Reason / approval reference" required error={reason && reason.trim().length < 3 ? 'At least 3 characters' : null}><Textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="CAB-1234 reviewed by …" /></FormField>
         <DialogFooter><Button variant="outline" onClick={onClose}>Cancel</Button><Button disabled={!name.trim() || reason.trim().length < 3 || save.isPending} onClick={() => save.mutate()}>Approve baseline</Button></DialogFooter>
@@ -444,7 +444,7 @@ function BaselinesTab({ device }: { device: any }) {
                     <td className="pr-2">{TYPE_LABEL[b.config_type]}</td>
                     <td className="pr-2">{b.retired_at ? <Badge variant="outline">Retired <Ago iso={b.retired_at} /></Badge> : <Badge variant="info">Active</Badge>}</td>
                     <td className="pr-2">{b.retired_at ? <span className="text-muted">—</span> : b.drift === 'in_sync' ? <span className="inline-flex items-center gap-1 text-success"><ToneIcon tone="success" />In sync</span> : b.drift === 'drifted' ? <span className="inline-flex items-center gap-1 text-warning"><ToneIcon tone="warning" />Drifted</span> : <span className="text-muted">Unknown</span>}</td>
-                    <td className="pr-2">{b.actor_name}<div className="text-xs text-muted"><Ago iso={b.created_at} /> · version {absoluteUtc(b.version_captured_at)}</div></td>
+                    <td className="pr-2">{b.actor_name}<div className="text-xs text-muted"><Ago iso={b.created_at} /> · version {absoluteTime(b.version_captured_at)}</div></td>
                     <td className="max-w-xs pr-2 text-xs">{b.reason}</td>
                     <td className="whitespace-nowrap text-right">
                       {!b.retired_at && b.drift === 'drifted' && b.latest_version_id && <Button size="sm" variant="ghost" onClick={() => setCmp({ a: { id: b.version_id, label: `Baseline “${b.name}”` }, b: { id: b.latest_version_id, captured_at: new Date().toISOString() } })}>Show drift</Button>}
@@ -469,8 +469,8 @@ function BaselinesTab({ device }: { device: any }) {
           {tests.isError ? <SectionError what="Restore tests" onRetry={() => tests.refetch()} /> : tests.isPending ? null : !tests.data.data.length ? <EmptyState>No restore test recorded. Record one from a version under Backups &amp; versions after a lab drill.</EmptyState> : (
             <ul className="divide-y divide-border rounded-md border border-border text-sm">{tests.data.data.map((t: any) => (
               <li key={t.id} className="px-3 py-2">
-                <div className="flex flex-wrap items-center gap-2"><Badge variant={t.result === 'passed' ? 'success' : t.result === 'partial' ? 'warning' : 'danger'}>{t.result}</Badge><span className="font-medium">{t.target}</span><span className="text-xs text-muted">{t.method.replace(/_/g, ' ')} · {absoluteUtc(t.tested_at)} · by {t.actor_name}</span></div>
-                <div className="text-xs text-muted">{TYPE_LABEL[t.config_type]} captured {absoluteUtc(t.version_captured_at)}{t.scope_notes ? ` · Scope: ${t.scope_notes}` : ''}{t.notes ? ` · ${t.notes}` : ''}</div>
+                <div className="flex flex-wrap items-center gap-2"><Badge variant={t.result === 'passed' ? 'success' : t.result === 'partial' ? 'warning' : 'danger'}>{t.result}</Badge><span className="font-medium">{t.target}</span><span className="text-xs text-muted">{t.method.replace(/_/g, ' ')} · {absoluteTime(t.tested_at)} · by {t.actor_name}</span></div>
+                <div className="text-xs text-muted">{TYPE_LABEL[t.config_type]} captured {absoluteTime(t.version_captured_at)}{t.scope_notes ? ` · Scope: ${t.scope_notes}` : ''}{t.notes ? ` · ${t.notes}` : ''}</div>
               </li>
             ))}</ul>
           )}

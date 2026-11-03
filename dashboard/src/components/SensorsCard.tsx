@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { Link } from 'react-router-dom'
 import { SensorSiteEditor } from '@/components/SensorSiteEditor'
 /**
@@ -701,7 +702,7 @@ export function TokenDialog({ info, onClose }: { info: TokenInfo | null; onClose
             )}
             <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
               <strong>Token shown only once.</strong> Download the seed ISO and attach it to the sensor VM
-              before <span className="font-medium">{new Date(info.expires_at).toLocaleString()}</span>.
+              before <span className="font-medium">{regionalDate(new Date(info.expires_at), 'datetime')}</span>.
               You can re-issue a fresh token from the sensor's detail dialog if needed.
             </div>
 
@@ -826,7 +827,7 @@ function SensorDownloadsDialog({ info, onClose }: { info: SensorDownloads | null
               <div className="mt-1 font-medium text-text">{info.sensor_name}</div>
               {info.updated_at && (
                 <div className="mt-1 text-xs text-muted">
-                  Last generated {new Date(info.updated_at).toLocaleString()}
+                  Last generated {regionalDate(new Date(info.updated_at), 'datetime')}
                 </div>
               )}
             </div>
@@ -1068,7 +1069,7 @@ export function SensorDetailDialog({
           <Row k="Health policy" v={`${sensor.degraded_after_s}s degraded · ${sensor.offline_after_s}s offline`} />
           <Row k="Minimum version" v={sensor.min_supported_version || '—'} />
           <Row k="API key" v={sensor.api_key_prefix ? `${sensor.api_key_prefix}…` : '— (not enrolled)'} />
-          <Row k="Created" v={new Date(sensor.created_at).toLocaleString()} />
+          <Row k="Created" v={regionalDate(new Date(sensor.created_at), 'datetime')} />
         </div>
 
         <div className="my-4 border-t border-border" />

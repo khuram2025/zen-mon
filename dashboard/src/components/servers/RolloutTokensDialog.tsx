@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Clock3, KeyRound, Loader2, ShieldX } from 'lucide-react'
@@ -167,7 +168,7 @@ export function RolloutTokensDialog({
                     </Td>
                     <Td className="text-xs capitalize text-muted">{token.platform || 'any'}</Td>
                     <Td className="text-xs tabular-nums">{usageLabel(token)}</Td>
-                    <Td className="text-xs text-muted" title={new Date(token.expires_at).toLocaleString()}>
+                    <Td className="text-xs text-muted" title={regionalDate(new Date(token.expires_at), 'datetime')}>
                       {expiryLabel(token.expires_at)}
                     </Td>
                     <Td><StateBadge token={token} /></Td>

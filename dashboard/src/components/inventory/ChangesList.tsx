@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { Link } from 'react-router-dom'
 import {
   AlertTriangle, ArrowDownCircle, ArrowUpCircle, Cpu, MonitorCog, PackageMinus, PackagePlus, RefreshCw, Wrench, type LucideIcon,
@@ -44,7 +45,7 @@ export function ChangeRowView({ entry, tz }: { entry: ChangeEntry; tz: string })
   if (entry.kind === 'marker') {
     return (
       <li className="flex items-start gap-3 rounded-md border border-dashed border-warning/50 bg-warning/5 px-2 py-2" data-change-kind="marker" data-change={entry.ids.join(',')}>
-        <time dateTime={entry.at} title={at === null ? undefined : new Date(at).toLocaleString()} className="w-11 shrink-0 pt-0.5 text-xs tabular-nums text-muted">{time}</time>
+        <time dateTime={entry.at} title={at === null ? undefined : regionalDate(new Date(at), 'datetime')} className="w-11 shrink-0 pt-0.5 text-xs tabular-nums text-muted">{time}</time>
         <span aria-hidden className={cn('flex h-6 w-6 shrink-0 items-center justify-center rounded-md', g.tone)}><Icon className="h-3.5 w-3.5" /></span>
         <div className="min-w-0 flex-1 text-sm leading-5">
           <span className="font-medium text-warning-fg">Change budget exceeded</span>
@@ -57,7 +58,7 @@ export function ChangeRowView({ entry, tz }: { entry: ChangeEntry; tz: string })
   }
   return (
     <li className="flex items-start gap-3 py-2" data-change-kind={entry.kind} data-change={entry.ids.join(',')}>
-      <time dateTime={entry.at} title={at === null ? undefined : new Date(at).toLocaleString()} className="w-11 shrink-0 pt-0.5 text-xs tabular-nums text-muted">{time}</time>
+      <time dateTime={entry.at} title={at === null ? undefined : regionalDate(new Date(at), 'datetime')} className="w-11 shrink-0 pt-0.5 text-xs tabular-nums text-muted">{time}</time>
       <span aria-hidden className={cn('flex h-6 w-6 shrink-0 items-center justify-center rounded-md', g.tone)}><Icon className="h-3.5 w-3.5" /></span>
       <div className="min-w-0 flex-1 text-sm leading-5">
         <span className="text-text2">

@@ -1,3 +1,4 @@
+import { regionalDateBound, regionalTimezone } from '@/lib/regionalTime'
 /**
  * NCCM audit trail: who did what, to which device, and when. Fleet-wide when
  * no device is given, otherwise scoped to that device (with an opt-out).
@@ -16,7 +17,7 @@ import { FormField } from '@/components/ui/FormField'
 import { Label } from '@/components/ui/Label'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
-import { absoluteUtc, download, ncmError, toCsv } from './model'
+import { absoluteTime, download, ncmError, toCsv } from './model'
 import { Ago, EmptyState, Pagination, SectionError } from './ui'
 
 const PAGE = 50
@@ -96,8 +97,8 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
     device_id: deviceId && onlyDevice ? deviceId : undefined,
     action: action === 'all' ? undefined : action,
     actor: actor || undefined,
-    since: since ? `${since}T00:00:00Z` : undefined,
-    until: until ? `${until}T23:59:59Z` : undefined,
+    since: since ? regionalDateBound(since) : undefined,
+    until: until ? regionalDateBound(until, true) : undefined,
     limit: PAGE,
     offset: (page - 1) * PAGE,
   }
@@ -115,9 +116,9 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
   const filtered = action !== 'all' || !!actor || !!since || !!until
 
   const exportCsv = () => {
-    const header = ['time_utc', 'actor', 'action', 'device', 'device_id', 'resource_id', 'metadata']
+    const header = ['time_with_zone', 'actor', 'action', 'device', 'device_id', 'resource_id', 'metadata']
     const body = rows.map((r) => [
-      absoluteUtc(r.created_at), r.actor_name, r.action, r.hostname, r.device_id, r.resource_id,
+      absoluteTime(r.created_at), r.actor_name, r.action, r.hostname, r.device_id, r.resource_id,
       r.metadata == null ? '' : valueText(r.metadata),
     ])
     download(`nccm-audit${deviceId && onlyDevice ? `-${deviceId.slice(0, 8)}` : ''}-page${page}.csv`, toCsv([header, ...body]), 'text/csv')
@@ -149,10 +150,10 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
           <FormField label="Actor" className="w-full sm:w-44">
             <Input value={actorInput} onChange={(e) => setActorInput(e.target.value)} placeholder="Name contains" className="h-8 text-xs" />
           </FormField>
-          <FormField label="Since (UTC)" className="w-full sm:w-40">
+          <FormField label={`Since (${regionalTimezone()})`} className="w-full sm:w-40">
             <Input type="date" value={since} max={until || undefined} onChange={(e) => setSince(e.target.value)} className="h-8 text-xs" />
           </FormField>
-          <FormField label="Until (UTC)" className="w-full sm:w-40">
+          <FormField label={`Until (${regionalTimezone()})`} className="w-full sm:w-40">
             <Input type="date" value={until} min={since || undefined} onChange={(e) => setUntil(e.target.value)} className="h-8 text-xs" />
           </FormField>
           {deviceId && (
@@ -204,7 +205,7 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
                   {rows.map((r) => (
                     <Tr key={r.id}>
                       <Td className="whitespace-nowrap">
-                        <div className="text-xs">{absoluteUtc(r.created_at)}</div>
+                        <div className="text-xs">{absoluteTime(r.created_at)}</div>
                         <div className="text-xs text-muted"><Ago iso={r.created_at} /></div>
                       </Td>
                       <Td className="max-w-[10rem] truncate text-sm" title={r.actor_name || undefined}>{r.actor_name || <span className="text-muted">system</span>}</Td>

@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useId, useMemo, useState, type ReactNode } from 'react'
 import {
   CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -132,14 +133,14 @@ export type Threshold = { value: number; label: string; tone: 'warning' | 'dange
 export type SeriesDef = { key: string; name: string; color: string; points: Point[]; dashed?: boolean }
 
 function axisTimeFormatter(rangeHours: number): (ts: number) => string {
-  if (rangeHours <= 12) return (ts) => new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  if (rangeHours <= 12) return (ts) => regionalDate(new Date(ts), 'time', undefined, { hour: '2-digit', minute: '2-digit' })
   if (rangeHours <= 24 * 7) {
     return (ts) => {
       const d = new Date(ts)
-      return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
+      return `${regionalDate(d, 'date', undefined, { month: 'short', day: 'numeric' })}, ${regionalDate(d, 'time', undefined, { hour: '2-digit', minute: '2-digit' })}`
     }
   }
-  return (ts) => new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  return (ts) => regionalDate(new Date(ts), 'date', undefined, { month: 'short', day: 'numeric' })
 }
 
 export function TimeSeriesPanel({

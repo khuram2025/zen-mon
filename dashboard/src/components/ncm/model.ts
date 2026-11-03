@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * NCCM view model: protection states, semantic colours and shared helpers.
  *
@@ -84,24 +85,10 @@ export function errorDetail(e: any): any {
   return d && typeof d === 'object' && !Array.isArray(d) ? d : null
 }
 
-const fmtUtc = new Intl.DateTimeFormat('en-GB', {
-  timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-})
-const fmtLocal = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-
-/** "2026-09-30 10:04:38 UTC" — appliance timestamps are UTC. */
-export function absoluteUtc(iso?: string | null): string {
+/** Absolute event time in the configured company timezone. */
+export function absoluteTime(iso?: string | null): string {
   if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return '—'
-  const p = Object.fromEntries(fmtUtc.formatToParts(d).map((x) => [x.type, x.value]))
-  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second} UTC`
-}
-
-export function absoluteLocal(iso?: string | null): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '—' : fmtLocal.format(d)
+  return regionalDate(new Date(iso), 'datetime')
 }
 
 export function pct(n: number, d: number): string {

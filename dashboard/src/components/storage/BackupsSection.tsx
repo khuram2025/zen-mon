@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -225,7 +226,7 @@ export function BackupsSection() {
                       value={effectiveSchedule.hour_utc}
                       onChange={(e) => setSchedule({ ...effectiveSchedule, hour_utc: Number(e.target.value) })} />
                     <span className="text-muted">:00 UTC{Number.isInteger(effectiveSchedule.hour_utc) &&
-                      ` (${new Date(Date.UTC(2000, 0, 1, effectiveSchedule.hour_utc)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} local)`}</span>
+                      ` (${regionalDate(new Date(Date.UTC(2000, 0, 1, effectiveSchedule.hour_utc)), 'time', [], { hour: '2-digit', minute: '2-digit' })} local)`}</span>
                   </div>
                 </label>
                 <label className="text-xs text-text2">
@@ -272,7 +273,7 @@ export function BackupsSection() {
               {backups!.map((b) => (
                 <Tr key={b.id}>
                   <Td>
-                    <div className="text-sm">{new Date(b.created_at).toLocaleString()}</div>
+                    <div className="text-sm">{regionalDate(new Date(b.created_at), 'datetime')}</div>
                     <div className="text-xs text-muted">
                       {relativeTime(b.created_at)} · by {b.created_by}
                       {b.note && <> · {b.note}</>}
@@ -345,7 +346,7 @@ export function BackupsSection() {
             </DialogHeader>
             <DialogDescription>
               Restoring overwrites current data with the backup from{' '}
-              <span className="font-medium text-text">{restoreTarget && new Date(restoreTarget.created_at).toLocaleString()}</span>.
+              <span className="font-medium text-text">{restoreTarget && regionalDate(new Date(restoreTarget.created_at), 'datetime')}</span>.
               Select what to restore:
             </DialogDescription>
             <div className="space-y-2">
@@ -385,7 +386,7 @@ export function BackupsSection() {
           open={deleteTarget !== null}
           onOpenChange={(o) => !o && setDeleteTarget(null)}
           title="Delete backup?"
-          description={`The backup from ${deleteTarget ? new Date(deleteTarget.created_at).toLocaleString() : ''} (${deleteTarget ? bytes(deleteTarget.size_bytes) : ''}) will be permanently removed.`}
+          description={`The backup from ${deleteTarget ? regionalDate(new Date(deleteTarget.created_at), 'datetime') : ''} (${deleteTarget ? bytes(deleteTarget.size_bytes) : ''}) will be permanently removed.`}
           confirmText="Delete"
           destructive
           loading={remove.isPending}

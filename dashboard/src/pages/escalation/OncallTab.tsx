@@ -1,3 +1,5 @@
+import { regionalInput, regionalInputMs, regionalTimezone } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * On-call: schedules (layers rotate ordered members every shift length from a
  * handoff, optionally restricted to days/hours, in the schedule's IANA time
@@ -190,14 +192,14 @@ function ScheduleDetail({ s, canManage, onEdit, onDelete }: { s: OncallSchedule;
 /* ── 14-day timeline ──────────────────────────────────────────────────── */
 
 function TimelineCard({ s }: { s: OncallSchedule }) {
-  const [{ from, to }] = useState(() => timelineWindow(Date.now(), DAYS))
+  const [{ from, to }] = useState(() => timelineWindow(Date.now(), DAYS, regionalTimezone()))
   const tl = useScheduleTimeline(s.id, from, to)
   return (
     <Card>
       <CardContent className="space-y-2 p-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h3 className="text-sm font-semibold">Next {DAYS} days</h3>
-          <span className="text-xs text-muted">Times in your browser&apos;s zone; hover a shift for {s.timezone}.</span>
+          <span className="text-xs text-muted">Times in {regionalTimezone()}; hover a shift for {s.timezone}.</span>
         </div>
         {tl.isLoading ? <Skeleton className="h-24 w-full" />
           : tl.isError ? <QueryFailure compact error={tl.error} what="the timeline" onRetry={() => void tl.refetch()} retrying={tl.isFetching} />
@@ -209,7 +211,7 @@ function TimelineCard({ s }: { s: OncallSchedule }) {
 
 export function ShiftTimeline({ shifts, from, to, tz, now }: { shifts: Shift[]; from: number; to: number; tz: string; now: number }) {
   const rows = useMemo(() => layoutShifts(shifts, from, to), [shifts, from, to])
-  const ticks = useMemo(() => dayTicks(from, Math.round((to - from) / 86400_000)), [from, to])
+  const ticks = useMemo(() => dayTicks(from, Math.round((to - from) / 86400_000), regionalTimezone()), [from, to])
   const gaps = useMemo(() => coverageGapsInWindow(shifts, from, to).filter((g) => g.end - g.start >= 60_000), [shifts, from, to])
   const nowPct = now >= from && now <= to ? ((now - from) / (to - from)) * 100 : null
   const legend = useMemo(() => {
@@ -226,7 +228,7 @@ export function ShiftTimeline({ shifts, from, to, tz, now }: { shifts: Shift[]; 
           <div className="relative ml-28 h-5 border-b border-border text-2xs text-muted">
             {ticks.map((t) => (
               <span key={t.at} className="absolute top-0 -translate-x-0 whitespace-nowrap pl-0.5" style={{ left: `${t.leftPct}%` }}>
-                {new Date(t.at).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' })}
+                {regionalDate(new Date(t.at), 'date', 'en-GB', { weekday: 'short', day: 'numeric' })}
               </span>
             ))}
           </div>
@@ -270,8 +272,7 @@ export function ShiftTimeline({ shifts, from, to, tz, now }: { shifts: Shift[]; 
 
 function toLocalInput(ms: number): string {
   const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return regionalInput(d)
 }
 
 function OverridesCard({ s, canManage, nameOf, users }: { s: OncallSchedule; canManage: boolean; nameOf: (id: string) => string; users: Array<{ id: string; name: string }> }) {
@@ -280,8 +281,8 @@ function OverridesCard({ s, canManage, nameOf, users }: { s: OncallSchedule; can
   const [start, setStart] = useState(() => toLocalInput(Date.now()))
   const [end, setEnd] = useState(() => toLocalInput(Date.now() + 8 * 3600_000))
   const [reason, setReason] = useState('')
-  const startMs = Date.parse(start)
-  const endMs = Date.parse(end)
+  const startMs = regionalInputMs(start)
+  const endMs = regionalInputMs(end)
   const invalid = !userId ? 'Choose who covers' : !(endMs > startMs) ? 'The end must be after the start' : null
   const refresh = () => qc.invalidateQueries({ queryKey: ['escalation'] })
 
@@ -330,8 +331,8 @@ function OverridesCard({ s, canManage, nameOf, users }: { s: OncallSchedule; can
                 {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
               </select>
             </FormField>
-            <FormField label="From (your time)"><Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></FormField>
-            <FormField label="Until (your time)"><Input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} /></FormField>
+            <FormField label="From (configured time)"><Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></FormField>
+            <FormField label="Until (configured time)"><Input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} /></FormField>
             <FormField label="Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Covering annual leave" maxLength={200} /></FormField>
             <div className="flex items-end">
               <Button type="submit" size="sm" disabled={!!invalid || create.isPending} title={invalid ?? undefined}>

@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { Badge } from '@/components/ui/Badge'
 import type { ProbeStatus } from './types'
 
@@ -67,7 +68,7 @@ export function relTime(iso: string | null | undefined): string {
 
 export function fmtClock(iso: string): string {
   const d = new Date(iso)
-  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  return regionalDate(d, 'datetime', undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
 // Country flag emoji from an ISO-3166 alpha-2 code.

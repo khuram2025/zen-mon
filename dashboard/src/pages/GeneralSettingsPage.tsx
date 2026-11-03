@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -570,7 +571,7 @@ function ProfileCard() {
                       <div className="min-w-0">
                         <div className="font-medium">{row.ip_address || 'unknown address'} {current && <span className="ml-1 rounded bg-primary/10 px-1.5 py-0.5 text-2xs text-primary">This session</span>}</div>
                         <div className="truncate text-muted" title={row.user_agent || ''}>{row.user_agent || 'unknown client'}</div>
-                        <div className="text-muted">Started {new Date(row.created_at).toLocaleString()} · last seen {relativeTime(row.last_seen_at)}</div>
+                        <div className="text-muted">Started {regionalDate(new Date(row.created_at), 'datetime')} · last seen {relativeTime(row.last_seen_at)}</div>
                       </div>
                       {!current && <Button size="sm" variant="outline" disabled={revokeSession.isPending} onClick={() => revokeSession.mutate(row.id)}>Revoke</Button>}
                     </li>

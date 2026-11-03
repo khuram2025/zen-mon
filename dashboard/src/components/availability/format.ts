@@ -1,3 +1,6 @@
+import { regionalParts } from '@/lib/regionalTime'
+import { regionalTimezone, regionalZoneLabel } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Formatting rules for the Availability page.
  *
@@ -71,16 +74,7 @@ export function plural(n: number, one: string, many = `${one}s`): string {
 
 /** Browser timezone name + UTC offset, e.g. "Asia/Riyadh (UTC+3)". */
 export function timezoneLabel(): string {
-  let name = 'Local time'
-  try {
-    name = Intl.DateTimeFormat().resolvedOptions().timeZone || name
-  } catch { /* older browsers */ }
-  const offsetMin = -new Date().getTimezoneOffset()
-  const sign = offsetMin >= 0 ? '+' : '−'
-  const abs = Math.abs(offsetMin)
-  const hh = Math.floor(abs / 60)
-  const mm = abs % 60
-  return `${name} (UTC${sign}${hh}${mm ? `:${String(mm).padStart(2, '0')}` : ''})`
+  return `${regionalTimezone()} (${regionalZoneLabel()})`
 }
 
 /** Parse backend timestamps; naive values are UTC. */
@@ -94,7 +88,7 @@ export function parseTs(iso: string | null | undefined): number | null {
 
 export function fmtDateTime(ms: number | null | undefined, withSeconds = false): string {
   if (ms == null) return '—'
-  return new Date(ms).toLocaleString([], {
+  return regionalDate(new Date(ms), 'datetime', [], {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
@@ -105,7 +99,7 @@ export function fmtDateTime(ms: number | null | undefined, withSeconds = false):
 
 export function fmtClock(ms: number | null | undefined, withSeconds = false): string {
   if (ms == null) return '—'
-  return new Date(ms).toLocaleTimeString([], {
+  return regionalDate(new Date(ms), 'time', [], {
     hour: '2-digit',
     minute: '2-digit',
     ...(withSeconds ? { second: '2-digit' as const } : {}),
@@ -113,7 +107,7 @@ export function fmtClock(ms: number | null | undefined, withSeconds = false): st
 }
 
 export function fmtPeriod(fromMs: number, toMs: number): string {
-  const sameYear = new Date(fromMs).getFullYear() === new Date(toMs).getFullYear()
+  const sameYear = regionalParts(fromMs).year === regionalParts(toMs).year
   const opts: Intl.DateTimeFormatOptions = {
     month: 'short',
     day: 'numeric',
@@ -121,7 +115,7 @@ export function fmtPeriod(fromMs: number, toMs: number): string {
     minute: '2-digit',
     ...(sameYear ? {} : { year: 'numeric' as const }),
   }
-  return `${new Date(fromMs).toLocaleString([], opts)} → ${new Date(toMs).toLocaleString([], opts)}`
+  return `${regionalDate(new Date(fromMs), 'datetime', [], opts)} → ${regionalDate(new Date(toMs), 'datetime', [], opts)}`
 }
 
 /** "3m ago" style age relative to a reference instant. */

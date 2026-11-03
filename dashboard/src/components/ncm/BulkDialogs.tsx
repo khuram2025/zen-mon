@@ -17,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { toast } from '@/components/ui/Toast'
 import { Ago, StateBadge, ToneIcon } from './ui'
-import { HELP, TIMEZONES, WEEKDAYS, errorDetail, ncmError, scheduleSummary, absoluteUtc, type Tone } from './model'
+import { HELP, TIMEZONES, WEEKDAYS, errorDetail, ncmError, scheduleSummary, absoluteTime, type Tone } from './model'
 
 // --------------------------------------------------------------------------- //
 // Shared pieces
@@ -329,7 +329,7 @@ function BulkSettingsResult({ result, applied }: { result: any; applied: boolean
                 <td className="p-2">{r.changes && Object.keys(r.changes).length ? Object.entries(r.changes).map(([k, c]: any) => (
                   <div key={k}>{FIELD_LABEL[k] || k}: <span className="text-muted line-through">{fmtValue(k, c.before)}</span> → <strong>{fmtValue(k, c.after)}</strong></div>
                 )) : <span className="text-muted">—</span>}</td>
-                <td className="p-2">{r.schedule_summary || '—'}{r.collection_enabled === false && <div className="text-muted">Collection disabled — will not run</div>}{r.next_run_at && r.collection_enabled !== false && <div title={absoluteUtc(r.next_run_at)}>Next: <Ago iso={r.next_run_at} /> ({absoluteUtc(r.next_run_at)})</div>}</td>
+                <td className="p-2">{r.schedule_summary || '—'}{r.collection_enabled === false && <div className="text-muted">Collection disabled — will not run</div>}{r.next_run_at && r.collection_enabled !== false && <div title={absoluteTime(r.next_run_at)}>Next: <Ago iso={r.next_run_at} /> ({absoluteTime(r.next_run_at)})</div>}</td>
               </tr>
             ))}
           </tbody>

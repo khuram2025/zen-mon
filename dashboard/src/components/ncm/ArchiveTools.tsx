@@ -23,7 +23,7 @@ import { Label } from '@/components/ui/Label'
 import { Switch } from '@/components/ui/Switch'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
-import { absoluteUtc, ncmError } from './model'
+import { absoluteTime, ncmError } from './model'
 import { Ago, EmptyState, SectionError } from './ui'
 import { DiffView } from './DiffView'
 
@@ -277,7 +277,7 @@ function SidePicker({ label, idPrefix, side, onChange, devices }: {
             <SelectContent>
               {list.map((v, i) => (
                 <SelectItem key={v.id} value={v.id}>
-                  {absoluteUtc(v.captured_at)} · {v.hash}{v.validated ? ' · validated' : ' · unvalidated'}{i === 0 ? ' (latest)' : ''}
+                  {absoluteTime(v.captured_at)} · {v.hash}{v.validated ? ' · validated' : ' · unvalidated'}{i === 0 ? ' (latest)' : ''}
                 </SelectItem>
               ))}
             </SelectContent>

@@ -48,6 +48,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from app.services.regional_time import notification_branding, timestamp_label
 from typing import Any, Callable
 
 from sqlalchemy import text
@@ -584,7 +585,7 @@ class Gate:
         interval_driven = (release_at - now).total_seconds() > first_wait + 1
         condition = self._condition(reason, release_at, wait=first_wait, interval=interval,
                                     max_items=max_items, interval_driven=interval_driven,
-                                    sent_last_hour=sent_last_hour)
+                                    sent_last_hour=sent_last_hour, branding=await notification_branding(db))
         row = (await db.execute(text(
             "INSERT INTO notification_digests (group_key, group_label, channel_id, recipient, status,"
             " reason, release_condition, release_at, item_count)"
@@ -634,14 +635,14 @@ class Gate:
         return FAMILY_LABELS.get(self.family, self.family)
 
     def _condition(self, reason, release_at, *, wait, interval, max_items, interval_driven,
-                   sent_last_hour) -> str:
+                   sent_last_hour, branding=None) -> str:
         if reason == REASON_BUDGET:
-            return (f"Released at {_fmt_utc(release_at)} as one summary of every notification "
+            return (f"Released at {timestamp_label(release_at, branding, seconds=True) if branding else _fmt_utc(release_at)} as one summary of every notification "
                     f"held for this recipient over the hourly budget ({self.budget}); "
                     "critical (P1/P2) notifications are never held.")
         why = (f"next update for this group (group interval {interval} s)" if interval_driven
                else f"group wait {wait} s")
-        return (f"Released at {_fmt_utc(release_at)} ({why}) as one summary with related warnings, "
+        return (f"Released at {timestamp_label(release_at, branding, seconds=True) if branding else _fmt_utc(release_at)} ({why}) as one summary with related warnings, "
                 f"or at the next sweep once {max_items} incidents are waiting; critical (P1/P2) "
                 "notifications are never held.")
 
@@ -848,7 +849,7 @@ async def _fail_or_retry(db: AsyncSession, d, err: str, items: list, detail: dic
     retry_at = (await db.execute(text("SELECT now() + make_interval(secs => :i)"),
                                  {"i": interval})).scalar()
     why = (f"Attempt {attempt} of {MAX_RELEASE_ATTEMPTS} failed: {err} Retrying at "
-           f"{_fmt_utc(retry_at)}.")
+           f"{timestamp_label(retry_at, await notification_branding(db), seconds=True)}.")
     params = {"d": str(d.id), "err": why, "rel": retry_at}
     try:
         async with db.begin_nested():
@@ -957,6 +958,7 @@ async def digest_context(db: AsyncSession, d, items: list, *, max_items: int = 5
     """The dispatch ctx of a digest: subject, text, SMS line, HTML and a
     structured webhook payload, all listing every child incident."""
     from app.api.v1.alert_engine import _dashboard_url
+    branding = await notification_branding(db)
 
     active = [i for i in items if not _recovered(i)]
     recovered = [i for i in items if _recovered(i)]
@@ -991,7 +993,7 @@ async def digest_context(db: AsyncSession, d, items: list, *, max_items: int = 5
             continue
         lines.append(f"- {s.get('incident_ref', '')} {s.get('asset', '')}: {s.get('condition', '')}"
                      + (f" ({s['value']})" if s.get("value") else "")
-                     + (f" — first seen {s['first_seen']}" if s.get("first_seen") else "")
+                     + (f" — first seen {timestamp_label(s['first_seen'], branding)}" if s.get("first_seen") else "")
                      + (f" {s['url']}" if s.get("url") else ""))
     if recovered:
         lines += ["", "Already recovered:"]
@@ -1015,7 +1017,7 @@ async def digest_context(db: AsyncSession, d, items: list, *, max_items: int = 5
         "message": sms[:480],
         "html_body": digest_email_html(rows, head=head, extra=extra, severity=sev, priority=priority,
                                        reason_line=reason_line, digest_url=digest_url,
-                                       max_items=max_items),
+                                       max_items=max_items, branding=branding),
         "rule_name": f"Digest: {label}",
         "hostname": label,
         "ip_address": "",
@@ -1035,7 +1037,7 @@ async def digest_context(db: AsyncSession, d, items: list, *, max_items: int = 5
 
 
 def digest_email_html(rows: list[dict], *, head: str, extra: str, severity: str, priority: str,
-                      reason_line: str, digest_url: str, max_items: int = 50) -> str:
+                      reason_line: str, digest_url: str, max_items: int = 50, branding=None) -> str:
     """One summary mail in the house style (email_render's shell)."""
     from app.services import email_render as er
 
@@ -1057,7 +1059,7 @@ def digest_email_html(rows: list[dict], *, head: str, extra: str, severity: str,
                 f'vertical-align:top;"><b>{esc(s.get("asset") or "")}</b><br>{esc(s.get("condition") or "")}'
                 + (f' &middot; {esc(s["value"])}' if s.get("value") else "") +
                 f'</td><td style="padding:8px 10px;border-top:1px solid {er._BORDER};font-size:12px;'
-                f'color:{er._MUTED};white-space:nowrap;vertical-align:top;">{er._fmt_ts(s.get("first_seen"))}</td></tr>')
+                f'color:{er._MUTED};white-space:nowrap;vertical-align:top;">{er._fmt_ts(s.get("first_seen"), branding)}</td></tr>')
         hdr = (f'<tr><td style="padding:8px 10px;font-size:10px;font-weight:700;letter-spacing:.6px;'
                f'text-transform:uppercase;color:{er._MUTED};">Incident</td>'
                f'<td style="padding:8px 10px;font-size:10px;font-weight:700;letter-spacing:.6px;'

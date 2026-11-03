@@ -246,7 +246,9 @@ async def acknowledge(db: AsyncSession, alert_id, user, *, note: str | None = No
     if row.status == "acknowledged":
         return False
     if row.status == "resolved":
-        raise WorkflowError(409, f"Alert was already resolved at {_fmt(row.resolved_at)}.")
+        from app.services.regional_time import notification_branding, timestamp_label
+        label = timestamp_label(row.resolved_at, await notification_branding(db))
+        raise WorkflowError(409, f"Alert was already resolved at {label}.")
     if row.status == "pending":
         raise WorkflowError(409, "Alert is still in its hold period and has not fired yet.")
     has_owner = await supported(db)

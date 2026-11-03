@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 // Pure helpers for the Storage tab. Self-contained (no app imports) so
 // scripts/test-storage-ui.mjs can exercise them directly.
 import type { Consumer, Forecast, MountInfo, Severity, StorageEvent, StorageIssue, DiagnosticLog, Layout } from './types'
@@ -219,7 +220,7 @@ export function logGroups(logs: DiagnosticLog[]) {
     const expiry = l.expires_after ? new Date(l.expires_after) : null
     const validExpiry = expiry && Number.isFinite(expiry.getTime())
     const policy = l.evidence ? 'Kept for support review'
-      : l.legacy ? (validExpiry ? `Eligible from ${expiry!.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })} (UTC)` : `${l.retention_days} days after the last entry`)
+      : l.legacy ? (validExpiry ? `Eligible from ${regionalDate(expiry!, 'date', undefined, { year: 'numeric', month: 'short', day: 'numeric' })}` : `${l.retention_days} days after the last entry`)
       : l.ttl_active ? `Rolling ${l.retention_days}-day retention` : 'Retention activates when new entries arrive'
     const key = `${label}:${policy}:${l.protected}`
     const old = groups.get(key)

@@ -1,3 +1,4 @@
+import { regionalInput } from '@/lib/regionalTime'
 // Pure logic behind the Inventory primitives (components/inventory/*). No React, no router, no
 // API: scripts/test-inventory-ui.mjs exercises it directly, and the components only render what
 // it returns.
@@ -420,13 +421,8 @@ export function visibleFacetItems<T extends FacetItem>(
 export function asOfLabel(iso: string | null | undefined, now: number): string {
   const at = toMillis(iso)
   if (at === null) return 'unknown'
-  const d = new Date(at)
-  const n = new Date(now)
-  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  const sameDay = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
-  if (sameDay) return hhmm
-  const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  return `${ymd} ${hhmm}`
+  const local = regionalInput(at)
+  return local.slice(0,10) === regionalInput(now).slice(0,10) ? local.slice(11) : local.replace('T', ' ')
 }
 
 /** A user's effective visibility scope: the tags on the account and the tags inherited from the role, together. */

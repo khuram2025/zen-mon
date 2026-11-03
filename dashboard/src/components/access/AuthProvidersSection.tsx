@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowRight, CheckCircle2, FlaskConical, HardDrive, History, KeyRound, Loader2, Network, Server, Settings2, ShieldCheck, XCircle } from 'lucide-react'
@@ -379,7 +380,7 @@ function HistoryDialog({ open, onClose }: { open: boolean; onClose: () => void }
                   <li key={i} className="rounded-md border border-border p-2.5 text-xs">
                     <div className="flex flex-wrap items-center justify-between gap-1">
                       <span className="font-medium">{r.provider || 'auth'} · {r.action.replace('settings.auth.', '')}{r.details?.secret && r.details.secret !== 'unchanged' ? ` · secret ${r.details.secret}` : ''}</span>
-                      <span className="text-muted">{r.actor || 'system'} · <time dateTime={r.at}>{new Date(r.at).toLocaleString()}</time></span>
+                      <span className="text-muted">{r.actor || 'system'} · <time dateTime={r.at}>{regionalDate(new Date(r.at), 'datetime')}</time></span>
                     </div>
                     {r.details?.privileged_grants?.length > 0 && <div className="mt-1 text-warning">Privileged grants: {r.details.privileged_grants.join(', ')}</div>}
                     {r.action === 'settings.auth.toggle' && <div className="mt-1 text-muted">{r.details.enabled ? 'Enabled' : 'Disabled'}{r.details.sessions_revoked ? ` · ${r.details.sessions_revoked} sessions signed out` : ''}</div>}

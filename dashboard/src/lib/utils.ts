@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import { serverNow } from './serverClock'
@@ -102,23 +103,23 @@ export function relativeTime(iso: string | null | undefined): string {
 export function timeAxisTickFormatter(rangeHours: number): (ts: number) => string {
   if (rangeHours <= 24) {
     return (ts: number) =>
-      new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      regionalDate(new Date(ts), 'time', [], { hour: '2-digit', minute: '2-digit' })
   }
   if (rangeHours <= 24 * 7) {
     return (ts: number) => {
       const d = new Date(ts)
-      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-        ' ' + d.toLocaleTimeString([], { hour: '2-digit' })
+      return regionalDate(d, 'date', [], { month: 'short', day: 'numeric' }) +
+        ' ' + regionalDate(d, 'time', [], { hour: '2-digit' })
     }
   }
   return (ts: number) =>
-    new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })
+    regionalDate(new Date(ts), 'date', [], { month: 'short', day: 'numeric' })
 }
 
 /** Tooltip label formatter — always shows day + time so hovered points
  *  in multi-day ranges have full context. */
 export function timeTooltipLabelFormatter(ts: any): string {
-  return new Date(ts).toLocaleString([], {
+  return regionalDate(new Date(ts), 'datetime', [], {
     month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit',
   })

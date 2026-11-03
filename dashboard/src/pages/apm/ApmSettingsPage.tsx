@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -239,7 +240,7 @@ export function ApmSettingsPage() {
                         : <span title="No telemetry has ever authenticated with this key">never used</span>}
                     </Td>
                     <Td className="text-muted text-xs">
-                      {new Date(k.created_at).toLocaleDateString()}
+                      {regionalDate(new Date(k.created_at), 'date')}
                     </Td>
                     <Td className="text-right">
                       <div className="flex justify-end gap-0.5">
@@ -568,7 +569,7 @@ function EnrollmentTokensTab() {
                     <Td>{t.env ?? <span className="text-muted">all</span>}</Td>
                     <Td className="text-right tabular-nums">{t.uses} / {t.max_uses}</Td>
                     <Td className="text-xs text-muted">
-                      {t.expires_at ? new Date(t.expires_at).toLocaleString() : 'never'}
+                      {t.expires_at ? regionalDate(new Date(t.expires_at), 'datetime') : 'never'}
                     </Td>
                     <Td>{state(t)}</Td>
                     <Td className="text-right">
@@ -1229,7 +1230,7 @@ function KeyDetailsDialog({ keyRow, onClose, onEdit }: {
     { label: 'Environment', value: keyRow.env ?? 'all environments' },
     { label: 'Key prefix', value: <code className="font-mono text-xs">{keyRow.key_prefix}…</code> },
     { label: 'Status', value: keyRow.revoked_at || !keyRow.enabled ? 'Revoked' : 'Active' },
-    { label: 'Created', value: new Date(keyRow.created_at).toLocaleString() },
+    { label: 'Created', value: regionalDate(new Date(keyRow.created_at), 'datetime') },
     { label: 'Last used', value: keyRow.last_used_at ? relativeTime(keyRow.last_used_at) : 'never used' },
     ...(isRum ? [
       { label: 'Application ID', value: <code className="font-mono text-xs">{keyRow.application_id || 'legacy / unbound'}</code> },

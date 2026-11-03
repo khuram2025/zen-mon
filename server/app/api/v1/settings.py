@@ -18,6 +18,8 @@ from app.core.database import get_db
 from app.core.security import get_current_user, require_admin_user, require_permission
 from app.models.user import User
 from app.services import branding, device_status_explanation, device_status_machine
+from app.services.regional_time import notification_branding
+from app.services.alert_phrasing import sms_with_timestamp
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
@@ -647,8 +649,9 @@ async def get_company_logo(
 async def get_timezone(db: AsyncSession = Depends(get_db)):
     """Public endpoint for timezone (no auth required)."""
     raw = await _get_system_setting(db, "company")
-    tz = raw.get("timezone", "UTC") if raw else "UTC"
-    return {"timezone": tz}
+    regional = branding.branding_from_values(raw)
+    return {"timezone": regional.timezone, "date_format": regional.date_format,
+            "time_format": regional.time_format}
 
 
 def _row_to_channel(row) -> dict:
@@ -699,7 +702,7 @@ def _normalize_smtp_config(raw: dict) -> dict:
     return cfg
 
 
-def _do_smtp_test(raw_config: dict, recipient: str) -> dict:
+def _do_smtp_test(raw_config: dict, recipient: str, regional=None) -> dict:
     """Send a test email using the given SMTP config dict. Raises HTTPException on failure."""
     config = SmtpConfig(**_normalize_smtp_config(raw_config))
     recipients = [r.strip() for r in (recipient or "").split(",") if r.strip()]
@@ -721,6 +724,8 @@ def _do_smtp_test(raw_config: dict, recipient: str) -> dict:
         test_ctx = {
             "status": "TEST",
             "title": "SMTP configuration verified",
+            "branding": regional,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "message": "This is a test email from ZenPlus. If you are reading it, "
                        "this SMTP gateway can deliver mail to your inbox and is "
                        "ready to carry alerts, reports, and notifications.",
@@ -760,13 +765,13 @@ def _do_smtp_test(raw_config: dict, recipient: str) -> dict:
         raise HTTPException(status_code=400, detail=f"SMTP test failed — {type(e).__name__}: {e}")
 
 
-async def _do_sms_test(raw_config: dict, recipient: str) -> dict:
+async def _do_sms_test(raw_config: dict, recipient: str, regional=None) -> dict:
     """Send a test SMS using the given SMS config dict. Raises HTTPException on failure."""
     config = SmsConfig(**(raw_config or {}))
     try:
         response = await send_sms_request(config.model_dump(), {
             'recipients': recipient,
-            'message': 'ZenPlus Test Alert: This is a test SMS from your monitoring system.',
+            'message': sms_with_timestamp('ZenPlus Test Alert: This is a test SMS from your monitoring system.', datetime.now(timezone.utc), regional),
             'sender': config.sender_name or 'ZenPlus',
             'hostname': 'test-device', 'ip_address': '0.0.0.0', 'status': 'TEST',
         }, client_factory=NotificationHTTPClient)
@@ -867,7 +872,7 @@ async def test_smtp_legacy(
     smtp_raw = await _get_system_setting(db, "smtp")
     if not smtp_raw:
         raise HTTPException(status_code=400, detail="SMTP not configured")
-    return _do_smtp_test(smtp_raw, data.recipient)
+    return _do_smtp_test(smtp_raw, data.recipient, await notification_branding(db))
 
 
 @router.post("/gateways/sms/test")
@@ -879,7 +884,7 @@ async def test_sms_legacy(
     sms_raw = await _get_system_setting(db, "sms")
     if not sms_raw:
         raise HTTPException(status_code=400, detail="SMS not configured")
-    return await _do_sms_test(sms_raw, data.recipient)
+    return await _do_sms_test(sms_raw, data.recipient, await notification_branding(db))
 
 
 # ---------------------------------------------------------------------------
@@ -1052,9 +1057,9 @@ async def test_gateway(
 
     config = decrypt_config(row.config)
     if row.type == "smtp":
-        return _do_smtp_test(config, data.recipient)
+        return _do_smtp_test(config, data.recipient, await notification_branding(db))
     if row.type == "sms":
-        return await _do_sms_test(config, data.recipient)
+        return await _do_sms_test(config, data.recipient, await notification_branding(db))
     raise HTTPException(status_code=400, detail=f"Unsupported gateway type: {row.type}")
 
 
@@ -1255,7 +1260,7 @@ async def test_channel(
         if not gw_enabled:
             raise HTTPException(status_code=400, detail="SMS gateway is disabled")
 
-        return await _do_sms_test(sms_cfg.model_dump(), phone_numbers)
+        return await _do_sms_test(sms_cfg.model_dump(), phone_numbers, await notification_branding(db))
 
     # ─── Email Channel ───
     elif channel_type == "email":
@@ -1303,6 +1308,8 @@ async def test_channel(
             test_ctx = {
                 "status": "TEST",
                 "title": "Notification channel verified",
+                "branding": await notification_branding(db),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "message": "This is a test email from ZenPlus. If you are reading it, "
                            f"the '{row.name}' notification channel is configured "
                            "correctly and will deliver alerts to these recipients.",

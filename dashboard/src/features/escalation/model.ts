@@ -1208,27 +1208,22 @@ export function coverageGapsInWindow(shifts: Shift[], from: number, to: number):
   return gaps
 }
 
-/** Start of the viewer's local day and a `days`-long window. */
-export function timelineWindow(now: number, days = 14): { from: number; to: number } {
-  const d = new Date(now)
-  d.setHours(0, 0, 0, 0)
-  const from = d.getTime()
-  const end = new Date(from)
-  end.setDate(end.getDate() + days)
-  return { from, to: end.getTime() }
+/** Start of a configured calendar day; schedule rotation instants stay unchanged. */
+function timelineDay(now: number, offset: number, tz: string): number {
+  const day = new Date(utcToZonedWall(now, tz).date + 'T00:00:00Z')
+  day.setUTCDate(day.getUTCDate() + offset)
+  return Date.parse(zonedWallToUtc(day.toISOString().slice(0, 10), '00:00', tz)!)
+}
+export function timelineWindow(now: number, days = 14, tz = 'UTC'): { from: number; to: number } {
+  return { from: timelineDay(now, 0, tz), to: timelineDay(now, days, tz) }
 }
 
-export function dayTicks(from: number, days: number): Array<{ at: number; leftPct: number }> {
-  const out: Array<{ at: number; leftPct: number }> = []
-  const end = new Date(from)
-  end.setDate(end.getDate() + days)
-  const span = end.getTime() - from
-  for (let i = 0; i < days; i++) {
-    const d = new Date(from)
-    d.setDate(d.getDate() + i)
-    out.push({ at: d.getTime(), leftPct: ((d.getTime() - from) / span) * 100 })
-  }
-  return out
+export function dayTicks(from: number, days: number, tz = 'UTC'): Array<{ at: number; leftPct: number }> {
+  const span = timelineDay(from, days, tz) - from
+  return Array.from({ length: days }, (_, i) => {
+    const at = timelineDay(from, i, tz)
+    return { at, leftPct: ((at - from) / span) * 100 }
+  })
 }
 
 export function onCallNowFromApi(raw: unknown): OnCallNow {

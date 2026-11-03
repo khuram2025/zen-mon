@@ -1,18 +1,21 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { transformWithEsbuild } from 'vite'
+import { build } from 'esbuild'
+import path from 'node:path'
+process.env.TZ = 'UTC'
 
 const source = fs.readFileSync('src/pages/ServiceCheckDetail.tsx', 'utf8')
 const section = (a, b) => source.slice(source.indexOf(a), source.indexOf(b, source.indexOf(a)))
-const code = `const UP_COLOR='green', WARN_COLOR='orange', DOWN_COLOR='red';
+const code = `import { regionalDay, regionalInput } from '@/lib/regionalTime';
+const UP_COLOR='green', WARN_COLOR='orange', DOWN_COLOR='red';
 const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
 ${section('function buildAvailabilityBuckets(', '/* ─── Performance chart')}
 ${section('function buildDailyUptime(', 'const WEEKDAYS')}
 ${section('const DEFAULT_HEALTH_SCORE_CONFIG:', 'const HEALTH_SCORE_CONFIG_KEY')}
 ${section('function computeHealthScore(', 'function HealthScoreDetailsDialog(')}
 export {buildAvailabilityBuckets,buildDailyUptime,coveredWeightedUptime,computeHealthScore};`
-const compiled = await transformWithEsbuild(code, 'availability.ts', { loader: 'ts', format: 'esm' })
-const m = await import(`data:text/javascript;base64,${Buffer.from(compiled.code).toString('base64')}`)
+const compiled = await build({ stdin: { contents: code, loader: 'ts', resolveDir: process.cwd() }, bundle: true, write: false, format: 'esm', platform: 'browser', alias: { '@': path.resolve('src') }, define: { 'process.env.NODE_ENV': '"production"' } })
+const m = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`)
 const now = Date.now(), from = now - 3600000
 const check = {status:'unknown',check_interval:60,last_check_at:new Date(from-86400000).toISOString()}
 const stale = [{timestamp:check.last_check_at,new_status:'up'}]

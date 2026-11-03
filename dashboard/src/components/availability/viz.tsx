@@ -1,3 +1,6 @@
+import { zonedToUtc } from '@/features/reports/periods'
+import { regionalParts, regionalTimezone } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Visual kit for the Availability dashboard: ring gauge, donuts, sparklines,
  * bullet bars, health tiles, heatmap and the availability + outage-activity
@@ -742,13 +745,13 @@ function medianStep(ts: number[], fallback: number): number {
 
 function axisTime(t: number, spanMs: number): string {
   const d = new Date(t)
-  if (spanMs > 3 * 86_400_000) return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  if (spanMs > 3 * 86_400_000) return regionalDate(d, 'date', [], { month: 'short', day: 'numeric' })
   if (spanMs > 20 * 3_600_000) {
-    return d.getHours() === 0 && d.getMinutes() === 0
-      ? d.toLocaleDateString([], { month: 'short', day: 'numeric' })
-      : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return regionalParts(d).hour === 0 && regionalParts(d).minute === 0
+      ? regionalDate(d, 'date', [], { month: 'short', day: 'numeric' })
+      : regionalDate(d, 'time', [], { hour: '2-digit', minute: '2-digit' })
   }
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return regionalDate(d, 'time', [], { hour: '2-digit', minute: '2-digit' })
 }
 
 function tooltipBase(colors: VizColors) {
@@ -917,7 +920,7 @@ export function AvailabilityActivityChart({
           const x = Number(arr[0]?.value?.[0] ?? arr[0]?.axisValue) - step / 2
           const k = keys.reduce((best, cur) => (Math.abs(cur - x) < Math.abs(best - x) ? cur : best), keys[0] ?? x)
           const row = byT.get(k) || {}
-          const lines = [`<div style="font-weight:600;margin-bottom:4px">${fmtDateTime(k)} – ${new Date(k + step).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>`]
+          const lines = [`<div style="font-weight:600;margin-bottom:4px">${fmtDateTime(k)} – ${regionalDate(new Date(k + step), 'time', [], { hour: '2-digit', minute: '2-digit' })}</div>`]
           if (hasTrend) {
             const band = availBand(row.v ?? null, target)
             lines.push(`<div style="display:flex;justify-content:space-between;gap:16px"><span>Availability</span><b style="color:${bandColor(band, colors)}">${row.v == null ? 'No evidence' : `${availNumber(row.v).toFixed(2)}%`}</b></div>`)
@@ -951,7 +954,7 @@ export function AvailabilityHeatmap({
     if (!pts.length) return null
     const step = medianStep(pts.map((p) => p.t), 3_600_000)
     const span = pts[pts.length - 1].t - pts[0].t + step
-    const dayKey = (t: number) => new Date(t).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+    const dayKey = (t: number) => regionalDate(new Date(t), 'date', [], { weekday: 'short', month: 'short', day: 'numeric' })
     type Cell = { sum: number; n: number; any: boolean; start: number }
     const cells = new Map<string, Cell>()
     const rows: string[] = []
@@ -960,7 +963,7 @@ export function AvailabilityHeatmap({
     if (span <= 20 * 3_600_000) {
       mode = 'strip'
       rows.push('Fleet')
-      cols = pts.map((p) => new Date(p.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
+      cols = pts.map((p) => regionalDate(new Date(p.t), 'time', [], { hour: '2-digit', minute: '2-digit' }))
       pts.forEach((p, i) => cells.set(`0:${i}`, { sum: p.v ?? 0, n: p.v == null ? 0 : 1, any: true, start: p.t }))
     } else if (step <= 3_600_000) {
       mode = 'day-hour'
@@ -969,20 +972,20 @@ export function AvailabilityHeatmap({
         const d = new Date(p.t)
         const rk = dayKey(p.t)
         if (!rows.includes(rk)) rows.push(rk)
-        const k = `${rows.indexOf(rk)}:${d.getHours()}`
-        const c = cells.get(k) ?? { sum: 0, n: 0, any: true, start: new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime() }
+        const k = `${rows.indexOf(rk)}:${regionalParts(d).hour}`
+        const c = cells.get(k) ?? { sum: 0, n: 0, any: true, start: p.t - regionalParts(d).minute * 60_000 - regionalParts(d).second * 1000 }
         if (p.v != null) { c.sum += p.v; c.n += 1 }
         cells.set(k, c)
       }
     } else if (step < 86_400_000) {
       mode = 'day-part'
-      const hours = [...new Set(pts.map((p) => new Date(p.t).getHours()))].sort((a, b) => a - b)
+      const hours = [...new Set(pts.map((p) => regionalParts(p.t).hour))].sort((a, b) => a - b)
       const stepH = Math.round(step / 3_600_000)
       cols = hours.map((h) => `${String(h).padStart(2, '0')}–${String((h + stepH) % 24).padStart(2, '0')}`)
       for (const p of pts) {
         const rk = dayKey(p.t)
         if (!rows.includes(rk)) rows.push(rk)
-        const k = `${rows.indexOf(rk)}:${hours.indexOf(new Date(p.t).getHours())}`
+        const k = `${rows.indexOf(rk)}:${hours.indexOf(regionalParts(p.t).hour)}`
         cells.set(k, { sum: p.v ?? 0, n: p.v == null ? 0 : 1, any: true, start: p.t })
       }
     } else {
@@ -990,9 +993,12 @@ export function AvailabilityHeatmap({
       cols = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
       for (const p of pts) {
         const d = new Date(p.t)
-        const wd = (d.getDay() + 6) % 7
-        const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - wd)
-        const rk = `Week of ${monday.toLocaleDateString([], { month: 'short', day: 'numeric' })}`
+        const wall = regionalParts(d)
+        const calendar = new Date(Date.UTC(wall.year, wall.month - 1, wall.day))
+        const wd = (calendar.getUTCDay() + 6) % 7
+        calendar.setUTCDate(calendar.getUTCDate() - wd)
+        const monday = zonedToUtc(calendar.getUTCFullYear(), calendar.getUTCMonth() + 1, calendar.getUTCDate(), regionalTimezone())
+        const rk = `Week of ${regionalDate(monday, 'date', [], { month: 'short', day: 'numeric' })}`
         if (!rows.includes(rk)) rows.push(rk)
         cells.set(`${rows.indexOf(rk)}:${wd}`, { sum: p.v ?? 0, n: p.v == null ? 0 : 1, any: true, start: p.t })
       }
@@ -1185,7 +1191,7 @@ export function AlertVolumeChart({
           const arr = Array.isArray(params) ? params : [params]
           const t = Number(arr[0]?.value?.[0]) - step / 2
           const head = step >= 86_400_000
-            ? new Date(t).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }) + ' (UTC day)'
+            ? regionalDate(new Date(t), 'date', [], { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }) + ' (UTC day)'
             : fmtDateTime(t)
           return `<div style="font-weight:600;margin-bottom:4px">${head}</div>` + arr.map((p: any) =>
             `<div style="display:flex;justify-content:space-between;gap:16px"><span>${p.marker}${p.seriesName}</span><b>${p.value[1]}</b></div>`).join('')

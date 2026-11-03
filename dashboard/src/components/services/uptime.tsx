@@ -1,3 +1,4 @@
+import { regionalDate, regionalDay, regionalInput } from '@/lib/regionalTime'
 import { cn } from '@/lib/utils'
 import { serverNow } from '@/lib/serverClock'
 
@@ -80,16 +81,14 @@ export function buildDaySeries(
 ): DayCell[] {
   const byKey = new Map<string, { pct: number | null; samples: number }>()
   for (const r of rows) {
-    // Backend dates are UTC calendar days; render them as-is rather than reshifting.
+    // Backend date keys use the requested configured timezone.
     byKey.set(r.date, { pct: r.uptime_pct, samples: r.sample_count })
   }
   const out: DayCell[] = []
-  const today = new Date(nowMs)
-  today.setHours(0, 0, 0, 0)
+  const today = regionalDay(nowMs)
   for (let i = dayCount - 1; i >= 0; i--) {
-    const date = new Date(today)
-    date.setDate(today.getDate() - i)
-    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    const date = regionalDay(today, -i)
+    const key = regionalInput(date).slice(0, 10)
     const v = byKey.get(key)
     out.push({ key, date, pct: v?.pct ?? null, samples: v?.samples ?? 0 })
   }
@@ -129,7 +128,7 @@ export function UptimeBars({ cells, className, barClassName, onSelect }: {
 }
 
 export function dayTitle(d: { date: Date; pct: number | null; samples: number }): string {
-  const when = d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+  const when = regionalDate(d.date, 'date', undefined, { weekday: 'short', month: 'short', day: 'numeric' })
   if (d.pct == null) return `${when} — not monitored`
   const source = d.samples > 0 ? `${d.samples} checks` : 'from status log'
   return `${when} — ${d.pct.toFixed(d.pct >= 99 ? 2 : 1)}% up · ${source}`

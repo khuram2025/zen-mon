@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Alert Center insights (F09, F12): opened vs closed trend, open-incident
  * aging, top rules / entities and backlog-health diagnostics.
@@ -199,8 +200,8 @@ function TrendChart({ trend }: { trend: AlertTrend }) {
     const label = (ms: number) => {
       const d = new Date(ms)
       return hourly
-        ? d.toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
-        : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+        ? regionalDate(d, 'datetime', 'en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
+        : regionalDate(d, 'date', 'en-GB', { day: 'numeric', month: 'short' })
     }
     const tip = {
       backgroundColor: colors.c('surface'),

@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { ServiceFailureReason } from './ServiceFailureReason'
 import { buildProbeFailures, probeHistoryEmptyMessage } from './probeFailures'
 
@@ -11,7 +12,7 @@ export function DailyProbeFailureDetails({ failures, loading, error, onRetry, do
   hasCoverage: boolean
 }) {
   const count = failures?.reduce((sum, f) => sum + f.samples, 0) ?? 0
-  const time = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const time = (t: number) => regionalDate(new Date(t), 'time', [], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   const duration = (ms: number) => {
     const seconds = Math.round(ms / 1000)
     return seconds >= 3600 ? `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`

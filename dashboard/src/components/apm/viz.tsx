@@ -1,3 +1,5 @@
+import { regionalParts } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Shared APM visualization primitives: theme-aware charts, KPI cards, and
  * metric cells. Pages compose these; they do not invent their own palettes.
@@ -94,18 +96,18 @@ export function formatChartTick(t: string | number, windowMs: number): string {
   const d = new Date(t)
   if (Number.isNaN(d.getTime())) return ''
   if (windowMs >= 14 * 86_400_000) {
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+    return regionalDate(d, 'date', [], { month: 'short', day: 'numeric' })
   }
   if (windowMs >= 3 * 86_400_000) {
     // Multi-day windows with sub-day buckets: label midnight ticks with the
     // date and intraday ticks with the time, so consecutive ticks never repeat.
-    if (d.getHours() === 0 && d.getMinutes() === 0) return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    if (regionalParts(d).hour === 0 && regionalParts(d).minute === 0) return regionalDate(d, 'date', [], { month: 'short', day: 'numeric' })
+    return regionalDate(d, 'time', [], { hour: '2-digit', minute: '2-digit' })
   }
   if (windowMs >= 12 * 3_600_000) {
-    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    return regionalDate(d, 'datetime', [], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   }
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return regionalDate(d, 'time', [], { hour: '2-digit', minute: '2-digit' })
 }
 
 export interface ApmChartSeries {
@@ -202,7 +204,7 @@ export function ApmTimeChart({
         axisPointer: { type: 'line', lineStyle: { color: muted, opacity: 0.4 } },
         formatter: (params: Array<{ axisValue: string; marker: string; seriesName: string; value: [string, number]; seriesIndex: number }>) => {
           const ts = params[0]?.axisValue
-          const label = ts ? new Date(ts).toLocaleString() : ''
+          const label = ts ? regionalDate(new Date(ts), 'datetime') : ''
           let html = `<div style="font-size:11px;color:${muted};margin-bottom:6px">${label}</div>`
           params.forEach((p) => {
             const raw = Array.isArray(p.value) ? p.value[1] : p.value
@@ -537,7 +539,7 @@ export function ApmLatencyHeatmap({
         formatter: (p: { value: [number, number, number] }) => {
           const [xi, yi, v] = p.value
           const ts = times[xi]
-          const when = ts ? new Date(ts).toLocaleString() : ''
+          const when = ts ? regionalDate(new Date(ts), 'datetime') : ''
           return `<div style="font-size:11px;color:${muted}">${when}</div><div>${buckets[yi] || ''} · <b>${v.toLocaleString()}</b> spans</div>`
         },
       },

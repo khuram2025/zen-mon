@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Compliance tab — this server evaluated against its software baselines.
  *
  *  A score and per-status counts up top, a per-baseline breakdown, then every
@@ -316,7 +317,7 @@ export function ComplianceTab({ server }: { server: ServerItem }) {
         subtitle={(
           <>
             {summary?.compliant}/{total} compliant
-            {lastEvaluated && <> · evaluated <span title={new Date(lastEvaluated).toLocaleString()}>{relativeTime(lastEvaluated)}</span></>}
+            {lastEvaluated && <> · evaluated <span title={regionalDate(new Date(lastEvaluated), 'datetime')}>{relativeTime(lastEvaluated)}</span></>}
             {baseline && <> · {baselines.find((b) => b.id === baseline)?.name}</>}
           </>
         )}
@@ -405,7 +406,7 @@ export function ComplianceTab({ server }: { server: ServerItem }) {
                   <Td className="py-2"><SevPill sev={r.severity} /></Td>
                   <Td
                     className="whitespace-nowrap py-2 pr-4 text-right text-xs tabular-nums text-muted"
-                    title={r.first_failed_at ? new Date(r.first_failed_at).toLocaleString() : undefined}
+                    title={r.first_failed_at ? regionalDate(new Date(r.first_failed_at), 'datetime') : undefined}
                   >
                     {r.first_failed_at ? relativeTime(r.first_failed_at) : '—'}
                   </Td>

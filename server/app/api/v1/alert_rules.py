@@ -1039,7 +1039,7 @@ def _render_template(template: str, variables: dict) -> str:
     return result
 
 
-def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
+def _build_alert_message(rule_dict: dict, is_recovery: bool = False, branding=None) -> dict:
     """Build a preview/simulation alert message from a rule.
 
     Uses the same phrasing helpers and the same default templates as the live
@@ -1100,7 +1100,7 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         "location": rule_dict.get("location") or "DC-1 Rack A1",
         # "Now" rather than a frozen date: a preview/test mail stamped months in
         # the past reads as stale data rather than as a sample.
-        "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
+        "timestamp": branding.fmt_datetime(now, with_tz=True) if branding is not None else now.strftime("%H:%M UTC on %d %b %Y"),
         "rtt": RTT_UNAVAILABLE if down_device else "45.2 ms",
         "packet_loss": "100%" if down_device else "0%" if device_status == "UP" else "15%",
         "check_name": "Dashboard HTTPS",
@@ -1138,7 +1138,7 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
     return {
         "subject": _render_template(subject_tpl, variables),
         "email_body": _render_template(body_tpl, variables),
-        "sms_body": ap.sms_with_timestamp(_render_template(sms_tpl, variables), now),
+        "sms_body": ap.sms_with_timestamp(_render_template(sms_tpl, variables), now, branding),
         "sim_hostname": variables["hostname"],
         "sim_ip": variables["ip_address"],
         "device_status": device_status,
@@ -1231,9 +1231,13 @@ async def _preview_payload(db: AsyncSession, rule: dict, stored: dict) -> dict:
     )
     action_url = await _dashboard_url(db, "/alerts")
 
+    from app.services.regional_time import notification_branding
+    branding = await notification_branding(db)
+
     def _render(is_recovery: bool) -> dict:
-        msg = _build_alert_message(rule, is_recovery=is_recovery)
+        msg = _build_alert_message(rule, is_recovery=is_recovery, branding=branding)
         ctx = _preview_email_ctx(rule, msg, is_recovery, action_url)
+        ctx['branding'] = branding
         msg["email_html"] = build_alert_email_html(ctx)
         msg["email_text"] = build_alert_email_text(ctx)
         return msg
@@ -1336,7 +1340,9 @@ async def simulate_alert_rule(
     if options is not None:
         for key, value in options.model_dump(exclude_unset=True, exclude={'is_recovery'}).items():
             rule[key] = value or None
-    alert_msg = _build_alert_message(rule, is_recovery=is_recovery)
+    from app.services.regional_time import notification_branding
+    branding = await notification_branding(db)
+    alert_msg = _build_alert_message(rule, is_recovery=is_recovery, branding=branding)
     notify_channels = rule.get("notify_channels", [])
     results = []
 
@@ -1448,7 +1454,8 @@ async def simulate_alert_rule(
                             rule.get("metric"), rule.get("operator"), rule.get("threshold")) if x not in (None, ""))),
                         ("Sample device", f"{alert_msg['sim_hostname']} ({alert_msg['sim_ip']})"),
                     ],
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": alert_msg["iso_timestamp"],
+                    "branding": branding,
                 }
                 html_body = build_alert_email_html(sim_ctx)
                 text_body = build_alert_email_text(sim_ctx)

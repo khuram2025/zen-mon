@@ -1,3 +1,4 @@
+import { regionalDateBound, regionalDay, regionalInput, regionalTimezone } from '@/lib/regionalTime'
 /**
  * NCCM configuration compliance: fleet workspace (overview, results explorer,
  * policy packs, exceptions) and the per-device compliance tab.
@@ -31,7 +32,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
 import { useVizColors } from '@/components/availability/viz'
-import { absoluteUtc, download, ncmError, pct, toCsv, TONE_BADGE, type Tone } from './model'
+import { absoluteTime, download, ncmError, pct, toCsv, TONE_BADGE, type Tone } from './model'
 import { Ago, EmptyState, Kpi, Pagination, SectionError, ToneIcon } from './ui'
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
@@ -168,8 +169,8 @@ function totalsText(t: EvalTotals) {
   return `${t.devices} device${t.devices === 1 ? '' : 's'} · ${t.fail} failed · ${t.unknown} not assessable · ${t.excepted} excepted · ${t.pass} passed`
 }
 
-function utcDate(offsetDays: number) {
-  return new Date(serverNow() + offsetDays * 86400000).toISOString().slice(0, 10)
+function configuredDate(offsetDays: number) {
+  return regionalInput(regionalDay(serverNow(), offsetDays)).slice(0, 10)
 }
 
 /** "in 12 d" / "3 d ago" for future-or-past timestamps (Ago only handles the past). */
@@ -180,7 +181,7 @@ function Relative({ iso }: { iso: string }) {
   if (diff <= 0) return <Ago iso={iso} />
   const h = diff / 3600000
   const text = h < 1 ? `in ${Math.max(1, Math.round(diff / 60000))} min` : h < 48 ? `in ${Math.round(h)} h` : `in ${Math.round(h / 24)} d`
-  return <time dateTime={iso} title={absoluteUtc(iso)}>{text}</time>
+  return <time dateTime={iso} title={absoluteTime(iso)}>{text}</time>
 }
 
 function Loading({ what }: { what: string }) {
@@ -540,13 +541,13 @@ function ResultsExplorer({ filters, onFilters, onException }: {
     return next
   })
   const exportCsv = () => {
-    const header = ['Device', 'IP', 'Rule', 'Rule key', 'Policy', 'Severity', 'Status', 'Detail', 'Evidence', 'Remediation', 'Assessed (UTC)']
+    const header = ['Device', 'IP', 'Rule', 'Rule key', 'Policy', 'Severity', 'Status', 'Detail', 'Evidence', 'Remediation', 'Assessed (configured timezone)']
     const body = rows.map((r) => [
       r.hostname || r.device_id, r.ip, r.title, r.rule_key, r.policy_name, SEVERITY_LABEL[r.severity] || r.severity,
       STATUS_META[r.status]?.label || r.status, r.detail,
-      evidenceOf(r.evidence).map((e) => `L${e.line}: ${e.text}`).join(' | '), r.remediation, absoluteUtc(r.assessed_at),
+      evidenceOf(r.evidence).map((e) => `L${e.line}: ${e.text}`).join(' | '), r.remediation, absoluteTime(r.assessed_at),
     ])
-    download(`compliance-results-${utcDate(0)}-p${page}.csv`, toCsv([header, ...body]), 'text/csv')
+    download(`compliance-results-${configuredDate(0)}-p${page}.csv`, toCsv([header, ...body]), 'text/csv')
   }
   const filtersActive = filterKey !== JSON.stringify(DEFAULT_FILTERS)
 
@@ -670,7 +671,7 @@ function ResultRowView({ row: r, open, evidence, onToggle, canExcept, onExceptio
               <EvidenceLines evidence={evidence} emptyText={r.status === 'fail' && r.check_type === 'must_match'
                 ? 'Required configuration was not found, so there is no line to show.' : undefined} />
               <Remediation text={r.remediation} />
-              <p className="text-xs text-muted">Assessed {absoluteUtc(r.assessed_at)}{r.rule_key ? ` · rule ${r.rule_key}` : ''}</p>
+              <p className="text-xs text-muted">Assessed {absoluteTime(r.assessed_at)}{r.rule_key ? ` · rule ${r.rule_key}` : ''}</p>
             </div>
           </Td>
         </Tr>
@@ -1170,7 +1171,7 @@ function RuleTester({ draft }: { draft: RuleDraft }) {
             <StatusBadge status={result.status} />
             <span className="min-w-0 break-words">{result.detail}</span>
           </div>
-          {result.captured_at && <p className="text-xs text-muted">Tested on {hostname || 'device'} against the configuration captured <Ago iso={result.captured_at} /> ({absoluteUtc(result.captured_at)}).</p>}
+          {result.captured_at && <p className="text-xs text-muted">Tested on {hostname || 'device'} against the configuration captured <Ago iso={result.captured_at} /> ({absoluteTime(result.captured_at)}).</p>}
           <EvidenceLines evidence={evidenceOf(result.evidence)} emptyText="No matching lines to show for this outcome." />
         </div>
       )}
@@ -1239,7 +1240,7 @@ function ExceptionsTab() {
                       <Td className="max-w-[18rem] text-xs"><span className="line-clamp-3 break-words" title={x.reason}>{x.reason}</span></Td>
                       <Td className="whitespace-nowrap text-xs">
                         <div><Relative iso={x.expires_at} /></div>
-                        <div className="text-muted">{absoluteUtc(x.expires_at)}</div>
+                        <div className="text-muted">{absoluteTime(x.expires_at)}</div>
                       </Td>
                       <Td className="whitespace-nowrap text-xs">
                         <div>{x.created_by || '—'}</div>
@@ -1268,11 +1269,11 @@ function ExceptionsTab() {
 function ExceptionDialog({ target, onClose, allowFleet = true }: { target: ExceptionTarget; onClose: () => void; allowFleet?: boolean }) {
   const qc = useQueryClient()
   const username = useAuth((s) => s.user?.username)
-  const minDate = utcDate(1)
-  const maxDate = utcDate(365)
+  const minDate = configuredDate(1)
+  const maxDate = configuredDate(365)
   const [owner, setOwner] = useState(username || '')
   const [reason, setReason] = useState('')
-  const [expiry, setExpiry] = useState(utcDate(90))
+  const [expiry, setExpiry] = useState(configuredDate(90))
   const [scope, setScope] = useState<'device' | 'all'>('device')
   const [submitted, setSubmitted] = useState(false)
 
@@ -1289,7 +1290,7 @@ function ExceptionDialog({ target, onClose, allowFleet = true }: { target: Excep
       device_id: scope === 'device' ? target.device_id : null,
       owner: owner.trim(),
       reason: reason.trim(),
-      expires_at: `${expiry}T23:59:59Z`,
+      expires_at: regionalDateBound(expiry, true),
     })).data,
     onSuccess: () => {
       toast.success('Exception added', scope === 'device' ? `${target.hostname || 'The device'} was re-evaluated.` : 'All devices were re-evaluated.')
@@ -1328,7 +1329,7 @@ function ExceptionDialog({ target, onClose, allowFleet = true }: { target: Excep
           <FormField label="Reason" required hint="Why the deviation is accepted and what compensates for it." error={submitted ? errors.reason : null}>
             <Textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={2000} rows={3} />
           </FormField>
-          <FormField label="Expires on (UTC)" required hint={`Ends at 23:59:59 UTC on this date. Up to one year (${maxDate}).`} error={submitted ? errors.expiry : null}>
+          <FormField label={`Expires on (${regionalTimezone()})`} required hint={`Ends at 23:59:59 in ${regionalTimezone()} on this date. Up to one year (${maxDate}).`} error={submitted ? errors.expiry : null}>
             <Input type="date" value={expiry} min={minDate} max={maxDate} onChange={(e) => setExpiry(e.target.value)} />
           </FormField>
         </div>
@@ -1469,7 +1470,7 @@ function DeviceRuleRow({ row: r, canExcept, onException }: { row: ResultRow; can
       {r.status === 'excepted' && <p className="text-xs text-muted">Covered by an active exception; see the Exceptions tab of the Configuration workspace.</p>}
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
         <span>Assessed <Ago iso={r.assessed_at} /></span>
-        <span>Configuration captured <Ago iso={r.version_captured_at} empty="unknown" />{r.version_captured_at ? ` (${absoluteUtc(r.version_captured_at)})` : ''}</span>
+        <span>Configuration captured <Ago iso={r.version_captured_at} empty="unknown" />{r.version_captured_at ? ` (${absoluteTime(r.version_captured_at)})` : ''}</span>
       </div>
     </li>
   )

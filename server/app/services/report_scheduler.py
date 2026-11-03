@@ -834,7 +834,10 @@ async def _deliver(db: AsyncSession, schedule: dict, *, channel_ids: list, direc
                 phones = cfg.get("phone_numbers", "")
                 gw = await _gateway_config(db, ch, "sms")
                 if phones and gw:
-                    await _send_sms(gw, phones, channel_message)
+                    from app.services.regional_time import notification_branding
+                    from app.services.alert_phrasing import sms_with_timestamp
+                    message = sms_with_timestamp(channel_message, ctx.get('triggered_at'), await notification_branding(db))
+                    await _send_sms(gw, phones, message)
                     delivered.append(ch.name)
                 else:
                     fail(ch.name, "no phone numbers or SMS gateway")
@@ -1222,6 +1225,7 @@ async def _finish_run(db: AsyncSession, schedule: dict, *, run_id: str, token: s
     message = _channel_message(meta["title"], plabel, kpi_pairs, view_url, manual)
     ctx = _channel_ctx(subject, message, branding.display_name, kpi_pairs, view_url,
                        schedule.get("id"), meta["title"])
+    ctx["triggered_at"] = meta["generated_at"].isoformat()
 
     channel_ids = schedule.get("notify_channels") or []
     direct = [r for r in (str(x).strip().lower() for x in (schedule.get("recipients") or [])) if is_email(r)]
@@ -1273,7 +1277,7 @@ async def retry_run(db: AsyncSession, run_id: str, *, manual: bool = False) -> d
     row = (await db.execute(text(
         """SELECT r.id, r.schedule_id, r.title, r.token, r.status, r.delivered_to, r.failed_targets,
                   r.retry_count, r.email_subject, r.email_html, r.email_text, r.artifact,
-                  r.artifact_name, r.artifact_mime, r.window_from, r.window_to, r.notes, r.error,
+                  r.artifact_name, r.artifact_mime, r.generated_at, r.window_from, r.window_to, r.notes, r.error,
                   s.reply_to, s.group_send, s.cc, s.name AS schedule_name, s.timezone
            FROM report_runs r LEFT JOIN report_schedules s ON s.id = r.schedule_id
            WHERE r.id = CAST(:id AS uuid)"""), {"id": str(run_id)})).first()
@@ -1333,6 +1337,8 @@ async def retry_run(db: AsyncSession, run_id: str, *, manual: bool = False) -> d
     message = f"{row.email_subject}" + (f"\n{view_url}" if view_url else "")
     ctx = _channel_ctx(row.email_subject, message, getattr(branding, "display_name", "ZenPlus"), [],
                        view_url, row.schedule_id, row.title)
+    if getattr(row, "generated_at", None):
+        ctx["triggered_at"] = row.generated_at.isoformat()
     delivered, errors, failed, permanent = await _deliver(
         db, sched, channel_ids=channel_ids, direct=direct, subject=row.email_subject,
         email_text=row.email_text or "", email_html=row.email_html, attachment=attachment,

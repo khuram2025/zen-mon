@@ -280,7 +280,8 @@ async def test_complete_loss_never_shows_as_excellent_latency(mail):
     assert details["Round-trip time"] == "unavailable (no reply)"
     for text_ in (m["html"], m["body"], m["subject"]):
         assert "0.0ms" not in text_ and "0.0 ms" not in text_ and "0 ms" not in text_
-    assert m["body"] == "Packet loss on edge-1 (10.0.0.1) rose above 5% (currently 100%)."
+    assert m["ctx"]["message"] == "Packet loss on edge-1 (10.0.0.1) rose above 5% (currently 100%)."
+    assert m["ctx"]["message"] in m["body"] and "Time:" in m["body"]
     # State and severity as separate pills: "DOWN" neutral, "WARNING" amber.
     assert _chips(m["html"]) == ["DOWN", "WARNING"]
     # Lifecycle and incident in subject and body.
@@ -303,7 +304,7 @@ async def test_a_degraded_latency_alert_reports_the_reply(mail):
     assert head["label"] == "Round-trip time" and head["value"] == "100.04 ms"
     assert head["detail"] == "Threshold 100.00 ms"
     assert head["secondary_label"] == "Packet loss" and head["secondary_value"] == "0%"
-    assert m["body"] == ("Round-trip time on edge-1 (10.0.0.1) rose above 100.00 ms "
+    assert m["ctx"]["message"] == ("Round-trip time on edge-1 (10.0.0.1) rose above 100.00 ms "
                          "(currently 100.04 ms).")
     assert dict(m["ctx"]["details"])["Reachability"] == "Degraded (responding)"
 
@@ -343,4 +344,5 @@ async def test_template_variables_render_no_reply_and_the_incident(mail):
     await mail.run(db, "up", "down", rtt_ms=None, packet_loss=1.0)
     [m] = mail.sent
     [row] = db.alerts
-    assert m["body"] == f"edge-1: rtt unavailable (no reply), loss 100%, {ap.incident_ref(row['id'])} New"
+    assert m["ctx"]["message"] == f"edge-1: rtt unavailable (no reply), loss 100%, {ap.incident_ref(row['id'])} New"
+    assert m["ctx"]["message"] in m["body"] and "Time:" in m["body"]

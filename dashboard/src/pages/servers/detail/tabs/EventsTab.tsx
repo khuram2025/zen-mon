@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Events tab — Windows Event Log summaries.
  *
  *  The agent reports per-interval event counts by channel (Application,
@@ -456,7 +457,7 @@ function LegacyEventsTab({ server }: { server: ServerItem }) {
                   return (
                     <Tr key={`${e.timestamp}-${e.log_name}-${e.level}-${i}`} className="border-border/60 hover:bg-surface2/40">
                       <Td className="whitespace-nowrap py-2 pl-4 tabular-nums text-text2" title={e.timestamp}>
-                        {Number.isNaN(ts) ? e.timestamp : new Date(ts).toLocaleString()}
+                        {Number.isNaN(ts) ? e.timestamp : regionalDate(new Date(ts), 'datetime')}
                       </Td>
                       <Td className="max-w-[260px] truncate py-2 font-medium" title={e.log_name}>{e.log_name}</Td>
                       <Td className="py-2"><Pill tone={meta.tone}>{meta.label}</Pill></Td>

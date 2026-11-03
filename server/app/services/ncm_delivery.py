@@ -56,7 +56,7 @@ async def sms_send(gw, phones, payload):
         if state not in ('accepted', 'uncertain'):
             try:
                 await send_sms_request(gw, {
-                    'recipients': phone, 'message': payload['subject'][:300],
+                    'recipients': phone, 'message': payload.get('sms_body') or payload['subject'][:300],
                     'sender': gw.get('sender_name') or 'ZenPlus',
                 }, client_factory=NotificationHTTPClient)
                 state = 'accepted'
@@ -90,6 +90,14 @@ def smtp_send(config, recipients, payload):
 
 
 async def send(db, channel_ids, payload):
+    from app.services.regional_time import notification_branding, timestamp_label
+    from app.services.alert_phrasing import sms_with_timestamp
+    branding = await notification_branding(db)
+    # Keep the original structured event unchanged for webhooks and retries.
+    human = dict(payload)
+    if payload.get('timestamp'):
+        human['body'] = (payload.get('body') or payload['subject']) + '\nTime: ' + timestamp_label(payload['timestamp'], branding)
+        human['sms_body'] = sms_with_timestamp(payload['subject'][:300], payload['timestamp'], branding)
     accepted = 0
     for channel_id in channel_ids:
         ch = (await db.execute(text('SELECT type,config,gateway_id,enabled FROM notification_channels WHERE id=:id'),
@@ -102,13 +110,13 @@ async def send(db, channel_ids, payload):
             gw = await _gateway_config(db, ch, 'smtp')
             if not gw:
                 raise ValueError('Unavailable SMTP gateway')
-            await asyncio.to_thread(smtp_send, gw, cfg.get('recipients', ''), payload)
+            await asyncio.to_thread(smtp_send, gw, cfg.get('recipients', ''), human)
         elif ch.type == 'sms':
             from app.services.host_alert_service import _gateway_config
             gw = await _gateway_config(db, ch, 'sms')
             if not gw:
                 raise ValueError('Unavailable SMS gateway')
-            await sms_send(gw, cfg.get('phone_numbers', ''), payload)
+            await sms_send(gw, cfg.get('phone_numbers', ''), human)
         else:
             url = cfg.get('url') or cfg.get('webhook_url')
             body = payload

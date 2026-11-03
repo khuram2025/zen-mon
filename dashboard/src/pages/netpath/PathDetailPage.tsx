@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query'
@@ -285,7 +286,7 @@ function LatencyChart({ snapshots, probe, onPick }: { snapshots: SnapshotSummary
           <ComposedChart data={data} onClick={(e: any) => { const p = e?.activePayload?.[0]?.payload; if (p) onPick(p.id) }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border))" />
             <XAxis dataKey="t" type="number" domain={['dataMin', 'dataMax']} scale="time"
-              tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              tickFormatter={(t) => regionalDate(new Date(t), 'time', [], { hour: '2-digit', minute: '2-digit' })}
               stroke="rgb(var(--muted))" fontSize={11} />
             <YAxis yAxisId="l" stroke="rgb(var(--muted))" fontSize={11} unit="ms" />
             <YAxis yAxisId="r" orientation="right" stroke="rgb(var(--muted))" fontSize={11} unit="%" domain={[0, 100]} />

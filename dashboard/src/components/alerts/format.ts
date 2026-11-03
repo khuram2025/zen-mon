@@ -1,3 +1,5 @@
+import { regionalTimezone, regionalZoneLabel, regionalParts } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Alert Center time formatting (review A13, A27).
  *
@@ -23,24 +25,14 @@ export function parseTs(v: string | number | null | undefined): number | null {
   return Number.isNaN(t) ? null : t
 }
 
-/** "UTC+3", "UTC−4:30", "UTC" for the viewer's offset at that instant. */
+/** "UTC+3", "UTC−4:30", "UTC" for the configured offset at that instant. */
 export function utcOffsetLabel(ms: number = Date.now()): string {
-  const off = -new Date(ms).getTimezoneOffset()
-  if (off === 0) return 'UTC'
-  const sign = off > 0 ? '+' : '−'
-  const abs = Math.abs(off)
-  const h = Math.floor(abs / 60)
-  const m = abs % 60
-  return `UTC${sign}${h}${m ? `:${String(m).padStart(2, '0')}` : ''}`
+  return regionalZoneLabel(ms).replace('GMT', 'UTC')
 }
 
-/** Browser timezone name + offset, e.g. "Asia/Riyadh (UTC+3)". */
+/** Configured timezone name + offset, e.g. "Asia/Riyadh (UTC+3)". */
 export function timezoneName(): string {
-  let name = 'Local time'
-  try {
-    name = Intl.DateTimeFormat().resolvedOptions().timeZone || name
-  } catch { /* older browsers */ }
-  return `${name} (${utcOffsetLabel()})`
+  return `${regionalTimezone()} (${utcOffsetLabel()})`
 }
 
 /**
@@ -54,18 +46,18 @@ export function fmtAlertDate(
   const ms = parseTs(v)
   if (ms == null) return '—'
   const d = new Date(ms)
-  const showYear = opts.year === 'always' || d.getFullYear() !== new Date(serverNow()).getFullYear()
-  const date = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(showYear ? { year: 'numeric' as const } : {}) })
-  const time = d.toLocaleTimeString('en-GB', {
+  const showYear = opts.year === 'always' || regionalParts(d).year !== regionalParts(serverNow()).year
+  const date = regionalDate(d, 'date', 'en-GB', { day: 'numeric', month: 'short', ...(showYear ? { year: 'numeric' as const } : {}) })
+  const time = regionalDate(d, 'time', 'en-GB', {
     hour: '2-digit', minute: '2-digit', ...(opts.seconds ? { second: '2-digit' as const } : {}), hour12: false,
   })
   return `${date}, ${time}${opts.tz === false ? '' : ` ${utcOffsetLabel(ms)}`}`
 }
 
-/** `14:05:09` in the viewer timezone. */
+/** `14:05:09` in the configured timezone. */
 export function fmtClock(ms: number | null | undefined, seconds = true): string {
   if (ms == null) return '—'
-  return new Date(ms).toLocaleTimeString('en-GB', {
+  return regionalDate(new Date(ms), 'time', 'en-GB', {
     hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' as const } : {}), hour12: false,
   })
 }

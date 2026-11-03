@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** On-demand, connection-level network capture with interface traffic context. */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -390,7 +391,7 @@ export function NetworkCapturePanel({
               <div className="flex min-w-0 items-center gap-2">
                 {statusBadge(current.status)}
                 <span className="font-medium text-text">
-                  {new Date(current.requested_at).toLocaleString()}
+                  {regionalDate(new Date(current.requested_at), 'datetime')}
                 </span>
                 <span className="text-muted">
                   {formatDuration(current.duration_s)} / {current.flow_count.toLocaleString()} records
@@ -473,7 +474,7 @@ export function NetworkCapturePanel({
                     {captures.map((capture) => (
                       <SelectItem key={capture.id} value={capture.id}>
                         {capture.archived_at ? '[Archived] ' : ''}
-                        {new Date(capture.requested_at).toLocaleString()} - {capture.status} - {capture.flow_count} records
+                        {regionalDate(new Date(capture.requested_at), 'datetime')} - {capture.status} - {capture.flow_count} records
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -488,7 +489,7 @@ export function NetworkCapturePanel({
                 {current.archived_at
                   ? 'Archived captures are kept until you purge them.'
                   : current.purge_after
-                    ? `${retentionLabel(current)} (${new Date(current.purge_after).toLocaleString()}).`
+                    ? `${retentionLabel(current)} (${regionalDate(new Date(current.purge_after), 'datetime')}).`
                     : isInFlight(current)
                       ? `The ${retentionLabel(current).toLowerCase()} window starts when capture finishes.`
                       : 'Automatic purge is being scheduled.'}
@@ -570,7 +571,7 @@ export function NetworkCapturePanel({
         title="Purge capture data?"
         description={purging ? (
           <span>
-            This permanently deletes the capture from {new Date(purging.requested_at).toLocaleString()},
+            This permanently deletes the capture from {regionalDate(new Date(purging.requested_at), 'datetime')},
             including its flow records, interface samples, and control metadata. This cannot be undone.
           </span>
         ) : undefined}
@@ -942,7 +943,7 @@ function CaptureDetail({
                           </div>
                         ) : <span className="text-xs text-muted">Metadata only</span>}
                       </Td>
-                      <Td className="py-2.5 pr-4 text-xs text-muted" title={new Date(flow.last_seen).toLocaleString()}>
+                      <Td className="py-2.5 pr-4 text-xs text-muted" title={regionalDate(new Date(flow.last_seen), 'datetime')}>
                         {relativeTime(flow.last_seen)}
                       </Td>
                     </Tr>
@@ -1087,7 +1088,7 @@ function CaptureTrafficPanel({ capture, supported }: { capture: Capture; support
                     <XAxis
                       dataKey="ts"
                       tick={{ fontSize: chartFont(10), fill: 'rgb(var(--muted))' }}
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      tickFormatter={(value) => regionalDate(new Date(value), 'time', [], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                       axisLine={false}
                       tickLine={false}
                     />
@@ -1106,7 +1107,7 @@ function CaptureTrafficPanel({ capture, supported }: { capture: Capture; support
                         color: 'rgb(var(--text))',
                         fontSize: chartFont(12),
                       }}
-                      labelFormatter={(value) => new Date(Number(value)).toLocaleString()}
+                      labelFormatter={(value) => regionalDate(new Date(Number(value)), 'datetime')}
                       formatter={(value: number, name: string) => [formatBps(Number(value)), name === 'rx' ? 'Received' : 'Sent']}
                     />
                     <Legend

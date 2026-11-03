@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Ago, SectionError, ToneIcon, useClockOffset } from './ui'
-import { absoluteUtc, type Tone } from './model'
+import { absoluteTime, type Tone } from './model'
 
 const CHECK_TONE: Record<string, Tone> = { pass: 'success', blocked: 'danger', pending: 'warning', info: 'neutral' }
 const CHECK_TEXT: Record<string, string> = { pass: 'Ready', blocked: 'Action needed', pending: 'Not verified yet', info: 'For information' }
@@ -103,13 +103,13 @@ export function NcmHealth() {
       {data?.time_sync === 'unsynchronized' && (
         <div role="alert" className="flex gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
           <Clock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <span>The appliance clock is not NTP-synchronized (appliance time now {absoluteUtc(data.server_time)}). Schedules, freshness and every recorded timestamp depend on it. Ask an administrator to repair time synchronization; recorded history is kept as captured, not rewritten.</span>
+          <span>The appliance clock is not NTP-synchronized (appliance time now {absoluteTime(data.server_time)}). Schedules, freshness and every recorded timestamp depend on it. Ask an administrator to repair time synchronization; recorded history is kept as captured, not rewritten.</span>
         </div>
       )}
       {skewed && (
         <div role="status" className="flex gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
           <Clock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <span>Your browser clock is {formatOffset(offset)} {offset > 0 ? 'behind' : 'ahead of'} the appliance. Ages on this page are measured with the appliance clock; hover any time to see the exact appliance (UTC) and local time.</span>
+          <span>Your browser clock is {formatOffset(offset)} {offset > 0 ? 'behind' : 'ahead of'} the appliance. Ages on this page are measured with the appliance clock; hover any time to see the exact time in the configured company timezone.</span>
         </div>
       )}
     </div>

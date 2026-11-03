@@ -90,6 +90,7 @@ jobs:
       - run: node scripts/test-inventory-software-settings.mjs
       - run: node scripts/test-inventory-touchpoints.mjs
       - run: node scripts/test-branding.mjs
+      - run: node scripts/test-regional-time.mjs
       - run: node scripts/test-report-periods.mjs
       - run: node scripts/test-report-render.mjs
       - run: node scripts/test-report-library.mjs

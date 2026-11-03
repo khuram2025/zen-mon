@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useEffect, useMemo, useState } from 'react'
 import { Activity, AlertTriangle, ChevronDown, ChevronUp, Flame, Link2Off, ServerCrash, ShieldCheck, Unplug } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -117,7 +118,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
   }, [detail, nodesLive, liveData])
 
   const age = Math.max(0, Math.round((now - updatedAt) / 1000))
-  const clock = new Date(now).toLocaleTimeString([], { hour12: false })
+  const clock = regionalDate(new Date(now), 'time', [], { hour12: false })
   const stale = age > 60
 
   return (

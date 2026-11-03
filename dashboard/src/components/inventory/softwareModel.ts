@@ -1,3 +1,4 @@
+import { regionalInput } from '@/lib/regionalTime'
 // Pure logic behind the Software catalog (Documentation/Inventory/03-UI-UX-SPEC.md section 3.4,
 // 05-P1-API-CONTRACT.md sections 3.8, 3.9 and 4): the URL vocabulary, sort rules, the version bar, the
 // footer and the drill links. No React, no router, no API: scripts/test-inventory-software-settings.mjs
@@ -454,13 +455,13 @@ export function productSubline(row: Pick<CatalogRow, 'publisher' | 'category'>):
   return [row.publisher, categoryLabel(row.category)].filter(Boolean).join(' · ')
 }
 
-/** "2026-07-19" in the browser's time zone; missing is a dash, never a date. */
+/** "2026-07-19" in the configured time zone; missing is a dash, never a date. */
 export function shortDate(iso: string | null | undefined): string {
   if (!iso) return '—'
   const t = Date.parse(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso.replace(' ', 'T')}Z`)
   if (!Number.isFinite(t)) return '—'
   const d = new Date(t)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  return regionalInput(d).slice(0, 10)
 }
 
 /** The moment of an ISO string in the browser's clock, or null when it is not a time. */

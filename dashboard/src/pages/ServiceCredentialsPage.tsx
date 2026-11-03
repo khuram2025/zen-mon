@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -58,7 +59,7 @@ const AUTH_DESCRIPTIONS: Record<AuthType, string> = {
 function updatedLabel(value: string | null) {
   if (!value) return 'Not updated'
   const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? 'Not updated' : date.toLocaleString()
+  return Number.isNaN(date.getTime()) ? 'Not updated' : regionalDate(date, 'datetime')
 }
 
 export function ServiceCredentialsPage() {

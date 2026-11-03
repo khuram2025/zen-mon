@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useMemo, useState, useEffect, useCallback } from 'react'
 import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -303,7 +304,7 @@ export function RunPage() {
               {(run.activity_log || []).slice().reverse().map((e, i) => (
                 <div key={i} className="flex gap-3">
                   <span className="text-muted">
-                    {new Date(e.ts).toLocaleTimeString()}
+                    {regionalDate(new Date(e.ts), 'time')}
                   </span>
                   <span
                     className={cn(

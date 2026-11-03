@@ -109,6 +109,7 @@ export function CompanySettings() {
       toast.success('Company settings saved', 'New reports use the updated branding and formats.')
       qc.invalidateQueries({ queryKey: ['settings', 'company'] })
       qc.invalidateQueries({ queryKey: ['settings', 'timezone'] })
+      qc.invalidateQueries({ queryKey: ['settings', 'regional'] })
       qc.invalidateQueries({ queryKey: ['reports', 'branding'] })
     },
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
@@ -181,7 +182,7 @@ export function CompanySettings() {
         {/* Regional */}
         <Card>
           <CardHeader className="pb-3">
-            <SectionTitle icon={Globe2} title="Regional formats" description="Every report, schedule and export prints times in this timezone and format." />
+            <SectionTitle icon={Globe2} title="Regional formats" description="Alerts, email, SMS, dashboards, reports and exports use this timezone and format." />
           </CardHeader>
           <CardContent className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <FormField label="Timezone" className="md:col-span-2" hint={<NowLine form={form} />}>

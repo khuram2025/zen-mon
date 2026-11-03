@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /* Live link drill-down (F7): side panel for one cable in NOC mode — both
  * ends (port, oper/admin, speed, in/out, utilisation), the cable's kind /
  * speed / notes, bundle members, and a 24 h in/out sparkline per matched end
@@ -230,7 +231,7 @@ export function LinkDrillPanel({ link, live, sourceName, targetName, sourceDevic
 
         {live?.generated_at && (
           <div className="text-2xs text-muted">
-            Live window {live.window_seconds ? `${Math.round(live.window_seconds / 60)} min` : '—'} · updated {new Date(live.generated_at).toLocaleTimeString()}
+            Live window {live.window_seconds ? `${Math.round(live.window_seconds / 60)} min` : '—'} · updated {regionalDate(new Date(live.generated_at), 'time')}
           </div>
         )}
       </div>

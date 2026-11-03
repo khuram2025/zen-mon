@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Performance: every resource over a chosen window.
  *
  *  CPU (user/system split, processor queue, per-core heatmap), memory
@@ -87,7 +88,7 @@ function CoreHeatmap({ detail, tick }: { detail: MetricDetail; tick: (ts: number
               return (
                 <div
                   key={`${col.ts}-${core}`}
-                  title={`Core ${core} · ${new Date(col.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${v.toFixed(1)}%`}
+                  title={`Core ${core} · ${regionalDate(new Date(col.ts), 'time', [], { hour: '2-digit', minute: '2-digit' })} · ${v.toFixed(1)}%`}
                   style={{ background: color }}
                 />
               )

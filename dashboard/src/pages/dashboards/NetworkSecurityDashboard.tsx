@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Network & Security team dashboard.
  *
@@ -325,8 +326,8 @@ export function NetworkSecurityDashboard() {
 
   const chartData = useMemo(() => {
     const fmt = range.minutes <= 1440
-      ? (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : (d: Date) => d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      ? (d: Date) => regionalDate(d, 'time', [], { hour: '2-digit', minute: '2-digit' })
+      : (d: Date) => regionalDate(d, 'date', [], { month: 'short', day: 'numeric' })
     return (nfSeries || []).map((p) => ({ t: fmt(new Date(p.ts)), mbps: p.bps / 1_000_000 }))
   }, [nfSeries, range.minutes])
 

@@ -390,7 +390,8 @@ async def test_postgres_device_status_pages_once_per_recipient_with_durable_keys
     ref = ap.incident_ref(alert_id)
     assert first["subject"].startswith("[WARNING]") and f"[{ref}]" in first["subject"]
     assert "[New]" in first["subject"]
-    assert first["body"] == w.rendered[0]["message"]
+    assert w.rendered[0]["message"] in first["body"]
+    assert "Time:" in first["body"] and "UTC" in first["body"]
     ctx = w.rendered[0]
     assert ctx["title"] == "Device Down" and ctx["hostname"] == "edge-1"
     assert ctx["ip_address"] == "10.88.0.1" and ctx["status"] == "DOWN"

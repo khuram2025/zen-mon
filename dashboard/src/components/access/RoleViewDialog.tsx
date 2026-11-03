@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useQuery } from '@tanstack/react-query'
 import { Copy, Lock, Pencil, ShieldAlert, Users as UsersIcon } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -147,7 +148,7 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
                     <li key={`${r.revision}-${i}`} className="rounded-md border border-border p-2.5 text-xs">
                       <div className="flex flex-wrap items-center justify-between gap-1">
                         <span className="font-medium">{ACTION_LABEL[r.action] || r.action} <span className="font-normal text-muted">· revision {r.revision}</span></span>
-                        <span className="text-muted">{r.actor || 'system'} · <time dateTime={r.at}>{new Date(r.at).toLocaleString()}</time></span>
+                        <span className="text-muted">{r.actor || 'system'} · <time dateTime={r.at}>{regionalDate(new Date(r.at), 'datetime')}</time></span>
                       </div>
                       {(r.added.length > 0 || r.removed.length > 0) && (
                         <div className="mt-1.5 space-y-0.5 font-mono text-xs">

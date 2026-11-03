@@ -1274,9 +1274,18 @@ def _as_utc(ts) -> Optional[datetime]:
     return ts.astimezone(timezone.utc)
 
 
-def sms_with_timestamp(message: str, timestamp) -> str:
-    """Stamp the notification event in UTC, including on queued delivery."""
+def sms_with_timestamp(message: str, timestamp, branding=None) -> str:
+    """Stamp the original event in the configured zone, including queued delivery."""
     event_time = _as_utc(timestamp) or datetime.now(timezone.utc)
+    if branding is not None:
+        from app.services.regional_time import localize_text, timestamp_label
+        message = localize_text(message, branding)
+        stamp = timestamp_label(event_time, branding)
+        if '{timestamp}' in message:
+            return message.replace('{timestamp}', stamp)
+        if stamp in message or timestamp_label(event_time, branding, seconds=True) in message:
+            return message
+        return f'{message.rstrip()}\n{stamp}'
     stamp = event_time.strftime("%d %b %Y %H:%M UTC")
     if "{timestamp}" in message:
         return message.replace("{timestamp}", stamp)

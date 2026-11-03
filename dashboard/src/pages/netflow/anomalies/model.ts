@@ -1,3 +1,4 @@
+import { regionalInputMs } from '@/lib/regionalTime'
 /**
  * Detection findings: response shapes and the pure logic behind the Anomalies page and the
  * Network & Security dashboard (B5; NF-03, NF-07, NF-09, FE-06, CR-10, CR-11).
@@ -809,7 +810,7 @@ export function exceptionBody(d: {
   if (!d.reason.trim()) errors.reason = 'Say why this is approved'
   let expires: string | null = null
   if (d.expires.trim()) {
-    const ms = Date.parse(d.expires)
+    const ms = regionalInputMs(d.expires)
     if (!Number.isFinite(ms)) errors.expires = 'Not a date'
     else expires = new Date(ms).toISOString()
   }

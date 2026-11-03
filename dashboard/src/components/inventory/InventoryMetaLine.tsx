@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { Clock, RefreshCw, ShieldCheck } from 'lucide-react'
 import { serverNow } from '@/lib/serverClock'
 import { cn } from '@/lib/utils'
@@ -85,7 +86,7 @@ export function InventoryMetaLine({ summary, loading, failed, onRetry, scopeTags
           <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden />
           <span>
             Inventory as of{' '}
-            <time dateTime={summary.generated_at} title={new Date(summary.generated_at).toLocaleString()} className="font-medium text-text2">
+            <time dateTime={summary.generated_at} title={regionalDate(new Date(summary.generated_at), 'datetime')} className="font-medium text-text2">
               {asOfLabel(summary.generated_at, clock)}
             </time>
           </span>

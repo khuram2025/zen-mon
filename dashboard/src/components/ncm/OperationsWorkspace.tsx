@@ -21,7 +21,7 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
-import { absoluteUtc, categoryLabel, ncmError, TONE_BADGE, type Tone } from './model'
+import { absoluteTime, categoryLabel, ncmError, TONE_BADGE, type Tone } from './model'
 import { Ago, EmptyState, Kpi, Pagination, SectionError, ToneIcon } from './ui'
 
 // --------------------------------------------------------------------------- //
@@ -131,11 +131,11 @@ function Attempt({ run, index, final }: { run: any; index?: number; final?: bool
       <dl className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
         <div className="min-w-0">
           <dt className="text-muted">Started</dt>
-          <dd className="break-words">{absoluteUtc(run.started_at)} {run.started_at && <span className="text-muted">(<Ago iso={run.started_at} />)</span>}</dd>
+          <dd className="break-words">{absoluteTime(run.started_at)} {run.started_at && <span className="text-muted">(<Ago iso={run.started_at} />)</span>}</dd>
         </div>
         <div className="min-w-0">
           <dt className="text-muted">Finished</dt>
-          <dd className="break-words">{run.finished_at ? <>{absoluteUtc(run.finished_at)} <span className="text-muted">(<Ago iso={run.finished_at} />)</span></> : <span className="text-muted">not finished</span>}</dd>
+          <dd className="break-words">{run.finished_at ? <>{absoluteTime(run.finished_at)} <span className="text-muted">(<Ago iso={run.finished_at} />)</span></> : <span className="text-muted">not finished</span>}</dd>
         </div>
         <div className="min-w-0">
           <dt className="text-muted">Duration</dt>
@@ -167,9 +167,9 @@ function AttemptTimeline({ job }: { job: any }) {
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
         <span>Job {String(job.id).slice(0, 8)}</span>
         <span>Requested by {job.actor_name || 'system'}</span>
-        <span>Created {absoluteUtc(job.created_at)}</span>
-        {job.started_at && <span>Started {absoluteUtc(job.started_at)}</span>}
-        {job.finished_at && <span>Finished {absoluteUtc(job.finished_at)}</span>}
+        <span>Created {absoluteTime(job.created_at)}</span>
+        {job.started_at && <span>Started {absoluteTime(job.started_at)}</span>}
+        {job.finished_at && <span>Finished {absoluteTime(job.finished_at)}</span>}
         {job.cancel_requested && <span className="text-warning">Cancellation requested</span>}
       </div>
       {job.status === 'failed' && job.recommended_action && (
@@ -230,7 +230,7 @@ function JobsTable({ jobs, showDevice, onCancel, canCancel }: {
                 <Tr>
                   <Td className="p-1.5">
                     <Button variant="ghost" size="icon" className="h-8 w-8" aria-expanded={expanded}
-                      aria-label={`${expanded ? 'Hide' : 'Show'} attempts for job created ${absoluteUtc(j.created_at)}`}
+                      aria-label={`${expanded ? 'Hide' : 'Show'} attempts for job created ${absoluteTime(j.created_at)}`}
                       onClick={() => toggle(j.id)}>
                       {expanded ? <ChevronDown /> : <ChevronRight />}
                     </Button>

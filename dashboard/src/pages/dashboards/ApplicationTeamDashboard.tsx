@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Application team dashboard.
  *
@@ -516,12 +517,12 @@ function FleetChart({ data, dataKey, color, label, fmt }: {
               <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.5} strokeDasharray="3 3" vertical={false} />
               <XAxis
                 dataKey="timestamp" stroke="rgb(var(--muted))" fontSize={10} tickLine={false} axisLine={false} minTickGap={44}
-                tickFormatter={(t: string) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                tickFormatter={(t: string) => regionalDate(new Date(t), 'time', [], { hour: '2-digit', minute: '2-digit' })}
               />
               <YAxis stroke="rgb(var(--muted))" fontSize={10} tickLine={false} axisLine={false} width={46} tickFormatter={(v: number) => fmt(v)} />
               <Tooltip
                 contentStyle={chartTooltipStyle}
-                labelFormatter={(t) => new Date(String(t)).toLocaleString()}
+                labelFormatter={(t) => regionalDate(new Date(String(t)), 'datetime')}
                 formatter={(v: number | string) => [fmt(Number(v)), label]}
               />
               <Area type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2} fill={`url(#${gid})`} isAnimationActive={false} dot={false} activeDot={{ r: 3, fill: color }} />
