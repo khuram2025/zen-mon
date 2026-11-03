@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from app.api.v1 import settings, alert_engine
 from app.services import host_alert_service, ncm_delivery, sms_transport
 from app.services.alert_delivery_log import DeliveryRejected
+from pg_fixture import pg_cluster, pg_db  # noqa: F401
 
 
 @pytest.fixture
@@ -104,10 +105,10 @@ async def test_channel_rejection_is_failure_not_success(status, body, http_fixtu
 async def test_alert_and_ncm_reject_provider_200_failure(http_fixture):
     _, state = http_fixture
     state['body'] = {'Success': False}
-    for action in [lambda: alert_engine._send_sms(gateway(), '15550000001', 'test'),
-                   lambda: ncm_delivery.sms_send(gateway(), '15550000001', {'subject': 'test'})]:
-        with pytest.raises(DeliveryRejected):
-            await action()
+    with pytest.raises(DeliveryRejected):
+        await alert_engine._send_sms(gateway(), '15550000001', 'test')
+    with pytest.raises(sms_transport.SMSBatchError, match='0 accepted, 1 failed, 0 uncertain'):
+        await ncm_delivery.sms_send(gateway(), '15550000001', {'subject': 'test'})
 
 
 @pytest.mark.asyncio
@@ -191,12 +192,99 @@ def test_placeholder_values_are_not_recursively_substituted():
 
 
 @pytest.mark.asyncio
-async def test_gateway_selection_round_trip_real_postgres(http_fixture, monkeypatch):
-    """Opt-in disposable PostgreSQL only; includes encrypted config and typed lookup."""
-    import os
-    url = os.getenv('SMS_TEST_PG_URL')
-    if not url:
-        pytest.skip('SMS_TEST_PG_URL must point to a disposable database')
+@pytest.mark.parametrize('path', ['gateway', 'channel', 'alert', 'ncm'])
+async def test_multiple_numbers_are_separate_requests_on_every_path(path, http_fixture):
+    requests, _ = http_fixture
+    phones = '+15550000001; +1 (555) 000-0002\n+15550000001'
+    cfg = gateway()
+    if path == 'gateway':
+        result = await settings._do_sms_test(cfg, phones)
+        assert result['recipient_count'] == 2
+    elif path == 'channel':
+        ch, db = channel_db(cfg)
+        ch.config['phone_numbers'] = phones
+        result = await settings.test_channel(ch.id, db, NS())
+        assert result['recipient_count'] == 2
+    elif path == 'alert':
+        await alert_engine._send_sms(cfg, phones, 'Outage\n03 Nov 2026 14:00 UTC')
+    else:
+        await ncm_delivery.sms_send(cfg, phones, {'subject': 'NCM test'})
+    assert [parse_qs(r.content.decode())['Recipient'] for r in requests] == [
+        ['+15550000001'], ['+15550000002']]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('url,expected', [
+    ('https://basic.unifonic.com/rest/SMS/messages', '15550000001'),
+    ('https://el.cloud.unifonic.com/rest/SMS/messages', '15550000001'),
+    ('https://unifonic.com.attacker.invalid/send', '+15550000001'),
+])
+async def test_unifonic_uses_international_digits_without_changing_endpoint(url, expected, http_fixture):
+    requests, _ = http_fixture
+    await sms_transport.send_sms_request(gateway(api_url=url), {'recipients': '+15550000001'})
+    assert str(requests[0].url) == url
+    assert parse_qs(requests[0].content.decode())['Recipient'] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_get_preserves_literal_plus_in_phone_number(http_fixture):
+    requests, _ = http_fixture
+    await sms_transport.send_sms_request(gateway(http_method='GET'), {'recipients': '+15550000001'})
+    assert requests[0].url.params['Recipient'] == '+15550000001'
+
+
+@pytest.mark.asyncio
+async def test_invalid_recipient_list_sends_nothing(http_fixture):
+    requests, _ = http_fixture
+    with pytest.raises(ValueError, match='international phone number'):
+        await sms_transport.send_sms_request(gateway(), {'recipients': '+15550000001,invalid'})
+    assert not requests
+
+
+@pytest.mark.asyncio
+async def test_partial_failure_does_not_block_other_numbers_or_claim_success(monkeypatch):
+    sent = []
+    def handler(request):
+        phone = parse_qs(request.content.decode())['Recipient'][0]
+        sent.append(phone)
+        return httpx.Response(200, json={'Success': phone != '+15550000002', 'secret': 'private'})
+    monkeypatch.setattr(settings, 'NotificationHTTPClient',
+                        lambda **kw: httpx.AsyncClient(transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(HTTPException) as failure:
+        await settings._do_sms_test(gateway(), '+15550000001,+15550000002,+15550000003')
+    assert failure.value.status_code == 502
+    assert failure.value.detail == 'SMS provider results: 2 accepted, 1 failed, 0 uncertain'
+    assert sent == ['+15550000001', '+15550000002', '+15550000003']
+
+
+@pytest.mark.asyncio
+async def test_ncm_partial_retry_skips_previously_accepted_and_uncertain(monkeypatch):
+    sent = []
+    failures = {'+15550000002'}
+    def handler(request):
+        phone = parse_qs(request.content.decode())['Recipient'][0]
+        sent.append(phone)
+        return httpx.Response(200, json={'Success': phone not in failures})
+    monkeypatch.setattr(ncm_delivery, 'NotificationHTTPClient',
+                        lambda **kw: httpx.AsyncClient(transport=httpx.MockTransport(handler), **kw))
+    payload = {'subject': 'NCM test'}
+    with pytest.raises(sms_transport.SMSBatchError) as failure:
+        await ncm_delivery.sms_send(gateway(), '+15550000001,+15550000002', payload)
+    payload['_sms_delivery_outcomes'] = {o['recipient']: o['outcome'] for o in failure.value.outcomes
+                                        if o['outcome'] in ('accepted', 'uncertain')}
+    failures.clear()
+    await ncm_delivery.sms_send(gateway(), '+15550000001,+15550000002', payload)
+    assert sent == ['+15550000001', '+15550000002', '+15550000002']
+    payload['_sms_delivery_outcomes']['+15550000002'] = 'uncertain'
+    with pytest.raises(sms_transport.SMSBatchError, match='1 accepted, 0 failed, 1 uncertain'):
+        await ncm_delivery.sms_send(gateway(), '+15550000001,+15550000002', payload)
+    assert len(sent) == 3
+
+
+@pytest.mark.asyncio
+async def test_gateway_selection_round_trip_real_postgres(http_fixture, monkeypatch, pg_db):
+    """Disposable PostgreSQL only; includes encrypted config and typed lookup."""
+    url = pg_db.url
     import json
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession

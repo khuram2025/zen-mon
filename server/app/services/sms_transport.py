@@ -3,10 +3,38 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, urlsplit
 
 from app.services.alert_delivery_log import DeliveryRejected
 from app.services.notification_transport import NotificationHTTPClient
+
+
+def sms_recipients(raw) -> list[str]:
+    """Normalize destination lists before substituting a single-recipient API."""
+    items = raw if isinstance(raw, (list, tuple)) else re.split(r'[,;\r\n]+', str(raw or ''))
+    recipients = []
+    for item in items:
+        phone = re.sub(r'[\s().-]', '', str(item or ''))
+        if not phone:
+            continue
+        if not re.fullmatch(r'\+?[0-9]+', phone):
+            raise ValueError('SMS gateway recipient must be an international phone number')
+        if phone not in recipients:
+            recipients.append(phone)
+    if not recipients:
+        raise ValueError('A recipient phone number is required')
+    return recipients
+
+
+class SMSBatchError(Exception):
+    """Safe summary plus per-recipient outcomes for callers retaining progress."""
+
+    def __init__(self, outcomes):
+        self.outcomes = outcomes
+        counts = {state: sum(o['outcome'] == state for o in outcomes)
+                  for state in ('accepted', 'failed', 'uncertain')}
+        super().__init__(f"SMS provider results: {counts['accepted']} accepted, "
+                         f"{counts['failed']} failed, {counts['uncertain']} uncertain")
 
 
 def fill_template(template: str, values: dict, *, is_get: bool,
@@ -18,8 +46,7 @@ def fill_template(template: str, values: dict, *, is_get: bool,
             return match.group(0)
         rendered = str(values[key])
         if is_get:
-            # Keep existing multi-recipient GET conventions compatible.
-            rendered = quote(rendered, safe=',+') if key == 'recipients' else quote(rendered, safe='')
+            rendered = quote(rendered, safe='')
         elif media_type == 'application/x-www-form-urlencoded':
             rendered = quote_plus(rendered, safe='')
         elif media_type == 'application/json':
@@ -46,12 +73,45 @@ def ensure_sms_accepted(response) -> None:
 
 
 async def send_sms_request(config: dict, values: dict, *, client_factory=None):
+    """Deliver separately to every number; never pass a list as one number.
+
+    Continue after an individual failure, but report success only if all
+    recipients were accepted. Callers with durable delivery keys send one
+    recipient at a time so partial successes survive a retry/restart.
+    """
+    from app.services.alert_delivery_log import outcome_for_exception
+
+    recipients = sms_recipients(values.get('recipients'))
+    outcomes = []
+    response = None
+    for recipient in recipients:
+        try:
+            response = await _send_one_sms_request(
+                config, {**values, 'recipients': recipient}, client_factory=client_factory)
+            outcomes.append({'recipient': recipient, 'outcome': 'accepted'})
+        except Exception as exc:
+            if len(recipients) == 1:
+                raise
+            outcomes.append({'recipient': recipient, 'outcome': outcome_for_exception(exc)})
+    if any(o['outcome'] != 'accepted' for o in outcomes):
+        raise SMSBatchError(outcomes)
+    response.extensions['sms_recipient_count'] = len(recipients)
+    return response
+
+
+async def _send_one_sms_request(config: dict, values: dict, *, client_factory=None):
     if config.get('provider', 'custom_http') != 'custom_http':
         raise ValueError('This SMS provider does not support sending yet')
     if not config.get('api_url'):
         raise ValueError('SMS gateway API URL is not configured')
     if not str(values.get('recipients') or '').strip():
         raise ValueError('A recipient phone number is required')
+    # Unifonic requires international digits without '+' or '00'. Keep the
+    # configured endpoint and credentials; no implicit bulk API/host switch.
+    host = (urlsplit(config['api_url']).hostname or '').lower()
+    if host == 'unifonic.com' or host.endswith('.unifonic.com'):
+        phone = values['recipients'].removeprefix('+')
+        values = {**values, 'recipients': phone.removeprefix('00')}
     method = str(config.get('http_method') or 'GET').upper()
     if method not in ('GET', 'POST'):
         raise ValueError('SMS gateway method must be GET or POST')

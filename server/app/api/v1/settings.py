@@ -1,5 +1,5 @@
 from app.services.notification_transport import NotificationHTTPClient
-from app.services.sms_transport import send_sms_request
+from app.services.sms_transport import send_sms_request, SMSBatchError
 from app.services.alert_delivery_log import DeliveryRejected
 from app.core.crypto import encrypt_config, decrypt_config
 import ssl
@@ -770,7 +770,7 @@ async def _do_sms_test(raw_config: dict, recipient: str) -> dict:
             'sender': config.sender_name or 'ZenPlus',
             'hostname': 'test-device', 'ip_address': '0.0.0.0', 'status': 'TEST',
         }, client_factory=NotificationHTTPClient)
-    except DeliveryRejected as exc:
+    except (DeliveryRejected, SMSBatchError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     except ValueError as exc:
         # Only locally generated validation messages are exposed.
@@ -778,7 +778,9 @@ async def _do_sms_test(raw_config: dict, recipient: str) -> dict:
         raise HTTPException(status_code=400, detail=detail) from None
     except Exception:
         raise HTTPException(status_code=502, detail='SMS gateway connection failed') from None
-    return {'message': 'SMS test accepted by the provider', 'status_code': response.status_code}
+    count = response.extensions.get('sms_recipient_count', 1)
+    return {'message': f'SMS test accepted by the provider for {count} recipient(s)',
+            'status_code': response.status_code, 'recipient_count': count}
 
 
 async def _clear_default_gateways(db: AsyncSession, gateway_type: str, keep_id=None) -> None:

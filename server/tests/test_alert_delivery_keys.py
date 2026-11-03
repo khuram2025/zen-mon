@@ -180,6 +180,84 @@ async def test_a_definite_failure_may_be_retried(world):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('error', [dl.DeliveryRejected('provider rejected'), TimeoutError('timeout')])
+async def test_sms_recipient_results_survive_partial_failure_and_restart(world, monkeypatch, error):
+    w = world
+    w.db.execute("INSERT INTO notification_gateways (name,type,config,is_default,enabled)"
+                 " VALUES ('sms','sms',$1::jsonb,true,true)",
+                 {'provider': 'custom_http', 'api_url': 'https://sms.fixture.invalid/send'})
+    channel = str(w.db.scalar("INSERT INTO notification_channels (name,type,config)"
+                              " VALUES ('phones','sms',$1::jsonb) RETURNING id",
+                              {'phone_numbers': '+15550000001,+15550000002,+15550000003'}))
+    sent = []
+    fail = True
+    async def send_sms(gw, phone, message, values=None):
+        sent.append(phone)
+        if fail and phone == '+15550000002':
+            raise error
+        return True
+    monkeypatch.setattr(alert_engine, '_send_sms', send_sms)
+    aid = w.alert()
+    await dispatch(w, [channel], ctx(aid))
+    assert sent == ['+15550000001', '+15550000002', '+15550000003']
+    assert {r[2]: r[3] for r in keys(w, aid)} == {
+        '+15550000001': 'accepted', '+15550000002': dl.outcome_for_exception(error),
+        '+15550000003': 'accepted'}
+    fail = False
+    dl.reset_for_tests()  # durable keys still prevent repeats after process restart
+    await dispatch(w, [channel], ctx(aid))
+    assert sent == ['+15550000001', '+15550000002', '+15550000003'] + (
+        ['+15550000002'] if isinstance(error, dl.DeliveryRejected) else [])
+    await dispatch(w, [channel], ctx(aid, 'recovery', is_recovery=True))
+    assert sent[-3:] == ['+15550000001', '+15550000002', '+15550000003']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('uncertain', [False, True])
+async def test_ncm_sms_outbox_persists_partial_progress(world, monkeypatch, uncertain):
+    import httpx
+    from urllib.parse import parse_qs
+    from app.services import ncm_delivery, ncm_events
+    w = world
+    cfg = {'provider': 'custom_http', 'api_url': 'https://sms.fixture.invalid/send',
+           'http_method': 'POST', 'content_type': 'application/x-www-form-urlencoded',
+           'request_template': 'Recipient={recipients}&Body={message}'}
+    w.db.execute("INSERT INTO notification_gateways (name,type,config,is_default,enabled)"
+                 " VALUES ('sms','sms',$1::jsonb,true,true)", cfg)
+    channel = w.db.scalar("INSERT INTO notification_channels (name,type,config)"
+                          " VALUES ('phones','sms',$1::jsonb) RETURNING id",
+                          {'phone_numbers': '+15550000001,+15550000002'})
+    device = w.db.scalar("INSERT INTO devices (hostname,ip_address) VALUES ('fixture','192.0.2.1') RETURNING id")
+    outbox = w.db.scalar("INSERT INTO ncm_notification_outbox (device_id,event_key,channel_id,payload)"
+                         " VALUES ($1,'sms-fixture',$2,$3::jsonb) RETURNING id",
+                         device, channel, {'subject': 'NCM test'})
+    sent = []
+    failing = True
+    def handler(request):
+        phone = parse_qs(request.content.decode())['Recipient'][0]
+        sent.append(phone)
+        bad = failing and phone == '+15550000002'
+        if bad and uncertain:
+            raise httpx.ReadTimeout('fixture timeout', request=request)
+        return httpx.Response(200, json={'Success': not bad})
+    monkeypatch.setattr(ncm_delivery, 'NotificationHTTPClient',
+                        lambda **kw: httpx.AsyncClient(transport=httpx.MockTransport(handler), **kw))
+    async with session(w.db) as s:
+        result = await ncm_events.deliver_due(s)
+    assert result == {'processed': 1, 'delivered': 0}
+    assert sent == ['+15550000001', '+15550000002']
+    [(status, payload)] = w.db.query('SELECT status,payload FROM ncm_notification_outbox WHERE id=$1', outbox)
+    assert payload['_sms_delivery_outcomes']['+15550000001'] == 'accepted'
+    assert status == ('failed' if uncertain else 'pending')
+    failing = False
+    w.db.execute('UPDATE ncm_notification_outbox SET next_attempt_at=now() WHERE id=$1', outbox)
+    async with session(w.db) as s:
+        result = await ncm_events.deliver_due(s)
+    assert result['delivered'] == (0 if uncertain else 1)
+    assert sent == ['+15550000001', '+15550000002'] + ([] if uncertain else ['+15550000002'])
+
+
+@pytest.mark.asyncio
 async def test_a_genuine_new_event_is_sent(world):
     w = world
     first = w.alert()

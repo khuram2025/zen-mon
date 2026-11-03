@@ -209,7 +209,7 @@ def _recipients(raw, kind: str) -> list[tuple[str, str]]:
     ignore spacing and punctuation."""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
-    items = raw if isinstance(raw, (list, tuple)) else str(raw or "").replace(";", ",").split(",")
+    items = raw if isinstance(raw, (list, tuple)) else re.split(r"[,;\r\n]+", str(raw or ""))
     for item in items:
         addr = str(item or "").strip()
         if not addr:
@@ -517,18 +517,30 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                 targets = await route.gated(targets)
                 if not targets:
                     continue
+                if ch.type == "sms":
+                    # Each phone gets its own claim/outcome. A failed phone
+                    # must not roll back a successful phone or prevent later
+                    # recipients from being attempted.
+                    for target in targets:
+                        phone_route = _Route(ch_id, ch_id, name=ch.name, ctype=ch.type)
+                        try:
+                            fresh, already = await phone_route.claim([target])
+                            if not fresh:
+                                if already:
+                                    credited.add(ch_id)
+                                await phone_route.log("skipped", "duplicate: already delivered for this event")
+                                continue
+                            await phone_route.send_addresses(gw, "sms", target[1], fresh)
+                        except Exception as exc:
+                            await phone_route.failed(exc)
+                    continue
                 targets, already = await route.claim(targets)
                 if not targets:
                     if already:
                         credited.add(ch_id)
                     await route.log("skipped", "duplicate: already delivered for this event")
                     continue
-                if ch.type == "email":
-                    rcpt = ", ".join(a for _, a in targets)
-                elif len(targets) == len(listed) and only is None and isinstance(cfg.get(field), str):
-                    rcpt = cfg[field]     # SMS gateways substitute the list verbatim
-                else:
-                    rcpt = ",".join(a for _, a in targets)
+                rcpt = ", ".join(a for _, a in targets)
                 await route.send_addresses(gw, ch.type, rcpt, targets)
             elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
                 if not await route.gated([("", "")]):
