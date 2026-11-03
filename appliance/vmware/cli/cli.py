@@ -32,9 +32,9 @@ CONFIG_COMMANDS = ['interface','ip address dhcp','ip address','ip gateway','ip d
                    'rollback','show candidate-config','show interfaces','exit','end','help']
 
 
-def run(args, timeout=60, check=True, stdin=None):
+def run(args, timeout=60, check=True, stdin=None, cwd=None):
     p = subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=timeout,
-                       env=dict(os.environ, LC_ALL='C'))
+                       env=dict(os.environ, LC_ALL='C'), cwd=cwd)
     if check and p.returncode:
         raise ValueError('Operation failed; inspect service health and system log')
     return p.stdout.strip()
@@ -339,7 +339,7 @@ class CLI:
         elif command=='updates apply':
             self.require_setup()
             self.confirm('Install the currently eligible required upgrade path now? Services will restart, even outside the automatic maintenance window.')
-            display(run(['/opt/zenplus/venv/bin/python','-B','-m','updater','--install-latest'], timeout=1800))
+            display(run(['/opt/zenplus/venv/bin/python','-B','-m','updater','--install-latest'], timeout=1800, cwd='/opt/zenplus'))
             print('Updater finished; use show updates to inspect its result.')
         elif command in ('system reboot','system shutdown'):
             self.confirm(command+'?')
@@ -400,12 +400,15 @@ class CLI:
 
     def check_updates(self):
         # Trusted shipped updater, no URL/version/path supplied by the operator.
-        p=subprocess.run(['/opt/zenplus/venv/bin/python','-m','updater','--check'],
+        p=subprocess.run(['/opt/zenplus/venv/bin/python','-B','-m','updater','--plan'],
                          cwd='/opt/zenplus',text=True,capture_output=True,timeout=180,
                          env=dict(os.environ,PYTHONPATH='/opt/zenplus'))
         if p.returncode:
             raise ValueError('Update check failed; registration may be required. Use show updates.')
-        return 'Signed update check finished. No update was applied.'
+        result=json.loads(p.stdout)
+        versions=[result['from_version']]+[step['version'] for step in result['steps']]
+        return ('Eligible upgrade path: '+ ' → '.join('v'+v for v in versions) if result['steps']
+                else 'No eligible updates available.') + '\nNo update was installed.'
 
     def show(self, what):
         if what=='version':

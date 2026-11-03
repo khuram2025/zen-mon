@@ -122,6 +122,19 @@ class ParserTests(unittest.TestCase):
             run.assert_called_once_with(['/usr/bin/systemctl','restart','zenplus-api'])
     def test_no_command_history(self):
         self.assertEqual(cli.readline.get_current_history_length(),0)
+    def test_manual_install_uses_fixed_appliance_working_directory(self):
+        self.cli.execute('enable')
+        proc=unittest.mock.Mock(returncode=0,stdout='completed')
+        with patch.object(self.cli,'require_setup'),patch.object(cli,'read',return_value='CONFIRM'),patch.object(cli.subprocess,'run',return_value=proc) as run:
+            self.cli.execute('updates apply')
+            self.assertEqual(run.call_args.args[0],['/opt/zenplus/venv/bin/python','-B','-m','updater','--install-latest'])
+            self.assertEqual(run.call_args.kwargs['cwd'],'/opt/zenplus')
+    def test_check_displays_path_without_installing(self):
+        proc=unittest.mock.Mock(returncode=0,stdout=json.dumps({'from_version':'1.24.45','steps':[{'version':'1.24.46'},{'version':'1.24.48'}]}))
+        with patch.object(cli.subprocess,'run',return_value=proc) as run:
+            self.assertIn('v1.24.45 → v1.24.46 → v1.24.48',self.cli.check_updates())
+            self.assertEqual(run.call_args.args[0][-1],'--plan')
+            self.assertEqual(run.call_args.kwargs['cwd'],'/opt/zenplus')
     def test_certificate_fingerprint_uses_public_fixed_certificate(self):
         with patch.object(cli,'run',return_value='SHA256 Fingerprint=fixture') as run:
             self.cli.execute('show certificate')
