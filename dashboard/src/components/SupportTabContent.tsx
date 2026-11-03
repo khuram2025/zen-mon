@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -691,7 +692,7 @@ function formatBytes(n: number): string {
 function formatTime(ts: string | null): string {
   if (!ts) return '—'
   try {
-    return new Date(ts).toLocaleString()
+    return regionalDate(new Date(ts), 'datetime')
   } catch {
     return ts
   }

@@ -11,14 +11,14 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { build } from 'esbuild'
-import { transformWithEsbuild } from 'vite'
 
 process.env.TZ = 'UTC'
 const root = process.cwd()
 
-const src = fs.readFileSync('src/components/devices/deviceStatus.ts', 'utf8')
-const compiled = await transformWithEsbuild(src, 'deviceStatus.ts', { loader: 'ts', format: 'esm' })
-const S = await import(`data:text/javascript;base64,${Buffer.from(compiled.code).toString('base64')}`)
+const compiled = await build({ entryPoints: ['src/components/devices/deviceStatus.ts'],
+  bundle: true, write: false, format: 'esm', platform: 'browser',
+  alias: { '@': path.resolve('src') }, define: { 'process.env.NODE_ENV': '"production"' } })
+const S = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`)
 const vectors = JSON.parse(fs.readFileSync(path.join(root, '..', 'scripts/dev/device-status-contract/vectors.json'), 'utf8'))
 const utc = (ms) => new Date(ms).toISOString().slice(11, 16)
 const T0 = Date.parse('2026-10-14T12:00:00Z')

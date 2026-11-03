@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useState } from 'react'
 import { useLocation, useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -174,7 +175,7 @@ export function TraceWaterfallPage() {
               <div className="space-y-1 font-mono text-xs">
                 {(logs.data?.items ?? []).map((line, i) => (
                   <div key={`${line.span_id}-${i}`} className="grid grid-cols-[9rem_7rem_1fr] gap-2 rounded px-2 py-1 hover:bg-surface2">
-                    <span className="text-muted">{line.timestamp ? new Date(line.timestamp).toLocaleTimeString() : '—'}</span>
+                    <span className="text-muted">{line.timestamp ? regionalDate(new Date(line.timestamp), 'time') : '—'}</span>
                     <span className={line.level === 'error' ? 'text-[#ef4444]' : 'text-muted'}>{line.source}</span>
                     <span>
                       <span className="text-text2">{line.service_name} </span>

@@ -1,3 +1,5 @@
+import { regionalInput, regionalInputMs } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * On-call: schedules (layers rotate ordered members every shift length from a
  * handoff, optionally restricted to days/hours, in the schedule's IANA time
@@ -226,7 +228,7 @@ export function ShiftTimeline({ shifts, from, to, tz, now }: { shifts: Shift[]; 
           <div className="relative ml-28 h-5 border-b border-border text-2xs text-muted">
             {ticks.map((t) => (
               <span key={t.at} className="absolute top-0 -translate-x-0 whitespace-nowrap pl-0.5" style={{ left: `${t.leftPct}%` }}>
-                {new Date(t.at).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' })}
+                {regionalDate(new Date(t.at), 'date', 'en-GB', { weekday: 'short', day: 'numeric' })}
               </span>
             ))}
           </div>
@@ -270,8 +272,7 @@ export function ShiftTimeline({ shifts, from, to, tz, now }: { shifts: Shift[]; 
 
 function toLocalInput(ms: number): string {
   const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return regionalInput(d)
 }
 
 function OverridesCard({ s, canManage, nameOf, users }: { s: OncallSchedule; canManage: boolean; nameOf: (id: string) => string; users: Array<{ id: string; name: string }> }) {
@@ -280,8 +281,8 @@ function OverridesCard({ s, canManage, nameOf, users }: { s: OncallSchedule; can
   const [start, setStart] = useState(() => toLocalInput(Date.now()))
   const [end, setEnd] = useState(() => toLocalInput(Date.now() + 8 * 3600_000))
   const [reason, setReason] = useState('')
-  const startMs = Date.parse(start)
-  const endMs = Date.parse(end)
+  const startMs = regionalInputMs(start)
+  const endMs = regionalInputMs(end)
   const invalid = !userId ? 'Choose who covers' : !(endMs > startMs) ? 'The end must be after the start' : null
   const refresh = () => qc.invalidateQueries({ queryKey: ['escalation'] })
 

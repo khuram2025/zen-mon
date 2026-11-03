@@ -1,3 +1,5 @@
+import { regionalTimezone } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 /* Shared definitions for the Services list page (Services review B20–B23,
    UI 1/8/9 and the list features). Types for fields added by the services
    review contract are optional: an older appliance omits them and the list
@@ -117,7 +119,7 @@ export function clientSort(rows: ListRow[], sort: string, nowMs: number): ListRo
 export function formatExact(iso: string | null | undefined): string {
   const t = parseUtc(iso)
   if (t == null) return 'never'
-  return new Date(t).toLocaleString(undefined, {
+  return regionalDate(new Date(t), 'datetime', undefined, {
     year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
   })
 }
@@ -187,5 +189,5 @@ export function isRouteMissing(e: any): boolean {
 }
 
 export function browserTimezone(): string {
-  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } catch { return 'UTC' }
+  return regionalTimezone()
 }

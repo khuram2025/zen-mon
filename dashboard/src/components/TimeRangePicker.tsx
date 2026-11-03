@@ -1,3 +1,8 @@
+import { regionalInputMs } from '@/lib/regionalTime'
+import { periodRange } from '@/features/reports/periods'
+import { toZonedInput } from '@/features/reports/viewer/range'
+import { regionalTimezone, regionalZoneLabel } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 import { useEffect, useId, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Clock } from 'lucide-react'
@@ -11,7 +16,7 @@ export const TIME_RANGE_OPTIONS = [
 ] as const
 
 /**
- * Calendar-anchored presets (browser timezone). Opt-in per page through
+ * Calendar-anchored presets (configured timezone). Opt-in per page through
  * `TimeRangePicker calendarPresets`; `useTimeRange` resolves them for any
  * page so a shared link keeps its period.
  */
@@ -26,18 +31,8 @@ export type CalendarRangeKey = typeof CALENDAR_RANGE_OPTIONS[number]['key']
 export type TimeRangeKey = typeof TIME_RANGE_OPTIONS[number]['key'] | CalendarRangeKey | 'custom'
 
 function calendarBounds(key: CalendarRangeKey, nowMs: number): { from: Date; to: Date } {
-  const now = new Date(nowMs)
-  if (key === 'month') {
-    return { from: new Date(now.getFullYear(), now.getMonth(), 1), to: now }
-  }
-  if (key === 'last_month') {
-    return {
-      from: new Date(now.getFullYear(), now.getMonth() - 1, 1),
-      to: new Date(now.getFullYear(), now.getMonth(), 1),
-    }
-  }
-  const quarterStart = Math.floor(now.getMonth() / 3) * 3
-  return { from: new Date(now.getFullYear(), quarterStart, 1), to: now }
+  const period = key === 'month' ? 'month_to_date' : key === 'last_month' ? 'previous_month' : 'quarter_to_date'
+  return periodRange(period, regionalTimezone(), 'monday', new Date(nowMs))
 }
 
 function isCalendarKey(key: string | null): key is CalendarRangeKey {
@@ -54,15 +49,12 @@ export function isValidRange(from: string | null | undefined, to: string | null 
 
 /** A date with the month spelled out ("27 Oct 2026, 15:21"), so a day/month mix-up is visible. */
 export function longDateTime(ms: number): string {
-  return new Date(ms).toLocaleString([], { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  return regionalDate(new Date(ms), 'datetime', [], { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
-/** A datetime-local input value ("2026-10-27T15:21") for an instant, in browser time. */
+/** A datetime-local input value ("2026-10-27T15:21") for an instant, in configured time. */
 export function toLocalInput(ms: number): string {
-  const d = new Date(ms)
-  if (Number.isNaN(d.getTime())) return ''
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return Number.isFinite(ms) ? toZonedInput(new Date(ms), regionalTimezone()) : ''
 }
 
 export type CustomRangeCheck =
@@ -78,8 +70,8 @@ export function checkCustomRange(fromInput: string, toInput: string, nowMs: numb
   if (!fromInput && !toInput) return { ok: false, field: 'both', message: 'Enter a start and an end time.' }
   if (!fromInput) return { ok: false, field: 'from', message: 'Enter a start time.' }
   if (!toInput) return { ok: false, field: 'to', message: 'Enter an end time.' }
-  const from = new Date(fromInput).getTime()
-  const to = new Date(toInput).getTime()
+  const from = regionalInputMs(fromInput)
+  const to = regionalInputMs(toInput)
   if (Number.isNaN(from)) return { ok: false, field: 'from', message: 'The start time is not a valid date.' }
   if (Number.isNaN(to)) return { ok: false, field: 'to', message: 'The end time is not a valid date.' }
   if (from >= to) return { ok: false, field: 'both', message: 'The end time must be after the start time.' }
@@ -90,17 +82,9 @@ export function checkCustomRange(fromInput: string, toInput: string, nowMs: numb
   return { ok: true, fromISO: new Date(from).toISOString(), toISO: new Date(end).toISOString(), clipped: end < to }
 }
 
-/** The browser timezone shown next to custom inputs, e.g. "Asia/Riyadh (UTC+03:00)". */
+/** The configured timezone shown next to custom inputs, e.g. "Asia/Riyadh (UTC+03:00)". */
 export function timezoneLabel(at: number = Date.now()): string {
-  let zone = 'local time'
-  try {
-    zone = Intl.DateTimeFormat().resolvedOptions().timeZone || zone
-  } catch { /* older engines */ }
-  const off = -new Date(at).getTimezoneOffset()
-  const abs = Math.abs(off)
-  const hh = String(Math.floor(abs / 60)).padStart(2, '0')
-  const mm = String(abs % 60).padStart(2, '0')
-  return `${zone} (UTC${off >= 0 ? '+' : '-'}${hh}:${mm})`
+  return `${regionalTimezone()} (${regionalZoneLabel(at)})`
 }
 
 /**
@@ -202,7 +186,7 @@ export function useTimeRange(): {
     ? Math.max(1, Math.round((Date.parse(toISO) - Date.parse(fromISO)) / 3_600_000))
     : TIME_RANGE_OPTIONS[idx].hours
   const label = isCustom
-    ? `${new Date(fromISO).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} → ${new Date(toISO).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}`
+    ? `${regionalDate(new Date(fromISO), 'datetime', [], { dateStyle: 'short', timeStyle: 'short' })} → ${regionalDate(new Date(toISO), 'datetime', [], { dateStyle: 'short', timeStyle: 'short' })}`
     : calendarKey
       ? CALENDAR_RANGE_OPTIONS.find((option) => option.key === calendarKey)!.label
       : `Last ${TIME_RANGE_OPTIONS[idx].label}`

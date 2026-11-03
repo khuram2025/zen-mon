@@ -4,13 +4,13 @@ import { relativeTime, cn } from '@/lib/utils'
 import { clockOffsetMs, subscribeClock } from '@/lib/serverClock'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
-import { absoluteLocal, absoluteUtc, stateOf, TONE_BADGE, TONE_TEXT, type Tone } from './model'
+import { absoluteTime, stateOf, TONE_BADGE, TONE_TEXT, type Tone } from './model'
 
 /** Relative age on the appliance clock with the absolute time on hover/focus. */
 export function Ago({ iso, prefix = '', empty = 'never', className }: { iso?: string | null; prefix?: string; empty?: string; className?: string }) {
   useClockOffset()
   if (!iso) return <span className={cn('text-muted', className)}>{empty}</span>
-  const title = `${absoluteUtc(iso)} (appliance) · ${absoluteLocal(iso)} (your time)`
+  const title = absoluteTime(iso)
   return <time dateTime={iso} title={title} className={className}>{prefix}{relativeTime(iso)}</time>
 }
 

@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Overview: is this server OK, and if not, what needs attention first.
  *
  *  Problems lead (each links to the tab that explains it), then the last
@@ -305,7 +306,7 @@ export function OverviewTab({
               ['Processor', server.cpu_model || '—'],
               ['Cores', server.cpu_cores ? `${server.cpu_cores} logical${server.cpu_physical_cores ? ` · ${server.cpu_physical_cores} physical` : ''}` : '—'],
               ['Memory', server.memory_total_bytes ? formatBytes(server.memory_total_bytes) : '—'],
-              ['Uptime', server.boot_time ? `${formatUptime(server.boot_time)} · since ${new Date(server.boot_time).toLocaleDateString()}` : '—'],
+              ['Uptime', server.boot_time ? `${formatUptime(server.boot_time)} · since ${regionalDate(new Date(server.boot_time), 'date')}` : '—'],
               server.fqdn ? ['FQDN', server.fqdn] : null,
             ]}
           />

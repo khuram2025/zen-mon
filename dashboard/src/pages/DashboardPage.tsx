@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /* ZenPlus — Network Operations Overview
  *
  * The home dashboard, rebuilt around REAL telemetry only:
@@ -290,8 +291,8 @@ export function DashboardPage() {
 
   const chartData = useMemo(() => {
     const fmt = range.minutes <= 1440
-      ? (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : (d: Date) => d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      ? (d: Date) => regionalDate(d, 'time', [], { hour: '2-digit', minute: '2-digit' })
+      : (d: Date) => regionalDate(d, 'date', [], { month: 'short', day: 'numeric' })
     return (nfSeries || []).map((p) => ({ t: fmt(new Date(p.ts)), mbps: p.bps / 1_000_000, flows: p.flows }))
   }, [nfSeries, range.minutes])
 
@@ -963,7 +964,7 @@ function LiveClock() {
   }, [])
   return (
     <span className="hidden rounded-md border border-border bg-surface2/60 px-2.5 py-1 font-mono text-xs font-semibold tabular-nums text-text2 md:inline-block">
-      {now.toLocaleTimeString([], { hour12: false })}
+      {regionalDate(now, 'time', [], { hour12: false })}
     </span>
   )
 }

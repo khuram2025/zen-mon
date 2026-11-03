@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Identity, health and live resources of one server.
  *
  *  Answers "what is this host and is it OK?" before any tab is opened: name
@@ -189,11 +190,11 @@ export function ServerHeader({
                     </>
                   ) : 'No agent'}
                 </button>
-                <span className="inline-flex items-center gap-1.5 text-muted" title={server.boot_time ? `Booted ${new Date(server.boot_time).toLocaleString()}` : undefined}>
+                <span className="inline-flex items-center gap-1.5 text-muted" title={server.boot_time ? `Booted ${regionalDate(new Date(server.boot_time), 'datetime')}` : undefined}>
                   <Clock3 className="h-3.5 w-3.5" />
                   {server.boot_time ? `Up ${formatUptime(server.boot_time)}` : 'Uptime unknown'}
                 </span>
-                <span className="inline-flex items-center gap-1.5 text-muted" title={server.last_seen ? new Date(server.last_seen).toLocaleString() : undefined}>
+                <span className="inline-flex items-center gap-1.5 text-muted" title={server.last_seen ? regionalDate(new Date(server.last_seen), 'datetime') : undefined}>
                   <RefreshCw className="h-3.5 w-3.5" />
                   Seen {relativeTime(server.last_seen)}
                 </span>

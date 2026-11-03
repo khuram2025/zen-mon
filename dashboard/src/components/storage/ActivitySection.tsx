@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { Activity, Loader2 } from 'lucide-react'
 import { cn, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -55,7 +56,7 @@ export function ActivitySection() {
                       by {e.actor === 'watchdog' || e.actor === 'system' ? 'Automatic protection' : e.actor}
                     </span>
                   </div>
-                  <span className="shrink-0 tabular-nums text-muted" title={new Date(e.created_at).toLocaleString()}>
+                  <span className="shrink-0 tabular-nums text-muted" title={regionalDate(new Date(e.created_at), 'datetime')}>
                     {count > 1 ? `${relativeTime(oldest)} – ${relativeTime(e.created_at)}` : relativeTime(e.created_at)}
                   </span>
                 </li>

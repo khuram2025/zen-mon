@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { AlertTriangle, CheckCircle2, Hourglass, Info, Waves } from 'lucide-react'
@@ -73,7 +74,7 @@ export function DeviceStatusExplanation({ deviceId, compact = false }: { deviceI
     </ul>
     {view.flapLimit && <p className="mt-2 text-xs text-warning">{view.flapLimit}</p>}
     {latest ? <div className="mt-3 rounded-lg border border-border bg-surface2/30 p-3">
-      <div className="mb-2 text-xs text-muted">Latest check · {data.source} · {relativeTime(latest.timestamp)} · {new Date(latest.timestamp).toLocaleString()}</div>
+      <div className="mb-2 text-xs text-muted">Latest check · {data.source} · {relativeTime(latest.timestamp)} · {regionalDate(new Date(latest.timestamp), 'datetime')}</div>
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
         <span>Latency <b>{latest.is_up ? `${number(latest.rtt_ms)} ms` : 'No response'}</b> <span className="text-xs text-muted">({limitText('latency', data)})</span></span>
         <span>Packet loss <b>{number(latest.packet_loss_pct)}%</b> <span className="text-xs text-muted">({limitText('loss', data)})</span></span>
@@ -85,12 +86,12 @@ export function DeviceStatusExplanation({ deviceId, compact = false }: { deviceI
       </div>
     </div> : <p className="mt-3 text-xs text-muted">No recent ping sample is available from the owning monitor.</p>}
     {recent && <details className="mt-3" open={data.status === 'degraded' || undefined}>
-      <summary className="cursor-pointer text-xs font-semibold">Most recent degraded event · {new Date(recent.timestamp).toLocaleString()}{recent.recovered_at ? ' · Recovered' : ''}</summary>
+      <summary className="cursor-pointer text-xs font-semibold">Most recent degraded event · {regionalDate(new Date(recent.timestamp), 'datetime')}{recent.recovered_at ? ' · Recovered' : ''}</summary>
       <div className="mt-2 space-y-2 border-l-2 border-warning/40 pl-3 text-xs">
         {recent.sample && recent.thresholds_unchanged && recent.sample.breaches.length ? <><Breaches sample={recent.sample} /><p className="text-muted">Check recorded near the transition: latency {number(recent.sample.rtt_ms)} ms; packet loss {number(recent.sample.packet_loss_pct)}%.</p></> : null}
         <p className={recent.sample && recent.thresholds_unchanged && recent.sample.breaches.length ? 'text-muted' : undefined}>{recent.reason}</p>
         {!recent.thresholds_unchanged && <p className="text-muted">Threshold settings have changed since this event. Current limits are not used to explain the historical change.</p>}
-        {recent.recovered_at && <p className="text-success">Recovered {new Date(recent.recovered_at).toLocaleString()} · lasted {Math.round((Date.parse(recent.recovered_at)-Date.parse(recent.timestamp))/1000)} seconds.</p>}
+        {recent.recovered_at && <p className="text-success">Recovered {regionalDate(new Date(recent.recovered_at), 'datetime')} · lasted {Math.round((Date.parse(recent.recovered_at)-Date.parse(recent.timestamp))/1000)} seconds.</p>}
       </div>
     </details>}
     <p className="mt-3 text-xs text-muted">The status follows these confirmation rules, not the selected chart’s average. Settings refresh on the controller’s configuration cycle (about a minute) and apply to later checks. These rules govern ping reachability; CPU, memory and hardware alerts have their own conditions.</p>

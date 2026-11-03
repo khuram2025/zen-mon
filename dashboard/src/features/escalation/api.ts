@@ -1,3 +1,4 @@
+import { regionalTimezone } from '@/lib/regionalTime'
 /**
  * Escalation & on-call data hooks (work/ESCALATION-PLAN.md "API"). Query keys:
  *   ['escalation', 'policies']                      GET /escalation-policies
@@ -200,7 +201,5 @@ export function useOrgTimezone(): string {
     enabled: can('reports.view'),
     staleTime: 5 * 60_000,
   })
-  let browser = 'UTC'
-  try { browser = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } catch { /* old engines */ }
-  return q.data?.timezone || browser
+  return q.data?.timezone || regionalTimezone()
 }

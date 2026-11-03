@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { Fragment, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -29,7 +30,7 @@ type GroupsResponse = {
 }
 const levels = ['critical', 'error', 'warning', 'information', 'audit', 'verbose']
 const tone = (level: string): Tone => level === 'critical' || level === 'error' ? 'danger' : level === 'warning' ? 'warning' : 'info'
-const time = (s: string) => new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : `${s}Z`).toLocaleString()
+const time = (s: string) => regionalDate(new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : `${s}Z`), 'datetime')
 const pageSize = 50
 
 export function GroupedEventsTab({ server }: { server: ServerItem }) {

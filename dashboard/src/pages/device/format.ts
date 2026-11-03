@@ -1,3 +1,5 @@
+import { regionalTimezone } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 import { serverNow } from '@/lib/serverClock'
 
 /* Formatting rules for the device page (one place, so every tab agrees):
@@ -11,11 +13,7 @@ import { serverNow } from '@/lib/serverClock'
 export const MISSING = '—'
 
 export function displayTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time'
-  } catch {
-    return 'local time'
-  }
+  return regionalTimezone()
 }
 
 /** Backend timestamps are UTC; a naive value (no offset) is read as UTC, not local time. */
@@ -35,7 +33,7 @@ const ABSOLUTE: Intl.DateTimeFormatOptions = { year: 'numeric', month: 'short', 
 export function formatAbsolute(value: string | number | Date | null | undefined, opts: { seconds?: boolean } = {}): string {
   const ms = parseTime(value)
   if (ms == null) return MISSING
-  return new Date(ms).toLocaleString(undefined, opts.seconds ? { ...ABSOLUTE, second: '2-digit' } : ABSOLUTE)
+  return regionalDate(new Date(ms), 'datetime', undefined, opts.seconds ? { ...ABSOLUTE, second: '2-digit' } : ABSOLUTE)
 }
 
 /** "just now", "5m ago", "3h 12m ago", "2d 22h ago" against the appliance clock. */

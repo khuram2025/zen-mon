@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { UseQueryResult } from '@tanstack/react-query'
@@ -472,7 +473,7 @@ function RecentChangesBody({ data, href }: { data: ChangesResponse; href: string
           const address = changeAssetAddress(r)
           return (
             <li key={r.id} className="flex items-start gap-2.5 py-1.5" data-change={r.id}>
-              <time dateTime={r.observed_at} title={new Date(toMillis(r.observed_at) ?? 0).toLocaleString()} className="w-14 shrink-0 pt-px text-xs tabular-nums text-muted">
+              <time dateTime={r.observed_at} title={regionalDate(new Date(toMillis(r.observed_at) ?? 0), 'datetime')} className="w-14 shrink-0 pt-px text-xs tabular-nums text-muted">
                 {ageWords(r.observed_at, now)}
               </time>
               <div className="min-w-0 flex-1 text-sm leading-5">

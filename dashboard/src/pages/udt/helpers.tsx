@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import {
   Boxes, Camera, Cpu, HelpCircle, Laptop, MonitorSmartphone, Network, Phone,
   Printer, Router, Server, Wifi,
@@ -91,7 +92,7 @@ export function durationBetween(a: string | null | undefined, b: string | null |
 
 export function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '—'
-  return new Date(iso).toLocaleString()
+  return regionalDate(new Date(iso), 'datetime')
 }
 
 const EVENT_META: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'outline' }> = {

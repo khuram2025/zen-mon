@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, Fragment, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -731,7 +732,7 @@ function ResultDetails({ row }: { row: DiscoveryResult }) {
       <DetailField label="matched OS" value={row.matched_os_version} />
       <DetailField
         label="scanned at"
-        value={row.scanned_at ? new Date(row.scanned_at).toLocaleString() : null}
+        value={row.scanned_at ? regionalDate(new Date(row.scanned_at), 'datetime') : null}
       />
       {row.imported_device_id && (
         <DetailField label="device id" value={row.imported_device_id} mono />

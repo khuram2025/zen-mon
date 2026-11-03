@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useMemo } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -180,7 +181,7 @@ export function ServiceIncidentsPage() {
             </div>
             <div className="mt-4 space-y-3 border-t border-border pt-4 text-sm">
               <ContextRow label="Service" value={check?.name || 'Loading…'} />
-              <ContextRow label="Last checked" value={check?.last_check_at ? new Date(check.last_check_at).toLocaleString() : 'Not available'} />
+              <ContextRow label="Last checked" value={check?.last_check_at ? regionalDate(new Date(check.last_check_at), 'datetime') : 'Not available'} />
               <ContextRow label="Monitoring" value={check?.enabled === false ? 'Paused' : 'Active'} />
               <ContextRow label="Maintenance" value={check?.in_maintenance ? 'In maintenance' : 'None'} />
             </div>
@@ -230,7 +231,7 @@ function IncidentRow({ event, longest }: { event: StatusEvent; longest: number }
         </div>
         <p className="mt-1 text-sm leading-relaxed text-muted">{event.reason || 'No diagnostic reason was recorded.'}</p>
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
-          <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" /> {new Date(event.timestamp).toLocaleString()}</span>
+          <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" /> {regionalDate(new Date(event.timestamp), 'datetime')}</span>
           <span>{relativeTime(event.timestamp)}</span>
           <span className="inline-flex items-center gap-1"><Timer className="h-3.5 w-3.5" /> {formatDur(event.duration_sec)}</span>
         </div>

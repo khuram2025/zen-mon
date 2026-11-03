@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** System tab — what the host is: hardware spec sheet, storage volumes with
  *  growth forecasts, network interfaces with live throughput and traffic
  *  capture, and installed software.
@@ -238,7 +239,7 @@ function HardwareSection({ server }: { server: ServerItem }) {
         <StatTile
           icon={Timer} label="Uptime"
           value={server.boot_time ? formatUptime(server.boot_time) : '—'}
-          sub={bootDate ? `Booted ${bootDate.toLocaleString()}` : 'Boot time not reported'}
+          sub={bootDate ? `Booted ${regionalDate(bootDate, 'datetime')}` : 'Boot time not reported'}
         />
       </div>
 
@@ -255,7 +256,7 @@ function HardwareSection({ server }: { server: ServerItem }) {
               [server.os_type === 'windows' ? 'Build' : 'Kernel', server.kernel_or_build],
               ['Architecture', server.architecture],
               ['Platform', capitalize(server.os_type)],
-              ['Boot time', bootDate ? bootDate.toLocaleString() : null],
+              ['Boot time', bootDate ? regionalDate(bootDate, 'datetime') : null],
             ]}
           />
         </Panel>
@@ -776,7 +777,7 @@ function NetworkSection({ server, netQ }: { server: ServerItem; netQ: NetQuery }
                       ) : <span className="text-xs text-muted">—</span>}
                     </Td>
                   )}
-                  <Td className={cn(td, 'whitespace-nowrap pr-4 text-right text-xs text-muted')} title={new Date(nic.updated_at).toLocaleString()}>
+                  <Td className={cn(td, 'whitespace-nowrap pr-4 text-right text-xs text-muted')} title={regionalDate(new Date(nic.updated_at), 'datetime')}>
                     {relativeTime(nic.updated_at)}
                   </Td>
                 </Tr>
@@ -984,9 +985,9 @@ function SoftwareSection({ server, swQ }: { server: ServerItem; swQ: SwQuery }) 
                     <div className="truncate text-text2" title={s.vendor || undefined}>{s.vendor || '—'}</div>
                   </Td>
                   <Td className={cn(td, 'whitespace-nowrap text-right tabular-nums text-text2')}>
-                    {installed ? installed.toLocaleDateString() : s.install_date || '—'}
+                    {installed ? regionalDate(installed, 'date') : s.install_date || '—'}
                   </Td>
-                  <Td className={cn(td, 'whitespace-nowrap pr-4 text-right text-xs text-muted')} title={new Date(s.updated_at).toLocaleString()}>
+                  <Td className={cn(td, 'whitespace-nowrap pr-4 text-right text-xs text-muted')} title={regionalDate(new Date(s.updated_at), 'datetime')}>
                     {relativeTime(s.updated_at)}
                   </Td>
                 </Tr>

@@ -1,3 +1,5 @@
+import { regionalInput, regionalInputMs } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -44,8 +46,7 @@ function windowState(w: ServiceMaintenanceWindow, now = serverNow()): WindowStat
 
 function isoLocalInputNow(offsetMinutes = 0): string {
   const d = new Date(serverNow() + offsetMinutes * 60_000)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return regionalInput(d)
 }
 
 export function ServiceMaintenancePage() {
@@ -116,8 +117,8 @@ export function ServiceMaintenancePage() {
     mutationFn: async () => {
       const body: any = {
         scope_type: form.scope_type,
-        starts_at: new Date(form.starts_at).toISOString(),
-        ends_at: new Date(form.ends_at).toISOString(),
+        starts_at: new Date(regionalInputMs(form.starts_at)).toISOString(),
+        ends_at: new Date(regionalInputMs(form.ends_at)).toISOString(),
         reason: form.reason || null,
       }
       if (form.scope_type === 'check') body.scope_check_id = form.scope_check_id
@@ -161,7 +162,7 @@ export function ServiceMaintenancePage() {
   const canSubmit =
     !!form.starts_at &&
     !!form.ends_at &&
-    new Date(form.ends_at) > new Date(form.starts_at) &&
+    new Date(regionalInputMs(form.ends_at)) > new Date(regionalInputMs(form.starts_at)) &&
     (form.scope_type === 'all' ||
       (form.scope_type === 'check' && !!form.scope_check_id) ||
       (form.scope_type === 'group' && !!form.scope_group_id) ||
@@ -415,12 +416,12 @@ function WindowTable({
                         <span className="ml-1 text-muted">· {w.scope_label}</span>
                       )}
                     </Td>
-                    <Td className="text-xs">{new Date(w.starts_at).toLocaleString()}</Td>
+                    <Td className="text-xs">{regionalDate(new Date(w.starts_at), 'datetime')}</Td>
                     <Td className="text-xs">
-                      {new Date(effEnd).toLocaleString()}
+                      {regionalDate(new Date(effEnd), 'datetime')}
                       {endedEarly ? (
                         <div className="text-2xs text-muted">
-                          Ended early{w.ended_by_name ? ` by ${w.ended_by_name}` : ''} · scheduled {new Date(w.ends_at).toLocaleString()}
+                          Ended early{w.ended_by_name ? ` by ${w.ended_by_name}` : ''} · scheduled {regionalDate(new Date(w.ends_at), 'datetime')}
                           {w.end_reason ? ` · ${w.end_reason}` : ''}
                         </div>
                       ) : st !== 'cancelled' ? (

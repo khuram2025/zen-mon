@@ -1,3 +1,4 @@
+import { RegionalTimeGate } from '@/components/RegionalTimeGate'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -300,7 +301,7 @@ export function Layout() {
         <main key={density} className="p-4 2xl:p-6 animate-fade-in">
           <ErrorBoundary resetKey={`${pathname}${search}`}>
             <RouteGate>
-              <Outlet />
+              <RegionalTimeGate><Outlet /></RegionalTimeGate>
             </RouteGate>
           </ErrorBoundary>
         </main>
@@ -428,7 +429,7 @@ export function Layout() {
         <main key={density} className="flex-1 overflow-y-auto p-4 animate-fade-in xl:p-5 2xl:p-6">
           <ErrorBoundary resetKey={`${pathname}${search}`}>
             <RouteGate>
-              <Outlet />
+              <RegionalTimeGate><Outlet /></RegionalTimeGate>
             </RouteGate>
           </ErrorBoundary>
         </main>

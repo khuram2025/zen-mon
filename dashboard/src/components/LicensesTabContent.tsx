@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Boxes, KeyRound, Loader2, RefreshCw } from 'lucide-react'
@@ -39,7 +40,7 @@ interface UpdateStatus {
 
 function fmtDate(d: string | null | undefined) {
   if (!d) return '—'
-  try { return new Date(d).toLocaleString() } catch { return d }
+  try { return regionalDate(new Date(d), 'datetime') } catch { return d }
 }
 
 export function LicensesTabContent() {
@@ -346,7 +347,7 @@ function NodeCapacityCard() {
         One node is one device or one server; a server linked to its device counts once. When the
         license is full, adding devices or servers, discovery imports and new agent enrollments are
         refused until the license is extended. Everything already monitored keeps running.
-        {cap.snapshot_at && <> License data from {new Date(cap.snapshot_at).toLocaleString()}.</>}
+        {cap.snapshot_at && <> License data from {regionalDate(new Date(cap.snapshot_at), 'datetime')}.</>}
       </p>
     </div>
   )

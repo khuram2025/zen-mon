@@ -1,3 +1,6 @@
+import { regionalZoneLabel } from '@/lib/regionalTime'
+import { regionalTimezone } from '@/lib/regionalTime'
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Formatting shared by the service detail page. Empty-value language is
  * deliberate and consistent (review UI 11):
@@ -83,26 +86,19 @@ export function exactTime(t: number | string | null | undefined, withSeconds = t
   if (t == null) return '—'
   const d = typeof t === 'number' ? new Date(t) : new Date(t)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString(undefined, {
+  return regionalDate(d, 'datetime', undefined, {
     year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
     ...(withSeconds ? { second: '2-digit' } : {}),
   })
 }
 
 export function browserTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time'
-  } catch {
-    return 'local time'
-  }
+  return regionalTimezone()
 }
 
 /** "UTC+03:00" for the browser's current offset. */
 export function utcOffsetLabel(at: number = Date.now()): string {
-  const off = -new Date(at).getTimezoneOffset()
-  const sign = off >= 0 ? '+' : '-'
-  const abs = Math.abs(off)
-  return `UTC${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
+  return regionalZoneLabel(at).replace('GMT', 'UTC')
 }
 
 export function isUnsupported(err: unknown): boolean {

@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ShieldCheck, Trash2 } from 'lucide-react'
@@ -72,7 +73,7 @@ export function ProbeTrustCard() {
               <div className="break-all text-muted">{cert.subject}</div></div>
               <Button variant="ghost" size="sm" aria-label={`Remove ${cert.label}`} onClick={() => setRemoving(cert.id)}><Trash2 className="h-4 w-4" /></Button></div>
             <div>Scope: {cert.hosts.length ? cert.hosts.join(', ') : 'All monitored services'}</div>
-            <div className={Date.parse(cert.not_after) < Date.now() ? 'text-danger' : 'text-muted'}>Expires {new Date(cert.not_after).toLocaleDateString()} · Issuer: {cert.issuer}</div>
+            <div className={Date.parse(cert.not_after) < Date.now() ? 'text-danger' : 'text-muted'}>Expires {regionalDate(new Date(cert.not_after), 'date')} · Issuer: {cert.issuer}</div>
             <div className="break-all font-mono text-xs text-muted">SHA-256: {cert.id}</div>
             {removing === cert.id && <div className="flex flex-wrap items-center gap-2 text-warning">Services relying on this certificate may fail verification.
               <Button size="sm" disabled={remove.isPending} onClick={() => remove.mutate(cert.id)}>Remove trust</Button><Button size="sm" variant="ghost" onClick={() => setRemoving(null)}>Cancel</Button></div>}

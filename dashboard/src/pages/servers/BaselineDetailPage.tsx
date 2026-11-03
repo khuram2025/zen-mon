@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -26,7 +27,7 @@ const SORTS = ['status', 'server_name', 'primary_ip', 'violations', 'checked', '
 type Sort = typeof SORTS[number]
 const LABELS = { compliant: 'Compliant', violated: 'Violated', missing: 'Missing', outdated: 'Outdated', prohibited: 'Prohibited', not_evaluated: 'Not evaluated' }
 const variant = (status: string) => status === 'compliant' ? 'success' : status === 'not_evaluated' ? 'outline' : status === 'outdated' ? 'warning' : 'danger'
-const dateTitle = (value: string | null) => value ? new Date(value).toLocaleString() : undefined
+const dateTitle = (value: string | null) => value ? regionalDate(new Date(value), 'datetime') : undefined
 const when = (value: string | null) => value ? relativeTime(value) : 'Not evaluated'
 
 function expectation(rule: Pick<BaselineRule, 'rule_type' | 'package_match' | 'match_type' | 'min_version'>) {

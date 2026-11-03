@@ -1,3 +1,4 @@
+import { regionalTimezone } from '@/lib/regionalTime'
 // Pure logic behind the Changes page (Documentation/Inventory/03-UI-UX-SPEC.md section 3.7): the filter
 // vocabulary of its address bar, the stats strip's windows and chips, the pairing of an installation and a
 // removal into one upgrade row, grouping by calendar day, the daily chart's data and the footnotes. No React,
@@ -256,12 +257,7 @@ export function isValidTimeZone(tz: string | null | undefined): tz is string {
 
 /** The browser's IANA zone; `UTC` when it cannot say. Sent to the API so its daily series and the page's day groups agree. */
 export function browserTimeZone(): string {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
-    return isValidTimeZone(tz) ? tz : 'UTC'
-  } catch {
-    return 'UTC'
-  }
+  return regionalTimezone()
 }
 
 interface Wall {

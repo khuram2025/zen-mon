@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Processes tab — the agent's top-N process sample, the watchlist, and
  *  per-process CPU / memory history. */
 
@@ -460,7 +461,7 @@ export function ProcessesTab({ server }: { server: ServerItem }) {
                       </BodyCell>
                       <BodyCell
                         className="whitespace-nowrap text-xs text-muted"
-                        title={p.updated_at ? new Date(p.updated_at).toLocaleString() : undefined}
+                        title={p.updated_at ? regionalDate(new Date(p.updated_at), 'datetime') : undefined}
                       >
                         {relativeTime(p.updated_at)}
                       </BodyCell>
@@ -555,7 +556,7 @@ function ProcessDetailDialog({ serverId, row, grouped, memTotal, onClose }: {
                   ['Memory', row.running
                     ? <>{formatBytes(row.memory_bytes)}{mp != null && <span className="text-muted"> · {fmtPct(mp)}</span>}</>
                     : '—'],
-                  ['Started', row.started_at ? new Date(row.started_at).toLocaleString() : 'unknown'],
+                  ['Started', row.started_at ? regionalDate(new Date(row.started_at), 'datetime') : 'unknown'],
                   ['Updated', row.updated_at ? relativeTime(row.updated_at) : '—'],
                 ]}
               />

@@ -31,7 +31,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
 import { useVizColors } from '@/components/availability/viz'
-import { absoluteUtc, download, ncmError, pct, toCsv, TONE_BADGE, type Tone } from './model'
+import { absoluteTime, download, ncmError, pct, toCsv, TONE_BADGE, type Tone } from './model'
 import { Ago, EmptyState, Kpi, Pagination, SectionError, ToneIcon } from './ui'
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
@@ -180,7 +180,7 @@ function Relative({ iso }: { iso: string }) {
   if (diff <= 0) return <Ago iso={iso} />
   const h = diff / 3600000
   const text = h < 1 ? `in ${Math.max(1, Math.round(diff / 60000))} min` : h < 48 ? `in ${Math.round(h)} h` : `in ${Math.round(h / 24)} d`
-  return <time dateTime={iso} title={absoluteUtc(iso)}>{text}</time>
+  return <time dateTime={iso} title={absoluteTime(iso)}>{text}</time>
 }
 
 function Loading({ what }: { what: string }) {
@@ -544,7 +544,7 @@ function ResultsExplorer({ filters, onFilters, onException }: {
     const body = rows.map((r) => [
       r.hostname || r.device_id, r.ip, r.title, r.rule_key, r.policy_name, SEVERITY_LABEL[r.severity] || r.severity,
       STATUS_META[r.status]?.label || r.status, r.detail,
-      evidenceOf(r.evidence).map((e) => `L${e.line}: ${e.text}`).join(' | '), r.remediation, absoluteUtc(r.assessed_at),
+      evidenceOf(r.evidence).map((e) => `L${e.line}: ${e.text}`).join(' | '), r.remediation, absoluteTime(r.assessed_at),
     ])
     download(`compliance-results-${utcDate(0)}-p${page}.csv`, toCsv([header, ...body]), 'text/csv')
   }
@@ -670,7 +670,7 @@ function ResultRowView({ row: r, open, evidence, onToggle, canExcept, onExceptio
               <EvidenceLines evidence={evidence} emptyText={r.status === 'fail' && r.check_type === 'must_match'
                 ? 'Required configuration was not found, so there is no line to show.' : undefined} />
               <Remediation text={r.remediation} />
-              <p className="text-xs text-muted">Assessed {absoluteUtc(r.assessed_at)}{r.rule_key ? ` · rule ${r.rule_key}` : ''}</p>
+              <p className="text-xs text-muted">Assessed {absoluteTime(r.assessed_at)}{r.rule_key ? ` · rule ${r.rule_key}` : ''}</p>
             </div>
           </Td>
         </Tr>
@@ -1170,7 +1170,7 @@ function RuleTester({ draft }: { draft: RuleDraft }) {
             <StatusBadge status={result.status} />
             <span className="min-w-0 break-words">{result.detail}</span>
           </div>
-          {result.captured_at && <p className="text-xs text-muted">Tested on {hostname || 'device'} against the configuration captured <Ago iso={result.captured_at} /> ({absoluteUtc(result.captured_at)}).</p>}
+          {result.captured_at && <p className="text-xs text-muted">Tested on {hostname || 'device'} against the configuration captured <Ago iso={result.captured_at} /> ({absoluteTime(result.captured_at)}).</p>}
           <EvidenceLines evidence={evidenceOf(result.evidence)} emptyText="No matching lines to show for this outcome." />
         </div>
       )}
@@ -1239,7 +1239,7 @@ function ExceptionsTab() {
                       <Td className="max-w-[18rem] text-xs"><span className="line-clamp-3 break-words" title={x.reason}>{x.reason}</span></Td>
                       <Td className="whitespace-nowrap text-xs">
                         <div><Relative iso={x.expires_at} /></div>
-                        <div className="text-muted">{absoluteUtc(x.expires_at)}</div>
+                        <div className="text-muted">{absoluteTime(x.expires_at)}</div>
                       </Td>
                       <Td className="whitespace-nowrap text-xs">
                         <div>{x.created_by || '—'}</div>
@@ -1469,7 +1469,7 @@ function DeviceRuleRow({ row: r, canExcept, onException }: { row: ResultRow; can
       {r.status === 'excepted' && <p className="text-xs text-muted">Covered by an active exception; see the Exceptions tab of the Configuration workspace.</p>}
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
         <span>Assessed <Ago iso={r.assessed_at} /></span>
-        <span>Configuration captured <Ago iso={r.version_captured_at} empty="unknown" />{r.version_captured_at ? ` (${absoluteUtc(r.version_captured_at)})` : ''}</span>
+        <span>Configuration captured <Ago iso={r.version_captured_at} empty="unknown" />{r.version_captured_at ? ` (${absoluteTime(r.version_captured_at)})` : ''}</span>
       </div>
     </li>
   )

@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * APM Synthetics — scripted user scenarios (multi-step HTTP journeys).
  *
@@ -332,7 +333,7 @@ function MonitorDetail({ m, freshRun }: { m: Monitor; freshRun: RunResult | null
           {rows.slice(0, 120).map((r, i) => (
             <span
               key={i}
-              title={`${new Date(r.timestamp).toLocaleString()} — ${r.status}${r.error ? `: ${r.error}` : ''} (${fmtMs(r.total_ms)})`}
+              title={`${regionalDate(new Date(r.timestamp), 'datetime')} — ${r.status}${r.error ? `: ${r.error}` : ''} (${fmtMs(r.total_ms)})`}
               className={cn('h-5 w-2 rounded-sm', r.success ? 'bg-success/70' : 'bg-danger')}
             />
           ))}

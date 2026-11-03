@@ -106,9 +106,12 @@ def _status_label(ctx: dict) -> str:
     return str(ctx.get("status") or "ALERT").upper()
 
 
-def _fmt_ts(ts) -> str:
+def _fmt_ts(ts, branding=None) -> str:
     if not ts:
         ts = datetime.now(timezone.utc).isoformat()
+    if branding is not None:
+        from app.services.regional_time import timestamp_label
+        return _esc(timestamp_label(ts, branding))
     if isinstance(ts, str):
         try:
             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -357,7 +360,7 @@ def _incident_rows(ctx: dict, existing_labels: set[str]) -> list[tuple[str, str]
         return []
     rows = []
     if ctx.get("first_seen"):
-        rows.append(("First seen", _fmt_ts(ctx["first_seen"])))
+        rows.append(("First seen", _fmt_ts(ctx["first_seen"], ctx.get("branding"))))
     if ctx.get("active_for"):
         recovered = str(ctx.get("lifecycle") or "").lower() == "recovered"
         rows.append(("Total duration" if recovered else "Active for", str(ctx["active_for"])))
@@ -401,7 +404,7 @@ def build_alert_email_text(ctx: dict) -> str:
              if value not in (None, "")]
     rows += _priority_row(ctx, {label for label, _ in rows})
     rows += _incident_rows(ctx, {label for label, _ in rows})
-    rows.append(("Time", _fmt_ts(ctx.get("timestamp"))))
+    rows.append(("Time", _fmt_ts(ctx.get("timestamp"), ctx.get("branding"))))
 
     # Size the label column to the widest label actually present; a fixed width
     # ran "Alert rule:" straight into its value.
@@ -430,7 +433,7 @@ def build_alert_email_html(ctx: dict) -> str:
     message = _esc(ctx.get("message") or "")
     hostname = _esc(ctx.get("hostname") or "")
     ip_address = _esc(ctx.get("ip_address") or "")
-    ts = _fmt_ts(ctx.get("timestamp"))
+    ts = _fmt_ts(ctx.get("timestamp"), ctx.get("branding"))
     icon = "&#10003;" if resolved else ("!" if severity in ("critical", "warning") else "i")
     preheader = (ctx.get("message") or f"{_status_label(ctx)} — {ctx.get('title') or 'Alert'}")[:140]
 
@@ -498,7 +501,7 @@ def build_notification_email_text(ctx: dict) -> str:
     for label, value in (ctx.get("details") or []):
         if value not in (None, ""):
             lines.append(f"{label + ':':<14}{value}")
-    lines.append(f"{'Time:':<14}{_fmt_ts(ctx.get('timestamp'))}")
+    lines.append(f"{'Time:':<14}{_fmt_ts(ctx.get('timestamp'), ctx.get('branding'))}")
     if ctx.get("action_url"):
         lines += ["", f"Open dashboard: {ctx['action_url']}"]
     lines += ["", f"— {ctx.get('product_name', 'ZenPlus')}"]
@@ -509,7 +512,7 @@ def build_notification_email_html(ctx: dict) -> str:
     product = _esc(ctx.get("product_name", "ZenPlus"))
     title = _esc(ctx.get("title") or "Notification")
     message = _esc(ctx.get("message") or "")
-    ts = _fmt_ts(ctx.get("timestamp"))
+    ts = _fmt_ts(ctx.get("timestamp"), ctx.get("branding"))
     status = _esc((ctx.get("status") or "NOTICE").upper())
     tint, _b = _TINT["info"]
     preheader = (ctx.get("message") or ctx.get("title") or "Notification")[:140]
@@ -541,7 +544,7 @@ def build_account_email_text(ctx: dict) -> str:
     for label, value in (ctx.get("details") or []):
         if value not in (None, ""):
             lines.append(f"{label + ':':<14}{value}")
-    lines.append(f"{'Time:':<14}{_fmt_ts(ctx.get('timestamp'))}")
+    lines.append(f"{'Time:':<14}{_fmt_ts(ctx.get('timestamp'), ctx.get('branding'))}")
     note = ctx.get("security_note") or (
         "If you did not expect this change, contact your administrator immediately."
     )
@@ -557,7 +560,7 @@ def build_account_email_html(ctx: dict) -> str:
     title = _esc(ctx.get("title") or "Account update")
     name = _esc(ctx.get("recipient_name") or "")
     message = _esc(ctx.get("message") or "")
-    ts = _fmt_ts(ctx.get("timestamp"))
+    ts = _fmt_ts(ctx.get("timestamp"), ctx.get("branding"))
     tint, tint_border = _TINT["info"]
     preheader = (ctx.get("message") or ctx.get("title") or "Account update")[:140]
 

@@ -12,7 +12,7 @@ try {
   const outfile = path.join(dir, 'test.cjs')
   await build({ stdin: { contents: `export * from './probeFailures'; export * from './DailyProbeFailureDetails';`,
     resolveDir: path.resolve('src/components/services'), loader: 'tsx' }, outfile, bundle: true,
-    platform: 'node', format: 'cjs', jsx: 'automatic' })
+    platform: 'node', format: 'cjs', jsx: 'automatic', alias: { '@': path.resolve('src') } })
   const { buildProbeFailures: periods, loadProbeHistory, DailyProbeFailureDetails: View } = createRequire(import.meta.url)(outfile)
   const start = Date.parse('2026-09-17T01:23:28.360Z')
   const point = (offset, is_up, error_message = 'network is unreachable') => ({

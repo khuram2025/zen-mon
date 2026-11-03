@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Copy, Dices, Loader2, LogOut, ShieldAlert } from 'lucide-react'
@@ -92,7 +93,7 @@ type EffectiveAccess = {
 }
 type SessionRow = { id: string; created_at: string; last_seen_at: string; ip_address: string | null; user_agent: string | null; auth_method: string; mfa_verified: boolean }
 
-const when = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString(undefined, { timeZoneName: 'short' }) : 'Never'
+const when = (iso: string | null | undefined) => iso ? regionalDate(new Date(iso), 'datetime', undefined, { timeZoneName: 'short' }) : 'Never'
 
 /** Account detail: what the account can actually do (effective access), where
  *  it is signed in (with per-session revoke), and the recent changes to it. */

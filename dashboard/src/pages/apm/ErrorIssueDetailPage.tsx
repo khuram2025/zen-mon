@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -74,8 +75,8 @@ export function ErrorIssueDetailPage() {
           to={`/apm/services/${encodeURIComponent(d.service)}`}
           label="Service" tone="primary" value={<span className="truncate text-lg">{d.service}</span>} sub="primary service"
         />
-        <ApmKpi label="First seen" value={new Date(d.first_seen).toLocaleDateString()} sub="introduced" />
-        <ApmKpi label="Last seen" value={new Date(d.last_seen).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} sub="most recent fire" />
+        <ApmKpi label="First seen" value={regionalDate(new Date(d.first_seen), 'date')} sub="introduced" />
+        <ApmKpi label="Last seen" value={regionalDate(new Date(d.last_seen), 'datetime', [], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} sub="most recent fire" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -102,7 +103,7 @@ export function ErrorIssueDetailPage() {
                 {d.occurrences_recent.map((o, i) => (
                   <div key={i} className="flex items-center justify-between px-3 py-2 text-xs hover:bg-surface2">
                     <div className="flex items-center gap-3">
-                      <span className="text-muted w-32">{new Date(o.timestamp).toLocaleString()}</span>
+                      <span className="text-muted w-32">{regionalDate(new Date(o.timestamp), 'datetime')}</span>
                       <span>{o.service}</span>
                       <span className="text-muted truncate max-w-xs">{o.message}</span>
                     </div>

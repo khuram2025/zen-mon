@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -192,8 +193,8 @@ function StatusCard({ status }: { status: TlsStatus }) {
             <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
               <InfoRow label="Issued by" value={cert.issuer} />
               <InfoRow label="Key" value={cert.key_algorithm} />
-              <InfoRow label="Valid from" value={new Date(cert.not_before).toLocaleDateString()} />
-              <InfoRow label="Valid until" value={new Date(cert.not_after).toLocaleDateString()} />
+              <InfoRow label="Valid from" value={regionalDate(new Date(cert.not_before), 'date')} />
+              <InfoRow label="Valid until" value={regionalDate(new Date(cert.not_after), 'date')} />
               {(cert.san_dns.length > 0 || cert.san_ips.length > 0) && (
                 <InfoRow label="Names (SAN)" value={[...cert.san_dns, ...cert.san_ips].join(', ')} />
               )}

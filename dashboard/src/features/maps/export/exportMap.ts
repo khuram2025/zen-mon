@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /* ──────────────────────────────────────────────────────────────────────────
  * Network map — export (PNG / SVG / PDF) + file helpers
  *
@@ -241,7 +242,7 @@ export async function exportMapImage(kind: MapImageKind, args: MapImageExportArg
   pdf.setFont('helvetica', 'normal')
   pdf.setFontSize(9)
   pdf.setTextColor(100, 116, 139)
-  pdf.text(`Exported ${new Date().toLocaleString()} · ZenPlus`, pageW - margin, margin + 6, { align: 'right' })
+  pdf.text(`Exported ${regionalDate(new Date(), 'datetime')} · ZenPlus`, pageW - margin, margin + 6, { align: 'right' })
   pdf.setDrawColor(203, 213, 225)
   pdf.line(margin, margin + headerH - 4, pageW - margin, margin + headerH - 4)
 

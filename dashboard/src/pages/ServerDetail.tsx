@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * ServerDetail — per-server view.
  *
@@ -593,7 +594,7 @@ export default function ServerDetail() {
                   <TBody>
                     {evQ.data!.items.map((e, i) => (
                       <Tr key={i}>
-                        <Td className="text-xs text-muted">{new Date(e.timestamp).toLocaleString()}</Td>
+                        <Td className="text-xs text-muted">{regionalDate(new Date(e.timestamp), 'datetime')}</Td>
                         <Td>{e.log_name}</Td>
                         <Td>
                           <Badge

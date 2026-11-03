@@ -1,3 +1,4 @@
+import { regionalTimezone } from '@/lib/regionalTime'
 /**
  * NetFlow time windows (contract §7 and §10).
  *
@@ -61,12 +62,7 @@ export function isRollingKey(key: string | null | undefined): key is (typeof TIM
 
 /** The viewer's display timezone (browser `Intl`), 'UTC' when the engine does not report one. */
 export function displayTimeZone(): string {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
-    return isValidTimeZone(tz) ? tz : 'UTC'
-  } catch {
-    return 'UTC'
-  }
+  return regionalTimezone()
 }
 
 const MINUTE = 60_000

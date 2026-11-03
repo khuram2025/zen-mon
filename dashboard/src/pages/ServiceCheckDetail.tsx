@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { DailyProbeFailures } from '@/components/services/DailyProbeFailures'
 import { explainServiceFailure } from '@/components/services/failureReason'
 import { ServiceFailureReason } from '@/components/services/ServiceFailureReason'
@@ -1110,7 +1111,7 @@ function ServiceHeader({
             <Dot />
             <span title={check.last_check_at ? exactTime(check.last_check_at) : undefined}>
               {check.last_check_at
-                ? <>checked {relativeTime(check.last_check_at)} <span className="font-mono">({new Date(check.last_check_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })})</span></>
+                ? <>checked {relativeTime(check.last_check_at)} <span className="font-mono">({regionalDate(new Date(check.last_check_at), 'time', [], { hour: '2-digit', minute: '2-digit', second: '2-digit' })})</span></>
                 : NEVER_CHECKED.toLowerCase()}
             </span>
             <Dot />
@@ -1315,7 +1316,7 @@ function ThirtyDayStrip({ days, fromTs, toTs, dim, onSelectDay }: {
   const dimOthers = dim && inCount > 0 && inCount < days.length
 
   const cells = days.map((d) => {
-    const when = d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+    const when = regionalDate(d.date, 'date', undefined, { weekday: 'short', month: 'short', day: 'numeric' })
     return {
       key: d.key,
       pct: colourPct(d.uptimePct, d.downtimeSec),
@@ -1562,7 +1563,7 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
   const resultLabel = latest?.is_up == null ? NO_DATA : latest.is_up ? 'UP' : 'DOWN'
   const resultTone = latest?.is_up == null ? 'text-muted' : latest.is_up ? 'text-success' : 'text-danger'
   const when = latest?.timestamp
-    ? `${relativeTime(latest.timestamp)} · ${new Date(latest.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+    ? `${relativeTime(latest.timestamp)} · ${regionalDate(new Date(latest.timestamp), 'time', [], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
     : check.enabled ? 'Waiting for the first probe' : NEVER_CHECKED
 
   return (
@@ -1639,7 +1640,7 @@ function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
               <div key={`${p.timestamp}-${i}`} className="flex items-center gap-2 text-xs">
                 <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', p.is_up ? 'bg-success' : 'bg-danger')} />
                 <span className="w-[68px] shrink-0 tabular-nums text-muted" title={exactTime(p.timestamp)}>
-                  {new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  {regionalDate(new Date(p.timestamp), 'time', [], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </span>
                 <span className={cn('font-medium', p.is_up ? 'text-success' : 'text-danger')}>{p.is_up ? 'UP' : 'DOWN'}</span>
                 <span className="tabular-nums text-muted">{formatMs(p.response_ms)}</span>
@@ -2171,7 +2172,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                 const band = availabilityBand(d.uptimePct, d.downtimeSec)
                 const isSelected = selected === d.key
                 const label = formatAvailability(d.uptimePct, d.downtimeSec, 2, '—')
-                const when = d.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })
+                const when = regionalDate(d.date, 'date', undefined, { weekday: 'long', month: 'long', day: 'numeric' })
                 const coverage = d.uptimePct == null ? 'no monitoring evidence'
                   : `${Math.round((d.coveredSec / Math.max(1, (Math.min(d.end, nowMs) - d.start) / 1000)) * 100)}% of the day observed`
                 const aria = d.uptimePct == null
@@ -2218,7 +2219,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                 <span className="text-xs text-muted">
                   Worst day{' '}
                   <span className={BAND_TEXT[availabilityBand(worst.uptimePct, worst.downtimeSec)]}>
-                    {worst.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {formatAvailability(worst.uptimePct, worst.downtimeSec, 2)}
+                    {regionalDate(worst.date, 'date', undefined, { month: 'short', day: 'numeric' })} · {formatAvailability(worst.uptimePct, worst.downtimeSec, 2)}
                   </span>
                 </span>
               )}
@@ -2229,7 +2230,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
               <div className="mt-3 rounded-lg border border-border bg-surface2/30 p-3">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs font-semibold">
-                    {selectedDay.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+                    {regionalDate(selectedDay.date, 'date', undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
                     <span className={cn('ml-2 font-mono font-medium tabular-nums', BAND_TEXT[availabilityBand(selectedDay.uptimePct, selectedDay.downtimeSec)])}>
                       {formatAvailability(selectedDay.uptimePct, selectedDay.downtimeSec, 3)}
                     </span>
@@ -2249,7 +2250,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                 </div>
                 <div className="flex gap-[2px]">
                   {selectedDay.hours.map((h) => {
-                    const hh = new Date(h.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    const hh = regionalDate(new Date(h.start), 'time', [], { hour: '2-digit', minute: '2-digit' })
                     return (
                       <div
                         key={h.hour}
@@ -2290,7 +2291,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                     <div className="space-y-1.5">
                       {selectedOutages.map((o) => {
                         const end = o.end ?? nowMs
-                        const fmt = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                        const fmt = (t: number) => regionalDate(new Date(t), 'time', [], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
                         return (
                           <div key={o.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
                             <span className={cn(
@@ -2333,7 +2334,7 @@ function DailyUptimeChart({ days, fromTs, toTs, dim }: { days: DayUptime[]; from
   const inRangeCount = days.filter((d) => d.end > fromTs && d.start < toTs).length
   const dimOthers = dim && inRangeCount > 0 && inRangeCount < days.length
   const data = days.map((d) => ({
-    label: d.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    label: regionalDate(d.date, 'date', undefined, { month: 'short', day: 'numeric' }),
     pct: d.uptimePct,
     downtime: d.downtimeSec,
     band: availabilityBand(d.uptimePct, d.downtimeSec),

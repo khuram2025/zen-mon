@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -284,7 +285,7 @@ export function UsersSection() {
                       </Td>
                       <Td className="text-xs">{external ? <span className="text-muted">via directory</span> : u.mfa_enabled ? <Badge variant="success">On</Badge> : <span className="text-muted">Off</span>}</Td>
                       <Td className="text-xs text-muted">
-                        <time dateTime={u.last_login || undefined} title={u.last_login ? new Date(u.last_login).toLocaleString(undefined, { timeZoneName: 'short' }) : 'Has never signed in'}>
+                        <time dateTime={u.last_login || undefined} title={u.last_login ? regionalDate(new Date(u.last_login), 'datetime', undefined, { timeZoneName: 'short' }) : 'Has never signed in'}>
                           {relativeTime(u.last_login)}
                         </time>
                       </Td>

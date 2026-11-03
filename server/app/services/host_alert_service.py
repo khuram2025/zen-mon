@@ -363,7 +363,10 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
     from app.services import alert_delivery_log as dl
     from app.services.alert_phrasing import sms_with_timestamp
     from app.services import notification_grouping as ng
-    from app.services.email_render import alert_subject, build_alert_email_html
+    from app.services.email_render import alert_subject, build_alert_email_html, build_alert_email_text
+    from app.services.regional_time import notification_branding, localize_text
+
+    branding = await notification_branding(db)
 
     kind = dl.kind_from_ctx(ctx)
     keyed = _key_context(ctx)
@@ -441,14 +444,19 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
             self.in_flight = [k for k, _ in targets]
             if ctype == "email":
                 mail_ctx = _mail_ctx(ctx)
-                ok = await _send_email(gw, rcpt, alert_subject(ctx["subject"], ctx),
-                                       mail_ctx["message"],
+                mail_ctx['branding'] = branding
+                for key in ('message', 'notice'):
+                    mail_ctx[key] = localize_text(str(mail_ctx.get(key) or ''), branding)
+                mail_ctx['details'] = [(label, localize_text(str(value), branding))
+                                       for label, value in mail_ctx.get('details', [])]
+                ok = await _send_email(gw, rcpt, localize_text(alert_subject(ctx["subject"], ctx), branding),
+                                       localize_text(ctx.get('body') or '', branding) if ctx.get('html_body') else build_alert_email_text(mail_ctx),
                                        html_body=ctx.get("html_body") or build_alert_email_html(mail_ctx))
                 skip_reason = "config: SMTP gateway has no host"
             else:
                 # Gateway template placeholders the sender offers
                 # (device path: {hostname}, {ip_address}, {status}).
-                message = sms_with_timestamp(ctx["message"], ctx.get("triggered_at"))
+                message = sms_with_timestamp(ctx["message"], ctx.get("triggered_at"), branding)
                 ok = await _send_sms(gw, rcpt, message,
                                      values=ctx.get("sms_template_values"))
                 skip_reason = "config: SMS gateway is not a usable HTTP gateway"

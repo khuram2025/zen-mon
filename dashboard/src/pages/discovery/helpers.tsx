@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
@@ -281,5 +282,5 @@ export function describeNextRun(iso: string | null | undefined): string {
   if (diff < 60_000) return 'In <1m'
   if (diff < 3_600_000) return `In ${Math.round(diff / 60_000)}m`
   if (diff < 86_400_000) return `In ${Math.round(diff / 3_600_000)}h`
-  return new Date(iso).toLocaleString()
+  return regionalDate(new Date(iso), 'datetime')
 }

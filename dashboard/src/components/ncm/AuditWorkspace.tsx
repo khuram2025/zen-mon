@@ -16,7 +16,7 @@ import { FormField } from '@/components/ui/FormField'
 import { Label } from '@/components/ui/Label'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
-import { absoluteUtc, download, ncmError, toCsv } from './model'
+import { absoluteTime, download, ncmError, toCsv } from './model'
 import { Ago, EmptyState, Pagination, SectionError } from './ui'
 
 const PAGE = 50
@@ -117,7 +117,7 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
   const exportCsv = () => {
     const header = ['time_utc', 'actor', 'action', 'device', 'device_id', 'resource_id', 'metadata']
     const body = rows.map((r) => [
-      absoluteUtc(r.created_at), r.actor_name, r.action, r.hostname, r.device_id, r.resource_id,
+      absoluteTime(r.created_at), r.actor_name, r.action, r.hostname, r.device_id, r.resource_id,
       r.metadata == null ? '' : valueText(r.metadata),
     ])
     download(`nccm-audit${deviceId && onlyDevice ? `-${deviceId.slice(0, 8)}` : ''}-page${page}.csv`, toCsv([header, ...body]), 'text/csv')
@@ -204,7 +204,7 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
                   {rows.map((r) => (
                     <Tr key={r.id}>
                       <Td className="whitespace-nowrap">
-                        <div className="text-xs">{absoluteUtc(r.created_at)}</div>
+                        <div className="text-xs">{absoluteTime(r.created_at)}</div>
                         <div className="text-xs text-muted"><Ago iso={r.created_at} /></div>
                       </Td>
                       <Td className="max-w-[10rem] truncate text-sm" title={r.actor_name || undefined}>{r.actor_name || <span className="text-muted">system</span>}</Td>

@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Services tab — service inventory, start-mode aware problem detection, and
  *  per-service "alert when stopped" rules. */
 
@@ -428,7 +429,7 @@ export function ServicesTab({ server }: { server: ServerItem }) {
                       <BodyCell className="text-right text-xs tabular-nums text-muted">{s.pid || '—'}</BodyCell>
                       <BodyCell
                         className="whitespace-nowrap text-xs text-muted"
-                        title={s.updated_at ? new Date(s.updated_at).toLocaleString() : undefined}
+                        title={s.updated_at ? regionalDate(new Date(s.updated_at), 'datetime') : undefined}
                       >
                         {relativeTime(s.updated_at)}
                       </BodyCell>

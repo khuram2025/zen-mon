@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useMemo, useState } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -493,7 +494,7 @@ function Profiling({ profiles, loading, onTrace }: { profiles: Profile[]; loadin
       <Card>
         <CardHeader><CardTitle className="text-sm">Profile context</CardTitle></CardHeader>
         <CardContent className="space-y-3 text-sm">
-          <div><div className="text-xs text-muted">Captured</div><div className="text-text">{new Date(selected.timestamp).toLocaleString()}</div></div>
+          <div><div className="text-xs text-muted">Captured</div><div className="text-text">{regionalDate(new Date(selected.timestamp), 'datetime')}</div></div>
           <div><div className="text-xs text-muted">Version</div><div className="font-mono text-xs text-text">{selected.service_version || 'not reported'}</div></div>
           <div><div className="text-xs text-muted">Samples</div><div className="text-text">{selected.sample_count.toLocaleString()}</div></div>
           {selected.trace_id && (

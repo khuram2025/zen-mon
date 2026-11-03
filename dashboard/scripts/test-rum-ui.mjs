@@ -1,17 +1,14 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { transformWithEsbuild } from 'vite'
+import { build } from 'esbuild'
 
 const root = process.cwd()
 const modelPath = path.join(root, 'src/pages/apm/rum/model.ts')
-const modelSource = fs.readFileSync(modelPath, 'utf8')
-const transformedModel = await transformWithEsbuild(modelSource, modelPath, {
-  loader: 'ts',
-  format: 'esm',
-  target: 'es2020',
-})
-const modelDataUrl = `data:text/javascript;base64,${Buffer.from(transformedModel.code).toString('base64')}`
+const transformedModel = await build({ entryPoints: [modelPath], bundle: true, write: false,
+  format: 'esm', platform: 'browser', target: 'es2020', alias: { '@': path.resolve('src') },
+  define: { 'process.env.NODE_ENV': '"production"' } })
+const modelDataUrl = `data:text/javascript;base64,${Buffer.from(transformedModel.outputFiles[0].text).toString('base64')}`
 const {
   buildRumHref,
   buildRumQuery,

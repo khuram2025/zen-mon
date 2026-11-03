@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /** Alerts tab — this server's alerts, silences and host alert rules.
  *
  *  Alerts can be acknowledged, snoozed/muted and resolved; silences can be
@@ -425,7 +426,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                   )}
                 </Td>
                 <Td className="py-2"><StatePill status={a.status} /></Td>
-                <Td className="whitespace-nowrap py-2 text-xs tabular-nums text-muted" title={new Date(a.triggered_at).toLocaleString()}>
+                <Td className="whitespace-nowrap py-2 text-xs tabular-nums text-muted" title={regionalDate(new Date(a.triggered_at), 'datetime')}>
                   {relativeTime(a.triggered_at)}
                 </Td>
                 <Td className="py-2 pr-4">
@@ -480,8 +481,8 @@ export function AlertsTab({ server }: { server: ServerItem }) {
               <li key={s.id} className="flex items-center gap-3 px-4 py-2 text-sm hover:bg-surface2/40">
                 <Pill tone="muted">{s.forever ? 'Muted' : 'Snoozed'}</Pill>
                 <span className="min-w-0 truncate font-medium" title={s.dedupe}>{silenceLabel(s)}</span>
-                <span className="shrink-0 text-xs text-muted" title={s.until ? new Date(s.until).toLocaleString() : undefined}>
-                  {s.forever ? 'until removed' : `until ${s.until ? new Date(s.until).toLocaleString() : ''}`}
+                <span className="shrink-0 text-xs text-muted" title={s.until ? regionalDate(new Date(s.until), 'datetime') : undefined}>
+                  {s.forever ? 'until removed' : `until ${s.until ? regionalDate(new Date(s.until), 'datetime') : ''}`}
                 </span>
                 <Button
                   size="sm" variant="ghost" className="ml-auto h-7 px-2.5 text-xs"

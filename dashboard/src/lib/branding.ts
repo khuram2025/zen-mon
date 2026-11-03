@@ -104,11 +104,11 @@ function toDate(value: string | number | Date): Date {
   if (value instanceof Date) return value
   if (typeof value === 'number') return new Date(value)
   // Naive timestamps from the API are UTC.
-  const naive = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(value)
-  return new Date(naive ? `${value}Z` : value)
+  const naive = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(value.replace(' ', 'T'))
+  return new Date(naive ? `${value.replace(' ', 'T')}Z` : value)
 }
 
-function zoneParts(d: Date, tz: string): Parts {
+export function zoneParts(d: Date, tz: string): Parts {
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: isValidTimezone(tz) ? tz : 'UTC',
     year: 'numeric', month: 'numeric', day: 'numeric',

@@ -1,3 +1,4 @@
+import { regionalInput, regionalInputMs } from '@/lib/regionalTime'
 /**
  * Alert Center — the operations backlog.
  *
@@ -260,8 +261,7 @@ function toLocalInput(iso: string | null): string {
   const ms = parseTs(iso)
   if (ms == null) return ''
   const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return regionalInput(d)
 }
 
 /* ── Page ─────────────────────────────────────────────────────────────── */
@@ -967,8 +967,8 @@ function RangeControls({ s, patch }: { s: UrlState; patch: (c: Record<string, st
   const [from, setFrom] = useState(toLocalInput(s.from))
   const [to, setTo] = useState(toLocalInput(s.to))
   useEffect(() => { setFrom(toLocalInput(s.from)); setTo(toLocalInput(s.to)); if (s.custom) setCustomOpen(true) }, [s.from, s.to, s.custom])
-  const fromMs = from ? new Date(from).getTime() : null
-  const toMs = to ? new Date(to).getTime() : null
+  const fromMs = from ? regionalInputMs(from) : null
+  const toMs = to ? regionalInputMs(to) : null
   const valid = (fromMs != null || toMs != null) && !(fromMs != null && toMs != null && fromMs >= toMs)
   return (
     <div className="flex flex-col gap-2 rounded-md border border-border bg-surface2/30 p-2">

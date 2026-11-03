@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Shared building blocks for the per-team dashboards
  * (/dashboards/network, /dashboards/servers, /dashboards/apps).
@@ -83,7 +84,7 @@ export function LiveClock() {
   }, [])
   return (
     <span className="hidden rounded-md border border-border bg-surface2/60 px-2.5 py-1 font-mono text-xs font-semibold tabular-nums text-text2 md:inline-block">
-      {now.toLocaleTimeString([], { hour12: false })}
+      {regionalDate(now, 'time', [], { hour12: false })}
     </span>
   )
 }

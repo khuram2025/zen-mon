@@ -83,7 +83,7 @@ async def test_alert_dispatch_sends_the_event_timestamp_in_the_sms(http_fixture,
     assert await host_alert_service.dispatch_to_channels(db, [str(channel.id)], ctx) == 1
     assert len(requests) == 1
     assert parse_qs(requests[0].content.decode())["Body"] == [
-        "edge-01 is down (no response to ICMP probes).\n03 Nov 2026 13:42 UTC"
+        "edge-01 is down (no response to ICMP probes).\n2026-11-03 13:42 UTC"
     ]
 
 

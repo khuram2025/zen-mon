@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useIsFetching, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -915,7 +916,7 @@ export function ServicesPage() {
 /* ─── Small pieces ──────────────────────────────────────────────────────── */
 
 function clock(ms: number): string {
-  return ms ? new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'earlier'
+  return ms ? regionalDate(new Date(ms), 'time', [], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'earlier'
 }
 
 function ErrorChip({ label, onRetry }: { label: string; onRetry: () => void }) {

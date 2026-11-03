@@ -8,6 +8,7 @@ ncm_backup_runs.
 """
 from __future__ import annotations
 import json
+from datetime import datetime, timezone
 from sqlalchemy import text
 
 
@@ -31,6 +32,7 @@ def _payload(row, device_id, key, kind, summary, *, metadata=None, severity='war
             'hostname':row.hostname,'ip_address':row.ip,'rule_name':summary,
             'subject':f'NCM: {summary} - {row.hostname}','message':summary,
             'body':summary,'severity':severity,'status':status,
+            'timestamp':datetime.now(timezone.utc).isoformat(),
             'metadata':metadata or {}}
 
 
@@ -106,7 +108,7 @@ async def deliver_due(db, *, limit=50, sender=None):
     if sender is None:
         from app.services.ncm_delivery import send
         sender=send
-    rows=(await db.execute(text('''SELECT id,channel_id,payload,attempts FROM ncm_notification_outbox
+    rows=(await db.execute(text('''SELECT id,channel_id,payload,attempts,created_at FROM ncm_notification_outbox
         WHERE status='pending' AND next_attempt_at<=now() ORDER BY created_at
         LIMIT :limit FOR UPDATE SKIP LOCKED'''),{'limit':limit})).fetchall()
     delivered=0
@@ -120,7 +122,10 @@ async def deliver_due(db, *, limit=50, sender=None):
         terminal=False
         try:
             async with db.begin_nested():
-                ok=await sender(db,[row.channel_id],row.payload)==1
+                payload = dict(row.payload)
+                if not payload.get('timestamp') and getattr(row, 'created_at', None):
+                    payload['timestamp'] = row.created_at.isoformat()
+                ok=await sender(db,[row.channel_id],payload)==1
         except Exception as exc:
             # Provider messages may contain tokens/URLs. Persist only safe codes.
             from app.services.ncm_delivery import safe_error

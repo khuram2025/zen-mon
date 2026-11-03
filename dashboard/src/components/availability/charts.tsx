@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * Shared chart pieces for the Availability page: compliance labels, the
  * incident timeline (explicit start, recovery or ongoing state) and the
@@ -57,8 +58,8 @@ export function IncidentTimeline({
   const pct = (t: number) => ((Math.max(fromMs, Math.min(toMs, t)) - fromMs) / span) * 100
   const mid = fromMs + span / 2
   const axisFmt = (t: number) => span > 48 * 3_600_000
-    ? new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' })
-    : new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    ? regionalDate(new Date(t), 'date', [], { month: 'short', day: 'numeric' })
+    : regionalDate(new Date(t), 'time', [], { hour: '2-digit', minute: '2-digit' })
   return (
     <div>
       <ul className="space-y-2">

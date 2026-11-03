@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 import { cn } from '@/lib/utils'
 import { serverNow } from '@/lib/serverClock'
 
@@ -129,7 +130,7 @@ export function UptimeBars({ cells, className, barClassName, onSelect }: {
 }
 
 export function dayTitle(d: { date: Date; pct: number | null; samples: number }): string {
-  const when = d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+  const when = regionalDate(d.date, 'date', undefined, { weekday: 'short', month: 'short', day: 'numeric' })
   if (d.pct == null) return `${when} — not monitored`
   const source = d.samples > 0 ? `${d.samples} checks` : 'from status log'
   return `${when} — ${d.pct.toFixed(d.pct >= 99 ? 2 : 1)}% up · ${source}`

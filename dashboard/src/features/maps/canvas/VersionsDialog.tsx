@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /* Map versions (F10): list the server-side snapshots of a map, take one on
  * demand and restore an older one. The server snapshots the current state
  * before every restore, so a restore can itself be undone from this list. */
@@ -63,7 +64,7 @@ export function VersionsDialog({ mapId, onClose, onRestored }: VersionsDialogPro
       (await api.post(`/maps/${mapId}/versions/${v.id}/restore`)).data as { restored: boolean; backup_version_id?: string },
     onSuccess: (_r, v) => {
       setConfirm(null)
-      toast.success('Map restored', `Back to ${new Date(v.created_at).toLocaleString()}. The previous state was saved as a version.`)
+      toast.success('Map restored', `Back to ${regionalDate(new Date(v.created_at), 'datetime')}. The previous state was saved as a version.`)
       qc.invalidateQueries({ queryKey: ['manual-map', mapId] })
       qc.invalidateQueries({ queryKey: ['manual-map-live', mapId] })
       qc.invalidateQueries({ queryKey: versionsQueryKey(mapId) })
@@ -134,7 +135,7 @@ export function VersionsDialog({ mapId, onClose, onRestored }: VersionsDialogPro
                   <li key={v.id} className="flex items-center gap-3 px-3 py-2 text-xs">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-semibold text-text" title={v.created_at}>{new Date(v.created_at).toLocaleString()}</span>
+                        <span className="font-semibold text-text" title={v.created_at}>{regionalDate(new Date(v.created_at), 'datetime')}</span>
                         <span className="text-2xs text-muted">{formatAgo(v.created_at)}</span>
                         {i === 0 && <span className="rounded bg-primary/10 px-1 text-2xs font-semibold uppercase text-primary">latest</span>}
                       </div>
@@ -163,7 +164,7 @@ export function VersionsDialog({ mapId, onClose, onRestored }: VersionsDialogPro
         title="Restore this version?"
         description={confirm ? (
           <>
-            The map will be replaced by the snapshot from <b>{new Date(confirm.created_at).toLocaleString()}</b>
+            The map will be replaced by the snapshot from <b>{regionalDate(new Date(confirm.created_at), 'datetime')}</b>
             {' '}({confirm.node_count} nodes, {confirm.link_count} links, {confirm.shape_count} shapes).
             The current state is saved as a new version first.
           </>

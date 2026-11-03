@@ -1,3 +1,4 @@
+import { regionalDate } from '@/lib/regionalTime'
 /**
  * ZenPlus Device Health Report — PDF Generator
  *
@@ -52,12 +53,12 @@ function fmtDuration(sec: number | null) {
 
 function fmtDate(d: string | null, tz: string) {
   if (!d) return '--'
-  try { return new Date(d).toLocaleString('en-US', { timeZone: tz, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }) } catch { return new Date(d).toLocaleString() }
+  try { return regionalDate(new Date(d), 'datetime', 'en-US', { timeZone: tz, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }) } catch { return regionalDate(new Date(d), 'datetime') }
 }
 
 function fmtShortDate(d: string | null, tz: string) {
   if (!d) return '--'
-  try { return new Date(d).toLocaleDateString('en-US', { timeZone: tz, month: 'short', day: 'numeric', year: 'numeric' }) } catch { return new Date(d).toLocaleDateString() }
+  try { return regionalDate(new Date(d), 'date', 'en-US', { timeZone: tz, month: 'short', day: 'numeric', year: 'numeric' }) } catch { return regionalDate(new Date(d), 'date') }
 }
 
 function rangeLabel(hours: number): string {
@@ -93,9 +94,9 @@ function axisLabelFmt(tz: string, rangeHours: number) {
   return (val: string) => {
     const d = new Date(val)
     try {
-      if (rangeHours > 2160) return d.toLocaleDateString('en-US', { timeZone: tz, month: 'short', day: 'numeric' })
-      if (rangeHours > 168) return d.toLocaleDateString('en-US', { timeZone: tz, month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })
-      return d.toLocaleTimeString('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })
+      if (rangeHours > 2160) return regionalDate(d, 'date', 'en-US', { timeZone: tz, month: 'short', day: 'numeric' })
+      if (rangeHours > 168) return regionalDate(d, 'date', 'en-US', { timeZone: tz, month: 'short', day: 'numeric' }) + ' ' + regionalDate(d, 'time', 'en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })
+      return regionalDate(d, 'time', 'en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })
     } catch { return '' }
   }
 }
@@ -220,7 +221,7 @@ export async function generateDeviceReport(data: ReportData): Promise<void> {
       doc.setDrawColor(229, 231, 235); doc.setLineWidth(0.3)
       doc.line(ml, ph - 12, pw - mr, ph - 12)
       doc.setFontSize(7); doc.setTextColor(160, 160, 160)
-      doc.text(`ZenPlus Device Report  |  ${device.hostname} (${device.ip_address})  |  Generated ${new Date().toLocaleString()}`, pw / 2, ph - 8, { align: 'center' })
+      doc.text(`ZenPlus Device Report  |  ${device.hostname} (${device.ip_address})  |  Generated ${regionalDate(new Date(), 'datetime')}`, pw / 2, ph - 8, { align: 'center' })
       doc.text(`Page ${i} of ${pages}`, pw - mr, ph - 8, { align: 'right' })
     }
   }
@@ -287,9 +288,9 @@ export async function generateDeviceReport(data: ReportData): Promise<void> {
   doc.text('Generated:', ml + 5, y + 12)
   doc.setFont('helvetica', 'bold'); doc.setTextColor(31, 41, 55)
   try {
-    doc.text(new Date().toLocaleString('en-US', { timeZone: timezone, year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }), ml + 30, y + 12)
+    doc.text(regionalDate(new Date(), 'datetime', 'en-US', { timeZone: timezone, year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }), ml + 30, y + 12)
   } catch {
-    doc.text(new Date().toLocaleString(), ml + 30, y + 12)
+    doc.text(regionalDate(new Date(), 'datetime'), ml + 30, y + 12)
   }
 
   // ─── EXECUTIVE SUMMARY ───

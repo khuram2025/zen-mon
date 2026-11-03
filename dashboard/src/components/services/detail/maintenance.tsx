@@ -1,3 +1,4 @@
+import { regionalInput, regionalInputMs } from '@/lib/regionalTime'
 /**
  * Maintenance for one monitor (B03, B04, B24).
  *
@@ -256,8 +257,7 @@ export function MaintenanceBanner({ windows, supported, slaExcludesMaintenance, 
 
 const toLocalInput = (ms: number) => {
   const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return regionalInput(d)
 }
 
 /** Start a check-scoped window. Presets use a server-side start where supported. */
@@ -343,8 +343,8 @@ export function MaintenanceDialog({
   const submitCustom = () => {
     setError(null)
     if (!startsAt || !endsAt) { setError('Enter both a start and an end time.'); return }
-    const s = new Date(startsAt).getTime()
-    const e = new Date(endsAt).getTime()
+    const s = regionalInputMs(startsAt)
+    const e = regionalInputMs(endsAt)
     if (!Number.isFinite(s) || !Number.isFinite(e)) { setError('Enter valid start and end times.'); return }
     if (e <= s) { setError('The end time must be after the start time.'); return }
     if (e <= serverNow()) { setError('The window would already be over by the appliance clock.'); return }
