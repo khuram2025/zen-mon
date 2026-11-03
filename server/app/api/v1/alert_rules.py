@@ -1063,8 +1063,11 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
     else:
         device_status = "DOWN" if trigger == "down" else "DEGRADED" if trigger == "degraded" else "UP" if trigger == "up" else "ALERT"
         status_intro = "An alert has been triggered:"
-        if kind == "service" and device_status == "ALERT":
-            device_status = "DOWN"
+        if device_status == "ALERT":
+            if kind == "service":
+                device_status = "DOWN"
+            elif kind == "device" and metric == "ping_status":
+                device_status = "DOWN" if ap.alerts_on_unhealthy(metric, operator, threshold) else "UP"
 
     # Preview against something the rule could plausibly fire on: an APM rule
     # previewed against "core-router-01" teaches the reader nothing about the
@@ -1099,7 +1102,7 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         # the past reads as stale data rather than as a sample.
         "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
         "rtt": RTT_UNAVAILABLE if down_device else "45.2 ms",
-        "packet_loss": "100%" if down_device else "0%" if is_recovery else "15%",
+        "packet_loss": "100%" if down_device else "0%" if device_status == "UP" else "15%",
         "check_name": "Dashboard HTTPS",
         "check_type": "HTTP",
         "target": "https://service.example.com",

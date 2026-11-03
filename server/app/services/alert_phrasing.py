@@ -502,7 +502,7 @@ def _cmp(value: float, operator: str, threshold: float) -> bool:
     return ops.get(normalize_operator(operator), False)
 
 
-def _alerts_on_unhealthy(metric: str, operator: str, threshold) -> bool:
+def alerts_on_unhealthy(metric: str, operator: str, threshold) -> bool:
     """Does this condition fire on the metric's *bad* state?
 
     Flag metrics disagree about which number is healthy: ping_status and
@@ -534,7 +534,7 @@ def _state_phrase(metric: str, operator: str, threshold, *, cleared: bool,
     """
     info = METRICS[metric]
     states = (info.get("narrative") if narrative else None) or info["state"]
-    wants_bad = _alerts_on_unhealthy(metric, operator, threshold)
+    wants_bad = alerts_on_unhealthy(metric, operator, threshold)
     key = "up" if (wants_bad == cleared) else "down"
     return states[key]
 
@@ -572,7 +572,7 @@ def condition_label(metric: Optional[str], operator: Optional[str], threshold,
     if "state" in info:
         # Name the state the rule actually watches — a trigger_on='up' rule
         # labelled "Device unreachable" would be exactly backwards.
-        side = "down" if _alerts_on_unhealthy(key, operator or "==", threshold) else "up"
+        side = "down" if alerts_on_unhealthy(key, operator or "==", threshold) else "up"
         labels = info.get("state_label") or {}
         return labels.get(side) or f"{info['noun']}: {info['state'][side]}"
     verb = _OPERATORS.get(normalize_operator(operator), _OPERATORS[">"])["present"]

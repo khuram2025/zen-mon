@@ -133,6 +133,19 @@ def test_preview_returns_rendered_email(preview_client):
     assert "{event_sentence}" in body["templates"]["effective"]["email_body"]
 
 
+@pytest.mark.parametrize("threshold,expected_status,packet_loss,reply", [
+    (0, "DOWN", "100%", "unavailable (no reply)"),
+    (1, "UP", "0%", "45.2 ms"),
+])
+def test_any_change_ping_preview_matches_the_rule(preview_client, threshold, expected_status, packet_loss, reply):
+    client, db = preview_client
+    db.row = _rule_row(trigger_on="any", threshold=threshold)
+    alert = client.post(f"/api/v1/alert-rules/{RULE_ID}/preview").json()["alert"]
+    assert alert["device_status"] == expected_status
+    assert alert["variables"]["packet_loss"] == packet_loss
+    assert alert["variables"]["rtt"] == reply
+
+
 def test_preview_bodies_read_as_english(preview_client):
     """No raw `metric operator threshold` anywhere a person reads."""
     client, db = preview_client
