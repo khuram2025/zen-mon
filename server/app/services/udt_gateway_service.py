@@ -10,6 +10,7 @@ import logging
 from types import SimpleNamespace
 
 from sqlalchemy import text
+from app.services.job_lock_keys import JOB_LOCK_KEYS
 from app.core.database import AsyncSessionLocal, engine
 from app.services.udt_gateway_collection import canonical_mac
 from app.services.udt_gateway_collection import (
@@ -23,7 +24,7 @@ from app.services.udt_gateway_collection import (
 )
 
 logger = logging.getLogger("zenplus.udt_gateway")
-LOCK = 1515074394
+LOCK = JOB_LOCK_KEYS["udt.gateway"]
 INTERVAL = 300
 
 

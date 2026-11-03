@@ -16,12 +16,16 @@ Retry identity: a batch of one upload keeps that upload's own deduplication
 token, exactly as before. A combined batch gets a token derived from its
 members and is retried, for up to RETRY_WINDOW_S, as the identical block with
 that token, so ClickHouse deduplicates a retry of a block that did land. If
-the outcome is still unknown after that, each upload is acknowledged only
-when all of its rows are verified stored; the rest replay from their spools.
-Residual window: a combined block that landed but could neither be confirmed
+the outcome is still unknown after that, raw-row verification is allowed only
+for an unreplicated table with no dependent views. Replicated writes and view
+completion require a successful insert response; the rest replay from spools.
+Without the opt-in PostgreSQL journal, a combined block that landed but could neither be confirmed
 nor verified (ClickHouse unreachable) can be stored twice when its uploads
 replay under their own tokens, as can an upload replayed to another worker
 while its first write is still in flight.
+
+The commissioned journal path retains the original grouping across processes
+and restarts. See host_ingest_journal for its bounded replay and capacity gates.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 import weakref
@@ -134,6 +139,27 @@ def rows_present(client, table: str, columns: list[str], rows: list[list]) -> bo
     return bool(result) and int(result[0][0]) >= len(rows)
 
 
+def presence_can_confirm(client, table: str) -> bool:
+    """Raw presence cannot prove replication quorum or dependent-view completion.
+
+    A timed-out quorum insert can later leave a raw row without its materialized
+    view contribution. Returning success in that state discards the producer's
+    retry opportunity. Metadata errors or unknown engines conservatively refuse
+    presence-based acknowledgement.
+    """
+    if not re.fullmatch(r'(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?[a-zA-Z_][a-zA-Z0-9_]*',table):
+        return False
+    database,_,name=table.rpartition('.')
+    result=client.query(
+        "SELECT engine,length(dependencies_table) FROM system.tables "
+        "WHERE database=if(%(database)s='',currentDatabase(),%(database)s) "
+        "AND name=%(name)s",
+        parameters={'database':database,'name':name or table},
+    ).result_rows
+    return (len(result)==1 and result[0][0] in {'MergeTree','ReplacingMergeTree'}
+            and int(result[0][1])==0)
+
+
 # ─── Batcher ─────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -154,15 +180,16 @@ class _Batch:
 
 class HostInsertBatcher:
     def __init__(self, client_factory: Callable[[], Any], *, max_rows: int = MAX_ROWS,
-                 max_delay_s: float = MAX_DELAY_S):
+                 max_delay_s: float = MAX_DELAY_S, journal=None):
         self.client_factory = client_factory
         self.max_rows = max_rows
         self.max_delay_s = max_delay_s
+        self.journal = journal
         self._open: dict[tuple[str, tuple[str, ...]], _Batch] = {}
         # token -> (outcome future, monotonic time): a replay of an upload that
         # is still being written, or was stored recently, reuses that outcome
         # instead of writing its rows a second time under a different block.
-        self._recent: "OrderedDict[str, tuple[asyncio.Future, float]]" = OrderedDict()
+        self._recent: "OrderedDict[tuple[str, str], tuple[asyncio.Future, float]]" = OrderedDict()
         self.stats = {"inserts": 0, "rows": 0, "members": 0, "failures": 0, "verified": 0,
                       "replays_joined": 0}
 
@@ -183,7 +210,8 @@ class HostInsertBatcher:
         loop = asyncio.get_running_loop()
         now = loop.time()
         self._prune_recent(now)
-        prior = self._recent.get(token)
+        identity = (table, token)
+        prior = self._recent.get(identity)
         if prior is not None:
             fut = prior[0]
             if not fut.done() or (not fut.cancelled() and fut.exception() is None):
@@ -200,8 +228,8 @@ class HostInsertBatcher:
         member.future.add_done_callback(lambda f: f.cancelled() or f.exception())
         batch.members.append(member)
         batch.rows += len(rows)
-        self._recent[token] = (member.future, now)
-        self._recent.move_to_end(token)
+        self._recent[identity] = (member.future, now)
+        self._recent.move_to_end(identity)
         if batch.rows >= self.max_rows:
             self._flush_soon(key, batch)
         await asyncio.shield(member.future)
@@ -224,19 +252,24 @@ class HostInsertBatcher:
                 .encode()).hexdigest()
         error: Optional[BaseException] = None
         try:
-            await asyncio.to_thread(self._write, batch.table, batch.columns, rows, token)
+            if self.journal is not None:
+                await self.journal.submit(batch.table, batch.columns,
+                                          [(m.token, m.rows) for m in batch.members])
+            else:
+                await asyncio.to_thread(self._write, batch.table, batch.columns, rows, token)
         except BaseException as exc:  # noqa: BLE001 — delivered to the members
             error = exc
         stored: set[int] = set()
         if error is not None:
             # Outcome unknown (e.g. the response was lost after the write).
-            # Acknowledge exactly the uploads whose rows are stored; each
-            # upload's rows were always written in one block, so one probe
-            # row per upload decides it. The rest replay from their spools.
-            try:
-                stored = await asyncio.to_thread(self._stored_members, batch)
-            except Exception:
-                stored = set()
+            # Only plain stores without dependent views can use raw presence
+            # as confirmation. Quorum and materialized-view completion need a
+            # successful retry; leave other uploads available for replay.
+            if self.journal is None:
+                try:
+                    stored = await asyncio.to_thread(self._stored_members, batch)
+                except Exception:
+                    stored = set()
             self.stats["verified"] += len(stored)
             self.stats["failures"] += 1
             logger.warning("host telemetry batch insert into %s failed (%d uploads, %d verified "
@@ -278,6 +311,8 @@ class HostInsertBatcher:
 
     def _stored_members(self, batch: _Batch) -> set[int]:
         client = self.client_factory()
+        if not presence_can_confirm(client,batch.table):
+            return set()
         return {i for i, m in enumerate(batch.members)
                 if rows_present(client, batch.table, batch.columns, m.rows)}
 
@@ -292,4 +327,8 @@ def batcher_for_loop(client_factory: Callable[[], Any]) -> HostInsertBatcher:
     b = _batchers.get(loop)
     if b is None:
         b = _batchers[loop] = HostInsertBatcher(client_factory)
+        from app.services.host_ingest_journal import enabled, HostIngestJournal
+        if enabled():
+            from app.core.database import engine
+            b.journal = HostIngestJournal(engine, b._write)
     return b

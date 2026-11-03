@@ -17,6 +17,7 @@ from app.api.v1.ssh_terminal import router as ssh_terminal_router
 from app.api.v1 import management_access
 from app.api.v1 import network_events
 from app.api.v1 import notification_grouping as notification_grouping_api
+from app.api.v1 import notification_sites as notification_sites_api
 from app.api.v1 import escalation_policies as escalation_policies_api
 from app.api.v1 import oncall as oncall_api
 from app.api.v1 import sensors as sensors_admin_api
@@ -93,6 +94,8 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
+    from app.core.controller_admission import ControllerAdmissionMiddleware
+    app.add_middleware(ControllerAdmissionMiddleware)
 
     # Agents compress uploads once the heartbeat advertises accepts_gzip.
     app.add_middleware(GzipRequestMiddleware)
@@ -166,6 +169,8 @@ def create_app() -> FastAPI:
     app.include_router(netpath.router, prefix="/api/v1", dependencies=[policy("netpath")])
     app.include_router(manual_maps.router, prefix="/api/v1", dependencies=[policy("maps")])
     app.include_router(sensors_admin_api.router, prefix="/api/v1")
+    app.include_router(notification_sites_api.router, prefix="/api/v1")
+    app.include_router(notification_sites_api.runtime, prefix="/api/v1")
     app.include_router(sensors_admin_api.sites_router, prefix="/api/v1")
     app.include_router(sensor_api.router, prefix="/api/v1")
     app.include_router(agents_runtime_api.router, prefix="/api/v1")
@@ -212,6 +217,11 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_background_tasks():
+        from app.services.rum_ingest_journal import validate_configuration as validate_rum_journal
+        validate_rum_journal()
+        from app.core.controller_admission import permitted
+        if not permitted():
+            raise RuntimeError("Controller authority is required before worker startup")
         # Built-in roles: reconcile persisted definitions with the code (versioned).
         try:
             from app.core.database import AsyncSessionLocal as _RoleSession
@@ -252,6 +262,16 @@ def create_app() -> FastAPI:
         # active and unacknowledged past each level's deadline.
         from app.services.alert_escalation_service import escalation_sweeper_loop
         app.state.alert_escalation_sweeper = asyncio.create_task(escalation_sweeper_loop())
+        from app.services.notification_outbox import notification_outbox_loop
+        app.state.notification_outbox = asyncio.create_task(notification_outbox_loop())
+        from app.services.service_transition_inbox import service_transition_loop
+        app.state.service_transition_inbox = asyncio.create_task(service_transition_loop())
+        from app.services.host_ingest_journal import enabled as journal_enabled, recovery_loop
+        if journal_enabled():
+            app.state.host_ingest_recovery = asyncio.create_task(recovery_loop())
+        from app.services.trap_incident_inbox import enabled as trap_inbox_enabled, trap_incident_loop
+        if trap_inbox_enabled():
+            app.state.trap_incident_inbox = asyncio.create_task(trap_incident_loop())
         # Scheduled reports: fire due report schedules (render + email delivery).
         from app.services.report_scheduler import report_scheduler_loop
         app.state.report_scheduler = asyncio.create_task(report_scheduler_loop())
@@ -330,10 +350,20 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
+        stopping = []
         for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
+                stopping.append(task)
+        for attr in ("alert_escalation_sweeper", "agent_package_sync", "notification_outbox", "host_ingest_recovery", "service_transition_inbox", "trap_incident_inbox"):
+            task = getattr(app.state, attr, None)
+            if task:
+                task.cancel()
+                stopping.append(task)
+        await asyncio.gather(*stopping, return_exceptions=True)
+        from app.services.discovery_executor import stop_run_tasks
+        await stop_run_tasks()
         await apm_ingest_api.stop_batch_writer()
 
     return app

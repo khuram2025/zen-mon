@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 from itertools import islice
 import re
 import time
@@ -40,6 +41,9 @@ from app.models.discovery_v2 import (
 )
 from app.services import discovery_probes as probes
 from app.services.discovery_identify import identify
+from app.services import discovery_ownership as ownership
+
+logger = logging.getLogger("zenplus.discovery_executor")
 
 
 # Background-task handles (run_id → asyncio.Task) for cancellation.
@@ -374,9 +378,9 @@ async def _probe_ip(
 # ────────────────────────────────────────────────────────────────────
 # Main run loop
 # ────────────────────────────────────────────────────────────────────
-async def execute_run(run_id: uuid.UUID) -> None:
+async def _execute_owned_run(run_id: uuid.UUID, token: uuid.UUID) -> None:
     start = time.monotonic()
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         run = await db.get(DiscoveryRun, run_id)
         if not run:
             return
@@ -386,7 +390,6 @@ async def execute_run(run_id: uuid.UUID) -> None:
             run.error_details = "Discovery profile not found"
             run.phase = "done"
             run.completed_at = datetime.now(timezone.utc)
-            await db.commit()
             return
 
         # Snapshot config so future edits don't change history
@@ -410,18 +413,16 @@ async def execute_run(run_id: uuid.UUID) -> None:
         activity = list(run.activity_log or [])
         _log_event(activity, f"Run started by trigger={run.trigger_type}")
         run.activity_log = activity
-        await db.commit()
 
     # Phase 1: prepare targets
     targets = expand_targets(profile.targets or [], profile.exclusions or [])
     if not targets:
-        async with AsyncSessionLocal() as db:
+        async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
             run = await db.get(DiscoveryRun, run_id)
             run.status = "failed"
             run.phase = "done"
             run.error_details = "No targets resolved from scope"
             run.completed_at = datetime.now(timezone.utc)
-            await db.commit()
         return
     if len(targets) > 4096:
         targets = targets[:4096]
@@ -432,7 +433,7 @@ async def execute_run(run_id: uuid.UUID) -> None:
     max_concurrency = max(1, min(int(profile.max_concurrency or 32), 128))
 
     # Phase 2: load credentials
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         snmp_creds = await _load_snmp_credentials(
             db, [str(c) for c in (profile.snmp_credential_ids or [])]
         )
@@ -449,9 +450,8 @@ async def execute_run(run_id: uuid.UUID) -> None:
                 progress_pct=3,
             )
         )
-        await db.commit()
 
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         run = await db.get(DiscoveryRun, run_id)
         activity = list(run.activity_log or [])
         _log_event(activity, f"Loaded {len(snmp_creds)} SNMP credential(s), {len(windows_creds)} Windows credential(s), {len(ssh_creds)} SSH credential(s)")
@@ -462,7 +462,6 @@ async def execute_run(run_id: uuid.UUID) -> None:
         run.activity_log = activity
         run.phase = "scanning"
         run.progress_pct = 6
-        await db.commit()
 
     # Phase 3: scanning — probe each IP under a concurrency limit
     sem = asyncio.Semaphore(max_concurrency)
@@ -485,47 +484,50 @@ async def execute_run(run_id: uuid.UUID) -> None:
 
     tasks = [asyncio.create_task(_do(ip)) for ip in targets]
     batch_pulse = max(1, len(tasks) // 25)
-    for i, fut in enumerate(asyncio.as_completed(tasks)):
-        ip, ident = await fut
-        identities[ip] = ident
-        completed += 1
-        if ident.get("_responsive"):
-            responding += 1
-        else:
-            failed += 1
-        if completed % batch_pulse == 0 or completed == len(tasks):
-            pct = 6 + int((completed / len(tasks)) * 76)
-            async with AsyncSessionLocal() as db:
-                await db.execute(
-                    update(DiscoveryRun).where(DiscoveryRun.id == run_id).values(
-                        completed_targets=completed,
-                        responding_targets=responding,
-                        failed_targets=failed,
-                        progress_pct=min(pct, 82),
+    try:
+        for i, fut in enumerate(asyncio.as_completed(tasks)):
+            ip, ident = await fut
+            identities[ip] = ident
+            completed += 1
+            if ident.get("_responsive"):
+                responding += 1
+            else:
+                failed += 1
+            if completed % batch_pulse == 0 or completed == len(tasks):
+                pct = 6 + int((completed / len(tasks)) * 76)
+                async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
+                    await db.execute(
+                        update(DiscoveryRun).where(DiscoveryRun.id == run_id).values(
+                            completed_targets=completed,
+                            responding_targets=responding,
+                            failed_targets=failed,
+                            progress_pct=min(pct, 82),
+                        )
                     )
-                )
-                await db.commit()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     # Phase 4: identifying — already done inline. Pause for UX feel.
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         run = await db.get(DiscoveryRun, run_id)
         activity = list(run.activity_log or [])
         _log_event(activity, f"Identified {responding} responding host(s)")
         run.activity_log = activity
         run.phase = "identifying"
         run.progress_pct = 86
-        await db.commit()
     await asyncio.sleep(0.2)
 
     # Phase 5: matching existing inventory
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         run = await db.get(DiscoveryRun, run_id)
         run.phase = "matching"
         run.progress_pct = 90
-        await db.commit()
 
     # Pre-load ignored set
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         ignored_rows = (await db.execute(text(
             "SELECT ip_address::text AS ip FROM discovery_ignored_devices"
         ))).mappings().all()
@@ -534,7 +536,7 @@ async def execute_run(run_id: uuid.UUID) -> None:
     new_count = existing_count = changed_count = unknown_count = 0
     ignored_count = cred_failures = duplicates = ready_to_import = 0
 
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         for ip, ident in identities.items():
             is_responding = bool(ident.get("_responsive"))
             error_message = ident.get("_error") if ident.get("_error") else None
@@ -623,10 +625,9 @@ async def execute_run(run_id: uuid.UUID) -> None:
                 raw_data=_compact_raw(raw),
             )
             db.add(row)
-        await db.commit()
 
     # Phase 6: applying rules (placeholder — rules are evaluated at import)
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         run = await db.get(DiscoveryRun, run_id)
         activity = list(run.activity_log or [])
         _log_event(activity, f"Matched {existing_count} existing, {new_count} new, {changed_count} changed")
@@ -637,12 +638,11 @@ async def execute_run(run_id: uuid.UUID) -> None:
         run.activity_log = activity
         run.phase = "applying_rules"
         run.progress_pct = 95
-        await db.commit()
     await asyncio.sleep(0.1)
 
     # Phase 7: reporting / done
     duration_ms = int((time.monotonic() - start) * 1000)
-    async with AsyncSessionLocal() as db:
+    async with ownership.owned_session(AsyncSessionLocal, run_id, token) as db:
         run = await db.get(DiscoveryRun, run_id)
         activity = list(run.activity_log or [])
         _log_event(activity, f"Scan complete in {duration_ms} ms")
@@ -666,7 +666,6 @@ async def execute_run(run_id: uuid.UUID) -> None:
             run.status = "completed"
         run.completed_at = datetime.now(timezone.utc)
         run.duration_ms = duration_ms
-        await db.commit()
 
         await db.execute(
             update(DiscoveryProfile).where(DiscoveryProfile.id == profile.id).values(
@@ -674,7 +673,6 @@ async def execute_run(run_id: uuid.UUID) -> None:
                 updated_at=datetime.now(timezone.utc),
             )
         )
-        await db.commit()
 
 
 def _uuid_or_none(v) -> uuid.UUID | None:
@@ -806,6 +804,48 @@ def _compact_raw(raw: dict) -> dict:
 # ────────────────────────────────────────────────────────────────────
 # Task wrapper / cancel
 # ────────────────────────────────────────────────────────────────────
+async def execute_run(run_id: uuid.UUID) -> None:
+    token = uuid.uuid4()
+    if not await ownership.claim(AsyncSessionLocal, run_id, token):
+        return
+    work = asyncio.create_task(_execute_owned_run(run_id, token))
+
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(ownership.HEARTBEAT_SECONDS)
+            if not await ownership.renew(AsyncSessionLocal, run_id, token):
+                raise ownership.OwnershipLost('Discovery ownership is no longer valid')
+
+    pulse = asyncio.create_task(heartbeat())
+
+    async def stop_children():
+        for task in (work, pulse):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(work, pulse, return_exceptions=True)
+
+    try:
+        done, _ = await asyncio.wait((work, pulse), return_when=asyncio.FIRST_COMPLETED)
+        if work in done:
+            await work
+        else:
+            await pulse
+    except asyncio.CancelledError:
+        await stop_children()
+        await ownership.finish(AsyncSessionLocal, run_id, token, 'cancelled')
+        raise
+    except ownership.OwnershipLost:
+        logger.info('Discovery run %s stopped after ownership loss', run_id)
+    except Exception:
+        await stop_children()
+        logger.exception('Discovery run %s failed', run_id)
+        await ownership.finish(AsyncSessionLocal, run_id, token, 'failed',
+                               'Discovery executor failed; review server logs')
+        raise
+    finally:
+        await stop_children()
+
+
 def start_run_task(run_id: uuid.UUID) -> None:
     if run_id in _RUNNING_TASKS and not _RUNNING_TASKS[run_id].done():
         return
@@ -814,28 +854,20 @@ def start_run_task(run_id: uuid.UUID) -> None:
         try:
             await execute_run(run_id)
         except asyncio.CancelledError:
-            async with AsyncSessionLocal() as db:
-                run = await db.get(DiscoveryRun, run_id)
-                if run and run.status in ("running", "queued"):
-                    run.status = "cancelled"
-                    run.phase = "done"
-                    run.completed_at = datetime.now(timezone.utc)
-                    await db.commit()
             raise
-        except Exception as e:
-            async with AsyncSessionLocal() as db:
-                run = await db.get(DiscoveryRun, run_id)
-                if run:
-                    run.status = "failed"
-                    run.phase = "done"
-                    run.error_details = f"Executor crashed: {e}"
-                    run.completed_at = datetime.now(timezone.utc)
-                    await db.commit()
+        except Exception:
+            logger.exception('Discovery task %s stopped', run_id)
         finally:
             _RUNNING_TASKS.pop(run_id, None)
 
-    task = asyncio.create_task(_wrap())
-    _RUNNING_TASKS[run_id] = task
+    _RUNNING_TASKS[run_id] = asyncio.create_task(_wrap())
+
+
+async def stop_run_tasks() -> None:
+    tasks = list(_RUNNING_TASKS.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def cancel_run(run_id: uuid.UUID) -> bool:

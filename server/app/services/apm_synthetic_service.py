@@ -53,6 +53,7 @@ from typing import Any, Optional
 
 import httpx
 from sqlalchemy import text
+from app.services.job_lock_keys import JOB_LOCK_KEYS
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.host_alert_service import dispatch_to_channels
@@ -61,7 +62,7 @@ from app.services import alert_funnel
 logger = logging.getLogger("zenplus.apm_synthetics")
 
 TICK_INTERVAL_S = 15
-SYNTHETIC_SWEEP_ADVISORY_LOCK = 1515074391
+SYNTHETIC_SWEEP_ADVISORY_LOCK = JOB_LOCK_KEYS["apm.synthetic.sweep"]
 MAX_STEPS = 20
 MAX_BODY_CAPTURE = 512          # response snippet kept per step for the UI
 DEFAULT_LOCATION = "appliance"

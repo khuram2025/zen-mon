@@ -323,7 +323,9 @@ def _mail_ctx(ctx: dict) -> dict:
     return mail_ctx
 
 
-async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -> int:
+async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict, *,
+                               delivery_guard=None, route_guard=None, delivery_ledger=None,
+                               site_routing=True) -> int:
     """Send an alert to notification channels. Best-effort; returns how many
     channels (and direct recipients) accepted it — or hold it in a digest.
     Every outcome is written to the delivery log (accepted / failed / skipped
@@ -358,23 +360,33 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
     * ``only_recipients``: restrict channels to these recipient keys (digest
       release); ``html_body``: a pre-rendered mail body.
     """
+    if ctx.get("_enqueue_notification"):
+        from app.services.notification_outbox import enqueue
+        return await enqueue(db, channel_ids, ctx)
     from app.api.v1.alert_engine import _send_email, _send_sms, _dispatch_channel_result
     from app.services import alert_delivery_log as dl
     from app.services.alert_phrasing import sms_with_timestamp
+    if delivery_ledger is not None:
+        dl = delivery_ledger
     from app.services import notification_grouping as ng
     from app.services.email_render import alert_subject, build_alert_email_html
 
     kind = dl.kind_from_ctx(ctx)
     keyed = _key_context(ctx)
+    from app.core.config import get_settings
+    site_enabled = bool(site_routing and keyed and get_settings().NOTIFICATION_SITE_ROUTING_ENABLED)
+    strict = bool(ctx.get("_require_delivery_key")) or site_enabled
+    if strict and not keyed:
+        raise RuntimeError("Durable dispatch requires delivery key storage")
     # Recipients this dispatch has already handled (or found already
     # delivered for this incident event), by dedupe key.
     covered: set[str] = set()
     # ... of which these were delivered (or claimed) by an earlier dispatch.
-    prior = await dl.delivered_recipients(db, *keyed) if keyed else {}
+    prior = await dl.delivered_recipients(db, *keyed, strict=strict) if keyed else {}
     covered.update(prior)
     raw_only = ctx.get("only_recipients")
     only = None if raw_only is None else {str(k) for k in raw_only}
-    gate = await ng.gate_for(db, ctx, keyed)
+    gate = None if ctx.get("_skip_grouping") else await ng.gate_for(db, ctx, keyed)
     # Channels / direct recipients that accepted (or hold) this notification.
     credited: set[str] = set()
 
@@ -386,6 +398,7 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
             self.timer = dl.Timer()
             self.claimed: list[str] = []
             self.in_flight: list[str] = []
+            self.provider_accepted = False
 
         async def log(self, outcome: str, error=None):
             await dl.record(
@@ -401,9 +414,9 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                 return targets, False
             fresh, already = [], False
             for key, addr in targets:
-                key_id, state = await dl.claim_key(db, keyed[0], keyed[1], self.id, key)
-                if key_id:
-                    self.claimed.append(key_id)
+                claim_token, state = await dl.claim_key(db, keyed[0], keyed[1], self.id, key, strict=strict)
+                if claim_token:
+                    self.claimed.append(claim_token)
                     fresh.append((key, addr))
                 elif state is None:
                     fresh.append((key, addr))      # keys unavailable: send as before
@@ -418,7 +431,7 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
 
         async def finish(self, state: str, error=None):
             if self.claimed:
-                await dl.finish_keys(db, self.claimed, state, error)
+                await dl.finish_keys(db, self.claimed, state, error, strict=strict)
                 await db.commit()
 
         async def gated(self, targets: list[tuple[str, str]], direct_kind: str | None = None):
@@ -437,22 +450,31 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
             return rest
 
         async def send_addresses(self, gw: dict, ctype: str, rcpt: str, targets) -> None:
+            if delivery_guard is not None:
+                await delivery_guard()
             self.in_flight = [k for k, _ in targets]
-            if ctype == "email":
-                mail_ctx = _mail_ctx(ctx)
-                ok = await _send_email(gw, rcpt, alert_subject(ctx["subject"], ctx),
-                                       mail_ctx["message"],
-                                       html_body=ctx.get("html_body") or build_alert_email_html(mail_ctx))
-                skip_reason = "config: SMTP gateway has no host"
+            async def local_send(safety=False):
+                delivery_ctx = dict(ctx)
+                if safety:
+                    delivery_ctx['subject'] = '[Local safety copy] ' + ctx['subject']
+                    delivery_ctx['message'] = '[Local safety copy; remote delivery unconfirmed] ' + ctx['message']
+                if ctype == "email":
+                    mail_ctx = _mail_ctx(delivery_ctx)
+                    return await _send_email(gw, rcpt, alert_subject(delivery_ctx["subject"], delivery_ctx),
+                                           mail_ctx["message"],
+                                           html_body=(None if safety else ctx.get("html_body")) or build_alert_email_html(mail_ctx))
+                message = sms_with_timestamp(delivery_ctx["message"], delivery_ctx.get("triggered_at"))
+                return await _send_sms(gw, rcpt, message, values=ctx.get("sms_template_values"))
+            if site_enabled:
+                from app.services.notification_sites import route as site_route
+                ok = await site_route(db, self.id, targets[0][0], ctx, local_send, delivery_guard)
             else:
-                # Gateway template placeholders the sender offers
-                # (device path: {hostname}, {ip_address}, {status}).
-                message = sms_with_timestamp(ctx["message"], ctx.get("triggered_at"))
-                ok = await _send_sms(gw, rcpt, message,
-                                     values=ctx.get("sms_template_values"))
-                skip_reason = "config: SMS gateway is not a usable HTTP gateway"
+                ok = await local_send()
+            skip_reason = ("config: SMTP gateway has no host" if ctype == "email"
+                           else "config: SMS gateway is not a usable HTTP gateway")
             # Log first: the key's commit then makes both durable.
             if ok:
+                self.provider_accepted = True
                 credited.add(self.credit_key)
                 covered.update(self.in_flight)
                 await self.log("accepted")
@@ -463,7 +485,9 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
 
         async def failed(self, exc: BaseException):
             logger.warning("alert notify: channel %s failed: %s", self.name or self.id, exc)
-            outcome = dl.outcome_for_exception(exc)
+            # A receipt-storage failure after provider acceptance cannot turn
+            # an already sent message into a definitely-unsent retry.
+            outcome = "uncertain" if self.provider_accepted else dl.outcome_for_exception(exc)
             if outcome == "uncertain":
                 covered.update(self.in_flight)   # it may have arrived: never twice
             await self.log("failed", exc if outcome == "failed"
@@ -483,6 +507,8 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
             if not ch:
                 await route.log("skipped", "config: channel no longer exists")
                 continue
+            if route_guard is not None:
+                await route_guard(ch_id, ch)
             route.name, route.type = ch.name, ch.type
             if not ch.enabled:
                 await route.log("skipped", "config: channel disabled")
@@ -491,17 +517,22 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
             if ch.type in ("email", "sms"):
                 field = "recipients" if ch.type == "email" else "phone_numbers"
                 listed = _recipients(cfg.get(field, ""), ch.type)
+                route_targets = ctx.get("_outbox_route_targets", {}).get(ch_id)
+                if route_targets is not None:
+                    listed = [(k, a) for k, a in listed if k in route_targets]
                 if only is not None:
                     listed = [(k, a) for k, a in listed if k in only]
                     if not listed:
                         await route.log("skipped", "config: the held recipients are no longer on this channel")
                         continue
                 gw = await _gateway_config(db, ch, "smtp" if ch.type == "email" else "sms")
-                if not listed or not gw:
+                if not listed or (not gw and not site_enabled):
                     what = "recipients" if ch.type == "email" else "phone numbers"
                     await route.log("skipped", f"config: no {what}" if not listed
                                     else f"config: no enabled {'SMTP' if ch.type == 'email' else 'SMS'} gateway")
                     continue
+                if site_enabled and not gw:
+                    gw = {}
                 # A recipient counts as covered only once a channel accepted
                 # the message (or possibly did): a backup channel on another
                 # gateway still reaches them when this one fails.
@@ -517,6 +548,19 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                 targets = await route.gated(targets)
                 if not targets:
                     continue
+                if strict:
+                    # One recipient per provider request gives each durable
+                    # key its own outcome. SMTP may accept some RCPT commands
+                    # and refuse others; a single bool cannot describe both.
+                    for key, address in targets:
+                        recipient_route = _Route(ch_id, ch_id, ch.name, ch.type)
+                        try:
+                            fresh, _ = await recipient_route.claim([(key, address)])
+                            if fresh:
+                                await recipient_route.send_addresses(gw, ch.type, address, fresh)
+                        except Exception as exc:
+                            await recipient_route.failed(exc)
+                    continue
                 targets, already = await route.claim(targets)
                 if not targets:
                     if already:
@@ -525,7 +569,8 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                     continue
                 if ch.type == "email":
                     rcpt = ", ".join(a for _, a in targets)
-                elif len(targets) == len(listed) and only is None and isinstance(cfg.get(field), str):
+                elif (len(targets) == len(listed) and only is None and route_targets is None
+                      and isinstance(cfg.get(field), str)):
                     rcpt = cfg[field]     # SMS gateways substitute the list verbatim
                 else:
                     rcpt = ",".join(a for _, a in targets)
@@ -539,8 +584,26 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                         credited.add(ch_id)
                     await route.log("skipped", "duplicate: already delivered for this event")
                     continue
-                ok, err = await _dispatch_channel_result(ch.type, cfg, ctx)
+                if delivery_guard is not None:
+                    await delivery_guard()
+                provider_ctx = {k: v for k, v in ctx.items() if not k.startswith("_")}
+                if site_enabled:
+                    from app.services.notification_sites import route as site_route
+                    async def local_send(safety=False):
+                        delivery_ctx = dict(provider_ctx)
+                        if safety:
+                            delivery_ctx['subject'] = '[Local safety copy] ' + ctx['subject']
+                            delivery_ctx['message'] = '[Local safety copy; remote delivery unconfirmed] ' + ctx['message']
+                        accepted, failure = await _dispatch_channel_result(ch.type, cfg, delivery_ctx)
+                        if failure is not None:
+                            raise failure
+                        return accepted
+                    ok = await site_route(db, ch_id, '', ctx, local_send, delivery_guard)
+                    err = None
+                else:
+                    ok, err = await _dispatch_channel_result(ch.type, cfg, provider_ctx)
                 if ok:
+                    route.provider_accepted = True
                     credited.add(ch_id)
                     await route.log("accepted")
                     await route.finish("accepted")
@@ -736,6 +799,7 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
         "triggered_at": now.isoformat(),
         "rule_id": str(rule.id), "rule_name": rule.name,
         "alert_id": str(alert_id) if alert_id else None,
+        "_enqueue_notification": True,
         "delivery_event": event or ("recovery" if is_recovery else "trigger"),
         "is_recovery": is_recovery,
         **_funnel_fields(sev, getattr(rule, "priority", None), trigger=not is_recovery),
@@ -808,7 +872,8 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
 
     ``opened`` is the open incident the pass read (None = none). A new one is
     only inserted under the dimension's advisory lock, and create_server_alert
-    re-checks for an open row under it; every send happens after a commit.
+    re-checks for an open row under it. Incident changes and notification work
+    commit together; this evaluator never contacts a provider.
     """
     dedupe = _dedupe(rule, dimension)
     if breach:
@@ -832,8 +897,8 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
                 from app.services import alert_funnel
                 await alert_funnel.stamp_priority(db, new_id, getattr(rule, "priority", None),
                                                   rule.severity or "warning")
-            await db.commit()
             if not new_id:
+                await db.commit()
                 return  # silenced, or another evaluator opened it first
             counts["raised"] += 1
             # Quiet hours: the alert is recorded above; only the outbound
@@ -861,8 +926,7 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
             # breaching — announce it now the window has opened, otherwise the
             # breach is never reported at all. A snoozed condition stays quiet:
             # snoozing no longer closes the row. The claim (false -> sending)
-            # is committed first, so no other pass sends it as well.
-            await db.commit()
+            # and notification intent commit together under the same lock.
             await _notify_rule(db, rule, hostname, value=value, detail=detail,
                                alert_id=opened.id, first_seen=opened.triggered_at)
             await ns.stamp(db, opened.id, True)
@@ -872,13 +936,13 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
         return
     n = await resolve_server_alerts(db, sid, dedupe)
     counts["resolved"] += n
-    await db.commit()
     # An all-clear for a page nobody received is noise; it follows the
     # trigger's fate, and says how long the host sat over the threshold.
     if n and ns.flag_means_notified(opened.notified) and getattr(rule, "recovery_alert", False):
         await _notify_rule(db, rule, hostname, value=value, detail=detail,
                            is_recovery=True, duration=ap.duration_between(opened.triggered_at),
                            alert_id=opened.id, first_seen=opened.triggered_at)
+    await db.commit()
 
 
 async def _adopt_legacy_mount_incident(db: AsyncSession, rule, sid: str,

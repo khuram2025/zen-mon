@@ -10,6 +10,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/zenplus/poller/internal/netflow"
+	"github.com/zenplus/poller/internal/store"
 )
 
 // chStore is the ClickHouse implementation of flowStore plus the evidence
@@ -17,17 +18,51 @@ import (
 type chStore struct {
 	conn        driver.Conn
 	collectorID string
+	journal     store.AnalyticsBatchStager
 }
 
-func (s *chStore) Ping(ctx context.Context) error { return s.conn.Ping(ctx) }
+func (s *chStore) Ping(ctx context.Context) error {
+	if s.journal != nil {
+		return nil
+	} // Readiness is journal admission, not analytics visibility.
+	return s.conn.Ping(ctx)
+}
 
 func (s *chStore) EnsureSchema(ctx context.Context) error {
+	if s.journal != nil {
+		return nil
+	} // HA schema must be commissioned before enabling this mode.
 	for _, stmt := range schemaStatements {
 		if err := s.conn.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("exec schema: %w", err)
 		}
 	}
 	return nil
+}
+
+// Flow's IPv6 columns use fixed byte arrays for the native driver. The shared
+// typed wire format carries an IP string instead; arrays of template fields
+// remain arrays and UInt64 counters remain integers.
+type flowJournalBatch struct{ store.AnalyticsBatch }
+
+func (b flowJournalBatch) Append(values ...any) error {
+	copyValues := append([]any(nil), values...)
+	for i, v := range copyValues {
+		if ip, ok := v.([16]byte); ok {
+			copyValues[i] = net.IP(ip[:])
+		}
+	}
+	return b.AnalyticsBatch.Append(copyValues...)
+}
+func (s *chStore) prepareBatch(ctx context.Context, sql, token string) (store.AnalyticsBatch, error) {
+	if s.journal == nil {
+		return s.conn.PrepareBatch(ctx, sql)
+	}
+	b, err := store.NewFlowJournalBatch(ctx, s.journal, sql, token)
+	if err != nil {
+		return nil, err
+	}
+	return flowJournalBatch{b}, nil
 }
 
 // insertSettings makes a retried batch idempotent: flow_records keeps a
@@ -59,7 +94,7 @@ const insertFlowsSQL = `INSERT INTO flow_records (
 
 func (s *chStore) InsertFlows(ctx context.Context, token string, recs []netflow.Record) error {
 	ctx = insertContext(ctx, token)
-	batch, err := s.conn.PrepareBatch(ctx, insertFlowsSQL)
+	batch, err := s.prepareBatch(ctx, insertFlowsSQL, token)
 	if err != nil {
 		return err
 	}
@@ -128,7 +163,7 @@ const insertStatsSQL = `INSERT INTO flow_collector_stats (
 
 func (s *chStore) InsertStats(ctx context.Context, token string, rows []statsRow) error {
 	ctx = insertContext(ctx, token)
-	batch, err := s.conn.PrepareBatch(ctx, insertStatsSQL)
+	batch, err := s.prepareBatch(ctx, insertStatsSQL, token)
 	if err != nil {
 		return err
 	}
@@ -158,7 +193,7 @@ const insertTemplatesSQL = `INSERT INTO flow_templates (
 )`
 
 func (s *chStore) InsertTemplates(ctx context.Context, rows []templateRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, insertTemplatesSQL)
+	batch, err := s.prepareBatch(ctx, insertTemplatesSQL, "")
 	if err != nil {
 		return err
 	}
@@ -192,7 +227,7 @@ const insertAppNamesSQL = `INSERT INTO flow_app_names (app_id, name, description
 // ReplacingMergeTree(updated_at) keyed by app_id, so a repeated row simply
 // replaces the previous one and needs no deduplication token.
 func (s *chStore) InsertAppNames(ctx context.Context, rows []appNameRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, insertAppNamesSQL)
+	batch, err := s.prepareBatch(ctx, insertAppNamesSQL, "")
 	if err != nil {
 		return err
 	}
@@ -216,7 +251,7 @@ const insertIfCountersSQL = `INSERT INTO flow_if_counters (
 // an ambiguous failure does not duplicate them.
 func (s *chStore) InsertIfCounters(ctx context.Context, token string, rows []ifCounterRow) error {
 	ctx = insertContext(ctx, token)
-	batch, err := s.conn.PrepareBatch(ctx, insertIfCountersSQL)
+	batch, err := s.prepareBatch(ctx, insertIfCountersSQL, token)
 	if err != nil {
 		return err
 	}

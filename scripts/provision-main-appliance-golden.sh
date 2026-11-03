@@ -195,7 +195,6 @@ PY
     export PATH=/usr/local/go/bin:$PATH
     CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller
   )
-  setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
   chown "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME/bin/zenplus-poller"
   record_check "application" "poller rebuilt" "PASS" "-buildvcs=false"
 

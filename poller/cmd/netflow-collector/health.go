@@ -26,15 +26,17 @@ const (
 // whose rows carry per-interval deltas); exporters break them down per
 // exporter / observation domain / protocol.
 type healthDoc struct {
-	Status      string    `json:"status"` // ok | degraded | down
-	Reasons     []string  `json:"reasons"`
-	Service     string    `json:"service"`
-	CollectorID string    `json:"collector_id"`
-	BootID      string    `json:"boot_id"`
-	StartedAt   time.Time `json:"started_at"`
-	ServerTime  time.Time `json:"server_time"`
-	Listen      string    `json:"listen"`
-	Listening   bool      `json:"listening"`
+	Admission           string    `json:"admission"`
+	AnalyticsVisibility string    `json:"analytics_visibility"`
+	Status              string    `json:"status"` // ok | degraded | down
+	Reasons             []string  `json:"reasons"`
+	Service             string    `json:"service"`
+	CollectorID         string    `json:"collector_id"`
+	BootID              string    `json:"boot_id"`
+	StartedAt           time.Time `json:"started_at"`
+	ServerTime          time.Time `json:"server_time"`
+	Listen              string    `json:"listen"`
+	Listening           bool      `json:"listening"`
 	// sFlow listener (CR-03): the configured address ("" = disabled), whether
 	// it runs, why not, and the interface counter samples it writes.
 	SFlowListen    string         `json:"sflow_listen"`
@@ -103,6 +105,8 @@ func (c *collector) health(now time.Time) healthDoc {
 	d := c.delivery.snapshot()
 	qlen, qcap := c.queue.Len()
 	doc := healthDoc{
+		Admission:            "clickhouse_response",
+		AnalyticsVisibility:  "synchronous_write_response",
 		Service:              "zenplus-netflow-collector",
 		CollectorID:          c.cfg.ID,
 		BootID:               c.bootID,
@@ -131,6 +135,10 @@ func (c *collector) health(now time.Time) healthDoc {
 		Process:   process,
 		Exporters: exporters,
 		Reasons:   []string{},
+	}
+	if c.store != nil && c.store.journal != nil {
+		doc.Admission = "replicated_postgres_journal"
+		doc.AnalyticsVisibility = "asynchronous_not_checked_by_collector"
 	}
 	if doc.Exporters == nil {
 		doc.Exporters = []exporterHealth{}

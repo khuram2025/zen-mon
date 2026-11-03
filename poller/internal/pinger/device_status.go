@@ -151,8 +151,8 @@ func (h *httpAlertEvaluator) EvaluateDeviceStatus(ctx context.Context, ev Device
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("alert engine answered %s", resp.Status)
 	}
-	h.logger.Infof("Alert evaluation: %s %s→%s, notifications sent: %v",
-		ev.Hostname, ev.OldStatus, ev.NewStatus, out["notifications_sent"])
+	h.logger.Infof("Alert evaluation: %s %s→%s, notifications sent: %v, queued: %v",
+		ev.Hostname, ev.OldStatus, ev.NewStatus, out["notifications_sent"], out["notifications_queued"])
 	return nil
 }
 

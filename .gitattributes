@@ -10,4 +10,6 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.md text eol=lf
+bin/zenplus-management text eol=lf
+scripts/zenplus-* text eol=lf
 *.pdf binary

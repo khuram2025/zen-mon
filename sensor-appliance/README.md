@@ -66,11 +66,14 @@ SHA256SUMS
 
 ## Build Workflow
 
-Build the OVA/OVF on a Linux build host with Packer and QEMU tools installed:
+Build the OVA/OVF in a Linux source checkout with QEMU and libguestfs installed.
+Verify the Ubuntu image's signed checksum manifest first, then provide its digest:
 
 ```bash
-cd /opt/zenplus
-sensor-appliance/scripts/build-ova.sh
+cd /path/to/zenplus-source
+export ZENPLUS_SENSOR_BASE_SHA256=<digest-from-verified-manifest>
+export ZENPLUS_SENSOR_BASE_URL=<immutable-Ubuntu-image-URL>
+sensor-appliance/scripts/build-real-ova.sh
 ```
 
 Publish the resulting artifacts into the controller download directory:
@@ -81,7 +84,41 @@ sudo sensor-appliance/scripts/publish-artifacts.sh \
   --ovf /path/to/zenplus-sensor.ovf
 ```
 
-After publish, the controller manifest will report the artifacts as available.
+Normalize the VMware disk with `scripts/finalize-vmware-ova.ps1`, then complete
+the fresh-import and signed release gates below before publication. After
+publication, the controller manifest reports availability; it does not certify HA.
+
+### Boot qualification for rebuilt images
+
+Build and test from a separate source checkout, never the installed `/opt/zenplus`
+tree. `scripts/build-real-ova.sh` requires `ZENPLUS_SENSOR_BASE_SHA256` from a
+verified Ubuntu cloud-image manifest. Set an immutable `ZENPLUS_SENSOR_BASE_URL`
+for the release and retain the signed manifest. Cached and downloaded images
+must match the specified digest before customization; partial downloads are
+kept separate from the validated cache file.
+
+The builder leaves an existing, empty `/etc/machine-id`
+and a D-Bus alias to it. Do not delete that empty file during later sealing:
+the Ubuntu root filesystem is read-only during early boot, and systemd needs
+the file as the mount point for a fresh per-VM identity. The configured-image
+builder also resets that identity; it refuses a base without clock support.
+
+The image installs `zenplus-sensor-clock.service`, using the same tested UTC
+helper as the controller appliance. It runs before cloud-init and the sensor;
+an unavailable or unsupported host clock blocks those services. VMware uses
+host UTC, Hyper-V uses its time-synchronization PHC, and KVM/QEMU requires an
+explicit UTC RTC in the VM template. Keep the hypervisor clock correct and
+provide an approved NTP source for ongoing synchronization. This startup
+initialization does not replace drift monitoring or suspend/resume qualification.
+The ordinary Linux installer does not change its host's clock policy.
+
+Before publication, import at least two fresh VMs from the exact final image.
+Verify different generated machine IDs and SSH host keys, no sensor enrollment
+state in the generic image, static and DHCP first boot, clock agreement before
+enrollment, trusted HTTPS enrollment, upgrade/rollback and WAL recovery. Record
+the final OVA checksum and source revision. OVF validation and a manifest's
+`ready` flag alone do not establish these acceptance results. Do not publish a
+lab VM, its bootstrap seed or its test identity as a customer image.
 
 ## Runtime
 
@@ -94,7 +131,7 @@ poller/cmd/sensor
 Build it directly:
 
 ```bash
-cd /opt/zenplus/poller
+cd /path/to/zenplus-source/poller
 /usr/local/go/bin/go build -o /tmp/zenplus-sensor ./cmd/sensor
 ```
 

@@ -1,4 +1,6 @@
 import threading
+import ssl
+import os
 
 import clickhouse_connect
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
@@ -7,6 +9,8 @@ from sqlalchemy.orm import DeclarativeBase
 from app.core.config import get_settings
 
 settings = get_settings()
+if 'ZENPLUS_CONTROLLER_GRANT' in os.environ and not settings.DATABASE_SSL_ROOT_CERT:
+    raise RuntimeError('HA controllers require a verified PostgreSQL TLS root certificate')
 
 # PostgreSQL async engine
 engine = create_async_engine(
@@ -15,6 +19,8 @@ engine = create_async_engine(
     pool_size=20,
     max_overflow=10,
     pool_pre_ping=True,
+    connect_args={"ssl": ssl.create_default_context(cafile=settings.DATABASE_SSL_ROOT_CERT)}
+    if settings.DATABASE_SSL_ROOT_CERT else {},
 )
 
 AsyncSessionLocal = async_sessionmaker(

@@ -1,0 +1,25 @@
+[Unit]
+Description=ZenPlus operational PostgreSQL HA
+Wants=network-online.target zenplus-ha-etcd.service
+Requires=zenplus-ha-clock.service
+After=network-online.target zenplus-ha-etcd.service zenplus-ha-clock.service
+Conflicts=postgresql.service
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+ExecStart=/opt/zenplus-ha/venv/bin/patroni /etc/zenplus-ha/patroni.json
+KillMode=process
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/zenplus-ha/postgresql /var/lib/zenplus-ha/patroni /var/run/postgresql
+
+[Install]
+WantedBy=multi-user.target
