@@ -38,9 +38,9 @@ Capacity and uncertainty rules are shared with the host journal: at most
 20,000 rows and 8 MiB encoded per block, a 512 MiB compressed pending budget,
 and ten million retained receipts. Configuration with a larger native batch is
 refused. Uncertain writes beyond the qualified automatic replay window are
-held for reconciliation; they are not discarded. Receipt retirement, safe held
-work reconciliation and ClickHouse deduplication count/time qualification remain
-release requirements. Queuing and recovery add latency that must be measured
+held for reconciliation. Receipt retirement and qualification of the ClickHouse
+deduplication count and time windows remain release requirements.
+Queuing and recovery add latency that must be measured
 under the intended workload; source tests do not establish enterprise capacity.
 
 Do not disable recovery, change table schemas, discard receipts or downgrade
@@ -62,3 +62,37 @@ raw row per marker, with one ping and one service rollup sample. Full unsigned
 64-bit counters, nullable service fields and the IPv6 trap source were preserved.
 The primary was read only and its API process remained unchanged during both
 tests. These lab overlays and synthetic probes are not customer appliances.
+
+## Held analytics recovery
+
+Run the reconciliation command from the active HA appliance as a privileged
+operator. The command checks the controller grant and lists held batch IDs
+and payload digests without displaying telemetry. Use the API service's
+database environment and TLS trust when running the command.
+
+```sh
+cd /opt/zenplus
+sudo env PYTHONPATH=/opt/zenplus/server:/opt/zenplus /opt/zenplus/venv/bin/python \
+  -m app.services.host_ingest_reconcile --table device_status_log
+```
+
+Verify the exact block and its effects on the healthy replicas under the
+exclusive writer policy. Record the evidence in the incident or change record.
+Choose `confirm_committed` after all raw and derived effects match the expected
+result. Choose `retry_proven_absent` only after verifying that none of the
+effects exists. Leave an unresolved or partial outcome held while you establish
+the evidence. Raw presence alone cannot confirm a multi-step write.
+
+```sh
+sudo env PYTHONPATH=/opt/zenplus/server:/opt/zenplus /opt/zenplus/venv/bin/python \
+  -m app.services.host_ingest_reconcile --table device_status_log \
+  --batch-id <id> --digest <sha256> --decision confirm_committed \
+  --actor <operator-id> --evidence <change-record-id>
+```
+
+The decision targets the oldest uncommitted block for that table. The audit
+row and journal update share a commit under the table lock. A confirmed block
+releases payload capacity while preserving its receipt. A proven-absent block
+retains its original payload and token, and the recovery worker gets a new
+attempt window. Retain the receipt until a producer-specific replay floor has
+been implemented and qualified.

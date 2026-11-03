@@ -53,6 +53,12 @@ func main() {
 	}
 	defer pgStore.Close()
 	sugar.Info("Connected to PostgreSQL")
+	if os.Getenv("DEVICE_TRANSITION_INBOX_ENABLED") == "1" {
+		if os.Getenv("ZENPLUS_CONTROLLER_GRANT") == "" {
+			sugar.Fatal("Device transition inbox requires commissioned controller admission")
+		}
+		pgStore.EnableDeviceTransitionInbox()
+	}
 
 	// Connect to ClickHouse
 	chStore, err := store.NewClickHouseStore(cfg)

@@ -383,12 +383,17 @@ async def dispatch_sensor_transition_outbox(
         _dispatch_device_transitions,
         _dispatch_service_transitions,
     )
+    from app.services.device_map_webhook import enabled as durable_device_enabled
+    durable = durable_device_enabled()
+    order = "pending.queue_order" if durable else "pending.created_at, pending.id"
+    older = ("older.queue_order < pending.queue_order" if durable else
+             "(older.created_at, older.id) < (pending.created_at, pending.id)")
 
     processed = 0
     failed = 0
     for _ in range(max(1, min(limit, 500))):
-        row = (await db.execute(text("""
-            SELECT pending.id, pending.transition_type, pending.payload
+        row = (await db.execute(text(f"""
+            SELECT pending.id, pending.transition_type, pending.payload,pending.endpoint
               FROM sensor_transition_outbox AS pending
              WHERE pending.processed_at IS NULL
                AND pending.next_attempt_at <= NOW()
@@ -398,10 +403,9 @@ async def dispatch_sensor_transition_outbox(
                      WHERE older.processed_at IS NULL
                        AND older.transition_type = pending.transition_type
                        AND older.entity_id = pending.entity_id
-                       AND (older.created_at, older.id)
-                           < (pending.created_at, pending.id)
+                       AND {older}
                )
-             ORDER BY pending.created_at, pending.id
+             ORDER BY {order}
              FOR UPDATE OF pending SKIP LOCKED
              LIMIT 1
         """))).mappings().first()
@@ -432,8 +436,10 @@ async def dispatch_sensor_transition_outbox(
                 if index < len(events):
                     event = events[index]
                     event["timestamp"] = _outbox_timestamp(event.get("timestamp"))
+                    alert_only = row["endpoint"] in ("central", "managed")
                     await _dispatch_device_transitions(
-                        [event], db, raise_on_error=True
+                        [event], db, raise_on_error=True, durable=durable or alert_only,
+                        alert_only=alert_only,
                     )
             else:
                 payload["timestamp"] = _outbox_timestamp(payload.get("timestamp"))
@@ -457,7 +463,7 @@ async def dispatch_sensor_transition_outbox(
                                                  secs => LEAST(300, (2 ^ LEAST(attempts, 8)))::integer
                                              )
                                        WHERE id = :id AND processed_at IS NULL"""),
-                             {"id": row["id"], "error": str(exc)[:2048]})
+                             {"id": row["id"], "error": type(exc).__name__ if durable else str(exc)[:2048]})
             await db.commit()
             failed += 1
     return {"processed": processed, "failed": failed}
@@ -487,14 +493,16 @@ async def sensor_transition_outbox_loop() -> None:
     for the same entity (including while the older row is in retry backoff).
     """
     from app.core.database import AsyncSessionLocal
+    from app.core.controller_admission import permitted
 
     await asyncio.sleep(2)
     while True:
         processed = 0
         try:
-            async with AsyncSessionLocal() as db:
-                result = await dispatch_sensor_transition_outbox(db)
-                processed = result["processed"]
+            if permitted():
+                async with AsyncSessionLocal() as db:
+                    result = await dispatch_sensor_transition_outbox(db)
+                    processed = result["processed"]
         except asyncio.CancelledError:
             raise
         except Exception:

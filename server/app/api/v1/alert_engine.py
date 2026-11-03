@@ -892,6 +892,12 @@ async def evaluate_status_change(
     event: StatusChangeEvent,
     db: AsyncSession = Depends(get_db),
 ):
+    return await evaluate_device_transition(event, db)
+
+
+async def evaluate_device_transition(
+    event: StatusChangeEvent, db: AsyncSession, *, observed_at: datetime | None = None,
+):
     """
     Called by the Go poller when a device status changes.
     Evaluates all matching alert rules and sends notifications.
@@ -905,7 +911,7 @@ async def evaluate_status_change(
     # DOWN alert on an UP device.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:device_id))"),
                      {"device_id": event.device_id})
-    now = datetime.now(timezone.utc)
+    now = observed_at or datetime.now(timezone.utc)
     # Arriving at 'up' is never a problem. Only down/degraded -> up is a
     # recovery; unknown/maintenance -> up (a new device's first ping, the end
     # of a window) resolves stale status alerts silently.
@@ -919,6 +925,8 @@ async def evaluate_status_change(
         {"id": event.device_id},
     )
     dev_row = dev_result.first()
+    if observed_at is not None and dev_row is None:
+        return {"evaluated": 0, "matched": 0, "suppressed": "device_removed"}
     device_type = dev_row.device_type if dev_row else event.device_type
     group_id = str(dev_row.group_id) if dev_row and dev_row.group_id else event.group_id
     location = dev_row.location if dev_row else event.location
@@ -1039,7 +1047,8 @@ async def evaluate_status_change(
         )).fetchall()
         resolved_alerts += len(closed)
     if in_maintenance:
-        await db.commit()
+        if observed_at is None:
+            await db.commit()
         return {"evaluated": 0, "matched": 0, "suppressed": "maintenance",
                 "resolved_alerts": resolved_alerts}
     if is_recovery:
@@ -1407,13 +1416,17 @@ async def evaluate_status_change(
     notifications_queued = 0
     for channel_ids, ctx in planned:
         notifications_queued += await _enqueue_planned(db, channel_ids, ctx)
-    await db.commit()
+    if observed_at is None:
+        await db.commit()
+    elif event.old_status != event.new_status:
+        from app.services.device_map_webhook import enqueue
+        await enqueue(db, event, now, is_recovery)
 
     # Per-map webhook fan-out: if the device sits on any manual map with a
     # webhook configured, POST a compact transition event. We do this OUT
     # of the rule loop so it fires even when no alert rule matched — the
     # map owner asked to be told about *every* flip on their canvas.
-    if event.old_status != event.new_status:
+    if observed_at is None and event.old_status != event.new_status:
         try:
             map_hooks = (await db.execute(
                 text("""

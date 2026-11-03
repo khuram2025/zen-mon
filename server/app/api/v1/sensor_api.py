@@ -1038,6 +1038,8 @@ async def _dispatch_device_transitions(
     db: AsyncSession,
     *,
     raise_on_error: bool = False,
+    durable: bool = False,
+    alert_only: bool = False,
 ) -> None:
     """Side effects of confirmed remote-sensor transitions, in the central
     poller's order: ClickHouse device_status_log, alert evaluation (not for
@@ -1047,50 +1049,50 @@ async def _dispatch_device_transitions(
     if not transitions:
         return
     try:
-        await _insert_clickhouse(
-            "device_status_log",
-            [
-                [
+        if not alert_only:
+            await _insert_clickhouse(
+                "device_status_log",
+                [[
                     item["device_id"], item["timestamp"], item["old_status"],
                     item["new_status"], item["reason"], 0,
-                ]
-                for item in transitions
-            ],
-            ["device_id", "timestamp", "old_status", "new_status", "reason", "duration_sec"],
-        )
+                ] for item in transitions],
+                ["device_id", "timestamp", "old_status", "new_status", "reason", "duration_sec"],
+            )
     except Exception:
         logger.exception("failed to write remote-sensor device transition log")
         if raise_on_error:
             raise
 
-    from app.api.v1.alert_engine import StatusChangeEvent, evaluate_status_change
+    from app.api.v1.alert_engine import StatusChangeEvent, evaluate_status_change, evaluate_device_transition
     for item in transitions:
         if item["new_status"] != "maintenance":
             try:
-                await evaluate_status_change(
-                    StatusChangeEvent(
-                        device_id=item["device_id"],
-                        hostname=item["hostname"],
-                        ip_address=item["ip_address"],
-                        old_status=item["old_status"],
-                        new_status=item["new_status"],
-                        device_type=item.get("device_type"),
-                        group_id=item.get("group_id"),
-                        location=item.get("location"),
-                        rtt_ms=item["rtt_ms"],
-                        packet_loss=item["packet_loss"],
-                        flapping=bool(item.get("flapping", False)),
-                        is_flapping=bool(item.get("is_flapping", False)),
-                    ),
-                    db,
+                event = StatusChangeEvent(
+                    device_id=item["device_id"],
+                    hostname=item["hostname"],
+                    ip_address=item["ip_address"],
+                    old_status=item["old_status"],
+                    new_status=item["new_status"],
+                    device_type=item.get("device_type"),
+                    group_id=item.get("group_id"),
+                    location=item.get("location"),
+                    rtt_ms=item.get("rtt_ms"),
+                    packet_loss=item.get("packet_loss", 0),
+                    flapping=bool(item.get("flapping", False)),
+                    is_flapping=bool(item.get("is_flapping", False)),
                 )
+                if durable:
+                    await evaluate_device_transition(event, db, observed_at=item["timestamp"])
+                else:
+                    await evaluate_status_change(event, db)
             except Exception:
                 logger.exception(
                     "remote-sensor alert evaluation failed for device %s", item["device_id"]
                 )
                 if raise_on_error:
                     raise
-        await _publish_status_change(item)
+        if not alert_only:
+            await _publish_status_change(item)
 
 
 # ── Remote-sensor device status ─────────────────────────────────────

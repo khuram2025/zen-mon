@@ -281,6 +281,50 @@ class HostIngestJournal:
         if not await self._committed(ids):
             raise JournalUnavailable('host journal has pending uploads; retry')
 
+    async def reconcile_held(self, table, batch_id, *, decision, digest, actor, evidence):
+        """Apply a recorded operator decision without discarding receipt identity."""
+        from app.core.controller_admission import permitted
+
+        if (decision not in ('confirm_committed', 'retry_proven_absent')
+                or not re.fullmatch(r'[0-9a-f]{64}', digest)
+                or not 1 <= len(actor.strip()) <= 128
+                or not 1 <= len(evidence.strip()) <= 1024):
+            raise ValueError('A decision, matching digest, actor and evidence reference are required')
+        async with self._locked(table) as conn:
+            if not permitted():
+                raise JournalUnavailable('controller admission unavailable')
+            row = (await conn.execute(text('''
+                SELECT id,attempted_at,octet_length(payload) AS size,encode(sha256(payload),'hex') AS digest
+                FROM host_ingest_batches
+                WHERE table_name=:table AND id=:id AND state='held'
+                  AND hold_reason='replay_window_expired'
+                  AND id=(SELECT min(id) FROM host_ingest_batches
+                          WHERE table_name=:table AND state<>'committed')
+                FOR UPDATE
+            '''), {'table': table, 'id': batch_id})).mappings().first()
+            if row is None or row['attempted_at'] is None or row['digest'] != digest:
+                raise JournalUnavailable('Oldest held batch or payload digest no longer matches')
+            await conn.execute(text('''
+                INSERT INTO host_ingest_replay_decisions(batch_id,decision,payload_sha256,attempted_at,actor,evidence)
+                VALUES(:id,:decision,:digest,:at,:actor,:evidence)
+            '''), {'id': batch_id, 'decision': decision, 'digest': digest, 'at': row['attempted_at'],
+                   'actor': actor.strip(), 'evidence': evidence.strip()})
+            if decision == 'confirm_committed':
+                await conn.execute(text('''
+                    UPDATE host_ingest_batches SET state='committed',payload=NULL,
+                        committed_at=clock_timestamp(),hold_reason=NULL WHERE id=:id
+                '''), {'id': batch_id})
+                await conn.execute(text('''
+                    UPDATE host_ingest_capacity SET payload_bytes=payload_bytes-:size WHERE singleton
+                '''), {'size': row['size']})
+            else:
+                await conn.execute(text('''
+                    UPDATE host_ingest_batches SET state='pending',attempted_at=NULL,hold_reason=NULL WHERE id=:id
+                '''), {'id': batch_id})
+            if not permitted():
+                raise JournalUnavailable('controller admission expired before reconciliation')
+            await conn.commit()
+
     async def _committed(self, ids):
         async with self.engine.connect() as conn:
             incomplete = (await conn.execute(text('''

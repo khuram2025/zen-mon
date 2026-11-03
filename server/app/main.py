@@ -241,6 +241,9 @@ def create_app() -> FastAPI:
         )
         app.state.sensor_health_sweeper = asyncio.create_task(sensor_health_sweeper_loop())
         app.state.sensor_transition_outbox = asyncio.create_task(sensor_transition_outbox_loop())
+        from app.services.device_map_webhook import enabled as device_inbox_enabled, device_map_webhook_loop
+        if device_inbox_enabled():
+            app.state.device_map_webhook = asyncio.create_task(device_map_webhook_loop())
         # On-demand network captures: reconcile expired commands and runs that
         # lost their final agent upload.  The loop uses a Postgres advisory
         # lock, so it is safe when every Uvicorn worker starts one.
@@ -356,7 +359,7 @@ def create_app() -> FastAPI:
             if task:
                 task.cancel()
                 stopping.append(task)
-        for attr in ("alert_escalation_sweeper", "agent_package_sync", "notification_outbox", "host_ingest_recovery", "service_transition_inbox", "trap_incident_inbox"):
+        for attr in ("alert_escalation_sweeper", "agent_package_sync", "notification_outbox", "host_ingest_recovery", "service_transition_inbox", "trap_incident_inbox", "device_map_webhook"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

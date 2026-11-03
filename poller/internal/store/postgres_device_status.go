@@ -438,6 +438,9 @@ func (s *PostgresStore) saveDeviceStatusLocked(ctx context.Context, save *pinger
 
 // SaveDeviceStatus persists one central check (see saveDeviceStatusSQL).
 func (s *PostgresStore) SaveDeviceStatus(ctx context.Context, save *pinger.DeviceStatusSave) (pinger.DeviceStatusSaved, error) {
+	if save.AlertOperation != uuid.Nil {
+		return s.saveDeviceTransition(ctx, save)
+	}
 	if !s.statusLegacy.Load() {
 		var devRows, stateRows int64
 		var foreignOwner, curStatus *string
@@ -460,6 +463,64 @@ func (s *PostgresStore) SaveDeviceStatus(ctx context.Context, save *pinger.Devic
 		return pinger.DeviceStatusSaved{}, err
 	}
 	return pinger.DeviceStatusSaved{Device: tag.RowsAffected() > 0, State: !save.WriteState}, nil
+}
+
+func (s *PostgresStore) EnableDeviceTransitionInbox() {
+	s.deviceTransitionInbox = true
+}
+
+func (s *PostgresStore) DurableDeviceTransitions() bool {
+	return s.deviceTransitionInbox
+}
+
+func (s *PostgresStore) saveDeviceTransition(ctx context.Context, save *pinger.DeviceStatusSave) (pinger.DeviceStatusSaved, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return pinger.DeviceStatusSaved{}, err
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
+	if _, err := tx.Exec(ctx, lockDeviceSQL, save.DeviceID); err != nil {
+		return pinger.DeviceStatusSaved{}, err
+	}
+	var replayed bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sensor_transition_outbox WHERE id=$1 AND entity_id=$2 AND endpoint='central')`,
+		save.AlertOperation, save.DeviceID).Scan(&replayed)
+	if err != nil {
+		return pinger.DeviceStatusSaved{}, err
+	}
+	if replayed {
+		return pinger.DeviceStatusSaved{Device: true, State: true}, nil
+	}
+	var devRows, stateRows int64
+	var foreignOwner, curStatus *string
+	var curChangedAt *time.Time
+	err = tx.QueryRow(ctx, saveDeviceStatusSQL, saveDeviceStatusArgs(save)...).
+		Scan(&devRows, &stateRows, &foreignOwner, &curStatus, &curChangedAt)
+	if err != nil {
+		return pinger.DeviceStatusSaved{}, err
+	}
+	if foreignOwner != nil {
+		return pinger.DeviceStatusSaved{Foreign: true, ForeignOwner: *foreignOwner,
+			Status: deref(curStatus), StatusChangedAt: utcPtr(curChangedAt)}, nil
+	}
+	if devRows == 0 {
+		return pinger.DeviceStatusSaved{}, nil
+	}
+	if save.WriteState && stateRows == 0 {
+		return pinger.DeviceStatusSaved{}, errors.New("device state transition was not persisted")
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO sensor_transition_outbox
+		(id,endpoint,idempotency_key,transition_type,entity_id,payload)
+		VALUES($1,'central',$2,'device',$3,$4::jsonb)`,
+		save.AlertOperation, save.AlertOperation.String(), save.DeviceID, string(save.AlertPayload))
+	if err != nil {
+		return pinger.DeviceStatusSaved{}, err
+	}
+	return pinger.DeviceStatusSaved{Device: true, State: true}, tx.Commit(ctx)
 }
 
 // releaseDevicesSQL cleans up after devices that left central polling ($1:

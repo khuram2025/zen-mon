@@ -611,9 +611,34 @@ func (p *statusPipeline) persist(job *statusJob) {
 		}
 		return
 	}
-	ctx, cancel := context.WithTimeout(p.ctx, statusWriteTimeout)
-	saved, err := e.loader.SaveDeviceStatus(ctx, &job.save)
-	cancel()
+	if loader, ok := e.loader.(interface{ DurableDeviceTransitions() bool }); ok && loader.DurableDeviceTransitions() {
+		if err := job.prepareAlertWork(); err != nil {
+			e.logger.Errorf("Failed to encode device transition for %s: %v", job.save.DeviceID, err)
+			e.statusPersistFailed(job)
+			return
+		}
+	}
+	var saved DeviceStatusSaved
+	var err error
+	for {
+		ctx, cancel := context.WithTimeout(p.ctx, statusWriteTimeout)
+		saved, err = e.loader.SaveDeviceStatus(ctx, &job.save)
+		cancel()
+		if err == nil || job.save.AlertOperation == uuid.Nil {
+			break
+		}
+		// Keep the frozen transition at the head of the bounded writer
+		// queue. A later check must not overwrite unadmitted alert work.
+		e.logger.Warnf("Device transition %s admission failed (%T), retrying", job.save.AlertOperation, err)
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+		if e.statusJobStale(job) {
+			return
+		}
+	}
 	switch {
 	case err != nil:
 		// The in-memory machine stays authoritative: the next check rewrites
@@ -640,6 +665,41 @@ func (p *statusPipeline) persist(job *statusJob) {
 		e.statusStateWritten(job)
 	}
 	p.deliver(job)
+}
+
+func (j *statusJob) alertEvent(ev devicestatus.Event) DeviceAlertEvent {
+	return DeviceAlertEvent{
+		DeviceID: j.save.DeviceID, Hostname: j.hostname, IPAddress: j.ip,
+		OldStatus: ev.Old, NewStatus: ev.New, Responded: j.save.Responded,
+		RTTMs: j.save.RTTMs, PacketLoss: j.packetLoss,
+		Flapping: ev.Flapping, IsFlapping: j.save.State.IsFlapping(),
+	}
+}
+
+func (j *statusJob) prepareAlertWork() error {
+	var events []map[string]any
+	for _, ev := range j.events {
+		if ev.Type == devicestatus.EventTransition && ev.Alert {
+			item := deviceAlertPayload(j.alertEvent(ev))
+			item["timestamp"] = j.save.At.UTC()
+			item["reason"] = ev.Reason
+			events = append(events, item)
+		}
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	payload := events[len(events)-1]
+	if len(events) > 1 {
+		payload = map[string]any{"transitions": events, "next_index": 0}
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	j.save.AlertOperation = uuid.New()
+	j.save.AlertPayload = data
+	return nil
 }
 
 func (p *statusPipeline) release(ids []uuid.UUID) {
@@ -696,19 +756,8 @@ func (p *statusPipeline) deliver(job *statusJob) {
 				return e.writer.WriteStatusChange(ctx, sc, 0)
 			},
 		})
-		if ev.Alert {
-			alert := DeviceAlertEvent{
-				DeviceID:   id,
-				Hostname:   job.hostname,
-				IPAddress:  job.ip,
-				OldStatus:  ev.Old,
-				NewStatus:  ev.New,
-				Responded:  job.save.Responded,
-				RTTMs:      job.save.RTTMs,
-				PacketLoss: job.packetLoss,
-				Flapping:   ev.Flapping,
-				IsFlapping: isFlapping,
-			}
+		if ev.Alert && job.save.AlertOperation == uuid.Nil {
+			alert := job.alertEvent(ev)
 			p.effects.push(effectKey{id, effectAlert}, deviceEffect{
 				what:    "Failed to evaluate device alert",
 				timeout: alertEffectTimeout,
