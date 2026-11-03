@@ -360,6 +360,7 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
     """
     from app.api.v1.alert_engine import _send_email, _send_sms, _dispatch_channel_result
     from app.services import alert_delivery_log as dl
+    from app.services.alert_phrasing import sms_with_timestamp
     from app.services import notification_grouping as ng
     from app.services.email_render import alert_subject, build_alert_email_html
 
@@ -446,7 +447,8 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
             else:
                 # Gateway template placeholders the sender offers
                 # (device path: {hostname}, {ip_address}, {status}).
-                ok = await _send_sms(gw, rcpt, ctx["message"],
+                message = sms_with_timestamp(ctx["message"], ctx.get("triggered_at"))
+                ok = await _send_sms(gw, rcpt, message,
                                      values=ctx.get("sms_template_values"))
                 skip_reason = "config: SMS gateway is not a usable HTTP gateway"
             # Log first: the key's commit then makes both durable.

@@ -32,6 +32,7 @@ from app.services.alert_schedule import notifications_allowed, get_configured_ti
 from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
     DEFAULT_RECOVERY_EMAIL_SUBJECT, DEFAULT_RECOVERY_SMS, DEFAULT_SMS,
+    service_check_variables,
     conditions_label, default_templates, duration_between, effective_template,
     format_reading, format_threshold, host_label, incident_context, rule_phrasing,
 )
@@ -1124,6 +1125,7 @@ async def evaluate_status_change(
             rule, hostname=host_label(event.hostname, event.ip_address), is_recovery=is_recovery,
             reading=RTT_UNAVAILABLE if rule_metric == "rtt" and rtt_value is None else None,
             value=rule_value, duration=variables.get("duration", ""),
+            device_status=event.new_status,
         ))
 
         p_col, p_val, p_params = funnel.priority_insert(
@@ -1652,7 +1654,7 @@ async def evaluate_service_status_change(
 
         # A service check reports its own failure reason, so the phrasing leads
         # with the check and the error rather than with a threshold.
-        variables["error_sentence"] = f" {event.error.strip().rstrip('.')}." if event.error else ""
+        variables.update(service_check_variables(event.new_status, event.error))
         # Defaults live in alert_phrasing so the rule editors advertise exactly
         # the text this path sends.
         svc_defaults = default_templates("service")

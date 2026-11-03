@@ -153,15 +153,17 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         "group": "", "location": "", "device_type": "",
         "check_name": row.check_name or "",
         "check_type": row.check_type or "",
-        "target": row.check_target or "",
+        "target": row.check_target or hostname,
         "error": (meta.get("error") or ""),
-        "error_sentence": "",
+        **ap.service_check_variables(status_txt, meta.get("error")),
         "status_intro": "An alert has been triggered:",
-        **ap.rule_phrasing(row, hostname=ap.host_label(hostname, ip)),
+        **ap.rule_phrasing(row, hostname=ap.host_label(hostname, ip),
+                           device_status=status_txt.lower() if not is_service else None),
     }
-    subject = _render(ap.effective_template(row.email_subject, ap.DEFAULT_EMAIL_SUBJECT), variables)
-    body = _render(ap.effective_template(row.email_body, ap.DEFAULT_EMAIL_BODY), variables)
-    sms = _render(ap.effective_template(row.sms_template, ap.DEFAULT_SMS), variables)
+    templates = ap.effective_templates(row, "service" if is_service else "device")
+    subject = _render(templates["email_subject"], variables)
+    body = _render(templates["email_body"], variables)
+    sms = _render(templates["sms_template"], variables)
     if meta.get("flap_held"):
         # The hold came from flapping, not from the rule's own hold time.
         notice = (

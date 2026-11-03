@@ -28,7 +28,8 @@ _PERCENT = {"unit": "%", "decimals": 0}
 METRICS: dict[str, dict] = {
     # Reachability / ICMP
     "ping_status": {"noun": "ICMP reachability", "healthy": 1.0, "subject": "the device",
-                    "narrative": {"down": "is not responding to ping", "up": "is responding to ping again"},
+                    "narrative": {"down": "is down (no response to ICMP probes)",
+                                  "up": "is reachable again (ICMP probes are succeeding)"},
                     "state": {"down": "stops responding to ping",
                               "up": "responds to ping again"},
                     "state_label": {"down": "Device unreachable (no ICMP response)",
@@ -66,7 +67,7 @@ METRICS: dict[str, dict] = {
     "if_errors": {"noun": "Interface errors", "unit": " errors", "decimals": 0},
     "if_discards": {"noun": "Interface discards", "unit": " discards", "decimals": 0},
     "if_oper_status": {"noun": "Interface state", "healthy": 1.0, "subject": "the interface",
-                       "narrative": {"down": "is operationally down", "up": "is back up"},
+                       "narrative": {"down": "is down (interface operational status)", "up": "is operational again"},
                        "state": {"down": "goes operationally down",
                                  "up": "comes back up"},
                        "state_label": {"down": "Interface operationally down",
@@ -93,7 +94,7 @@ METRICS: dict[str, dict] = {
 
     # Service checks and traps
     "service_status": {"noun": "Service check", "healthy": 1.0, "subject": "the service",
-                       "narrative": {"down": "is failing its check", "up": "is passing its check again"},
+                       "narrative": {"down": "failed its availability check", "up": "passed its availability check again"},
                        "state": {"down": "fails its check",
                                  "up": "passes its check again"},
                        "state_label": {"down": "Service check failing",
@@ -116,13 +117,15 @@ METRICS: dict[str, dict] = {
     "host_filesystem_pct": {"noun": "Filesystem usage", **_PERCENT},
     "host_disk_util_pct": {"noun": "Disk utilisation", **_PERCENT},
     "host_service_down": {"noun": "Monitored service", "subject": "the host",
-                          "narrative": {"down": "has a stopped monitored service", "up": "has restarted the monitored service"},
+                          "narrative": {"down": "reported that a monitored service is stopped",
+                                        "up": "reported that the monitored service is running again"},
                           "state": {"down": "stops a monitored service",
                                     "up": "restarts the monitored service"},
                           "state_label": {"down": "Monitored service stopped",
                                           "up": "Monitored service running"}},
     "host_process_down": {"noun": "Monitored process", "subject": "the host",
-                          "narrative": {"down": "is missing a monitored process", "up": "has restarted the monitored process"},
+                          "narrative": {"down": "reported that a monitored process is stopped",
+                                        "up": "reported that the monitored process is running again"},
                           "state": {"down": "loses a monitored process",
                                     "up": "restarts the monitored process"},
                           "state_label": {"down": "Monitored process not running",
@@ -137,8 +140,8 @@ METRICS: dict[str, dict] = {
                          "state_label": {"down": "Server down (agent silent, no ping response)",
                                          "up": "Server reachable"}},
     "host_agent_offline": {"noun": "Server agent", "subject": "the server",
-                           "narrative": {"down": "has a silent agent but still answers ping",
-                                         "up": "has its agent reporting again"},
+                           "narrative": {"down": "is reachable, but its monitoring agent has stopped reporting",
+                                         "up": "is receiving reports from its monitoring agent again"},
                            "state": {"down": "loses its agent while still answering ping",
                                      "up": "has its agent reporting again"},
                            "state_label": {"down": "Agent offline (server still answers ping)",
@@ -168,7 +171,7 @@ METRICS: dict[str, dict] = {
     "apm_rum_new_error_groups": {"noun": "New browser error groups", "unit": "", "decimals": 0},
     "apm_slo_burn": {"noun": "SLO burn rate", "unit": "x", "decimals": 1},
     "apm_synthetic_down": {"noun": "Synthetic journey", "subject": "the service",
-                           "narrative": {"down": "is failing its synthetic journey", "up": "is passing its synthetic journey again"},
+                           "narrative": {"down": "failed its synthetic check", "up": "passed its synthetic check again"},
                            "state": {"down": "fails its synthetic journey",
                                      "up": "passes its synthetic journey again"},
                            "state_label": {"down": "Synthetic journey failing",
@@ -726,6 +729,9 @@ LEGACY_DEFAULT_TEMPLATES = frozenset({
     "[ZenPlus {severity}] {hostname} ({ip_address}) RECOVERED. Rule: {rule_name}",
     "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. RESOLVED: {rule_name}",
     "[ZenPlus {severity}] {hostname} is {status}. RESOLVED: {rule_name}",
+    'The {check_type} check “{check_name}” on {target} is {status}.{error_sentence}',
+    "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target}).",
+    "ZenPlus resolved — {rule_name}: {check_name} is passing again.{duration_suffix}",
     "An alert has been triggered:",
     "The following alert has been resolved:",
 })
@@ -751,16 +757,26 @@ def effective_template(stored: Optional[str], default: str) -> str:
 
 _SERVICE_TEMPLATES = {
     "email_subject": "[{severity}] {status}: {check_name}",
-    "email_body": "The {check_type} check “{check_name}” on {target} is {status}."
-                  "{error_sentence}",
-    "sms_template": "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target}).",
+    "email_body": "The {check_type} check “{check_name}” on {target} {check_result}.{error_sentence}",
+    "sms_template": "ZenPlus {severity} — {rule_name}: {check_name} ({target}) {check_result}.",
     # The service path has no {host_suffix}; its subject stays name-only.
     "recovery_email_subject": "[{severity}] Resolved: {rule_name}",
     "recovery_email_body": "The {check_type} check “{check_name}” on {target} is "
                            "passing again.{duration_sentence}",
-    "recovery_sms_template": "ZenPlus resolved — {rule_name}: {check_name} is "
-                             "passing again.{duration_suffix}",
+    "recovery_sms_template": "ZenPlus resolved — {rule_name}: {check_name} ({target}) "
+                             "is passing again.{duration_suffix}",
 }
+
+def service_check_variables(status: str, error: str = "") -> dict:
+    detail = (error or "").strip().rstrip(".").strip()
+    return {
+        "check_result": {
+            "down": "failed", "up": "passed", "degraded": "reported degraded performance",
+            "warning": "reported a warning",
+        }.get((status or "").lower(), "changed state"),
+        "error_sentence": f" Failure detail: {detail}." if detail else "",
+    }
+
 
 _TRAP_TEMPLATES = {
     "email_subject": DEFAULT_EMAIL_SUBJECT,
@@ -1014,7 +1030,8 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
                        condition_logic: str = "AND", reading: Optional[str] = None,
                        duration: str = "", is_recovery: bool = False,
                        subject_noun: Optional[str] = None, value=None,
-                       value_context: Optional[dict] = None) -> dict:
+                       value_context: Optional[dict] = None,
+                       device_status: Optional[str] = None) -> dict:
     """The condition/duration half of the template variables.
 
     Kept separate from the identity half (host, severity, timestamps) because
@@ -1065,9 +1082,15 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
         return text_ + "."
 
     # One sentence that names who it is about, so a template needs nothing else:
-    #   "core-router-01 is not responding to ping."
+    #   "core-router-01 is down (no response to ICMP probes)."
     #   "Interface utilisation on core-router-01 rose above 80% (currently 87%)."
-    if is_state:
+    if key == "ping_status" and device_status in ("up", "down", "degraded"):
+        who = subject_noun or METRICS[key]["subject"]
+        narrative = METRICS[key]["narrative"]
+        state_text = ("has degraded connectivity" if device_status == "degraded"
+                      else narrative[device_status])
+        event = f"{who} {state_text}"
+    elif is_state:
         event = condition_phrase(metric, operator, threshold, tense=tense, subject=subject_noun)
     elif subject_noun:
         noun = metric_noun(key)
@@ -1147,7 +1170,8 @@ def sample_reading(metric: Optional[str], operator: Optional[str], threshold,
 def rule_phrasing(rule, *, hostname: str = "", is_recovery: bool = False,
                   reading: Optional[str] = None, duration: str = "",
                   subject_noun: Optional[str] = None, value=None,
-                  value_context: Optional[dict] = None) -> dict:
+                  value_context: Optional[dict] = None,
+                  device_status: Optional[str] = None) -> dict:
     """`phrasing_variables` for an alert_rules row (ORM row, mapping or dict)."""
     def field(name, default=None):
         if isinstance(rule, dict):
@@ -1167,7 +1191,7 @@ def rule_phrasing(rule, *, hostname: str = "", is_recovery: bool = False,
         conditions=conditions, condition_logic=field("condition_logic") or "AND",
         reading=reading, duration=duration, is_recovery=is_recovery,
         subject_noun=subject_noun or (hostname or None),
-        value=value, value_context=value_context,
+        value=value, value_context=value_context, device_status=device_status,
     )
 
 
@@ -1247,6 +1271,19 @@ def _as_utc(ts) -> Optional[datetime]:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return ts.astimezone(timezone.utc)
+
+
+def sms_with_timestamp(message: str, timestamp) -> str:
+    """Stamp the notification event in UTC, including on queued delivery."""
+    event_time = _as_utc(timestamp) or datetime.now(timezone.utc)
+    stamp = event_time.strftime("%d %b %Y %H:%M UTC")
+    if any(rendered in message for rendered in (
+        stamp,
+        event_time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        event_time.strftime("%H:%M UTC on %d %b %Y"),
+    )):
+        return message
+    return f"{message.rstrip()}\n{stamp}"
 
 
 def lifecycle_label(lifecycle: str, *, reminder_index: Optional[int] = None,

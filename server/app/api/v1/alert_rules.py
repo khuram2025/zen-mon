@@ -1054,12 +1054,15 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
     operator = rule_dict.get("operator") or "=="
     threshold = rule_dict.get("threshold", 0)
 
+    kind = ap.template_kind(rule_dict)
     if is_recovery:
         device_status = "UP"
         status_intro = "The following alert has been resolved:"
     else:
         device_status = "DOWN" if trigger == "down" else "DEGRADED" if trigger == "degraded" else "UP" if trigger == "up" else "ALERT"
         status_intro = "An alert has been triggered:"
+        if kind == "service" and device_status == "ALERT":
+            device_status = "DOWN"
 
     # Preview against something the rule could plausibly fire on: an APM rule
     # previewed against "core-router-01" teaches the reader nothing about the
@@ -1098,9 +1101,11 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         "check_type": "HTTP",
         "target": "https://service.example.com",
         "error": "" if is_recovery else "connection timed out after 5s",
-        "error_sentence": "" if is_recovery else " Connection timed out after 5s.",
+        "trap_message": "Link state changed on the monitored interface.",
+        **ap.service_check_variables(device_status, "" if is_recovery else "Connection timed out after 5 seconds"),
         **ap.rule_phrasing(rule_dict, hostname=hostname, is_recovery=is_recovery,
-                           reading=reading, duration=sample_duration),
+                           reading=reading, duration=sample_duration,
+                           device_status=device_status.lower() if kind == "device" else None),
     }
 
     # NetFlow rules phrase their sample reading exactly as the evaluator does
@@ -1117,27 +1122,16 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
     # `effective_template` also treats the wizard's old pre-filled templates as
     # "no template", so a rule created before this wording existed previews
     # (and sends) the current text rather than the field dump it was seeded with.
-    if is_recovery:
-        subject_tpl = ap.effective_template(rule_dict.get("recovery_email_subject"),
-                                            ap.DEFAULT_RECOVERY_EMAIL_SUBJECT)
-        body_tpl = ap.effective_template(rule_dict.get("recovery_email_body"),
-                                         ap.DEFAULT_RECOVERY_EMAIL_BODY)
-        sms_tpl = ap.effective_template(rule_dict.get("recovery_sms_template"),
-                                        ap.DEFAULT_RECOVERY_SMS)
-    else:
-        subject_tpl = ap.effective_template(rule_dict.get("email_subject"), ap.DEFAULT_EMAIL_SUBJECT)
-        body_tpl = ap.effective_template(rule_dict.get("email_body"), ap.DEFAULT_EMAIL_BODY)
-        sms_tpl = ap.effective_template(rule_dict.get("sms_template"), ap.DEFAULT_SMS)
-        if metric == 'syslog':
-            defaults = ap.default_templates('syslog')
-            subject_tpl = rule_dict.get('email_subject') or defaults['email_subject']
-            body_tpl = rule_dict.get('email_body') or defaults['email_body']
-            sms_tpl = rule_dict.get('sms_template') or defaults['sms_template']
+    templates = ap.effective_templates(rule_dict, kind)
+    prefix = "recovery_" if is_recovery else ""
+    subject_tpl = templates[prefix + "email_subject"]
+    body_tpl = templates[prefix + "email_body"]
+    sms_tpl = templates[prefix + "sms_template"]
 
     return {
         "subject": _render_template(subject_tpl, variables),
         "email_body": _render_template(body_tpl, variables),
-        "sms_body": _render_template(sms_tpl, variables),
+        "sms_body": ap.sms_with_timestamp(_render_template(sms_tpl, variables), now),
         "sim_hostname": variables["hostname"],
         "sim_ip": variables["ip_address"],
         "device_status": device_status,
