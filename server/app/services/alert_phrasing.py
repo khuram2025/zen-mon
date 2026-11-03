@@ -54,7 +54,8 @@ METRICS: dict[str, dict] = {
                   "state_label": {"down": "Power supply failure reported",
                                   "up": "All power supplies healthy"}},
     "uptime_reset": {"noun": "Device uptime", "subject": "the device",
-                     "narrative": {"down": "has rebooted", "up": "has stayed up since the last check"},
+                     "narrative": {"down": "reported an uptime reset (possible reboot)",
+                                   "up": "reported no further uptime reset"},
                      "state": {"down": "reports a reboot", "up": "stays up"},
                      "state_label": {"down": "Device reboot detected",
                                      "up": "No reboot detected"}},
@@ -67,7 +68,7 @@ METRICS: dict[str, dict] = {
     "if_errors": {"noun": "Interface errors", "unit": " errors", "decimals": 0},
     "if_discards": {"noun": "Interface discards", "unit": " discards", "decimals": 0},
     "if_oper_status": {"noun": "Interface state", "healthy": 1.0, "subject": "the interface",
-                       "narrative": {"down": "is down (interface operational status)", "up": "is operational again"},
+                       "narrative": {"down": "is down", "up": "is operational again"},
                        "state": {"down": "goes operationally down",
                                  "up": "comes back up"},
                        "state_label": {"down": "Interface operationally down",
@@ -133,11 +134,11 @@ METRICS: dict[str, dict] = {
     # Server availability (server_availability.py). host_unreachable phrases a
     # Device Down rule firing for an agent server: it is not a stored metric.
     "host_unreachable": {"noun": "Server availability", "healthy": 1.0, "subject": "the server",
-                         "narrative": {"down": "has stopped reporting and cannot be reached",
-                                       "up": "is reporting again"},
+                         "narrative": {"down": "has stopped sending agent heartbeats. Network reachability is unknown",
+                                       "up": "is sending agent heartbeats again"},
                          "state": {"down": "stops reporting and cannot be reached",
                                    "up": "reports again"},
-                         "state_label": {"down": "Server down (agent silent, no ping response)",
+                         "state_label": {"down": "Server down (agent silent, reachability unknown)",
                                          "up": "Server reachable"}},
     "host_agent_offline": {"noun": "Server agent", "subject": "the server",
                            "narrative": {"down": "is reachable, but its monitoring agent has stopped reporting",
@@ -1277,6 +1278,8 @@ def sms_with_timestamp(message: str, timestamp) -> str:
     """Stamp the notification event in UTC, including on queued delivery."""
     event_time = _as_utc(timestamp) or datetime.now(timezone.utc)
     stamp = event_time.strftime("%d %b %Y %H:%M UTC")
+    if "{timestamp}" in message:
+        return message.replace("{timestamp}", stamp)
     if any(rendered in message for rendered in (
         stamp,
         event_time.strftime("%Y-%m-%d %H:%M:%S UTC"),

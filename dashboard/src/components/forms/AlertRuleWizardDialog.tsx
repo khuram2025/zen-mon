@@ -1952,7 +1952,7 @@ function LiveMail({ msg, label, accent }: { msg: any; label: string; accent?: bo
           <iframe title={label} sandbox="" srcDoc={msg.email_html} className="h-[26rem] w-full bg-white" />
           <div className="border-t border-border bg-surface2/40 px-4 py-2">
             <div className="text-2xs uppercase tracking-wider text-muted">SMS</div>
-            <div className="mt-1 text-xs">{msg.sms_body}</div>
+            <div className="mt-1 whitespace-pre-wrap text-xs">{msg.sms_body}</div>
             <p className="mt-2 text-xs text-muted">
               Sample device and readings. The header, severity pill, readings, details table and
               button are added by the layout — the fields above set the subject and the highlighted

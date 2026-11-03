@@ -121,6 +121,9 @@ def test_preview_returns_rendered_email(preview_client):
         stamp = datetime.fromisoformat(message["iso_timestamp"]).strftime("%d %b %Y %H:%M UTC")
         assert message["sms_body"].endswith("\n" + stamp)
 
+    assert "100%" in alert["email_text"]
+    assert "unavailable (no reply)" in alert["email_text"]
+
     # recovery_alert is on, so the resolved mail renders too.
     assert body["recovery"]["subject"] == "[CRITICAL] Resolved: Core router down — core-router-01"
 

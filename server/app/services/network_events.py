@@ -102,6 +102,7 @@ async def ingest_syslog(db, event, dispatch=None):
             from app.services import alert_phrasing as ap
             values = {'rule_name': r['name'], 'hostname': hostname, 'ip_address': event['source_ip'],
                       'event_message': event['message'], 'trap_message': event['message'],
+                      'timestamp': event['received_at'].strftime('%H:%M UTC on %d %b %Y'),
                       'syslog_severity': event['severity'], 'severity': r['severity'], 'status': 'SYSLOG',
                       'event_sentence': f'{hostname} sent a matching syslog event.'}
             def render(field):

@@ -148,8 +148,8 @@ def test_thresholded_state_metrics_keep_their_wording():
     """The fix is scoped to event metrics: real conditions still read correctly."""
     cases = {
         ("ping_status", "==", 0): "is down (no response to ICMP probes)",
-        ("if_oper_status", "eq", 2): "is down (interface operational status)",
-        ("uptime_reset", "eq", 1): "has rebooted",
+        ("if_oper_status", "eq", 2): "is down",
+        ("uptime_reset", "eq", 1): "reported an uptime reset (possible reboot)",
         ("udt_rogue_endpoint", ">=", 1): "has seen an unauthorised endpoint",
         ("service_status", "==", 0): "failed its availability check",
     }

@@ -366,7 +366,7 @@ export function AlertMessagePreviewDialog({
               )}
               {msg && view === 'sms' && (
                 <div className="mx-auto max-w-sm">
-                  <div className="rounded-2xl bg-primary px-4 py-3 text-sm text-white shadow-sm">
+                  <div className="whitespace-pre-wrap rounded-2xl bg-primary px-4 py-3 text-sm text-white shadow-sm">
                     {msg.sms_body}
                   </div>
                   <div className="mt-2 text-center text-xs text-muted">

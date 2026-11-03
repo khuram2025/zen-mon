@@ -320,5 +320,6 @@ def test_sms_uses_event_time_and_keeps_existing_timestamp():
     message = ap.sms_with_timestamp("Device recovered.", timestamp)
     assert message == "Device recovered.\n03 Nov 2026 13:42 UTC"
     assert ap.sms_with_timestamp(message, timestamp) == message
+    assert ap.sms_with_timestamp("At {timestamp}", timestamp) == "At 03 Nov 2026 13:42 UTC"
     custom = "Device recovered at 2026-11-03 13:42:00 UTC."
     assert ap.sms_with_timestamp(custom, timestamp) == custom

@@ -1046,6 +1046,8 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
     evaluators, so what an operator approves in the preview dialog is what the
     recipient gets.
     """
+    from app.api.v1.alert_engine import RTT_UNAVAILABLE
+
     now = datetime.now(timezone.utc)
     trigger = rule_dict.get("trigger_on", "any")
     metric = rule_dict.get("metric") or "ping_status"
@@ -1071,12 +1073,13 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         hostname = "checkout-api"
     elif metric.startswith("host_"):
         hostname = "app-server-01"
-    elif metric == "service_status" or rule_dict.get("service_check_id"):
+    elif kind == "service":
         hostname = "Dashboard HTTPS"
     elif metric.startswith("netflow_"):
         hostname = "edge-router-01"
     else:
         hostname = "core-router-01"
+    down_device = kind == "device" and metric == "ping_status" and device_status == "DOWN"
     reading = ap.sample_reading(metric, operator, threshold, recovered=is_recovery)
     # A worked example beats a placeholder: the recovery preview has to show
     # the "how long was it broken" line, so the sample carries a duration.
@@ -1095,15 +1098,16 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         # "Now" rather than a frozen date: a preview/test mail stamped months in
         # the past reads as stale data rather than as a sample.
         "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
-        "rtt": "45.2ms",
-        "packet_loss": "15%",
-        "check_name": rule_dict.get("name") or "Service check",
+        "rtt": RTT_UNAVAILABLE if down_device else "45.2 ms",
+        "packet_loss": "100%" if down_device else "0%" if is_recovery else "15%",
+        "check_name": "Dashboard HTTPS",
         "check_type": "HTTP",
         "target": "https://service.example.com",
         "error": "" if is_recovery else "connection timed out after 5s",
         "trap_message": "Link state changed on the monitored interface.",
         **ap.service_check_variables(device_status, "" if is_recovery else "Connection timed out after 5 seconds"),
         **ap.rule_phrasing(rule_dict, hostname=hostname, is_recovery=is_recovery,
+                           subject_noun=f"{hostname} / uplink" if metric.startswith("if_") else None,
                            reading=reading, duration=sample_duration,
                            device_status=device_status.lower() if kind == "device" else None),
     }
