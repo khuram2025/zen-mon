@@ -18,6 +18,7 @@ import { effectivePriority, policyForPriority, ruleEscalationSummary, ruleRouteS
 import { usePolicies } from '@/features/escalation/api'
 import type { EscalationPolicy } from '@/features/escalation/types'
 import { PriorityBadge } from '@/features/escalation/ui'
+import { APM_EVENT_TRIGGERS, apmEventScope, isApmEvent } from '@/components/forms/apmEventTriggers'
 
 const TRIGGER_LABELS: Record<string, string> = {
   down: 'Goes down',
@@ -27,6 +28,7 @@ const TRIGGER_LABELS: Record<string, string> = {
 }
 
 function scopeLabel(r: any, serverNames: Map<string, string>): string {
+  if (isApmEvent(r.metric)) return r.target ? (r.metric === 'apm_synthetic_down' ? 'One scenario' : 'One SLO') : apmEventScope(r.metric).all
   if (isServerMetric(r.metric)) {
     if (!r.server_id) return 'All servers'
     return serverNames.get(r.server_id) || 'One server'
@@ -213,6 +215,11 @@ export function AlertRulesPage() {
                           <div className="font-medium text-text">{NETFLOW_METRIC_BY_KEY[r.metric as NetflowMetric].label}</div>
                           <div className="max-w-[16rem] text-2xs text-muted">{summarizeNetflowForm(formFromRule(r))}</div>
                         </>
+                      ) : isApmEvent(r.metric) ? (
+                        <div className="space-y-0.5">
+                          <div className="font-medium text-text">{APM_EVENT_TRIGGERS.find(x => x.value === r.metric)?.label}</div>
+                          <div className="text-2xs text-muted">{r.metric === 'apm_synthetic_down' ? 'After configured retries' : 'Multi-window error-budget burn'}</div>
+                        </div>
                       ) : isServerMetric(r.metric) ? (
                         <>
                           <div className="font-medium text-text">{serverMetricLabel(r.metric)}</div>

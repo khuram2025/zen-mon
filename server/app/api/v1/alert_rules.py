@@ -24,6 +24,24 @@ from app.models.user import User
 from app.services import alert_phrasing as ap
 from app.services import alert_priority as prio
 from app.services import netflow_alert_service as nfa
+from app.services import apm_event_rules as aer
+
+
+def _validate_apm_event(rule):
+    try:
+        aer.validate_definition(rule)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+async def _validate_apm_event_target(db, rule):
+    if rule.get('metric') not in aer.EVENT_METRICS or not rule.get('target'):
+        return
+    table = 'apm_synthetic_monitors' if rule['metric'] == aer.SYNTHETIC else 'apm_slos'
+    found = (await db.execute(text(f'SELECT 1 FROM {table} WHERE id=:id'),
+                              {'id': UUID(str(rule['target']))})).scalar()
+    if not found:
+        raise HTTPException(422, 'The selected scenario or SLO no longer exists')
 
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
 
@@ -631,6 +649,9 @@ async def create_alert_rule(
     _validate_network_contract(metric, conditions)
     if metric == 'syslog':
         _merge_condition_update({'metric': metric, 'threshold': threshold}, {})
+    _validate_apm_event({**data.model_dump(), 'metric': metric, 'operator': operator,
+                         'threshold': threshold, 'conditions': conditions})
+    await _validate_apm_event_target(db, {**data.model_dump(), 'metric': metric})
 
     flow_scope = flow_params = None
     cleared: set[str] = set()
@@ -793,6 +814,9 @@ async def update_alert_rule(
         if not current_rule:
             raise HTTPException(status_code=404, detail='Alert rule not found')
         fields = _merge_condition_update(current_rule, fields)
+
+    _validate_apm_event({**before, **fields})
+    await _validate_apm_event_target(db, {**before, **fields})
 
     # NetFlow rules: validate the merged definition; a changed definition
     # makes the old subjects meaningless, so their state and open alerts go.
@@ -1115,6 +1139,13 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False, branding=No
                            device_status=device_status.lower() if kind == "device" else None),
     }
 
+    if metric in aer.EVENT_METRICS:
+        name = 'Checkout journey' if metric == aer.SYNTHETIC else 'Checkout availability'
+        details = {'failed_step': 'Submit payment', 'error': 'HTTP 503', 'service': 'checkout-api',
+                   'tier': 'fast', 'long_burn': 16, 'short_burn': 18, 'factor': 14.4}
+        variables.update(aer.phrasing(metric, name, details, recovery=is_recovery, duration=sample_duration))
+        device_status = variables['status']
+
     # NetFlow rules phrase their sample reading exactly as the evaluator does
     # (bands, windows, exporter silence vs device reachability).
     nf_vars = nfa.preview_phrasing(rule_dict, is_recovery=is_recovery, duration=sample_duration)
@@ -1195,6 +1226,10 @@ def _preview_email_ctx(rule_dict: dict, msg: dict, is_recovery: bool,
             ("Device type", rule_dict.get("device_type")),
             ("Tag", rule_dict.get("scope_tag")),
             ("Flow scope", variables.get("flow_scope_label")),
+            ("Scenario", variables.get('scenario_name')),
+            ("Failed step", variables.get('failed_step') if metric == aer.SYNTHETIC and not is_recovery else None),
+            ("Error", variables.get('error') if metric == aer.SYNTHETIC and not is_recovery else None),
+            ("SLO", variables.get('slo_name')),
         ]),
         "action_url": action_url,
         "timestamp": msg.get("iso_timestamp"),
@@ -1206,7 +1241,7 @@ def _preview_email_ctx(rule_dict: dict, msg: dict, is_recovery: bool,
             "secondary_label": "Packet loss",
             "secondary_value": variables.get("packet_loss"),
         }
-    elif variables.get("reading"):
+    elif variables.get("reading") and metric not in aer.EVENT_METRICS:
         # Every other metric family leads with the reading that fired the rule,
         # next to the threshold it crossed — the two numbers a reader compares.
         ctx["headline_metric"] = {

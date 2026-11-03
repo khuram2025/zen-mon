@@ -53,7 +53,7 @@ from typing import Any, Optional
 
 import httpx
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.services.host_alert_service import dispatch_to_channels
 from app.services import alert_funnel
@@ -352,7 +352,23 @@ async def _resolve_down(db: AsyncSession, alert_id, monitor: dict) -> None:
         })
 
 
-async def execute_and_record(db: AsyncSession, monitor: dict) -> dict:
+async def execute_and_record(db: AsyncSession, monitor: dict, *, scheduled=False) -> dict | None:
+    # A separate lock transaction survives dispatcher commits. Manual runs and
+    # both scheduler workers share it, so retries cannot race another run.
+    from app.services.alert_worker_lock import pass_lock
+    async with pass_lock(f'zenplus:synthetic:{monitor["id"]}', async_sessionmaker(db.bind)) as held:
+        if not held:
+            return None
+        if scheduled:
+            due = (await db.execute(text('''SELECT enabled AND (last_check_at IS NULL OR
+                last_check_at < now()-make_interval(secs=>check_interval))
+                FROM apm_synthetic_monitors WHERE id=:id'''), {'id': str(monitor['id'])})).scalar()
+            if not due:
+                return None
+        return await _execute_and_record(db, monitor)
+
+
+async def _execute_and_record(db: AsyncSession, monitor: dict) -> dict:
     """Run a monitor, persist the result, update status, raise/resolve alerts."""
     result = await run_monitor_with_retries(monitor)
     try:
@@ -365,12 +381,19 @@ async def execute_and_record(db: AsyncSession, monitor: dict) -> dict:
         "updated_at = NOW() WHERE id = :id"
     ), {"st": result["status"], "id": str(monitor["id"])})
 
+    from app.services.apm_event_rules import evaluate_event, SYNTHETIC
+    central = await evaluate_event(db, SYNTHETIC, monitor['id'], monitor['name'], not result['success'], {
+        'monitor_id': str(monitor['id']), 'monitor_name': monitor['name'],
+        'failed_step': result['failed_step'], 'error': result['error'],
+        'steps_passed': result['steps_passed'], 'steps_total': result['steps_total'],
+    })
     existing = await _active_down_alert(db, str(monitor["id"]))
-    if not result["success"] and existing is None:
+    if not result["success"] and existing is None and not central:
         await _raise_down(db, monitor, result)
         logger.warning("synthetic %s DOWN: %s", monitor["name"], result["error"])
     elif result["success"] and existing is not None:
-        await _resolve_down(db, existing, monitor)
+        legacy_monitor = {**monitor, 'config': {**(monitor.get('config') or {}), 'notify_channels': []}} if central else monitor
+        await _resolve_down(db, existing, legacy_monitor)
         logger.info("synthetic %s recovered", monitor["name"])
     await db.commit()
     return result
@@ -401,9 +424,11 @@ async def synthetic_tick(db: AsyncSession) -> int:
     for row in due:
         monitor = dict(row)
         try:
-            await execute_and_record(db, monitor)
-            ran += 1
+            result = await execute_and_record(db, monitor, scheduled=True)
+            if result is not None:
+                ran += 1
         except Exception:
+            await db.rollback()
             logger.exception("synthetic run failed: %s", monitor.get("name"))
     return ran
 

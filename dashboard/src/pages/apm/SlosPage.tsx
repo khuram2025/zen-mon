@@ -441,6 +441,7 @@ function SloFormDialog({ open, onOpenChange, slo, onSaved }: {
               <div className="text-sm font-medium text-text">Burn-rate alerts</div>
               <div className="text-xs text-muted">
                 Page at 14.4× (1h) and 6× (6h); ticket at 1× (3d).
+                {' '}These local settings apply when no enabled SLO Burn Alert Rule matches this SLO.
               </div>
             </div>
             <Switch checked={burnEnabled} onCheckedChange={setBurnEnabled} />

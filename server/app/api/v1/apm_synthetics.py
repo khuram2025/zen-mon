@@ -273,6 +273,8 @@ async def run_monitor_now(
     if not row:
         raise HTTPException(404, "Monitor not found")
     result = await execute_and_record(db, dict(row))
+    if result is None:
+        raise HTTPException(409, 'This scenario is already running. Wait for its current run to finish.')
     return result
 
 
