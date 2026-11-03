@@ -117,6 +117,7 @@ async def deliver_due(db, *, limit=50, sender=None):
             continue
         ok=False
         error='Delivery unsuccessful'
+        terminal=False
         try:
             async with db.begin_nested():
                 ok=await sender(db,[row.channel_id],row.payload)==1
@@ -124,6 +125,16 @@ async def deliver_due(db, *, limit=50, sender=None):
             # Provider messages may contain tokens/URLs. Persist only safe codes.
             from app.services.ncm_delivery import safe_error
             error=safe_error(exc)
+            from app.services.sms_transport import SMSBatchError
+            if isinstance(exc, SMSBatchError):
+                # Preserve successful/possibly successful recipients before
+                # the next outbox attempt; only definite failures may retry.
+                payload={**row.payload, '_sms_delivery_outcomes': {
+                    o['recipient']: o['outcome'] for o in exc.outcomes
+                    if o['outcome'] in ('accepted', 'uncertain')}}
+                await db.execute(text('UPDATE ncm_notification_outbox SET payload=CAST(:payload AS jsonb) WHERE id=:id'),
+                                 {'id':row.id,'payload':json.dumps(payload)})
+                terminal=not any(o['outcome']=='failed' for o in exc.outcomes)
         attempts=row.attempts+1
         if ok:
             delivered+=1
@@ -132,6 +143,6 @@ async def deliver_due(db, *, limit=50, sender=None):
             await db.execute(text('''UPDATE ncm_notification_outbox SET attempts=:attempts,
                 status=:status,last_error=:error,
                 next_attempt_at=now()+make_interval(secs=>:delay) WHERE id=:id'''),
-                {'id':row.id,'attempts':attempts,'error':error,'status':'failed' if attempts>=8 else 'pending','delay':min(3600,30*2**min(attempts,7))})
+                {'id':row.id,'attempts':attempts,'error':error,'status':'failed' if terminal or attempts>=8 else 'pending','delay':min(3600,30*2**min(attempts,7))})
     await db.commit()
     return {'processed':len(rows),'delivered':delivered}

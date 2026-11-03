@@ -167,8 +167,8 @@ def _sms_fill(template: str, values: dict, *, is_get: bool) -> str:
     GET templates become part of a query string, so substituted values must be
     URL-encoded — an unencoded message body ("CPU > 90% & rising") truncated
     the text at the first ``&`` and could smuggle extra query parameters.
-    Recipient lists keep ``,`` and ``+`` literal (multi-number and E.164
-    conventions most gateways expect). POST bodies are provider-defined
+    Plus signs are escaped so query parsers preserve international numbers.
+    POST bodies are provider-defined
     (JSON/XML/form), so they are substituted verbatim as before.
     """
     return fill_template(template, values, is_get=is_get)
@@ -176,7 +176,7 @@ def _sms_fill(template: str, values: dict, *, is_get: bool) -> str:
 
 async def _send_sms(gw_config: dict, phones: str, message: str,
                     values: dict | None = None) -> bool:
-    """Send one SMS through a custom HTTP gateway.
+    """Send one SMS per destination through a custom HTTP gateway.
 
     ``values`` fills further {placeholders} of the gateway's request template
     (the device path offers {hostname}, {ip_address} and {status}); they are

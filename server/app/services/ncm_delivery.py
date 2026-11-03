@@ -10,7 +10,7 @@ from email.message import EmailMessage
 from sqlalchemy import text
 from app.core.crypto import decrypt_config
 from app.services.notification_transport import NotificationHTTPClient
-from app.services.sms_transport import send_sms_request
+from app.services.sms_transport import send_sms_request, sms_recipients, SMSBatchError
 
 SUPPORTED_CHANNELS = ('email', 'webhook', 'slack', 'teams', 'discord', 'pagerduty', 'sms')
 
@@ -18,6 +18,8 @@ SUPPORTED_CHANNELS = ('email', 'webhook', 'slack', 'teams', 'discord', 'pagerdut
 def safe_error(exc):
     """A delivery failure category that never includes provider text, tokens or URLs."""
     import httpx
+    if isinstance(exc, SMSBatchError):
+        return str(exc)
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
         return f'Provider rejected the request (HTTP {code})' if 400 <= code < 500 else f'Provider error (HTTP {code})'
@@ -46,10 +48,23 @@ async def sms_send(gw, phones, payload):
         raise ValueError('Missing SMS recipients')
     if gw.get('provider') != 'custom_http' or not gw.get('api_url'):
         raise ValueError('Unsupported SMS gateway provider')
-    await send_sms_request(gw, {
-        'recipients': phones, 'message': payload['subject'][:300],
-        'sender': gw.get('sender_name') or 'ZenPlus',
-    }, client_factory=NotificationHTTPClient)
+    from app.services.alert_delivery_log import outcome_for_exception
+    prior = payload.get('_sms_delivery_outcomes') or {}
+    outcomes = []
+    for phone in sms_recipients(phones):
+        state = prior.get(phone)
+        if state not in ('accepted', 'uncertain'):
+            try:
+                await send_sms_request(gw, {
+                    'recipients': phone, 'message': payload['subject'][:300],
+                    'sender': gw.get('sender_name') or 'ZenPlus',
+                }, client_factory=NotificationHTTPClient)
+                state = 'accepted'
+            except Exception as exc:
+                state = outcome_for_exception(exc)
+        outcomes.append({'recipient': phone, 'outcome': state})
+    if any(o['outcome'] != 'accepted' for o in outcomes):
+        raise SMSBatchError(outcomes)
 
 
 def smtp_send(config, recipients, payload):
