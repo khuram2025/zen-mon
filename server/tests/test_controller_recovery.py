@@ -2,6 +2,7 @@
 import asyncio
 from datetime import datetime, timezone
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -46,6 +47,11 @@ async def test_healthy_fleet_reconnects_silently_and_disconnected_host_pages_onc
     # Maximum communication retry + heartbeat scheduling still gets no false page.
     for sid in healthy:
         beat(w, sid, T0 + cr.RECONNECT_S - 1)
+    recovery(w, now=T0 + cr.RECONNECT_S)
+    await run(w, T0 + cr.RECONNECT_S)
+    assert w.sent == []
+    for sid in healthy:
+        beat(w, sid, T0 + cr.RECONNECT_S + 178)
     recovery(w, now=T0 + cr.RECONNECT_S + 179)
     await run(w, T0 + cr.RECONNECT_S + 179)
     assert w.sent == []
@@ -155,12 +161,58 @@ async def test_sensor_timeout_query_obeys_same_recovery_gate(world):
     w = world
     now = datetime.now(timezone.utc).timestamp()
     recovery(w, ready=now, now=now, deadline=now + cr.HARD_LIMIT_S)
+    sid = w.db.scalar("INSERT INTO sensors(name,status,last_heartbeat_at) "
+                      "VALUES('returning-sensor','online',to_timestamp($1)) RETURNING id", now - 1200)
     async with session(w.db) as db:
         result = await sshs.sweep_sensor_health(db)
     assert result["offline"] == 0
+    assert w.db.scalar("SELECT status FROM sensors WHERE id=$1", sid) == "online"
+    recovery(w, ready=None, now=now - 2000, deadline=now - 1)
+    async with session(w.db) as db:
+        result = await sshs.sweep_sensor_health(db)
+    assert result["offline"] == 1
 
 
 def test_signed_update_records_window_before_stopping_services():
     from pathlib import Path
     source = (Path(__file__).parents[2] / "scripts/build-release.py").read_text()
     assert source.index('"code/scripts/ota-monitoring-maintenance.py"') < source.index('"type": "stop_services"')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metric,table,name_column", [
+    ("host_process_down", "server_process_inventory", "name"),
+    ("host_service_down", "server_service_inventory", "service_name"),
+])
+async def test_inventory_absence_waits_for_fresh_snapshot_but_fresh_failure_is_actionable(world, metric, table, name_column):
+    w = world
+    now = datetime.now(timezone.utc).timestamp()
+    sid = add_server(w, "inventory-target", heartbeat=now)
+    recovery(w, ready=now, now=now, deadline=now + cr.HARD_LIMIT_S)
+    if metric == "host_process_down":
+        w.db.execute(f"INSERT INTO {table}(server_id,pid,{name_column},running,updated_at) "
+                     "VALUES($1,123,'worker',FALSE,to_timestamp($2))", sid, now - 1000)
+    else:
+        w.db.execute(f"INSERT INTO {table}(server_id,{name_column},state,updated_at) "
+                     "VALUES($1,'worker','stopped',to_timestamp($2))", sid, now - 1000)
+    rule = SimpleNamespace(metric=metric, target="worker")
+    async with session(w.db) as db:
+        assert await has._current_value(db, rule, sid) is None
+    w.db.execute(f"UPDATE {table} SET updated_at=to_timestamp($2) WHERE server_id=$1", sid, now + 1)
+    async with session(w.db) as db:
+        assert (await has._current_value(db, rule, sid))[0] is True
+
+
+def test_server_display_is_unknown_until_reconnection_without_changing_persisted_health(world):
+    from app.api.v1.servers import _server_row_to_response
+    w = world
+    now = datetime.now(timezone.utc).timestamp()
+    sid = add_server(w, "display-target", heartbeat=now - 1000)
+    state = recovery(w, ready=now, now=now, deadline=now + cr.HARD_LIMIT_S)
+    row = {"id": sid, "display_name": "display-target", "collection_mode": "agent", "status": "healthy",
+           "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+           "agent_last_heartbeat_at": datetime.fromtimestamp(now - 1000, timezone.utc)}
+    assert _server_row_to_response(row, state).status == "monitoring_interrupted"
+    assert row["status"] == "healthy"
+    row["agent_last_heartbeat_at"] = datetime.fromtimestamp(now + 1, timezone.utc)
+    assert _server_row_to_response(row, state).status == "healthy"

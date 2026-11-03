@@ -605,6 +605,16 @@ async def _current_value(db: AsyncSession, rule, server_id: str, ch_fleets: dict
     or None to skip. Threshold metrics are judged on history instead."""
     metric = rule.metric
 
+    if metric in {"host_service_down", "host_process_down"}:
+        from app.services import controller_recovery as cr
+        recovery = await cr.load(db)
+        if recovery:
+            table = "server_service_inventory" if metric == "host_service_down" else "server_process_inventory"
+            observed = (await db.execute(text(f"SELECT max(updated_at) FROM {table} WHERE server_id=:sid"),
+                                         {"sid": server_id})).scalar()
+            if recovery.hold_missing(observed, datetime.now(timezone.utc).timestamp(), 180):
+                return None
+
     if metric == "host_service_down":
         if not rule.target:
             return None

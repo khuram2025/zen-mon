@@ -66,7 +66,7 @@ class Recovery:
 def silence_is_observable(column: str, threshold: str) -> str:
     # Both arguments are developer-owned SQL expressions, never request values.
     return f"""(EXTRACT(EPOCH FROM NOW()) >= :cr_deadline OR
-        (:cr_ready IS NOT NULL AND EXTRACT(EPOCH FROM NOW()) - :cr_tick <= :cr_gap
+        (CAST(:cr_ready AS double precision) IS NOT NULL AND EXTRACT(EPOCH FROM NOW()) - :cr_tick <= :cr_gap
          AND ({column} >= to_timestamp(:cr_ready) OR
               EXTRACT(EPOCH FROM NOW()) >= :cr_ready + :cr_reconnect + {threshold})))"""
 

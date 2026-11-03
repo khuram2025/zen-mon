@@ -412,7 +412,9 @@ def test_freshness_covers_slow_collection_and_upload_policy():
 
 
 @pytest.mark.asyncio
-async def test_process_down_alert_uses_agent_policy_freshness():
+async def test_process_down_alert_uses_agent_policy_freshness(monkeypatch):
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr("app.services.controller_recovery.load", AsyncMock(return_value=None))
     class AlertDB:
         def __init__(self):
             self.ttl = None
