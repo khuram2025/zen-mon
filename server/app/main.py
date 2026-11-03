@@ -269,6 +269,9 @@ def create_app() -> FastAPI:
         from app.services.host_ingest_journal import enabled as journal_enabled, recovery_loop
         if journal_enabled():
             app.state.host_ingest_recovery = asyncio.create_task(recovery_loop())
+        from app.services.trap_incident_inbox import enabled as trap_inbox_enabled, trap_incident_loop
+        if trap_inbox_enabled():
+            app.state.trap_incident_inbox = asyncio.create_task(trap_incident_loop())
         # Scheduled reports: fire due report schedules (render + email delivery).
         from app.services.report_scheduler import report_scheduler_loop
         app.state.report_scheduler = asyncio.create_task(report_scheduler_loop())
@@ -353,7 +356,7 @@ def create_app() -> FastAPI:
             if task:
                 task.cancel()
                 stopping.append(task)
-        for attr in ("alert_escalation_sweeper", "agent_package_sync", "notification_outbox", "host_ingest_recovery", "service_transition_inbox"):
+        for attr in ("alert_escalation_sweeper", "agent_package_sync", "notification_outbox", "host_ingest_recovery", "service_transition_inbox", "trap_incident_inbox"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

@@ -534,16 +534,16 @@ type trapAlertSink struct {
 func (s *trapAlertSink) WriteTrap(t snmp.TrapRecord) {
 	if s.inner != nil {
 		s.inner.WriteTrap(t)
+		if durable, ok := s.inner.(interface{ DurableTrapAlerts() bool }); ok && durable.DurableTrapAlerts() {
+			return
+		}
 	}
 	if s.engine != nil {
 		go s.engine.evaluateTrapAlert(t)
 	}
 }
 
-// evaluateTrapAlert posts a received SNMP trap to the API alert engine, which
-// fires any matching metric='trap' alert rules (alerts-only — no channel
-// dispatch). Best-effort: failures are logged and ignored so trap persistence
-// is never blocked.
+// evaluateTrapAlert is the legacy best-effort loopback for standalone installs.
 func (e *Engine) evaluateTrapAlert(t snmp.TrapRecord) {
 	if t.EventID == uuid.Nil {
 		t.EventID = uuid.New()
@@ -551,20 +551,7 @@ func (e *Engine) evaluateTrapAlert(t snmp.TrapRecord) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	deviceID := ""
-	if t.DeviceID != nil {
-		deviceID = t.DeviceID.String()
-	}
-	payload := map[string]interface{}{
-		"device_id": deviceID,
-		"source_ip": t.SourceIP.String(),
-		"trap_oid":  t.TrapOID,
-		"event_id":  t.EventID.String(),
-		"trap_name": t.TrapName,
-		"severity":  t.Severity,
-		"message":   t.Message,
-	}
-	body, err := json.Marshal(payload)
+	body, err := json.Marshal(TrapAlertPayload(t))
 	if err != nil {
 		return
 	}
@@ -583,6 +570,23 @@ func (e *Engine) evaluateTrapAlert(t snmp.TrapRecord) {
 	var r map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&r)
 	e.logger.Infof("trap alert eval: oid=%s alerts_created=%v", t.TrapOID, r["alerts_created"])
+}
+
+// TrapAlertPayload is the common event shape for legacy and durable evaluation.
+func TrapAlertPayload(t snmp.TrapRecord) map[string]any {
+	deviceID := ""
+	if t.DeviceID != nil {
+		deviceID = t.DeviceID.String()
+	}
+	return map[string]any{
+		"device_id": deviceID,
+		"source_ip": t.SourceIP.String(),
+		"trap_oid":  t.TrapOID,
+		"event_id":  t.EventID.String(),
+		"trap_name": t.TrapName,
+		"severity":  t.Severity,
+		"message":   t.Message,
+	}
 }
 
 // evaluateServiceAlerts fires the API-side alert engine when a service check
