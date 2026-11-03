@@ -1022,7 +1022,7 @@ function RangeControls({ s, patch }: { s: UrlState; patch: (c: Record<string, st
           }}
         >
           <label className="text-sm">
-            <span className="block text-muted">From (your local time)</span>
+            <span className="block text-muted">From (configured time)</span>
             <input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} className={cn('h-9 rounded-md border border-border bg-surface px-2 text-sm', focusRing)} />
           </label>
           <label className="text-sm">

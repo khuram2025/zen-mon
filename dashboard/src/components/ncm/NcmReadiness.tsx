@@ -109,7 +109,7 @@ export function NcmHealth() {
       {skewed && (
         <div role="status" className="flex gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
           <Clock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <span>Your browser clock is {formatOffset(offset)} {offset > 0 ? 'behind' : 'ahead of'} the appliance. Ages on this page are measured with the appliance clock; hover any time to see the exact appliance (UTC) and local time.</span>
+          <span>Your browser clock is {formatOffset(offset)} {offset > 0 ? 'behind' : 'ahead of'} the appliance. Ages on this page are measured with the appliance clock; hover any time to see the exact time in the configured company timezone.</span>
         </div>
       )}
     </div>

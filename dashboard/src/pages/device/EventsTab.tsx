@@ -146,7 +146,7 @@ export function EventsTab({ device, summary, range }: { device: DeviceRecord; su
         <EventsChart events={events} fromTs={fromTs} toTs={toTs} rangeHours={range.hours} loading={allLoading && !events.length} />
       </Panel>
 
-      <Panel title="Timeline" meta={`${range.label} · newest first · times in your browser’s timezone`}>
+      <Panel title="Timeline" meta={`${range.label} · newest first · times in the configured timezone`}>
         <SourceNotices loading={loading} failed={failed} truncated={enabledSources.filter((s) => s.truncated)} />
         {openBefore > 0 && (
           <p className="mb-3 rounded-lg border border-border bg-surface2/40 px-3 py-2 text-xs text-muted">

@@ -199,7 +199,7 @@ function TimelineCard({ s }: { s: OncallSchedule }) {
       <CardContent className="space-y-2 p-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h3 className="text-sm font-semibold">Next {DAYS} days</h3>
-          <span className="text-xs text-muted">Times in your browser&apos;s zone; hover a shift for {s.timezone}.</span>
+          <span className="text-xs text-muted">Times in {regionalTimezone()}; hover a shift for {s.timezone}.</span>
         </div>
         {tl.isLoading ? <Skeleton className="h-24 w-full" />
           : tl.isError ? <QueryFailure compact error={tl.error} what="the timeline" onRetry={() => void tl.refetch()} retrying={tl.isFetching} />
@@ -331,8 +331,8 @@ function OverridesCard({ s, canManage, nameOf, users }: { s: OncallSchedule; can
                 {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
               </select>
             </FormField>
-            <FormField label="From (your time)"><Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></FormField>
-            <FormField label="Until (your time)"><Input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} /></FormField>
+            <FormField label="From (configured time)"><Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></FormField>
+            <FormField label="Until (configured time)"><Input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} /></FormField>
             <FormField label="Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Covering annual leave" maxLength={200} /></FormField>
             <div className="flex items-end">
               <Button type="submit" size="sm" disabled={!!invalid || create.isPending} title={invalid ?? undefined}>

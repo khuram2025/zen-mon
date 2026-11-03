@@ -1,3 +1,4 @@
+import { regionalDateBound, regionalTimezone } from '@/lib/regionalTime'
 /**
  * NCCM audit trail: who did what, to which device, and when. Fleet-wide when
  * no device is given, otherwise scoped to that device (with an opt-out).
@@ -96,8 +97,8 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
     device_id: deviceId && onlyDevice ? deviceId : undefined,
     action: action === 'all' ? undefined : action,
     actor: actor || undefined,
-    since: since ? `${since}T00:00:00Z` : undefined,
-    until: until ? `${until}T23:59:59Z` : undefined,
+    since: since ? regionalDateBound(since) : undefined,
+    until: until ? regionalDateBound(until, true) : undefined,
     limit: PAGE,
     offset: (page - 1) * PAGE,
   }
@@ -115,7 +116,7 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
   const filtered = action !== 'all' || !!actor || !!since || !!until
 
   const exportCsv = () => {
-    const header = ['time_utc', 'actor', 'action', 'device', 'device_id', 'resource_id', 'metadata']
+    const header = ['time_with_zone', 'actor', 'action', 'device', 'device_id', 'resource_id', 'metadata']
     const body = rows.map((r) => [
       absoluteTime(r.created_at), r.actor_name, r.action, r.hostname, r.device_id, r.resource_id,
       r.metadata == null ? '' : valueText(r.metadata),
@@ -149,10 +150,10 @@ export function AuditWorkspace({ deviceId }: { deviceId?: string }) {
           <FormField label="Actor" className="w-full sm:w-44">
             <Input value={actorInput} onChange={(e) => setActorInput(e.target.value)} placeholder="Name contains" className="h-8 text-xs" />
           </FormField>
-          <FormField label="Since (UTC)" className="w-full sm:w-40">
+          <FormField label={`Since (${regionalTimezone()})`} className="w-full sm:w-40">
             <Input type="date" value={since} max={until || undefined} onChange={(e) => setSince(e.target.value)} className="h-8 text-xs" />
           </FormField>
-          <FormField label="Until (UTC)" className="w-full sm:w-40">
+          <FormField label={`Until (${regionalTimezone()})`} className="w-full sm:w-40">
             <Input type="date" value={until} min={since || undefined} onChange={(e) => setUntil(e.target.value)} className="h-8 text-xs" />
           </FormField>
           {deviceId && (

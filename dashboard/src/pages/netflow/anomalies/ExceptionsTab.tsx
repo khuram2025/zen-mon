@@ -105,7 +105,7 @@ export function ExceptionsTab({ tz }: { tz: string }) {
               <Labeled id="nf-x-port" label="Destination port" error={errors.port}>
                 <Input id="nf-x-port" className="h-9" inputMode="numeric" value={draft.port} onChange={(e) => setDraft({ ...draft, port: e.target.value })} placeholder="optional" aria-invalid={!!errors.port} />
               </Labeled>
-              <Labeled id="nf-x-exp" label="Expires (your local time, optional)" error={errors.expires}>
+              <Labeled id="nf-x-exp" label={`Expires (${tz}, optional)`} error={errors.expires}>
                 <Input id="nf-x-exp" className="h-9" type="datetime-local" value={draft.expires} onChange={(e) => setDraft({ ...draft, expires: e.target.value })} aria-invalid={!!errors.expires} />
               </Labeled>
               <Labeled id="nf-x-reason" label="Reason" error={errors.reason}>

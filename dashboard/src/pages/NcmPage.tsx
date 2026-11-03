@@ -18,7 +18,7 @@ import { toast } from '@/components/ui/Toast'
 import { NcmHealth } from '@/components/ncm/NcmReadiness'
 import { Ago, EmptyState, Kpi, Pagination, StaleBanner, StateBadge, ToneIcon } from '@/components/ncm/ui'
 import {
-  STATES, RISK_ORDER, TONE_BG, categoryLabel, download, ncmError, pct, scheduleSummary, stateOf, toCsv, type Tone,
+  absoluteTime, STATES, RISK_ORDER, TONE_BG, categoryLabel, download, ncmError, pct, scheduleSummary, stateOf, toCsv, type Tone,
 } from '@/components/ncm/model'
 import { AssignProfileDialog, BulkBackupDialog, BulkSettingsDialog, SelectionReviewDialog } from '@/components/ncm/BulkDialogs'
 import { ProfilesDialog } from '@/components/ncm/ProfilesDialog'
@@ -378,9 +378,9 @@ function DevicesWorkspace({ url }: { url: ReturnType<typeof useUrlState> }) {
     try {
       const all = (await api.get('/ncm/overview', { params: { ...params, page: 1, page_size: 1000 } })).data.data
       download(`nccm-devices-${new Date().toISOString().slice(0, 10)}.csv`, toCsv([
-        ['Hostname', 'IP', 'Vendor', 'Type', 'Site', 'Coverage', 'Protection', 'Latest validated capture (UTC)', 'Last attempt (UTC)', 'Last failure', 'Schedule', 'Next due (UTC)', 'Collector'],
-        ...all.map((d: any) => [d.hostname, d.ip, d.vendor, d.device_type, d.location, d.coverage, stateOf(d).label, d.validated_at, d.last_attempt_at,
-          d.last_failure_category ? categoryLabel(d.last_failure_category) : '', d.enrolled ? scheduleSummary(d) : '', d.next_due, d.platform_label || d.support?.state]),
+        ['Hostname', 'IP', 'Vendor', 'Type', 'Site', 'Coverage', 'Protection', 'Latest validated capture (configured timezone)', 'Last attempt (configured timezone)', 'Last failure', 'Schedule', 'Next due (configured timezone)', 'Collector'],
+        ...all.map((d: any) => [d.hostname, d.ip, d.vendor, d.device_type, d.location, d.coverage, stateOf(d).label, absoluteTime(d.validated_at), absoluteTime(d.last_attempt_at),
+          d.last_failure_category ? categoryLabel(d.last_failure_category) : '', d.enrolled ? scheduleSummary(d) : '', absoluteTime(d.next_due), d.platform_label || d.support?.state]),
       ]), 'text/csv')
     } catch (e: any) { toast.error('Export failed', ncmError(e)) }
   }

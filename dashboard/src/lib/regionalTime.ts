@@ -19,6 +19,12 @@ export function regionalDay(at: number | Date, offset = 0): Date {
   const day = new Date(Date.UTC(p.year, p.month - 1, p.day + offset))
   return zonedToUtc(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), current.timezone)
 }
+/** Inclusive calendar-day bounds for date-only audit and exception controls. */
+export function regionalDateBound(value: string, end = false): string {
+  const midday = regionalInputMs(value + 'T12:00')
+  if (!Number.isFinite(midday)) return ''
+  return new Date(+regionalDay(midday, end ? 1 : 0) - (end ? 1000 : 0)).toISOString()
+}
 export function regionalInput(at: number | Date) { return toZonedInput(new Date(at), current.timezone) }
 export function regionalInputMs(value: string): number {
   if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(value)) return Date.parse(value)

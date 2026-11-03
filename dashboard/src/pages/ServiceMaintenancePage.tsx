@@ -203,7 +203,7 @@ export function ServiceMaintenancePage() {
             <DialogTitle>Schedule maintenance window</DialogTitle>
             <DialogDescription>
               Covered monitors keep probing; alerts are suppressed and the window is excluded from SLA.
-              Times are in this browser's timezone.
+              Times are in the configured company timezone.
             </DialogDescription>
           </DialogHeader>
           <form

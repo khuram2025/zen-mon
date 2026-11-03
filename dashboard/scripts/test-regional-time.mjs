@@ -25,6 +25,8 @@ try {
   const at = new Date('2026-11-03T13:00:00Z')
   f.setRegionalTime({ timezone:'Asia/Riyadh' })
   assert.equal(f.regionalDay(at).toISOString(),'2026-11-02T21:00:00.000Z')
+  assert.equal(f.regionalDateBound('2026-11-03'),'2026-11-02T21:00:00.000Z')
+  assert.equal(f.regionalDateBound('2026-11-03',true),'2026-11-03T20:59:59.000Z')
   assert.equal(f.shortDate('2026-11-03T22:30:00Z'),'2026-11-04')
   assert.equal(f.buildDaySeries([],1,Date.parse('2026-11-03T22:30:00Z'))[0].key,'2026-11-04')
   assert.equal(f.timelineWindow(+at,1,'Asia/Riyadh').from,+f.regionalDay(at))
