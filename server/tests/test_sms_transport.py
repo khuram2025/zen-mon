@@ -195,7 +195,7 @@ def test_placeholder_values_are_not_recursively_substituted():
 @pytest.mark.parametrize('path', ['gateway', 'channel', 'alert', 'ncm'])
 async def test_multiple_numbers_are_separate_requests_on_every_path(path, http_fixture):
     requests, _ = http_fixture
-    phones = '+15550000001; +1 (555) 000-0002\n+15550000001'
+    phones = '+15550000001; +1 (555) 000-0002\n15550000001;0015550000001'
     cfg = gateway()
     if path == 'gateway':
         result = await settings._do_sms_test(cfg, phones)

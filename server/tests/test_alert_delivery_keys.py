@@ -347,6 +347,8 @@ def test_recipient_keys_and_transport_outcomes():
         ("ops@x.test", "Ops@X.test"), ("noc@x.test", "noc@x.test")]
     assert has._recipients("+966 50 123 4567,+966-50-1234567", "sms") == [
         ("+966501234567", "+966 50 123 4567")]
+    assert has._recipients("+15550000001,15550000001;0015550000001", "sms") == [
+        ("+15550000001", "+15550000001")]
     assert has._unique_channels(["a", "b", "a", None, ""]) == ["a", "b"]
     # Errors that prove nothing was handed over may be retried; the rest are
     # uncertain and never re-sent.

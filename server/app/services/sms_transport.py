@@ -13,13 +13,16 @@ def sms_recipients(raw) -> list[str]:
     """Normalize destination lists before substituting a single-recipient API."""
     items = raw if isinstance(raw, (list, tuple)) else re.split(r'[,;\r\n]+', str(raw or ''))
     recipients = []
+    seen = set()
     for item in items:
         phone = re.sub(r'[\s().-]', '', str(item or ''))
         if not phone:
             continue
         if not re.fullmatch(r'\+?[0-9]+', phone):
             raise ValueError('SMS gateway recipient must be an international phone number')
-        if phone not in recipients:
+        key = phone.removeprefix('+').removeprefix('00')
+        if key not in seen:
+            seen.add(key)
             recipients.append(phone)
     if not recipients:
         raise ValueError('A recipient phone number is required')

@@ -215,8 +215,9 @@ def _recipients(raw, kind: str) -> list[tuple[str, str]]:
         if not addr:
             continue
         key = addr.lower() if kind == "email" else _PHONE_NOISE.sub("", addr)
-        if key and key not in seen:
-            seen.add(key)
+        identity = key if kind == "email" else key.removeprefix('+').removeprefix('00')
+        if key and identity not in seen:
+            seen.add(identity)
             out.append((key, addr))
     return out
 

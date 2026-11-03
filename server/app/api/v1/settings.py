@@ -779,7 +779,8 @@ async def _do_sms_test(raw_config: dict, recipient: str) -> dict:
     except Exception:
         raise HTTPException(status_code=502, detail='SMS gateway connection failed') from None
     count = response.extensions.get('sms_recipient_count', 1)
-    return {'message': f'SMS test accepted by the provider for {count} recipient(s)',
+    noun = 'recipient' if count == 1 else 'recipients'
+    return {'message': f'SMS test accepted by the provider for {count} {noun}',
             'status_code': response.status_code, 'recipient_count': count}
 
 
