@@ -5,22 +5,22 @@ Scheduled discovery previously only fired when someone clicked the manual
 makes schedules real: a 60-second loop (started from main.py) evaluates due
 schedules and launches their runs in-process, exactly like the endpoint.
 
-It also recovers orphaned runs on startup: scans execute as in-process
-asyncio tasks, so an API restart strands anything 'queued'/'running' — those
-rows are marked failed so the UI doesn't show eternally spinning runs and the
-one-in-flight-per-profile guard doesn't deadlock the schedule forever.
+Every tick recovers expired running work and launches committed queued work.
+A new worker must never cancel scans owned by a healthy worker.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.discovery_v2 import DiscoveryRun, DiscoverySchedule
+from app.models.discovery_v2 import DiscoveryProfile, DiscoveryRun, DiscoverySchedule
+from app.services.discovery_ownership import recover_expired
 from app.services.discovery_executor import start_run_task
 
 logger = logging.getLogger("zenplus.discovery_scheduler")
@@ -73,11 +73,19 @@ async def run_scheduler_tick(db: AsyncSession) -> dict:
                 DiscoverySchedule.next_run_at != None,  # noqa: E711
                 DiscoverySchedule.next_run_at <= now,
             )
+            .order_by(DiscoverySchedule.profile_id, DiscoverySchedule.id)
             .with_for_update(skip_locked=True)
         )
     ).scalars().all()
     triggered: list[str] = []
     for s in rows:
+        # Manual starts use the same profile row lock so a schedule and a user
+        # cannot both pass the in-flight check for the same profile.
+        profile = (await db.execute(select(DiscoveryProfile).where(
+            DiscoveryProfile.id == s.profile_id
+        ).with_for_update())).scalar_one_or_none()
+        if profile is None:
+            continue
         in_flight = (
             await db.execute(
                 select(DiscoveryRun).where(
@@ -105,43 +113,42 @@ async def run_scheduler_tick(db: AsyncSession) -> dict:
         else:
             s.next_run_at = compute_next_run(s, after=now + timedelta(seconds=1))
         triggered.append(str(run.id))
-        start_run_task(run.id)
     await db.commit()
+    for run_id in triggered:
+        start_run_task(uuid.UUID(run_id))
     if triggered:
         logger.info("scheduler tick: started %d run(s): %s", len(triggered), triggered)
     return {"triggered": triggered, "checked": len(rows)}
 
 
 async def recover_stuck_runs(db: AsyncSession) -> int:
-    """Mark runs orphaned by a restart as failed (their tasks died with the process)."""
-    res = await db.execute(
-        text("""UPDATE discovery_runs
-                SET status = 'failed', phase = 'done',
-                    error_details = 'Interrupted by API restart',
-                    completed_at = NOW()
-                WHERE status IN ('queued', 'running')"""),
-    )
-    await db.commit()
-    n = res.rowcount or 0
+    """Fail only expired owners; committed queued work remains executable."""
+    n = await recover_expired(db)
     if n:
-        logger.warning("recovered %d discovery run(s) stranded by restart", n)
+        logger.warning("recovered %d discovery run(s) with expired owners", n)
     return n
 
 
+async def resume_queued_runs(db: AsyncSession) -> int:
+    ids = (await db.execute(select(DiscoveryRun.id).where(
+        DiscoveryRun.status == 'queued', DiscoveryRun.executor_id.is_(None)
+    ).order_by(DiscoveryRun.created_at).limit(100))).scalars().all()
+    await db.commit()
+    for run_id in ids:
+        start_run_task(run_id)
+    return len(ids)
+
+
 async def discovery_scheduler_loop() -> None:
-    """Background task: recover stranded runs once, then tick every minute."""
+    """Recover expired work and schedule committed runs every minute."""
     from app.core.database import AsyncSessionLocal
 
     await asyncio.sleep(15)  # let the app settle before touching the DB
-    try:
-        async with AsyncSessionLocal() as db:
-            await recover_stuck_runs(db)
-    except Exception:
-        logger.exception("stuck-run recovery failed")
-
     while True:
         try:
             async with AsyncSessionLocal() as db:
+                await recover_stuck_runs(db)
+                await resume_queued_runs(db)
                 await run_scheduler_tick(db)
         except asyncio.CancelledError:
             raise

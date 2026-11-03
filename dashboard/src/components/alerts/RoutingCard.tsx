@@ -32,8 +32,23 @@ const KIND_LABEL: Record<string, string> = {
   trigger: 'Alert', recovery: 'Recovery', escalation: 'Escalation', all_clear: 'All clear', reminder: 'Reminder', closure: 'Closure',
 }
 
+const WORK_LABEL: Record<string, string> = {
+  pending: 'Queued for delivery', processing: 'Delivery in progress', accepted: 'Provider accepted',
+  uncertain: 'Delivery uncertain — review provider logs', held: 'Delegated to digest',
+  blocked: 'Destination changed — restore original configuration', cancelled: 'Cancelled',
+}
+
 export function RoutingCard({ alert, now }: { alert: AlertDetail; now: number }) {
   const can = useCan()
+  const qc = useQueryClient()
+  const retryWork = useMutation({
+    mutationFn: async (id: string) => (await api.post(`/alerts/${alert.id}/notification-work/${id}/retry`)).data,
+    onSuccess: () => {
+      toast.success('Notification retry scheduled')
+      qc.invalidateQueries({ queryKey: ['alerts'] })
+    },
+    onError: (e) => toast.error('Retry failed', apiErrorMessage(e)),
+  })
   const [editOpen, setEditOpen] = useState(false)
   const rule = alert.rule
   const channels = alert.channels ?? []
@@ -79,6 +94,29 @@ export function RoutingCard({ alert, now }: { alert: AlertDetail; now: number })
           )}
           <p className="mt-1 text-xs text-muted">What the rule notifies today — not proof that anyone was notified.</p>
         </section>
+
+        {!!alert.notification_work?.length && (
+          <section aria-labelledby="notification-work-h">
+            <h3 id="notification-work-h" className="mb-1.5 text-sm font-semibold text-text2">Durable notification work</h3>
+            <p className="mb-2 text-xs text-muted">Queued work survives worker restarts. Provider acceptance does not confirm that a person received or read the message.</p>
+            <ul className="max-h-72 space-y-1 overflow-y-auto">
+              {alert.notification_work.map((w) => (
+                <li key={w.id} className="rounded-md border border-border/60 p-2.5 text-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span>{KIND_LABEL[w.event] ?? w.event} · {WORK_LABEL[w.status] ?? w.status}</span>
+                    {can('alerts.manage') && ['pending', 'blocked'].includes(w.status) && (
+                      <Button size="sm" variant="ghost" disabled={retryWork.isPending} onClick={() => retryWork.mutate(w.id)}>Retry now</Button>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-muted">{w.attempts} worker attempt{w.attempts === 1 ? '' : 's'} · created {fmtAgo(w.created_at, now)}
+                    {['pending', 'blocked'].includes(w.status) && <> · eligible after {fmtAlertDate(w.due_at)}</>}
+                  </p>
+                  {w.last_error && <p className="mt-1 text-xs text-warning">{w.last_error}</p>}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
         <section aria-labelledby="delivery-h">
           <h3 id="delivery-h" className="mb-1.5 text-sm font-semibold text-text2">

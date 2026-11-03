@@ -1027,10 +1027,34 @@ async def get_alert_detail(
         ]
     from app.services import notification_grouping as ng
     await ng.attach_alert_holds(db, payload, row.id)
+    # The scope check above applies to durable work as well as receipts.
+    # Never expose stored message bodies, recipient lists or channel hashes.
+    payload["notification_work"] = [dict(r._mapping) for r in (await db.execute(text(
+        "SELECT id,event,status,attempts,created_at,due_at,finished_at,last_error"
+        " FROM notification_outbox WHERE alert_id=:id ORDER BY sequence DESC LIMIT 100"
+    ), {"id": row.id})).all()]
     return payload
 
 
 # ── Actions ─────────────────────────────────────────────────────────────────
+
+@router.post("/{alert_id}/notification-work/{work_id}/retry")
+async def retry_notification_work(alert_id: UUID, work_id: UUID,
+                                  db: AsyncSession = Depends(get_db),
+                                  user: User = Depends(can_manage)):
+    await _in_scope_or_404(db, user, alert_id)
+    row = (await db.execute(text(
+        "UPDATE notification_outbox SET due_at=clock_timestamp()"
+        " WHERE id=:id AND alert_id=:aid AND status IN ('pending','blocked') RETURNING id"
+    ), {"id": work_id, "aid": alert_id})).first()
+    if row is None:
+        raise HTTPException(409, "Only pending or blocked notification work can be retried")
+    from app.services.audit_service import write_audit_log
+    await write_audit_log(db, actor=user, action="alert.notification_work.retry",
+                          resource_type="notification_outbox", resource_id=str(work_id),
+                          metadata={"alert_id": str(alert_id)}, required=True)
+    await db.commit()
+    return {"id": str(work_id), "scheduled": True}
 
 class NoteBody(BaseModel):
     note: Optional[str] = Field(default=None, max_length=500)

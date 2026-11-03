@@ -61,6 +61,21 @@ func main() {
 	}
 	defer chStore.Close()
 	sugar.Info("Connected to ClickHouse")
+	if os.Getenv("POLLER_INSERT_JOURNAL_ENABLED") == "1" {
+		if os.Getenv("HOST_INSERT_JOURNAL_ENABLED") != "1" || os.Getenv("ZENPLUS_CONTROLLER_GRANT") == "" {
+			sugar.Fatal("Poller journal requires the API recovery worker and commissioned controller admission")
+		}
+		if err := chStore.EnableAnalyticsJournal(pgStore); err != nil {
+			sugar.Fatal("Invalid poller journal batching configuration")
+		}
+		sugar.Info("Poller analytics durable handoff enabled")
+	}
+	if os.Getenv("TRAP_INCIDENT_INBOX_ENABLED") == "1" {
+		if err := chStore.EnableDurableTrapAlerts(); err != nil {
+			sugar.Fatal(err)
+		}
+		sugar.Info("Trap incident durable handoff enabled")
+	}
 
 	// Connect to Redis
 	redisStore, err := store.NewRedisStore(cfg)

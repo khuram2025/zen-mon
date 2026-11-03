@@ -340,8 +340,22 @@ func (s *Spool) Enqueue(item Item) (retained bool, err error) {
 // bounded to one data segment, which lets old segments be reclaimed without
 // copying live payloads. Its persisted manifest freezes membership and key.
 func (s *Spool) NextBatch(limit int) (*Batch, error) {
+	return s.NextBatchWithLimits(limit, 0, nil)
+}
+
+// NextBatchWithLimits bounds new manifests by endpoint count and a conservative
+// encoded-payload byte budget. WAL frame sizes include the JSON-encoded payload
+// plus metadata, so their sum is an upper bound on the uploaded items. Callers
+// must reserve room for their HTTP envelope. A single over-budget item is still
+// returned so the caller can handle it explicitly rather than stall the queue.
+// Existing manifests are immutable: a lost ACK must retry the original key and
+// membership, even if limits changed after an upgrade.
+func (s *Spool) NextBatchWithLimits(limit, maxPayloadBytes int, endpointLimits map[string]int) (*Batch, error) {
 	if limit <= 0 {
 		return nil, errors.New("batch limit must be positive")
+	}
+	if maxPayloadBytes < 0 {
+		return nil, errors.New("batch byte limit must not be negative")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -357,15 +371,23 @@ func (s *Spool) NextBatch(limit int) (*Batch, error) {
 	if oldest == nil {
 		return nil, nil
 	}
+	if endpointLimit := endpointLimits[oldest.path]; endpointLimit > 0 && endpointLimit < limit {
+		limit = endpointLimit
+	}
 
 	manifest := &inflightRecord{Path: oldest.path}
+	var encodedBytes int64
 	for i := int(oldest.index); i < len(oldest.segment.entries); i++ {
 		e := oldest.segment.entries[i]
 		if e.dead || e.path != manifest.Path {
 			continue
 		}
+		if maxPayloadBytes > 0 && len(manifest.Refs) > 0 && encodedBytes+e.frameSize > int64(maxPayloadBytes) {
+			break
+		}
 		manifest.Refs = append(manifest.Refs, e.ref())
 		manifest.IDs = append(manifest.IDs, e.id)
+		encodedBytes += e.frameSize
 		if len(manifest.Refs) == limit {
 			break
 		}

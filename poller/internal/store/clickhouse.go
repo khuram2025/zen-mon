@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -18,6 +19,8 @@ import (
 // ClickHouseStore handles metric writes to ClickHouse.
 type ClickHouseStore struct {
 	conn          driver.Conn
+	journal       batchStager
+	trapJournal   *PostgresStore
 	batchSize     int
 	flushInterval time.Duration
 	buffer        chan *pinger.PingResult
@@ -75,6 +78,13 @@ func (s *ClickHouseStore) Close() {
 
 // WriteResult queues a ping result for batch insertion.
 func (s *ClickHouseStore) WriteResult(result *pinger.PingResult) {
+	if s.journal != nil {
+		select {
+		case s.buffer <- result:
+		case <-s.done:
+		}
+		return
+	}
 	select {
 	case s.buffer <- result:
 	default:
@@ -88,17 +98,27 @@ func (s *ClickHouseStore) RunBatchWriter(ctx context.Context) {
 
 	batch := make([]*pinger.PingResult, 0, s.batchSize)
 
+	pending := false
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
 		if err := s.insertBatch(ctx, batch); err != nil {
 			fmt.Printf("ERROR: Failed to flush metrics batch: %v\n", err)
+			if s.journal != nil {
+				pending = true
+				return
+			}
 		}
+		pending = false
 		batch = batch[:0]
 	}
 
 	for {
+		input := s.buffer
+		if pending {
+			input = nil
+		}
 		select {
 		case <-ctx.Done():
 			flush()
@@ -106,7 +126,7 @@ func (s *ClickHouseStore) RunBatchWriter(ctx context.Context) {
 		case <-s.done:
 			flush()
 			return
-		case result := <-s.buffer:
+		case result := <-input:
 			batch = append(batch, result)
 			if len(batch) >= s.batchSize {
 				flush()
@@ -118,7 +138,7 @@ func (s *ClickHouseStore) RunBatchWriter(ctx context.Context) {
 }
 
 func (s *ClickHouseStore) insertBatch(ctx context.Context, results []*pinger.PingResult) error {
-	batch, err := s.conn.PrepareBatch(ctx, `
+	batch, err := s.prepareBatch(ctx, `
 		INSERT INTO ping_metrics (
 			device_id, timestamp, is_up, rtt_ms, packet_loss, jitter_ms,
 			min_rtt_ms, max_rtt_ms, packets_sent, packets_recv, poller_id, ip_address
@@ -177,7 +197,7 @@ func deviceStatusLogRow(sc *pinger.StatusChange, durationSec uint64) []any {
 // WriteStatusChange logs a confirmed device status transition (hard
 // transitions and the maintenance overlay only; never flapping markers).
 func (s *ClickHouseStore) WriteStatusChange(ctx context.Context, sc *pinger.StatusChange, durationSec uint64) error {
-	batch, err := s.conn.PrepareBatch(ctx, deviceStatusLogInsert)
+	batch, err := s.prepareBatch(ctx, deviceStatusLogInsert)
 	if err != nil {
 		return fmt.Errorf("prepare device status log: %w", err)
 	}
@@ -192,6 +212,13 @@ func (s *ClickHouseStore) WriteStatusChange(ctx context.Context, sc *pinger.Stat
 
 // WriteServiceResult queues a service check result for batch insertion.
 func (s *ClickHouseStore) WriteServiceResult(result *checker.ServiceCheckResult) {
+	if s.journal != nil {
+		select {
+		case s.serviceBuffer <- result:
+		case <-s.done:
+		}
+		return
+	}
 	select {
 	case s.serviceBuffer <- result:
 	default:
@@ -205,17 +232,27 @@ func (s *ClickHouseStore) RunServiceBatchWriter(ctx context.Context) {
 
 	batch := make([]*checker.ServiceCheckResult, 0, s.batchSize)
 
+	pending := false
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
 		if err := s.insertServiceBatch(ctx, batch); err != nil {
 			fmt.Printf("ERROR: Failed to flush service metrics batch: %v\n", err)
+			if s.journal != nil {
+				pending = true
+				return
+			}
 		}
+		pending = false
 		batch = batch[:0]
 	}
 
 	for {
+		input := s.serviceBuffer
+		if pending {
+			input = nil
+		}
 		select {
 		case <-ctx.Done():
 			flush()
@@ -223,7 +260,7 @@ func (s *ClickHouseStore) RunServiceBatchWriter(ctx context.Context) {
 		case <-s.done:
 			flush()
 			return
-		case result := <-s.serviceBuffer:
+		case result := <-input:
 			batch = append(batch, result)
 			if len(batch) >= s.batchSize {
 				flush()
@@ -235,7 +272,7 @@ func (s *ClickHouseStore) RunServiceBatchWriter(ctx context.Context) {
 }
 
 func (s *ClickHouseStore) insertServiceBatch(ctx context.Context, results []*checker.ServiceCheckResult) error {
-	batch, err := s.conn.PrepareBatch(ctx, `
+	batch, err := s.prepareBatch(ctx, `
 		INSERT INTO service_metrics (
 			service_check_id, device_id, timestamp, check_type, is_up,
 			response_ms, status_code, tls_days_remaining, tls_valid,
@@ -322,6 +359,13 @@ func (s *ClickHouseStore) insertServiceBatch(ctx context.Context, results []*che
 // the buffer capacity is batchSize*4, so this only matters during an
 // outage when CH writes are stuck.
 func (s *ClickHouseStore) WriteSNMPMetric(m snmp.MetricSample) {
+	if s.journal != nil {
+		select {
+		case s.snmpBuffer <- m:
+		case <-s.done:
+		}
+		return
+	}
 	select {
 	case s.snmpBuffer <- m:
 	default:
@@ -330,6 +374,13 @@ func (s *ClickHouseStore) WriteSNMPMetric(m snmp.MetricSample) {
 
 // WriteSNMPIfMetric queues an interface-counter snapshot.
 func (s *ClickHouseStore) WriteSNMPIfMetric(m snmp.InterfaceSample) {
+	if s.journal != nil {
+		select {
+		case s.snmpIfBuffer <- m:
+		case <-s.done:
+		}
+		return
+	}
 	select {
 	case s.snmpIfBuffer <- m:
 	default:
@@ -345,13 +396,19 @@ func (s *ClickHouseStore) RunSNMPBatchWriter(ctx context.Context) {
 	scalarBatch := make([]snmp.MetricSample, 0, s.batchSize)
 	ifBatch := make([]snmp.InterfaceSample, 0, s.batchSize)
 
+	scalarPending, ifPending := false, false
 	flushScalars := func() {
 		if len(scalarBatch) == 0 {
 			return
 		}
 		if err := s.insertSNMPBatch(ctx, scalarBatch); err != nil {
 			fmt.Printf("ERROR: Failed to flush snmp_metrics batch: %v\n", err)
+			if s.journal != nil {
+				scalarPending = true
+				return
+			}
 		}
+		scalarPending = false
 		scalarBatch = scalarBatch[:0]
 	}
 	flushIf := func() {
@@ -360,11 +417,23 @@ func (s *ClickHouseStore) RunSNMPBatchWriter(ctx context.Context) {
 		}
 		if err := s.insertSNMPIfBatch(ctx, ifBatch); err != nil {
 			fmt.Printf("ERROR: Failed to flush snmp_if_metrics batch: %v\n", err)
+			if s.journal != nil {
+				ifPending = true
+				return
+			}
 		}
+		ifPending = false
 		ifBatch = ifBatch[:0]
 	}
 
 	for {
+		scalarInput, ifInput := s.snmpBuffer, s.snmpIfBuffer
+		if scalarPending {
+			scalarInput = nil
+		}
+		if ifPending {
+			ifInput = nil
+		}
 		select {
 		case <-ctx.Done():
 			flushScalars()
@@ -374,12 +443,12 @@ func (s *ClickHouseStore) RunSNMPBatchWriter(ctx context.Context) {
 			flushScalars()
 			flushIf()
 			return
-		case m := <-s.snmpBuffer:
+		case m := <-scalarInput:
 			scalarBatch = append(scalarBatch, m)
 			if len(scalarBatch) >= s.batchSize {
 				flushScalars()
 			}
-		case m := <-s.snmpIfBuffer:
+		case m := <-ifInput:
 			ifBatch = append(ifBatch, m)
 			if len(ifBatch) >= s.batchSize {
 				flushIf()
@@ -392,7 +461,7 @@ func (s *ClickHouseStore) RunSNMPBatchWriter(ctx context.Context) {
 }
 
 func (s *ClickHouseStore) insertSNMPBatch(ctx context.Context, samples []snmp.MetricSample) error {
-	batch, err := s.conn.PrepareBatch(ctx, `
+	batch, err := s.prepareBatch(ctx, `
 		INSERT INTO snmp_metrics (device_id, metric_key, value, unit, timestamp, poller_id)
 	`)
 	if err != nil {
@@ -407,7 +476,7 @@ func (s *ClickHouseStore) insertSNMPBatch(ctx context.Context, samples []snmp.Me
 }
 
 func (s *ClickHouseStore) insertSNMPIfBatch(ctx context.Context, samples []snmp.InterfaceSample) error {
-	batch, err := s.conn.PrepareBatch(ctx, `
+	batch, err := s.prepareBatch(ctx, `
 		INSERT INTO snmp_if_metrics (
 		    device_id, if_index, timestamp,
 		    in_octets, out_octets, in_errors, out_errors, in_discards, out_discards,
@@ -433,6 +502,16 @@ func (s *ClickHouseStore) insertSNMPIfBatch(ctx context.Context, samples []snmp.
 // WriteTrap queues a decoded SNMP trap for batched insertion. This
 // implements the snmp.TrapSink interface.
 func (s *ClickHouseStore) WriteTrap(t snmp.TrapRecord) {
+	if s.DurableTrapAlerts() && t.EventID == uuid.Nil {
+		t.EventID = uuid.New()
+	}
+	if s.journal != nil {
+		select {
+		case s.trapBuffer <- t:
+		case <-s.done:
+		}
+		return
+	}
 	select {
 	case s.trapBuffer <- t:
 	default:
@@ -447,17 +526,27 @@ func (s *ClickHouseStore) RunTrapBatchWriter(ctx context.Context) {
 	defer ticker.Stop()
 
 	batch := make([]snmp.TrapRecord, 0, 256)
+	pending := false
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
 		if err := s.insertTrapBatch(ctx, batch); err != nil {
 			fmt.Printf("ERROR: Failed to flush snmp_traps batch: %v\n", err)
+			if s.journal != nil {
+				pending = true
+				return
+			}
 		}
+		pending = false
 		batch = batch[:0]
 	}
 
 	for {
+		input := s.trapBuffer
+		if pending {
+			input = nil
+		}
 		select {
 		case <-ctx.Done():
 			flush()
@@ -465,7 +554,7 @@ func (s *ClickHouseStore) RunTrapBatchWriter(ctx context.Context) {
 		case <-s.done:
 			flush()
 			return
-		case t := <-s.trapBuffer:
+		case t := <-input:
 			batch = append(batch, t)
 			if len(batch) >= 256 {
 				flush()
@@ -477,9 +566,27 @@ func (s *ClickHouseStore) RunTrapBatchWriter(ctx context.Context) {
 }
 
 func (s *ClickHouseStore) insertTrapBatch(ctx context.Context, traps []snmp.TrapRecord) error {
-	batch, err := s.conn.PrepareBatch(ctx, `
-		INSERT INTO snmp_traps (device_id, source_ip, trap_oid, trap_name, bindings, severity, message, timestamp, poller_id, source_ip_text, event_id)
-	`)
+	const insert = `INSERT INTO snmp_traps (device_id, source_ip, trap_oid, trap_name, bindings, severity, message, timestamp, poller_id, source_ip_text, event_id)`
+	var batch analyticsBatch
+	var err error
+	if s.DurableTrapAlerts() {
+		events := make([]map[string]any, 0, len(traps))
+		for _, trap := range traps {
+			event := pinger.TrapAlertPayload(trap)
+			event["observed_at"] = trap.Timestamp.UTC()
+			events = append(events, event)
+		}
+		work, encodeErr := json.Marshal(events)
+		if encodeErr != nil {
+			return fmt.Errorf("encode trap incident work: %w", encodeErr)
+		}
+		stage := batchStageFunc(func(ctx context.Context, table, token string, payload []byte) error {
+			return s.trapJournal.stageAnalytics(ctx, table, token, payload, work)
+		})
+		batch, err = prepareJournalBatch(ctx, stage, insert, "", map[string]bool{"snmp_traps": true})
+	} else {
+		batch, err = s.prepareBatch(ctx, insert)
+	}
 	if err != nil {
 		return fmt.Errorf("prepare trap batch: %w", err)
 	}
@@ -502,6 +609,19 @@ func (s *ClickHouseStore) insertTrapBatch(ctx context.Context, traps []snmp.Trap
 	return batch.Send()
 }
 
+func (s *ClickHouseStore) EnableDurableTrapAlerts() error {
+	pg, ok := s.journal.(*PostgresStore)
+	if !ok || pg == nil {
+		return fmt.Errorf("trap incident inbox requires the poller analytics journal")
+	}
+	s.trapJournal = pg
+	return nil
+}
+
+func (s *ClickHouseStore) DurableTrapAlerts() bool {
+	return s.trapJournal != nil
+}
+
 // serviceStatusLogInsert is the service_status_log insert. Values are bound by
 // the native batch protocol, never formatted into the SQL text, so reasons
 // containing quotes, backslashes or newlines are stored verbatim.
@@ -520,7 +640,7 @@ func serviceStatusLogRow(sc *checker.ServiceStatusChange, durationSec uint64, no
 
 // WriteServiceStatusChange logs a service check status transition.
 func (s *ClickHouseStore) WriteServiceStatusChange(ctx context.Context, sc *checker.ServiceStatusChange, durationSec uint64) error {
-	batch, err := s.conn.PrepareBatch(ctx, serviceStatusLogInsert)
+	batch, err := s.prepareBatch(ctx, serviceStatusLogInsert)
 	if err != nil {
 		return fmt.Errorf("prepare service status log: %w", err)
 	}

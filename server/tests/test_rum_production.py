@@ -805,6 +805,8 @@ def test_windows_resolve_presets_custom_bounds_and_previous_period():
         rum._resolve_window("custom", _recent(59), _recent(60))
     with pytest.raises(HTTPException):
         rum._resolve_window("custom", _recent(150), _recent(30))   # > 90 days
+    with pytest.raises(HTTPException, match="retained for 90 days"):
+        rum._resolve_window("custom", _recent(92), _recent(91))
     # FastAPI FieldInfo defaults (direct calls) are treated as "not supplied".
     from fastapi import Query
     assert rum._resolve_window("24h", Query(default=None), Query(default=None)).range == "24h"

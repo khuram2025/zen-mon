@@ -447,6 +447,16 @@ def databases():
         admin.command(f"CREATE DATABASE {name}")
         made.append(name)
         _apply(admin, name, *files)
+        # The deterministic arithmetic/replay vectors use a fixed calendar
+        # date. Production TTL would eventually delete those rows mid-test,
+        # making results depend on the day the suite runs. Disable expiry in
+        # these private tables; the dedicated TTL-edge test installs its own
+        # retention policy and uses timestamps relative to the current clock.
+        for (table,) in admin.query(
+            f"SELECT name FROM system.tables WHERE database = '{name}' "
+            "AND engine LIKE '%MergeTree' AND create_table_query LIKE '% TTL %'"
+        ).result_rows:
+            admin.command(f"ALTER TABLE {name}.{table} REMOVE TTL")
         if drop_views:
             for (view,) in admin.query(
                 f"SELECT name FROM system.tables WHERE database = '{name}' AND engine = 'MaterializedView'"

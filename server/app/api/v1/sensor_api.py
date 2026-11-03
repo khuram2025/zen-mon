@@ -834,7 +834,7 @@ def _parse_dt(v: Any) -> datetime:
     raise HTTPException(400, "Every result requires a valid ISO-8601 timestamp")
 
 
-def _batch_payload_sha256(body: ResultsBatch) -> str:
+def _batch_payload_sha256(body: ResultsBatch | EventsBatch) -> str:
     canonical = json.dumps(
         body.model_dump(mode="json")["items"],
         sort_keys=True,
@@ -846,7 +846,7 @@ def _batch_payload_sha256(body: ResultsBatch) -> str:
 async def _reserve_ingest(
     sensor_id: UUID,
     endpoint: str,
-    body: ResultsBatch,
+    body: ResultsBatch | EventsBatch,
     db: AsyncSession,
 ) -> Optional[dict[str, Any]]:
     """Reserve an idempotent batch or return its prior completed outcome."""
@@ -2116,6 +2116,10 @@ async def post_events(
     await _limit_sensor_request(
         request, "events", sensor_id=x_sensor_id, amount=max(1, len(body.items)), limit=10_000
     )
+    if body.idempotency_key:
+        prior = await _reserve_ingest(sensor["id"], "events", body, db)
+        if prior is not None:
+            return {"accepted": prior["inserted"], "duplicate": True, "idempotent": True}
     items = body.items or []
     if items:
         params = []
@@ -2165,9 +2169,12 @@ async def post_events(
                     VALUES (:sensor_id, :ts, :kind, CAST(:detail AS jsonb))"""),
             params,
         )
-        await db.commit()
+    if body.idempotency_key:
+        await _complete_ingest(sensor["id"], "events", body.idempotency_key, len(items), 0, db)
+    # Event history, command outcome and ledger completion are one transaction.
+    await db.commit()
     logger.info("sensor %s events: %d", sensor["id"], len(items))
-    return {"accepted": len(items)}
+    return {"accepted": len(items), "duplicate": False, "idempotent": bool(body.idempotency_key)}
 
 
 # ── Sensor appliance downloads ───────────────────────────────────────

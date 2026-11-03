@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import text
+from app.services.job_lock_keys import JOB_LOCK_KEYS
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt
@@ -30,7 +31,7 @@ logger = logging.getLogger("zenplus.udt_ad")
 POLL_TICK_S = 30            # scheduler granularity; per-DC interval respected
 DEFAULT_LOOKBACK_MIN = 30   # first poll window when no checkpoint exists
 MAX_EVENTS = 500
-UDT_AD_ADVISORY_LOCK = 1515074393
+UDT_AD_ADVISORY_LOCK = JOB_LOCK_KEYS["udt.ad"]
 
 # PowerShell: emit recent logon events as a compact JSON array. We ask
 # for 4624 (logon) + 4768/4769 (Kerberos). TargetUserName/IpAddress are

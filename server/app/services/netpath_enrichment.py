@@ -16,6 +16,7 @@ import logging
 import socket
 
 from sqlalchemy import text
+from app.services.job_lock_keys import JOB_LOCK_KEYS
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
@@ -23,7 +24,7 @@ from app.services import geoip
 
 logger = logging.getLogger("netpath.enrichment")
 
-NETPATH_ENRICH_LOCK = 1515074394
+NETPATH_ENRICH_LOCK = JOB_LOCK_KEYS["netpath.enrichment"]
 ENRICH_INTERVAL_S = 30
 BATCH = 200
 # re-check long-lived enrichment (device came online, rDNS changed) occasionally

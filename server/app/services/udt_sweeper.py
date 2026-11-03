@@ -24,6 +24,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from sqlalchemy import text
+from app.services.job_lock_keys import JOB_LOCK_KEYS
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
@@ -39,7 +40,7 @@ DNS_BUDGET_PER_TICK = 100
 DNS_TIMEOUT_S = 1.5
 WATCH_SEEN_DEDUPE = "1 hour"
 
-UDT_SWEEP_ADVISORY_LOCK = 1515074391
+UDT_SWEEP_ADVISORY_LOCK = JOB_LOCK_KEYS["udt.sweep"]
 
 
 def _consume_dns_lookup_exception(lookup: asyncio.Future) -> None:
