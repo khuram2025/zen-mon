@@ -216,3 +216,29 @@ def test_server_display_is_unknown_until_reconnection_without_changing_persisted
     assert row["status"] == "healthy"
     row["agent_last_heartbeat_at"] = datetime.fromtimestamp(now + 1, timezone.utc)
     assert _server_row_to_response(row, state).status == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_startup_records_interruption_before_readiness(pg_db, monkeypatch):
+    from app.core import database
+    monkeypatch.setattr(database, "AsyncSessionLocal", lambda: session(pg_db))
+    monkeypatch.setenv("INVOCATION_ID", "startup-service-invocation")
+    await cr.startup(ready=False)
+    async with session(pg_db) as db:
+        before = await cr.load(db)
+    assert before.ready_at is None
+    await cr.startup(ready=True)
+    async with session(pg_db) as db:
+        after = await cr.load(db)
+    assert after.ready_at >= before.started_at
+    assert after.deadline == before.deadline
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_silently_bypass_failed_registration(monkeypatch):
+    from app.core import database
+    def unavailable():
+        raise RuntimeError("fixture database unavailable")
+    monkeypatch.setattr(database, "AsyncSessionLocal", unavailable)
+    with pytest.raises(RuntimeError, match="fixture database unavailable"):
+        await cr.startup(ready=False)

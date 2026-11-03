@@ -172,9 +172,14 @@ def client():
         yield FakeDB()
 
     app.dependency_overrides[get_db] = fake_db
-    with TestClient(app) as test_client:
+    # Route tests inject a fake DB. Do not start real appliance background
+    # workers or controller registration against the environment's database.
+    test_client = TestClient(app)
+    try:
         yield test_client
-    app.dependency_overrides.clear()
+    finally:
+        test_client.close()
+        app.dependency_overrides.clear()
 
 
 @pytest.fixture
