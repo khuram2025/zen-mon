@@ -144,7 +144,7 @@ def test_preview_bodies_read_as_english(preview_client):
 
     alert = body["alert"]
     assert alert["email_body"] == (
-        "Interface utilisation on core-router-01 rose above 80% (currently 87%)."
+        "Interface utilisation on core-router-01 / uplink rose above 80% (currently 87%)."
     )
     # The stored metric key never reaches the reader — in any channel.
     for text_ in (alert["email_body"], alert["sms_body"], alert["email_text"],
