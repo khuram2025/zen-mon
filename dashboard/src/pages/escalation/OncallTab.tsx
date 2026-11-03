@@ -1,4 +1,4 @@
-import { regionalInput, regionalInputMs } from '@/lib/regionalTime'
+import { regionalInput, regionalInputMs, regionalTimezone } from '@/lib/regionalTime'
 import { regionalDate } from '@/lib/regionalTime'
 /**
  * On-call: schedules (layers rotate ordered members every shift length from a
@@ -192,7 +192,7 @@ function ScheduleDetail({ s, canManage, onEdit, onDelete }: { s: OncallSchedule;
 /* ── 14-day timeline ──────────────────────────────────────────────────── */
 
 function TimelineCard({ s }: { s: OncallSchedule }) {
-  const [{ from, to }] = useState(() => timelineWindow(Date.now(), DAYS))
+  const [{ from, to }] = useState(() => timelineWindow(Date.now(), DAYS, regionalTimezone()))
   const tl = useScheduleTimeline(s.id, from, to)
   return (
     <Card>
@@ -211,7 +211,7 @@ function TimelineCard({ s }: { s: OncallSchedule }) {
 
 export function ShiftTimeline({ shifts, from, to, tz, now }: { shifts: Shift[]; from: number; to: number; tz: string; now: number }) {
   const rows = useMemo(() => layoutShifts(shifts, from, to), [shifts, from, to])
-  const ticks = useMemo(() => dayTicks(from, Math.round((to - from) / 86400_000)), [from, to])
+  const ticks = useMemo(() => dayTicks(from, Math.round((to - from) / 86400_000), regionalTimezone()), [from, to])
   const gaps = useMemo(() => coverageGapsInWindow(shifts, from, to).filter((g) => g.end - g.start >= 60_000), [shifts, from, to])
   const nowPct = now >= from && now <= to ? ((now - from) / (to - from)) * 100 : null
   const legend = useMemo(() => {

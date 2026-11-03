@@ -2,6 +2,7 @@
  * Explicit report/schedule zones remain supported; API instants stay unchanged.
  */
 import { DEFAULT_BRANDING, formatDate, formatDateTime, formatTime, isValidTimezone, zoneLabel, zoneParts, type Branding } from './branding'
+import { zonedToUtc } from '../features/reports/periods'
 import { fromZonedInput, toZonedInput } from '../features/reports/viewer/range'
 
 let current: Branding = DEFAULT_BRANDING
@@ -12,6 +13,12 @@ export function regionalSettings() { return current }
 export function regionalTimezone() { return current.timezone }
 export function regionalZoneLabel(at: number = Date.now()) { return zoneLabel(current.timezone, at) }
 export function regionalParts(at: number | Date) { return zoneParts(new Date(at), current.timezone) }
+/** Midnight in the configured zone, with calendar-day arithmetic across DST. */
+export function regionalDay(at: number | Date, offset = 0): Date {
+  const p = regionalParts(at)
+  const day = new Date(Date.UTC(p.year, p.month - 1, p.day + offset))
+  return zonedToUtc(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), current.timezone)
+}
 export function regionalInput(at: number | Date) { return toZonedInput(new Date(at), current.timezone) }
 export function regionalInputMs(value: string): number {
   if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(value)) return Date.parse(value)

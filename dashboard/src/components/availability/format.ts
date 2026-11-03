@@ -1,3 +1,4 @@
+import { regionalParts } from '@/lib/regionalTime'
 import { regionalTimezone, regionalZoneLabel } from '@/lib/regionalTime'
 import { regionalDate } from '@/lib/regionalTime'
 /**
@@ -106,7 +107,7 @@ export function fmtClock(ms: number | null | undefined, withSeconds = false): st
 }
 
 export function fmtPeriod(fromMs: number, toMs: number): string {
-  const sameYear = new Date(fromMs).getFullYear() === new Date(toMs).getFullYear()
+  const sameYear = regionalParts(fromMs).year === regionalParts(toMs).year
   const opts: Intl.DateTimeFormatOptions = {
     month: 'short',
     day: 'numeric',

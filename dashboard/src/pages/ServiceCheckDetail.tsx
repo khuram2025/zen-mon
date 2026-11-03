@@ -1,3 +1,4 @@
+import { regionalDay, regionalInput, regionalParts } from '@/lib/regionalTime'
 import { regionalDate } from '@/lib/regionalTime'
 import { DailyProbeFailures } from '@/components/services/DailyProbeFailures'
 import { explainServiceFailure } from '@/components/services/failureReason'
@@ -2032,14 +2033,11 @@ type DayUptime = {
 
 function buildDailyUptime(hours: Array<{ ts: string; uptime_pct: number | null; sample_count: number; covered_sec?: number; maintenance_sec?: number }>, dayCount: number, nowMs: number = Date.now()): DayUptime[] {
   // Local-midnight boundaries via calendar arithmetic, never +24 h: DST days are 23 or 25 hours.
-  const today = new Date(nowMs)
-  today.setHours(0, 0, 0, 0)
+  const today = regionalDay(nowMs)
   const days: DayUptime[] = []
   for (let i = dayCount - 1; i >= 0; i--) {
-    const date = new Date(today)
-    date.setDate(today.getDate() - i)
-    const next = new Date(date)
-    next.setDate(next.getDate() + 1)
+    const date = regionalDay(today, -i)
+    const next = regionalDay(today, 1 - i)
     const start = date.getTime()
     const end = next.getTime()
     const slots = Math.max(1, Math.round((end - start) / 3_600_000))
@@ -2104,7 +2102,7 @@ function coveredWeightedUptime(days: DayUptime[]): number | null {
 }
 
 function dayKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  return regionalInput(d).slice(0, 10)
 }
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
@@ -2139,7 +2137,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
   const dimOthers = dim && inCount > 0 && inCount < days.length
 
   // Monday-first grid: pad the first week so each column is a weekday.
-  const leadPad = days.length ? (days[0].date.getDay() + 6) % 7 : 0
+  const leadPad = days.length ? (new Date(days[0].key + 'T00:00:00Z').getUTCDay() + 6) % 7 : 0
 
   return (
     <SectionCard
@@ -2194,7 +2192,7 @@ function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSe
                     )}
                     style={d.uptimePct != null ? { backgroundColor: withAlpha(BAND_FILL[band], band === 'perfect' ? 0.22 : 0.28) } : undefined}
                   >
-                    <span className="text-xs font-semibold tabular-nums text-text">{d.date.getDate()}</span>
+                    <span className="text-xs font-semibold tabular-nums text-text">{regionalParts(d.date).day}</span>
                     <span className={cn('text-2xs font-medium tabular-nums', BAND_TEXT[band])}>{label}</span>
                     <span
                       className="absolute inset-x-1.5 bottom-1 h-[3px] rounded-full"

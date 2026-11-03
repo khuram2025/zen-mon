@@ -15,11 +15,26 @@ try {
     export { displayTimeZone } from './src/lib/netflow/window';
     export { asOfLabel } from './src/components/inventory/model';
     export { formatDateTime } from './src/lib/branding';
+    export { buildDaySeries } from './src/components/services/uptime';
+    export { shortDate } from './src/components/inventory/softwareModel';
+    export { timelineWindow } from './src/features/escalation/model';
   `, resolveDir: process.cwd() }, bundle: true, platform: 'node', format: 'esm', packages: 'external',
     alias: { '@': path.resolve('src') }, write: false, logLevel: 'silent' })
   const file = path.join(dir,'test.mjs'); await writeFile(file,result.outputFiles[0].text)
   const f = await import(pathToFileURL(file).href)
   const at = new Date('2026-11-03T13:00:00Z')
+  f.setRegionalTime({ timezone:'Asia/Riyadh' })
+  assert.equal(f.regionalDay(at).toISOString(),'2026-11-02T21:00:00.000Z')
+  assert.equal(f.shortDate('2026-11-03T22:30:00Z'),'2026-11-04')
+  assert.equal(f.buildDaySeries([],1,Date.parse('2026-11-03T22:30:00Z'))[0].key,'2026-11-04')
+  assert.equal(f.timelineWindow(+at,1,'Asia/Riyadh').from,+f.regionalDay(at))
+  f.setRegionalTime({ timezone:'America/New_York' })
+  for (const [iso,hours] of [['2026-03-08T12:00:00Z',23],['2026-11-01T12:00:00Z',25]]) {
+    const day=Date.parse(iso)
+    assert.equal((+f.regionalDay(day,1)-+f.regionalDay(day))/3600000,hours)
+    const window=f.timelineWindow(day,1,'America/New_York')
+    assert.equal((window.to-window.from)/3600000,hours)
+  }
   f.setRegionalTime({ timezone:'Asia/Riyadh' })
   assert.equal(f.regionalDate(at,'datetime'),'2026-11-03 16:00:00 GMT+3')
   assert.equal(f.regionalDate(at,'time','en-GB',{hour:'2-digit',minute:'2-digit',hour12:false}),'16:00')
