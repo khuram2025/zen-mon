@@ -389,18 +389,25 @@ async def evaluate_slo_burn(db: AsyncSession) -> dict[str, int]:
         except Exception:
             logger.exception("slo burn: compute failed for %s", slo["id"])
             continue
+        from app.services.apm_event_rules import evaluate_event, SLO
+        breached = next((tier for tier in status['tiers'] if tier['breaching']), None)
+        complete = all(tier['long_burn'] is not None and tier['short_burn'] is not None for tier in status['tiers'])
+        detail = {**(breached or {}), 'slo_id': str(slo['id']), 'slo_name': slo['name'],
+                  'service': slo['service_name'], 'target': slo['target']}
+        central = await evaluate_event(db, SLO, slo['id'], slo['name'],
+                                       True if breached else False if complete else None, detail)
         for tier in status["tiers"]:
             dedupe = f"slo:{slo['id']}:{tier['tier']}"
             existing = await _active_alert_id(db, dedupe)
             if tier["breaching"]:
-                if existing is None:
+                if existing is None and not central:
                     msg = _burn_message(slo, tier)
                     alert_id = await _raise(db, slo, tier, dedupe, msg)
                     raised += 1
                     await db.commit()
                     if slo.get("burn_alert_enabled", True):
                         await _notify(db, slo, tier, msg, alert_id=alert_id)
-            elif existing is not None:
+            elif existing is not None and tier['long_burn'] is not None and tier['short_burn'] is not None:
                 resolved += await _resolve(db, existing)
         await db.commit()
 

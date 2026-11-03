@@ -31,9 +31,8 @@ Alerts dedupe on (rule_id, metadata->>'service'): a rule/service pair raises
 at most one active alert. Both uvicorn workers start this loop; a pass runs in
 one of them at a time (``alert_worker_lock``), as for the host and network
 evaluators, because the open-alert check and the insert are not atomic. ``apm_slo_burn`` is *not* evaluated here —
-the SLO burn loop (apm_slo_service) raises directly. ``apm_synthetic_down``
-and ``apm_anomaly`` are whitelisted but their sources don't exist yet
-(AM-E9/E12), so they are intentionally not handled.
+the SLO burn loop and synthetic runner feed confirmed events into
+``apm_event_rules``. ``apm_anomaly`` remains reserved without an evaluator.
 """
 
 from __future__ import annotations

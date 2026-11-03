@@ -30,6 +30,7 @@ import { toast } from '@/components/ui/Toast'
 import { fmtMs } from '@/components/apm/shared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { ApmKpi, RankBar } from '@/components/apm/viz'
+import { useNotificationChannels } from '@/hooks/useNotificationChannels'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -359,7 +360,7 @@ function MonitorDetail({ m, freshRun }: { m: Monitor; freshRun: RunResult | null
 
 // ─── Scenario editor dialog ─────────────────────────────────────────────────
 
-function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; onClose: () => void }) {
+export function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; onClose: () => void }) {
   const qc = useQueryClient()
   const [name, setName] = useState(monitor?.name ?? '')
   const [interval, setIntervalS] = useState(String(monitor?.check_interval ?? 60))
@@ -370,11 +371,8 @@ function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; onClose
     monitor?.steps?.length ? JSON.parse(JSON.stringify(monitor.steps)) : [emptyStep()],
   )
 
-  const { data: channels } = useQuery<any[]>({
-    queryKey: ['settings', 'channels'],
-    queryFn: async () => (await api.get('/settings/channels')).data,
-    staleTime: 60_000,
-  })
+  const channelsQuery = useNotificationChannels()
+  const channels = channelsQuery.data ?? []
   const [notify, setNotify] = useState<string[]>(monitor?.notify_channels ?? [])
 
   const save = useMutation({
@@ -468,16 +466,24 @@ function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; onClose
             </p>
           </div>
 
-          {(channels ?? []).length > 0 && (
             <div>
               <div className="mb-1.5 text-xs text-text2">Notify on failure</div>
+              <p className="mb-2 text-xs text-muted">Used when no enabled Alert Rule matches this scenario. Matching Alert Rules control notification routing.</p>
+              {channelsQuery.isPending && <p role="status" className="text-xs text-muted">Loading notification channels…</p>}
+              {channelsQuery.isError && <div role="alert" className="text-xs text-danger">
+                Could not load notification channels: {apiErrorMessage(channelsQuery.error)}
+                <Button variant="ghost" size="sm" onClick={() => channelsQuery.refetch()}>Retry</Button>
+              </div>}
+              {channelsQuery.isSuccess && channels.length === 0 && <p className="text-xs text-muted">No notification channels configured. Add a channel in Notification Channels.</p>}
               <div className="flex flex-wrap gap-2">
-                {(channels ?? []).map((c: any) => {
-                  const cid = String(c.id ?? c.channel_type ?? c.type)
+                {channels.map((c) => {
+                  const cid = String(c.id)
                   const on = notify.includes(cid)
                   return (
                     <button
                       key={cid} type="button"
+                      aria-pressed={on}
+                      disabled={c.enabled === false && !on}
                       onClick={() => setNotify(on ? notify.filter((x) => x !== cid) : [...notify, cid])}
                       className={cn(
                         'rounded-full border px-2.5 py-1 text-xs transition-colors',
@@ -485,13 +491,12 @@ function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; onClose
                            : 'border-border bg-surface2 text-text2 hover:border-primary/40',
                       )}
                     >
-                      {c.name ?? cid}
+                      {c.name ?? cid}{c.enabled === false ? ' (disabled)' : ''}
                     </button>
                   )
                 })}
               </div>
             </div>
-          )}
         </div>
 
         <DialogFooter>

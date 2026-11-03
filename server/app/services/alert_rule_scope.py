@@ -63,6 +63,10 @@ def describe_scope(rule, names: dict | None = None) -> dict:
                     "target": target}
         return {"kind": "global", "label": "All monitored servers", "target": target}
     if fam == "apm":
+        metric = _get(rule, 'metric')
+        if metric in ('apm_synthetic_down', 'apm_slo_burn'):
+            noun, all_label = ('Scenario', 'All scenarios') if metric == 'apm_synthetic_down' else ('SLO', 'All SLOs')
+            return {'kind': 'apm', 'label': f'{noun} {n.get("apm_entity") or target}' if target else all_label, 'target': target}
         return {"kind": "apm", "label": f"APM service {target}" if target else "All APM services",
                 "target": target}
     if fam == "netpath":
@@ -151,6 +155,10 @@ def _netflow_exporter(rule) -> str | None:
 async def scope_names(db: AsyncSession, rule) -> dict:
     """Display names for the ids a rule references."""
     out: dict = {}
+    if _get(rule, 'metric') in ('apm_synthetic_down', 'apm_slo_burn') and _get(rule, 'target'):
+        table = 'apm_synthetic_monitors' if _get(rule, 'metric') == 'apm_synthetic_down' else 'apm_slos'
+        out['apm_entity'] = (await db.execute(text(f'SELECT name FROM {table} WHERE id::text=:id'),
+                                            {'id': str(_get(rule, 'target'))})).scalar()
     queries = [
         ("device", "device_id", "SELECT hostname FROM devices WHERE id = :id"),
         ("group", "group_id", "SELECT name FROM device_groups WHERE id = :id"),
@@ -196,6 +204,13 @@ async def affected(db: AsyncSession, rule) -> dict:
             if _netflow_exporter(rule):
                 return {"count": 1, "noun": "flow exporter", "shared": False}
             return {"count": None, "noun": "flow exporters", "shared": True}
+        if fam == 'apm' and _get(rule, 'metric') in ('apm_synthetic_down', 'apm_slo_burn'):
+            synthetic = _get(rule, 'metric') == 'apm_synthetic_down'
+            table = 'apm_synthetic_monitors' if synthetic else 'apm_slos'
+            where = ' WHERE id::text=:target' if _get(rule, 'target') else ''
+            count = (await db.execute(text(f'SELECT count(*) FROM {table}{where}'),
+                                     {'target': str(_get(rule, 'target'))})).scalar() or 0
+            return {'count': count, 'noun': 'scenarios' if synthetic else 'SLOs', 'shared': count != 1}
         if fam in ("apm", "udt"):
             return {"count": None, "noun": "APM services" if fam == "apm" else "tracked endpoints",
                     "shared": not bool(_get(rule, "target"))}

@@ -4,6 +4,7 @@
  */
 import { FormEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { APM_EVENT_TRIGGERS, apmEventScope, apmScopeKind, isApmEvent } from './apmEventTriggers'
 import {
   Bell,
   Check,
@@ -180,6 +181,7 @@ const INTERFACE_METRICS = new Set<string>(NETWORK_METRICS.filter((m) => m.iface)
 // Server APM metrics are evaluated per service; browser RUM metrics are
 // evaluated per application ID. Rates are fractions in 0–1.
 const APM_METRICS = [
+  ...APM_EVENT_TRIGGERS,
   { value: 'apm_latency_p95', label: 'p95 latency (ms)' },
   { value: 'apm_latency_p99', label: 'p99 latency (ms)' },
   { value: 'apm_latency_p50', label: 'p50 latency (ms)' },
@@ -204,6 +206,7 @@ const TEMPLATE_VARS = [
   '{group}', '{location}', '{device_type}', '{timestamp}',
   '{metric_label}', '{threshold_value}', '{metric}', '{operator}', '{threshold}',
   '{rtt}', '{packet_loss}',
+  '{scenario_name}', '{failed_step}', '{error}', '{slo_name}',
 ]
 
 // The six template fields, in the order the editor shows them.
@@ -415,8 +418,8 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
     description: s.description || null,
     enabled: s.enabled,
     metric: isService ? 'service_status' : isTrap ? 'trap' : isSyslog ? 'syslog' : first.metric,
-    operator: isDevice || isApm || isSyslog ? first.operator : '==',
-    threshold: isDevice || isApm || isSyslog ? first.threshold : 0,
+    operator: isApm && isApmEvent(first.metric) ? '==' : isDevice || isApm || isSyslog ? first.operator : '==',
+    threshold: isApm && isApmEvent(first.metric) ? 1 : isDevice || isApm || isSyslog ? first.threshold : 0,
     conditions,
     condition_logic: s.condition_logic,
     trigger_on: isService ? s.trigger_on : isDevice && first.metric === 'ping_status' ? s.trigger_on : 'any',
@@ -429,7 +432,7 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
       : isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric))
       ? s.target.trim() || null
       : null,
-    min_duration: isSyslog || isTrap ? 0 : s.min_duration,
+    min_duration: isSyslog || isTrap || (isApm && isApmEvent(first.metric)) ? 0 : s.min_duration,
     clear_duration: usesMetricLifecycle(s) ? s.clear_duration : null,
     notify_while_flapping: flapHoldApplies(s) ? s.notify_while_flapping : false,
     severity: s.severity,
@@ -509,6 +512,8 @@ export function AlertRuleWizardDialog({
   const [preview, setPreview] = useState<any>(null)
   const [livePreview, setLivePreview] = useState<any>(null)
   const isRumMetric = s.source === 'apm' && s.conditions[0]?.metric.startsWith('apm_rum_')
+  const apmEvent = s.source === 'apm' && isApmEvent(s.conditions[0]?.metric)
+  const apmEventInfo = apmEventScope(s.conditions[0]?.metric)
   // A device rule evaluated on confirmed status changes (ping status, RTT, packet loss); unless it triggers on Up, its
   // alerts are held while the device flaps.
   const statusRule = isStatusRule(s)
@@ -616,6 +621,12 @@ export function AlertRuleWizardDialog({
     enabled: open && s.source === 'apm',
   })
   const apmServices: string[] = (apmServicesResp?.services || []).map((x: any) => x.name)
+  const { data: apmEntitiesResp } = useQuery<any>({
+    queryKey: ['apm', 'alert-event-scope', s.conditions[0]?.metric],
+    queryFn: async () => (await api.get(s.conditions[0]?.metric === 'apm_synthetic_down' ? '/apm/synthetics' : '/apm/slos')).data,
+    enabled: open && apmEvent,
+  })
+  const apmEntities: { id: string; name: string }[] = apmEntitiesResp?.monitors ?? apmEntitiesResp?.items ?? []
   const { data: rumScopeRows } = useQuery<any>({
     queryKey: ['apm', 'rum', 'views', 'alert-scope'],
     queryFn: async () => (await api.get('/apm/rum/views?range=24h&page=1&page_size=100&sort=last_seen&order=desc')).data,
@@ -781,6 +792,8 @@ export function AlertRuleWizardDialog({
         ? s.trap_oid ? `Trap OID prefix ${s.trap_oid}` : 'Any SNMP trap'
         : s.source === 'service'
         ? `Service status → ${s.trigger_on}`
+        : s.source === 'apm' && isApmEvent(first.metric)
+        ? APM_EVENT_TRIGGERS.find(x => x.value === first.metric)!.label
         : s.conditions.length > 1
         ? s.conditions.map((c) => `${c.metric} ${c.operator} ${c.threshold}`).join(` ${s.condition_logic} `)
         : `${first.metric} ${first.operator} ${first.threshold}`
@@ -1226,14 +1239,17 @@ export function AlertRuleWizardDialog({
 
                 {s.source === 'apm' && (
                   <div className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
-                    <div className="grid flex-1 grid-cols-3 gap-2">
-                      <FormField label="Metric">
+                    <div className={cn('grid flex-1 gap-2', apmEvent ? 'grid-cols-1' : 'grid-cols-3')}>
+                      <FormField label="Trigger / metric">
                         <Select value={s.conditions[0]?.metric} onValueChange={(v) => {
-                          const switchesDataPlane = v.startsWith('apm_rum_') !== isRumMetric
+                          const switchesDataPlane = apmScopeKind(v) !== apmScopeKind(s.conditions[0]?.metric)
                           setS({
                             ...s,
                             target: switchesDataPlane ? '' : s.target,
-                            conditions: s.conditions.map((condition, index) => index === 0 ? { ...condition, metric: v } : condition),
+                            min_duration: isApmEvent(v) ? 0 : s.min_duration,
+                            clear_duration: isApmEvent(v) ? null : s.clear_duration,
+                            conditions: [{ ...s.conditions[0], metric: v,
+                              ...(isApmEvent(v) ? { operator: '==', threshold: 1, reset_threshold: null } : {}) }],
                           })
                         }}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1244,7 +1260,7 @@ export function AlertRuleWizardDialog({
                           </SelectContent>
                         </Select>
                       </FormField>
-                      <FormField label="Operator">
+                      {!apmEvent && <><FormField label="Operator">
                         <Select value={s.conditions[0]?.operator} onValueChange={(v) => updateCond(0, { operator: v })}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
@@ -1256,8 +1272,9 @@ export function AlertRuleWizardDialog({
                       </FormField>
                       <FormField label="Threshold">
                         <Input type="number" step="any" value={s.conditions[0]?.threshold} onChange={(e) => updateCond(0, { threshold: Number(e.target.value) })} />
-                      </FormField>
+                      </FormField></>}
                     </div>
+                    {apmEvent && <p className="max-w-sm text-xs text-muted">{apmEventInfo.hint}</p>}
                   </div>
                 )}
 
@@ -1265,7 +1282,7 @@ export function AlertRuleWizardDialog({
                   <NetflowConditionFields form={s.nf} errors={nfErrors} onChange={(nf) => setS((st) => ({ ...st, nf }))} />
                 )}
 
-                {s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && !(isServer && serverKind !== 'pct' && serverKind !== 'flag') && (
+                {!apmEvent && s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && !(isServer && serverKind !== 'pct' && serverKind !== 'flag') && (
                   serverKind === 'flag' ? (
                     <FormField label="Agent silent for" hint={`How long the agent may miss its heartbeats (every 30 seconds) before the alert is raised. 0 = the default ${DEFAULT_SILENCE_SECONDS} seconds; never less than ${MIN_SILENCE_SECONDS}.`}>
                       <div className="flex items-center gap-3">
@@ -1357,8 +1374,8 @@ export function AlertRuleWizardDialog({
                   </div>
                 ) : s.source === 'apm' ? (
                   <FormField
-                    label={isRumMetric ? 'Browser application / environment' : 'Application service'}
-                    hint={isRumMetric
+                    label={apmEvent ? apmEventInfo.label : isRumMetric ? 'Browser application / environment' : 'Application service'}
+                    hint={apmEvent ? apmEventInfo.hint : isRumMetric
                       ? 'Empty = every application and environment reporting browser events. Each environment is evaluated independently once per minute.'
                       : 'Empty = every service reporting traces. Evaluated per service every minute against the RED rollups.'}
                   >
@@ -1366,10 +1383,10 @@ export function AlertRuleWizardDialog({
                       value={s.target || '__all__'}
                       onValueChange={(v) => setS({ ...s, target: v === '__all__' ? '' : v })}
                     >
-                      <SelectTrigger><SelectValue placeholder={isRumMetric ? 'All browser app environments' : 'All services'} /></SelectTrigger>
+                      <SelectTrigger><SelectValue placeholder={apmEvent ? apmEventInfo.all : isRumMetric ? 'All browser app environments' : 'All services'} /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="__all__">{isRumMetric ? 'All browser app environments' : 'All services'}</SelectItem>
-                        {(isRumMetric ? rumApplications : apmServices).map((name) => (
+                        <SelectItem value="__all__">{apmEvent ? apmEventInfo.all : isRumMetric ? 'All browser app environments' : 'All services'}</SelectItem>
+                        {apmEvent ? apmEntities.map(entity => <SelectItem key={entity.id} value={entity.id}>{entity.name}</SelectItem>) : (isRumMetric ? rumApplications : apmServices).map((name) => (
                           <SelectItem key={name} value={name}>{name}</SelectItem>
                         ))}
                       </SelectContent>

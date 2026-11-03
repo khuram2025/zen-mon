@@ -203,7 +203,8 @@ def _legacy_sweep_sql(policies: bool) -> str:
 
 def _subject_noun(row) -> tuple[str, str]:
     """(display name, ip) for the thing the alert is about."""
-    name = row.device_hostname or row.server_hostname or row.check_name or "monitored object"
+    name = (row.device_hostname or row.server_hostname or row.check_name
+            or (getattr(row, 'metadata', None) or {}).get('entity_name') or "monitored object")
     return name, (row.device_ip or "")
 
 

@@ -16,6 +16,7 @@
     "test:list-ordering": "node scripts/test-list-ordering.mjs",
     "test:baseline-details": "node scripts/test-baseline-details.mjs",
     "test:manual-updates": "node scripts/test-manual-updates.mjs",
+    "test:apm-event-rules": "node scripts/test-apm-event-rules.mjs",
     "test:regional-time": "node scripts/test-regional-time.mjs"
   },
   "dependencies": {
