@@ -225,11 +225,17 @@ class Supervisor:
         self.health_failure_since=None
         self.ever_ready=True
         self.dependency_failure_since=None
-        if self.endpoint and not self.endpoint_announced:
+        if self.endpoint:
             address,interface=self.endpoint
-            await command('ip','address','replace',address,'dev',interface)
-            controller_endpoint.announce(interface,address)
-            self.endpoint_announced=True
+            _,out=await command('ip','-json','address','show','dev',interface)
+            present=any(a.get('local')==address.split('/')[0]
+                        for item in json.loads(out) for a in item.get('addr_info',[]))
+            # Network reconfiguration can remove the VIP without restarting
+            # this supervisor. Reconcile the actual address, not just our flag.
+            if not self.endpoint_announced or not present:
+                await command('ip','address','replace',address,'dev',interface)
+                controller_endpoint.announce(interface,address)
+                self.endpoint_announced=True
 
     async def local_primary(self):
         def check():

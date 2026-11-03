@@ -36,3 +36,27 @@ def test_zero_log_index_requires_verified_absence_of_first_entry():
     with pytest.raises(AnalyticsUnavailable):validate([row],caught_up=True)
     row['verified_empty_log']=True
     validate([row],caught_up=True)
+
+
+def test_compact_still_rejects_stale_or_lost_parts():
+    row = replica()
+    row['active_replicas'] = 1
+    validate([row], caught_up=True, copies=1)
+    row['queue_size'] = 1
+    with pytest.raises(AnalyticsUnavailable):
+        validate([row], caught_up=True, copies=1)
+    row['queue_size'] = 0
+    row['lost_part_count'] = 1
+    with pytest.raises(AnalyticsUnavailable):
+        validate([row], caught_up=False, copies=1)
+
+
+def test_profile_defaults_to_two_copies_and_rejects_writable_policy(tmp_path, monkeypatch):
+    import analytics_health
+    path = tmp_path / 'profile.json'
+    monkeypatch.setattr(analytics_health, 'PROFILE', path)
+    assert analytics_health.required_copies() == 2
+    path.write_text('{"profile":"compact"}')
+    path.chmod(0o666)
+    with pytest.raises(AnalyticsUnavailable):
+        analytics_health.required_copies()

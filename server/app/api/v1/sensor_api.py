@@ -1120,6 +1120,7 @@ _LOCK_OWNED_DEVICES = text("""
            d.hostname, host(d.ip_address)::text AS ip_address,
            d.device_type, d.group_id::text AS group_id, d.location,
            NOW() AS db_now,
+           (SELECT fallback_changed_at FROM sensors WHERE id = :sid) AS owner_since,
            COALESCE((
                SELECT jsonb_agg(jsonb_build_array(m.starts_at, m.ends_at) ORDER BY m.starts_at, m.ends_at)
                  FROM device_maintenance m
@@ -1511,6 +1512,12 @@ async def _apply_owned_device_status(
     the outbox in the same transaction)."""
     if not samples_by_device:
         return []
+    # Lock first, then read ownership in a new READ COMMITTED snapshot. A
+    # fallback change may have committed while this batch waited for the lock.
+    await db.execute(text("""
+        SELECT id FROM devices WHERE id = ANY(:ids)
+        ORDER BY id FOR NO KEY UPDATE
+    """), {"ids": [UUID(device_id) for device_id in samples_by_device]})
     locked = (await db.execute(
         _LOCK_OWNED_DEVICES,
         {"ids": [UUID(device_id) for device_id in samples_by_device], "sid": sensor["id"]},
@@ -1521,6 +1528,8 @@ async def _apply_owned_device_status(
     candidates: list[tuple[Mapping[str, Any], list[dict[str, Any]]]] = []
     for info in locked:
         oldest = info["db_now"] - timedelta(seconds=max(int(info["ping_interval"]) * 2, 60))
+        if info.get("owner_since"):
+            oldest = max(oldest, info["owner_since"])
         fresh = sorted(
             (s for s in samples_by_device[info["device_id"]] if s["ts"] >= oldest),
             key=lambda s: s["ts"],

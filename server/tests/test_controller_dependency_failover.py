@@ -76,3 +76,23 @@ async def test_quarantine_blocks_authority_before_network_or_database_access(sup
     with pytest.raises(controller.authority.AuthorityUnavailable,match='quarantined'):
         await value.eligible()
     value.local_primary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_service_address_is_republished_after_network_reload(monkeypatch):
+    value=controller.Supervisor.__new__(controller.Supervisor)
+    value.endpoint=('192.0.2.10/24','lab0');value.endpoint_announced=True
+    value.health_failure_since=None;value.ever_ready=True
+    monkeypatch.setattr(controller.asyncio,'to_thread',AsyncMock(return_value=True))
+    calls=[]
+    async def command(*args,**kwargs):
+        calls.append(args)
+        if args[0]=='systemctl':return 0,'active\nactive\n'
+        if args[:3]==('ip','-json','address'):return 0,'[{"addr_info":[{"local":"192.0.2.11"}]}]'
+        return 0,''
+    monkeypatch.setattr(controller,'command',command)
+    announcements=[]
+    monkeypatch.setattr(controller.controller_endpoint,'announce',lambda *args:announcements.append(args))
+    await value.publish_endpoint()
+    assert ('ip','address','replace','192.0.2.10/24','dev','lab0') in calls
+    assert announcements==[('lab0','192.0.2.10/24')]

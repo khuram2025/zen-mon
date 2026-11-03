@@ -18,10 +18,33 @@ its own conversion, durable-ingestion and release qualification gates.
 |---|---|---|---|
 | Strict | 3 | 3 | New commits wait for a synchronous replica |
 | Economy | 2 plus a vote-only witness | 3 | Patroni can remove the synchronous requirement; new writes can have only one copy |
+| Compact | 2 plus a vote-only witness | 3 | Same PostgreSQL policy as economy; analytics also permit one remaining data replica |
 
-Both profiles use one active PostgreSQL primary. A witness holds consensus data,
+All profiles use one active PostgreSQL primary. A witness holds consensus data,
 not PostgreSQL WAL. Three VMs on one workstation demonstrate process and VM
 recovery; they do not create three independent physical failure domains.
+
+Compact is an explicit reduced-durability profile. ClickHouse writes require one
+replica even when both are healthy; a sudden loss may leave missing data that
+prevents admission of the survivor. Lost parts, an expired Keeper session and
+an incomplete replay queue still block promotion. Strict/economy keep their
+two-replica analytics requirement. Never infer compact from the replica count.
+The root-controlled `/etc/zenplus-ha/profile.json` selects the admission policy.
+
+A sensor can share the vote-only witness VM in a three-VM engineering lab.
+Stopping the sensor process then losing a controller leaves two voters.
+Losing the entire sensor/witness VM then a controller leaves one voter and must
+fail closed. The shared IP endpoint requires a common layer-2 subnet; routed
+sites need separate endpoint and routing qualification. This is one controller
+cell, not independently writable autonomous sites.
+
+Sensor device fallback is opt-in on the sensor detail page. After the sensor's
+existing offline threshold, the active controller polls devices assigned to
+that single remote sensor. Both controllers require target network access and
+credentials. Multi-vantage devices and services retain their current policies.
+Recovery waits for the configured healthy hold; buffered history is retained,
+but samples older than the ownership handover cannot overwrite current status.
+See the recorded three-VM lab manual for measured outage evidence and limits.
 
 `database_profile.py` validates three unique voters, profile membership and
 separate credentials. It emits JSON accepted as YAML by Patroni and etcd, into a

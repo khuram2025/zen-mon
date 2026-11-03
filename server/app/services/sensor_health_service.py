@@ -301,6 +301,15 @@ async def sweep_sensor_health(db: AsyncSession) -> dict[str, int]:
     )
 
     suppressed = 0
+    from app.services.sensor_controller_fallback import reconcile_controller_fallback
+    fallback_changes = await reconcile_controller_fallback(db)
+    # Disabling fallback while its sensor is already offline returns the
+    # device to an unverifiable owner, even without a new offline transition.
+    for change in fallback_changes:
+        if not change['next_active'] and change['status'] == 'offline':
+            suppressed += await _suppress_owned_device_alerts(
+                db, str(change['id']), change['name']
+            )
     for row in degraded:
         await resolve_sensor_alert(db, str(row.id), "sensor_offline", "sensor is degraded")
         await create_sensor_alert(

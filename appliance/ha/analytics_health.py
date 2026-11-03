@@ -11,6 +11,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 CLIENT = Path('/etc/zenplus-ha/analytics/client.xml')
+PROFILE = Path('/etc/zenplus-ha/profile.json')
 QUERY = """SELECT table,zookeeper_path,is_readonly,is_session_expired,active_replicas,
     queue_size,log_pointer,log_max_index,lost_part_count
     FROM system.replicas WHERE database='zenplus' FORMAT JSON"""
@@ -20,12 +21,26 @@ class AnalyticsUnavailable(RuntimeError):
     pass
 
 
-def validate(rows, *, caught_up):
+def required_copies():
+    if not PROFILE.exists():
+        return 2
+    st = PROFILE.stat()
+    if PROFILE.is_symlink() or not PROFILE.is_file() or st.st_uid != 0 or st.st_mode & 0o022:
+        raise AnalyticsUnavailable('Analytics protection profile is not root controlled')
+    profile = json.loads(PROFILE.read_bytes())
+    if profile.get('profile') not in ('strict', 'economy', 'compact'):
+        raise AnalyticsUnavailable('Unknown analytics protection profile')
+    return 1 if profile['profile'] == 'compact' else 2
+
+
+def validate(rows, *, caught_up, copies=2):
+    if copies not in (1, 2):
+        raise AnalyticsUnavailable('Invalid analytics replica requirement')
     if not rows:
         raise AnalyticsUnavailable('No replicated analytics tables')
     for row in rows:
         if (row['is_readonly'] or row['is_session_expired']
-                or int(row['active_replicas']) < 2 or int(row['lost_part_count']) != 0):
+                or int(row['active_replicas']) < copies or int(row['lost_part_count']) != 0):
             raise AnalyticsUnavailable('Analytics replica or quorum unavailable')
         empty = (int(row['log_pointer']) == 0 and int(row['log_max_index']) == 0
                  and row.get('verified_empty_log') is True)
@@ -71,7 +86,7 @@ def check(*, caught_up):
             if int(log[0]['n']):
                 raise AnalyticsUnavailable('Initial analytics log entry not consumed')
             for row in empty_candidates:row['verified_empty_log']=True
-    validate(rows,caught_up=caught_up)
+    validate(rows,caught_up=caught_up,copies=required_copies())
     if caught_up:
         tables=query("SELECT count() AS n FROM system.tables WHERE database='zenplus' AND endsWith(engine,'MergeTree') FORMAT JSON")
         if int(tables[0]['n']) != len(rows):
