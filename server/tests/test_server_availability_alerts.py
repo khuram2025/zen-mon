@@ -239,9 +239,9 @@ async def test_field_replay_agent_only_server_down_pages_device_down_once(world)
     assert "OCI-Payment-DB3" in inc.message and "ping not monitored" in inc.message
     [page] = w.sent
     assert page["rule_id"] == down and not page["is_recovery"]
-    # Phrased as the server's availability, not as an ICMP failure nobody measured.
-    assert dict(page["details"])["Condition"] == "Server down (agent silent, no ping response)"
-    assert "responding to ping" not in page["subject"] + page["body"]
+    # The agent stopped reporting and there is no ICMP measurement.
+    assert dict(page["details"])["Condition"] == "Server down (agent silent, reachability unknown)"
+    assert "Network reachability is unknown" in page["body"]
 
     # Still down: the same incident, nothing re-sent.
     await run(w, T0 + 1800)
