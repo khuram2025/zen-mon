@@ -499,13 +499,15 @@ def _policy_sweep_sql(*, ids_only: bool = False) -> str:
     route = eps.route_policy_sql("a", "r")
     where = f"""
     FROM alerts a
-    JOIN alert_rules r ON r.id = {effective_rule_sql('a')}
+    LEFT JOIN alert_rules r ON r.id = {effective_rule_sql('a')}
     LEFT JOIN devices d ON d.id = a.device_id
     LEFT JOIN servers s ON s.id = a.server_id
     LEFT JOIN service_checks sc ON sc.id = a.service_check_id
-    WHERE NOT {notice_sql('a')}
+    WHERE (r.id IS NOT NULL OR a.metadata->>'source' = 'controller_monitoring')
+      AND NOT {notice_sql('a')}
       AND (
-            (a.status IN ('active', 'acknowledged') AND r.enabled = true
+            (a.status IN ('active', 'acknowledged')
+             AND (r.enabled = true OR a.metadata->>'source' = 'controller_monitoring')
              AND NOT {suppressed_sql('a')} AND {route} IS NOT NULL)
          OR (a.status = 'resolved'
              AND a.metadata->'escalation'->>'mode' = 'policy'
@@ -523,11 +525,12 @@ def _policy_sweep_sql(*, ids_only: bool = False) -> str:
            a.status, a.severity AS alert_severity, a.priority AS alert_priority, a.message,
            a.triggered_at, a.resolved_at, a.acknowledged_at, a.acknowledged_by, a.assigned_to,
            a.metadata, {suppressed_sql('a')} AS suppressed,
-           r.id AS eff_rule_id, r.name AS rule_name, r.metric, r.operator, r.threshold,
+           r.id AS eff_rule_id, COALESCE(r.name, 'ZenPlus monitoring') AS rule_name, r.metric, r.operator, r.threshold,
            r.conditions, r.condition_logic, r.severity AS rule_severity, r.priority AS rule_priority,
            r.notify_channels, r.recovery_alert, r.escalation_policy_id,
            d.hostname AS device_hostname, host(d.ip_address) AS device_ip,
-           s.hostname AS server_hostname, sc.name AS check_name,
+           COALESCE(s.hostname, CASE WHEN a.metadata->>'source' = 'controller_monitoring'
+                    THEN 'ZenPlus controller' END) AS server_hostname, sc.name AS check_name,
            {route} AS route_policy_id
     {where}
       AND a.id = ANY(CAST(:ids AS uuid[]))
@@ -985,7 +988,7 @@ async def explain_route(db: AsyncSession, alert_id, *, now: datetime | None = No
             if rp:
                 rule_policy = {"id": str(rp.id), "name": rp.name, "enabled": rp.enabled}
     legacy = row.escalation_levels if row.eff_rule_id else None
-    if row.eff_rule_id is None:
+    if row.eff_rule_id is None and meta.get('source') != 'controller_monitoring':
         route = eps.Route("none", notes=["This incident has no alert rule, so it does not escalate."])
     else:
         route = eps.resolve_route(priority=priority, rule_policy=rule_policy, defaults=defaults,

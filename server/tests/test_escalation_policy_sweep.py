@@ -149,6 +149,35 @@ def chan(i):
 
 
 @pytest.mark.asyncio
+async def test_controller_recovery_routes_once_through_default_p1_and_sends_all_clear(world):
+    from app.services import controller_recovery as cr
+    w = world
+    w.policy("Controller P1", [(0, [sched(w.sch.primary), chan(w.ch.noc)])])
+    now = w.now.timestamp()
+    overdue = cr.Recovery(now - 2000, None, now - 1, now, "boot")
+    for _ in range(2):
+        async with session(w.db) as db:
+            await cr.sync_incident(db, overdue, now)
+    # The controller has no base channel; actual delivery belongs to the policy.
+    w.pages.clear()
+    await asyncio.gather(sweep(w), sweep(w))
+    assert len(w.pages) == 1
+    assert w.pages[0].channels == [w.ch.noc]
+    assert w.pages[0].people == ["aisha@example.test"]
+    assert w.pages[0].ctx["priority"] == "P1"
+    assert w.pages[0].ctx["hostname"] == "ZenPlus controller"
+    assert w.db.scalar("SELECT count(*) FROM alerts WHERE metadata->>'source'='controller_monitoring'") == 1
+    recovered = cr.Recovery(now - 2000, now - 1000, now - 1, now, "boot", settled=True)
+    async with session(w.db) as db:
+        await cr.sync_incident(db, recovered, now)
+    w.pages.clear()
+    await sweep(w)
+    assert len(w.pages) == 1 and w.pages[0].ctx["is_recovery"]
+    assert w.pages[0].channels == [w.ch.noc]
+    assert w.pages[0].people == ["aisha@example.test"]
+
+
+@pytest.mark.asyncio
 async def test_two_concurrent_sweeps_page_a_step_once(world):
     w = world
     pol = w.policy("P1 matrix", [(0, [sched(w.sch.primary), chan(w.ch.noc)]), (5, [sched(w.sch.backup)])])

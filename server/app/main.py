@@ -212,6 +212,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_background_tasks():
+        from app.services import controller_recovery
+        # Persist the interruption before any absence-based evaluator starts.
+        await controller_recovery.startup(ready=False)
         # Built-in roles: reconcile persisted definitions with the code (versioned).
         try:
             from app.core.database import AsyncSessionLocal as _RoleSession
@@ -315,6 +318,9 @@ def create_app() -> FastAPI:
         # views on it) fresh before it expires, so no request waits for the scan.
         from app.services.inventory_software_query import catalog_warmer_loop
         app.state.inventory_catalog_warmer = asyncio.create_task(catalog_warmer_loop())
+        # Startup work is complete and heartbeat handlers can accept requests.
+        await controller_recovery.startup(ready=True)
+        app.state.controller_recovery = asyncio.create_task(controller_recovery.recovery_loop())
 
     async def _sync_agent_packages_once():
         _pkg_logger = logging.getLogger("zenplus.agent_packages")
@@ -330,11 +336,20 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
+        for attr in ("controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
         await apm_ingest_api.stop_batch_writer()
+        try:
+            from datetime import datetime, timezone
+            from app.core.database import AsyncSessionLocal
+            from app.services import controller_recovery as cr
+            async with AsyncSessionLocal() as db:
+                await cr.transition(db, token=cr.invocation_id(),
+                                    now=datetime.now(timezone.utc).timestamp(), planned=True)
+        except Exception:
+            logging.getLogger(__name__).exception("Could not record graceful monitoring interruption")
 
     return app
 

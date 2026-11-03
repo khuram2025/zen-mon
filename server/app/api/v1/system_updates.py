@@ -926,10 +926,32 @@ async def system_health():
 
     checks["snmp_encryption"] = "ok" if snmp_crypto_is_configured() else "error"
 
+    # External monitors can report one controller incident when observation
+    # ingestion is unavailable, including a stuck worker after the hard deadline.
+    recovery_status = None
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.services import controller_recovery as cr
+        from datetime import datetime, timezone
+        async with AsyncSessionLocal() as db:
+            recovery = await cr.load(db)
+        if recovery:
+            now = datetime.now(timezone.utc).timestamp()
+            ready = recovery.ready_at is not None and now - recovery.last_tick <= cr.LEASE_GAP_S
+            checks["monitoring_ingestion"] = "ok" if ready and not recovery.overdue(now) else "error"
+            recovery_status = {
+                "state": "monitoring_interrupted" if not ready or recovery.overdue(now) else
+                         ("reconnecting" if now < recovery.ready_at + cr.RECONNECT_S else "ready"),
+                "started_at": datetime.fromtimestamp(recovery.started_at, timezone.utc).isoformat(),
+                "protection_deadline": datetime.fromtimestamp(recovery.deadline, timezone.utc).isoformat(),
+            }
+    except Exception:
+        checks["monitoring_ingestion"] = "error"
+
     overall = "ok" if all(v in ("ok", "active") for v in checks.values()) else "degraded"
     version, _ = _get_version_info()
 
-    return {"status": overall, "version": version, "checks": checks}
+    return {"status": overall, "version": version, "checks": checks, "monitoring_recovery": recovery_status}
 
 
 # Storage status and disk/volume management moved to storage_management.py

@@ -98,9 +98,12 @@ def preview_client():
 
     app.dependency_overrides[get_db] = fake_db
     app.dependency_overrides[get_current_user] = fake_user
-    with TestClient(app) as client:
+    client = TestClient(app)  # route fixture only; no real appliance startup
+    try:
         yield client, db
-    app.dependency_overrides.clear()
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
 
 
 def test_preview_returns_rendered_email(preview_client):

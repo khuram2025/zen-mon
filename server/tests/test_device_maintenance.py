@@ -138,9 +138,12 @@ def maint_client():
 
     app.dependency_overrides[get_db] = fake_db
     # The engine only answers the local poller (loopback, not proxied).
-    with TestClient(app, client=("127.0.0.1", 50000)) as test_client:
+    test_client = TestClient(app, client=("127.0.0.1", 50000))
+    try:
         yield test_client, db
-    app.dependency_overrides.pop(get_db, None)
+    finally:
+        test_client.close()
+        app.dependency_overrides.pop(get_db, None)
 
 
 def test_status_alert_suppressed_during_maintenance(maint_client):
@@ -188,5 +191,8 @@ def test_engine_refuses_proxied_or_remote_callers(maint_client):
     relayed = client.post("/api/v1/alert-engine/evaluate", json=body,
                           headers={"X-Real-IP": "203.0.113.9"})
     assert relayed.status_code == 404
-    with TestClient(app, client=("203.0.113.9", 4000)) as remote:
+    remote = TestClient(app, client=("203.0.113.9", 4000))
+    try:
         assert remote.post("/api/v1/alert-engine/evaluate", json=body).status_code == 404
+    finally:
+        remote.close()

@@ -77,13 +77,15 @@ def down_after_seconds(rule: Any) -> int:
     return max(configured or DOWN_AFTER_S, MIN_DOWN_AFTER_S)
 
 
-def judge(signals: ServerSignals, now: float, after_s: int) -> str:
+def judge(signals: ServerSignals, now: float, after_s: int, recovery=None) -> str:
     """The server's state for a rule with this silence allowance (see the
     module table)."""
     if signals.heartbeat_at is None:
         return "unknown"
     if now - signals.heartbeat_at.timestamp() < after_s:
         return "up"
+    if recovery and recovery.hold_missing(signals.heartbeat_at, now, after_s):
+        return "monitoring_interrupted"
     if signals.ping == "maintenance":
         return "maintenance"
     if signals.ping == "down":
@@ -229,8 +231,9 @@ def _tags(raw) -> set[str]:
     return {str(t).strip().lower() for t in raw or [] if str(t).strip()}
 
 
-async def load_signals(db: AsyncSession) -> dict[str, ServerSignals]:
-    rows = (await db.execute(text(_SIGNALS_SQL))).all()
+async def load_signals(db: AsyncSession, server_id: str | None = None) -> dict[str, ServerSignals]:
+    query = _SIGNALS_SQL + (" AND s.id = CAST(:server_id AS uuid)" if server_id else "")
+    rows = (await db.execute(text(query), {"server_id": server_id} if server_id else {})).all()
     return {r[0]: ServerSignals(server_id=r[0], hostname=r[1] or "server", tags=_tags(r[2]),
                                 heartbeat_at=r[3], ping=r[4], ping_device_id=r[5])
             for r in rows}
@@ -279,7 +282,7 @@ def covered(rules: Iterable, signals: ServerSignals, state: str) -> bool:
     staleness sweep raises its built-in, unrouted *agent offline* alert only
     when none does, so a covered server never gets two alerts for one outage.
     A server in maintenance is never paged for."""
-    if state == "maintenance":
+    if state in ("maintenance", "monitoring_interrupted"):
         return True
     if state == "agent_offline":
         def wanted(r):

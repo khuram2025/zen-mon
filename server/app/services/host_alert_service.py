@@ -605,6 +605,16 @@ async def _current_value(db: AsyncSession, rule, server_id: str, ch_fleets: dict
     or None to skip. Threshold metrics are judged on history instead."""
     metric = rule.metric
 
+    if metric in {"host_service_down", "host_process_down"}:
+        from app.services import controller_recovery as cr
+        recovery = await cr.load(db)
+        if recovery:
+            table = "server_service_inventory" if metric == "host_service_down" else "server_process_inventory"
+            observed = (await db.execute(text(f"SELECT max(updated_at) FROM {table} WHERE server_id=:sid"),
+                                         {"sid": server_id})).scalar()
+            if recovery.hold_missing(observed, datetime.now(timezone.utc).timestamp(), 180):
+                return None
+
     if metric == "host_service_down":
         if not rule.target:
             return None
@@ -803,7 +813,8 @@ async def _lock(db: AsyncSession, rule, sid: str, dimension: str | None) -> None
 
 async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimension: str | None,
                        breach: bool, value: float | None, detail: str, *, allowed: bool,
-                       counts: dict, opened: _Open | None, extra: dict | None = None) -> None:
+                       counts: dict, opened: _Open | None, extra: dict | None = None,
+                       availability_now: float | None = None) -> None:
     """Raise, continue or resolve one rule/server/dimension incident.
 
     ``opened`` is the open incident the pass read (None = none). A new one is
@@ -838,6 +849,8 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
             counts["raised"] += 1
             # Quiet hours: the alert is recorded above; only the outbound
             # notification waits for the rule's schedule window.
+            if allowed and sa.is_availability_rule(rule):
+                allowed = await _availability_still_breaching(db, rule, sid, availability_now)
             if allowed:
                 await _notify_rule(db, rule, hostname, value=value, detail=detail,
                                    alert_id=new_id,
@@ -863,6 +876,10 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
             # snoozing no longer closes the row. The claim (false -> sending)
             # is committed first, so no other pass sends it as well.
             await db.commit()
+            if sa.is_availability_rule(rule) and not await _availability_still_breaching(db, rule, sid, availability_now):
+                await ns.stamp(db, opened.id, False)
+                await db.commit()
+                return
             await _notify_rule(db, rule, hostname, value=value, detail=detail,
                                alert_id=opened.id, first_seen=opened.triggered_at)
             await ns.stamp(db, opened.id, True)
@@ -931,6 +948,16 @@ async def _load_rules(db: AsyncSession) -> list:
     return [r for r in rows if r.metric.startswith("host_") or sa.is_down_rule(r)]
 
 
+async def _availability_still_breaching(db, rule, sid, now=None):
+    from app.services import controller_recovery as cr
+    latest = (await sa.load_signals(db, sid)).get(sid)
+    if latest is None:
+        return False
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    state = sa.judge(latest, now, sa.down_after_seconds(rule), await cr.load(db))
+    return sa.breach_for(rule, state) is True
+
+
 async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: dict, *,
                                  now: float, since: float, allowed: bool, counts: dict) -> None:
     """Raise or resolve one availability rule against every server it covers."""
@@ -938,9 +965,18 @@ async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: 
     for sid, sig in signals.items():
         if not sa.rule_covers(rule, sig):
             continue
-        state = sa.judge(sig, now, after_s)
+        # A slow send for another target must not make this snapshot authoritative.
+        from app.services import controller_recovery as cr
+        sig = (await sa.load_signals(db, sid)).get(sid)
+        if sig is None:
+            continue
+        state = sa.judge(sig, now, after_s, await cr.load(db))
         breach = sa.breach_for(rule, state)
         if breach is None:
+            incident = opened.get((sid, _dedupe(rule, None)))
+            if incident and state == "monitoring_interrupted":
+                await _stamp_state(db, incident.id, {"data_state": "unknown",
+                                   "monitoring_state": state})
             continue
         extra = {"availability": state, "down_after_s": after_s}
         held = breach and sa.predates_paging(sig, since)
@@ -951,7 +987,8 @@ async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: 
         await _apply_state(db, rule, sid, sig.hostname, None, breach, None,
                            sa.describe(rule, state, sig, after_s),
                            allowed=allowed and not held, counts=counts,
-                           opened=opened.get((sid, _dedupe(rule, None))), extra=extra)
+                           opened=opened.get((sid, _dedupe(rule, None))), extra=extra,
+                           availability_now=now)
         if breach:
             # This incident replaces the sweep's built-in, unrouted alert.
             await resolve_server_alerts(db, sid, "agent_offline")

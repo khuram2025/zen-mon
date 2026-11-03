@@ -1,6 +1,6 @@
 /** Types for the Servers monitoring module (/servers, /agent-fleet, /agent-policies, /server-baselines). */
 
-export type ServerStatus = 'healthy' | 'warning' | 'critical' | 'unknown' | 'stale' | 'disabled'
+export type ServerStatus = 'healthy' | 'warning' | 'critical' | 'unknown' | 'stale' | 'disabled' | 'monitoring_interrupted'
 export type AgentStatus = 'enrolling' | 'online' | 'stale' | 'offline' | 'disabled' | 'updating' | 'error'
 export type OsType = 'windows' | 'linux' | 'macos' | 'bsd' | 'other' | 'unknown'
 export type CollectionMode = 'agent' | 'agentless_wmi' | 'agentless_winrm' | 'snmp' | 'ssh' | 'none'

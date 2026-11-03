@@ -7,6 +7,7 @@ import type { AgentStatus, OsType, ServerStatus } from '@/types/servers'
 import { TagBadge } from '@/components/tags/TagBadge'
 
 export const SERVER_STATUS_META: Record<ServerStatus, { label: string; variant: 'success' | 'warning' | 'danger' | 'info' | 'default' | 'outline'; dot: string }> = {
+  monitoring_interrupted: { label: 'Monitoring interrupted', variant: 'info', dot: 'bg-info' },
   healthy: { label: 'Healthy', variant: 'success', dot: 'bg-success' },
   warning: { label: 'Warning', variant: 'warning', dot: 'bg-warning' },
   critical: { label: 'Critical', variant: 'danger', dot: 'bg-danger' },
