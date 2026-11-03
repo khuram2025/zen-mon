@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.v1 import settings, alert_engine
-from app.services import ncm_delivery, sms_transport
+from app.services import host_alert_service, ncm_delivery, sms_transport
 from app.services.alert_delivery_log import DeliveryRejected
 
 
@@ -69,6 +69,21 @@ async def test_all_sms_paths_encode_form_and_set_content_type(path, http_fixture
     assert set(body) == {'AppSid', 'Recipient', 'Body', 'Sender'}
     if path in ('alert', 'ncm'):
         assert body['Body'] == [message]
+
+
+@pytest.mark.asyncio
+async def test_alert_dispatch_sends_the_event_timestamp_in_the_sms(http_fixture, monkeypatch):
+    requests, _ = http_fixture
+    channel, db = channel_db(gateway())
+    monkeypatch.setattr('app.services.notification_grouping.gate_for', AsyncMock(return_value=None))
+    monkeypatch.setattr('app.services.alert_delivery_log.record', AsyncMock())
+    ctx = {"message": "edge-01 is down (no response to ICMP probes).",
+           "triggered_at": "2026-11-03T13:42:00+00:00"}
+    assert await host_alert_service.dispatch_to_channels(db, [str(channel.id)], ctx) == 1
+    assert len(requests) == 1
+    assert parse_qs(requests[0].content.decode())["Body"] == [
+        "edge-01 is down (no response to ICMP probes).\n03 Nov 2026 13:42 UTC"
+    ]
 
 
 @pytest.mark.asyncio
