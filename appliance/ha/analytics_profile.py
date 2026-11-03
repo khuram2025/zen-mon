@@ -117,18 +117,21 @@ def render(inventory, node_name, credentials):
         element(peer, 'secure', 1)
     element(zk, 'identity', 'zenplus:'+credentials['keeper'])
     element(zk, 'session_timeout_ms', 30000)
+    # Compact commissioning explicitly accepts one-copy analytics while a
+    # controller is unavailable. Existing profiles retain their two-copy rule.
+    required_copies = 1 if inventory['profile'] == 'compact' else 2
     profiles = element(server, 'profiles')
     for name in ('default', 'ha_application', 'ha_administration'):
         profile = element(profiles, name)
         for key, value in {'max_threads': 2, 'max_memory_usage': 256*1024*1024,
-                           'insert_quorum': 2, 'insert_quorum_timeout': 10000,
+                           'insert_quorum': required_copies, 'insert_quorum_timeout': 10000,
                            'insert_quorum_parallel': 1, 'async_insert': 0,
                            'wait_for_async_insert': 1,
                            'deduplicate_blocks_in_dependent_materialized_views': 1}.items():
             element(profile, key, value)
         if name == 'ha_application':
             constraints = element(profile, 'constraints')
-            for key, value in {'insert_quorum': 2, 'async_insert': 0}.items():
+            for key, value in {'insert_quorum': required_copies, 'async_insert': 0}.items():
                 entry = element(constraints, key)
                 element(entry, 'min', value); element(entry, 'max', value)
     users = element(server, 'users')

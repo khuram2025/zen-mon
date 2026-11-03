@@ -14,7 +14,7 @@ import re
 
 
 NAME = re.compile(r"[a-z][a-z0-9-]{0,47}\Z")
-PROFILES = {"strict": 3, "economy": 2}
+PROFILES = {"strict": 3, "economy": 2, "compact": 2}
 
 
 def validate(inventory):
@@ -23,7 +23,7 @@ def validate(inventory):
     if not NAME.fullmatch(inventory["cluster"]):
         raise ValueError("Invalid cluster identity")
     if inventory["profile"] not in PROFILES:
-        raise ValueError("Profile must be strict or economy")
+        raise ValueError("Profile must be strict, economy or compact")
     nodes = inventory["nodes"]
     if len(nodes) != 3:
         raise ValueError("A cell requires exactly three independent DCS voters")

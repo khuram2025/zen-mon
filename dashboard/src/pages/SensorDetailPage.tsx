@@ -48,6 +48,24 @@ function TargetTable({ title, items, kind, search }: { title: string; items: Tar
   </CardContent></Card>
 }
 
+function DeviceFallbackPolicy({ sensor, canManage, refresh }: { sensor: Sensor; canManage: boolean; refresh: () => void }) {
+  const [enabled, setEnabled] = useState(sensor.controller_fallback_enabled ?? false)
+  const [seconds, setSeconds] = useState(String(sensor.fallback_recovery_seconds ?? 120))
+  const recovery = Number(seconds)
+  const save = useMutation({
+    mutationFn: () => api.put(`/sensors/${sensor.id}`, { controller_fallback_enabled: enabled, fallback_recovery_seconds: recovery }),
+    onSuccess: () => { toast.success('Device fallback policy saved'); refresh() },
+    onError: e => toast.error('Could not save fallback policy', apiErrorMessage(e)),
+  })
+  return <Card><CardHeader><CardTitle>Device polling fallback</CardTitle></CardHeader><CardContent className="space-y-4">
+    <p className="text-sm">{sensor.controller_fallback_active ? 'Controller fallback is active.' : 'Normal sensor assignment is active.'} When enabled, the active controller takes over devices assigned only to this sensor after its offline threshold. Controller HA selects the secondary if the primary becomes unavailable.</p>
+    <p className="text-xs text-muted">Both controllers need network access and credentials for these devices. Multiple sensor assignments and service checks keep their existing monitoring policy. A lost site network cannot be recovered by polling from another site.</p>
+    <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={enabled} disabled={!canManage || save.isPending} onChange={e => setEnabled(e.target.checked)} />Enable controller fallback for this sensor</label>
+    <div className="max-w-sm"><label htmlFor="fallback-recovery" className="text-xs text-muted">Healthy connection before returning polling to the sensor (seconds)</label><Input id="fallback-recovery" type="number" min={30} max={3600} step={1} value={seconds} disabled={!canManage || save.isPending} onChange={e => setSeconds(e.target.value)} /></div>
+    {canManage && <Button size="sm" disabled={save.isPending || !Number.isInteger(recovery) || recovery < 30 || recovery > 3600} onClick={() => save.mutate()}>Save fallback policy</Button>}
+  </CardContent></Card>
+}
+
 export function SensorDetailPage() {
   const { id } = useParams<{ id: string }>()
   const qc = useQueryClient(), can = useCan(), canManage = can('settings.manage')
@@ -80,6 +98,7 @@ export function SensorDetailPage() {
       <Card><CardHeader><CardTitle>Updates & configuration</CardTitle></CardHeader><CardContent className="space-y-4"><dl className="grid grid-cols-2 gap-4"><Detail label="Installed version">{sensor.version}</Detail><Detail label="Published signed version">{release.version || 'No signed release published'}</Detail></dl><p className="text-sm">{activeCommand('update') ? 'Update in progress — waiting for the sensor outcome.' : available ? 'A signed sensor update is available.' : signed && sensor.version ? 'No newer signed release is available.' : 'No signed update is available.'}</p><div className="flex flex-wrap gap-2">{canManage && <><Button size="sm" disabled={!allowed || !available || !!activeCommand('update') || command.isPending} onClick={()=>command.mutate('update')}><Download className="h-4 w-4" />Install update</Button><Button size="sm" variant="outline" disabled={!allowed || !!activeCommand('reload_config') || command.isPending} onClick={()=>command.mutate('reload_config')}>Reload monitoring configuration</Button></>}</div><p className="text-xs text-muted">Commands are delivered on the next heartbeat. Offline sensors receive queued commands when they reconnect, before the command expires.</p><h3 className="text-xs font-semibold">Recent commands</h3>{commands.isError ? <p className="text-xs text-danger">Command history could not be loaded.</p> : !commands.data?.length ? <p className="text-xs text-muted">No commands yet.</p> : <ul className="max-h-48 divide-y divide-border overflow-y-auto">{commands.data.map(c=><li key={c.id} className="flex items-start justify-between gap-3 py-2 text-xs"><div className="min-w-0"><p className="font-medium capitalize">{c.verb.replace(/_/g,' ')}{c.payload.version ? ` · ${c.payload.version}` : ''}</p>{c.result && <p className="mt-1 break-words text-muted">{c.result}</p>}<p className="mt-1 text-muted">{relativeTime(c.completed_at || c.created_at)}</p></div><Status command state={['pending','delivered'].includes(c.status)&&Date.parse(c.expires_at)<Date.now() ? 'expired' : c.status} /></li>)}</ul>}</CardContent></Card>
     </div>
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Monitoring from this sensor</h2><p className="text-xs text-muted">Direct assignments, default-sensor assignments and inherited device groups. Open a target to manage its monitoring sites.</p></div><Input className="max-w-sm" aria-label="Search monitored targets" placeholder="Search devices, IPs or services…" value={search} onChange={e=>setSearch(e.target.value)} /></div>
+    <DeviceFallbackPolicy key={`${sensor.id}-${sensor.controller_fallback_enabled}-${sensor.fallback_recovery_seconds}`} sensor={sensor} canManage={canManage} refresh={refresh} />
     <TargetTable key={`devices-${id}-${search}`} title="Devices" items={devices} kind="devices" search={search} />
     <TargetTable key={`services-${id}-${search}`} title="Services" items={services} kind="services" search={search} />
     <p className="text-xs text-muted">Availability uses observed checks in the last 24 hours; missing results are not counted as success. SNMP freshness reflects the last received sample. Refreshes every 10 seconds · snapshot {new Date(overview.data.observed_at).toLocaleString()}.</p>

@@ -154,6 +154,65 @@ async def sweep(db: PgDatabase) -> dict:
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_controller_fallback_preserves_incident_and_rejects_old_sensor_replay(pg_db, recorders):
+    sensor = add_sensor(pg_db, 'fallback-edge')
+    device = add_device(pg_db, sensor, 'down')
+    pg_db.execute("UPDATE sensors SET controller_fallback_enabled = true, "
+                  "last_heartbeat_at = now() - interval '1 hour' WHERE id = $1", sensor)
+    incident = pg_db.scalar("INSERT INTO alerts (device_id, status, severity, message) "
+                            "VALUES ($1, 'active', 'critical', 'Device is down') RETURNING id", device)
+    result = await sweep(pg_db)
+    assert result['offline'] == 1 and result['alerts_suppressed'] == 0
+    assert pg_db.scalar("SELECT owner_kind FROM device_polling_owner WHERE device_id = $1", device) == 'central'
+    assert pg_db.scalar("SELECT status FROM alerts WHERE id = $1", incident) == 'active'
+    with pytest.raises(HTTPException) as rejected:
+        await ingest(pg_db, sensor, [ok(device, recent(1))])
+    assert rejected.value.status_code == 409
+    assert pg_db.scalar("SELECT status FROM devices WHERE id = $1", device) == 'down'
+
+    pg_db.execute("UPDATE sensors SET status = 'online', last_heartbeat_at = now(), "
+                  "fallback_healthy_since = now() WHERE id = $1", sensor)
+    await ingest(pg_db, sensor, [ok(device, recent(1))])
+    assert pg_db.scalar("SELECT status FROM devices WHERE id = $1", device) == 'down'
+    await sweep(pg_db)
+    assert pg_db.scalar("SELECT controller_fallback_active FROM sensors WHERE id = $1", sensor)
+    pg_db.execute("UPDATE sensors SET fallback_healthy_since = now() - interval '5 minutes' WHERE id = $1", sensor)
+    await sweep(pg_db)
+    assert owner_of(pg_db, device) == sensor
+    await ingest(pg_db, sensor, [ok(device, recent(30))])
+    assert pg_db.scalar("SELECT status FROM devices WHERE id = $1", device) == 'down'
+    await ingest(pg_db, sensor, [ok(device, datetime.now(UTC))])
+    assert pg_db.scalar("SELECT status FROM devices WHERE id = $1", device) == 'up'
+
+
+@pytest.mark.asyncio
+async def test_fallback_does_not_override_multiple_sensor_vantages(pg_db, recorders):
+    sensor = add_sensor(pg_db, 'fallback-first')
+    other = add_sensor(pg_db, 'fallback-second')
+    device = add_device(pg_db, sensor)
+    assign(pg_db, other, device)
+    pg_db.execute("UPDATE sensors SET controller_fallback_enabled = true, "
+                  "last_heartbeat_at = now() - interval '1 hour' WHERE id = $1", sensor)
+    await sweep(pg_db)
+    assert pg_db.scalar("SELECT count(*) FROM device_monitoring_vantages "
+                        "WHERE device_id = $1 AND poller_id = 'central'", device) == 0
+
+
+@pytest.mark.asyncio
+async def test_disabling_fallback_for_an_offline_sensor_restores_unknown_status(pg_db, recorders):
+    sensor = add_sensor(pg_db, 'fallback-disabled')
+    device = add_device(pg_db, sensor)
+    pg_db.execute("UPDATE sensors SET controller_fallback_enabled = true, "
+                  "last_heartbeat_at = now() - interval '1 hour' WHERE id = $1", sensor)
+    await sweep(pg_db)
+    assert pg_db.scalar("SELECT owner_kind FROM device_polling_owner WHERE device_id = $1", device) == 'central'
+    pg_db.execute("UPDATE sensors SET controller_fallback_enabled = false WHERE id = $1", sensor)
+    await sweep(pg_db)
+    assert owner_of(pg_db, device) == sensor
+    assert pg_db.scalar("SELECT status FROM devices WHERE id = $1", device) == 'unknown'
+
+
 def device_row(db: PgDatabase, device) -> dict:
     row = db.query("SELECT status, is_flapping, flapping_since, flap_kind, status_changed_at, last_seen, last_rtt_ms "
                    "FROM devices WHERE id = $1", device)[0]

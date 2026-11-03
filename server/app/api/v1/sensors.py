@@ -31,6 +31,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -586,6 +587,10 @@ _SENSOR_LIST_SQL = """
 
 def _row_to_sensor(r: dict) -> SensorResponse:
     return SensorResponse(
+        controller_fallback_enabled=bool(r.get("controller_fallback_enabled", False)),
+        controller_fallback_active=bool(r.get("controller_fallback_active", False)),
+        fallback_recovery_seconds=r.get("fallback_recovery_seconds", 120),
+        fallback_changed_at=r.get("fallback_changed_at"),
         authorization_pending=bool((r.get("bootstrap_config") or {}).get("authorization_pending")),
         id=str(r["id"]),
         name=r["name"],
@@ -1152,8 +1157,10 @@ async def update_sensor(
         site = (await db.execute(text("SELECT id FROM sites WHERE id=:id"), {"id": update_data["site_id"]})).first()
         if not site:
             raise HTTPException(400, "Unknown site")
-    for f in ("name", "description", "site_id", "location"):
+    for f in ("name", "description", "site_id", "location", "controller_fallback_enabled", "fallback_recovery_seconds"):
         if f in update_data:
+            if f in ("controller_fallback_enabled", "fallback_recovery_seconds") and update_data[f] is None:
+                raise HTTPException(422, f + " cannot be null")
             sets.append(f"{f} = :{f}")
             params[f] = update_data[f]
     if "tags" in update_data:

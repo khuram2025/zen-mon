@@ -48,6 +48,10 @@ export type Sensor = {
   heartbeat_interval_s: number
   degraded_after_s: number
   offline_after_s: number
+  controller_fallback_enabled?: boolean
+  controller_fallback_active?: boolean
+  fallback_recovery_seconds?: number
+  fallback_changed_at?: string | null
   min_supported_version: string | null
   hostname: string | null
   os_info: string | null

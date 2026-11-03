@@ -47,6 +47,9 @@ def test_transport_and_witness_boundaries():
     witness = profile.render(inv,'node-3',credentials())
     assert set(witness) == {'keeper.xml'}
     assert all(v not in witness['keeper.xml'] for v in credentials().values())
+    economy = ET.fromstring(profile.render(inv, 'node-1', credentials())['clickhouse.xml'])
+    assert economy.findtext('profiles/ha_application/insert_quorum') == '2'
+    assert economy.findtext('profiles/ha_application/constraints/insert_quorum/min') == '2'
 
 
 def test_secret_and_inventory_rejection():
@@ -55,6 +58,16 @@ def test_secret_and_inventory_rejection():
     with pytest.raises(ValueError): profile.render(inventory(),'absent',credentials())
     inv=inventory(); inv['nodes'][1]['address']='192.0.2.1'
     with pytest.raises(ValueError): profile.render(inv,'node-1',credentials())
+
+
+def test_compact_explicitly_allows_one_copy_and_keeps_a_data_free_witness():
+    inv = inventory()
+    inv['profile'] = 'compact'
+    inv['nodes'][2]['data'] = False
+    ch = ET.fromstring(profile.render(inv, 'node-1', credentials())['clickhouse.xml'])
+    assert ch.findtext('profiles/ha_application/insert_quorum') == '1'
+    assert ch.findtext('profiles/ha_application/constraints/insert_quorum/min') == '1'
+    assert set(profile.render(inv, 'node-3', credentials())) == {'keeper.xml'}
 
 
 def test_private_render_refuses_to_overwrite_an_existing_cell(tmp_path):

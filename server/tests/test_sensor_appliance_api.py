@@ -16,6 +16,22 @@ from app.api.v1 import sensor_api
 from app.api.v1.sensors import _bootstrap_cloud_init, _install_command, _sensor_env
 
 
+@pytest.mark.asyncio
+async def test_optional_seed_failure_still_returns_enrollment_token(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from uuid import uuid4
+    from app.api.v1 import sensors
+    monkeypatch.setattr(sensors, '_controller_ca_pem', lambda _: None)
+    def fail_seed(*_):
+        raise OSError('Seed writer unavailable')
+    monkeypatch.setattr(sensors, '_write_bootstrap_iso', fail_seed)
+    response = await sensors._token_response(uuid4(), 'test-enrollment-token',
+        datetime.now(timezone.utc)+timedelta(hours=1), 'https://controller.example', 'test-edge')
+    assert response.enrollment_token == 'test-enrollment-token'
+    assert response.bootstrap_iso_url is None
+    assert 'Seed writer unavailable' in response.bootstrap_warning
+
+
 def test_sensor_appliance_manifest_reports_artifact_slots(client, tmp_path, monkeypatch):
     monkeypatch.setattr(sensor_api, "SENSOR_ARTIFACT_DIR", tmp_path)
     response = client.get("/api/v1/sensor/appliance/manifest")

@@ -118,6 +118,8 @@ class SensorCreate(BaseModel):
 
 
 class SensorUpdate(BaseModel):
+    controller_fallback_enabled: Optional[bool] = None
+    fallback_recovery_seconds: Optional[int] = Field(default=None, ge=30, le=3600)
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     description: Optional[str] = None
     site_id: Optional[UUID] = None
@@ -136,6 +138,10 @@ class SensorUpdate(BaseModel):
 
 
 class SensorResponse(BaseModel):
+    controller_fallback_enabled: bool = False
+    controller_fallback_active: bool = False
+    fallback_recovery_seconds: int = 120
+    fallback_changed_at: Optional[datetime] = None
     authorization_pending: bool = False
     id: str
     name: str
