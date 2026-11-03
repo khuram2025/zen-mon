@@ -313,11 +313,19 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
     Raises a critical *agent offline* alert per server on the offline
     transition (resolved again by the next heartbeat in agents.py).
     """
+    from app.services import controller_recovery as cr
+    recovery = await cr.load(db)
+    recovery_params = recovery.sql_parameters() if recovery else {}
+    def observable(column, seconds):
+        return cr.silence_is_observable(column, str(seconds)) if recovery else "TRUE"
+
     stale = await db.execute(
         text(f"""UPDATE agents SET status = 'stale', updated_at = NOW()
                  WHERE status = 'online'
                    AND last_heartbeat_at < NOW() - INTERVAL '{AGENT_STALE_AFTER_S} seconds'
+                   AND {observable('last_heartbeat_at', AGENT_STALE_AFTER_S)}
                  RETURNING id"""),
+        recovery_params,
     )
     stale_n = len(stale.fetchall())
 
@@ -325,7 +333,9 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
         text(f"""UPDATE agents SET status = 'offline', updated_at = NOW()
                  WHERE status IN ('online', 'stale')
                    AND last_heartbeat_at < NOW() - INTERVAL '{AGENT_OFFLINE_AFTER_S} seconds'
+                   AND {observable('last_heartbeat_at', AGENT_OFFLINE_AFTER_S)}
                  RETURNING id, server_id, hostname, last_heartbeat_at"""),
+        recovery_params,
     )
     offline_rows = offline.fetchall()
 
@@ -337,8 +347,9 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
                  WHERE collection_mode = 'agent'
                    AND status NOT IN ('disabled', 'stale', 'unknown')
                    AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL '{SERVER_STALE_AFTER_S} seconds')
+                   AND {observable('last_seen', SERVER_STALE_AFTER_S)}
                  RETURNING id"""),
-        {"reason": json.dumps(["No data received from agent (heartbeats stopped)"])},
+        {"reason": json.dumps(["No data received from agent (heartbeats stopped)"]), **recovery_params},
     )
     servers_n = len(servers_stale.fetchall())
 

@@ -256,7 +256,15 @@ async def _fleet_agent_freshness_seconds(
     }
 
 
-def _server_row_to_response(row: dict) -> ServerResponse:
+def _server_row_to_response(row: dict, recovery=None) -> ServerResponse:
+    if (recovery and row.get("collection_mode") == "agent"
+            and row.get("status") != "disabled" and row.get("agent_status") != "disabled"
+            and recovery.hold_missing(row.get("agent_last_heartbeat_at"),
+                                      datetime.now(timezone.utc).timestamp(), 180)):
+        row = dict(row)
+        row["status"] = "monitoring_interrupted"
+        row["status_reasons"] = ["Monitoring interrupted — awaiting fresh agent data after ZenPlus restart.",
+                                 *_json_list(row.get("status_reasons"))]
     tags = _json_list(row.get("tags"))
     return ServerResponse(
         id=str(row["id"]),
@@ -442,8 +450,10 @@ async def list_servers(
     """
     rows = (await db.execute(text(sql), params)).mappings().all()
 
+    from app.services import controller_recovery
+    recovery = await controller_recovery.load(db)
     return {
-        "items": [_server_row_to_response(dict(r)) for r in rows],
+        "items": [_server_row_to_response(dict(r), recovery) for r in rows],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -672,7 +682,8 @@ async def get_server(
     if not scoping.entity_visible(row["tags"], await scoping.visible_tags(db, user)):
         # 404, not 403: out-of-scope ids must not be confirmable.
         raise HTTPException(404, "Server not found")
-    return _server_row_to_response(dict(row))
+    from app.services import controller_recovery
+    return _server_row_to_response(dict(row), await controller_recovery.load(db))
 
 
 @router.patch("/{server_id}", response_model=ServerResponse)

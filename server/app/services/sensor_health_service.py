@@ -256,13 +256,20 @@ async def sweep_sensor_health(db: AsyncSession) -> dict[str, int]:
     if not locked:
         return {"degraded": 0, "offline": 0, "alerts_suppressed": 0}
 
-    offline = (await db.execute(text("""
+    from app.services import controller_recovery as cr
+    recovery = await cr.load(db)
+    params = recovery.sql_parameters() if recovery else {}
+    def observable(threshold):
+        return cr.silence_is_observable("last_heartbeat_at", threshold) if recovery else "TRUE"
+
+    offline = (await db.execute(text(f"""
         WITH candidates AS (
             SELECT id, name, status AS old_status, last_heartbeat_at
               FROM sensors
              WHERE status IN ('online', 'degraded')
                AND last_heartbeat_at IS NOT NULL
                AND last_heartbeat_at <= NOW() - make_interval(secs => offline_after_s)
+               AND {observable('offline_after_s')}
              FOR UPDATE
         )
         UPDATE sensors s
@@ -272,9 +279,9 @@ async def sweep_sensor_health(db: AsyncSession) -> dict[str, int]:
           FROM candidates c
          WHERE s.id = c.id
         RETURNING s.id, s.name, c.old_status, c.last_heartbeat_at
-    """))).fetchall()
+    """), params)).fetchall()
 
-    degraded = (await db.execute(text("""
+    degraded = (await db.execute(text(f"""
         WITH candidates AS (
             SELECT id, name, status AS old_status, last_heartbeat_at
               FROM sensors
@@ -282,6 +289,7 @@ async def sweep_sensor_health(db: AsyncSession) -> dict[str, int]:
                AND last_heartbeat_at IS NOT NULL
                AND last_heartbeat_at <= NOW() - make_interval(secs => degraded_after_s)
                AND last_heartbeat_at > NOW() - make_interval(secs => offline_after_s)
+               AND {observable('degraded_after_s')}
              FOR UPDATE
         )
         UPDATE sensors s
@@ -291,7 +299,7 @@ async def sweep_sensor_health(db: AsyncSession) -> dict[str, int]:
           FROM candidates c
          WHERE s.id = c.id
         RETURNING s.id, s.name, c.old_status, c.last_heartbeat_at
-    """))).fetchall()
+    """), params)).fetchall()
 
     await _record_transitions(
         db, offline, new_status="offline", reason="heartbeat timeout"

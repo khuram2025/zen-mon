@@ -972,6 +972,7 @@ def build_package(version: str, changelog: str, severity: str,
     steps.append({"type": "run_hook", "script": "code/scripts/ota-snapshot-units.py", "timeout": 60})
 
     # Stop services before update
+    steps.append({"type": "run_hook", "script": "code/scripts/ota-monitoring-maintenance.py", "timeout": 30})
     steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector", "zenplus-syslog",
         "zenplus-ncm-backup.timer", "zenplus-ncm-delivery.timer", "zenplus-ncm-backup.service", "zenplus-ncm-delivery.service", "zenplus-ncm-worker.service"]})
     steps.append({"type": "run_hook", "script": "code/scripts/ota-create-backup.py", "timeout": 600})

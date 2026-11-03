@@ -24,6 +24,7 @@ import { agentProfile, type MetricDetail, type TabKey } from './data'
 import { C, Pill, StatTile, fmtPct, pctTone, type Tone } from './ui'
 
 const HEALTH: Record<ServerItem['status'], { label: string; tone: Tone }> = {
+  monitoring_interrupted: { label: 'Monitoring interrupted', tone: 'info' },
   healthy: { label: 'Healthy', tone: 'success' },
   warning: { label: 'Warning', tone: 'warning' },
   critical: { label: 'Critical', tone: 'danger' },
