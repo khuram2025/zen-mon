@@ -1813,6 +1813,16 @@ async def evaluate_trap(
     event: TrapEvent,
     db: AsyncSession = Depends(get_db),
 ):
+    """Legacy loopback entry point for pollers without the durable inbox."""
+    return await evaluate_trap_event(event, db)
+
+
+async def evaluate_trap_event(
+    event: TrapEvent,
+    db: AsyncSession,
+    *,
+    observed_at: datetime | None = None,
+):
     """
     Called by the Go poller's trap listener for every received SNMP trap.
     Fires metric='trap' alert rules whose optional OID filter and device/group
@@ -1820,7 +1830,8 @@ async def evaluate_trap(
     channels (email/SMS/webhook family) with a per-rule cooldown so a trap
     storm pages once, not once per trap.
     """
-    now = datetime.now(timezone.utc)
+    durable = observed_at is not None
+    now = observed_at or datetime.now(timezone.utc)
 
     did = event.device_id or None
     if did in ("", "00000000-0000-0000-0000-000000000000"):
@@ -1839,18 +1850,23 @@ async def evaluate_trap(
         device_tags = _tag_set(dev.tags if dev else None)
         hostname = (dev.hostname if dev else "") or ""
         device_ip = (dev.ip if dev else "") or ""
+        if durable and dev is None:
+            did = None
 
+    if did:
         # NCCM: a configuration-change trap schedules a debounced backup. It is
         # recorded before maintenance/dependency suppression on purpose —
         # changes made in a maintenance window are exactly what must be kept.
-        try:
-            from app.services import ncm_changes
-            if ncm_changes.change_trap(event.trap_oid):
+        from app.services import ncm_changes
+        if durable:
+            await ncm_changes.record_trap(db, did, event.trap_oid, event.event_id, received_at=now)
+        elif ncm_changes.change_trap(event.trap_oid):
+            try:
                 async with db.begin_nested():
                     await ncm_changes.record_trap(db, did, event.trap_oid, event.event_id)
                 await db.commit()
-        except Exception:
-            pass  # never let backup bookkeeping affect trap alerting
+            except Exception:
+                pass  # legacy loopback treats backup bookkeeping as best effort
 
         # Planned downtime: traps from a device in maintenance don't raise alerts.
         if await _device_in_maintenance(db, did):
@@ -1870,6 +1886,7 @@ async def evaluate_trap(
                    schedule_start, schedule_end, schedule_days, {prio_col}
             FROM alert_rules
             WHERE enabled = true AND metric = 'trap'
+            ORDER BY id
         """)
     )).fetchall()
     _tz = await get_configured_timezone(db)
@@ -1945,7 +1962,7 @@ async def evaluate_trap(
             continue
         allowed = notifications_allowed(
             rule.schedule_start, rule.schedule_end,
-            getattr(rule, "schedule_days", None), _tz,
+            getattr(rule, "schedule_days", None), _tz, now=observed_at,
         )
         if allowed:
             prior = (await db.execute(
@@ -1955,13 +1972,15 @@ async def evaluate_trap(
                       AND device_id IS NOT DISTINCT FROM CAST(:did AS uuid)
                       AND metadata->>'source_ip' = :source_ip
                       AND id <> :aid
-                      AND COALESCE(metadata->>'notified', 'true') = 'true'
+                      AND (COALESCE(metadata->>'notified', 'true') = 'true'
+                           OR (:durable AND metadata->>'trap_notification_queued' = 'true'))
                       AND COALESCE(metadata->>'trap', 'false') = 'true'
-                      AND triggered_at > now() - make_interval(secs => :cd)
+                      AND triggered_at > CAST(:at AS timestamptz) - make_interval(secs => :cd)
+                      AND (NOT :durable OR triggered_at <= CAST(:at AS timestamptz))
                     LIMIT 1
                 """),
                 {"rid": str(rule.id), "did": did, "aid": alert_id, "source_ip": event.source_ip,
-                 "cd": max(int(rule.cooldown or 0), 60)},
+                 "cd": max(int(rule.cooldown or 0), 60), "at": now, "durable": durable},
             )).first()
             allowed = prior is None
         if not allowed:
@@ -1987,38 +2006,47 @@ async def evaluate_trap(
         email_body = _render(effective_template(rule.email_body, trap_defaults["email_body"]), variables)
         sms_body = _render(effective_template(rule.sms_template, trap_defaults["sms_template"]), variables)
 
-        try:
-            from app.services.host_alert_service import dispatch_to_channels
-            sent = await dispatch_to_channels(db, channels, {
-                "subject": email_subject,
-                "body": email_body,
-                "message": sms_body,
-                "hostname": subject_name,
-                "ip_address": device_ip or event.source_ip,
-                "status": "TRAP", "severity": sev, "resolved": False,
-                "rule_name": rule.name,
-                "details": [
+        ctx = {
+            "subject": email_subject,
+            "body": email_body,
+            "message": sms_body,
+            "hostname": subject_name,
+            "ip_address": device_ip or event.source_ip,
+            "status": "TRAP", "severity": sev, "resolved": False,
+            "rule_name": rule.name,
+            "details": [
                     ("Alert rule", rule.name),
                     ("Trap OID", event.trap_oid),
                     ("Trap name", event.trap_name),
                     ("Source IP", event.source_ip),
                     ("Message", event.message),
                 ],
-                "action_url": await _dashboard_url(db, "/alerts"),
-                "triggered_at": now.isoformat(),
-                "rule_id": str(rule.id),
-                "is_recovery": False,
-                # Keyed on the trap's own alert row: a retried dispatch of
-                # this trap never pages twice, and the log links the incident.
-                "alert_id": str(alert_id) if alert_id else None,
-                "delivery_event": "trigger",
-                **funnel.notification_fields(sev, getattr(rule, "priority", None), trigger=True),
-            })
+            "action_url": await _dashboard_url(db, "/alerts"),
+            "triggered_at": now.isoformat(),
+            "rule_id": str(rule.id),
+            "is_recovery": False,
+            # Keyed on the trap's own alert row: a retried dispatch of
+            # this trap never pages twice, and the log links the incident.
+            "alert_id": str(alert_id) if alert_id else None,
+            "delivery_event": "trigger",
+            **funnel.notification_fields(sev, getattr(rule, "priority", None), trigger=True),
+        }
+        if durable:
+            if await _enqueue_planned(db, channels, ctx):
+                await db.execute(text("""
+                    UPDATE alerts SET metadata=metadata || jsonb_build_object('trap_notification_queued',true)
+                    WHERE id=:id
+                """), {"id": alert_id})
+            continue
+        try:
+            from app.services.host_alert_service import dispatch_to_channels
+            sent = await dispatch_to_channels(db, channels, ctx)
             await ns.stamp(db, alert_id, bool(sent))
         except Exception as exc:
             print(f"ERROR trap notification for rule {rule.id}: {exc}")
 
-    await db.commit()
+    if not durable:
+        await db.commit()
     return {
         "matched_rules": len(rules),
         "alerts_created": alerts_created,

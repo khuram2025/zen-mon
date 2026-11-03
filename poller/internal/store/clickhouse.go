@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -19,6 +20,7 @@ import (
 type ClickHouseStore struct {
 	conn          driver.Conn
 	journal       batchStager
+	trapJournal   *PostgresStore
 	batchSize     int
 	flushInterval time.Duration
 	buffer        chan *pinger.PingResult
@@ -500,6 +502,9 @@ func (s *ClickHouseStore) insertSNMPIfBatch(ctx context.Context, samples []snmp.
 // WriteTrap queues a decoded SNMP trap for batched insertion. This
 // implements the snmp.TrapSink interface.
 func (s *ClickHouseStore) WriteTrap(t snmp.TrapRecord) {
+	if s.DurableTrapAlerts() && t.EventID == uuid.Nil {
+		t.EventID = uuid.New()
+	}
 	if s.journal != nil {
 		select {
 		case s.trapBuffer <- t:
@@ -561,9 +566,27 @@ func (s *ClickHouseStore) RunTrapBatchWriter(ctx context.Context) {
 }
 
 func (s *ClickHouseStore) insertTrapBatch(ctx context.Context, traps []snmp.TrapRecord) error {
-	batch, err := s.prepareBatch(ctx, `
-		INSERT INTO snmp_traps (device_id, source_ip, trap_oid, trap_name, bindings, severity, message, timestamp, poller_id, source_ip_text, event_id)
-	`)
+	const insert = `INSERT INTO snmp_traps (device_id, source_ip, trap_oid, trap_name, bindings, severity, message, timestamp, poller_id, source_ip_text, event_id)`
+	var batch analyticsBatch
+	var err error
+	if s.DurableTrapAlerts() {
+		events := make([]map[string]any, 0, len(traps))
+		for _, trap := range traps {
+			event := pinger.TrapAlertPayload(trap)
+			event["observed_at"] = trap.Timestamp.UTC()
+			events = append(events, event)
+		}
+		work, encodeErr := json.Marshal(events)
+		if encodeErr != nil {
+			return fmt.Errorf("encode trap incident work: %w", encodeErr)
+		}
+		stage := batchStageFunc(func(ctx context.Context, table, token string, payload []byte) error {
+			return s.trapJournal.stageAnalytics(ctx, table, token, payload, work)
+		})
+		batch, err = prepareJournalBatch(ctx, stage, insert, "", map[string]bool{"snmp_traps": true})
+	} else {
+		batch, err = s.prepareBatch(ctx, insert)
+	}
 	if err != nil {
 		return fmt.Errorf("prepare trap batch: %w", err)
 	}
@@ -584,6 +607,19 @@ func (s *ClickHouseStore) insertTrapBatch(ctx context.Context, traps []snmp.Trap
 		}
 	}
 	return batch.Send()
+}
+
+func (s *ClickHouseStore) EnableDurableTrapAlerts() error {
+	pg, ok := s.journal.(*PostgresStore)
+	if !ok || pg == nil {
+		return fmt.Errorf("trap incident inbox requires the poller analytics journal")
+	}
+	s.trapJournal = pg
+	return nil
+}
+
+func (s *ClickHouseStore) DurableTrapAlerts() bool {
+	return s.trapJournal != nil
 }
 
 // serviceStatusLogInsert is the service_status_log insert. Values are bound by

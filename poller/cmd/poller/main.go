@@ -70,6 +70,12 @@ func main() {
 		}
 		sugar.Info("Poller analytics durable handoff enabled")
 	}
+	if os.Getenv("TRAP_INCIDENT_INBOX_ENABLED") == "1" {
+		if err := chStore.EnableDurableTrapAlerts(); err != nil {
+			sugar.Fatal(err)
+		}
+		sugar.Info("Trap incident durable handoff enabled")
+	}
 
 	// Connect to Redis
 	redisStore, err := store.NewRedisStore(cfg)

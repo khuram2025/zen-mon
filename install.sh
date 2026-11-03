@@ -787,7 +787,7 @@ build_components() {
     go mod tidy || err "Go dependency resolution failed"
     CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller || err "Go poller build failed"
     [[ -x "$ZENPLUS_HOME/bin/zenplus-poller" ]] || err "Go poller binary was not created"
-    setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
+    # Grant network capabilities to the systemd service instead of the binary.
     log "Go poller built"
 
     # NetFlow / IPFIX / sFlow collector (zenplus-netflow-collector.service)
@@ -947,7 +947,8 @@ Restart=on-failure
 RestartSec=5
 StartLimitBurst=5
 StartLimitIntervalSec=60
-AmbientCapabilities=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 PrivateTmp=true
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/zenplus/poller/internal/checker/snmp"
 	"github.com/zenplus/poller/internal/pinger"
 	"net"
 	"os"
@@ -19,6 +20,60 @@ type stagedBlock struct {
 	token   string
 	payload []byte
 }
+
+func TestTrapJournalPrivatePostgres(t *testing.T) {
+	dsn := os.Getenv("ZENPLUS_TRAP_JOURNAL_TEST_DSN")
+	if dsn == "" {
+		t.Skip("private PostgreSQL fixture required")
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(cfg.ConnConfig.Host, "/tmp/") || !strings.HasPrefix(cfg.ConnConfig.Database, "zp_t_") || cfg.ConnConfig.Port == 5432 || cfg.ConnConfig.Password != "" {
+		t.Fatal("disposable fixture required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	store := &ClickHouseStore{journal: &PostgresStore{pool: pool}}
+	if err = store.EnableDurableTrapAlerts(); err != nil {
+		t.Fatal(err)
+	}
+	trap := snmp.TrapRecord{EventID: uuid.New(), Timestamp: time.Now(), SourceIP: net.ParseIP("2001:db8::5"), TrapOID: "1.3.6.1.6.3.1.1.5.3"}
+	counts := func(want int) {
+		t.Helper()
+		var analytics, incidents, receipts int
+		err := pool.QueryRow(ctx, `SELECT
+			(SELECT count(*) FROM host_ingest_batches WHERE table_name='snmp_traps'),
+			(SELECT count(*) FROM snmp_trap_incident_inbox WHERE event_id=$1),
+			(SELECT count(*) FROM host_ingest_receipts WHERE table_name='snmp_traps')`, trap.EventID).Scan(&analytics, &incidents, &receipts)
+		if err != nil || analytics != want || incidents != want || receipts != want {
+			t.Fatalf("unexpected trap admission counts %d/%d/%d: %v", analytics, incidents, receipts, err)
+		}
+	}
+	if _, err = pool.Exec(ctx, `UPDATE host_ingest_capacity SET trap_bytes=33554432`); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.insertTrapBatch(ctx, []snmp.TrapRecord{trap}); err != journalRefusal("trap incident inbox capacity exhausted") {
+		t.Fatalf("expected trap capacity refusal, got %v", err)
+	}
+	counts(0)
+	if _, err = pool.Exec(ctx, `UPDATE host_ingest_capacity SET trap_bytes=0`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err = store.insertTrapBatch(ctx, []snmp.TrapRecord{trap}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	counts(1)
+}
+
 type failingStager struct {
 	mu       sync.Mutex
 	calls    []stagedBlock

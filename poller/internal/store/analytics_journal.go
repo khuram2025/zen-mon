@@ -35,6 +35,12 @@ type AnalyticsBatchStager = batchStager
 type batchStager interface {
 	StageAnalytics(context.Context, string, string, []byte) error
 }
+type batchStageFunc func(context.Context, string, string, []byte) error
+
+func (f batchStageFunc) StageAnalytics(ctx context.Context, table, token string, payload []byte) error {
+	return f(ctx, table, token, payload)
+}
+
 type journalBatch struct {
 	ctx      context.Context
 	table    string
@@ -180,7 +186,13 @@ type journalRefusal string
 
 func (e journalRefusal) Error() string { return string(e) }
 
-func (s *PostgresStore) StageAnalytics(ctx context.Context, table, token string, payload []byte) (err error) {
+func (s *PostgresStore) StageAnalytics(ctx context.Context, table, token string, payload []byte) error {
+	return s.stageAnalytics(ctx, table, token, payload, nil)
+}
+
+// Trap incidents and analytics share the same acknowledgement. Either the
+// whole batch survives promotion or the producer retries with the same ID.
+func (s *PostgresStore) stageAnalytics(ctx context.Context, table, token string, payload, traps []byte) (err error) {
 	defer func() {
 		if err != nil {
 			if _, safe := err.(journalRefusal); !safe {
@@ -234,6 +246,29 @@ func (s *PostgresStore) StageAnalytics(ctx context.Context, table, token string,
 	}
 	if _, err = tx.Exec(ctx, `UPDATE host_ingest_capacity SET payload_bytes=payload_bytes+$1,receipts=receipts+1 WHERE singleton`, len(payload)); err != nil {
 		return err
+	}
+	if len(traps) != 0 {
+		var admitted bool
+		if err = tx.QueryRow(ctx, `
+			WITH staged AS (
+				INSERT INTO snmp_trap_incident_inbox(event_id,source_key,observed_at,payload)
+				SELECT (event->>'event_id')::uuid,
+				       COALESCE(NULLIF(event->>'device_id',''),event->>'source_ip'),
+				       (event->>'observed_at')::timestamptz,event - 'observed_at'
+				FROM jsonb_array_elements($1::jsonb) AS event
+				ON CONFLICT(event_id) DO NOTHING RETURNING payload_bytes
+			), bytes AS (SELECT COALESCE(sum(payload_bytes),0) AS used FROM staged),
+			admitted AS (
+				UPDATE host_ingest_capacity SET trap_bytes=trap_bytes+used FROM bytes
+				WHERE singleton AND trap_bytes+used<=33554432 RETURNING 1
+			)
+			SELECT EXISTS(SELECT 1 FROM admitted)
+		`, string(traps)).Scan(&admitted); err != nil {
+			return err
+		}
+		if !admitted {
+			return journalRefusal("trap incident inbox capacity exhausted")
+		}
 	}
 	return tx.Commit(ctx)
 }
