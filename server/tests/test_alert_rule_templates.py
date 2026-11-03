@@ -147,11 +147,11 @@ def test_the_trap_placeholder_threshold_does_not_change_the_wording():
 def test_thresholded_state_metrics_keep_their_wording():
     """The fix is scoped to event metrics: real conditions still read correctly."""
     cases = {
-        ("ping_status", "==", 0): "is not responding to ping",
-        ("if_oper_status", "eq", 2): "is operationally down",
-        ("uptime_reset", "eq", 1): "has rebooted",
+        ("ping_status", "==", 0): "is down (no response to ICMP probes)",
+        ("if_oper_status", "eq", 2): "is down",
+        ("uptime_reset", "eq", 1): "reported an uptime reset (possible reboot)",
         ("udt_rogue_endpoint", ">=", 1): "has seen an unauthorised endpoint",
-        ("service_status", "==", 0): "is failing its check",
+        ("service_status", "==", 0): "failed its availability check",
     }
     for (metric, operator, threshold), expected in cases.items():
         v = ap.rule_phrasing({"metric": metric, "operator": operator, "threshold": threshold},

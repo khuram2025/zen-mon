@@ -102,7 +102,7 @@ def test_event_sentence_names_the_subject_once():
     # A state metric puts the subject first and keeps the host's own casing.
     v = ap.phrasing_variables(metric="ping_status", operator="==", threshold=0,
                               subject_noun="core-router-01")
-    assert v["event_sentence"] == "core-router-01 is not responding to ping."
+    assert v["event_sentence"] == "core-router-01 is down (no response to ICMP probes)."
 
 
 def test_recovery_phrasing_flips_the_verb_and_carries_the_duration():
@@ -307,3 +307,19 @@ def test_counter_detail_names_an_unknown_direction():
     # Only per-poll counters carry a window.
     assert ap.reading_text("cpu", 91, ">", 90, {"interval_s": 60}) == "91.0%"
     assert ap.reading_text("cpu", 97, ">", 90, {"interval_s": 60}) == "97%"   # far: catalogue format
+
+
+def test_confirmed_degraded_device_is_not_described_as_down():
+    message = ap.phrasing_variables(metric="ping_status", operator="==", threshold=0,
+                                    subject_noun="edge-01", device_status="degraded")
+    assert message["event_sentence"] == "edge-01 has degraded connectivity."
+
+
+def test_sms_uses_event_time_and_keeps_existing_timestamp():
+    timestamp = "2026-11-03T16:42:00+03:00"
+    message = ap.sms_with_timestamp("Device recovered.", timestamp)
+    assert message == "Device recovered.\n03 Nov 2026 13:42 UTC"
+    assert ap.sms_with_timestamp(message, timestamp) == message
+    assert ap.sms_with_timestamp("At {timestamp}", timestamp) == "At 03 Nov 2026 13:42 UTC"
+    custom = "Device recovered at 2026-11-03 13:42:00 UTC."
+    assert ap.sms_with_timestamp(custom, timestamp) == custom

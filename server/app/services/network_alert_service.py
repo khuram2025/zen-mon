@@ -520,7 +520,8 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
               "hostname": f"{hostname} / {iface_label}" if iface_label else hostname,
               "ip_address": ip_address or "",
               "severity": sev.upper(),
-              "status": "RESOLVED" if is_recovery else "ALERT"})
+              "status": "RESOLVED" if is_recovery else "ALERT",
+              "timestamp": now.strftime("%H:%M UTC on %d %b %Y")})
     v.update(incident)
     prefix = 'recovery_' if is_recovery else ''
     body = _render(getattr(rule, prefix + 'email_body', None) or (ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery else ap.DEFAULT_EMAIL_BODY), v)

@@ -117,6 +117,13 @@ def test_preview_returns_rendered_email(preview_client):
     assert "core-router-01" in alert["email_text"]
     assert alert["sms_body"].startswith("ZenPlus CRITICAL — Core router down:")
 
+    for message in (alert, body["recovery"]):
+        stamp = datetime.fromisoformat(message["iso_timestamp"]).strftime("%d %b %Y %H:%M UTC")
+        assert message["sms_body"].endswith("\n" + stamp)
+
+    assert "100%" in alert["email_text"]
+    assert "unavailable (no reply)" in alert["email_text"]
+
     # recovery_alert is on, so the resolved mail renders too.
     assert body["recovery"]["subject"] == "[CRITICAL] Resolved: Core router down — core-router-01"
 
@@ -137,7 +144,7 @@ def test_preview_bodies_read_as_english(preview_client):
 
     alert = body["alert"]
     assert alert["email_body"] == (
-        "Interface utilisation on core-router-01 rose above 80% (currently 87%)."
+        "Interface utilisation on core-router-01 / uplink rose above 80% (currently 87%)."
     )
     # The stored metric key never reaches the reader — in any channel.
     for text_ in (alert["email_body"], alert["sms_body"], alert["email_text"],
@@ -180,7 +187,7 @@ def test_wizard_seeded_template_is_treated_as_no_template(preview_client):
 
     alert = client.post(f"/api/v1/alert-rules/{RULE_ID}/preview").json()["alert"]
 
-    assert alert["email_body"] == "core-router-01 is not responding to ping."
+    assert alert["email_body"] == "core-router-01 is down (no response to ICMP probes)."
     assert "Metric: ping_status" not in alert["email_body"]
     assert alert["sms_body"].startswith("ZenPlus CRITICAL — Core router down:")
 
@@ -201,7 +208,7 @@ def test_recovery_never_falls_back_to_the_trigger_body(preview_client):
     body = client.post(f"/api/v1/alert-rules/{RULE_ID}/preview").json()
     assert body["alert"]["email_body"] == "core-router-01 is DOWN."
     assert "is DOWN" not in body["recovery"]["email_body"]
-    assert body["recovery"]["email_body"].startswith("core-router-01 is responding to ping again.")
+    assert body["recovery"]["email_body"].startswith("core-router-01 is reachable again (ICMP probes are succeeding).")
 
 
 def test_preview_uses_posted_templates_without_saving(preview_client):

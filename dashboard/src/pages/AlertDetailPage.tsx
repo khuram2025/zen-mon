@@ -595,7 +595,7 @@ function MessagePreviewCard({ ruleId }: { ruleId: string }) {
               )}
             </div>
           ) : (
-            <div className="rounded-md border border-border bg-surface2/40 p-3 font-mono text-xs leading-relaxed">{data.alert.sms_body}</div>
+            <div className="whitespace-pre-wrap rounded-md border border-border bg-surface2/40 p-3 font-mono text-xs leading-relaxed">{data.alert.sms_body}</div>
           )
         ) : null}
         <p className="mt-2 text-xs text-muted">Rendered with sample values — edit templates on the rule in Alert Rules.</p>
