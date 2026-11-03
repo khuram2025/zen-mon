@@ -31,7 +31,8 @@ def test_reconnected_agent_uses_normal_threshold_during_fleet_recovery():
     old = datetime.fromtimestamp(T0 - 1000, timezone.utc)
     assert state.hold_missing(old, T0 + 200, 180)
     assert not state.hold_missing(fresh, T0 + 200, 180)
-    assert not state.hold_missing(old, T0 + cr.HARD_LIMIT_S, 180)
+    assert state.hold_missing(old, T0 + cr.HARD_LIMIT_S, 180)  # unavailable controller is not a host outage
+    assert state.overdue(T0 + cr.HARD_LIMIT_S)
 
 
 @pytest.mark.asyncio
@@ -123,7 +124,8 @@ async def test_multiworker_start_and_restart_loop_keep_one_hard_deadline(pg_db):
     assert restarted.deadline == first.deadline
     expired = await start("boot-3", T0 + cr.HARD_LIMIT_S + 10, True)
     assert expired.deadline == first.deadline
-    assert not expired.hold_missing(None, T0 + cr.HARD_LIMIT_S + 10, 180)
+    assert expired.hold_missing(None, T0 + cr.HARD_LIMIT_S + 10, 180)
+    assert expired.overdue(T0 + cr.HARD_LIMIT_S + 10)
 
 
 @pytest.mark.asyncio
@@ -148,8 +150,12 @@ async def test_staleness_sweep_does_not_invent_offline_alerts_during_restart(wor
         await shs.sweep_stale(db)
     assert w.db.scalar("SELECT status FROM agents WHERE server_id=$1", sid) == "online"
     assert incidents(w, sid) == []
-    # Hard deadline is fail-open even if the readiness lease never recovered.
+    # An expired controller deadline must not release a blind fleet storm.
     recovery(w, ready=None, now=now - 2000, deadline=now - 1)
+    async with session(w.db) as db:
+        await shs.sweep_stale(db)
+    assert incidents(w, sid) == []
+    recovery(w, ready=now - 2000, now=now, deadline=now - 1)
     async with session(w.db) as db:
         await shs.sweep_stale(db)
     assert w.db.scalar("SELECT status FROM agents WHERE server_id=$1", sid) == "offline"
@@ -167,7 +173,7 @@ async def test_sensor_timeout_query_obeys_same_recovery_gate(world):
         result = await sshs.sweep_sensor_health(db)
     assert result["offline"] == 0
     assert w.db.scalar("SELECT status FROM sensors WHERE id=$1", sid) == "online"
-    recovery(w, ready=None, now=now - 2000, deadline=now - 1)
+    recovery(w, ready=now - 2000, now=now, deadline=now - 1)
     async with session(w.db) as db:
         result = await sshs.sweep_sensor_health(db)
     assert result["offline"] == 1
@@ -242,3 +248,23 @@ async def test_startup_does_not_silently_bypass_failed_registration(monkeypatch)
     monkeypatch.setattr(database, "AsyncSessionLocal", unavailable)
     with pytest.raises(RuntimeError, match="fixture database unavailable"):
         await cr.startup(ready=False)
+
+
+@pytest.mark.asyncio
+async def test_expired_controller_deadline_pages_one_controller_incident_not_the_fleet(world):
+    w = world
+    add_rule(w, "ping_status")
+    sid = add_server(w, "healthy-but-unobserved", heartbeat=T0 - 900)
+    state = recovery(w, ready=None, now=T0, deadline=T0 - 1)
+    await run(w, T0)
+    assert incidents(w, sid) == [] and w.sent == []
+    for _ in range(2):
+        async with session(w.db) as db:
+            await cr.sync_incident(db, state, T0)
+    assert len(w.sent) == 1 and w.sent[0]["priority"] == "P1"
+    assert w.sent[0]["hostname"] == "ZenPlus controller"
+    assert w.db.scalar("SELECT count(*) FROM alerts WHERE metadata->>'source'='controller_monitoring'") == 1
+    recovered = cr.Recovery(T0, T0, T0 - 1, T0 + 1000, "boot", settled=True)
+    async with session(w.db) as db:
+        await cr.sync_incident(db, recovered, T0 + 1000)
+    assert len(w.sent) == 2 and w.sent[-1]["is_recovery"]

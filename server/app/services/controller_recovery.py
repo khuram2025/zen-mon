@@ -48,13 +48,14 @@ class Recovery:
     settled: bool = False
 
     def hold_missing(self, observed_at: datetime | None, now: float, after_s: int) -> bool:
-        if now >= self.deadline:
-            return False
         if self.ready_at is None or now - self.last_tick > LEASE_GAP_S:
             return True
         if observed_at is not None and observed_at.timestamp() >= self.ready_at:
             return False
-        return now < min(self.ready_at + RECONNECT_S + after_s, self.deadline)
+        return now < self.ready_at + RECONNECT_S + after_s
+
+    def overdue(self, now: float) -> bool:
+        return now >= self.deadline and (not self.settled or now - self.last_tick > LEASE_GAP_S)
 
     def sql_parameters(self) -> dict:
         """Same gate for sweep SQL, with a per-row silence threshold."""
@@ -65,10 +66,9 @@ class Recovery:
 
 def silence_is_observable(column: str, threshold: str) -> str:
     # Both arguments are developer-owned SQL expressions, never request values.
-    return f"""(EXTRACT(EPOCH FROM NOW()) >= :cr_deadline OR
-        (CAST(:cr_ready AS double precision) IS NOT NULL AND EXTRACT(EPOCH FROM NOW()) - :cr_tick <= :cr_gap
+    return f"""(CAST(:cr_ready AS double precision) IS NOT NULL AND EXTRACT(EPOCH FROM NOW()) - :cr_tick <= :cr_gap
          AND ({column} >= to_timestamp(:cr_ready) OR
-              EXTRACT(EPOCH FROM NOW()) >= :cr_ready + :cr_reconnect + {threshold})))"""
+              EXTRACT(EPOCH FROM NOW()) >= :cr_ready + :cr_reconnect + {threshold}))"""
 
 
 async def load(db) -> Recovery | None:
@@ -103,7 +103,7 @@ async def transition(db, *, token: str, now: float, ready: bool = False,
     else:
         state = Recovery(old.started_at, old.ready_at if old.ready_at is not None else (now if ready else None),
                          old.deadline, now, token, old.reason,
-                         old.settled or (ready and now >= old.deadline))
+                         old.settled or (ready and old.ready_at is not None and now >= old.ready_at + RECONNECT_S))
     await save(db, state)
     await db.commit()
     return state
@@ -123,9 +123,62 @@ async def recovery_loop() -> None:
             async with AsyncSessionLocal() as db:
                 state = await transition(db, token=invocation_id(),
                                          now=datetime.now(timezone.utc).timestamp(), ready=True)
-                if state.ready_at and state.last_tick >= state.deadline and not state.settled:
-                    logger.error("Controller recovery deadline reached; normal outage alerting resumes")
+                await sync_incident(db, state, state.last_tick)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Controller monitoring readiness lease failed")
+
+
+async def sync_incident(db, state: Recovery, now: float) -> None:
+    """One durable controller incident instead of releasing a blind fleet storm.
+
+The default P1 policy routes it. The shared claim/delivery-key machinery keeps
+it single across workers and retries an interrupted send. An external health
+monitor is still required while this controller process cannot execute at all.
+"""
+    from app.services import alert_funnel, alert_notify_state as ns
+    from app.services.host_alert_service import dispatch_to_channels
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+                     {"key": KEY + ":incident"})
+    row = (await db.execute(text("""SELECT id,metadata->>'notified' AS notified FROM alerts
+        WHERE status IN ('active','acknowledged') AND metadata->>'source'='controller_monitoring'
+        ORDER BY triggered_at LIMIT 1"""))).first()
+    failed = state.overdue(now)
+    if failed and row is None:
+        alert_id = (await db.execute(text("""INSERT INTO alerts(status,severity,message,metadata)
+            VALUES ('active','critical','ZenPlus monitoring recovery exceeded its deadline',
+                    CAST(:meta AS jsonb)) RETURNING id"""),
+            {"meta": json.dumps({"source": "controller_monitoring", "dedupe": "controller_monitoring", "notified": False})})).scalar()
+        await alert_funnel.stamp_priority(db, alert_id, "P1", "critical")
+    elif row:
+        alert_id = row.id
+    else:
+        await db.commit()
+        return
+    send = False
+    if failed:
+        send = await ns.claim_pending(db, alert_id)
+    elif state.settled and row:
+        await db.execute(text("UPDATE alerts SET status='resolved',resolved_at=NOW() WHERE id=:id"), {"id": alert_id})
+        send = ns.flag_means_notified(row.notified)
+    await db.commit()
+    if not send:
+        return
+    body = ("ZenPlus has not completed monitoring recovery within 30 minutes. "
+            "Targets without fresh observations remain unknown. Check controller services and connectivity."
+            if failed else "ZenPlus monitoring is ready and the agent reconnection window has completed.")
+    await dispatch_to_channels(db, [], {
+        "alert_id": str(alert_id), "delivery_event": "trigger" if failed else "recovery",
+        "is_recovery": not failed, "resolved": not failed,
+        "subject": "[CRITICAL] ZenPlus monitoring interrupted" if failed else "Resolved: ZenPlus monitoring recovered",
+        "rule_name": "ZenPlus monitoring", "hostname": "ZenPlus controller", "severity": "critical",
+        "status": "ALERT" if failed else "RESOLVED", "body": body,
+        "message": "ZenPlus monitoring interrupted: recovery deadline exceeded. Check controller health."
+                   if failed else "ZenPlus monitoring recovered: agent reconnection window completed.",
+        "triggered_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        **alert_funnel.notification_fields("critical", "P1", trigger=failed),
+    })
+    if failed:
+        await ns.stamp(db, alert_id, True)
+        await db.commit()

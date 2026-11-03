@@ -938,10 +938,10 @@ async def system_health():
         if recovery:
             now = datetime.now(timezone.utc).timestamp()
             ready = recovery.ready_at is not None and now - recovery.last_tick <= cr.LEASE_GAP_S
-            checks["monitoring_ingestion"] = "ok" if ready else "error"
+            checks["monitoring_ingestion"] = "ok" if ready and not recovery.overdue(now) else "error"
             recovery_status = {
-                "state": "monitoring_interrupted" if not ready else
-                         ("reconnecting" if now < min(recovery.ready_at + cr.RECONNECT_S, recovery.deadline) else "ready"),
+                "state": "monitoring_interrupted" if not ready or recovery.overdue(now) else
+                         ("reconnecting" if now < recovery.ready_at + cr.RECONNECT_S else "ready"),
                 "started_at": datetime.fromtimestamp(recovery.started_at, timezone.utc).isoformat(),
                 "protection_deadline": datetime.fromtimestamp(recovery.deadline, timezone.utc).isoformat(),
             }

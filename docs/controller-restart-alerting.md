@@ -22,11 +22,15 @@ plus the evaluator interval. Once an agent reports after readiness, it immediate
 uses the normal silence allowance, even while other agents reconnect. Process/service
 inventory waits for a new snapshot during the same recovery period.
 
-The 30-minute hard deadline is retained across repeated restarts until the controller
-has completed a stable recovery cycle. No restart can renew an unfinished deadline.
-At that deadline normal absence detection resumes even if readiness did not recover.
+The 30-minute recovery deadline is retained across repeated restarts until the
+controller completes a stable reconnection window. No restart can renew an unfinished
+deadline. If it expires, ZenPlus raises one **ZenPlus monitoring interrupted** P1
+incident through the configured default P1 policy. It does not convert unobserved
+targets into a fleet of false outages. Fresh target failures still alert, and targets
+that remain silent alert after a stable reconnection window plus their normal threshold.
 The health endpoint exposes `monitoring_ingestion=error` for a missing readiness lease
-and reports the recovery phase/deadline. An independent external monitor must watch
+or an exceeded recovery deadline and reports the recovery phase/deadline.
+An independent external monitor must watch
 controller health to notify while ZenPlus itself is unavailable. This release does
 not configure an external monitoring service.
 
