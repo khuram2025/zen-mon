@@ -116,6 +116,10 @@ type DeviceStatusSave struct {
 	// save may replace: the row the engine's seed was taken over from. A
 	// state row of any other non-central owner makes the save Foreign.
 	TakeoverOwner string
+	// Set only for durable alert work. The operation ID is stable across a
+	// timeout or an unknown transaction outcome.
+	AlertOperation uuid.UUID
+	AlertPayload   []byte
 }
 
 // DeviceStatusSaved reports what SaveDeviceStatus wrote.

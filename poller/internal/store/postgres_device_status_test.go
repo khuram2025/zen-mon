@@ -21,6 +21,49 @@ import (
 
 func tsPtr(t time.Time) *time.Time { return &t }
 
+func TestDurableDeviceTransitionPrivatePostgres(t *testing.T) {
+	dsn := os.Getenv("ZENPLUS_DEVICE_TRANSITION_TEST_DSN")
+	if dsn == "" {
+		t.Skip("private PostgreSQL fixture required")
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(cfg.ConnConfig.Host, "/tmp/") || !strings.HasPrefix(cfg.ConnConfig.Database, "zp_t_") || cfg.ConnConfig.Port == 5432 || cfg.ConnConfig.Password != "" {
+		t.Fatal("disposable fixture required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	id := uuid.MustParse(os.Getenv("ZENPLUS_DEVICE_TRANSITION_TEST_ID"))
+	store := &PostgresStore{pool: pool}
+	now := time.Now().UTC()
+	save := &pinger.DeviceStatusSave{
+		DeviceID: id, At: now, State: devicestatus.Seed("down", &now, "central"), WriteState: true,
+		AlertOperation: uuid.New(), AlertPayload: []byte(`{"old_status":"up","new_status":"down"}`),
+	}
+	got, err := store.SaveDeviceStatus(ctx, save)
+	if os.Getenv("ZENPLUS_DEVICE_TRANSITION_EXPECT_FAILURE") == "1" {
+		if err == nil {
+			t.Fatal("expected the state transaction to fail with the inbox")
+		}
+		return
+	}
+	if err != nil || !got.Device || !got.State {
+		t.Fatalf("durable save: %+v %v", got, err)
+	}
+	// A retry after an unknown commit must not overwrite state or enqueue twice.
+	save.State = devicestatus.Seed("up", &now, "central")
+	if got, err = store.SaveDeviceStatus(ctx, save); err != nil || !got.Device || !got.State {
+		t.Fatalf("durable replay: %+v %v", got, err)
+	}
+}
+
 // maxPlaceholder returns the highest $n in a statement.
 func maxPlaceholder(sql string) int {
 	n := 0

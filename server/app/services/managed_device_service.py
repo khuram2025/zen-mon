@@ -34,13 +34,14 @@ import ipaddress
 import json
 import logging
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from app.services.job_lock_keys import JOB_LOCK_KEYS
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.services.device_map_webhook import enabled as durable_device_enabled
 
 logger = logging.getLogger("zenplus.managed_devices")
 
@@ -355,7 +356,7 @@ async def sync_all_controllers(db: AsyncSession, only_controller: UUID | None = 
 async def _fire_transitions(transitions: list[dict]) -> None:
     """Feed observed child status changes through the same alert pipeline the
     poller uses, one fresh session per event (the engine commits per event)."""
-    if not transitions:
+    if not transitions or durable_device_enabled():
         return
     from app.api.v1.alert_engine import StatusChangeEvent, evaluate_status_change
 
@@ -365,6 +366,20 @@ async def _fire_transitions(transitions: list[dict]) -> None:
                 await evaluate_status_change(StatusChangeEvent(**tr), db)
         except Exception:
             logger.exception("managed-device alert dispatch failed for %s", tr.get("hostname"))
+
+
+async def _stage_transitions(db, transitions):
+    if not transitions or not durable_device_enabled():
+        return
+    observed = datetime.now(timezone.utc).isoformat()
+    await db.execute(text("""
+        INSERT INTO sensor_transition_outbox(id,endpoint,idempotency_key,transition_type,entity_id,payload)
+        VALUES(:id,'managed',:key,'device',:device,CAST(:payload AS jsonb))
+    """), [
+        {"id": operation, "key": str(operation), "device": event["device_id"],
+         "payload": json.dumps({**event, "timestamp": observed})}
+        for event, operation in ((event, uuid4()) for event in transitions)
+    ])
 
 
 async def run_child_sync_once(db: AsyncSession) -> dict | None:
@@ -380,6 +395,7 @@ async def run_child_sync_once(db: AsyncSession) -> dict | None:
     if not got:
         return None
     summary = await sync_all_controllers(db)
+    await _stage_transitions(db, summary["transitions"])
     await db.commit()
     return summary
 
@@ -389,6 +405,7 @@ async def sync_controller_now(controller_id: UUID) -> dict:
     so the UI reflects children without waiting for the sweeper)."""
     async with AsyncSessionLocal() as db:
         summary = await sync_all_controllers(db, only_controller=controller_id)
+        await _stage_transitions(db, summary["transitions"])
         await db.commit()
     await _fire_transitions(summary["transitions"])
     return summary

@@ -31,8 +31,9 @@ type PostgresStore struct {
 	// Device status schema lag (migration 161), see
 	// postgres_device_status.go: statusLegacy selects the pre-161 statements
 	// until the next LoadDevices succeeds with the current one.
-	statusLegacy   atomic.Bool
-	statusWarnedAt atomic.Int64 // last loud warning (unix nanoseconds)
+	statusLegacy          atomic.Bool
+	statusWarnedAt        atomic.Int64 // last loud warning (unix nanoseconds)
+	deviceTransitionInbox bool
 }
 
 // NewPostgresStore connects to PostgreSQL.

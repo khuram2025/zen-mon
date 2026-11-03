@@ -59,6 +59,33 @@ def test_encoding_preserves_exact_values_and_rejects_bad_values():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["confirm_committed", "retry_proven_absent"])
+async def test_held_decision_keeps_receipts_and_audit(pg_db, decision):
+    table = "host_cpu_metrics"
+    writer = Store()
+    async with fixture(pg_db, writer) as journal:
+        first, = await journal.stage(table, COLS, [member("first")])
+        second, = await journal.stage(table, COLS, [member("second")])
+        pg_db.execute("""
+            UPDATE host_ingest_batches SET state='held',hold_reason='replay_window_expired',
+              attempted_at=clock_timestamp()-interval '6 minutes' WHERE id=$1
+        """, first)
+        digest = pg_db.scalar("SELECT encode(sha256(payload),'hex') FROM host_ingest_batches WHERE id=$1", first)
+        with pytest.raises(J.JournalUnavailable):
+            await journal.reconcile_held(table, first, decision=decision, digest="0" * 64,
+                                         actor="lab", evidence="fixture")
+        assert not writer.calls
+        await journal.reconcile_held(table, first, decision=decision, digest=digest, actor="lab", evidence="fixture")
+        assert await journal.stage(table, COLS, [member("first", 99)]) == [first]
+        await journal.drain(table)
+    assert pg_db.scalar("SELECT count(*) FROM host_ingest_replay_decisions WHERE decision=$1", decision) == 1
+    assert pg_db.scalar("SELECT receipts FROM host_ingest_capacity") == 2
+    assert pg_db.scalar("SELECT payload_bytes FROM host_ingest_capacity") == 0
+    assert pg_db.scalar("SELECT state FROM host_ingest_batches WHERE id=$1", second) == "committed"
+    assert [call[2][0][2] for call in writer.calls] == ([1, 1] if decision == "retry_proven_absent" else [1])
+
+
+@pytest.mark.asyncio
 async def test_recovery_stops_between_blocks_when_controller_admission_expires(pg_db, monkeypatch):
     from app.core import controller_admission
     admitted = [True]
