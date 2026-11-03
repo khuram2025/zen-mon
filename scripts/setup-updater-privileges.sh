@@ -3,7 +3,7 @@
 # ZenPlus updater privileges
 #
 # What the zenplus service account (the API) may do to the OTA updater:
-#   - start zenplus-updater.service ("Check for update"), via sudo
+#   - queue an explicitly selected update through the bounded install helper
 #   - set the updater check interval, via the root-owned
 #     /usr/local/sbin/zenplus-updater-timer-helper, which accepts a number and
 #     writes a fixed [Timer] drop-in
@@ -53,11 +53,15 @@ if [ ! -f "${HELPER_SRC}" ] || [ -L "${HELPER_SRC}" ]; then
 fi
 install -o root -g root -m 0755 "${HELPER_SRC}" "${HELPER_DST}"
 log "Installed ${HELPER_DST}"
+install -o root -g root -m 0755 "${SCRIPT_DIR}/zenplus-updater-install-helper" /usr/local/sbin/zenplus-updater-install-helper
+install -o root -g root -m 0644 "${ZENPLUS_DIR}/updater/systemd/zenplus-updater-install@.service" /etc/systemd/system/zenplus-updater-install@.service
+systemctl daemon-reload
 
 # ── 2. Sudoers ──────────────────────────────────────────────────────────────
 # Each line corresponds to an exact subprocess.run() call in
 # server/app/api/v1/system_updates.py; do not broaden them.
 if [ -x "${OVA_BROKER}" ]; then
+    install -o root -g root -m 0755 "${ZENPLUS_DIR}/appliance/vmware/privileged.py" "${OVA_BROKER}"
     log "Typed privilege broker present; leaving its sudoers policy unchanged"
 elif ! command -v visudo >/dev/null 2>&1; then
     warn "visudo not found (sudo not installed?); updater sudo grants not written"
@@ -69,6 +73,7 @@ else
 # interval. The helper validates the number and writes a fixed timer drop-in.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl --no-block start zenplus-updater.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl start zenplus-updater.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/sbin/zenplus-updater-install-helper *
 ${SERVICE_USER} ALL=(root) NOPASSWD: ${HELPER_DST} set-interval *
 SUDOEOF
     chown root:root "${tmp}"

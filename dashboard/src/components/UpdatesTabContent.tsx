@@ -19,6 +19,7 @@ import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
 import { Switch } from '@/components/ui/Switch'
 import { toast } from '@/components/ui/Toast'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/Dialog'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 interface UpdateHistoryRecord {
@@ -74,6 +75,15 @@ interface UpdateStatus {
   history: UpdateHistoryRecord[]
   recent_log: string[]
   subscription: RemoteSubscription | null
+  manual_install?: { state: string; target_version: string; message: string; updated_at: string } | null
+  maintenance_timezone?: string
+}
+
+interface UpdatePlan {
+  from_version: string
+  checked_at: string
+  plan_id: string
+  steps: { id: string; version: string; min_version: string | null; changelog: string; severity: string }[]
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -122,6 +132,9 @@ function isApiRestarting(error: unknown): boolean {
 export function UpdatesTabContent() {
   const queryClient = useQueryClient()
   const [showLog, setShowLog] = useState(false)
+  const [plan, setPlan] = useState<UpdatePlan | null>(null)
+  const [targetVersion, setTargetVersion] = useState('')
+  const [reviewInstall, setReviewInstall] = useState(false)
 
   // Status query — refetches more often when an update is in flight.
   const { data: status, isLoading, isError, error } = useQuery<UpdateStatus>({
@@ -161,12 +174,31 @@ export function UpdatesTabContent() {
 
   // Mutations
   const checkNow = useMutation({
-    mutationFn: async () => (await api.post('/system/check-update', {})).data,
-    onSuccess: () => {
-      toast.success('Update check triggered', 'Checking zentryc.com for available updates…')
-      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['system-update-status'] }), 3000)
+    mutationFn: async () => (await api.post<UpdatePlan>('/system/check-update', {}, { timeout: 100000 })).data,
+    onMutate: () => { setPlan(null); setReviewInstall(false) },
+    onSuccess: (data) => {
+      setPlan(data)
+      setTargetVersion(data.steps.at(-1)?.version || '')
+      toast.success(data.steps.length ? 'Update available' : 'Check complete', 'No update was installed.')
     },
     onError: (e: any) => toast.error('Check failed', apiErrorMessage(e)),
+  })
+
+  const installNow = useMutation({
+    mutationFn: async () => (await api.post('/system/install-update', {
+      plan_id: plan?.plan_id, target_version: targetVersion,
+    }, { timeout: 110000 })).data,
+    onSuccess: () => {
+      setReviewInstall(false)
+      setPlan(null)
+      toast.success('Installation queued', `Installing the required path through v${targetVersion}.`)
+      queryClient.invalidateQueries({ queryKey: ['system-update-status'] })
+    },
+    onError: (e: any) => {
+      toast.error('Installation not started', apiErrorMessage(e))
+      setReviewInstall(false)
+      setPlan(null)
+    },
   })
 
   const saveConfig = useMutation({
@@ -223,6 +255,13 @@ export function UpdatesTabContent() {
 
   return (
     <div className="space-y-5">
+      {status.manual_install?.state === 'failed' && !status.updater_running && (
+        <div role="status" className="rounded-xl border border-red-500/30 bg-red-500/10 p-4">
+          <p className="text-sm font-semibold">Requested installation stopped</p>
+          <p className="mt-1 text-xs">{status.manual_install.message}</p>
+          <p className="mt-1 text-xs text-muted">{fmtDate(status.manual_install.updated_at)}</p>
+        </div>
+      )}
       {/* Services restarting mid-update: the status poll is briefly failing (502).
           Show progress instead of an error; the page recovers on its own. */}
       {restarting && (
@@ -357,16 +396,16 @@ export function UpdatesTabContent() {
           </div>
           <button
             onClick={() => checkNow.mutate()}
-            disabled={checkNow.isPending || !!status?.active_update || !isRegistered}
+            disabled={checkNow.isPending || installNow.isPending || status?.updater_running || !!status?.active_update || !isRegistered}
             className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
             title={!isRegistered ? 'Register first' : ''}
           >
-            {checkNow.isPending || status?.updater_running ? (
+            {checkNow.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <RefreshCw className="h-4 w-4" />
             )}
-            {status?.updater_running ? 'Checking…' : 'Check for Updates'}
+            {checkNow.isPending ? 'Checking…' : 'Check for Updates'}
           </button>
         </div>
 
@@ -424,6 +463,60 @@ export function UpdatesTabContent() {
           </div>
         </div>
       </div>
+
+      {plan && (
+        <section aria-label="Available upgrade path" className="rounded-xl border border-border bg-surface p-6">
+          <h3 className="text-sm font-semibold">{plan.steps.length ? 'Available upgrade path' : 'No eligible updates available'}</h3>
+          <p className="mt-1 text-xs text-muted">Checked {fmtDate(plan.checked_at)}. Checking does not download or install updates.</p>
+          {plan.from_version !== status.current_version ? (
+            <p className="mt-3 text-sm text-amber-500">The installed version changed. Check again to refresh the upgrade path.</p>
+          ) : plan.steps.length > 0 && (
+            <>
+              <ol className="my-4 space-y-3">
+                <li className="text-sm text-muted">Installed: v{plan.from_version}</li>
+                {plan.steps.map((step, index) => (
+                  <li key={step.id} className="rounded-lg bg-surface2 p-3">
+                    <p className="text-sm font-medium">{index + 1}. v{step.version} <span className="ml-2 text-xs text-muted">{index < plan.steps.length - 1 ? 'Required intermediate version' : 'Latest eligible version'}</span></p>
+                    <p className="mt-1 whitespace-pre-wrap text-xs text-muted">{step.changelog}</p>
+                  </li>
+                ))}
+              </ol>
+              <p className="mb-3 text-xs text-muted">Required intermediate versions are installed in order. Each step must pass verification and health checks before the next starts.</p>
+              <label htmlFor="update-target" className="block text-xs font-medium">Install through version</label>
+              <select id="update-target" value={targetVersion} onChange={e => setTargetVersion(e.target.value)}
+                disabled={installNow.isPending}
+                className="mt-1 rounded-lg border border-border bg-surface2 px-3 py-2 text-sm">
+                {plan.steps.map((step, index) => <option key={step.id} value={step.version}>
+                  v{step.version}{index === plan.steps.length - 1 ? ' — complete required path' : ' — stop after this step'}
+                </option>)}
+              </select>
+              <p className="mt-3 text-xs text-muted">{status.auto_update
+                ? `Automatic installation is enabled. Scheduled runs may install eligible updates within the configured maintenance window (${status.maintenance_timezone || 'appliance local time'}).`
+                : 'Automatic installation is off. Scheduled checks leave installation to you.'}</p>
+              <button className="mt-4 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                disabled={installNow.isPending || status.updater_running || !!status.active_update || !targetVersion}
+                onClick={() => setReviewInstall(true)}>Review installation</button>
+            </>
+          )}
+        </section>
+      )}
+
+      <Dialog open={reviewInstall} onOpenChange={open => { if (!installNow.isPending) setReviewInstall(open) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Install updates now?</DialogTitle>
+            <DialogDescription>Monitoring services will restart. Installation begins now, even outside the automatic maintenance window, and stops if a step fails.</DialogDescription>
+          </DialogHeader>
+          <p className="text-sm">v{plan?.from_version} → {plan?.steps.slice(0, plan.steps.findIndex(s => s.version === targetVersion) + 1).map(s => `v${s.version}`).join(' → ')}</p>
+          <p className="text-xs text-muted">Installation stops at v{targetVersion}. A newly published release will require a new check and selection.</p>
+          <DialogFooter>
+            <button className="rounded-lg border border-border px-4 py-2 text-sm" disabled={installNow.isPending} onClick={() => setReviewInstall(false)}>Cancel</button>
+            <button className="rounded-lg bg-primary px-4 py-2 text-sm text-white disabled:opacity-50"
+              disabled={installNow.isPending || plan?.from_version !== status.current_version || status.updater_running || !!status.active_update}
+              onClick={() => installNow.mutate()}>{installNow.isPending ? 'Queuing…' : 'Install now'}</button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* History */}
       {status?.history && status.history.length > 0 && (

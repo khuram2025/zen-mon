@@ -4,6 +4,16 @@ Maintained with the release source. Introduced in v1.23.10 on 9 September 2026.
 
 ## Contract
 
+From 1.24.46, the web Check for Updates action only reads the eligible path.
+Review installation lets the operator select the final version of a path prefix;
+Install now is a separate confirmation. Required intermediate versions cannot be
+skipped. The selected identities and hashes are revalidated at queue time and
+before each installation step. Catalog changes require a fresh review, and the
+manual run never continues beyond the selected version. Scheduled runs honor
+auto_update and the appliance-local maintenance window. Explicit operator CLI
+installation (`zenplus update` or `updates apply`) installs the currently eligible
+path immediately and remains subject to the same signature and eligibility gates.
+
 A release's signed min_version names its minimum installed prerequisite. If an appliance is below it, Zentryc resolves that exact published bridge and recursively resolves its prerequisites. It offers only the first required step. After a successful update the appliance rechecks, then starts the newly installed updater in a fresh process before the next hop. A failed download, prerequisite, migration, schema check or health check stops progression.
 
 Cumulative releases ship the full migration set. Installing every historic release is unnecessary: migration runners use scripts/migrations.lock in original release order and the PostgreSQL/ClickHouse ledgers to apply pending work. Required one-time OS, updater, data-transform or trust-key transitions must be represented by min_version and retained as a published, accessible bridge. Severity alone does not make a release a bridge. Future cumulative releases include earlier security fixes; never omit a required one-time operation without retaining its prerequisite.

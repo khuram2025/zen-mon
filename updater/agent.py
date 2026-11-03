@@ -11,6 +11,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -518,7 +519,8 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
     return True
 
 
-def main(config_path: str | None = None, check_only: bool = False) -> int:
+def main(config_path: str | None = None, check_only: bool = False,
+         install_plan: str | None = None, remaining_path: list | None = None) -> int:
     """Main agent entry point.
 
     Args:
@@ -553,13 +555,52 @@ def main(config_path: str | None = None, check_only: bool = False) -> int:
         return 1
 
     try:
+        from .plan import (automatic_install_allowed, get_plan, release_identity,
+                           selected_path, validate_remaining, write_manual_status)
+        manual_target = ''
+        if install_plan or remaining_path is not None:
+            if check_only:
+                raise ValueError('Checking and installing are separate operations')
+            if install_plan:
+                match = re.fullmatch(r'([0-9a-f]{64})-([0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6})', install_plan)
+                if not match:
+                    raise ValueError('Invalid install selection')
+                manual_target = match[2]
+                write_manual_status('checking', manual_target, 'Rechecking the selected upgrade path')
+                plan = get_plan(cfg)
+                if plan['plan_id'] != match[1]:
+                    raise ValueError('Available upgrade path changed; check again before installing')
+                remaining_path = selected_path(plan, match[2])
+            validate_remaining(remaining_path, get_current_version())
+            manual_target = remaining_path[-1]['version']
+            write_manual_status('checking', manual_target, 'Rechecking the next approved release')
+            # Revalidate the immediate offer even after a bridge reload. Never
+            # replace an approved package with a later release or another hash.
+            release = check_for_update(cfg)
+            if not release or release_identity(release) != remaining_path[0]:
+                raise ValueError('Approved release is no longer offered; check again before installing')
+            if not run_update(cfg, release):
+                write_manual_status('failed', manual_target, 'Installation stopped because a step failed. Review update history before retrying.')
+                return 1
+            if get_current_version() != remaining_path[0]['version']:
+                raise ValueError('Installed version does not match the approved step')
+            if len(remaining_path) > 1:
+                lock.release()
+                args = [sys.executable, '-B', '-m', 'updater', '--continue-plan',
+                        json.dumps(remaining_path[1:], separators=(',', ':'))]
+                if config_path:
+                    args.extend(['--config', str(Path(config_path).resolve())])
+                os.execv(sys.executable, args)
+            write_manual_status('success', manual_target, 'The selected upgrade path completed successfully')
+            return 0
+
         # Check in and look for updates
         release = checkin(cfg)
 
         if not release:
             return 0
 
-        if check_only:
+        if check_only or not automatic_install_allowed(cfg.update):
             print(
                 f"Update available: {get_current_version()} → {release['version']}"
             )
@@ -611,6 +652,12 @@ def main(config_path: str | None = None, check_only: bool = False) -> int:
         return 0
 
     except Exception as e:
+        if install_plan or remaining_path is not None:
+            try:
+                from .plan import write_manual_status
+                write_manual_status('failed', manual_target, 'Installation stopped. Check the upgrade path again and review the updater log before retrying.')
+            except OSError:
+                logger.warning('Could not save the manual installation result')
         logger.exception("Unexpected error: %s", e)
         return 1
     finally:
@@ -640,6 +687,10 @@ def cli() -> None:
         action="store_true",
         help="Check for updates without applying",
     )
+    parser.add_argument('--plan', action='store_true', help='Print a read-only upgrade-path preview as JSON')
+    parser.add_argument('--install-plan', help='Install an explicitly approved plan ID and target version')
+    parser.add_argument('--install-latest', action='store_true', help='Explicitly install the currently eligible required upgrade path')
+    parser.add_argument('--continue-plan', help=argparse.SUPPRESS)
     parser.add_argument(
         "--version",
         action="version",
@@ -647,6 +698,20 @@ def cli() -> None:
     )
 
     args = parser.parse_args()
+
+    if sum(bool(x) for x in (args.check, args.plan, args.install_plan, args.continue_plan, args.install_latest, args.register)) > 1:
+        parser.error('Choose one operation: check, plan, install, or register')
+    if args.plan:
+        try:
+            from .plan import get_plan
+            cfg = load_config(args.config)
+            if not cfg.appliance.id or not cfg.appliance.api_key:
+                raise ValueError('Appliance is not registered')
+            print(json.dumps(get_plan(cfg)))
+        except Exception:
+            print('Could not check the update catalog. Verify registration and update-server connectivity.', file=sys.stderr)
+            sys.exit(1)
+        return
 
     if args.register:
         try:
@@ -663,4 +728,24 @@ def cli() -> None:
             sys.exit(1)
         return
 
-    sys.exit(main(config_path=args.config, check_only=args.check))
+    if args.install_latest:
+        try:
+            from .plan import get_plan
+            plan = get_plan(load_config(args.config))
+            if not plan['steps']:
+                print('No eligible updates available')
+                return
+            args.install_plan = plan['plan_id'] + '-' + plan['steps'][-1]['version']
+        except Exception:
+            print('Could not prepare the eligible upgrade path; no installation started.', file=sys.stderr)
+            sys.exit(1)
+    remaining = None
+    if args.continue_plan:
+        try:
+            if len(args.continue_plan) > 24000:
+                raise ValueError('Path too large')
+            remaining = json.loads(args.continue_plan)
+        except ValueError:
+            parser.error('Invalid approved path')
+    sys.exit(main(config_path=args.config, check_only=args.check,
+                  install_plan=args.install_plan, remaining_path=remaining))

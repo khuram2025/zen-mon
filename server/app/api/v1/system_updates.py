@@ -1,16 +1,18 @@
 """System update status, storage, and control endpoints for the dashboard."""
 
 import configparser
+import asyncio
 import json
 import os
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import is_configured as snmp_crypto_is_configured
@@ -48,6 +50,19 @@ class UpdateConfig(BaseModel):
     check_interval_hours: int = 4
     maintenance_window_start: str = ""
     maintenance_window_end: str = ""
+
+    @model_validator(mode='after')
+    def valid_window(self):
+        import re
+        values = (self.maintenance_window_start, self.maintenance_window_end)
+        if any(values) and not all(re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', v) for v in values):
+            raise ValueError('Provide both maintenance-window times in HH:MM format, or leave both empty')
+        return self
+
+
+class InstallUpdateRequest(BaseModel):
+    plan_id: str = Field(pattern=r'^[0-9a-f]{64}$')
+    target_version: str = Field(pattern=r'^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$')
 
 
 class UpdateHistoryRecord(BaseModel):
@@ -116,6 +131,8 @@ class UpdateStatus(BaseModel):
     history: list[UpdateHistoryRecord] = []
     recent_log: list[str] = []
     subscription: Optional[RemoteSubscription] = None
+    manual_install: Optional[dict] = None
+    maintenance_timezone: str = ''
 
 
 class RegisterRequest(BaseModel):
@@ -273,8 +290,14 @@ def _updater_service_is_running() -> bool:
             if "=" in line:
                 k, v = line.split("=", 1)
                 info[k] = v
-        return info.get("ActiveState") in ("activating", "active") and \
-               info.get("SubState") in ("start", "start-pre", "start-post", "running")
+        if info.get("ActiveState") in ("activating", "active") and \
+               info.get("SubState") in ("start", "start-pre", "start-post", "running"):
+            return True
+        manual = subprocess.run(
+            ['systemctl', 'list-units', 'zenplus-updater-install@*.service',
+             '--state=activating,active', '--no-legend', '--plain'],
+            capture_output=True, text=True, timeout=5)
+        return manual.returncode == 0 and bool(manual.stdout.strip())
     except Exception:
         return False
 
@@ -371,6 +394,11 @@ async def get_update_status(user: User = Depends(require_admin_user)):
     updater_running = _updater_service_is_running()
 
     interval_sec = config.getint("server", "check_interval_seconds", fallback=14400)
+    manual_install = None
+    try:
+        manual_install = json.loads((UPDATER_DIR / 'logs/manual-install.json').read_text())
+    except (OSError, ValueError):
+        pass
 
     return UpdateStatus(
         current_version=version,
@@ -391,6 +419,8 @@ async def get_update_status(user: User = Depends(require_admin_user)):
         history=[UpdateHistoryRecord(**r) for r in history_raw[:10]],
         recent_log=recent_log,
         subscription=_load_subscription(),
+        manual_install=manual_install,
+        maintenance_timezone=datetime.now().astimezone().tzname() or 'appliance local time',
     )
 
 
@@ -517,58 +547,67 @@ async def trigger_check(
     user: User = Depends(require_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Trigger an on-demand update check via systemctl.
-
-    Uses ``systemctl --no-block start`` so the API returns as soon as the
-    job is queued — we do not want to conflate a sudo refusal with the
-    downstream service's own exit code (e.g. a legitimate manifest
-    signature rejection would otherwise look like a "sudoers missing"
-    error in the UI).
-    """
+    """Read eligible offers without starting a service or downloading a package."""
     if not _registration_is_valid():
         raise HTTPException(
             status_code=400,
             detail="Appliance is not registered. Enter your license key in Settings > Subscription first.",
         )
 
+    plan = await _available_update_plan()
+    await write_audit_log(db, actor=user, action='system.update_check',
+                         resource_type='system_update', resource_id='updater',
+                         metadata={'status': 'checked', 'available_steps': len(plan['steps'])})
+    await db.commit()
+    return plan
+
+
+async def _available_update_plan():
     try:
-        result = subprocess.run(
-            ["sudo", "-n", "/bin/systemctl", "--no-block", "start",
-             "zenplus-updater.service"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        return {"status": "ok", "message": "Update check queued"}
+        # Unprivileged subprocess: loads the same root-owned trust configuration
+        # as the installer, performs only GETs, and does not initialize logging.
+        result = await asyncio.to_thread(
+            subprocess.run, [sys.executable, '-B', '-m', 'updater', '--plan'],
+            cwd=str(VERSION_FILE.parent),
+            env={**os.environ, 'PYTHONPATH': str(VERSION_FILE.parent), 'PYTHONDONTWRITEBYTECODE': '1'},
+            capture_output=True, text=True, timeout=90)
+        if result.returncode:
+            raise ValueError('Catalog check failed')
+        plan = json.loads(result.stdout)
+        if not isinstance(plan.get('steps'), list) or not plan.get('plan_id'):
+            raise ValueError('Invalid update plan')
+        return plan
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise HTTPException(status_code=502, detail='Could not check the update catalog. Verify registration and update-server connectivity.') from None
 
-    if result.returncode == 0:
-        await write_audit_log(
-            db,
-            actor=user,
-            action="system.update_check",
-            resource_type="system_update",
-            resource_id="updater",
-            metadata={"status": "queued"},
-        )
-        await db.commit()
-        return {"status": "ok", "message": "Update check queued"}
 
-    # Classify the failure so the user sees the real reason.
-    stderr = (result.stderr or result.stdout).strip() or "unknown error"
-    lower = stderr.lower()
-
-    if "a password is required" in lower or "not allowed" in lower or "may not run sudo" in lower:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "The API server is not permitted to start the updater service. "
-                "Install /etc/sudoers.d/zenplus-updater via scripts/setup-updater.sh."
-            ),
-        )
-
-    raise HTTPException(
-        status_code=500,
-        detail=f"systemctl refused to queue the job: {stderr}",
-    )
+@router.post('/install-update')
+async def install_update(body: InstallUpdateRequest,
+                         user: User = Depends(require_admin_user),
+                         db: AsyncSession = Depends(get_db)):
+    """Queue only the currently offered path explicitly selected by an admin."""
+    if not _registration_is_valid():
+        raise HTTPException(status_code=400, detail='Appliance is not registered')
+    if _updater_service_is_running():
+        raise HTTPException(status_code=409, detail='An update is already in progress')
+    plan = await _available_update_plan()
+    if plan['plan_id'] != body.plan_id or body.target_version not in [s['version'] for s in plan['steps']]:
+        raise HTTPException(status_code=409, detail='The upgrade path changed. Check for updates and review it again.')
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ['sudo', '-n', '/usr/local/sbin/zenplus-updater-install-helper',
+             'install', body.plan_id, body.target_version],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        raise HTTPException(status_code=503, detail='Could not confirm that installation was queued. Check update status before retrying.') from None
+    if result.returncode:
+        raise HTTPException(status_code=503, detail='Installation could not be queued. Check updater privileges and service status.')
+    await write_audit_log(db, actor=user, action='system.update_install',
+                         resource_type='system_update', resource_id=body.target_version,
+                         metadata={'plan_id': body.plan_id, 'target_version': body.target_version})
+    await db.commit()
+    return {'status': 'queued', 'target_version': body.target_version}
 
 
 # ─── Registration ─────────────────────────────────────────────────────────────

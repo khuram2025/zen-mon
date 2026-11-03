@@ -82,6 +82,7 @@ jobs:
       - run: npm run test:alert-wizard
       - run: npm run test:list-ordering
       - run: npm run test:baseline-details
+      - run: npm run test:manual-updates
       - run: node scripts/test-event-log-policy.mjs
       - run: node scripts/test-role-model.mjs
       - run: node scripts/test-inventory-ui.mjs
