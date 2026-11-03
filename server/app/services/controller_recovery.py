@@ -98,7 +98,7 @@ async def transition(db, *, token: str, now: float, ready: bool = False,
         deadline = old.deadline if old and not old.settled else now + HARD_LIMIT_S
         state = Recovery(now, now if ready and not planned else None, deadline, now, token,
                          "planned update" if planned else "controller restart or monitoring interruption")
-        logger.warning("Monitoring recovery started; missing-observation protection ends by %s",
+        logger.warning("Monitoring recovery started; controller escalation deadline is %s",
                        datetime.fromtimestamp(deadline, timezone.utc).isoformat())
     else:
         state = Recovery(old.started_at, old.ready_at if old.ready_at is not None else (now if ready else None),
