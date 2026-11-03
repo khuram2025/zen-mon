@@ -120,7 +120,7 @@ def test_apply_code_keeps_installed_version_until_commit(tmp_path, monkeypatch):
 
 
 def test_next_hop_reloads_new_updater_and_preserves_config(tmp_path, monkeypatch):
-    config = NS(appliance=NS(id="test", api_key="test"))
+    config = NS(appliance=NS(id="test", api_key="test"), update=NS(auto_update=True, maintenance_window_start='', maintenance_window_end=''))
     lock = Mock()
     monkeypatch.setattr(agent, "load_config", lambda *a: config)
     monkeypatch.setattr(agent, "setup_logging", lambda *a: None)
@@ -189,7 +189,7 @@ def test_windows_catalog_bridge_missing_does_not_fall_back_to_appliance_only_rel
 
 
 def test_failure_stops_before_checking_for_another_hop(monkeypatch):
-    cfg = NS(appliance=NS(id="test", api_key="test"))
+    cfg = NS(appliance=NS(id="test", api_key="test"), update=NS(auto_update=True, maintenance_window_start='', maintenance_window_end=''))
     monkeypatch.setattr(agent, "load_config", lambda *a: cfg)
     monkeypatch.setattr(agent, "setup_logging", lambda *a: None)
     monkeypatch.setattr(agent, "UpdateLock", Mock())

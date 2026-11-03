@@ -12,6 +12,7 @@ if not isinstance(args,list) or not 1<=len(args)<=12 or any(not isinstance(a,str
 allowed={
  '/usr/local/sbin/zenplus-security-helper':{'install-cert','apply','remove-cert'},
  '/usr/local/sbin/zenplus-access-helper':{'apply'},
+ '/usr/local/sbin/zenplus-updater-install-helper':{'install'},
  '/usr/local/sbin/zenplus-storage-helper':{'rescan','pg-dump','pg-restore','pg-createdb','pg-dropdb','os-usage','vacuum-journal','apt-clean','restart-app-services'},
  '/usr/local/sbin/zenplus-volume-helper':{'inventory','rescan','add-disk','extend','evacuate','abort-evacuation','remove-disk','remove-missing'},
  '/usr/local/sbin/zenplus-lvm-helper':{'vgs','lvs','pvs','pvresize'},

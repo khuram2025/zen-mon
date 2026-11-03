@@ -396,6 +396,6 @@ def test_installer_cli_update_and_ota_run_the_sysctl_setup():
     assert "setup-netflow-sysctl.sh" in install
     # Operator updates delegate to OTA; the signed manifest owns this setup.
     cli = (ROOT / "bin" / "zenplus-management").read_text()
-    assert "systemctl start zenplus-updater.service" in cli
+    assert "/opt/zenplus/venv/bin/python -B -m updater --install-latest" in cli
     release = (ROOT / "scripts" / "build-release.py").read_text()
     assert '"script": "code/scripts/setup-netflow-sysctl.sh"' in release

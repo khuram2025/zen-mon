@@ -338,9 +338,9 @@ class CLI:
             display(self.check_updates())
         elif command=='updates apply':
             self.require_setup()
-            self.confirm('Apply eligible signed updates under the configured rollout and maintenance policy?')
-            run(['/usr/bin/systemctl','--no-block','start','zenplus-updater.service'])
-            print('Updater queued; use show updates to inspect its result.')
+            self.confirm('Install the currently eligible required upgrade path now? Services will restart, even outside the automatic maintenance window.')
+            display(run(['/opt/zenplus/venv/bin/python','-B','-m','updater','--install-latest'], timeout=1800))
+            print('Updater finished; use show updates to inspect its result.')
         elif command in ('system reboot','system shutdown'):
             self.confirm(command+'?')
             run(['/usr/bin/systemctl','--no-block','reboot' if args[1]=='reboot' else 'poweroff'])

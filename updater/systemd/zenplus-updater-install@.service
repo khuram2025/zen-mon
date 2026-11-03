@@ -1,0 +1,16 @@
+[Unit]
+Description=ZenPlus operator-selected update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/zenplus
+Environment=PYTHONPATH=/opt/zenplus
+EnvironmentFile=-/opt/zenplus/.env
+ExecStart=/opt/zenplus/venv/bin/python -B -m updater --install-plan %i
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zenplus-updater
+TimeoutStartSec=1800

@@ -13,8 +13,9 @@ case "${1:-help}" in
             zenplus-netflow-collector.service nginx.service zenplus-updater.timer
         ;;
     update)
-        echo "Checking for an approved signed OTA release..."
-        systemctl start zenplus-updater.service
+        echo "Installing the currently eligible signed OTA upgrade path..."
+        cd /opt/zenplus
+        /opt/zenplus/venv/bin/python -B -m updater --install-latest
         ;;
     restart)
         systemctl restart zenplus-api zenplus-poller zenplus-netflow-collector nginx

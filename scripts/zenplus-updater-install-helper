@@ -1,0 +1,22 @@
+#!/usr/bin/python3
+"""Queue only an updater instance bound to the reviewed plan and target version."""
+import os
+import re
+import subprocess
+import sys
+
+
+def main(argv=None, *, run=subprocess.run, require_root=True):
+    args = sys.argv[1:] if argv is None else argv
+    if require_root and os.geteuid() != 0:
+        return 1
+    if (len(args) != 3 or args[0] != 'install'
+            or not re.fullmatch(r'[0-9a-f]{64}', args[1])
+            or not re.fullmatch(r'[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}', args[2])):
+        return 1
+    unit = f'zenplus-updater-install@{args[1]}-{args[2]}.service'
+    return run(['/bin/systemctl', '--no-block', 'start', unit], timeout=10).returncode
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

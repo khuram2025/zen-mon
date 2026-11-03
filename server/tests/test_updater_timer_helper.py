@@ -181,6 +181,7 @@ def test_no_free_form_write_grant_remains():
     assert grants == [
         "/bin/systemctl --no-block start zenplus-updater.service",
         "/bin/systemctl start zenplus-updater.service",
+        "/usr/local/sbin/zenplus-updater-install-helper *",
         "${HELPER_DST} set-interval *",
     ]
     assert not (ROOT / "updater" / "polkit" / "zenplus-updater.pkla").exists()
@@ -191,10 +192,10 @@ def test_every_api_sudo_call_is_granted():
     """Each privileged call in system_updates.py has a matching sudo line, so
     nothing depends on polkit (which 20.04/22.04 no longer get)."""
     api = (ROOT / "server" / "app" / "api" / "v1" / "system_updates.py").read_text()
-    assert '["sudo", "-n", "/bin/systemctl", "--no-block", "start",\n             "zenplus-updater.service"]' in api
+    assert "['sudo', '-n', '/usr/local/sbin/zenplus-updater-install-helper'," in api
     assert '["sudo", "-n", TIMER_HELPER, "set-interval", str(hours)]' in api
     calls = re.findall(r'\["systemctl", "(\w[\w-]*)"', api)
-    assert set(calls) <= {"show", "is-active"}, "unprivileged systemctl calls must stay read-only"
+    assert set(calls) <= {"show", "is-active", "list-units"}, "unprivileged systemctl calls must stay read-only"
 
 
 def test_privileges_hook_runs_on_every_ota_and_from_the_installers():
