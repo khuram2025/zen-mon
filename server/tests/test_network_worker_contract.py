@@ -21,11 +21,16 @@ class DB:
     def __init__(self, r): self.rule = r; self.statements = []
     async def execute(self, query, params=None):
         self.statements.append(str(query))
+        if 'FROM pg_attribute' in str(query):
+            return NS(first=lambda: (True,))
         return NS(all=lambda: [self.rule] if 'FROM alert_rules' in str(query) else [])
     async def commit(self): pass
 
 
 async def run(monkeypatch, r, history, dependency=None):
+    from app.services import alert_funnel
+    # Exercise the schema probe even when another test populated its cache.
+    monkeypatch.setattr(alert_funnel, '_PRIORITY_SUPPORTED', False)
     db = DB(r)
     monkeypatch.setattr(worker, '_snmp_devices', AsyncMock(return_value={'d': dict(
         hostname='fixture', device_type='switch', location='', group_id=None, tags=set(), poll_interval=60)}))
