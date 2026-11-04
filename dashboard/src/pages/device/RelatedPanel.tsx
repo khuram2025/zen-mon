@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { ArrowDownRight, ArrowUpRight, Clock, Map as MapIcon, Network } from 'lucide-react'
+import { ArrowDownRight, ArrowUpRight, Cable, Clock, Map as MapIcon, Network } from 'lucide-react'
 import { deviceStatusView, TONE_CLASS } from '@/components/devices/DeviceStatusBadge'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -30,11 +30,15 @@ function StatusPill({ status }: { status: string }) {
 }
 
 function DeviceLine({ device, extra }: { device: RelatedDevice; extra?: React.ReactNode }) {
+  const seen = device.last_observed
+    ? <span title={formatAbsolute(device.last_observed)}>{device.observed_via === 'controller' ? 'via controller ' : 'seen '}{formatRelative(device.last_observed)}</span>
+    : null
+  const parts = [device.ip_address, device.model, extra, seen].filter(Boolean)
   return (
     <li className="flex min-w-0 items-center justify-between gap-2 py-1 text-sm">
       <span className="min-w-0">
         <Link to={`/devices/${device.id}`} className="break-words font-medium text-primary hover:underline">{device.hostname}</Link>
-        {(device.ip_address || extra) && <span className="block text-xs text-muted">{[device.ip_address, extra].filter(Boolean).map((v, i) => <span key={i}>{i ? ' · ' : ''}{v}</span>)}</span>}
+        {parts.length > 0 && <span className="block text-xs text-muted">{parts.map((v, i) => <span key={i}>{i ? ' · ' : ''}{v}</span>)}</span>}
       </span>
       <StatusPill status={device.status} />
     </li>
@@ -80,6 +84,17 @@ export function RelatedPanel({ deviceId }: { deviceId: string }) {
               {r.dependencies.downstream.map((d) => <DeviceLine key={`${d.id}-${d.dependency_type}`} device={d} extra={`${dependencyLabel(d.dependency_type)} dependency`} />)}
               {r.children.items.filter((c) => c.status !== 'up').slice(0, 5).map((d) => <DeviceLine key={d.id} device={d} extra="Managed device" />)}
             </ul>
+          </Section>}
+          {(r.controller_neighbours?.length ?? 0) > 0 && <Section icon={Cable} title="Connected (seen by the controller)">
+            <ul className="divide-y divide-border/50">{r.controller_neighbours!.slice(0, 8).map((d) => <DeviceLine key={`${d.id}-${d.port}`} device={d}
+              extra={d.direction === 'upstream' ? `Uplink: ${d.port || 'switch port'}` : `On ${d.port || 'a port'}`} />)}</ul>
+          </Section>}
+          {r.peers && r.peers.total > 0 && <Section icon={Network} title="Same controller">
+            <p className="text-sm">
+              {r.parent ? <Link to={`/devices?managed_by=${r.parent.id}`} className="font-medium text-primary hover:underline">{childrenText(r.peers)}</Link> : childrenText(r.peers)}
+              <span className="text-xs text-muted"> besides this device</span>
+            </p>
+            <ul className="divide-y divide-border/50">{r.peers.items.slice(0, 6).map((d) => <DeviceLine key={d.id} device={d} />)}</ul>
           </Section>}
           {r.maps && r.maps.maps.length > 0 && <Section icon={MapIcon} title="On network maps">
             <ul className="space-y-1 text-sm">

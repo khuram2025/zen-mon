@@ -12,7 +12,7 @@ import type { DeviceRecord } from './types'
  *   Configuration  how it is monitored and what it is
  * Old links keep working: ?tab=overview → summary, ?tab=inventory → configuration. */
 
-export type BuiltinTabId = 'summary' | 'performance' | 'interfaces' | 'metrics' | 'hardware' | 'events' | 'configuration'
+export type BuiltinTabId = 'summary' | 'performance' | 'managed' | 'interfaces' | 'metrics' | 'hardware' | 'events' | 'configuration'
 /** Template-declared vendor tabs ("VPN & SD-WAN" -> tpl-vpn-sd-wan); see templateTabId. */
 export type TemplateTabId = `tpl-${string}`
 export type DeviceTabId = BuiltinTabId | TemplateTabId
@@ -61,6 +61,11 @@ export function vendorTabLabel(device: Pick<DeviceRecord, 'vendor'>, templateVen
   return vendor && !/^(unknown|n\/a|not reported)$/i.test(vendor) ? `${vendor} metrics` : 'Device metrics'
 }
 
+/** The tab of a controller-managed child, by what its controller reports about it. */
+export function managedTabLabel(deviceType: string | null | undefined): string {
+  return deviceType === 'access_point' ? 'Radios & clients' : deviceType === 'switch' ? 'Ports & PoE' : 'Controller data'
+}
+
 export function deviceTabs(device: DeviceRecord, template?: TemplateTabsInput | string | null): DeviceTab[] {
   const info: TemplateTabsInput = typeof template === 'string' ? { vendor: template } : (template || {})
   const snmp = !!device.snmp_enabled
@@ -74,6 +79,9 @@ export function deviceTabs(device: DeviceRecord, template?: TemplateTabsInput | 
   return [
     { id: 'summary', label: 'Summary', usesRange: true },
     { id: 'performance', label: 'Performance', usesRange: true },
+    // A controller-managed child (FortiLink switch, FortiAP): its ports or radios and clients, read through the controller.
+    ...(device.poll_mode === 'via_controller' && device.managed_by_device_id
+      ? [{ id: 'managed' as const, label: managedTabLabel(device.device_type), usesRange: true }] : []),
     ...(snmp ? [{ id: 'interfaces' as const, label: 'Interfaces', usesRange: true }] : []),
     ...(showDefault ? [{ id: 'metrics' as const, label: vendorTabLabel(device, info.vendor), usesRange: true }] : []),
     ...declared.map((t) => ({ id: templateTabId(t.label), label: t.label, usesRange: true, groups: t.groups })),

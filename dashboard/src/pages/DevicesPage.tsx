@@ -189,6 +189,7 @@ const HIDEABLE_COLUMNS = [
   'cpu',
   'memory',
   'uptime',
+  'boot_uptime',
   'last_seen',
 ] as const
 type HideableCol = (typeof HIDEABLE_COLUMNS)[number]
@@ -207,6 +208,7 @@ const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
   cpu: true,
   memory: true,
   uptime: true,
+  boot_uptime: true,
   last_seen: true,
 }
 
@@ -219,7 +221,10 @@ const COLUMN_LABELS: Record<HideableCol, string> = {
   tags: 'Tags',
   cpu: 'CPU',
   memory: 'Memory',
-  uptime: 'Uptime',
+  // Two measurements, two labels: the share of checks (or controller-reported state) that was up in the
+  // selected range, and the time since the device last booted as the device or its controller reports it.
+  uptime: 'Availability',
+  boot_uptime: 'Uptime (since boot)',
   last_seen: 'Last seen',
 }
 
@@ -365,6 +370,8 @@ export function DevicesPage() {
   const { data: uptimePctData } = useQuery<{
     hours: number
     devices: Record<string, number>
+    /** Controller-managed children: availability from controller-reported state, with coverage. */
+    controller?: Record<string, { pct: number | null; coverage_pct: number; sufficient: boolean }>
   }>({
     queryKey: ['devices', 'uptime-pct', rangeHours],
     queryFn: async () =>
@@ -372,6 +379,7 @@ export function DevicesPage() {
     refetchInterval: 30_000,
   })
   const uptimePctMap = uptimePctData?.devices || {}
+  const controllerAvailability = uptimePctData?.controller || {}
 
   const { data: alertCountData } = useQuery<{ devices: Record<string, DeviceAlertCount> }>({
     queryKey: ['devices', 'alert-counts', rangeHours],
@@ -382,7 +390,7 @@ export function DevicesPage() {
 
   // Latest SNMP scalar metrics (cpu, memory, …) per device, from ClickHouse.
   const { data: metricsData } = useQuery<{
-    devices: Record<string, Record<string, number | string>>
+    devices: Record<string, Record<string, number | string | boolean>>
   }>({
     queryKey: ['devices', 'current-metrics'],
     queryFn: async () => (await api.get('/devices/current-metrics')).data,
@@ -435,9 +443,15 @@ export function DevicesPage() {
       const uptimeSec = uptimeMap[d.id]
       const uptime = formatRealUptime(uptimeSec, health)
       const uptimePct = uptimePctMap[d.id]
-      return { device: d, health, snmpNoData, flapping, cpu, mem, uptime, uptimePct }
+      // Time since boot: sysUpTime, or what a controller reports for its managed child.
+      const bootUptime = typeof m.uptime === 'number' && m.uptime > 0 ? m.uptime : null
+      const source: MetricSource | null = m._source === 'controller'
+        ? { controller: d.managed_by_hostname || 'controller', at: typeof m._ts === 'string' ? m._ts : null, stale: m._stale === true }
+        : null
+      const availabilityCoverage = controllerAvailability[d.id]
+      return { device: d, health, snmpNoData, flapping, cpu, mem, uptime, uptimePct, bootUptime, source, availabilityCoverage }
     })
-  }, [devices, uptimeMap, metricsData, metricsMap, uptimePctMap])
+  }, [devices, uptimeMap, metricsData, metricsMap, uptimePctMap, controllerAvailability])
 
   // Every filter except status — KPIs/sidebar are computed from this so they
   // match the table, while the status KPI cards keep working as toggles.
@@ -1102,7 +1116,12 @@ export function DevicesPage() {
                     {prefs.visible.memory && <Th className="min-w-[140px]">Memory</Th>}
                     {prefs.visible.uptime && (
                       <Th className="whitespace-nowrap">
-                        Uptime <span className="font-normal text-muted">({rangeLabel})</span>
+                        Availability <span className="font-normal text-muted">({rangeLabel})</span>
+                      </Th>
+                    )}
+                    {prefs.visible.boot_uptime && (
+                      <Th className="whitespace-nowrap">
+                        Uptime <span className="font-normal text-muted">(since boot)</span>
                       </Th>
                     )}
                     {prefs.visible.last_seen && (
@@ -1150,7 +1169,7 @@ export function DevicesPage() {
                       </Td>
                     </Tr>
                   )}
-                  {pageRows.map(({ device: d, health, snmpNoData, flapping, cpu, mem, uptime, uptimePct }) => {
+                  {pageRows.map(({ device: d, health, snmpNoData, flapping, cpu, mem, uptimePct, bootUptime, source, availabilityCoverage }) => {
                     const isSel = selected.has(d.id)
                     const typeInfo = TYPE_STYLE[normalizeType(d.device_type)] || TYPE_STYLE.other
                     const alertCount = alertCountMap[d.id]
@@ -1293,17 +1312,28 @@ export function DevicesPage() {
                         </Td>
                         {prefs.visible.cpu && (
                           <Td>
-                            <MetricCell value={cpu} />
+                            <MetricCell value={cpu} source={source} />
                           </Td>
                         )}
                         {prefs.visible.memory && (
                           <Td>
-                            <MetricCell value={mem} />
+                            <MetricCell value={mem} source={source} />
                           </Td>
                         )}
                         {prefs.visible.uptime && (
                           <Td className="whitespace-nowrap text-sm">
-                            <UptimePctCell pct={uptimePct} fallback={uptime} />
+                            <UptimePctCell pct={uptimePct}
+                              fallback={availabilityCoverage && !availabilityCoverage.sufficient ? 'Insufficient history' : '—'}
+                              fallbackTitle={availabilityCoverage && !availabilityCoverage.sufficient
+                                ? `Only ${availabilityCoverage.coverage_pct.toFixed(0)}% of the range was observed by the controller` : undefined} />
+                          </Td>
+                        )}
+                        {prefs.visible.boot_uptime && (
+                          <Td className="whitespace-nowrap text-sm tabular-nums">
+                            <span className={bootUptime == null ? 'text-muted' : ''}
+                              title={bootUptime == null ? 'Not reported' : source ? `Since boot, reported by ${source.controller}` : 'Since boot (sysUpTime)'}>
+                              {formatBootUptime(bootUptime)}
+                            </span>
                           </Td>
                         )}
                         {prefs.visible.last_seen && (
@@ -1535,10 +1565,28 @@ function KpiCard({
 // Metric cell (CPU / Memory)
 // =========================================================================
 
-function MetricCell({ value }: { value: number | null }) {
+/** Where a CPU/memory reading came from when the device itself is not polled. */
+type MetricSource = { controller: string; at: string | null; stale: boolean }
+
+function MetricCell({ value, source }: { value: number | null; source?: MetricSource | null }) {
+  const title = source
+    ? `Reported by ${source.controller}${source.at ? ` at ${new Date(source.at).toLocaleString()}` : ''}${source.stale ? ' (stale)' : ''}`
+    : undefined
   if (value == null) {
     return <span className="text-xs text-muted">—</span>
   }
+  if (source) {
+    return (
+      <div className="flex flex-col gap-0.5" title={title}>
+        <MetricBar value={value} />
+        <span className={`text-2xs ${source.stale ? 'text-warning' : 'text-muted'}`}>via controller{source.stale ? ' · stale' : ''}</span>
+      </div>
+    )
+  }
+  return <MetricBar value={value} />
+}
+
+function MetricBar({ value }: { value: number }) {
   const tone =
     value >= 80 ? 'danger' : value >= 60 ? 'warning' : 'success'
   const barColor =
@@ -2729,9 +2777,9 @@ function TimeRangePicker({
 // Uptime % cell — colored by SLA threshold
 // =========================================================================
 
-function UptimePctCell({ pct, fallback }: { pct: number | undefined; fallback: string }) {
+function UptimePctCell({ pct, fallback, fallbackTitle }: { pct: number | undefined; fallback: string; fallbackTitle?: string }) {
   if (typeof pct !== 'number' || !Number.isFinite(pct)) {
-    return <span className="text-muted">{fallback || '—'}</span>
+    return <span className="text-muted" title={fallbackTitle}>{fallback || '—'}</span>
   }
   const color =
     pct >= 99.9 ? 'text-success'
@@ -2936,6 +2984,16 @@ function buildAvailabilityRows(
 
 function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+function formatBootUptime(seconds: number | null): string {
+  if (seconds == null || !isFinite(seconds) || seconds <= 0) return '—'
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
 }
 
 function formatRealUptime(seconds: number | undefined, health: HealthKind): string {

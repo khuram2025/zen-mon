@@ -25,6 +25,7 @@ import { useDeviceRecord, useDeviceSummary, useSnmpMetrics } from './device/hook
 import { InterfacesTab } from './device/InterfacesTab'
 import { IssuesBar } from './device/IssuesBar'
 import { PerformanceTab, type PinnedMetric } from './device/PerformanceTab'
+import { isManagedChild, ManagedChildTab, useControllerReadings } from './device/ControllerChild'
 import { SummaryTab } from './device/SummaryTab'
 import { deviceTabs, issueTab, placeGroup, resolveTab, type DeviceTabId } from './device/tabs'
 import type { DeviceIssue } from './device/types'
@@ -62,8 +63,12 @@ export function DeviceDetailPage() {
   // Uptime for the header: sysUpTime from the shortest SNMP window (shared with the Summary tab's 1h query).
   const uptimeMetrics = useSnmpMetrics(id || '', 1, !!device?.snmp_enabled)
   const uptimePoints = (uptimeMetrics.data?.uptime || uptimeMetrics.data?.sysUpTime || uptimeMetrics.data?.sys_uptime)?.points
+  // A controller-managed child has no sysUpTime of its own: its controller reports the boot uptime (FortiAP).
+  const managedChild = !!device && isManagedChild(device)
+  const controllerReadings = useControllerReadings(id || '', managedChild)
   const uptimeSeconds = typeof device?.uptime_seconds === 'number' ? device.uptime_seconds
-    : uptimePoints?.length ? uptimePoints[uptimePoints.length - 1].value : null
+    : managedChild ? controllerReadings.data?.readings?.uptime_s ?? null
+      : uptimePoints?.length ? uptimePoints[uptimePoints.length - 1].value : null
 
   const { data: maint } = useQuery<{ active: any[]; upcoming: any[] }>({
     queryKey: ['device-maintenance', id],
@@ -184,6 +189,7 @@ export function DeviceDetailPage() {
         </div>
 
         <TabsContent value="summary"><SummaryTab device={device} summary={summary} range={range} onOpen={(t, g) => openTab(t, { group: g })} /></TabsContent>
+        {tabs.some((t) => t.id === 'managed') && <TabsContent value="managed"><ManagedChildTab device={device} range={range} /></TabsContent>}
         <TabsContent value="performance"><PerformanceTab device={device} summary={summary} range={range} pinned={pinned} onClearPin={() => openTab('performance')} /></TabsContent>
         {tabs.some((t) => t.id === 'interfaces') && <TabsContent value="interfaces"><InterfacesTab device={device} range={range} /></TabsContent>}
         {tabs.some((t) => t.id === 'metrics') && (

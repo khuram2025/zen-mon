@@ -16,6 +16,7 @@ import { useDeviceAvailability, usePingMetrics, useSnmpMetrics } from './hooks'
 import { KpiTile, UsageBar } from './KpiTile'
 import { DeviceNetflowCard, useDeviceNetflow } from './NetflowCard'
 import { RelatedPanel } from './RelatedPanel'
+import { ControllerSourcePanel, controllerTiles, isManagedChild, useControllerHistory, useControllerReadings } from './ControllerChild'
 import type { DeviceTabId } from './tabs'
 import type { DeviceRange, DeviceRecord, DeviceSummary, HealthGroupDigest, Thresholds } from './types'
 
@@ -42,6 +43,9 @@ export function SummaryTab({ device, summary, range, onOpen }: {
   const availability = useDeviceAvailability(id, range, !!device.ping_enabled)
   const { data: explanation } = useDeviceStatusExplanation(id, !!device.ping_enabled)
   const netflow = useDeviceNetflow(id, device.ip_address, range)
+  const managedChild = isManagedChild(device)
+  const controller = useControllerReadings(id, managedChild)
+  const controllerHistory = useControllerHistory(id, Math.max(1, Math.round(range.hours)), managedChild)
 
   const limits = explanation?.thresholds
   const rttLimit = limits?.degraded_rtt_ms ?? null
@@ -88,13 +92,17 @@ export function SummaryTab({ device, summary, range, onOpen }: {
       trend={unanswered ? null : trendOf(rtt.map((p) => p.value), 'latency', range.label, rttLimit)}
       chart={<Sparkline label="Latency" domain={latencyDomain(rtt.map((p) => p.value), rttLimit)} threshold={rttLimit} format={formatMs} values={rtt.map((p) => p.value).slice(-60)} />} />)
   }
-  if (cpuVal != null || (snmp && metrics.isPending)) {
+  if (managedChild) {
+    // Read through the controller: CPU, memory, boot uptime and availability carry its measurement time.
+    tiles.push(...controllerTiles(controller.data, controllerHistory.data, controller.isPending))
+  }
+  if (!managedChild && (cpuVal != null || (snmp && metrics.isPending))) {
     tile('cpu', 'CPU', <KpiTile label="CPU" loading={metrics.isPending} value={formatUsagePct(cpuVal)} tone={toneFor(cpuVal, cpuTh)}
       sub={cpuValues.length ? `Max ${formatUsagePct(Math.max(...cpuValues))} in ${range.label.replace(/^Last /, 'the last ')}` : undefined}
       trend={trendOf(cpuValues, 'percent', range.label, cpuTh?.warn)}
       chart={<Sparkline label="CPU" domain={PERCENT_DOMAIN} threshold={cpuTh?.crit ?? cpuTh?.warn} format={(v) => `${v.toFixed(0)}%`} values={cpuValues.slice(-60)} />} />)
   }
-  if (memVal != null) {
+  if (!managedChild && memVal != null) {
     tile('memory', isF5 ? 'System RAM' : 'Memory', <KpiTile label={isF5 ? 'System RAM' : 'Memory'} value={formatUsagePct(memVal)} tone={toneFor(memVal, memTh)}
       sub={isF5 ? 'System used / system total' : memValues.length ? `Max ${formatUsagePct(Math.max(...memValues))}` : undefined}
       trend={trendOf(memValues, 'percent', range.label, memTh?.warn)}
@@ -127,6 +135,10 @@ export function SummaryTab({ device, summary, range, onOpen }: {
   if (device.ping_enabled) {
     panels.push({ id: 'latency-loss', title: 'Latency and loss', width: 8, height: 10, minWidth: 4, minHeight: 6,
       content: <LatencyLossPanel rtt={rtt} loss={loss} points={points} fromTs={fromTs} toTs={toTs} range={range} rttLimit={rttLimit} lossLimit={lossLimit} onOpenEvents={() => onOpen('events')} loading={ping.isPending} /> })
+  }
+  if (managedChild) {
+    panels.push({ id: 'controller', title: 'Controller', width: 6, height: 10, minWidth: 3, minHeight: 6,
+      content: <ControllerSourcePanel data={controller.data} /> })
   }
   panels.push({ id: 'recent-events', title: 'Recent events', width: 4, height: 10, minWidth: 3, minHeight: 5,
     content: <RecentEventsPanel summary={summary} onOpen={() => onOpen('events')} /> })
