@@ -141,7 +141,7 @@ def test_installer_wires_install_and_verification():
     assert "install_ncm_units ||" in create
     verify = install[install.index("verify_installation() {"):]
     verify = verify[:verify.index("\n}\n")]
-    assert 'scripts/verify-ncm-units.py" --wait 30' in verify and "failures=$((failures + 1))" in verify
+    assert 'scripts/verify-ncm-units.py" --wait 30 --require-active' in verify and "failures=$((failures + 1))" in verify
     # The VMware provisioning reuses create_services from install.sh.
     assert "create_services" in (ROOT / "appliance" / "vmware" / "provision.sh").read_text()
 
@@ -200,6 +200,21 @@ def test_verifier_exit_code_and_messages(verifier, monkeypatch, capsys):
     assert "FAIL zenplus-ncm-worker.service (backup worker): NOT INSTALLED" in err
     assert "systemctl enable --now zenplus-ncm-worker.service" in err
 
+
+
+def test_inactive_unit_warns_on_upgrade_and_fails_a_fresh_install(verifier, monkeypatch, capsys):
+    # The OTA hook fails only on what the update installs; a worker that is
+    # installed and enabled but crashing is reported, not rolled back over.
+    states = _states()
+    states["zenplus-ncm-worker.service"].update(active="activating", sub="auto-restart")
+    problems = verifier.problems_for("zenplus-ncm-worker.service", states["zenplus-ncm-worker.service"])
+    monkeypatch.setattr(verifier, "check", lambda wait: (states, problems))
+    assert verifier.main(["--wait", "0"]) == 0
+    out = capsys.readouterr()
+    assert "WARN zenplus-ncm-worker.service (backup worker): installed but ACTIVATING" in out.err
+    assert "not all are active yet" in out.out
+    assert verifier.main(["--wait", "0", "--require-active"]) == 1
+    assert "FAIL zenplus-ncm-worker.service" in capsys.readouterr().err
 
 # --------------------------------------------------------------------------- #
 # Readiness API: not installed vs inactive

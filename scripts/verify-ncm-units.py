@@ -10,11 +10,17 @@ For every unit the appliance needs it reports, distinctly:
   not enabled     the unit will not start at boot
   inactive/failed the unit is not running now
 and exits non-zero, naming each problem, when any required unit is not
-installed, enabled and active. ``--wait`` (default 30 s) gives a unit that
-was just started time to settle (the worker restarts on failure).
+installed and enabled; a unit that is installed and enabled but not active
+is a warning unless ``--require-active`` is given. ``--wait`` (default 30 s)
+gives a unit that was just started time to settle (the worker restarts on
+failure).
 
-Used by install.sh (verify_installation) and as an OTA ``run_hook`` after
-start_services, where a non-zero exit fails the update. Stdlib only; runs
+Used by install.sh (verify_installation, ``--require-active``: an operator is
+there to fix it) and as an OTA ``run_hook`` after start_services, where a
+non-zero exit fails the update. The OTA hook fails only on what the update
+itself installs (unit files, enablement): a worker that crashes for another
+reason is reported loudly in the update log and on the NCCM page, but does not
+roll back an otherwise good appliance update, which would not fix it either. Stdlib only; runs
 directly (``#!/usr/bin/python3``) under the 1.23.9+ updater executor.
 """
 from __future__ import annotations
@@ -83,11 +89,17 @@ def check(wait: float = 30.0, *, poll=unit_state, sleep=time.sleep, clock=time.m
         sleep(2)
 
 
+def is_inactive_only(problem: str) -> bool:
+    return "installed but" in problem and "NOT ENABLED" not in problem
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--wait", type=float, default=float(os.environ.get("ZENPLUS_NCM_UNIT_WAIT", "30")),
                         help="seconds to let just-started units become active (default 30)")
     parser.add_argument("--json", action="store_true", help="print unit states as JSON")
+    parser.add_argument("--require-active", action="store_true",
+                        help="fail (not only warn) when an installed, enabled unit is not active")
     args = parser.parse_args(argv)
     states, problems = check(args.wait)
     if args.json:
@@ -96,14 +108,21 @@ def main(argv=None) -> int:
         if "error" not in state:
             print(f"[ncm-units] {unit}: load={state['load']} active={state['active']} "
                   f"enabled={state['unit_file'] or '-'}", flush=True)
-    if problems:
-        for problem in problems:
+    hard = [p for p in problems if args.require_active or not is_inactive_only(p)]
+    for problem in problems:
+        if problem not in hard:
+            print(f"[ncm-units] WARN {problem}", file=sys.stderr, flush=True)
+    if hard:
+        for problem in hard:
             print(f"[ncm-units] FAIL {problem}", file=sys.stderr, flush=True)
         print("[ncm-units] NCCM backups cannot run until these units are installed, enabled and "
               "active (install from /opt/zenplus/scripts/systemd, then systemctl daemon-reload and "
               "systemctl enable --now zenplus-ncm-worker.service zenplus-ncm-backup.timer "
               "zenplus-ncm-delivery.timer)", file=sys.stderr, flush=True)
         return 1
+    if problems:
+        print("[ncm-units] NCCM units installed and enabled; not all are active yet (see WARN above)", flush=True)
+        return 0
     print("[ncm-units] NCCM worker and timers installed, enabled and active", flush=True)
     return 0
 

@@ -1373,7 +1373,7 @@ verify_installation() {
 
     # NCCM worker + schedule/delivery timers: installed, enabled and active.
     # Prints each unit's state and names any not-installed/disabled/inactive one.
-    if python3 "$ZENPLUS_HOME/scripts/verify-ncm-units.py" --wait 30; then
+    if python3 "$ZENPLUS_HOME/scripts/verify-ncm-units.py" --wait 30 --require-active; then
         log "NCCM worker and timers installed, enabled and active"
     else
         echo "[fail] NCCM backup units are not installed, enabled and active (see the lines above)"
