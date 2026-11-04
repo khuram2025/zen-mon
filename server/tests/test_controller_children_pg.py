@@ -285,7 +285,11 @@ def test_inventory_list_marks_controller_readings_and_availability(promoted, wor
 
     with api_client(world, role="t_cc_view", permissions=["devices.view"]) as c:
         metrics = c.get("/api/v1/devices/current-metrics").json()["devices"]
-        stats = c.get("/api/v1/devices/dashboard/uptime-stats", params={"hours": 24}).json()
+        # Use the same window as the synthetic buckets. Wall-clock evaluation
+        # may cross a five-minute boundary after this module was imported.
+        stats = c.get("/api/v1/devices/dashboard/uptime-stats", params={
+            "from": since.isoformat(), "to": NOW.isoformat(),
+        }).json()
     assert metrics[sw]["cpu"] == 23 and metrics[sw]["_source"] == "controller"
     assert metrics[sw]["_controller_id"] == str(FGT) and metrics[sw]["_stale"] is False
     assert metrics[ap]["uptime"] == 266400.0
