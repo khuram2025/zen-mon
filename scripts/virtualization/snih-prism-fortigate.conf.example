@@ -1,0 +1,29 @@
+# REVIEW TEMPLATE ONLY. Select the correct VDOM, replace interface placeholders,
+# and place the policy before the existing deny rule. Do not paste unchanged.
+config firewall address
+    edit "ZenPlus-SNIH-10.21.0.13"
+        set subnet 10.21.0.13 255.255.255.255
+    next
+    edit "Prism-SNIH-10.23.2.31"
+        set subnet 10.23.2.31 255.255.255.255
+    next
+end
+config firewall service custom
+    edit "ZenPlus-Prism-TCP9440"
+        set tcp-portrange 9440
+    next
+end
+config firewall policy
+    edit 0
+        set name "ZenPlus-SNIH-Prism-read"
+        set srcintf "<ZENPLUS_SOURCE_INTERFACE>"
+        set dstintf "<PRISM_DESTINATION_INTERFACE>"
+        set srcaddr "ZenPlus-SNIH-10.21.0.13"
+        set dstaddr "Prism-SNIH-10.23.2.31"
+        set action accept
+        set schedule "always"
+        set service "ZenPlus-Prism-TCP9440"
+        set nat disable
+        set logtraffic all
+    next
+end

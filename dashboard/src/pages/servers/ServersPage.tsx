@@ -283,6 +283,9 @@ export function ServerInventoryPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" asChild>
+            <Link to="/virtualization">Virtualization</Link>
+          </Button>
           <div className="inline-flex rounded-md border border-border bg-surface2/30 p-0.5">
             <button
               type="button"
