@@ -340,14 +340,13 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        task = getattr(app.state, "virtualization_poller", None)
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        for attr in ("controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
+        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
+        task = getattr(app.state, "virtualization_poller", None)
+        if task:
+            await asyncio.gather(task, return_exceptions=True)
         await apm_ingest_api.stop_batch_writer()
         try:
             from datetime import datetime, timezone
