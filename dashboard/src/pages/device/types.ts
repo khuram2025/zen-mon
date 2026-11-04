@@ -140,6 +140,8 @@ export type DeviceRecord = {
   uptime_seconds?: number | null
   managed_by_device_id?: string | null
   managed_by_hostname?: string | null
+  /** 'via_controller' for a child read through its controller (never polled itself). */
+  poll_mode?: string
   is_flapping?: boolean
   flapping_since?: string | null
   flap_kind?: string | null

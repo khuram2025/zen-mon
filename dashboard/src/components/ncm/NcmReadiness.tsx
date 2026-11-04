@@ -71,7 +71,8 @@ export function NcmReadiness({ deviceId, onAction, compact = false }: { deviceId
   )
 }
 
-const RUNTIME_TONE = (v?: string): Tone => (v === 'active' || v === 'configured' || v === 'synchronized' ? 'success' : v === 'inactive' || v === 'missing' || v === 'unsynchronized' ? 'danger' : 'warning')
+const RUNTIME_TONE = (v?: string): Tone => (v === 'active' || v === 'configured' || v === 'synchronized' ? 'success' : v === 'inactive' || v === 'not_installed' || v === 'missing' || v === 'unsynchronized' ? 'danger' : 'warning')
+const RUNTIME_TEXT: Record<string, string> = { synchronized: 'NTP-synchronized', unsynchronized: 'not synchronized', not_installed: 'not installed' }
 
 function formatOffset(ms: number) {
   const s = Math.abs(ms) / 1000
@@ -94,12 +95,17 @@ export function NcmHealth() {
           <div className="flex flex-wrap gap-x-5 gap-y-1">
             {[['worker', 'Backup worker'], ['scheduler', 'Schedule timer'], ['delivery', 'Delivery timer'], ['encryption', 'Archive encryption'], ['time_sync', 'Appliance clock']].map(([key, label]) => (
               <span key={key} className="inline-flex items-center gap-1">
-                <ToneIcon tone={RUNTIME_TONE(data[key])} />{label}: <strong className="font-medium">{data[key] === 'synchronized' ? 'NTP-synchronized' : data[key] === 'unsynchronized' ? 'not synchronized' : data[key] || 'unknown'}</strong>
+                <ToneIcon tone={RUNTIME_TONE(data[key])} />{label}: <strong className="font-medium">{RUNTIME_TEXT[data[key]] || data[key] || 'unknown'}</strong>
               </span>
             ))}
           </div>
         )}
       </div>
+      {(['worker', 'scheduler', 'delivery'] as const).some((k) => data?.[k] === 'not_installed') && (
+        <div role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
+          NCCM service units are not installed on this appliance ({(['worker', 'scheduler', 'delivery'] as const).filter((k) => data?.[k] === 'not_installed').map((k) => data?.units?.[k]?.unit || k).join(', ')}), so backups and schedules cannot run. Ask an appliance administrator to re-run the installer or apply the current update, which installs and starts them.
+        </div>
+      )}
       {data?.time_sync === 'unsynchronized' && (
         <div role="alert" className="flex gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
           <Clock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />

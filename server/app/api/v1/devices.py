@@ -19,6 +19,7 @@ from app.schemas.device import (
 )
 from app.schemas.metric import MetricResponse, StatusChangeEvent
 from app.services import device_service, license_capacity, metric_service
+from app.services import controller_children as _children
 from app.services import device_status_explanation as explain
 from app.services import device_status_machine as dsm
 from app.services.audit_service import write_audit_log
@@ -36,6 +37,7 @@ from sqlalchemy import text
 import time
 import asyncio
 import json
+import logging
 import re
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
@@ -265,6 +267,7 @@ async def dashboard_uptime_stats(
         )).scalars().all()
         params["ids"] = [str(i) for i in visible]
         where += " AND toString(device_id) IN %(ids)s"
+    visible_ids = params.get("ids")
     if device_id is not None:
         params["device"] = str(device_id)
         where += " AND toString(device_id) = %(device)s"
@@ -349,6 +352,23 @@ async def dashboard_uptime_stats(
         uptime_map[did] = round(up / total * 100, 2)
         failed_map[did] = int(round(down))
 
+    # Controller-managed children are never pinged: their availability is the
+    # controller-reported state, with coverage. Below the coverage minimum it
+    # is withheld (``controller[id].sufficient = false``), never guessed.
+    controller_map: dict[str, dict] = {}
+    if scope is None or visible_ids:
+        try:
+            controller_map = await _controller_availability(
+                db, from_time.replace(tzinfo=timezone.utc), to_time.replace(tzinfo=timezone.utc),
+                only=str(device_id) if device_id is not None else None,
+                visible=visible_ids if scope is not None else None)
+        except Exception:
+            logging.getLogger(__name__).warning("controller-reported availability failed", exc_info=True)
+            await _quiet_rollback(db)
+        for did, res in controller_map.items():
+            if did not in uptime_map and res["sufficient"]:
+                uptime_map[did] = res["pct"]
+
     return {
         "hours": hours,
         "from": from_time.isoformat(),
@@ -358,7 +378,48 @@ async def dashboard_uptime_stats(
         # Which resolution actually answered — a caller asking for 30 days off
         # the 5-minute rollup is looking at a shorter window than it thinks.
         "source_table": chosen_table,
+        # Per controller-managed child: pct (None when coverage is short),
+        # coverage_pct, sufficient, samples, basis = "controller".
+        "controller": controller_map,
     }
+
+
+async def _quiet_rollback(db) -> None:
+    """Clear a failed optional query without masking the answer already built."""
+    try:
+        await db.rollback()
+    except Exception:
+        pass
+
+
+async def _controller_availability(db: AsyncSession, since: datetime, until: datetime,
+                                   only: str | None = None, visible: list[str] | None = None) -> dict[str, dict]:
+    """Availability of controller-managed children from controller-reported state."""
+    where, params = "poll_mode = 'via_controller'", {}
+    if only is not None:
+        where += " AND id = CAST(:only AS uuid)"
+        params["only"] = only
+    if visible is not None:
+        where += " AND id = ANY(CAST(:visible AS uuid[]))"
+        params["visible"] = visible
+    ids = [str(r) for r in (await db.execute(text(f"SELECT id FROM devices WHERE {where}"), params)).scalars().all()]
+    if not ids:
+        return {}
+    contexts = await _children.load_contexts(db, ids)
+    if not contexts:
+        return {}
+    step = _children.AVAILABILITY_BUCKET_S if (until - since) <= timedelta(days=7) else 3600
+    buckets = await asyncio.to_thread(_children.availability_buckets, contexts, since, until, step)
+    windows: dict[str, list[tuple[datetime, datetime]]] = {}
+    for r in (await db.execute(text(f"""
+        SELECT d.id::text AS device_id, GREATEST(m.starts_at, :s) AS s, LEAST(m.ends_at, :e) AS e
+        FROM device_maintenance m JOIN devices d ON {MAINT_COVERS_DEVICE_SQL}
+        WHERE m.starts_at < :e AND m.ends_at > :s AND d.id = ANY(CAST(:ids AS uuid[]))
+    """), {"s": since, "e": until, "ids": [str(c.child["id"]) for c in contexts]})).mappings().all():
+        windows.setdefault(r["device_id"], []).append((r["s"], r["e"]))
+    return {str(c.child["id"]): _children.availability_from_buckets(
+                buckets.get(str(c.child["id"]), {}), since, until, windows.get(str(c.child["id"])), step)
+            for c in contexts}
 
 
 # Statuses in which a device answers pings: continuous uptime runs through
@@ -479,7 +540,28 @@ async def current_metrics(
             ts = ts.replace(tzinfo=timezone.utc)
         out[did]["_ts"] = ts.isoformat()
 
-    return {"generated_at": datetime.now(timezone.utc).isoformat(), "devices": out}
+    # Controller-managed children: the readings were reported by their
+    # controller (managed-device fan-out). Name the source and flag a
+    # reading older than the staleness limit.
+    now = datetime.now(timezone.utc)
+    try:
+        kids = (await db.execute(text(
+            "SELECT id::text, managed_by_device_id::text FROM devices WHERE poll_mode = 'via_controller'"
+        ))).all()
+    except Exception:
+        await _quiet_rollback(db)
+        kids = []
+    for did, ctrl in kids:
+        bucket = out.get(did)
+        ts = latest_ts.get(did)
+        if bucket is None or ts is None:
+            continue
+        ts = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+        bucket["_source"] = "controller"
+        bucket["_controller_id"] = ctrl
+        bucket["_stale"] = (now - ts).total_seconds() > _children.STALE_MIN_S
+
+    return {"generated_at": now.isoformat(), "devices": out}
 
 
 @router.get("/groups", response_model=list[DeviceGroupResponse])
@@ -1991,9 +2073,9 @@ async def device_template_insights(
         text("""
             SELECT group_key, metric_key, instance, series_key, label, unit,
                    value_num, value_text, updated_at
-            FROM device_template_values WHERE device_id = :id
+            FROM device_template_values WHERE device_id = :id AND NOT (group_key = ANY(:hidden))
         """),
-        {"id": device_id},
+        {"id": device_id, "hidden": _children.hidden_group_keys(oid_groups)},
     )).mappings().all()
     groups_out, latest_ts = _insights.shape_template_groups(oid_groups, vals, child_ids)
 
@@ -2096,8 +2178,8 @@ async def get_device_page_summary(
         vals = (await db.execute(text("""
             SELECT group_key, metric_key, instance, series_key, label, unit,
                    value_num, value_text, updated_at
-            FROM device_template_values WHERE device_id = :id
-        """), {"id": device_id})).mappings().all()
+            FROM device_template_values WHERE device_id = :id AND NOT (group_key = ANY(:hidden))
+        """), {"id": device_id, "hidden": _children.hidden_group_keys(oid_groups)})).mappings().all()
         groups, template_updated = _insights.shape_template_groups(oid_groups, vals)
     shown_groups = [g for g in groups if (g.get("rows") if g.get("kind") == "table"
                                           else any(m.get("has_data") for m in g.get("metrics") or []))]
@@ -2621,7 +2703,8 @@ async def get_device_related(
     scope = await scoping.visible_tags(db, user)
     visible = lambda tags: scoping.entity_visible(tags, scope)  # noqa: E731
     unavailable: list[str] = []
-    cols = "d.id, d.hostname, d.ip_address, d.device_type, d.status, d.tags"
+    cols = ("d.id, d.hostname, d.ip_address, d.device_type, d.status, d.tags, d.model, d.poll_mode, "
+            "d.last_seen, d.managed_last_seen")
 
     parent = None
     if device.managed_by_device_id:
@@ -2655,6 +2738,42 @@ async def get_device_related(
                                                  "suppress_alerts": bool(r["suppress_alerts"]), "enabled": bool(r["enabled"])})
     for k in dependencies:
         dependencies[k] = _related.by_status_then_name(dependencies[k])[:_related.MAX_LISTED]
+
+    # Peers: the other devices the same controller manages (a switch's sibling
+    # switches and APs), and the controller-known neighbours: the switch port
+    # an AP's MAC is seen on, or the APs seen on this switch's ports.
+    peers = None
+    neighbours: list[dict] = []
+    if device.managed_by_device_id and device.poll_mode == "via_controller":
+        peer_rows = [r for r in (await db.execute(text(f"""
+            SELECT {cols} FROM devices d WHERE d.managed_by_device_id = :cid AND d.id <> :id
+        """), {"cid": device.managed_by_device_id, "id": device_id})).mappings().all() if visible(r["tags"])]
+        by_status: dict[str, int] = {}
+        for r in peer_rows:
+            by_status[r["status"] or "unknown"] = by_status.get(r["status"] or "unknown", 0) + 1
+        peers = {"total": len(peer_rows), "by_status": by_status,
+                 "items": _related.by_status_then_name([_related.device_brief(r) for r in peer_rows])[:_related.MAX_LISTED]}
+        try:
+            contexts = await _children.load_contexts(db, [str(device_id)])
+            ctx = contexts[0] if contexts else None
+            if ctx and ctx.group_key == "access_points":
+                panel = await _children.fortiap_panel(db, ctx, can_view_clients=False, can_view_users=False)
+                for port in (panel.get("uplink") or {}).get("switch_ports") or []:
+                    sw = port.get("switch")
+                    if sw:
+                        neighbours.append({**sw, "direction": "upstream", "relation": "switch port",
+                                           "port": port.get("if_name") or (f"port{port['port_number']}" if port.get("port_number") else None),
+                                           "last_observed": port.get("last_seen")})
+            elif ctx and ctx.group_key == "fortiswitch":
+                panel = await _children.fortiswitch_panel(db, ctx)
+                for port in panel.get("ports") or []:
+                    for ap in port.get("connected_devices") or []:
+                        neighbours.append({**ap, "direction": "downstream", "relation": "on port",
+                                           "port": port["name"], "last_observed": port.get("measured_at")})
+        except Exception:
+            logging.getLogger(__name__).warning("controller neighbours failed for %s", device_id, exc_info=True)
+            await db.rollback()
+            unavailable.append("controller_neighbours")
 
     maps = None
     if await user_has_permission(db, user, "maps.view"):
@@ -2706,11 +2825,110 @@ async def get_device_related(
         "device_id": str(device_id),
         "parent": parent,
         "children": children,
+        "peers": peers,
+        "controller_neighbours": neighbours,
         "dependencies": dependencies,
         "maps": maps,
         "same_time": same_time,
         "unavailable": unavailable,
     }
+
+
+# ── Controller-managed children (migrate-182) ─────────────────────────────
+# A FortiSwitch/FortiAP promoted from its FortiGate is read through the
+# controller's template rows; nothing here polls the child.
+
+def _child_kind(ctx) -> str:
+    return {"fortiswitch": "switch", "access_points": "access_point"}.get(ctx.group_key, ctx.child.get("device_type") or "other")
+
+
+@router.get("/{device_id}/controller-readings", dependencies=[Depends(_device_in_scope)])
+async def get_controller_readings(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Controller-derived readings and panels of a managed child.
+
+    ``managed`` is false for a device that is not controller-managed. Readings
+    carry the controller, measurement time and staleness; ``availability`` is
+    the last 24 hours of controller-reported state with its coverage.
+    Wireless client identity needs udt.view (user names udt.view_users)."""
+    from app.core.security import user_has_permission
+
+    contexts = await _children.load_contexts(db, [str(device_id)])
+    if not contexts:
+        device = await device_service.get_device(db, device_id)
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+        return {"device_id": str(device_id), "managed": False}
+    ctx = contexts[0]
+    now = datetime.now(timezone.utc)
+    shaped = _children.readings(ctx, now)
+    kind = _child_kind(ctx)
+    unavailable: list[str] = []
+    panel = None
+    try:
+        if ctx.group_key == "fortiswitch":
+            panel = await _children.fortiswitch_panel(db, ctx, now)
+        elif ctx.group_key == "access_points":
+            panel = await _children.fortiap_panel(
+                db, ctx, now=now,
+                can_view_clients=await user_has_permission(db, user, "udt.view"),
+                can_view_users=await user_has_permission(db, user, "udt.view_users"))
+    except Exception:
+        logging.getLogger(__name__).warning("controller panel failed for %s", device_id, exc_info=True)
+        await db.rollback()
+        unavailable.append("panel")
+    availability = None
+    try:
+        availability = (await _controller_availability(db, now - timedelta(hours=24), now,
+                                                       only=str(device_id))).get(str(device_id))
+    except Exception:
+        await db.rollback()
+        unavailable.append("availability")
+    not_supported = list(_children.UNAVAILABLE.get(kind, []))
+    if kind == "access_point" and shaped["readings"]["uptime_s"] is None and not shaped["readings"]["offline"]:
+        not_supported.insert(0, {"metric": "boot_uptime", "label": "Uptime since boot",
+                                 "reason": "The controller did not report fgWcWtpSessionWtpUpTime for this AP.",
+                                 "requires": "FortiOS 6.4+ FORTINET-FORTIGATE-MIB fgWcWtpSessionTable"})
+    return {
+        "device_id": str(device_id),
+        "managed": True,
+        "kind": kind,
+        **shaped,
+        "availability": availability,
+        "panel": panel,
+        "not_supported": not_supported,
+        "unavailable": unavailable,
+        "generated_at": now.isoformat(),
+    }
+
+
+@router.get("/{device_id}/controller-history", dependencies=[Depends(_device_in_scope)])
+async def get_controller_history(
+    device_id: UUID,
+    hours: float = Query(default=24, gt=0, le=720),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """History of a managed child from its controller's own series: CPU,
+    memory, clients, boot uptime, and PoE draw and ports up (switch) or
+    traffic and per-radio clients (AP)."""
+    contexts = await _children.load_contexts(db, [str(device_id)])
+    if not contexts:
+        raise HTTPException(status_code=404, detail="Not a controller-managed device")
+    ctx = contexts[0]
+    panel = None
+    if ctx.group_key == "fortiswitch":
+        panel = await _children.fortiswitch_panel(db, ctx)
+    elif ctx.group_key == "access_points":
+        panel = await _children.fortiap_panel(db, ctx, can_view_clients=False, can_view_users=False)
+    try:
+        return await asyncio.to_thread(_children.history, ctx, panel, hours)
+    except Exception:
+        logging.getLogger(__name__).warning("controller history failed for %s", device_id, exc_info=True)
+        return {"hours": hours, "series": [], "unavailable": ["clickhouse"]}
 
 
 # ── Server-saved widget layouts (migrate-165) ─────────────────────────────

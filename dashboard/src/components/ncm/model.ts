@@ -101,7 +101,49 @@ export const CATEGORY_LABELS: Record<string, string> = {
   unreachable: 'Unreachable', timeout: 'Timed out', negotiation: 'SSH negotiation failed', privilege: 'Insufficient privileges',
   driver: 'Driver / detection', unsupported_type: 'Unsupported capture type', incomplete: 'Incomplete output',
   format: 'Unexpected output format', interrupted: 'Session interrupted', archive: 'Archive / storage', cancelled: 'Cancelled',
-  busy: 'Another capture running', unknown: 'Unknown',
+  busy: 'Another capture running', key: 'SSH key problem', unknown: 'Unknown',
+}
+
+/** Capture deadline bounds (server: ncm_collection.CAPTURE_TIMEOUT_MIN/MAX). */
+export const CAPTURE_TIMEOUT_MIN = 60
+export const CAPTURE_TIMEOUT_MAX = 3600
+
+/** Validation message for an optional capture deadline field ('' = inherit). */
+export function captureTimeoutError(value: string): string | undefined {
+  if (!value.trim()) return undefined
+  const n = Number(value)
+  return Number.isInteger(n) && n >= CAPTURE_TIMEOUT_MIN && n <= CAPTURE_TIMEOUT_MAX
+    ? undefined : `Enter ${CAPTURE_TIMEOUT_MIN}–${CAPTURE_TIMEOUT_MAX} seconds, or leave blank.`
+}
+
+export const DEADLINE_SOURCE: Record<string, string> = {
+  device: 'this device', profile: 'connection profile', driver: 'driver default', system: 'system default',
+}
+
+/** Live counters of a running capture (ncm_jobs.progress). */
+export type CaptureProgress = {
+  phase?: string; command?: string | null; platform?: string | null; config_type?: string
+  bytes?: number; lines?: number; pages?: number; elapsed_seconds?: number
+  capture_elapsed_seconds?: number | null; deadline_seconds?: number | null
+}
+
+export function formatBytes(n?: number | null): string {
+  if (n == null) return '—'
+  if (n >= 1048576) return `${(n / 1048576).toFixed(1)} MiB`
+  if (n >= 1024) return `${Math.round(n / 1024)} KiB`
+  return `${n} B`
+}
+
+/** One-line summary of a capture's progress, e.g. "Capturing show full-configuration: 1.2 MiB, 40,000 lines, 700 pages, 95 s of 900 s". */
+export function progressSummary(p?: CaptureProgress | null): string | null {
+  if (!p || !p.phase) return null
+  const phase = p.phase === 'connecting' ? 'Connecting' : p.phase === 'validating' ? 'Validating' : p.phase === 'finished' ? 'Finished' : 'Capturing'
+  if (p.phase === 'connecting') return `${phase}${p.elapsed_seconds != null ? ` (${Math.round(p.elapsed_seconds)} s)` : ''}`
+  const parts = [formatBytes(p.bytes), `${(p.lines || 0).toLocaleString()} lines`]
+  if (p.pages) parts.push(`${p.pages.toLocaleString()} pages`)
+  const elapsed = p.capture_elapsed_seconds ?? p.elapsed_seconds
+  if (elapsed != null) parts.push(p.deadline_seconds ? `${Math.round(elapsed)} s of ${p.deadline_seconds} s` : `${Math.round(elapsed)} s`)
+  return `${phase}${p.command ? ` ${p.command}` : ''}${p.config_type ? ` (${p.config_type})` : ''}: ${parts.join(', ')}`
 }
 
 export function categoryLabel(c?: string | null) {

@@ -3,7 +3,9 @@ on it, what it is drawn next to, and which devices changed status at the same
 time.
 
 * **Managed by / manages**: the controller that reports this device
-  (``managed_by_device_id``) and the devices it reports.
+  (``managed_by_device_id``) and the devices it reports; for a managed child,
+  its **peers** under the same controller and the controller-known
+  neighbours (the switch port an AP is seen on, the APs on a switch's ports).
 * **Dependencies**: configured ``topology_dependencies`` upstream and
   downstream (the ones alert suppression already uses).
 * **On maps**: the network maps that show this device, with the devices
@@ -117,9 +119,19 @@ def transitions_near(device_id: str, own: list[dict], window_s: int = SAME_TIME_
 
 
 def device_brief(row) -> dict[str, Any]:
-    return {"id": str(row["id"]), "hostname": row["hostname"],
-            "ip_address": str(row["ip_address"]) if row["ip_address"] else None,
-            "device_type": row["device_type"], "status": row["status"]}
+    out = {"id": str(row["id"]), "hostname": row["hostname"],
+           "ip_address": str(row["ip_address"]) if row["ip_address"] else None,
+           "device_type": row["device_type"], "status": row["status"]}
+    keys = row.keys() if hasattr(row, "keys") else ()
+    if "model" in keys:
+        out["model"] = row["model"]
+    if "last_seen" in keys or "managed_last_seen" in keys:
+        # A controller-managed child is observed through its controller.
+        managed = "poll_mode" in keys and row["poll_mode"] == "via_controller"
+        seen = row["managed_last_seen"] if managed and "managed_last_seen" in keys else row.get("last_seen")
+        out["last_observed"] = seen.isoformat() if hasattr(seen, "isoformat") else seen
+        out["observed_via"] = "controller" if managed else "direct"
+    return out
 
 
 def by_status_then_name(items: list[dict]) -> list[dict]:

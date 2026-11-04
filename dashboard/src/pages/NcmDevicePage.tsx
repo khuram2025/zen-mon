@@ -21,7 +21,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
 import { NcmReadiness, type ReadinessAction } from '@/components/ncm/NcmReadiness'
 import { Ago, EmptyState, Fact, Pagination, SectionError, StaleBanner, StateBadge, ToneIcon } from '@/components/ncm/ui'
-import { HELP, absoluteTime, categoryLabel, download, errorDetail, ncmError, scheduleSummary, stateOf } from '@/components/ncm/model'
+import { CAPTURE_TIMEOUT_MAX, CAPTURE_TIMEOUT_MIN, DEADLINE_SOURCE, HELP, absoluteTime, captureTimeoutError, categoryLabel, download, errorDetail, ncmError, scheduleSummary, stateOf } from '@/components/ncm/model'
 import { DayPicker, TimezoneSelect } from '@/components/ncm/BulkDialogs'
 import { DiffView } from '@/components/ncm/DiffView'
 import { DeviceCompliance } from '@/components/ncm/ComplianceWorkspace'
@@ -563,7 +563,13 @@ function toForm(d: any) {
     schedule_timezone: d.schedule_timezone || 'UTC', schedule_interval_hours: d.schedule_interval_hours || 24, schedule_time: d.schedule_time || '02:00',
     schedule_days: d.schedule_days || [1, 2, 3, 4, 5], keep_versions: d.keep_versions || 5, alert_on_change: d.alert_on_change !== false,
     event_backup: d.event_backup !== false,
+    capture_timeout_seconds: d.capture_timeout_seconds ? String(d.capture_timeout_seconds) : '',
   }
+}
+
+function selectedCredDeadline(list: any[] | undefined, id: string): { seconds: number; source: string } | null {
+  const seconds = (list || []).find((c) => c.id === id)?.capture_timeout_seconds
+  return seconds ? { seconds, source: 'profile' } : null
 }
 
 function SettingsTab({ device, stale, onDirty, editRequest, onRemoved }: { device: any; stale: boolean; onDirty: (d: boolean) => void; editRequest: number; onRemoved: () => void }) {
@@ -599,8 +605,15 @@ function SettingsTab({ device, stale, onDirty, editRequest, onRemoved }: { devic
   if (form.schedule_enabled && form.schedule_type === 'weekly' && !form.schedule_days.length) errors.days = 'Pick at least one day.'
   if (!(form.keep_versions >= 1 && form.keep_versions <= 100)) errors.keep = '1–100.'
   if (!(form.freshness_hours >= 1 && form.freshness_hours <= 720)) errors.freshness = '1–720 hours.'
+  const deadlineError = captureTimeoutError(form.capture_timeout_seconds)
+  if (deadlineError) errors.deadline = deadlineError
+  // Blank inherits: profile setting, then the driver default (FortiOS 900 s), then 240 s.
+  const inheritedDeadline = selectedCredDeadline(creds.data?.data, form.credential_id)
+    ?? (driver?.capture_timeout_default ? { seconds: driver.capture_timeout_default, source: 'driver' } : { seconds: 240, source: 'system' })
   const save = useMutation({
-    mutationFn: async () => (await api.put(`/devices/${device.device_id}/ncm`, form)).data,
+    mutationFn: async () => (await api.put(`/devices/${device.device_id}/ncm`, {
+      ...form, capture_timeout_seconds: form.capture_timeout_seconds.trim() ? Number(form.capture_timeout_seconds) : null,
+    })).data,
     onSuccess: async () => { toast.success('Backup settings saved'); await qc.invalidateQueries({ queryKey: ['ncm'] }); setEditing(false) },
     onError: (e: any) => toast.error('Settings not saved', ncmError(e)),
   })
@@ -629,6 +642,7 @@ function SettingsTab({ device, stale, onDirty, editRequest, onRemoved }: { devic
             <Fact label="Capture types">{(device.config_types || []).map((t: string) => TYPE_LABEL[t]).join(', ')}</Fact>
             <Fact label="Schedule">{scheduleSummary(device)}{device.next_due && device.ncm_enabled && <div className="text-xs text-muted">Next <Ago iso={device.next_due} /></div>}</Fact>
             <Fact label="Freshness limit">{device.freshness_hours} h</Fact>
+            <Fact label="Capture deadline">{device.capture_timeout_effective ? `${device.capture_timeout_effective} s` : '—'}{device.capture_timeout_source && <span className="text-xs text-muted"> ({DEADLINE_SOURCE[device.capture_timeout_source] || device.capture_timeout_source})</span>}</Fact>
             <Fact label="Retention">{device.keep_versions} changed versions (+ protected)</Fact>
             <Fact label="Change alerts">{device.alert_on_change ? 'On' : 'Off'} · event backups {device.event_backup ? 'on' : 'off'}</Fact>
             <Fact label="Coverage scope">{device.eligible_override === null ? 'Automatic' : device.eligible_override ? 'Included' : 'Excluded'} — {device.eligibility_reason}</Fact>
@@ -710,6 +724,11 @@ function SettingsTab({ device, stale, onDirty, editRequest, onRemoved }: { devic
             <FormField label="Keep changed versions" error={errors.keep} hint={HELP.retention}><Input type="number" min={1} max={100} value={form.keep_versions} onChange={(e) => set({ keep_versions: Number(e.target.value) })} /></FormField>
             <FormField label="Freshness limit (hours)" error={errors.freshness} hint={HELP.freshness}><Input type="number" min={1} max={720} value={form.freshness_hours} onChange={(e) => set({ freshness_hours: Number(e.target.value) })} /></FormField>
           </div>
+          <FormField label="Capture deadline (seconds)" error={errors.deadline}
+            hint={`Optional, ${CAPTURE_TIMEOUT_MIN}–${CAPTURE_TIMEOUT_MAX}. How long one configuration capture may run before it is rejected as incomplete. Blank uses ${inheritedDeadline.seconds} s (${DEADLINE_SOURCE[inheritedDeadline.source]}). Raise it for very large configurations.`}>
+            <Input type="number" inputMode="numeric" min={CAPTURE_TIMEOUT_MIN} max={CAPTURE_TIMEOUT_MAX} value={form.capture_timeout_seconds}
+              onChange={(e) => set({ capture_timeout_seconds: e.target.value })} placeholder={`${inheritedDeadline.seconds} (inherited)`} aria-label="Capture deadline (seconds)" />
+          </FormField>
         </fieldset>
         <fieldset className="space-y-3 rounded-md border border-border p-3 lg:col-span-2">
           <legend className="px-1 text-xs font-semibold uppercase tracking-wider text-muted">Alerts &amp; notifications</legend>

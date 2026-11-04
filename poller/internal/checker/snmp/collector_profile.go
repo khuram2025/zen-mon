@@ -2,6 +2,7 @@ package snmp
 
 import (
 	"context"
+	"encoding/hex"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,20 @@ import (
 // thousand F5 virtual servers) cannot blow up metric-key cardinality in
 // ClickHouse or stall the per-device poll budget.
 const maxTableRows = 500
+
+// maxTableRowsLimit bounds a group's own max_rows.
+const maxTableRowsLimit = 5000
+
+// tableRowLimit is the row cap for one table group.
+func tableRowLimit(gr *OidGroup) int {
+	if gr.Table == nil || gr.Table.MaxRows <= 0 {
+		return maxTableRows
+	}
+	if gr.Table.MaxRows > maxTableRowsLimit {
+		return maxTableRowsLimit
+	}
+	return gr.Table.MaxRows
+}
 
 // scalarGetChunk is how many OIDs we pack into one SNMP GET.
 const scalarGetChunk = 16
@@ -196,8 +211,8 @@ func (c *Collector) collectTemplateTable(
 		suffixes = append(suffixes, suf)
 	}
 	sort.Strings(suffixes)
-	if len(suffixes) > maxTableRows {
-		suffixes = suffixes[:maxTableRows]
+	if limit := tableRowLimit(gr); len(suffixes) > limit {
+		suffixes = suffixes[:limit]
 	}
 
 	var samples []MetricSample
@@ -218,6 +233,7 @@ func (c *Collector) collectTemplateTable(
 			if !keep {
 				continue
 			}
+			value.Index = suf
 			values = append(values, value)
 			if sample != nil {
 				samples = append(samples, *sample)
@@ -259,6 +275,10 @@ func (c *Collector) templateValue(
 		isStr = true
 	}
 
+	if isStr && m.Format == "hex" {
+		tv.ValueText = hexString(pdu)
+		return nil, tv, tv.ValueText != ""
+	}
 	if isStr {
 		text := strings.TrimSpace(asString(pdu))
 		if m.Type == "string" {
@@ -318,6 +338,17 @@ func (c *Collector) templateValue(
 		Unit: m.Unit, Timestamp: ts, PollerID: c.pollerID,
 	}
 	return sample, tv, true
+}
+
+// hexString renders an OctetString's raw bytes as lowercase hex.
+func hexString(pdu g.SnmpPDU) string {
+	switch x := pdu.Value.(type) {
+	case []byte:
+		return hex.EncodeToString(x)
+	case string:
+		return hex.EncodeToString([]byte(x))
+	}
+	return ""
 }
 
 // templateRate turns a monotonic counter into a per-second rate using

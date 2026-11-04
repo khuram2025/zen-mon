@@ -86,7 +86,9 @@ export function DeviceHeader({
   const identity = summary?.identity
   const typeLabel = device.device_type === 'other' && device.profile_name ? device.profile_name : titleCase(device.device_type || 'device')
   const eyebrow = [typeLabel, summary?.template?.name || device.vendor].filter(Boolean).join(' · ')
-  const cadence = [
+  // A controller-managed child is not pinged or polled by design: say where its readings come from instead.
+  const viaController = device.poll_mode === 'via_controller' && !!device.managed_by_device_id
+  const cadence = viaController ? 'Readings via its controller (not polled directly)' : [
     device.ping_enabled ? `ping every ${formatSpan(device.ping_interval)}` : 'ping off',
     device.snmp_enabled ? `SNMP v${device.snmp_version}${summary?.polling.snmp_interval_s ? ` every ${formatSpan(summary.polling.snmp_interval_s)}` : ''}` : 'SNMP off',
   ].join(' · ')

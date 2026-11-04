@@ -1,7 +1,16 @@
 /* GET /devices/{id}/related, and the wording the Related panel uses for it. Kept free of React so
  * scripts/test-device-page-phase3.mjs can check it. */
 
-export type RelatedDevice = { id: string; hostname: string; ip_address: string | null; device_type: string; status: string }
+export type RelatedDevice = {
+  id: string; hostname: string; ip_address: string | null; device_type: string; status: string
+  model?: string | null
+  /** Last observation: through its controller for a managed child, else its own last response. */
+  last_observed?: string | null
+  observed_via?: 'controller' | 'direct'
+}
+
+/** A controller-known neighbour: the switch port a FortiAP is seen on, or the APs on a switch's ports. */
+export type ControllerNeighbour = RelatedDevice & { direction: 'upstream' | 'downstream'; relation: string; port: string | null }
 
 export type SameTimeMatch = {
   at: string
@@ -16,6 +25,9 @@ export type DeviceRelated = {
   device_id: string
   parent: RelatedDevice | null
   children: { total: number; by_status: Record<string, number>; items: RelatedDevice[] }
+  /** Other devices under the same controller (managed children only; absent from older APIs). */
+  peers?: { total: number; by_status: Record<string, number>; items: RelatedDevice[] } | null
+  controller_neighbours?: ControllerNeighbour[]
   dependencies: {
     upstream: Array<RelatedDevice & { dependency_type: string; suppress_alerts: boolean; enabled: boolean }>
     downstream: Array<RelatedDevice & { dependency_type: string; suppress_alerts: boolean; enabled: boolean }>

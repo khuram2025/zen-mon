@@ -33,6 +33,12 @@ is wrong right now, and where do I go next.
 Old links keep working: `?tab=overview` opens Summary and `?tab=inventory`
 opens Configuration.
 
+A controller-managed child (FortiLink switch, FortiAP) has no Interfaces or
+Hardware tab; it gets **Ports & PoE** or **Radios & clients** instead, and its
+Summary shows controller-sourced CPU, memory, availability and boot uptime
+with the controller and measurement time (see
+`docs/controller-managed-children.md`).
+
 ## Status and health are separate
 
 The confirmed status is never changed by anything on this page (see

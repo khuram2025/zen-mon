@@ -342,7 +342,8 @@ const hostnames = (html) => [...html.matchAll(/<a ([^>]*)>([^<]*)<\/a>/g)]
   // RG-02 / UI-17: the identity columns are opt-in (Columns). On by default they push Status, CPU and Memory off the
   // first screen: measured in the mock harness, the OS version alone (90 px) moves Status past the edge of the table box at 1280 px.
   assert.deepEqual(heads.slice(1, 7), ['Device Name/IP', 'Type', 'Group / Location', 'Tags', 'Status', 'CPU'], `headers: ${heads}`)
-  assert.deepEqual(heads.slice(7), ['Memory', 'Uptime (24h)', 'Last Seen', 'Actions'], 'the existing columns are where they were')
+  // Availability (a percentage of the range) and uptime since boot (a duration) are separate, labelled columns.
+  assert.deepEqual(heads.slice(7), ['Memory', 'Availability (24h)', 'Uptime (since boot)', 'Last Seen', 'Actions'], 'the existing columns are where they were')
   assert(!['Vendor', 'Model', 'OS version'].some((c) => heads.includes(c)), 'none of the three is on by default')
   const rows = rowsOf(html)
   assert.equal(rows.length, DEVICES.length)
@@ -380,7 +381,7 @@ const hostnames = (html) => [...html.matchAll(/<a ([^>]*)>([^<]*)<\/a>/g)]
   const heads = headersOf(old)
   assert(['Vendor', 'Model', 'OS version'].every((c) => !heads.includes(c)), 'an old choice does not grow three columns under its owner')
   assert(!heads.includes('Group / Location') && !heads.includes('CPU'), 'and still hides what it hid')
-  assert.deepEqual(heads.slice(1), ['Device Name/IP', 'Type', 'Tags', 'Status', 'Uptime (24h)', 'Last Seen', 'Actions'], `old choice: ${heads}`)
+  assert.deepEqual(heads.slice(1), ['Device Name/IP', 'Type', 'Tags', 'Status', 'Availability (24h)', 'Uptime (since boot)', 'Last Seen', 'Actions'], `old choice: ${heads}`)
   const some = devicesPage('/devices', { stored: { visible: { vendor: false, model: true, os_version: false }, pageSize: 10 } })
   const sh = headersOf(some)
   assert(!sh.includes('Vendor') && sh.includes('Model') && !sh.includes('OS version'), 'each added column can be chosen on its own')
@@ -517,11 +518,11 @@ const hostnames = (html) => [...html.matchAll(/<a ([^>]*)>([^<]*)<\/a>/g)]
 // Empty and loading: the placeholder rows span every visible column.
 {
   const empty = devicesPage('/devices', { devices: [] })
-  assert(/colspan="11"/i.test(empty), 'the checkbox, name, type, group, tags, status, CPU, memory, uptime, last seen and actions')
+  assert(/colspan="12"/i.test(empty), 'the checkbox, name, type, group, tags, status, CPU, memory, availability, uptime since boot, last seen and actions')
   const all = devicesPage('/devices', { devices: [], stored: { visible: { vendor: true, model: true, os_version: true } } })
-  assert(/colspan="14"/i.test(all), 'the span follows the columns shown: all fourteen')
+  assert(/colspan="15"/i.test(all), 'the span follows the columns shown: all fifteen')
   const fewer = devicesPage('/devices', { devices: [], stored: { visible: { type: false, tags: false, vendor: false, model: false, os_version: false } } })
-  assert(/colspan="9"/i.test(fewer))
+  assert(/colspan="10"/i.test(fewer))
 }
 
 /* ═══ (c) the device detail Inventory & Configuration card ═════════════════════════════════ */

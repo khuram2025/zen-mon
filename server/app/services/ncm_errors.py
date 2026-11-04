@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from paramiko import AuthenticationException, SSHException
 from paramiko.ssh_exception import NoValidConnectionsError
 from netmiko.exceptions import NetmikoTimeoutException, ReadTimeout
-from app.services.ncm_collection import CaptureError
+from app.services.ncm_collection import CaptureError, KeyLoadError, KeyRejectedError
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,7 @@ GUIDANCE = {
     'not_enrolled': 'Save an enabled enrollment with a connection profile.',
     'credentials': 'Re-save the connection profile secret; confirm the appliance archive key has not changed.',
     'authentication': 'Check the profile username/password or key, the account lockout state and source-address restrictions on the device.',
+    'key': 'Re-save the connection profile with the complete OpenSSH or PEM private key (Ed25519, ECDSA or RSA) and, if it is encrypted, its passphrase.',
     'unreachable': 'Verify the management IP, routing, ACLs/firewall rules and that SSH is enabled on the device port.',
     'timeout': 'Verify reachability and device load; slow devices may need a less busy maintenance window.',
     'negotiation': 'The device and collector share no SSH algorithms or the handshake was refused; check SSH server settings.',
@@ -45,6 +46,7 @@ GUIDANCE = {
 STAGES = {
     'prerequisites': 'Prerequisite check',
     'credentials': 'Credential decryption',
+    'key': 'SSH key loading',
     'connect': 'SSH connection',
     'collection': 'Configuration collection',
     'validation': 'Output validation',
@@ -63,6 +65,11 @@ def exception_chain(exc):
 
 def classify(exc, stage='collection') -> Failure:
     if isinstance(exc, PrerequisiteError):
+        return Failure(exc.category, str(exc), False)
+    # Key loading (bad format, passphrase required/wrong, unsupported type)
+    # and key rejection by the device are permanent and named specifically,
+    # whatever the stage, instead of a generic credential/collection failure.
+    if isinstance(exc, (KeyLoadError, KeyRejectedError)):
         return Failure(exc.category, str(exc), False)
     if stage == 'credentials':
         return Failure('credentials', 'Credentials unavailable: verify the saved profile and appliance encryption key.', False)
