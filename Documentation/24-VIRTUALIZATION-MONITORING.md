@@ -62,7 +62,7 @@ The implementation follows Microsoft's [JEA role-capability model](https://learn
 - If using `https://10.23.2.31:9440`, the Prism certificate must include **IP SAN 10.23.2.31**. Otherwise use the certificate's DNS name, resolving to that address, and keep the same scoped firewall destination.
 - Expired, untrusted and hostname-mismatched certificates fail. Do not work around the failure by disabling TLS verification.
 - Credentials are encrypted using ZenPlus's AES-GCM integration encryption key (`SNMP_ENC_KEY`). The key must already be configured and backed up through the appliance's normal protected configuration backup. API responses and audit records do not return the credential.
-- Administrators create, test, edit, pause and delete connectors. Authenticated readers see only connectors allowed by existing visibility tags. Editing a credential requires re-entry and a new connection test.
+- Administrators create, test, edit, pause and delete connectors. Readers require `servers.view` and see only connectors allowed by existing user/role visibility tags. Editing a credential requires re-entry and a new connection test.
 - Tests return a signed, user-bound receipt valid for ten minutes. Saving different connection details or an expired test is rejected by the backend.
 - To change the endpoint or platform, create a new connector so resource history remains attached to the correct provider identity. Editing credentials clears the current snapshot until the new account completes discovery.
 

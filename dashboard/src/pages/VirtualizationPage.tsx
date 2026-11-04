@@ -22,6 +22,7 @@ import { useCan } from '@/stores/auth'
 import { Button } from '@/components/ui/Button'
 import { Link } from 'react-router-dom'
 import { chartFont, seriesVar } from '@/lib/chartTheme'
+import { regionalDate } from '@/lib/regionalTime'
 import { Input } from '@/components/ui/Input'
 import { Card } from '@/components/ui/Card'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -376,7 +377,7 @@ export function VirtualizationPage() {
                     <p className="text-xs text-muted">
                       Last successful collection:{' '}
                       {current.last_success_at
-                        ? new Date(current.last_success_at).toLocaleString()
+                        ? regionalDate(new Date(current.last_success_at), 'datetime')
                         : 'Never'}
                     </p>
                   </div>
@@ -660,7 +661,7 @@ export function VirtualizationPage() {
                             tick={{ fontSize: chartFont(11) }}
                             dataKey="time"
                             tickFormatter={(t) =>
-                              new Date(t).toLocaleTimeString([], {
+                              regionalDate(new Date(t), 'time', [], {
                                 hour: '2-digit',
                                 minute: '2-digit',
                               })
@@ -668,7 +669,7 @@ export function VirtualizationPage() {
                           />
                           <YAxis tick={{ fontSize: chartFont(11) }} />
                           <Tooltip
-                            labelFormatter={(t) => new Date(t).toLocaleString()}
+                            labelFormatter={(t) => regionalDate(new Date(t), 'datetime')}
                           />
                           <Line
                             type="monotone"
