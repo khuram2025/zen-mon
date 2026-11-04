@@ -96,11 +96,12 @@ def world(pg_db_module):
                " snmp_poll_interval, device_type, vendor, model, profile_id, promote_managed)"
                " VALUES ($1, 'SNIH-FGT201F', '10.21.0.1'::inet, '[\"snih\"]'::jsonb, 'up', true, 60, true, 60,"
                " 'firewall', 'Fortinet', 'FortiGate-201F', $2, true)", FGT, profile)
+    measured = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=40)   # fresh when the module's tests start
     for group, inst, oid, metric, num, txt, label in _rows():
         db.execute("INSERT INTO device_template_values (device_id, group_key, metric_key, instance, series_key, label,"
                    " value_num, value_text, updated_at, instance_oid)"
                    " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-                   FGT, group, metric, inst, f"tpl_{metric}_{inst}", label, num, txt, NOW - timedelta(seconds=40), oid)
+                   FGT, group, metric, inst, f"tpl_{metric}_{inst}", label, num, txt, measured, oid)
     return db
 
 
@@ -264,20 +265,21 @@ def test_inventory_list_marks_controller_readings_and_availability(promoted, wor
     from app.core import database
     from app.services import controller_children
     sw, ap = str(promoted["SNIH-FSW-ASW01"]), str(promoted["AP01"])
-    recent = (NOW - timedelta(seconds=40)).replace(tzinfo=None)
+    recent = (datetime.now(timezone.utc) - timedelta(seconds=40)).replace(tzinfo=None)   # fresh when the request runs
     metric_rows = [(sw, "cpu", 23.0, recent), (sw, "memory", 61.0, recent), (ap, "uptime", 266400.0, recent)]
     fake = SimpleNamespace(query=lambda sql, parameters=None: SimpleNamespace(
         result_rows=metric_rows if "INTERVAL 15 MINUTE" in sql else []))
     monkeypatch.setattr(database, "get_clickhouse_client", lambda: fake)
 
-    since = NOW - timedelta(hours=24)
-
     def status_rows(sql, params):
+        # Buckets follow the window the endpoint asked for (not module import
+        # time), so the test does not depend on crossing a 5-minute boundary.
+        since = params["since"].replace(tzinfo=timezone.utc)
         start = int(since.timestamp()) // 300 * 300
         rows = []
-        for i in range(288):
+        for i in range(289):
             b = start + i * 300
-            rows.append((f"tpl_fgt_sw_status_x5a000001", b, [1.0] if i else [0.0]))   # one 5-min bucket down
+            rows.append((f"tpl_fgt_sw_status_x5a000001", b, [0.0] if i == 150 else [1.0]))  # one 5-min bucket down
             if i % 2 == 0:
                 rows.append((f"tpl_fgt_ap_status_x6b000001", b, [2.0]))          # only half the window observed
         return rows
@@ -289,7 +291,9 @@ def test_inventory_list_marks_controller_readings_and_availability(promoted, wor
     assert metrics[sw]["cpu"] == 23 and metrics[sw]["_source"] == "controller"
     assert metrics[sw]["_controller_id"] == str(FGT) and metrics[sw]["_stale"] is False
     assert metrics[ap]["uptime"] == 266400.0
-    assert stats["controller"][sw]["sufficient"] is True and stats["devices"][sw] == round(287 / 288 * 100, 2)
+    sw_stats = stats["controller"][sw]
+    assert sw_stats["sufficient"] is True and stats["devices"][sw] == sw_stats["pct"]
+    assert sw_stats["pct"] == round((sw_stats["samples"] - 1) / sw_stats["samples"] * 100, 2)   # exactly one down sample
     # Half the window observed: insufficient history, no percentage invented.
     assert stats["controller"][ap]["sufficient"] is False and ap not in stats["devices"]
     assert 45 <= stats["controller"][ap]["coverage_pct"] <= 55
