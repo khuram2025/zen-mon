@@ -16,6 +16,7 @@ from app.api.v1.probe_trust import router as probe_trust_router
 from app.api.v1.ssh_terminal import router as ssh_terminal_router
 from app.api.v1 import management_access
 from app.api.v1 import network_events
+from app.api.v1 import virtualization
 from app.api.v1 import notification_grouping as notification_grouping_api
 from app.api.v1 import escalation_policies as escalation_policies_api
 from app.api.v1 import oncall as oncall_api
@@ -127,6 +128,7 @@ def create_app() -> FastAPI:
     app.include_router(alert_engine.router, prefix="/api/v1")
     app.include_router(traps.router, prefix="/api/v1", dependencies=[policy("events")])
     app.include_router(network_events.router, prefix="/api/v1", dependencies=[policy("events")])
+    app.include_router(virtualization.router, prefix="/api/v1")
     app.include_router(ncm.router, prefix="/api/v1", dependencies=[policy("ncm")])
     app.include_router(ncm.device_router, prefix="/api/v1", dependencies=[policy("ncm")])
     # Fixed /service-checks/{report,bulk,import} paths must precede /{check_id}.
@@ -212,6 +214,8 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_background_tasks():
+        from app.services.virtualization_service import polling_loop
+        app.state.virtualization_poller = asyncio.create_task(polling_loop())
         from app.services import controller_recovery
         # Persist the interruption before any absence-based evaluator starts.
         await controller_recovery.startup(ready=False)
@@ -336,6 +340,10 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
+        task = getattr(app.state, "virtualization_poller", None)
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         for attr in ("controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
             task = getattr(app.state, attr, None)
             if task:

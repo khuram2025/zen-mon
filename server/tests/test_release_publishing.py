@@ -20,6 +20,19 @@ def _load_builder():
     return module
 
 
+def test_canary_can_require_manual_promotion(monkeypatch):
+    builder = _load_builder()
+    sent = []
+    monkeypatch.setattr(builder, "get_admin_token", lambda: "fixture")
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(
+        get=lambda *a, **k: _Response(200, [{"id": "release-1", "version": "1.25.0"}]),
+        post=lambda *a, **k: sent.append(k["json"]) or _Response(201, {}),
+    ))
+    builder.create_rollout("1.25.0", "canary", "only-dev-221", 100, auto_promote=False)
+    assert sent[0]["auto_promote"] is False
+    assert sent[0]["target_group"] == "only-dev-221"
+
+
 def _package(path: Path, *, signed: bool = True, min_version: str | None = None) -> None:
     with tarfile.open(path, "w:gz") as archive:
         manifest = json.dumps({

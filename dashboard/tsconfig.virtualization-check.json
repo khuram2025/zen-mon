@@ -1,0 +1,4 @@
+{
+  "include": ["src/pages/VirtualizationPage.tsx"],
+  "extends": "./tsconfig.app.json"
+}
