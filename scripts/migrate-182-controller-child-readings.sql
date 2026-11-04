@@ -1,4 +1,4 @@
--- migrate-171: Controller-derived readings for managed FortiSwitches/FortiAPs
+-- migrate-182: Controller-derived readings for managed FortiSwitches/FortiAPs
 --
 -- Children promoted from a FortiGate (migrate-069) had blank CPU, memory and
 -- uptime because nothing carried the controller's per-switch/per-AP readings

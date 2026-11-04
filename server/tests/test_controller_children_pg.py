@@ -3,7 +3,7 @@ each child controller-derived readings on the inventory and detail pages
 (SNIH, 1.24.48: blank CPU/memory, no uptime, "Uptime (24h)" mixing a
 duration with a percentage).
 
-Real schema on a disposable Postgres with every migration (migrate-171
+Real schema on a disposable Postgres with every migration (migrate-182
 included) and the builtin Fortinet FortiGate template; ClickHouse is faked.
 Nothing here reaches an installed database or a real device."""
 

@@ -182,7 +182,7 @@ class OidGroupChildren(BaseModel):
     os_version_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
     serial_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
     ip_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
-    # Controller-derived readings shown on the child (migrate-171).
+    # Controller-derived readings shown on the child (migrate-182).
     mac_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
     cpu_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
     memory_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)

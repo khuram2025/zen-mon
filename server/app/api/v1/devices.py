@@ -2834,7 +2834,7 @@ async def get_device_related(
     }
 
 
-# ── Controller-managed children (migrate-171) ─────────────────────────────
+# ── Controller-managed children (migrate-182) ─────────────────────────────
 # A FortiSwitch/FortiAP promoted from its FortiGate is read through the
 # controller's template rows; nothing here polls the child.
 

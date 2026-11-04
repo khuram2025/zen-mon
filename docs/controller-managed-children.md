@@ -40,7 +40,7 @@ Rules:
   `udt.view`; user names need `udt.view_users`. Counts, SSIDs and signal
   summaries do not.
 
-## Template data model (migrate-171)
+## Template data model (migrate-182)
 
 * `device_template_values.instance_oid` keeps the raw OID index suffix next to
   the hashed `instance` token, so a radio row `{vdom, wtpId, radioId}` can be
