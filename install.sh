@@ -1080,7 +1080,37 @@ NGINXEOF
         systemctl restart zenplus-netflow-collector
     fi
     systemctl restart nginx
+    install_ncm_units || warn "NCCM units not installed/enabled — configuration backups will not run (verified below)"
     log "All services created and started"
+}
+
+# NCCM (configuration backup) units. The OTA manifest installs the same files
+# (scripts/build-release.py NCM_UNITS); a fresh install must too, or the NCCM
+# page reports the worker and schedule timer inactive and no backup ever runs.
+# The *.service units behind the timers are oneshot runs: installed, never
+# enabled. verify_installation checks the result with verify-ncm-units.py.
+NCM_UNIT_FILES=(zenplus-ncm-worker.service zenplus-ncm-backup.service zenplus-ncm-backup.timer
+                zenplus-ncm-delivery.service zenplus-ncm-delivery.timer)
+NCM_ENABLED_UNITS=(zenplus-ncm-worker.service zenplus-ncm-backup.timer zenplus-ncm-delivery.timer)
+install_ncm_units() {
+    local unit missing=0
+    for unit in "${NCM_UNIT_FILES[@]}"; do
+        if [[ -f "$ZENPLUS_HOME/scripts/systemd/$unit" ]]; then
+            install -m 0644 "$ZENPLUS_HOME/scripts/systemd/$unit" "/etc/systemd/system/$unit"
+        else
+            echo "[fail] NCCM unit scripts/systemd/$unit missing in the release — config backups will not run"
+            missing=$((missing + 1))
+        fi
+    done
+    (( missing == 0 )) || return 1
+    systemctl daemon-reload
+    if ! systemctl enable "${NCM_ENABLED_UNITS[@]}"; then
+        echo "[fail] Could not enable the NCCM worker and timers: ${NCM_ENABLED_UNITS[*]}"
+        return 1
+    fi
+    systemctl restart "${NCM_ENABLED_UNITS[@]}" \
+        || warn "NCCM worker/timers did not start — journalctl -u zenplus-ncm-worker -n 100"
+    log "NCCM units installed and enabled: ${NCM_ENABLED_UNITS[*]}"
 }
 
 # Define the query-string-free access log format in nginx.conf's http block.
@@ -1340,6 +1370,15 @@ verify_installation() {
             warn "service not active: $unit"
         fi
     done
+
+    # NCCM worker + schedule/delivery timers: installed, enabled and active.
+    # Prints each unit's state and names any not-installed/disabled/inactive one.
+    if python3 "$ZENPLUS_HOME/scripts/verify-ncm-units.py" --wait 30; then
+        log "NCCM worker and timers installed, enabled and active"
+    else
+        echo "[fail] NCCM backup units are not installed, enabled and active (see the lines above)"
+        failures=$((failures + 1))
+    fi
 
     if docker ps --filter name=zenplus-clickhouse --format '{{.Status}}' 2>/dev/null | grep -qi up; then
         log "ClickHouse container up"

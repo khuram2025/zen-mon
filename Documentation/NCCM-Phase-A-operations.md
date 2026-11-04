@@ -10,7 +10,9 @@ Current fleet disposition before onboarding: 37 inventory devices; 14 automatica
 
 ## 2. Create a restricted connection profile
 
-Use NCCM → Connection Profiles. Select the vendor/OS in **access guidance**, read the brief and expand commands/completeness limits. This is a help selector; the actual driver is selected in each device's settings. Profiles store SSH username/password and optionally an enable secret. They do not currently implement SSH-key authentication or API-token collection.
+Use NCCM → Connection Profiles. Select the vendor/OS in **access guidance**, read the brief and expand commands/completeness limits. This is a help selector; the actual driver is selected in each device's settings. Profiles store an SSH username with a password or a private key (OpenSSH or PEM: Ed25519, ECDSA P-256/384/521 or RSA, optionally passphrase-protected), and optionally an enable secret. The key is decrypted in memory and handed to the SSH client; it is never written to disk. A key that cannot be loaded (bad format, passphrase missing or wrong, unsupported type such as DSA or a PuTTY `.ppk`) or that the device rejects is reported as such on the job and device page. API-token collection is not implemented.
+
+**Capture deadline.** One configuration capture may run for at most the capture deadline (60–3600 s). Resolution: the device setting, then the connection profile, then the driver default (FortiOS 900 s, which also allows 60 s of silence between output), then the system default of 240 s. Large FortiGate configurations are paged (`--More--`) and the pager is walked; `config system console` is never changed. While a job runs, the job list shows received bytes, lines, pages, elapsed time against the deadline and the current command. A capture that ends early or misses its closing `end` markers is still rejected and never replaces the last validated version.
 
 Use a dedicated account, restrict management source addresses to the actual collector egress, and retain device-side authentication/command audit records. Avoid shared human administrator accounts. Select the driver explicitly to limit autodetection probes. Session preparation commands can vary with the installed Netmiko version; confirm the allowlist on the exact model/OS in the pilot.
 
@@ -44,7 +46,10 @@ Read-only service diagnostics:
 ```sh
 sudo systemctl is-active zenplus-api zenplus-ncm-worker.service zenplus-ncm-backup.timer zenplus-ncm-delivery.timer
 sudo systemctl list-timers zenplus-ncm-backup.timer zenplus-ncm-delivery.timer
+sudo /opt/zenplus/scripts/verify-ncm-units.py --wait 0
 ```
+
+The installer and every OTA update install the NCCM units from `scripts/systemd/`, enable and start the worker and both timers, and run `verify-ncm-units.py`, which names any unit that is not installed, not enabled or not active (a failed OTA check rolls the update back). The NCCM page distinguishes "Not installed" (re-run the installer or apply the current update) from "Inactive" (start the unit).
 
 Use the device's safe last-error and job history first. Authentication, timeout/reachability, privilege/format rejection, credential decryption and archive failures have distinct actions. Avoid posting raw debug logs/configurations or environment output.
 
