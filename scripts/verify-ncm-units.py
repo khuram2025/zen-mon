@@ -77,7 +77,8 @@ def problems_for(unit: str, state: dict) -> list[str]:
     return out
 
 
-def check(wait: float = 30.0, *, poll=unit_state, sleep=time.sleep, clock=time.monotonic) -> tuple[dict, list[str]]:
+def check(wait: float = 30.0, *, poll=None, sleep=time.sleep, clock=time.monotonic) -> tuple[dict, list[str]]:
+    poll = poll or unit_state      # looked up at call time (tests replace unit_state)
     deadline = clock() + max(0.0, wait)
     while True:
         states = {unit: poll(unit) for unit in NCM_UNITS}
