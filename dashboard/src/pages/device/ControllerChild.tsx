@@ -5,7 +5,7 @@ import type { DeviceWidget } from '@/components/devices/DeviceWidgetGrid'
 import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { Panel, SERIES_COLORS, Sparkline, TimeSeriesPanel } from './charts'
+import { Legend, Panel, SERIES_COLORS, Sparkline, TimeSeriesPanel } from './charts'
 import {
   availabilityText, formatWatts, historyPoints, isApPanel, isSwitchPanel, portList, signalTone, sourceText,
   type ApPanel, type ControllerHistory, type ControllerReadings, type NotSupported, type SwitchPanel,
@@ -146,21 +146,27 @@ function HistoryCharts({ data, history, range }: { data: ControllerReadings; his
   return (
     <Panel title="History" meta={<>From {data.controller?.hostname || 'the controller'}'s own series · {range.label}</>}>
       <div className="space-y-4">
+        <Legend items={[{ name: 'CPU', color: SERIES_COLORS.primary }, { name: 'Memory', color: SERIES_COLORS.accent }]} />
         <TimeSeriesPanel {...common} domain={PERCENT_DOMAIN} format={(v) => `${v.toFixed(1)}%`} axisFormat={(v) => `${Math.round(v)}%`}
           series={[{ key: 'cpu', name: 'CPU', color: SERIES_COLORS.primary, points: historyPoints(history, 'cpu') },
             { key: 'memory', name: 'Memory', color: SERIES_COLORS.accent, points: historyPoints(history, 'memory') }]} />
         {isAp ? <>
+          <Legend items={[{ name: 'Traffic in', color: SERIES_COLORS.info }, { name: 'Traffic out', color: SERIES_COLORS.accent }]} />
           <TimeSeriesPanel {...common} domain="auto" format={formatBitRate} axisFormat={formatBitRateAxis}
             series={[{ key: 'rx', name: 'Traffic in', color: SERIES_COLORS.info, points: historyPoints(history, 'rx_bps') },
               { key: 'tx', name: 'Traffic out', color: SERIES_COLORS.accent, points: historyPoints(history, 'tx_bps') }]} emptyText="No traffic samples" />
+          <Legend items={radios.length ? radios.map((r, i) => ({ name: `Radio ${r.radio_id} clients`, color: colors[i % colors.length] }))
+            : [{ name: 'Clients', color: SERIES_COLORS.primary }]} />
           <TimeSeriesPanel {...common} domain="auto" format={(v) => `${Math.round(v)} clients`} axisFormat={(v) => `${Math.round(v)}`}
             series={radios.length ? radios.map((s, i) => ({ key: s.key, name: `Radio ${s.radio_id} clients`, color: colors[i % colors.length],
               points: s.points.map((p) => ({ ts: Date.parse(p.ts), value: p.value })) }))
               : [{ key: 'clients', name: 'Clients', color: SERIES_COLORS.primary, points: historyPoints(history, 'clients') }]}
             emptyText="No client samples" />
         </> : <>
+          <Legend items={[{ name: 'PoE drawn', color: SERIES_COLORS.warning }]} />
           <TimeSeriesPanel {...common} domain="auto" format={(v) => formatWatts(v)} axisFormat={(v) => `${Math.round(v)} W`}
             series={[{ key: 'poe', name: 'PoE drawn', color: SERIES_COLORS.warning, points: historyPoints(history, 'poe_draw_w') }]} emptyText="No PoE samples" />
+          <Legend items={[{ name: 'Ports up', color: SERIES_COLORS.success }]} />
           <TimeSeriesPanel {...common} domain="auto" format={(v) => `${Math.round(v)} ports up`} axisFormat={(v) => `${Math.round(v)}`}
             series={[{ key: 'ports', name: 'Ports up', color: SERIES_COLORS.success, points: historyPoints(history, 'ports_up') }]} emptyText="No port samples" />
         </>}

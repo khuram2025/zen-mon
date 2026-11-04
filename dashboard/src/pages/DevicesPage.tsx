@@ -2745,10 +2745,10 @@ function TimeRangePicker({
     <div
       className="inline-flex h-10 items-center gap-1 rounded-md border border-border bg-surface px-1"
       role="tablist"
-      aria-label="Uptime time range"
+      aria-label="Availability time range"
     >
       <span className="px-1.5 text-xs font-medium uppercase tracking-wider text-muted">
-        Uptime
+        Availability
       </span>
       {presets.map((p) => {
         const active = value === p.key

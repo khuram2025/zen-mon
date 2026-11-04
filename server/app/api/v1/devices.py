@@ -364,7 +364,7 @@ async def dashboard_uptime_stats(
                 visible=visible_ids if scope is not None else None)
         except Exception:
             logging.getLogger(__name__).warning("controller-reported availability failed", exc_info=True)
-            await db.rollback()
+            await _quiet_rollback(db)
         for did, res in controller_map.items():
             if did not in uptime_map and res["sufficient"]:
                 uptime_map[did] = res["pct"]
@@ -382,6 +382,14 @@ async def dashboard_uptime_stats(
         # coverage_pct, sufficient, samples, basis = "controller".
         "controller": controller_map,
     }
+
+
+async def _quiet_rollback(db) -> None:
+    """Clear a failed optional query without masking the answer already built."""
+    try:
+        await db.rollback()
+    except Exception:
+        pass
 
 
 async def _controller_availability(db: AsyncSession, since: datetime, until: datetime,
@@ -541,7 +549,7 @@ async def current_metrics(
             "SELECT id::text, managed_by_device_id::text FROM devices WHERE poll_mode = 'via_controller'"
         ))).all()
     except Exception:
-        await db.rollback()
+        await _quiet_rollback(db)
         kids = []
     for did, ctrl in kids:
         bucket = out.get(did)
