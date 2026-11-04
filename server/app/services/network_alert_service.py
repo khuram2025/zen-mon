@@ -281,12 +281,19 @@ def _uptime_resets() -> set[str]:
 # ─── Postgres fetchers ──────────────────────────────────────────────────────
 
 async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
-    """{device_id: {hostname, ip, device_type, location, group_id, tags}} for SNMP devices."""
+    """{device_id: {hostname, ip, device_type, location, group_id, tags}} for SNMP devices.
+
+    Controller-managed children (poll_mode via_controller) are included: the
+    managed-device sync writes their controller-reported cpu/memory/uptime to
+    their own series, so a rule's breach belongs to the AP or switch, not to
+    its FortiGate. Their cadence is the controller's SNMP interval."""
     rows = (await db.execute(text(
-        "SELECT d.id, d.hostname, d.device_type, d.location, d.group_id, d.tags, d.snmp_poll_interval, p.oid_groups, "
-        "host(d.ip_address) "
+        "SELECT d.id, d.hostname, d.device_type, d.location, d.group_id, d.tags, "
+        "COALESCE(c.snmp_poll_interval, d.snmp_poll_interval), p.oid_groups, "
+        "COALESCE(host(d.ip_address), host(d.managed_ip)) "
         "FROM devices d LEFT JOIN device_profiles p ON p.id = d.profile_id "
-        "WHERE d.snmp_enabled = true AND d.status <> 'maintenance' ORDER BY d.id"
+        "LEFT JOIN devices c ON c.id = d.managed_by_device_id AND d.poll_mode = 'via_controller' "
+        "WHERE (d.snmp_enabled = true OR d.poll_mode = 'via_controller') AND d.status <> 'maintenance' ORDER BY d.id"
     ))).all()
     return {
         str(r[0]): {

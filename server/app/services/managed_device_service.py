@@ -40,6 +40,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.services import controller_children as _cc
 
 logger = logging.getLogger("zenplus.managed_devices")
 
@@ -81,6 +82,19 @@ def _clean(raw: str | None, cap: int) -> str | None:
     return out[:cap] if out else None
 
 
+def _index_serial(spec: dict, instance_oid: str | None) -> str | None:
+    """Serial decoded from the row index (FortiAP: {vdom, wtpId}) when the
+    pack declares ``serial_from_index``; the index column itself is not walkable."""
+    rule = spec.get("serial_from_index")
+    if not isinstance(rule, dict) or not instance_oid:
+        return None
+    parts = _cc.decode_index(instance_oid, rule.get("layout") or [])
+    part = rule.get("part")
+    if not parts or not isinstance(part, int) or part >= len(parts) or not isinstance(parts[part], str):
+        return None
+    return _clean(parts[part], 128)
+
+
 def _child_specs(oid_groups) -> dict[str, dict]:
     """{group_key: children-spec} for table groups that declare children."""
     if isinstance(oid_groups, str):
@@ -96,7 +110,7 @@ async def _controller_report(db: AsyncSession, controller_id, specs: dict[str, d
     """Translate the controller's latest template rows into child records."""
     vals = (await db.execute(
         text("""
-            SELECT group_key, metric_key, instance, label, value_num, value_text, updated_at
+            SELECT group_key, metric_key, instance, label, value_num, value_text, updated_at, instance_oid
             FROM device_template_values
             WHERE device_id = :cid AND group_key = ANY(:keys)
         """),
@@ -106,9 +120,11 @@ async def _controller_report(db: AsyncSession, controller_id, specs: dict[str, d
     rows: dict[tuple[str, str], dict] = {}
     for v in vals:
         key = (v["group_key"], v["instance"])
-        row = rows.setdefault(key, {"label": "", "cells": {}, "seen_at": v["updated_at"]})
+        row = rows.setdefault(key, {"label": "", "cells": {}, "seen_at": v["updated_at"], "oid": None})
         if v["label"]:
             row["label"] = v["label"]
+        if v["instance_oid"]:
+            row["oid"] = v["instance_oid"]
         if v["updated_at"] and v["updated_at"] > row["seen_at"]:
             row["seen_at"] = v["updated_at"]
         row["cells"][v["metric_key"]] = (v["value_num"], v["value_text"])
@@ -137,8 +153,8 @@ async def _controller_report(db: AsyncSession, controller_id, specs: dict[str, d
             "status": status,
             "model": _clean(cell_text(spec.get("model_key")), 255),
             "os_version": _clean(cell_text(spec.get("os_version_key")), 255),
-            "serial": _clean(cell_text(spec.get("serial_key")), 128),
-            "managed_ip": _clean_ip(cell_text(spec.get("ip_key"))),
+            "serial": _clean(cell_text(spec.get("serial_key")), 128) or _index_serial(spec, row["oid"]),
+            "managed_ip": _cc.hex_to_ip(cell_text(spec.get("ip_key"))) or _clean_ip(cell_text(spec.get("ip_key"))),
             "seen_at": row["seen_at"],
         })
     return report
@@ -393,6 +409,50 @@ async def sync_controller_now(controller_id: UUID) -> dict:
     return summary
 
 
+# Newest reading already written per child (seeded from ClickHouse each pass,
+# so another worker's writes or a restart never duplicate a sample).
+_FANOUT_LAST: dict[str, datetime] = {}
+
+
+def _latest_fanout(child_ids: list[str]) -> dict[str, datetime]:
+    from app.core.database import get_clickhouse_client
+    rows = get_clickhouse_client().query("""
+        SELECT toString(device_id), max(timestamp) FROM zenplus.snmp_metrics
+        WHERE timestamp >= now() - INTERVAL 2 HOUR AND metric_key IN ('cpu', 'memory', 'uptime')
+          AND startsWith(poller_id, %(prefix)s) AND toString(device_id) IN %(ids)s
+        GROUP BY device_id
+    """, parameters={"prefix": _cc.FANOUT_POLLER_PREFIX, "ids": child_ids}).result_rows
+    return {str(r[0]): _cc._aware(r[1]) for r in rows}
+
+
+def _insert_fanout(rows: list[list]) -> None:
+    from app.core.database import get_clickhouse_client
+    get_clickhouse_client().insert("snmp_metrics", rows, column_names=[
+        "device_id", "metric_key", "value", "unit", "timestamp", "poller_id"])
+
+
+async def fanout_child_readings() -> int:
+    """Write fresh controller readings (cpu, memory, boot uptime) to each
+    child's own snmp_metrics series, so charts, reports and metric alert
+    rules are tied to the child. Stale or offline readings are never written:
+    a controller outage leaves a gap, not a copy of the last value."""
+    async with AsyncSessionLocal() as db:
+        contexts = await _cc.load_contexts(db)
+    if not contexts:
+        return 0
+    ids = [str(c.child["id"]) for c in contexts]
+    try:
+        for cid, ts in (await asyncio.to_thread(_latest_fanout, ids)).items():
+            if ts and (cid not in _FANOUT_LAST or ts > _FANOUT_LAST[cid]):
+                _FANOUT_LAST[cid] = ts
+    except Exception:
+        logger.warning("managed-device fan-out: could not read written samples; using this worker's record")
+    rows = _cc.fanout_rows(contexts, _FANOUT_LAST)
+    if rows:
+        await asyncio.to_thread(_insert_fanout, rows)
+    return len(rows)
+
+
 async def managed_sync_loop() -> None:
     await asyncio.sleep(25)
     logger.info("managed-device sync started (interval %ss)", SYNC_INTERVAL_S)
@@ -405,6 +465,10 @@ async def managed_sync_loop() -> None:
                     logger.info("managed-device sync: %s", {
                         k: v for k, v in summary.items() if k != "transitions"})
                 await _fire_transitions(summary["transitions"])
+                try:
+                    await fanout_child_readings()
+                except Exception:
+                    logger.exception("managed-device reading fan-out failed")
         except asyncio.CancelledError:
             raise
         except Exception:

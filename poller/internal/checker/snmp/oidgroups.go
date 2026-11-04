@@ -37,6 +37,10 @@ type OidMetric struct {
 	// devices that expose states as strings (e.g. PAN-OS HA "active").
 	// Matching is case-insensitive on the trimmed value.
 	ValueMap map[string]float64 `json:"value_map,omitempty"`
+	// Format "hex" stores a binary OctetString (InetAddress, PhysAddress)
+	// as lowercase hex instead of text, which would drop its non-printable
+	// bytes. Consumers decode it (see app.services.controller_children).
+	Format string `json:"format,omitempty"`
 }
 
 // OidGroupTable configures table-kind groups.
@@ -44,6 +48,10 @@ type OidGroupTable struct {
 	// LabelOID is an optional column walked to produce per-row display
 	// labels (e.g. tunnel name, AP name). Falls back to the row index.
 	LabelOID string `json:"label_oid,omitempty"`
+	// MaxRows raises (or lowers) the per-poll row cap for large tables such
+	// as a controller's per-port or per-client tables. Zero means
+	// maxTableRows; values above maxTableRowsLimit are clamped.
+	MaxRows int `json:"max_rows,omitempty"`
 }
 
 // OidGroup is one section of a monitoring template.
@@ -67,6 +75,10 @@ type TemplateValue struct {
 	GroupKey  string
 	MetricKey string
 	Instance  string // "" for scalars; row index token for table cells
+	// Index is the raw OID index suffix of a table cell ("" for scalars).
+	// Instance hashes composite indexes; Index keeps them decodable, so a
+	// radio row can be related to its AP row by index prefix.
+	Index     string
 	SeriesKey string
 	Label     string // row label for table cells, "" for scalars
 	Unit      string

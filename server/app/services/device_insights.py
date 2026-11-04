@@ -100,6 +100,9 @@ def metric_status(metric: dict, value_num, value_text: str) -> str:
 
 def metric_display(metric: dict, value_num, value_text: str) -> str:
     """Human display string for enum metrics (label text beats raw text/code)."""
+    if metric.get("format") == "hex":
+        from app.services.controller_children import display_hex
+        return display_hex(value_text)
     labels = metric.get("labels") or {}
     if value_num is not None and labels:
         code = str(int(value_num)) if float(value_num).is_integer() else str(value_num)
@@ -201,6 +204,10 @@ def shape_template_groups(oid_groups: list[dict], vals: Iterable, child_ids: dic
 
     groups_out: list[dict] = []
     for gr in oid_groups:
+        if gr.get("display") == "children":
+            # Controller-source rows (switch ports, AP radios, wireless clients)
+            # belong on the managed child's page, not the controller's.
+            continue
         gkey = gr.get("key")
         metrics_def = {m["key"]: m for m in gr.get("metrics", []) if isinstance(m, dict) and m.get("key")}
         rows_for_group = by_group.get(gkey, [])

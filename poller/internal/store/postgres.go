@@ -628,17 +628,18 @@ func (s *PostgresStore) UpsertTemplateValues(
 		batch.Queue(`
 			INSERT INTO device_template_values
 			    (device_id, group_key, metric_key, instance, series_key,
-			     label, unit, value_num, value_text, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			     label, unit, value_num, value_text, updated_at, instance_oid)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULLIF($11, ''))
 			ON CONFLICT (device_id, group_key, metric_key, instance) DO UPDATE SET
 			    series_key = EXCLUDED.series_key,
+			    instance_oid = EXCLUDED.instance_oid,
 			    label      = EXCLUDED.label,
 			    unit       = EXCLUDED.unit,
 			    value_num  = EXCLUDED.value_num,
 			    value_text = EXCLUDED.value_text,
 			    updated_at = EXCLUDED.updated_at
 		`, deviceID, v.GroupKey, v.MetricKey, v.Instance, v.SeriesKey,
-			v.Label, v.Unit, v.ValueNum, v.ValueText, cycleStart)
+			v.Label, v.Unit, v.ValueNum, v.ValueText, cycleStart, v.Index)
 	}
 	if batch.Len() > 0 {
 		br := tx.SendBatch(ctx, batch)

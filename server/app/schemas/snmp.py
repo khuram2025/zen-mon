@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, field_serializer
 
@@ -117,6 +117,15 @@ class OidMetric(BaseModel):
     labels: Optional[dict[str, MetricLabel]] = Field(
         default=None, description="Enum code -> display label + severity")
     thresholds: Optional[MetricThresholds] = None
+    format: Optional[str] = Field(
+        default=None, description='"hex": keep a binary OctetString (InetAddress, PhysAddress) as hex')
+
+    @field_validator("format")
+    @classmethod
+    def _format_ok(cls, v: Optional[str]) -> Optional[str]:
+        if v not in (None, "hex"):
+            raise ValueError("format must be hex")
+        return v
 
     @field_validator("type")
     @classmethod
@@ -129,6 +138,31 @@ class OidMetric(BaseModel):
 class OidGroupTable(BaseModel):
     label_oid: Optional[str] = Field(default=None, pattern=_OID_PATTERN,
                                      description="Column walked for per-row labels")
+    max_rows: Optional[int] = Field(default=None, ge=1, le=5000,
+                                    description="Per-poll row cap (default 500)")
+
+
+class OidGroupBelongsTo(BaseModel):
+    """How a controller-source row belongs to a managed child: by a serial
+    column, by raw index prefix, or through the AP profile name."""
+    group: str = Field(..., pattern=_KEY_PATTERN)
+    by: str
+    metric: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    layout: list[str] = Field(default_factory=list)
+
+    @field_validator("by")
+    @classmethod
+    def _by_ok(cls, v: str) -> str:
+        if v not in ("serial", "index_prefix", "profile"):
+            raise ValueError("by must be serial|index_prefix|profile")
+        return v
+
+    @field_validator("layout")
+    @classmethod
+    def _layout_ok(cls, v: list[str]) -> list[str]:
+        if any(part not in ("int", "str", "mac") for part in v):
+            raise ValueError("layout parts must be int|str|mac")
+        return v
 
 
 class OidGroupChildren(BaseModel):
@@ -148,6 +182,17 @@ class OidGroupChildren(BaseModel):
     os_version_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
     serial_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
     ip_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    # Controller-derived readings shown on the child (migrate-171).
+    mac_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    cpu_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    memory_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    uptime_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN,
+                                      description="Seconds since the child booted")
+    clients_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    state_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    auth_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    serial_from_index: Optional[dict[str, Any]] = Field(
+        default=None, description='{"layout": ["int","str"], "part": 1}: serial decoded from the row index')
 
     @field_validator("device_type")
     @classmethod
@@ -175,6 +220,11 @@ class OidGroup(BaseModel):
     table: Optional[OidGroupTable] = None
     metrics: list[OidMetric] = Field(default_factory=list)
     children: Optional[OidGroupChildren] = None
+    display: Optional[str] = Field(
+        default=None, description='"children": rows are shown on managed children, not on the polled device')
+    belongs_to: Optional[OidGroupBelongsTo] = None
+    tab: Optional[str] = Field(default=None, max_length=60)
+    applies_when: Optional[dict[str, Any]] = None
 
     @field_validator("kind")
     @classmethod
