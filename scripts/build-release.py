@@ -1520,7 +1520,7 @@ def list_releases() -> None:
 
 
 def create_rollout(version: str, stage: str, target_group: str | None,
-                   target_pct: int) -> None:
+                   target_pct: int, *, auto_promote: bool = True) -> None:
     """Create a rollout policy for a release."""
     import httpx
 
@@ -1551,7 +1551,7 @@ def create_rollout(version: str, stage: str, target_group: str | None,
             "stage": stage,
             "target_group": target_group,
             "target_pct": target_pct,
-            "auto_promote": stage != "full",
+            "auto_promote": auto_promote and stage != "full",
             "promote_after": "24:00:00",
             "max_failure_pct": 5,
         },
@@ -1655,6 +1655,7 @@ Examples:
                        help="Auto-create rollout after publishing")
     pub_p.add_argument("--rollout-pct", type=int, default=100, help="Rollout percentage (default 100)")
     pub_p.add_argument("--rollout-group", default=None, help="Target rollout group")
+    pub_p.add_argument("--no-auto-promote", action="store_true", help="Keep staged rollout pending explicit promotion")
 
     # Lint migrations
     lint_p = sub.add_parser("lint-migrations",
@@ -1671,6 +1672,7 @@ Examples:
     roll_p.add_argument("--stage", required=True, choices=["canary", "percentage", "full"])
     roll_p.add_argument("--group", default=None, help="Target group (default: all)")
     roll_p.add_argument("--pct", type=int, default=100, help="Target percentage")
+    roll_p.add_argument("--no-auto-promote", action="store_true", help="Keep staged rollout pending explicit promotion")
 
     args = parser.parse_args()
 
@@ -1700,7 +1702,7 @@ Examples:
                         args.skip_agent_artifacts)
 
         if args.rollout:
-            create_rollout(args.version, args.rollout, args.rollout_group, args.rollout_pct)
+            create_rollout(args.version, args.rollout, args.rollout_group, args.rollout_pct, auto_promote=not args.no_auto_promote)
 
     elif args.command == "lint-migrations":
         lint_migrations(update_lock=args.update_lock)
@@ -1710,7 +1712,7 @@ Examples:
         list_releases()
 
     elif args.command == "rollout":
-        create_rollout(args.version, args.stage, args.group, args.pct)
+        create_rollout(args.version, args.stage, args.group, args.pct, auto_promote=not args.no_auto_promote)
 
 
 if __name__ == "__main__":

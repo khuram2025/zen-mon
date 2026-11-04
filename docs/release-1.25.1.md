@@ -1,4 +1,4 @@
-# ZenPlus 1.24.49
+# ZenPlus 1.25.1
 
 FortiGate-managed FortiSwitches and FortiAPs now show the readings their
 controller already collects. The Devices list shows their CPU and memory,
@@ -26,6 +26,6 @@ connection profile and device (FortiOS default 900 s). Captures report live
 progress, and paginated FortiOS reads are faster. Complete-capture validation
 and encrypted storage are unchanged.
 
-Migrations 182 (controller child readings, Fortinet template extension) and
+Includes 1.25.0 (native virtualization monitoring). Migrations 182 (controller child readings, Fortinet template extension) and
 183 (NCCM capture deadline and progress). Appliance-only release requiring
 the signed 1.24.36 bridge; existing Windows agent packages are preserved.

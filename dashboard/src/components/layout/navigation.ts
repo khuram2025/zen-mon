@@ -246,6 +246,7 @@ export const NAV_GROUPS: NavGroup[] = [
     zone: 'monitor',
     items: [
       { to: '/servers', label: 'Server Overview', icon: Gauge, end: true, hint: 'Fleet CPU, memory and disk', permission: 'servers.view' },
+      { to: '/virtualization', label: 'Virtualization', icon: Layers, hint: 'Nutanix, VMware and Hyper-V', permission: 'servers.view' },
       // `/servers/:id` detail pages have no row of their own — All Servers owns them. ("Inventory"
       // now means the Inventory & Compliance module below, so this row is not called that.)
       { to: '/servers/inventory', label: 'All Servers', icon: Server, hint: 'Every monitored host', extra: ['/servers/'], permission: 'servers.view' },

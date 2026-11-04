@@ -71,6 +71,7 @@ import { UsagePage } from '@/pages/apm/UsagePage'
 import { ErrorIssueDetailPage } from '@/pages/apm/ErrorIssueDetailPage'
 import { ServersDashboardPage } from '@/pages/servers/ServersDashboardPage'
 import { ServerInventoryPage } from '@/pages/servers/ServersPage'
+import { VirtualizationPage } from '@/pages/VirtualizationPage'
 import { ServerDetailPage } from '@/pages/servers/detail/ServerDetailPage'
 import { AgentFleetPage } from '@/pages/servers/AgentFleetPage'
 import { AgentPoliciesPage } from '@/pages/servers/AgentPoliciesPage'
@@ -168,6 +169,7 @@ export default function App() {
         <Route path="link-utilization" element={<LinkUtilizationPage />} />
         <Route path="servers" element={<ServersDashboardPage />} />
         <Route path="servers/inventory" element={<ServerInventoryPage />} />
+        <Route path="virtualization" element={<VirtualizationPage />} />
         <Route path="servers/:id" element={<ServerDetailPage />} />
         <Route path="server-agents" element={<AgentFleetPage />} />
         <Route path="agent-policies" element={<AgentPoliciesPage />} />
