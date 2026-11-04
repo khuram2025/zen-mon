@@ -10,7 +10,8 @@ case "${1:-help}" in
         printf 'ZenPlus version: '
         head -1 /opt/zenplus/.version
         systemctl --no-pager list-units --all zenplus-api.service zenplus-poller.service \
-            zenplus-netflow-collector.service nginx.service zenplus-updater.timer
+            zenplus-netflow-collector.service nginx.service zenplus-updater.timer \
+            zenplus-ncm-worker.service zenplus-ncm-backup.timer zenplus-ncm-delivery.timer
         ;;
     update)
         echo "Installing the currently eligible signed OTA upgrade path..."

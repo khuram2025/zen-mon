@@ -21,7 +21,7 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
-import { absoluteTime, categoryLabel, ncmError, TONE_BADGE, type Tone } from './model'
+import { absoluteTime, categoryLabel, formatBytes, ncmError, progressSummary, TONE_BADGE, type CaptureProgress, type Tone } from './model'
 import { Ago, EmptyState, Kpi, Pagination, SectionError, ToneIcon } from './ui'
 
 // --------------------------------------------------------------------------- //
@@ -61,10 +61,33 @@ function StatusBadge({ status, map }: { status?: string | null; map: Record<stri
 }
 
 function runtimeTone(state?: string | null): Tone {
-  return state === 'active' ? 'success' : state === 'inactive' ? 'danger' : 'warning'
+  return state === 'active' ? 'success' : state === 'inactive' || state === 'not_installed' ? 'danger' : 'warning'
 }
 function runtimeText(state?: string | null) {
-  return state === 'active' ? 'Active' : state === 'inactive' ? 'Inactive' : 'Unknown'
+  return state === 'active' ? 'Active' : state === 'inactive' ? 'Inactive' : state === 'not_installed' ? 'Not installed' : 'Unknown'
+}
+const RUNTIME_UNIT: Record<string, string> = {
+  worker: 'zenplus-ncm-worker.service', scheduler: 'zenplus-ncm-backup.timer', delivery: 'zenplus-ncm-delivery.timer',
+}
+
+/** Poll quickly while a capture is running so its progress stays current. */
+function jobsRefetch(idle: number) {
+  return (query: { state: { data?: any } }) => ((query.state.data?.data || []).some((j: any) => j.status === 'running') ? 3000 : idle)
+}
+
+/** Live counters of a running capture, or the final counters of the last attempt. */
+function CaptureProgressLine({ progress, live }: { progress?: CaptureProgress | null; live: boolean }) {
+  const text = progressSummary(progress)
+  if (!text) return null
+  const pct = live && progress?.deadline_seconds && progress.capture_elapsed_seconds != null
+    ? Math.min(100, Math.round((progress.capture_elapsed_seconds / progress.deadline_seconds) * 100)) : null
+  return (
+    <div className="min-w-0 text-xs" aria-live={live ? 'polite' : undefined}>
+      <span className="text-muted">{live ? 'Progress: ' : 'Last capture: '}</span>
+      <span className="tabular-nums">{text}</span>
+      {pct != null && pct >= 75 && <span className="ml-1 text-warning">({pct}% of the capture deadline used)</span>}
+    </div>
+  )
 }
 
 function duration(sec?: number | null) {
@@ -142,6 +165,13 @@ function Attempt({ run, index, final }: { run: any; index?: number; final?: bool
           <dd>{duration(run.duration_seconds)}{run.platform && <span className="text-muted"> · driver {run.platform}</span>}</dd>
         </div>
       </dl>
+      {run.capture_stats && run.capture_stats.bytes != null && (
+        <div className="mt-1 text-xs text-muted tabular-nums">
+          Received {formatBytes(run.capture_stats.bytes)}, {(run.capture_stats.lines || 0).toLocaleString()} lines
+          {run.capture_stats.pages ? `, ${run.capture_stats.pages.toLocaleString()} pages` : ''}
+          {run.capture_stats.deadline_seconds ? ` · deadline ${run.capture_stats.deadline_seconds} s` : ''}
+        </div>
+      )}
       {failed && (
         <div className="mt-2 space-y-1 text-xs">
           {run.failure_category && <div><span className="text-muted">Failure: </span><span className="font-medium text-danger">{categoryLabel(run.failure_category)}</span></div>}
@@ -172,6 +202,7 @@ function AttemptTimeline({ job }: { job: any }) {
         {job.finished_at && <span>Finished {absoluteTime(job.finished_at)}</span>}
         {job.cancel_requested && <span className="text-warning">Cancellation requested</span>}
       </div>
+      {job.progress && <CaptureProgressLine progress={job.progress} live={job.status === 'running'} />}
       {job.status === 'failed' && job.recommended_action && (
         <p className="text-xs"><span className="text-muted">Recommended action: </span>{job.recommended_action}</p>
       )}
@@ -195,7 +226,10 @@ function outcome(job: any) {
   if (job.status === 'cancelled') return <span className="text-xs text-muted">Cancelled</span>
   if (job.cancel_requested) return <span className="text-xs text-warning">Cancellation requested</span>
   if (job.status === 'queued') return <span className="text-xs text-muted">Waiting for worker</span>
-  if (job.status === 'running') return <span className="text-xs text-muted">In progress</span>
+  if (job.status === 'running') {
+    const text = progressSummary(job.progress)
+    return <span className="block max-w-xs truncate text-xs text-muted tabular-nums" title={text || undefined}>{text || 'In progress'}</span>
+  }
   return <span className="text-xs text-muted">—</span>
 }
 
@@ -296,7 +330,7 @@ export function JobsWorkspace() {
     queryKey: ['ncm', 'jobs', 'fleet', params],
     queryFn: async () => (await api.get('/ncm/jobs', { params })).data,
     placeholderData: keepPreviousData,
-    refetchInterval: 15000,
+    refetchInterval: jobsRefetch(15000),
   })
   const data = jobs.data
   const queue = data?.queue
@@ -325,7 +359,7 @@ export function JobsWorkspace() {
             <Kpi key={k} label={k === 'worker' ? 'Backup worker' : k === 'scheduler' ? 'Scheduler' : 'Delivery'}
               value={runtime ? <span className="text-lg">{runtimeText(runtime[k])}</span> : '…'}
               tone={runtime ? runtimeTone(runtime[k]) : 'neutral'}
-              sub={k === 'scheduler' && runtime?.time_sync ? `Clock ${runtime.time_sync}` : undefined} />
+              sub={runtime?.[k] === 'not_installed' ? RUNTIME_UNIT[k] : k === 'scheduler' && runtime?.time_sync ? `Clock ${runtime.time_sync}` : undefined} />
           ))}
         </section>
       )}
@@ -399,7 +433,7 @@ export function JobList({ deviceId }: { deviceId: string }) {
     queryKey: ['ncm', 'jobs', 'device', deviceId, params],
     queryFn: async () => (await api.get(`/devices/${deviceId}/ncm-jobs`, { params })).data,
     placeholderData: keepPreviousData,
-    refetchInterval: 10000,
+    refetchInterval: jobsRefetch(10000),
   })
   const runs = useQuery<any>({
     queryKey: ['ncm', 'runs', deviceId, RUN_FETCH],

@@ -98,6 +98,37 @@ SCRIPT_CODE_IGNORE = [
     "seed-devices.sql",
 ]
 
+# NCCM (configuration backup) units: install.sh installs the same list
+# (NCM_UNIT_FILES/NCM_ENABLED_UNITS) and scripts/verify-ncm-units.py checks it.
+# The *.service units behind the timers are oneshot runs, installed but never
+# enabled; the worker and both timers are enabled and started.
+NCM_UNITS = (
+    ("zenplus-ncm-worker.service", True),
+    ("zenplus-ncm-backup.service", False),
+    ("zenplus-ncm-backup.timer", True),
+    ("zenplus-ncm-delivery.service", False),
+    ("zenplus-ncm-delivery.timer", True),
+)
+NCM_UNIT_VERIFIER = "code/scripts/verify-ncm-units.py"
+
+
+def ncm_unit_steps(build_dir: Path) -> list[dict]:
+    """install_systemd steps for the NCCM units; refuses a payload missing one."""
+    steps = []
+    for unit, enable in NCM_UNITS:
+        source = f"code/scripts/systemd/{unit}"
+        if not (Path(build_dir) / source).is_file():
+            raise RuntimeError(f"Required NCCM unit missing from the release payload: {source}")
+        steps.append({"type": "install_systemd", "source": source, "enable": enable})
+    if not (Path(build_dir) / NCM_UNIT_VERIFIER).is_file():
+        raise RuntimeError(f"Required NCCM unit verifier missing from the release payload: {NCM_UNIT_VERIFIER}")
+    return steps
+
+
+def ncm_enabled_units() -> list[str]:
+    return [unit for unit, enable in NCM_UNITS if enable]
+
+
 # Lockfile recording the SHA256 of every migrate-*.sql that has ever shipped.
 # Migrations are append-only once released — see lint_migrations() below.
 MIGRATIONS_LOCK = ZENPLUS_DIR / "scripts" / "migrations.lock"
@@ -1136,10 +1167,7 @@ def build_package(version: str, changelog: str, severity: str,
 
     steps.append({"type": "install_systemd", "source": "code/scripts/systemd/zenplus-syslog.service", "enable": False})
     # NCM uses a local service identity; the HTTP scheduler requires RBAC.
-    for unit in ("zenplus-ncm-backup.service", "zenplus-ncm-backup.timer",
-                 "zenplus-ncm-delivery.service", "zenplus-ncm-delivery.timer", "zenplus-ncm-worker.service"):
-        steps.append({"type": "install_systemd", "source": f"code/scripts/systemd/{unit}",
-                      "enable": unit.endswith(".timer") or unit=="zenplus-ncm-worker.service"})
+    steps.extend(ncm_unit_steps(build_dir))
 
     agent_artifact_dir = build_dir / "agent-artifacts"
     if agent_artifact_dir.is_dir():
@@ -1170,9 +1198,13 @@ def build_package(version: str, changelog: str, severity: str,
 
     # Restart services
     steps.append({"type": "start_services",
-                   "enabled_services": ["zenplus-syslog", "zenplus-ncm-backup.timer", "zenplus-ncm-delivery.timer", "zenplus-ncm-worker.service"],
+                   "enabled_services": ["zenplus-syslog", *ncm_enabled_units()],
                    "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector",
                                 "netmon-gunicorn", "netmon-celery", "netmon-celery-beat", "nginx"]})
+    # The NCCM worker and timers must be installed, enabled and running after
+    # the restart; a non-zero exit names the unit and fails (rolls back) the
+    # update instead of leaving configuration backups silently stopped.
+    steps.append({"type": "run_hook", "script": NCM_UNIT_VERIFIER, "timeout": 90})
     steps.append({"type": "health_check", "url": "http://localhost:8000/api/v1/system/health", "timeout": 30})
 
     manifest = {

@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { toast } from '@/components/ui/Toast'
 import { ConnectionAccessGuide } from './ConnectionAccessGuide'
-import { errorDetail, ncmError } from './model'
+import { captureTimeoutError, CAPTURE_TIMEOUT_MAX, CAPTURE_TIMEOUT_MIN, errorDetail, ncmError } from './model'
 import { Ago, EmptyState, SectionError } from './ui'
 
 export type Profile = {
@@ -23,17 +23,19 @@ export type Profile = {
   auth_method: 'password' | 'key'; has_password: boolean; has_enable: boolean; has_private_key: boolean; has_passphrase: boolean
   key_type: string | null; key_fingerprint: string | null; secret_rotated_at: string | null; rotation_days: number | null
   rotation_due: boolean; rotation_unknown: boolean; used_by: number; ssh_legacy_compat: boolean
+  capture_timeout_seconds: number | null
 }
 type UsageRow = { device_id: string; hostname: string; ip: string | null; enabled: boolean; schedule_enabled: boolean }
 
 type Form = {
   name: string; description: string; username: string; port: string; auth_method: 'password' | 'key'
   password: string; enable_password: string; clear_enable_password: boolean; private_key: string; key_passphrase: string
-  is_default: boolean; rotation_days: string; ssh_legacy_compat: boolean
+  is_default: boolean; rotation_days: string; ssh_legacy_compat: boolean; capture_timeout_seconds: string
 }
 const EMPTY: Form = {
   name: '', description: '', username: '', port: '22', auth_method: 'password', password: '', enable_password: '',
   clear_enable_password: false, private_key: '', key_passphrase: '', is_default: false, rotation_days: '', ssh_legacy_compat: false,
+  capture_timeout_seconds: '',
 }
 
 function formOf(p: Profile): Form {
@@ -41,6 +43,7 @@ function formOf(p: Profile): Form {
     ...EMPTY, name: p.name, description: p.description || '', username: p.username, port: String(p.port || 22),
     auth_method: p.auth_method || 'password', is_default: p.is_default, ssh_legacy_compat: p.ssh_legacy_compat || false,
     rotation_days: p.rotation_days ? String(p.rotation_days) : '',
+    capture_timeout_seconds: p.capture_timeout_seconds ? String(p.capture_timeout_seconds) : '',
   }
 }
 
@@ -54,6 +57,8 @@ function validate(f: Form, editing: Profile | null): Partial<Record<keyof Form, 
     const d = Number(f.rotation_days)
     if (!Number.isInteger(d) || d < 1 || d > 3650) e.rotation_days = 'Enter 1–3650 days, or leave blank.'
   }
+  const deadline = captureTimeoutError(f.capture_timeout_seconds)
+  if (deadline) e.capture_timeout_seconds = deadline
   if (f.auth_method === 'password' && !f.password && !(editing?.has_password)) e.password = 'A password is required for a new password profile.'
   if (f.auth_method === 'key' && !f.private_key.trim() && !(editing?.has_private_key)) e.private_key = 'A private key is required for SSH key authentication.'
   if (f.private_key.trim() && !/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(f.private_key)) e.private_key = 'Paste the full private key including the BEGIN/END lines.'
@@ -116,6 +121,7 @@ export function ProfilesDialog({ open, onOpenChange }: { open: boolean; onOpenCh
         is_default: form.is_default,
         ssh_legacy_compat: form.ssh_legacy_compat,
         rotation_days: form.rotation_days.trim() ? Number(form.rotation_days) : null,
+        capture_timeout_seconds: form.capture_timeout_seconds.trim() ? Number(form.capture_timeout_seconds) : null,
       }
       if (editing) return (await api.put(`/ncm/credentials/${editing.id}`, body)).data
       return (await api.post('/ncm/credentials', body)).data
@@ -168,6 +174,7 @@ export function ProfilesDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                         <span className="break-words text-sm font-medium">{p.name}</span>
                         {p.is_default && <Badge variant="info">Default</Badge>}
                         {p.ssh_legacy_compat && <Badge variant="warning">Legacy SSH</Badge>}
+                        {p.capture_timeout_seconds ? <Badge variant="outline" title="Capture deadline for devices using this profile">Deadline {p.capture_timeout_seconds} s</Badge> : null}
                         <Badge variant="outline">
                           {p.auth_method === 'key' ? <><KeyRound className="h-3 w-3" aria-hidden /> SSH key{p.key_type ? ` ${p.key_type}` : ''}</> : 'Password'}
                         </Badge>
@@ -285,6 +292,12 @@ export function ProfilesDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                   </div>
                   <Switch checked={form.ssh_legacy_compat} onCheckedChange={(v) => set('ssh_legacy_compat', v)} aria-label="Legacy SSH compatibility" />
                 </div>
+
+                <FormField label="Capture deadline (seconds)" error={showErr('capture_timeout_seconds')}
+                  hint={`Optional, ${CAPTURE_TIMEOUT_MIN}–${CAPTURE_TIMEOUT_MAX}. How long one configuration capture may take for devices using this profile; a device setting overrides it. Blank = the driver default (FortiOS 900 s, others 240 s).`}>
+                  <Input type="number" inputMode="numeric" min={CAPTURE_TIMEOUT_MIN} max={CAPTURE_TIMEOUT_MAX} value={form.capture_timeout_seconds}
+                    onChange={(e) => set('capture_timeout_seconds', e.target.value)} placeholder="Driver default" aria-label="Capture deadline (seconds)" />
+                </FormField>
 
                 <FormField label="Rotation policy (days)" error={showErr('rotation_days')}
                   hint="Optional. The profile is flagged “Rotation overdue” when the password or key is older than this. Blank = no policy.">

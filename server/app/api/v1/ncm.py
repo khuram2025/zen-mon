@@ -27,7 +27,8 @@ from app.services import ncm_events, ssh_host_keys
 from app.services.ncm_content import normalize_config as _normalize_config, read_content, encrypt_content, checked_content, config_diff, redact_config, safe_pattern
 from app.services.ncm_collection import (PLATFORM_COMMANDS, STARTUP_COMMANDS, DRIVERS, UNSUPPORTED, platform_catalog,
                                          fetch_config as _netmiko_fetch, CaptureError, key_fingerprint,
-                                         load_private_key)
+                                         load_private_key, CaptureProgress, capture_deadline,
+                                         CAPTURE_TIMEOUT_MIN, CAPTURE_TIMEOUT_MAX, DEFAULT_CAPTURE_TIMEOUT)
 from app.services.ncm_errors import classify, exception_chain, GUIDANCE, STAGES, PrerequisiteError
 from app.services import ncm_schedule
 from app.core import crypto
@@ -113,7 +114,8 @@ async def _validate_channels(db, channels):
 
 
 async def _assurance_settings(db, user, device_id, data):
-    names = {'notify_channels', 'freshness_hours', 'eligible_override', 'config_types', 'schedule_timezone', 'event_backup'}
+    names = {'notify_channels', 'freshness_hours', 'eligible_override', 'config_types', 'schedule_timezone', 'event_backup',
+             'capture_timeout_seconds'}
     updates = {k: getattr(data, k) for k in names & data.model_fields_set}
     if 'notify_channels' in updates:
         await _validate_channels(db, updates['notify_channels'])
@@ -203,6 +205,9 @@ class CredentialIn(BaseModel):
     key_passphrase: Optional[str] = Field(default=None, max_length=1024)
     is_default: bool = False
     rotation_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    # Whole-capture deadline for devices using this profile; None inherits
+    # the driver default (FortiOS 900 s) or the system default (240 s).
+    capture_timeout_seconds: Optional[int] = Field(default=None, ge=CAPTURE_TIMEOUT_MIN, le=CAPTURE_TIMEOUT_MAX)
 
 
 def _parse_key(data):
@@ -259,7 +264,7 @@ async def list_credentials(db: AsyncSession = Depends(get_db), user: User = Depe
           (c.enable_password_enc IS NOT NULL) AS has_enable,
           (c.private_key_enc IS NOT NULL) AS has_private_key,
           (c.key_passphrase_enc IS NOT NULL) AS has_passphrase,
-          c.key_type,c.key_fingerprint,c.secret_rotated_at,c.rotation_days,c.updated_at,
+          c.key_type,c.key_fingerprint,c.secret_rotated_at,c.rotation_days,c.updated_at,c.capture_timeout_seconds,
           (SELECT count(*) FROM device_ncm n JOIN devices d ON d.id=n.device_id
            WHERE n.credential_id=c.id {allowed}) AS used_by
         FROM ncm_credentials c {restriction} ORDER BY c.is_default DESC,c.name
@@ -280,6 +285,7 @@ async def list_credentials(db: AsyncSession = Depends(get_db), user: User = Depe
             "secret_rotated_at": rotated.isoformat() if rotated else None,
             "rotation_days": r.rotation_days, "rotation_due": due,
             "rotation_unknown": bool(r.rotation_days and not rotated),
+            "capture_timeout_seconds": r.capture_timeout_seconds,
             "used_by": r.used_by,
         })
     return {"data": out}
@@ -308,16 +314,17 @@ async def create_credential(data: CredentialIn, db: AsyncSession = Depends(get_d
         text("""INSERT INTO ncm_credentials
                 (name, description, protocol, port, username, password_enc, enable_password_enc, is_default,
                  auth_method, private_key_enc, key_passphrase_enc, key_type, key_fingerprint, rotation_days,
-                 secret_rotated_at, ssh_legacy_compat)
+                 secret_rotated_at, ssh_legacy_compat, capture_timeout_seconds)
                 VALUES (:n, :d, :p, :port, :u, :pw, :en, :def, :am, :pk, :pp, :kt, :kf, :rot,
-                        CASE WHEN :secret THEN now() ELSE NULL END, :legacy)
+                        CASE WHEN :secret THEN now() ELSE NULL END, :legacy, :ctimeout)
                 RETURNING id"""),
         {"n": data.name, "d": data.description, "p": data.protocol, "port": data.port,
          "u": data.username, "pw": crypto.encrypt(data.password),
          "en": crypto.encrypt(data.enable_password), "def": data.is_default,
          "am": data.auth_method, "pk": crypto.encrypt(data.private_key) if data.auth_method == 'key' else None,
          "pp": crypto.encrypt(data.key_passphrase) if data.auth_method == 'key' else None,
-         "kt": key_type, "kf": key_fp, "rot": data.rotation_days, "secret": secret_set, "legacy": data.ssh_legacy_compat},
+         "kt": key_type, "kf": key_fp, "rot": data.rotation_days, "secret": secret_set, "legacy": data.ssh_legacy_compat,
+         "ctimeout": data.capture_timeout_seconds},
     )).first()
     if data.is_default:
         await db.execute(text("UPDATE ncm_credentials SET is_default = (id = :id)"), {"id": row.id})
@@ -338,6 +345,9 @@ async def update_credential(cred_id: UUID, data: CredentialIn, db: AsyncSession 
     params = {"id": cred_id, "n": data.name, "d": data.description, "p": data.protocol,
               "port": data.port, "u": data.username, "def": data.is_default, "am": data.auth_method,
               "rot": data.rotation_days, "legacy": data.ssh_legacy_compat}
+    # Older clients omit the deadline: keep the saved value unless supplied.
+    if 'capture_timeout_seconds' in data.model_fields_set:
+        sets.append("capture_timeout_seconds=:ctimeout"); params["ctimeout"] = data.capture_timeout_seconds
     changed = []
     # Blank means keep: secrets are only overwritten when a new value is supplied.
     if data.password:
@@ -415,6 +425,9 @@ class NcmEnroll(BaseModel):
     eligible_override: Optional[bool] = None
     config_types: list[str] = Field(default_factory=lambda: ['running'], min_length=1, max_length=2)
     event_backup: bool = True
+    # Device override of the capture deadline; None inherits the profile,
+    # driver or system default. Saved only when supplied.
+    capture_timeout_seconds: Optional[int] = Field(default=None, ge=CAPTURE_TIMEOUT_MIN, le=CAPTURE_TIMEOUT_MAX)
 
     @field_validator('schedule_timezone')
     @classmethod
@@ -746,7 +759,28 @@ class _FetchError(Exception):
         self.run_id = run_id
 
 
-async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type='running', job_id=None):
+async def _write_progress(sessions, job_id, progress, stop, config_type, interval=3.0):
+    """Persist capture counters on the running job every ``interval`` seconds
+    (and once at the end) through a separate session, so the job list shows
+    bytes/lines/pages/elapsed while the device is still streaming."""
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+        try:
+            async with sessions() as session:
+                await session.execute(text("UPDATE ncm_jobs SET progress=CAST(:p AS jsonb) WHERE id=:id AND status='running'"),
+                                      {'p': json.dumps({**progress.snapshot(), 'config_type': config_type}), 'id': job_id})
+                await session.commit()
+        except Exception:
+            logger.warning('NCCM progress update failed', exc_info=True)
+        if stop.is_set():
+            return
+
+
+async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type='running', job_id=None,
+                    progress_sessions=None):
     # Transaction-scoped advisory lock protects both manual and scheduler paths.
     locked = (await db.execute(text('SELECT pg_try_advisory_xact_lock(hashtextextended(:device,0))'),
                                {'device': str(device_id)})).scalar()
@@ -754,7 +788,8 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
         raise _FetchError('A backup is already running for this device', 'busy', True)
     row = (await db.execute(text("""SELECT host(d.ip_address) AS ip,n.platform,n.credential_id,
         n.enabled,c.username,c.password_enc,c.enable_password_enc,c.port,c.auth_method,
-        c.private_key_enc,c.key_passphrase_enc,c.ssh_legacy_compat FROM devices d
+        c.private_key_enc,c.key_passphrase_enc,c.ssh_legacy_compat,
+        n.capture_timeout_seconds AS device_capture_timeout,c.capture_timeout_seconds AS profile_capture_timeout FROM devices d
         LEFT JOIN device_ncm n ON n.device_id=d.id LEFT JOIN ncm_credentials c ON c.id=n.credential_id
         WHERE d.id=:id"""), {'id': device_id})).first()
     if not row:
@@ -765,24 +800,45 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
         VALUES (:d,:t,:trigger,:actor,'running',:job,'prerequisites') RETURNING id"""),
         {'d': device_id, 't': config_type, 'trigger': trigger, 'actor': getattr(actor, 'id', None), 'job': job_id})).first()
     stage = 'prerequisites'
+    # An explicit device/profile deadline applies to any driver; otherwise the
+    # resolved driver's default (FortiOS 900 s) or the system default.
+    explicit_deadline = row.device_capture_timeout if row.device_capture_timeout is not None else row.profile_capture_timeout
+    progress = CaptureProgress(capture_deadline(row.platform, row.device_capture_timeout, row.profile_capture_timeout)[0])
+    stop_progress = asyncio.Event()
+    writer = None
     try:
         port = row.port or 22
         stage = 'credentials'
         password = crypto.decrypt(row.password_enc) if row.password_enc else ''
         enable = crypto.decrypt(row.enable_password_enc) if row.enable_password_enc else ''
-        pkey = None
+        pkey_text = passphrase = None
         if (row.auth_method or 'password') == 'key':
             if row.private_key_enc is None:
                 raise ValueError('missing key')
-            pkey = load_private_key(crypto.decrypt(row.private_key_enc),
-                                    crypto.decrypt(row.key_passphrase_enc) if row.key_passphrase_enc else None)
+            pkey_text = crypto.decrypt(row.private_key_enc)
+            passphrase = crypto.decrypt(row.key_passphrase_enc) if row.key_passphrase_enc else None
+        pkey = None
+        if pkey_text is not None:
+            # Separate stage: a bad format, missing/wrong passphrase or an
+            # unsupported key type is reported as such (KeyLoadError).
+            stage = 'key'
+            pkey = load_private_key(pkey_text, passphrase)
         stage = 'collection'
         await db.execute(text("UPDATE ncm_backup_runs SET stage='collection' WHERE id=:id"), {'id': run.id})
+        if job_id is not None and progress_sessions is not None:
+            writer = asyncio.create_task(_write_progress(progress_sessions, job_id, progress, stop_progress, config_type))
         observed_key: dict = {}
-        platform, content = await asyncio.to_thread(_netmiko_fetch, row.ip, row.platform or 'autodetect',
-                                                    row.username, password, enable, port, config_type,
-                                                    pkey=pkey, legacy_compat=row.ssh_legacy_compat,
-                                                    observed_key=observed_key)
+        try:
+            platform, content = await asyncio.to_thread(_netmiko_fetch, row.ip, row.platform or 'autodetect',
+                                                        row.username, password, enable, port, config_type,
+                                                        pkey=pkey, legacy_compat=row.ssh_legacy_compat,
+                                                        observed_key=observed_key, capture_timeout=explicit_deadline,
+                                                        progress=progress)
+        finally:
+            progress.update(phase='finished')
+            stop_progress.set()
+            if writer is not None:
+                await writer
         # The savepoint ensures a storage failure cannot publish an alert or
         # prune the last good snapshot while the attempt is recorded as failed.
         stage = 'archive'
@@ -794,9 +850,11 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
         if failure.category in ('negotiation', 'authentication', 'unreachable'):
             stage = 'connect'
         await db.execute(text("""UPDATE ncm_backup_runs SET status='failed',finished_at=now(),error_code=:error,
-            stage=:stage,failure_category=:cat,retryable=:retry,platform=:platform WHERE id=:id"""),
+            stage=:stage,failure_category=:cat,retryable=:retry,platform=:platform,
+            capture_stats=CAST(:stats AS jsonb) WHERE id=:id"""),
             {'id': run.id, 'error': failure.message, 'stage': stage, 'cat': failure.category,
-             'retry': failure.retryable, 'platform': row.platform if row.platform != 'autodetect' else None})
+             'retry': failure.retryable, 'platform': row.platform if row.platform != 'autodetect' else None,
+             'stats': json.dumps(progress.snapshot())})
         await db.execute(text("""UPDATE device_ncm SET last_status='failed',last_error=:error,last_failure_category=:cat,
             last_attempt_at=now() WHERE device_id=:d"""), {'d': device_id, 'error': failure.message, 'cat': failure.category})
         await ncm_events.audit(db, actor, 'backup.failed', device_id=device_id, resource_id=run.id,
@@ -807,8 +865,9 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
     content = result.pop('content')
     host_key = await _observe_host_key(db, device_id, row.ip, port, observed_key, actor=actor, run_id=run.id)
     await db.execute(text("""UPDATE ncm_backup_runs SET status='success',finished_at=now(),validated=true,stage='archive',
-        is_change=:changed,version_id=:version,platform=:platform WHERE id=:id"""),
-        {'id': run.id, 'changed': result['is_change'], 'version': UUID(result['version_id']), 'platform': platform})
+        is_change=:changed,version_id=:version,platform=:platform,capture_stats=CAST(:stats AS jsonb) WHERE id=:id"""),
+        {'id': run.id, 'changed': result['is_change'], 'version': UUID(result['version_id']), 'platform': platform,
+         'stats': json.dumps(progress.snapshot())})
     await db.execute(text("""UPDATE device_ncm SET last_status='success',last_error=NULL,last_failure_category=NULL,
         last_attempt_at=now(),last_success_at=now(),platform=CASE WHEN platform='autodetect' THEN :platform ELSE platform END
         WHERE device_id=:d"""), {'d': device_id, 'platform': platform})
@@ -1030,8 +1089,9 @@ _OVERVIEW_SQL = """
            n.schedule_interval_hours, n.schedule_type, n.schedule_time, n.schedule_days, n.schedule_timezone,
            n.keep_versions, n.alert_on_change, n.notify_channels, n.freshness_hours, n.eligible_override, n.config_types,
            n.last_status, n.last_error, n.last_attempt_at, n.last_success_at, n.last_scheduled_at,
-           n.last_failure_category, n.event_backup,
+           n.last_failure_category, n.event_backup, n.capture_timeout_seconds AS device_capture_timeout,
            cr.name AS credential_name, cr.port AS credential_port, cr.auth_method,
+           cr.capture_timeout_seconds AS profile_capture_timeout,
            (coalesce(cr.username,'')<>'' AND (coalesce(octet_length(cr.password_enc),0)>0
              OR (cr.auth_method='key' AND cr.private_key_enc IS NOT NULL))) AS profile_configured,
            c.versions, c.last_capture, c.last_by, c.validated_at, c.legacy_plaintext,
@@ -1061,6 +1121,13 @@ _OVERVIEW_SQL = """
         FROM device_configs GROUP BY device_id
     ) c ON c.device_id = d.id
 """
+
+
+def _deadline_view(r):
+    """Device override plus the effective capture deadline and where it comes from."""
+    seconds, source = capture_deadline(r.platform, r.device_capture_timeout, r.profile_capture_timeout)
+    return {'capture_timeout_seconds': r.device_capture_timeout, 'profile_capture_timeout_seconds': r.profile_capture_timeout,
+            'capture_timeout_effective': seconds, 'capture_timeout_source': source}
 
 
 def _device_row(r, now):
@@ -1098,6 +1165,7 @@ def _device_row(r, now):
         "alert_on_change": r.alert_on_change, "notify_channels": [str(x) for x in r.notify_channels or []],
         "freshness_hours": r.freshness_hours or 24, "eligible_override": r.eligible_override, "config_types": r.config_types or ["running"],
         "event_backup": r.event_backup if r.event_backup is not None else True,
+        **_deadline_view(r),
         "last_status": r.last_status,
         "last_error": r.last_error, "last_failure_category": r.last_failure_category,
         "recommended_action": GUIDANCE.get(r.last_failure_category) if r.last_failure_category else None,
@@ -1333,6 +1401,7 @@ def _run_view(r):
             'retryable': r.get('retryable'), 'message': r.get('error_code'), 'platform': r.get('platform'),
             'recommended_action': GUIDANCE.get(r.get('failure_category')) if r.get('failure_category') else None,
             'validated': r.get('validated'), 'is_change': r.get('is_change'),
+            'capture_stats': r.get('capture_stats'),
             'version_id': str(r['version_id']) if r.get('version_id') else None}
 
 
@@ -1357,6 +1426,9 @@ def _job_view(r, runs):
             'error_code': r['error_code'], 'failure_category': r.get('failure_category'),
             'recommended_action': GUIDANCE.get(r.get('failure_category')) if r.get('failure_category') else None,
             'cancel_requested': r['cancel_requested'], 'results': r['results'],
+            # Live counters while running (bytes/lines/pages/elapsed/deadline,
+            # current command); the last attempt's final counters afterwards.
+            'progress': r.get('progress'),
             'device_id': str(r['device_id']), 'hostname': r.get('hostname'),
             'runs': [_run_view(x) for x in runs]}
 

@@ -41,7 +41,7 @@ async def claim(db):
            OR (status='running' AND lease_until<now())
         ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
         UPDATE ncm_jobs j SET status='running',attempts=attempts+1,
-          started_at=COALESCE(started_at,now()),lease_until=now()+interval '2 minutes',lease_token=:token
+          started_at=COALESCE(started_at,now()),lease_until=now()+interval '2 minutes',lease_token=:token,progress=NULL
         FROM candidate c WHERE j.id=c.id RETURNING j.*'''),{'token':token})).first()
     await db.commit()
     return row
@@ -83,7 +83,8 @@ async def execute(sessions,job):
                     if current.cancel_requested:
                         status,category='cancelled','cancelled'
                         break
-                    result=await _do_fetch(db,job.device_id,actor=actor,trigger=job.trigger,config_type=config_type,job_id=job.id)
+                    result=await _do_fetch(db,job.device_id,actor=actor,trigger=job.trigger,config_type=config_type,job_id=job.id,
+                                           progress_sessions=sessions)
                     last_run=result.get('run_id')
                     results.append({'config_type':config_type,**result})
                     await db.execute(text('UPDATE ncm_jobs SET results=CAST(:results AS jsonb) WHERE id=:id AND lease_token=:token'),{'results':json.dumps(results),'id':job.id,'token':job.lease_token})
