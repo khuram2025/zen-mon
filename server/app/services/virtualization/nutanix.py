@@ -2,16 +2,225 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import httpx
 
-from .common import ConnectionConfig, ConnectorError, Snapshot, number, percent, tls_context
+from .common import ConnectionConfig, ConnectorError, Snapshot, health_from_score, number, percent, tls_context
 
 
 class Unsupported(ConnectorError):
     pass
+
+
+PLACEHOLDER = re.compile(r"\{([A-Za-z0-9_.\-]+)\}")
+
+
+def dig(obj, path, default=None):
+    for key in path.split("."):
+        if not isinstance(obj, dict):
+            return default
+        obj = obj.get(key)
+        if obj is None:
+            return default
+    return obj
+
+
+def first(obj, *paths):
+    for path in paths:
+        value = dig(obj, path)
+        if value not in (None, "", []):
+            return value
+    return None
+
+
+def short_type(value):
+    # "vmm.v4.ahv.config.UefiBoot" -> "UefiBoot"; provider enums stay readable without nested bodies.
+    return str(value).rsplit(".", 1)[-1] if value else None
+
+
+def ip_addresses(value, depth=0, key=""):
+    """IPv4/IPv6 addresses anywhere in a NIC description, excluding gateways, masks and DNS servers."""
+    found = []
+    if depth > 8 or any(word in key.lower() for word in ("gateway", "mask", "subnet", "dns", "prefix")):
+        return found
+    if isinstance(value, dict):
+        for k, v in value.items():
+            found.extend(ip_addresses(v, depth + 1, str(k)))
+    elif isinstance(value, list):
+        for v in value:
+            found.extend(ip_addresses(v, depth + 1, key))
+    elif isinstance(value, str) and ("ip" in key.lower() or key == "value"):
+        try:
+            ip = ipaddress.ip_address(value.strip())
+            if not (ip.is_unspecified or ip.is_loopback or ip.is_link_local):
+                found.append(str(ip))
+        except ValueError:
+            pass
+    return list(dict.fromkeys(found))
+
+
+def iso_time(value):
+    """v4 RFC 3339 strings pass through; v2 microsecond epochs are converted."""
+    if isinstance(value, str) and value:
+        return value[:40]
+    n = number(value)
+    if n:
+        try:
+            return datetime.fromtimestamp(n / 1_000_000, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
+
+
+def alert_params(alert):
+    params = {}
+    for p in alert.get("parameters") or []:
+        if not isinstance(p, dict):
+            continue
+        name = p.get("paramName") or p.get("name")
+        v = p.get("paramValue", p.get("value"))
+        if isinstance(v, dict):
+            v = next((x for k, x in v.items() if not str(k).startswith("$") and not isinstance(x, (dict, list))), None)
+        if name and v is not None and not isinstance(v, (dict, list)):
+            params[str(name)] = str(v)
+    for k, v in zip(alert.get("context_types") or [], alert.get("context_values") or []):
+        params.setdefault(str(k), str(v))
+    return params
+
+
+def render(text, params):
+    """Fill Prism message templates; an unknown placeholder is dropped rather than shown as {name}."""
+    if not text:
+        return ""
+    text = str(text)
+    for _ in range(2):  # a parameter (e.g. alert_title) may itself be a template
+        text = PLACEHOLDER.sub(lambda m: params.get(m.group(1), m.group(0)), text)
+    text = PLACEHOLDER.sub("", text)
+    text = re.sub(r"\s+([.,;:)])", r"\1", re.sub(r"\(\s*\)", "", text))
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def humanize(value):
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", str(value or "")).replace("_", " ").strip().capitalize()
+
+
+def enabled_mode(value):
+    return None if value is None or str(value).upper() in ("NONE", "OFF", "FALSE", "DISABLED") else humanize(value)
+
+
+def vm_memory(m):
+    """AHV reserves a VM's whole memory, so hypervisor usage reads 100% without guest tools.
+
+    Guest-reported usage is utilization; a fully reserved hypervisor figure is not, and stays only as
+    hypervisor_memory_usage_percent so it is never presented as the guest running out of memory.
+    """
+    hypervisor = m.pop("memory_usage_percent", None)
+    used = m.pop("memory_used_bytes", None)
+    guest = m.pop("guest_memory_usage_percent", None)
+    if hypervisor is not None:
+        m["hypervisor_memory_usage_percent"] = hypervisor
+    if guest is not None:
+        m["memory_usage_percent"] = guest
+    elif hypervisor is not None and hypervisor < 99.5:
+        m["memory_usage_percent"] = hypervisor
+        if used is not None:
+            m["memory_used_bytes"] = used
+    if "memory_usage_percent" in m and "memory_capacity_bytes" in m and "memory_used_bytes" not in m:
+        m["memory_used_bytes"] = m["memory_capacity_bytes"] * m["memory_usage_percent"] / 100
+    return m
+
+
+def disk_bytes(disks, *paths, skip_cdrom=False):
+    total, found = 0, False
+    for d in disks or []:
+        if not isinstance(d, dict) or (skip_cdrom and d.get("is_cdrom")):
+            continue
+        size = number(first(d, *paths))
+        if size is not None:
+            total, found = total + size, True
+    return total if found else None
+
+
+def uptime(row):
+    boot = number(first(row, "bootTimeUsecs", "boot_time_in_usecs"))
+    if not boot:
+        return {}
+    seconds = datetime.now(timezone.utc).timestamp() - boot / 1_000_000
+    return {"uptime_seconds": seconds} if 0 < seconds < 20 * 365 * 86400 else {}
+
+
+def host_metrics(stat, h):
+    m = metrics(stat, h)
+    m.update(uptime(h))
+    return m
+
+
+def host_health(h, m):
+    if h.get("isDegraded"):
+        return "warning"
+    if "health_score" in m:
+        return health_from_score(m["health_score"])
+    return "healthy" if h.get("isDegraded") is False else "unknown"
+
+
+def cluster_attributes(c):
+    return dict(
+        version=first(c, "config.buildInfo.version", "version"),
+        hypervisors=first(c, "config.hypervisorTypes", "hypervisor_types"),
+        nodes=first(c, "nodes.numberOfNodes", "num_nodes"),
+        virtual_ip=first(c, "network.externalAddress.ipv4.value", "cluster_external_ipaddress"),
+        data_services_ip=first(c, "network.externalDataServiceIp.ipv4.value", "cluster_external_data_services_ipaddress"),
+        redundancy_factor=first(c, "config.redundancyFactor", "cluster_redundancy_state.desired_redundancy_factor"),
+        operation_mode=humanize(first(c, "config.operationMode", "operation_mode")) or None,
+        timezone=first(c, "config.timezone", "timezone"),
+    )
+
+
+def host_attributes(h):
+    return dict(
+        hypervisor=first(h, "hypervisor.fullName", "hypervisor_full_name"),
+        hypervisor_ip=first(h, "hypervisor.externalAddress.ipv4.value", "hypervisor_address"),
+        cvm_ip=first(h, "controllerVm.externalAddress.ipv4.value", "service_vmexternal_ip"),
+        ipmi_ip=first(h, "ipmi.ip.ipv4.value", "ipmi_address"),
+        model=first(h, "blockModel", "block_model_name"),
+        serial=first(h, "blockSerial", "serial"),
+        cpu_model=first(h, "cpuModel", "cpu_model"),
+        cpu_sockets=first(h, "numberOfCpuSockets", "num_cpu_sockets"),
+        maintenance=humanize(first(h, "maintenanceState", "hypervisor.state")) or None,
+        node_status=humanize(first(h, "nodeStatus", "state")) or None,
+    )
+
+
+def vm_attributes(vm, hypervisor):
+    tools = vm.get("guestTools") or {}
+    installed = tools.get("isInstalled")
+    return dict(
+        hypervisor=hypervisor,
+        ip_addresses=ip_addresses(vm.get("nics") or vm.get("vm_nics") or []),
+        guest_os=first(vm, "guestTools.guestOsVersion", "guestOs", "guest_os"),
+        guest_tools=(("enabled" if tools.get("isEnabled") else "installed") + (f" ({tools['version']})" if tools.get("version") else ""))
+        if installed else ("not installed" if installed is False else None),
+        description=first(vm, "description"),
+        created=first(vm, "createTime"),
+        machine_type=first(vm, "machineType", "machine_type"),
+        boot=short_type(first(vm, "bootConfig.$objectType")),
+        vcpu_topology=(f"{vm['numSockets']} socket(s) × {vm['numCoresPerSocket']} core(s)"
+                       if vm.get("numSockets") and vm.get("numCoresPerSocket") else None),
+    )
+
+
+def storage_attributes(s):
+    return dict(
+        replication_factor=first(s, "replicationFactor", "replication_factor"),
+        compression="enabled" if first(s, "isCompressionEnabled", "compression_enabled") else None,
+        deduplication=enabled_mode(first(s, "onDiskDedup", "on_disk_dedup")),
+        erasure_coding=enabled_mode(first(s, "erasureCode", "erasure_code")),
+        encrypted="yes" if s.get("isEncrypted") else None,
+    )
 
 
 def latest(value):
@@ -42,6 +251,7 @@ def metrics(data, config=None):
     mapping = {
         "cpu_usage_percent": ("hypervisorCpuUsagePpm", "hypervisor_cpu_usage_ppm", 0.0001),
         "memory_usage_percent": ("hypervisorMemoryUsagePpm", "hypervisor_memory_usage_ppm", 0.0001),
+        "guest_memory_usage_percent": ("guestMemoryUsagePpm", "guest.memory_usage_ppm", 0.0001),
         "storage_capacity_bytes": ("storageCapacityBytes", "storage.capacity_bytes", 1),
         "storage_used_bytes": ("storageUsageBytes", "storage.usage_bytes", 1),
         "iops": ("controllerNumIops", "controller_num_iops", 1),
@@ -188,10 +398,25 @@ class PrismCollector:
             resource = next((r for r in self.snapshot.resources if r["external_id"] == source_id), None)
             severity = str(a.get("severity", "unknown")).lower()
             resolved = a.get("resolved", a.get("isResolved", False))
+            params = alert_params(a)
+            message = render(a.get("message"), params)
+            alert_type = a.get("alertType") or a.get("alert_type_uuid")
+            title = (render(a.get("title") or a.get("alert_title"), params) or message
+                     or humanize(alert_type) or "Prism alert")
+            source_name = source.get("name") or (affected[0].get("entity_name") if affected else None)
             self.snapshot.alerts.append(dict(
                 id=str(rid), severity=severity, resolved=bool(resolved),
                 acknowledged=bool(a.get("acknowledged", a.get("isAcknowledged", False))),
-                title=str(a.get("title") or a.get("alert_title") or a.get("message") or "Prism alert"),
+                title=title[:500],
+                message=message[:2000] if message and message != title else None,
+                created_at=iso_time(a.get("creationTime") or a.get("created_time_stamp_in_usecs")),
+                updated_at=iso_time(a.get("lastUpdatedTime") or a.get("last_occurrence_time_stamp_in_usecs")),
+                resolved_at=iso_time(a.get("resolvedTime") or a.get("resolved_time_stamp_in_usecs")) if resolved else None,
+                source_name=str(source_name)[:255] if source_name else None,
+                source_type=humanize(short_type(source.get("type"))) or None,
+                alert_type=str(alert_type)[:255] if alert_type else None,
+                impact=", ".join(humanize(i) for i in (a.get("impactTypes") or a.get("impact_types") or [])
+                                 if isinstance(i, str))[:255] or None,
                 resource_id=resource["id"] if resource else None,
                 resource_url=resource["url"] if resource else None,
                 url=self.link(path, rid),
@@ -210,15 +435,16 @@ class PrismCollector:
             cid_url = quote(cid, safe="")
             stat = await self.stats(f"{base}/stats/clusters/{cid_url}", "cluster_metrics")
             self.snapshot.resource("cluster", cid, c.get("name"), metrics=metrics(stat, c),
-                                   url=self.link(base + "/config/clusters", cid))
+                                   url=self.link(base + "/config/clusters", cid), attributes=cluster_attributes(c))
             hosts = await self.pages(f"{base}/config/clusters/{cid_url}/hosts")
             self.snapshot.capabilities["hosts"] = True
             for h in hosts:
                 hid = h["extId"]
                 stat = await self.stats(f"{base}/stats/clusters/{cid_url}/hosts/{quote(hid, safe='')}", "host_metrics")
+                m = host_metrics(stat, h)
                 self.snapshot.resource("host", hid, h.get("hostName"), parent_id=f"cluster:{cid}",
-                                       health="warning" if h.get("isDegraded") else ("healthy" if h.get("isDegraded") is False else "unknown"),
-                                       metrics=metrics(stat, h), url=self.link(f"{base}/config/clusters/{cid_url}/hosts", hid))
+                                       health=host_health(h, m), metrics=m, attributes=host_attributes(h),
+                                       url=self.link(f"{base}/config/clusters/{cid_url}/hosts", hid))
         for hypervisor in ("ahv", "esxi"):
             vm_base = f"/api/vmm/{v}/{hypervisor}"
             vms = await self.optional_pages(vm_base + "/config/vms", hypervisor + "_vms")
@@ -234,12 +460,16 @@ class PrismCollector:
                 stat = vm_stats.get(vid, {})
                 parent = (vm.get("host") or {}).get("extId")
                 cluster = (vm.get("cluster") or {}).get("extId")
-                m = metrics(stat, vm)
+                m = vm_memory(metrics(stat, vm))
                 if number(vm.get("numSockets")) is not None and number(vm.get("numCoresPerSocket")) is not None:
                     m["cpu_cores"] = vm["numSockets"] * vm["numCoresPerSocket"]
+                disks = disk_bytes(vm.get("disks"), "backingInfo.diskSizeBytes", "diskSizeBytes")
+                if disks is not None:
+                    m["disk_provisioned_bytes"] = disks
                 self.snapshot.resource("vm", vid, vm.get("name"),
                                        parent_id=f"host:{parent}" if parent else (f"cluster:{cluster}" if cluster else None),
                                        power_state=vm.get("powerState"), metrics=m,
+                                       attributes=vm_attributes(vm, "AHV" if hypervisor == "ahv" else "ESXi"),
                                        url=self.link(vm_base + "/config/vms", vid))
         for container in await self.optional_pages(base + "/config/storage-containers", "storage"):
             rid = container["extId"]
@@ -247,6 +477,7 @@ class PrismCollector:
             cid = container.get("clusterExtId")
             self.snapshot.resource("storage", rid, container.get("name"),
                 parent_id=f"cluster:{cid}" if cid else None, metrics=metrics(stat, container),
+                attributes=storage_attributes(container),
                 url=self.link(base + "/config/storage-containers", rid))
         alert_path = f"/api/monitoring/{v}/serviceability/alerts"
         self.add_alerts(await self.optional_pages(alert_path, "alerts"), alert_path)
@@ -263,6 +494,15 @@ class PrismCollector:
                     cluster_id = rid
                     self.snapshot.version = f"Prism Element {row.get('version', 'unknown AOS')} / API v2.0"
                 m = metrics({**row.get("stats", {}), **row.get("usage_stats", {})}, row)
+                attributes = {"cluster": cluster_attributes, "host": host_attributes,
+                              "storage": storage_attributes}.get(kind, lambda r: vm_attributes(r, None))(row)
+                if kind == "vm":
+                    m = vm_memory(m)
+                    disks = disk_bytes(row.get("vm_disk_info"), "size", skip_cdrom=True)
+                    if disks is not None:
+                        m["disk_provisioned_bytes"] = disks
+                if kind == "host":
+                    m.update(uptime(row))
                 if kind == "vm" and number(row.get("num_vcpus")) is not None:
                     m["cpu_cores"] = row["num_vcpus"] * (number(row.get("num_cores_per_vcpu")) or 1)
                 host = row.get("host_uuid")
@@ -270,7 +510,8 @@ class PrismCollector:
                     parent_id=f"host:{host}" if host else (f"cluster:{cluster_id}" if kind != "cluster" and cluster_id else None),
                     health={"Good": "healthy", "Critical": "critical", "Warning": "warning", "Error": "critical"}.get(
                         (row.get("health_summary") or {}).get("health_status"), "warning" if row.get("is_degraded") else "unknown"),
-                    metrics=m, power_state=row.get("power_state"), url=self.link(base + "/" + collection, rid))
+                    metrics=m, power_state=row.get("power_state"), attributes=attributes,
+                    url=self.link(base + "/" + collection, rid))
         path = base + "/alerts"
         self.add_alerts(await self.pages(path, v2=True), path, v2=True)
         self.snapshot.capabilities["alerts"] = True
