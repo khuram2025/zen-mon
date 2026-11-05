@@ -80,7 +80,7 @@ def collect(config):
         alarm_sources = {}
         for obj in view.view:
             rid = obj._moId
-            m, parent, power = {}, None, None
+            m, parent, power, attributes = {}, None, None, {}
             if isinstance(obj, vim.ClusterComputeResource):
                 kind = "cluster"
                 m = dict(cpu_capacity_hz=scaled(attr(obj, "summary.totalCpu"), 1000000),
@@ -106,6 +106,12 @@ def collect(config):
                          memory_capacity_bytes=memory, memory_used_bytes=used_memory,
                          memory_usage_percent=percent(used_memory, memory))
                 power = str(attr(obj, "runtime.powerState", "unknown"))
+                m["uptime_seconds"] = attr(obj, "summary.quickStats.uptime")
+                attributes = dict(hypervisor=attr(obj, "summary.config.product.fullName"),
+                                  model=attr(obj, "summary.hardware.model"), vendor=attr(obj, "summary.hardware.vendor"),
+                                  cpu_model=attr(obj, "summary.hardware.cpuModel"),
+                                  maintenance="yes" if attr(obj, "runtime.inMaintenanceMode") else None,
+                                  connection=attr(obj, "runtime.connectionState"))
             elif isinstance(obj, vim.VirtualMachine):
                 kind = "vm"
                 host = attr(obj, "runtime.host")
@@ -125,15 +131,25 @@ def collect(config):
                          storage_used_bytes=committed, storage_capacity_bytes=disk_capacity,
                          storage_usage_percent=percent(committed, disk_capacity))
                 power = str(attr(obj, "runtime.powerState", "unknown"))
+                m["uptime_seconds"] = attr(obj, "summary.quickStats.uptimeSeconds")
+                addresses = [attr(obj, "guest.ipAddress")]
+                for nic in attr(obj, "guest.net", []) or []:
+                    addresses.extend(list(getattr(nic, "ipAddress", None) or []))
+                attributes = dict(ip_addresses=[a for a in addresses if isinstance(a, str) and a and not a.startswith("fe80")],
+                                  guest_os=attr(obj, "summary.config.guestFullName") or attr(obj, "guest.guestFullName"),
+                                  guest_tools=attr(obj, "guest.toolsRunningStatus") or attr(obj, "summary.guest.toolsStatus"),
+                                  hostname=attr(obj, "guest.hostName"), hypervisor="ESXi")
             else:
                 kind = "storage"
                 capacity, free = attr(obj, "summary.capacity"), attr(obj, "summary.freeSpace")
                 used = capacity - free if capacity is not None and free is not None else None
                 m = dict(storage_capacity_bytes=capacity, storage_used_bytes=used,
                          storage_usage_percent=percent(used, capacity))
+                attributes = dict(type=attr(obj, "summary.type"))
             url = config.endpoint + "/ui/#/search?query=" + quote(str(obj.name), safe="")
             item = snapshot.resource(kind, rid, obj.name, parent_id=parent, power_state=power,
-                                     health=health.get(str(obj.overallStatus), "unknown"), metrics=m, url=url)
+                                     health=health.get(str(obj.overallStatus), "unknown"), metrics=m, url=url,
+                                     attributes=attributes)
             if kind in ("host", "vm"):
                 performance_objects.append(obj)
             for alarm in obj.triggeredAlarmState or []:

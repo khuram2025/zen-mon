@@ -100,13 +100,27 @@ A ping or TCP check verifies only routing/reachability. Acceptance requires auth
 - All resource identities are scoped to the connector and keyed by provider IDs. A completed inventory replaces the prior snapshot. A failed collection retains the last successful snapshot and timestamp. Staleness is shown after failure, pause, or two polling intervals plus 30 seconds without a success.
 - CPU/memory PPM from Nutanix are converted to percent by division by 10,000. Byte capacities remain bytes; the dashboard formats binary units. Unavailable/negative sentinel values are omitted, not converted to zero.
 - Prism v4 uses cluster/host `TimeValuePair` arrays and VM `stats` tuples; VM statistics are fetched in paginated batches. PE VM lists use `offset/length`, while PE clusters/hosts/alerts use `count/page`.
-- Health states come from provider health/operational fields and active alert severity. Where only a numeric health score exists it is displayed as `health_score`; absent categorical health remains unknown. An empty alert list is not proof of overall cluster health.
+- Health states come from provider health/operational fields and active alert severity. Where only a numeric health-check score (0-100) exists it is kept as `health_score` and mapped to a state: 80 or more healthy, 50-79 warning, below 50 critical. Active critical/warning alerts can still raise the state. Resources with neither remain unknown. An empty alert list is not proof of overall cluster health.
+- AHV reserves a VM's whole memory assignment, so Prism's hypervisor memory figure for a VM reads 100% when Nutanix Guest Tools are absent. That figure is stored as `hypervisor_memory_usage_percent` and is never shown as utilization. `memory_usage_percent` for a Nutanix VM comes from `guestMemoryUsagePpm`; without it the dashboard shows the assigned memory only. A hypervisor figure below 99.5% (for example ESXi on Nutanix) is still treated as usage. VM provisioned disk size is the sum of the configured disk sizes.
+- Prism alert titles and messages are templates (`{cvm_ip}`, `{alert_title}`). They are filled from the alert's parameters (v4 `parameters`, v2 `context_types`/`context_values`); an unresolvable placeholder is dropped rather than displayed. Alerts carry creation/resolution time, source entity and impact where Prism returns them.
+- Descriptive fields (software version, node count, virtual IP, hypervisor and CVM IPs, model/serial, VM IP addresses, guest OS, guest tools, storage data services) are kept as short strings in each resource's `attributes`. They are display-only and are not stored as metric history.
 - VMware VM storage usage is committed allocation, and Hyper-V VM storage usage is VHD file allocation; neither is guest filesystem utilization. Hyper-V VM memory demand and assigned memory are separately named metrics, not presented as guest memory usage. Install an OS agent for guest/application monitoring.
 - Imported Prism alerts preserve provider ID, severity, acknowledgment and resolution state. Links point to the affected resource and alert's authenticated provider API URL; Prism UI hash routes differ by release and are not guessed. VMware links open the vSphere client search for the resource. Hyper-V links open the local ZenPlus resource view; it has no assumed web console.
 - Provider alerts are shown in the Virtualization module. This change does not automatically create notification rules or acknowledge/resolve anything in the provider. Hyper-V VMMS events are bounded to 24 hours / 500 records, and are events rather than a provider acknowledgment workflow.
 - Metrics are retained in ClickHouse for 30 days. History reads aggregate into five-minute buckets, or hourly for API requests exceeding 72 hours. No cross-provider capacity totals are calculated, preventing double counting when Central and vCenter expose the same VMs/storage.
 - Pagination and request durations are bounded; transient HTTP 429/502/503/504 responses get bounded retries. Unsupported optional endpoints produce coverage notes. TLS/authentication/permission errors fail the poll. There is no implicit v3 or insecure API downgrade.
 - Multiple API workers coordinate polling with PostgreSQL row locks (`FOR UPDATE SKIP LOCKED`). Synchronous VMware/Hyper-V SDK collectors run in a subprocess terminated at the collection timeout or API shutdown; credentials are supplied through stdin, not command arguments or files.
+
+## Dashboard layout
+
+Servers → Virtualization opens one connector at a time (a connector switcher appears when there are several). Tabs:
+
+- **Overview:** inventory, health and alert tiles; cluster CPU/memory/storage utilization, IOPS and latency; vCPU-to-core ratio; utilization history (1 hour to 30 days); top VMs by CPU and IOPS; per-host CPU/memory; VM power state; active alerts; storage containers.
+- **Virtual machines, Hosts, Storage:** searchable, sortable tables. VMs filter by power state and host and show IP, guest OS, vCPU, CPU, memory, disk, IOPS, latency and alert count. Hosts show health score, cores, VM placement and uptime.
+- **Clusters:** a card per cluster with utilization, I/O, software version, nodes, virtual IP and a utilization trend.
+- **Alerts:** severity counts, active/resolved filter, search, affected resource and age.
+
+Selecting a resource opens its detail (Summary, Performance charts for every sampled metric, Alerts, and member VMs or hosts). The tab and the open resource are kept in the URL (`?tab=vms&r=vm:<id>`), so links and the browser Back button work.
 
 ## Developer verification
 

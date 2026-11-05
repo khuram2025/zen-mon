@@ -92,6 +92,34 @@ def percent(used, capacity):
     return min(100.0, a * 100 / b) if a is not None and b else None
 
 
+def health_from_score(score):
+    """Provider health-check score (0-100) to a coarse state; missing scores stay unknown."""
+    n = number(score)
+    if n is None:
+        return "unknown"
+    return "healthy" if n >= 80 else ("warning" if n >= 50 else "critical")
+
+
+def clean_attributes(attributes):
+    """Descriptive provider fields: short strings or short string lists only, never nested provider bodies."""
+    out = {}
+    for key, value in (attributes or {}).items():
+        if value is None or isinstance(value, (dict, bytes)):
+            continue
+        if isinstance(value, (list, tuple, set)):
+            items = [str(v)[:120] for v in value if v not in (None, "") and not isinstance(v, (dict, list))]
+            items = list(dict.fromkeys(items))[:20]
+            if items:
+                out[str(key)[:64]] = items
+            continue
+        if isinstance(value, bool):
+            value = "yes" if value else "no"
+        text = str(value).strip()
+        if text:
+            out[str(key)[:64]] = text[:300]
+    return out
+
+
 @dataclass
 class Snapshot:
     resources: list[dict] = field(default_factory=list)
@@ -101,13 +129,15 @@ class Snapshot:
     version: str = ""
 
     def resource(self, kind, rid, name, *, parent_id=None, health="unknown", power_state=None,
-                 metrics=None, url=None):
+                 metrics=None, url=None, attributes=None):
         if not rid:
             raise ConnectorError("Provider returned a resource without a stable identifier")
+        metrics = {k: n for k, v in (metrics or {}).items() if (n := number(v)) is not None}
+        if health == "unknown" and "health_score" in metrics:
+            health = health_from_score(metrics["health_score"])
         item = dict(id=f"{kind}:{rid}", external_id=str(rid), kind=kind, name=str(name or rid),
                     parent_id=parent_id, health=health, power_state=power_state,
-                    metrics={k: n for k, v in (metrics or {}).items() if (n := number(v)) is not None},
-                    url=url)
+                    metrics=metrics, url=url, attributes=clean_attributes(attributes))
         self.resources.append(item)
         return item
 

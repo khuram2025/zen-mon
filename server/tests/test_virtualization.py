@@ -75,6 +75,69 @@ async def test_pc_discovery_stats_alert_links_and_pagination():
 
 
 @pytest.mark.asyncio
+async def test_pc_alert_templates_reserved_vm_memory_health_scores_and_details():
+    def handle(request):
+        p = request.url.path
+        if p.endswith("/config/clusters"):
+            return httpx.Response(200, json=response([{"extId": "c1", "name": "SNIH", "config": {"buildInfo": {"version": "6.8"}},
+                "nodes": {"numberOfNodes": 3}, "network": {"externalAddress": {"ipv4": {"value": "10.0.0.10"}}}}]))
+        if p.endswith("/config/clusters/c1/hosts"):
+            return httpx.Response(200, json=response([{"extId": "h1", "hostName": "node-1", "blockModel": "NX-3060",
+                "hypervisor": {"fullName": "AHV 10.0", "externalAddress": {"ipv4": {"value": "10.0.0.11"}}}}]))
+        if p.endswith("/stats/clusters/c1"):
+            return httpx.Response(200, json={"data": {"healthCheckScore": [{"value": 24}]}})
+        if p.endswith("/stats/clusters/c1/hosts/h1"):
+            return httpx.Response(200, json={"data": {"healthCheckScore": [{"value": 98}]}})
+        if p.endswith("/ahv/config/vms"):
+            return httpx.Response(200, json=response([
+                {"extId": "v1", "name": "no-tools", "host": {"extId": "h1"}, "powerState": "ON", "memorySizeBytes": 8 * 1024**3,
+                 "disks": [{"backingInfo": {"diskSizeBytes": 100}}, {"backingInfo": {"diskSizeBytes": 50}}],
+                 "nics": [{"networkInfo": {"ipv4Config": {"ipAddress": {"value": "10.0.1.5"}, "defaultGatewayAddress": {"value": "10.0.1.1"}}}}]},
+                {"extId": "v2", "name": "with-tools", "host": {"extId": "h1"}, "powerState": "ON", "memorySizeBytes": 4 * 1024**3,
+                 "guestTools": {"isInstalled": True, "isEnabled": True, "guestOsVersion": "Windows Server 2022"}}]))
+        if p.endswith("/ahv/stats/vms"):
+            return httpx.Response(200, json=response([
+                {"extId": "v1", "stats": [{"hypervisorMemoryUsagePpm": 1000000, "memoryUsageBytes": 8 * 1024**3}]},
+                {"extId": "v2", "stats": [{"hypervisorMemoryUsagePpm": 1000000, "guestMemoryUsagePpm": 250000}]}]))
+        if p.endswith("/config/storage-containers") or p.endswith("/esxi/config/vms"):
+            return httpx.Response(200, json=response([]))
+        if p.endswith("/serviceability/alerts"):
+            return httpx.Response(200, json=response([
+                {"extId": "a1", "title": "{alert_title}", "severity": "WARNING", "isResolved": True,
+                 "parameters": [{"paramName": "alert_title", "paramValue": {"stringValue": "Disk {disk_id} offline"}},
+                                {"paramName": "disk_id", "paramValue": {"intValue": 7}}]},
+                {"extId": "a2", "title": "The cluster is using password based ssh access for the cvm {cvm_ip}.", "severity": "INFO",
+                 "creationTime": "2026-11-04T10:00:00Z", "sourceEntity": {"extId": "c1", "name": "SNIH", "type": "cluster"}},
+                {"extId": "a3", "title": "", "message": "Prism Central {pcvm_ip} is using default password", "severity": "CRITICAL",
+                 "parameters": [{"paramName": "pcvm_ip", "paramValue": {"stringValue": "10.0.0.2"}}]}]))
+        raise AssertionError(p)
+    async with httpx.AsyncClient(base_url=config().endpoint, transport=httpx.MockTransport(handle)) as client:
+        result = await PrismCollector(config(), client).collect()
+    by_name = {r["name"]: r for r in result.resources}
+    assert by_name["SNIH"]["health"] == "critical"
+    assert by_name["SNIH"]["attributes"] == {"version": "6.8", "nodes": "3", "virtual_ip": "10.0.0.10"}
+    assert by_name["node-1"]["health"] == "healthy"
+    assert by_name["node-1"]["attributes"]["hypervisor"] == "AHV 10.0"
+    reserved = by_name["no-tools"]["metrics"]
+    assert "memory_usage_percent" not in reserved and "memory_used_bytes" not in reserved
+    assert reserved["hypervisor_memory_usage_percent"] == 100
+    assert reserved["disk_provisioned_bytes"] == 150
+    assert by_name["no-tools"]["attributes"]["ip_addresses"] == ["10.0.1.5"]
+    guest = by_name["with-tools"]
+    assert guest["metrics"]["memory_usage_percent"] == 25
+    assert guest["metrics"]["memory_used_bytes"] == 1024**3
+    assert guest["attributes"]["guest_os"] == "Windows Server 2022"
+    assert guest["attributes"]["guest_tools"] == "enabled"
+    titles = [a["title"] for a in result.alerts]
+    assert titles == ["Disk 7 offline", "The cluster is using password based ssh access for the cvm.",
+                      "Prism Central 10.0.0.2 is using default password"]
+    assert all("{" not in t for t in titles)
+    assert result.alerts[1]["created_at"] == "2026-11-04T10:00:00Z"
+    assert result.alerts[1]["source_name"] == "SNIH"
+    assert result.alerts[1]["resource_id"] == "cluster:c1"
+
+
+@pytest.mark.asyncio
 async def test_element_uses_vm_offset_and_host_pages():
     cfg = ConnectionConfig(provider="nutanix_pe", endpoint=config().endpoint, username="monitor", secret="fixture")
     def handle(request):
