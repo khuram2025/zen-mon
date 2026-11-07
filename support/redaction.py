@@ -145,7 +145,7 @@ PATTERNS: tuple[Pattern_, ...] = (
     Pattern_(
         kind="url_password",
         regex=re.compile(
-            r"\b([a-z][a-z0-9+.-]*://[^:/@\s]+):"
+            r"\b([a-z][a-z0-9+.-]*://[^:/@\s]*):"
             r"(?!\[REDACTED:url_password\])([^\s/?#]+)@",
             re.IGNORECASE,
         ),
