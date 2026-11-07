@@ -291,3 +291,24 @@ def test_n4_json_bytes_remain_valid_json():
     out = _json.loads(r.apply_bytes(raw))
     assert "SECRETPART" not in _json.dumps(out)
     assert out["channel"]["config"]["routing_key"] == "[REDACTED:structured_secret]"
+
+
+@pytest.mark.parametrize("scheme", ["redis", "rediss", "postgresql+asyncpg", "https"])
+def test_password_only_uri_userinfo_is_redacted(scheme):
+    original = f"SERVICE_URL={scheme}://:redis-uri-regression-secret@service.example:6379/0"
+    redactor = Redactor()
+    result = redactor.apply(original)
+    assert "redis-uri-regression-secret" not in result
+    assert f"{scheme}://:[REDACTED:url_password]@service.example:6379/0" in result
+    assert redactor.apply(result) == result
+
+
+def test_password_only_redis_uri_is_redacted_in_structured_config():
+    result = Redactor().apply_structure({"redis_url": "redis://:structured-redis-secret@localhost:6379/0"})
+    assert "structured-redis-secret" not in result["redis_url"]
+    assert "@localhost:6379/0" in result["redis_url"]
+
+
+def test_redis_uri_without_userinfo_keeps_host_and_port():
+    original = "REDIS_URL=redis://localhost:6379/0"
+    assert Redactor().apply(original) == original

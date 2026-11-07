@@ -35,7 +35,7 @@ else:
     env={'POSTGRES_PASSWORD':pg,'DB_PASSWORD':pg,'CLICKHOUSE_PASSWORD':ch,'REDIS_PASSWORD':rd,'JWT_SECRET':jwt,'SNMP_ENC_KEY':snmp,
          'API_HOST':'127.0.0.1','API_PORT':'8000','DATABASE_URL':f'postgresql+asyncpg://zenplus:{pg}@127.0.0.1:5432/zenplus',
          'CLICKHOUSE_HOST':'127.0.0.1','CLICKHOUSE_PORT':'9000','CLICKHOUSE_HTTP_PORT':'8123','CLICKHOUSE_DB':'zenplus','CLICKHOUSE_USER':'default',
-         'REDIS_URL':f'redis://:{rd}@127.0.0.1:6379/0','POLLER_ID':'poller-'+secrets.token_hex(8),
+         'REDIS_URL':f'redis://default:{rd}@127.0.0.1:6379/0','POLLER_ID':'poller-'+secrets.token_hex(8),
          'POSTGRES_HOST':'127.0.0.1','POSTGRES_PORT':'5432','POSTGRES_DB':'zenplus','POSTGRES_USER':'zenplus','REDIS_HOST':'127.0.0.1','REDIS_PORT':'6379'}
     write(envpath,'# Unique appliance secrets\n'+''.join(f'{k}={v}\n' for k,v in env.items()),0o640)
     run(['chown','root:zenplus',str(envpath)])
