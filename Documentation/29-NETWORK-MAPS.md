@@ -205,6 +205,7 @@ A role limited to selected maps (page-access roles) suits a wall account: it onl
 | Device labels truncated short names (for example "B8_SW01 (3750"). | Label cards size to their text up to 15 rem. |
 | Alert badges were small dots that collided with the status dot. | Separate bell badge with count (upper right) and status pip (lower right). |
 | The hover card and the pinned device card showed at the same time. | The pinned card is now the inspector; the hover card is hidden for that device. |
+| Opening `/maps` directly (bookmark, link, reload) returned 403 Forbidden in 1.25.5: the world-map data folder `public/maps/` shadowed the page. Fixed in 1.25.6. | The data moved to `/geo/world.json`; `npm run smoke:routes` now fails when a folder in `public/` is named like a route. |
 | The editor did not line up with the page edges on large screens (a 4 px gap at 2xl). | The editor frame follows the page padding at every breakpoint. |
 | The summary bar and the Attention list competed for the top of the canvas. | Tiles sit top left, the Attention list / inspector top right; the inspector replaces the Attention list while open. |
 
