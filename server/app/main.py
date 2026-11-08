@@ -18,6 +18,7 @@ from app.api.v1 import management_access
 from app.api.v1 import network_events
 from app.api.v1 import virtualization
 from app.api.v1 import notification_grouping as notification_grouping_api
+from app.api.v1 import alert_storm as alert_storm_api
 from app.api.v1 import escalation_policies as escalation_policies_api
 from app.api.v1 import oncall as oncall_api
 from app.api.v1 import sensors as sensors_admin_api
@@ -119,6 +120,7 @@ def create_app() -> FastAPI:
     app.include_router(devices.maintenance_router, prefix="/api/v1", dependencies=[policy("devices")])
     app.include_router(tags.router, prefix="/api/v1", dependencies=[policy("tags")])
     app.include_router(notification_grouping_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
+    app.include_router(alert_storm_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(escalation_policies_api.router, prefix="/api/v1", dependencies=[policy("escalation")])
     app.include_router(oncall_api.router, prefix="/api/v1", dependencies=[policy("oncall")])
     app.include_router(alerts.router, prefix="/api/v1", dependencies=[policy("alerts")])

@@ -841,6 +841,7 @@ export const HOLD_REASON_LABEL: Record<string, string> = {
   grouped: 'Grouped with related warnings',
   group: 'Grouped with related warnings',
   budget: 'Recipient message budget reached',
+  storm: 'Part of an alert storm (one combined notification)',
 }
 
 export function holdReasonLabel(reason: string): string {
@@ -1398,7 +1399,7 @@ export function contactsPayload(list: ContactMethod[]) {
 
 /* ── Page tabs ────────────────────────────────────────────────────────── */
 
-export const ESCALATION_TABS = ['matrix', 'policies', 'oncall', 'targets', 'grouping', 'coverage'] as const
+export const ESCALATION_TABS = ['matrix', 'policies', 'oncall', 'targets', 'grouping', 'storms', 'coverage'] as const
 export type EscalationTab = (typeof ESCALATION_TABS)[number]
 
 export function tabFromSearch(search: string | URLSearchParams): EscalationTab {
