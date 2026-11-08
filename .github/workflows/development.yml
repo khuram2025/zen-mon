@@ -78,6 +78,7 @@ jobs:
       - run: node scripts/test-nav-access.mjs
       - run: node scripts/test-page-access.mjs
       - run: node scripts/test-map-export.mjs
+      - run: npm run test:site-tile
       - run: node scripts/test-escalation-ui.mjs
       - run: node scripts/test-alert-storm-ui.mjs
       - run: node scripts/test-custom-time-range.mjs
