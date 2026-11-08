@@ -7,7 +7,7 @@
  * without it sees the same tabs read-only.
  */
 import { useSearchParams } from 'react-router-dom'
-import { CalendarClock, ChevronsUp, Grid3x3, Layers, ShieldCheck, Timer } from 'lucide-react'
+import { CalendarClock, ChevronsUp, CloudLightning, Grid3x3, Layers, ShieldCheck, Timer } from 'lucide-react'
 import { useCan } from '@/stores/auth'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { ESCALATION_TABS, tabFromSearch, type EscalationTab } from '@/features/escalation/model'
@@ -16,6 +16,7 @@ import { PoliciesTab } from './PoliciesTab'
 import { OncallTab } from './OncallTab'
 import { ResponseTargetsTab } from './ResponseTargetsTab'
 import { GroupingTab } from './GroupingTab'
+import { StormsTab } from './StormsTab'
 import { CoverageTab } from './CoverageTab'
 
 const TAB_META: Record<EscalationTab, { label: string; icon: typeof Grid3x3 }> = {
@@ -24,6 +25,7 @@ const TAB_META: Record<EscalationTab, { label: string; icon: typeof Grid3x3 }> =
   oncall: { label: 'On-call', icon: CalendarClock },
   targets: { label: 'Response targets', icon: Timer },
   grouping: { label: 'Grouping', icon: Layers },
+  storms: { label: 'Alert storms', icon: CloudLightning },
   coverage: { label: 'Coverage', icon: ShieldCheck },
 }
 
@@ -56,7 +58,7 @@ export function EscalationPage() {
           </div>
           <div>
             <h1 className="text-xl font-semibold tracking-tight">Escalation &amp; On-call</h1>
-            <p className="text-xs text-muted">Who is paged for each priority, when unacknowledged incidents escalate, who is on call, and how warnings are grouped.</p>
+            <p className="text-xs text-muted">Who is paged for each priority, when unacknowledged incidents escalate, who is on call, and how warnings are grouped and alert storms combined.</p>
           </div>
         </div>
         {!canManage && (
@@ -83,6 +85,7 @@ export function EscalationPage() {
         <TabsContent value="oncall"><OncallTab canManage={canManage} focusId={tab === 'oncall' ? focusId : null} /></TabsContent>
         <TabsContent value="targets"><ResponseTargetsTab canManage={canManage} /></TabsContent>
         <TabsContent value="grouping"><GroupingTab canManage={canManage} focusId={tab === 'grouping' ? focusId : null} /></TabsContent>
+        <TabsContent value="storms"><StormsTab canManage={canManage} focusId={tab === 'storms' ? (params.get('storm') ?? focusId) : null} /></TabsContent>
         <TabsContent value="coverage"><CoverageTab go={go} /></TabsContent>
       </Tabs>
     </div>

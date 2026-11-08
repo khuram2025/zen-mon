@@ -50,12 +50,13 @@ async def run(mode):
             if mode=='deliver':
                 return await ncm_events.deliver_due(db)
             from app.api.v1.ncm import _run_scheduled
-            from app.services import ncm_changes, ncm_compliance
+            from app.services import ncm_changes, ncm_compliance, ncm_normalization
             result = await _run_scheduled(db)
             # Event-triggered backups and the daily compliance pass ride on the
             # same one-minute timer; a failure in either never blocks schedules.
+            # The normalization pass is a no-op once stored hashes are current.
             for name, step in (('events', ncm_changes.scan_syslog), ('event_jobs', ncm_changes.process_pending),
-                               ('compliance', ncm_compliance.daily)):
+                               ('compliance', ncm_compliance.daily), ('normalization', ncm_normalization.reconcile)):
                 try:
                     outcome = await step(db)
                     await db.commit()

@@ -2,6 +2,17 @@
 
 Comparison deliberately preserves secret/key/certificate changes. Display
 redaction must never be used to decide whether the configuration changed.
+
+One exception is forced by the devices themselves: values a device re-encrypts
+with a fresh random salt every time it prints its configuration. FortiOS does
+this for every reversible secret (``set psksecret ENC …``, ``set passwd ENC
+…``, encrypted private keys), so two back-to-back captures of an unchanged
+FortiGate differ on hundreds of lines. Those ciphertexts carry no comparable
+information, so comparison replaces them with a fixed marker. Stored one-way
+hashes that print identically every time (FortiOS administrator passwords,
+``config system admin`` / ``set password ENC SH2…``) are still compared, and
+the setting name stays in place, so adding or removing a secret is still a
+change.
 """
 from __future__ import annotations
 
@@ -11,6 +22,17 @@ import re
 from app.core import crypto
 
 MAX_CONFIG_BYTES = 16 * 1024 * 1024
+# Bump when normalize_config changes meaning; stored norm_hash values are then
+# recomputed by ncm_normalization.reconcile so baseline drift stays correct.
+NORMALIZATION_VERSION = 2
+ENCRYPTED_MARKER = '<re-encrypted by device>'
+# FortiOS: ``set <name> ENC <ciphertext>`` (optionally quoted).
+_FORTIOS_ENC = re.compile(r'^(\s*set\s+(\S+)\s+ENC\s+)("?)[^\s"]+\3(\s*)$')
+_FORTIOS_CONFIG = re.compile(r'^\s*config\s+(.+?)\s*$')
+_FORTIOS_END = re.compile(r'^\s*end\s*$')
+# PEM private keys encrypted with a per-print salt/IV (PKCS#8 "ENCRYPTED
+# PRIVATE KEY", or legacy "Proc-Type: 4,ENCRYPTED" with a DEK-Info IV).
+_PEM_BLOCK = re.compile(r'-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----', re.S)
 _NOISE = re.compile(
     r"^(?:! Last configuration change[^\n]*|! NVRAM config last updated[^\n]*|"
     r"ntp clock-period \d+|Building configuration[^\n]*|Current configuration : \d+ bytes|"
@@ -25,8 +47,38 @@ _SECRET_LINE = re.compile(
     r"key-string|shared-secret|cipher|authentication-key|privacy-key)\b|\bENC\s+|\b(?:radius|tacacs).*\bkey\b).*$", re.I | re.M)
 
 
+def _mask_encrypted_pem(match: re.Match) -> str:
+    label, body = match.group(1), match.group(2)
+    if 'PRIVATE KEY' in label and ('ENCRYPTED' in label or re.search(r'Proc-Type:\s*4,ENCRYPTED', body)):
+        return f'-----BEGIN {label}-----{ENCRYPTED_MARKER}-----END {label}-----'
+    return match.group(0)
+
+
+def _mask_fortios_ciphertext(content: str) -> str:
+    """Replace FortiOS per-print ciphertexts, keeping stable admin hashes."""
+    if ' ENC ' not in content:
+        return content
+    path: list[str] = []
+    out = []
+    for line in content.split('\n'):
+        opened = _FORTIOS_CONFIG.match(line)
+        if opened:
+            path.append(opened.group(1))
+        elif _FORTIOS_END.match(line) and path:
+            path.pop()
+        else:
+            enc = _FORTIOS_ENC.match(line)
+            if enc and not (path and path[-1] == 'system admin' and enc.group(2) == 'password'):
+                line = f'{enc.group(1)}{ENCRYPTED_MARKER}{enc.group(4)}'
+        out.append(line)
+    return '\n'.join(out)
+
+
 def normalize_config(content: str) -> str:
-    return re.sub(r"\n{2,}", "\n", _NOISE.sub("", content.replace("\r\n", "\n"))).strip()
+    """Comparison form: device runtime noise and per-print ciphertext removed."""
+    content = _NOISE.sub("", content.replace("\r\n", "\n"))
+    content = _mask_fortios_ciphertext(_PEM_BLOCK.sub(_mask_encrypted_pem, content))
+    return re.sub(r"\n{2,}", "\n", content).strip()
 
 
 def redact_config(content: str) -> str:
