@@ -129,6 +129,9 @@ export function RolesSection() {
                             ? <Badge variant="outline"><Lock className="h-3 w-3" /> Built-in</Badge>
                             : <Badge variant="info">Custom</Badge>}
                           {r.is_system && r.name.endsWith('_team') && <Badge variant="outline">Team</Badge>}
+                          {r.page_access && (r.page_access.pages || r.page_access.maps) && (
+                            <Badge variant="outline" title={[r.page_access.pages ? `${r.page_access.pages.length} pages` : '', r.page_access.maps ? `${r.page_access.maps.length} network maps` : ''].filter(Boolean).join(', ')}>Selected pages</Badge>
+                          )}
                         </div>
                       </Td>
                       {canManage && (

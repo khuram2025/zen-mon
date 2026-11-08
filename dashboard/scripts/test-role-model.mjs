@@ -107,4 +107,36 @@ assert(!M.sameTags(['network'], []))
   for (const name of ['_VIEWER', '_READ_ONLY']) assert(!list(name).some((id) => id === 'inventory.export' || id === 'inventory.manage'), name)
 }
 
-console.log('Role model: presets stay standard-risk, dependencies stay consistent, grants stay within the editor’s own access; Inventory levels follow the built-in roles.')
+
+// ── page access (roles.page_access) ─────────────────────────────────────────
+{
+  assert.deepEqual(M.impliesOf(modules)['netflow.manage_shared'], ['netflow.manage', 'netflow.view'])
+  assert.equal(M.impliesOf(modules)['netflow.view'], undefined)
+  const keys = ['/a', '/b', '/c']
+  assert.equal(M.branchState(set(), keys), 'none')
+  assert.equal(M.branchState(set('/a'), keys), 'some')
+  assert.equal(M.branchState(set('/a', '/b', '/c', '/x'), keys), 'all')
+  assert.deepEqual([...M.toggleBranch(set('/a', '/x'), keys)].sort(), ['/a', '/b', '/c', '/x'], 'a partly ticked group ticks all')
+  assert.deepEqual([...M.toggleBranch(set('/a', '/b', '/c', '/x'), keys)], ['/x'], 'a fully ticked group clears, other pages stay')
+  assert.deepEqual([...M.toggleBranch(set('/a'), keys, false)], [])
+
+  // Nothing limited, or Full administration: no page_access at all (today's behaviour).
+  assert.equal(M.pageAccessPayload({ limitPages: false, pages: ['/a'], limitMaps: false, maps: ['X'] }), null)
+  assert.equal(M.pageAccessPayload({ limitPages: true, pages: ['/a'], limitMaps: true, maps: ['X'], fullAdmin: true }), null)
+  assert.deepEqual(M.pageAccessPayload({ limitPages: true, pages: ['/b', '/a', '/a'], limitMaps: false, maps: ['X'] }), { pages: ['/a', '/b'], maps: null })
+  assert.deepEqual(M.pageAccessPayload({ limitPages: false, pages: [], limitMaps: true, maps: ['B-1', 'a-2'] }), { pages: null, maps: ['a-2', 'b-1'] })
+
+  assert(M.samePageAccess(null, undefined) && M.samePageAccess(null, { pages: null, maps: null }))
+  assert(M.samePageAccess({ pages: ['/b', '/a'], maps: null }, { pages: ['/a', '/b'], maps: null }))
+  assert(!M.samePageAccess({ pages: [], maps: null }, null), 'an empty page list is a limit, not "every page"')
+  assert(!M.samePageAccess({ pages: ['/a'], maps: null }, { pages: ['/a'], maps: [] }))
+
+  const reach = set('/a', '/b')
+  assert.deepEqual(M.pageAccessErrors({ limitPages: false, pages: set(), reachable: reach, limitMaps: false, maps: set() }), {})
+  assert(M.pageAccessErrors({ limitPages: true, pages: set(), reachable: reach, limitMaps: false, maps: set() }).pages)
+  assert(M.pageAccessErrors({ limitPages: true, pages: set('/z'), reachable: reach, limitMaps: false, maps: set() }).pages, 'only pages the permissions cannot open')
+  assert.deepEqual(M.pageAccessErrors({ limitPages: true, pages: set('/a'), reachable: reach, limitMaps: false, maps: set() }), {})
+  assert(M.pageAccessErrors({ limitPages: false, pages: set(), reachable: reach, limitMaps: true, maps: set() }).maps)
+}
+
+console.log('Role model: presets stay standard-risk, dependencies stay consistent, grants stay within the editor’s own access; Inventory levels follow the built-in roles; page-access selections and payloads are consistent.')

@@ -1,0 +1,1233 @@
+{
+  "_comment": "Generated from dashboard/src/components/layout/navigation.ts by dashboard/scripts/test-page-access.mjs --write. Do not edit by hand.",
+  "version": 1,
+  "pages": [
+    {
+      "key": "/",
+      "label": "Network Operations",
+      "group": "overview",
+      "group_label": "Dashboards",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ],
+          "all": [
+            "dashboard.view"
+          ]
+        }
+      ],
+      "uses": [
+        "alerts.view",
+        "service_checks.view",
+        "netflow.view",
+        "apm.view",
+        "reports.view"
+      ],
+      "view_only": true
+    },
+    {
+      "key": "/dashboards/network",
+      "label": "Network & Security",
+      "group": "overview",
+      "group_label": "Dashboards",
+      "gates": [
+        {
+          "any": [
+            "devices.view",
+            "netflow.view"
+          ],
+          "all": [
+            "dashboard.view"
+          ]
+        }
+      ],
+      "uses": [
+        "alerts.view",
+        "ncm.view",
+        "netpath.view",
+        "udt.view",
+        "reports.view"
+      ],
+      "view_only": true
+    },
+    {
+      "key": "/dashboards/servers",
+      "label": "Server Team",
+      "group": "overview",
+      "group_label": "Dashboards",
+      "gates": [
+        {
+          "any": [
+            "servers.view"
+          ],
+          "all": [
+            "dashboard.view"
+          ]
+        }
+      ],
+      "uses": [
+        "alerts.view"
+      ],
+      "view_only": true
+    },
+    {
+      "key": "/dashboards/apps",
+      "label": "Application Team",
+      "group": "overview",
+      "group_label": "Dashboards",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ],
+          "all": [
+            "dashboard.view"
+          ]
+        }
+      ],
+      "uses": [
+        "alerts.view",
+        "service_checks.view"
+      ],
+      "view_only": true
+    },
+    {
+      "key": "/alerts",
+      "label": "Active Alerts",
+      "group": "alerting",
+      "group_label": "Alerts & Events",
+      "gates": [
+        {
+          "any": [
+            "alerts.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/traps",
+      "label": "SNMP Traps",
+      "group": "alerting",
+      "group_label": "Alerts & Events",
+      "gates": [
+        {
+          "any": [
+            "alerts.view",
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/network-events",
+      "label": "Network Syslog",
+      "group": "alerting",
+      "group_label": "Alerts & Events",
+      "gates": [
+        {
+          "any": [
+            "alerts.view",
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/alert-rules",
+      "label": "Alert Rules",
+      "group": "alerting",
+      "group_label": "Alerts & Events",
+      "gates": [
+        {
+          "any": [
+            "alerts.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/escalation",
+      "label": "Escalation & On-call",
+      "group": "alerting",
+      "group_label": "Alerts & Events",
+      "gates": [
+        {
+          "any": [
+            "alerts.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/channels",
+      "label": "Notification Channels",
+      "group": "alerting",
+      "group_label": "Alerts & Events",
+      "gates": [
+        {
+          "any": [
+            "alerts.manage",
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/gateways",
+      "label": "Delivery Gateways",
+      "group": "alerting",
+      "group_label": "Alerts & Events",
+      "gates": [
+        {
+          "any": [
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/devices",
+      "label": "Devices",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/link-utilization",
+      "label": "Link Utilization",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/netflow",
+      "label": "Overview",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "NetFlow",
+      "gates": [
+        {
+          "any": [
+            "netflow.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/netflow/forensics",
+      "label": "Forensics",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "NetFlow",
+      "gates": [
+        {
+          "any": [
+            "netflow.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/netflow/anomalies",
+      "label": "Anomalies",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "NetFlow",
+      "gates": [
+        {
+          "any": [
+            "netflow.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/netflow/capacity",
+      "label": "Capacity",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "NetFlow",
+      "gates": [
+        {
+          "any": [
+            "netflow.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/netflow/saved-views",
+      "label": "Saved Views",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "NetFlow",
+      "gates": [
+        {
+          "any": [
+            "netflow.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/netflow/health",
+      "label": "Collector health",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "NetFlow",
+      "gates": [
+        {
+          "any": [
+            "netflow.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/netflow/settings",
+      "label": "Settings",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "NetFlow",
+      "gates": [
+        {
+          "any": [
+            "netflow.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/netpath",
+      "label": "NetPath",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "netpath.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/maps/manual",
+      "label": "Network Maps",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "maps.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/ncm",
+      "label": "Config Manager (NCCM)",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "ncm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/discovery",
+      "label": "Profiles",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "Discovery",
+      "gates": [
+        {
+          "any": [
+            "discovery.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/discovery/scheduled",
+      "label": "Scheduled",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "Discovery",
+      "gates": [
+        {
+          "any": [
+            "discovery.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/discovery/reports",
+      "label": "Scan Results",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "Discovery",
+      "gates": [
+        {
+          "any": [
+            "discovery.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/discovery/imports",
+      "label": "Import Queue",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "Discovery",
+      "gates": [
+        {
+          "any": [
+            "discovery.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/discovery/ignored",
+      "label": "Ignored",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "Discovery",
+      "gates": [
+        {
+          "any": [
+            "discovery.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/discovery/credentials",
+      "label": "Credentials",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "Discovery",
+      "gates": [
+        {
+          "any": [
+            "discovery.view"
+          ]
+        },
+        {
+          "any": [
+            "devices.manage",
+            "service_checks.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/udt",
+      "label": "Endpoints",
+      "group": "device-tracker",
+      "group_label": "Device Tracker",
+      "gates": [
+        {
+          "any": [
+            "udt.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/udt/ports",
+      "label": "Switch Ports",
+      "group": "device-tracker",
+      "group_label": "Device Tracker",
+      "gates": [
+        {
+          "any": [
+            "udt.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/udt/users",
+      "label": "User Logins",
+      "group": "device-tracker",
+      "group_label": "Device Tracker",
+      "gates": [
+        {
+          "any": [
+            "udt.view_users",
+            "udt.manage"
+          ],
+          "all": [
+            "udt.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/udt/activity",
+      "label": "Activity",
+      "group": "device-tracker",
+      "group_label": "Device Tracker",
+      "gates": [
+        {
+          "any": [
+            "udt.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/udt/watch-lists",
+      "label": "Watch Lists",
+      "group": "device-tracker",
+      "group_label": "Device Tracker",
+      "gates": [
+        {
+          "any": [
+            "udt.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/udt/classification",
+      "label": "Classification",
+      "group": "device-tracker",
+      "group_label": "Device Tracker",
+      "gates": [
+        {
+          "any": [
+            "udt.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/udt/settings",
+      "label": "Tracker Settings",
+      "group": "device-tracker",
+      "group_label": "Device Tracker",
+      "gates": [
+        {
+          "any": [
+            "udt.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/servers",
+      "label": "Server Overview",
+      "group": "servers",
+      "group_label": "Servers",
+      "gates": [
+        {
+          "any": [
+            "servers.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/virtualization",
+      "label": "Virtualization",
+      "group": "servers",
+      "group_label": "Servers",
+      "gates": [
+        {
+          "any": [
+            "servers.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/servers/inventory",
+      "label": "All Servers",
+      "group": "servers",
+      "group_label": "Servers",
+      "gates": [
+        {
+          "any": [
+            "servers.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/server-baselines",
+      "label": "Baselines",
+      "group": "servers",
+      "group_label": "Servers",
+      "gates": [
+        {
+          "any": [
+            "servers.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/server-agents",
+      "label": "Agent Fleet",
+      "group": "servers",
+      "group_label": "Servers",
+      "gates": [
+        {
+          "any": [
+            "servers.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/agent-policies",
+      "label": "Agent Policies",
+      "group": "servers",
+      "group_label": "Servers",
+      "gates": [
+        {
+          "any": [
+            "servers.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm",
+      "label": "APM Overview",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/services",
+      "label": "Services",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/service-map",
+      "label": "Service Map",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/traces",
+      "label": "Traces",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/errors",
+      "label": "Errors",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/slos",
+      "label": "SLOs",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/rum",
+      "label": "Overview",
+      "group": "apm",
+      "group_label": "Applications",
+      "parent": "RUM",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/rum?tab=web-vitals",
+      "label": "Web Vitals",
+      "group": "apm",
+      "group_label": "Applications",
+      "parent": "RUM",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/rum?tab=views",
+      "label": "Views",
+      "group": "apm",
+      "group_label": "Applications",
+      "parent": "RUM",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/rum?tab=sessions",
+      "label": "Sessions",
+      "group": "apm",
+      "group_label": "Applications",
+      "parent": "RUM",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/rum?tab=errors",
+      "label": "JS Errors",
+      "group": "apm",
+      "group_label": "Applications",
+      "parent": "RUM",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/rum?tab=resources",
+      "label": "Resources",
+      "group": "apm",
+      "group_label": "Applications",
+      "parent": "RUM",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/rum?tab=actions",
+      "label": "Actions",
+      "group": "apm",
+      "group_label": "Applications",
+      "parent": "RUM",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/synthetics",
+      "label": "Synthetics",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/usage",
+      "label": "Usage",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/apm/settings",
+      "label": "APM Settings",
+      "group": "apm",
+      "group_label": "Applications",
+      "gates": [
+        {
+          "any": [
+            "apm.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/services",
+      "label": "All Checks",
+      "group": "uptime",
+      "group_label": "Uptime & SLA",
+      "parent": "Service Checks",
+      "gates": [
+        {
+          "any": [
+            "service_checks.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/services/groups",
+      "label": "Check Groups",
+      "group": "uptime",
+      "group_label": "Uptime & SLA",
+      "parent": "Service Checks",
+      "gates": [
+        {
+          "any": [
+            "service_checks.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/services/maintenance",
+      "label": "Maintenance",
+      "group": "uptime",
+      "group_label": "Uptime & SLA",
+      "parent": "Service Checks",
+      "gates": [
+        {
+          "any": [
+            "service_checks.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/services/templates",
+      "label": "Check Templates",
+      "group": "uptime",
+      "group_label": "Uptime & SLA",
+      "parent": "Service Checks",
+      "gates": [
+        {
+          "any": [
+            "service_checks.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/availability",
+      "label": "Availability & SLA",
+      "group": "uptime",
+      "group_label": "Uptime & SLA",
+      "gates": [
+        {
+          "any": [
+            "devices.view",
+            "service_checks.view",
+            "servers.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/inventory",
+      "label": "Overview",
+      "group": "inventory",
+      "group_label": "Inventory & Compliance",
+      "gates": [
+        {
+          "any": [
+            "inventory.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/inventory/assets",
+      "label": "Assets",
+      "group": "inventory",
+      "group_label": "Inventory & Compliance",
+      "gates": [
+        {
+          "any": [
+            "inventory.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/inventory/os",
+      "label": "Operating Systems",
+      "group": "inventory",
+      "group_label": "Inventory & Compliance",
+      "gates": [
+        {
+          "any": [
+            "inventory.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/inventory/software",
+      "label": "Software",
+      "group": "inventory",
+      "group_label": "Inventory & Compliance",
+      "gates": [
+        {
+          "any": [
+            "inventory.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/inventory/hardware",
+      "label": "Hardware",
+      "group": "inventory",
+      "group_label": "Inventory & Compliance",
+      "gates": [
+        {
+          "any": [
+            "inventory.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/inventory/changes",
+      "label": "Changes",
+      "group": "inventory",
+      "group_label": "Inventory & Compliance",
+      "gates": [
+        {
+          "any": [
+            "inventory.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/inventory/settings",
+      "label": "Inventory Settings",
+      "group": "inventory",
+      "group_label": "Inventory & Compliance",
+      "gates": [
+        {
+          "any": [
+            "inventory.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/reports",
+      "label": "Report Library",
+      "group": "reports",
+      "group_label": "Reports",
+      "gates": [
+        {
+          "any": [
+            "reports.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/reports/builder",
+      "label": "Template Designer",
+      "group": "reports",
+      "group_label": "Reports",
+      "gates": [
+        {
+          "any": [
+            "reports.manage"
+          ],
+          "all": [
+            "reports.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/reports/schedules",
+      "label": "Schedules",
+      "group": "reports",
+      "group_label": "Reports",
+      "gates": [
+        {
+          "any": [
+            "reports.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general",
+      "label": "Company",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=smtp",
+      "label": "SMTP / Email",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=appearance",
+      "label": "Appearance",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [],
+      "personal": true
+    },
+    {
+      "key": "/settings/general?tab=users",
+      "label": "Users & Access",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "users.view",
+            "users.manage",
+            "roles.view",
+            "roles.manage",
+            "system.admin"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=security",
+      "label": "Security & TLS",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "system.admin"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=licenses",
+      "label": "Licenses",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "system.admin"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=updates",
+      "label": "Updates",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "system.admin"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=storage",
+      "label": "Storage",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "system.admin"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=sensors",
+      "label": "Sensors",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=templates",
+      "label": "Monitoring Templates",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=mibs",
+      "label": "MIB Library",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/settings/general?tab=support",
+      "label": "Support",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [],
+      "personal": true
+    },
+    {
+      "key": "/settings/general?tab=profile",
+      "label": "My Profile",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [],
+      "personal": true
+    },
+    {
+      "key": "/credentials",
+      "label": "Credentials",
+      "group": "administration",
+      "group_label": "Administration",
+      "gates": [
+        {
+          "any": [
+            "devices.manage",
+            "service_checks.manage"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/subscription",
+      "label": "Subscription",
+      "group": "administration",
+      "group_label": "Administration",
+      "gates": [
+        {
+          "any": [
+            "settings.view"
+          ]
+        }
+      ]
+    }
+  ]
+}

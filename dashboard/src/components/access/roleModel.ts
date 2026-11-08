@@ -158,3 +158,72 @@ export function withDependencies(modules: readonly ModuleEntry[], granted: Reado
   }
   return next
 }
+
+/* ------------------------------------------------------------------ */
+/*  Page access (roles.page_access)                                    */
+/* ------------------------------------------------------------------ */
+
+/** `implies` of every permission in the catalog, as `restrictPermissions` (navAccess.ts) expects it. */
+export function impliesOf(modules: readonly ModuleEntry[]): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const m of modules) for (const p of m.permissions) if (p.implies?.length) out[p.id] = [...p.implies]
+  return out
+}
+
+/** Selection state of a group of page checkboxes. */
+export function branchState(selected: ReadonlySet<string>, keys: readonly string[]): 'all' | 'some' | 'none' {
+  const on = keys.filter((k) => selected.has(k)).length
+  return on === 0 ? 'none' : on === keys.length ? 'all' : 'some'
+}
+
+/** Ticks or clears every page of a group (a fully ticked group clears, anything else ticks all). */
+export function toggleBranch(selected: ReadonlySet<string>, keys: readonly string[], on?: boolean): Set<string> {
+  const next = new Set(selected)
+  const tick = on ?? branchState(selected, keys) !== 'all'
+  for (const k of keys) {
+    if (tick) next.add(k)
+    else next.delete(k)
+  }
+  return next
+}
+
+export type PageAccessValue = { pages: string[] | null; maps: string[] | null }
+
+/**
+ * What the editor sends as `page_access`: null when nothing is limited (and always with Full administration,
+ * which the server refuses to limit). Lists are sorted so a draft compares equal to what the server returns.
+ */
+export function pageAccessPayload(opts: {
+  limitPages: boolean
+  pages: Iterable<string>
+  limitMaps: boolean
+  maps: Iterable<string>
+  fullAdmin?: boolean
+}): PageAccessValue | null {
+  if (opts.fullAdmin || (!opts.limitPages && !opts.limitMaps)) return null
+  return {
+    pages: opts.limitPages ? [...new Set(opts.pages)].sort() : null,
+    maps: opts.limitMaps ? [...new Set(opts.maps)].map((m) => m.toLowerCase()).sort() : null,
+  }
+}
+
+export function samePageAccess(a: PageAccessValue | null | undefined, b: PageAccessValue | null | undefined): boolean {
+  const norm = (v: PageAccessValue | null | undefined) => {
+    if (!v || (v.pages == null && v.maps == null)) return 'null'
+    return JSON.stringify({
+      pages: v.pages == null ? null : [...v.pages].sort(),
+      maps: v.maps == null ? null : [...v.maps].map((m) => m.toLowerCase()).sort(),
+    })
+  }
+  return norm(a) === norm(b)
+}
+
+/** Problems that keep the page limit from being saved (shown on the Pages step). */
+export function pageAccessErrors(opts: { limitPages: boolean; pages: ReadonlySet<string>; reachable: ReadonlySet<string>; limitMaps: boolean; maps: ReadonlySet<string> }): { pages?: string; maps?: string } {
+  const out: { pages?: string; maps?: string } = {}
+  if (opts.limitPages && ![...opts.pages].some((p) => opts.reachable.has(p))) {
+    out.pages = 'Pick at least one page these permissions open, or allow every page'
+  }
+  if (opts.limitMaps && opts.maps.size === 0) out.maps = 'Pick at least one network map, or allow every map'
+  return out
+}

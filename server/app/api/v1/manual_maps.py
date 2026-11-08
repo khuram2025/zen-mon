@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,15 +17,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.netflow import access as nf_access
 from app.api.v1.netflow.common import RAW, table_ref
 from app.api.v1.netflow.sql import EXPORTER, IF_IN, IF_OUT, VOLUME_GUARD, display
-from app.core import scoping
+from app.core import page_access, scoping
 from app.core.database import get_clickhouse_client, get_db
-from app.core.security import require_permission
+from app.core.permissions import SUPERUSER_PERMISSION
+from app.core.security import get_current_user, get_role_page_access, get_role_permissions, require_permission
 from app.models.user import User
 from app.services import map_topology as topo
 
 logger = logging.getLogger("zenplus.manual_maps")
 
-router = APIRouter(prefix="/maps", tags=["Manual Maps"])
+
+async def allowed_map_ids(db: AsyncSession, user: User) -> Optional[set[str]]:
+    """Network maps the user's role is limited to (``roles.page_access.maps``,
+    migrate-185), or None for every map. Full administration is never limited."""
+    if SUPERUSER_PERMISSION in await get_role_permissions(db, user.role):
+        return None
+    return page_access.allowed_maps(await get_role_page_access(db, user.role))
+
+
+async def enforce_map_access(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> None:
+    """Router-wide: a role limited to selected maps can neither open (any
+    ``/maps/{map_id}...`` route) nor create a map outside its list. The list
+    itself is filtered in :func:`list_maps`. Permission checks stay with each
+    route's own guard."""
+    allowed = await allowed_map_ids(db, user)
+    if allowed is None:
+        return
+    map_id = request.path_params.get("map_id")
+    if map_id is not None:
+        if str(map_id).lower() not in allowed:
+            raise HTTPException(status_code=403, detail="Your role does not include this network map")
+    elif request.method == "POST" and request.url.path.rstrip("/").endswith("/maps"):
+        raise HTTPException(status_code=403, detail="Your role is limited to selected network maps, so it cannot create new ones")
+
+
+router = APIRouter(prefix="/maps", tags=["Manual Maps"], dependencies=[Depends(enforce_map_access)])
 
 # Snapshots kept per map (older ones are pruned when a new one is taken).
 MAX_VERSIONS = 50
@@ -525,6 +555,8 @@ async def list_maps(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("maps.view")),
 ):
+    allowed = await allowed_map_ids(db, user)
+    only = "WHERE m.id::text = ANY(:allowed)" if allowed is not None else ""
     rows = (await db.execute(
         text(f"""
             SELECT m.id, m.name, m.description, m.metadata, m.created_at, m.updated_at,
@@ -560,8 +592,10 @@ async def list_maps(
                 ) ns
                 GROUP BY ns.map_id
             ) st ON st.map_id = m.id
+            {only}
             ORDER BY m.updated_at DESC, m.name
-        """)
+        """),
+        {"allowed": sorted(allowed)} if allowed is not None else {},
     )).mappings().all()
     return {
         "data": [

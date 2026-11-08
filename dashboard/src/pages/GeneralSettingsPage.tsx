@@ -20,7 +20,7 @@ import { Switch } from '@/components/ui/Switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { useTheme } from '@/stores/theme'
 import { DENSITIES, useDisplay } from '@/stores/display'
-import { useAuth, useCan } from '@/stores/auth'
+import { useAllowedPages, useAuth, useCan } from '@/stores/auth'
 import { toast } from '@/components/ui/Toast'
 import { UpdatesTabContent } from '@/components/UpdatesTabContent'
 import { LicensesTabContent } from '@/components/LicensesTabContent'
@@ -59,9 +59,15 @@ const TABS = [
 
 type TabValue = typeof TABS[number]['value']
 
+/** Open to every account, never limited by a role's page list (navigation.ts marks them `personal`). */
+const PERSONAL_TABS = new Set<string>(['appearance', 'support', 'profile'])
+
 export function GeneralSettingsPage() {
   const can = useCan()
+  const pages = useAllowedPages()
   const visibleTabs = TABS.filter((t) => {
+    // A role limited to selected pages gets the Settings tabs on its list (personal tabs always).
+    if (pages && !PERSONAL_TABS.has(t.value) && !pages.has(t.value === 'company' ? '/settings/general' : `/settings/general?tab=${t.value}`)) return false
     if (!('permission' in t) || !t.permission) return true
     const needed = (Array.isArray(t.permission) ? t.permission : [t.permission]) as readonly string[]
     return needed.some((p) => can(p))

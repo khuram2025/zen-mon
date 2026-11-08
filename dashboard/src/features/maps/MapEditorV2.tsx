@@ -9,6 +9,7 @@ import {
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { toast } from '@/components/ui/Toast'
+import { useAuth } from '@/stores/auth'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -53,6 +54,8 @@ function newestCreatedMapId(maps: { id: string; created_at?: string | null; upda
 
 export function MapEditorV2() {
   const [params, setParams] = useSearchParams()
+  // A role limited to selected network maps sees only those and cannot create new ones (the server refuses it).
+  const mapLimited = useAuth((s) => Array.isArray(s.user?.page_access?.maps))
   const [mode, setMode] = useState<Mode>(() => (params.get('mode') === 'live' ? 'live' : 'design'))
   const [livePrefs, setLivePrefs] = useState<LivePrefs>(loadLivePrefs)
   const [paletteOpen, setPaletteOpen] = useState(true)
@@ -199,8 +202,10 @@ export function MapEditorV2() {
         onClick: () => goToMap(m.id, mode),
       })
     }
-    items.push({ type: 'divider' })
-    items.push({ type: 'item', label: 'New map…', icon: <Plus className="h-4 w-4" />, onClick: () => setNameDialog({ kind: 'new', name: 'Untitled map', description: '' }) })
+    if (!mapLimited) {
+      items.push({ type: 'divider' })
+      items.push({ type: 'item', label: 'New map…', icon: <Plus className="h-4 w-4" />, onClick: () => setNameDialog({ kind: 'new', name: 'Untitled map', description: '' }) })
+    }
     setMapMenu({ x: r.left, y: r.bottom + 4, items })
   }
 
@@ -259,7 +264,7 @@ export function MapEditorV2() {
     const items: MenuItem[] = [
       { type: 'header', label: current?.name || 'Map' },
       { type: 'item', label: 'Rename / description…', icon: <Tag className="h-4 w-4" />, disabled: !detail, onClick: () => setNameDialog({ kind: 'rename', name: current?.name || '', description: current?.description || '' }) },
-      { type: 'item', label: 'Duplicate as new map…', icon: <Copy className="h-4 w-4" />, disabled: !detail, onClick: () => setNameDialog({ kind: 'duplicate', name: `${current?.name || 'Map'} (copy)`, description: current?.description || '' }) },
+      { type: 'item', label: 'Duplicate as new map…', icon: <Copy className="h-4 w-4" />, disabled: !detail || mapLimited, onClick: () => setNameDialog({ kind: 'duplicate', name: `${current?.name || 'Map'} (copy)`, description: current?.description || '' }) },
       { type: 'item', label: 'Build from site / subnet…', icon: <Wand2 className="h-4 w-4" />, disabled: !detail, onClick: () => setBuildOpen(true) },
       { type: 'item', label: 'Verify topology', icon: <ShieldCheck className="h-4 w-4" />, disabled: !detail || mode !== 'design', onClick: () => canvasRef.current?.openVerify() },
       { type: 'item', label: 'Version history…', icon: <History className="h-4 w-4" />, disabled: !detail, onClick: () => setVersionsOpen(true) },
@@ -271,7 +276,7 @@ export function MapEditorV2() {
         getViewportEl: () => canvasRef.current?.getViewportEl() || null,
         prepare: async () => (await canvasRef.current?.prepareExport()) || (() => {}),
       }),
-      { type: 'item', label: 'Import JSON backup as new map…', icon: <FileUp className="h-4 w-4" />, onClick: () => void importJson() },
+      { type: 'item', label: 'Import JSON backup as new map…', icon: <FileUp className="h-4 w-4" />, disabled: mapLimited, onClick: () => void importJson() },
       { type: 'divider' },
       { type: 'item', label: 'Keyboard shortcuts', icon: <Keyboard className="h-4 w-4" />, onClick: () => setHelpOpen(true) },
       { type: 'divider' },
@@ -403,7 +408,7 @@ export function MapEditorV2() {
               <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading map…
             </div>
           ) : noMaps ? (
-            <EmptyState onCreate={() => setNameDialog({ kind: 'new', name: 'Untitled map', description: '' })} />
+            <EmptyState limited={mapLimited} onCreate={() => setNameDialog({ kind: 'new', name: 'Untitled map', description: '' })} />
           ) : detail ? (
             <ReactFlowProvider>
               <MapCanvas
@@ -509,7 +514,18 @@ function Toggle({ on, onClick, title, children }: { on: boolean; onClick: () => 
   )
 }
 
-function EmptyState({ onCreate }: { onCreate: () => void }) {
+function EmptyState({ onCreate, limited }: { onCreate: () => void; limited?: boolean }) {
+  if (limited) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-surface text-primary shadow"><MapIcon className="h-7 w-7" /></div>
+        <div>
+          <div className="text-sm font-semibold text-text">No network maps are assigned to your role</div>
+          <div className="mt-1 max-w-xs text-xs text-muted">Your role is limited to selected maps. Ask an administrator to add the maps you need.</div>
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
       <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-surface text-primary shadow"><MapIcon className="h-7 w-7" /></div>

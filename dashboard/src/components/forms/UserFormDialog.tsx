@@ -22,7 +22,7 @@ import { useDirtyGuard } from '@/hooks/useDirtyGuard'
 const SOURCE_LABEL: Record<string, string> = { ldap: 'LDAP / Active Directory', radius: 'RADIUS', oidc: 'OpenID Connect single sign-on' }
 const EMAIL_RE = /^[^@\s<>()[\],;:\\"]+@[^@\s<>()[\],;:\\"]+\.[^@\s<>()[\],;:\\"]{2,}$/
 
-type Assignable = { name: string; display_name: string; description: string; permission_count: number; privileged: boolean }
+type Assignable = { name: string; display_name: string; description: string; permission_count: number; privileged: boolean; page_limited?: boolean }
 
 /** Create or edit a user.
  *
@@ -227,6 +227,9 @@ export function UserFormDialog({ open, onOpenChange, user }: {
               )}
             </div>
             {assignable.isError && <QueryFailure compact error={assignable.error} what="the roles you may assign" onRetry={() => void assignable.refetch()} />}
+            {roleOptions.some((r) => r.name === role && r.page_limited) && (
+              <p role="note" className="flex items-start gap-2 text-xs text-muted"><Info className="mt-0.5 h-3.5 w-3.5 shrink-0" /> This role is limited to selected pages and network maps; the user lands on the first of them.</p>
+            )}
             {roleOptions.some((r) => r.name === role && r.privileged) && !roleIsAdmin && (
               <p role="note" className="flex items-start gap-2 text-xs text-warning"><ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" /> This role can manage users or roles. Assign it deliberately.</p>
             )}

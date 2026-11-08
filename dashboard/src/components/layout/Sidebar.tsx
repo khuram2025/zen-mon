@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { hasPermission, useAuth } from '@/stores/auth'
+import { allowedPages, hasPermission, useAuth } from '@/stores/auth'
 import {
   NAV_GROUPS,
   NAV_ZONES,
@@ -85,7 +85,7 @@ function SectionLabel({ children, className }: { children: string; className?: s
 /** Filters out nodes the signed-in role may not see, children included. */
 export function usePermittedGroups(): NavGroup[] {
   const user = useAuth((s) => s.user)
-  return useMemo(() => filterNavGroups(NAV_GROUPS, (p) => hasPermission(user, p)), [user])
+  return useMemo(() => filterNavGroups(NAV_GROUPS, (p) => hasPermission(user, p), allowedPages(user)), [user])
 }
 
 /** Every page the role can open, with the path that leads to it (for search and starred pages). */

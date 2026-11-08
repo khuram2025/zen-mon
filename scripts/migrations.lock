@@ -172,3 +172,4 @@ ad8463012ea727a39885532416dca6324d44298e5634cef4b1cee4b1f5e25675  migrate-171-vi
 ea32801df29733c614bd724484af41a459ed9d72ec4498ef2d37c1214b12af28  migrate-182-controller-child-readings.sql
 f4a70b6ae47df0e9f37c23e5f29c3a674e4a62c30ee64b66f444e64ec574f417  migrate-183-ncm-capture-deadline-progress.sql
 924d4dfed221931f6bd48d425cf1d25ec8830bda2fe04d4800171c341ea4b80a  migrate-184-alert-storm-policy.sql
+cae83eb592870ca602fdd6f5342bac57b10982bfcb092a50420ba1354b9be152  migrate-185-role-page-access.sql

@@ -121,6 +121,12 @@ export interface User {
   password_changed_at?: string | null
 }
 
+/** A role's page limit (roles.page_access): sidebar pages by address and network map ids; null in a field = no limit. */
+export interface PageAccess {
+  pages: string[] | null
+  maps: string[] | null
+}
+
 export interface Role {
   id: string
   name: string
@@ -129,6 +135,8 @@ export interface Role {
   permissions: string[]
   /** Visibility scope every member inherits (any-of tag match); empty = no role-level limit. */
   scope_tags?: string[]
+  /** Pages / network maps members are limited to; null = every page the permissions allow. */
+  page_access?: PageAccess | null
   is_system: boolean
   user_count: number
   /** Optimistic-concurrency token; send it back as expected_revision on save. */

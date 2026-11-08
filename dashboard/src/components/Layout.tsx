@@ -29,7 +29,7 @@ import { relativeTime } from '@/lib/utils'
 import { UpdateNotificationBell } from '@/components/UpdateNotificationBell'
 import { Sidebar, SIDEBAR_RAIL, SIDEBAR_WIDE } from '@/components/layout/Sidebar'
 import { trailForLocation } from '@/components/layout/navigation'
-import { RouteGate } from '@/components/layout/RouteGate'
+import { RouteGate, useCanOpen } from '@/components/layout/RouteGate'
 import { useBreadcrumbDetailFor } from '@/components/layout/breadcrumbDetail'
 
 type HeaderAlert = {
@@ -258,6 +258,7 @@ function HeaderAlertCenter() {
 export function Layout() {
   const { user, logout } = useAuth()
   const can = useCan()
+  const canOpen = useCanOpen()
   const { theme, toggle } = useTheme()
   const navigate = useNavigate()
   const { pathname, search } = useLocation()
@@ -347,7 +348,7 @@ export function Layout() {
             <Breadcrumbs />
           </div>
 
-          {can('devices.view') ? (
+          {can('devices.view') && canOpen('/devices') ? (
           <div role="search" aria-label="Device search" className="relative ml-auto mr-1 flex max-w-sm flex-1 items-center">
             <Search className="absolute left-2.5 h-4 w-4 text-muted" aria-hidden />
             <input
@@ -377,7 +378,7 @@ export function Layout() {
             {theme === 'dark' ? <Sun className="h-4 w-4" aria-hidden /> : <Moon className="h-4 w-4" aria-hidden />}
           </Button>
 
-          {can('alerts.view') && <HeaderAlertCenter />}
+          {can('alerts.view') && canOpen('/alerts') && <HeaderAlertCenter />}
 
           {/* Update notification bell — deep-links to Settings → Updates */}
           <UpdateNotificationBell />
