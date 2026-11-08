@@ -40,7 +40,7 @@ The live view opens with a row of tiles across the top left of the canvas:
 | Sites | Sites with a down or warning member, total sites and the devices inside them (only when the map has sites). |
 | Alerts | Critical and warning alert counts and the active total; click to open the alert list. |
 
-On narrow screens the Links, Traffic and Sites tiles drop out first; the wall draws the same tiles larger.
+Below 1536 px wide the Traffic and Sites tiles drop out, and below 1024 px the Links tile, so the row stays on one line; the wall always shows every tile, larger.
 
 ### Devices on the canvas
 
@@ -150,8 +150,9 @@ The wall is the live view without application chrome, for video walls and large 
   screen is requested when the browser allows it; the wall works the same without it (some browsers and kiosk PCs
   refuse full screen, which previously showed "Fullscreen is not available in this browser").
 - Dark, high-contrast palette regardless of the user's theme; no sidebar, header, toolbars, minimap or zoom
-  controls. The header shows the map name (and drill-down trail) and the summary tiles; the Attention list stays on
-  the right (`attention=0` hides it).
+  controls. The header shows the map name (and drill-down trail) and the summary tiles. An Attention column on the
+  right lists what needs action (down devices and sites, down or saturated links, critical alerts) beside the map,
+  never over it; cables without a bound interface are summarised in one line (`attention=0` hides the column).
 - Data refreshes on its own: links and nodes every 15 s, sites every 15 s, the map itself every 30 s, so topology
   edits reach the wall without a reload.
 - The map re-fits when the screen size changes or the map gains or loses items.

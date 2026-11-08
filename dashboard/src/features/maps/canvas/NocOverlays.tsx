@@ -198,7 +198,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, sitesLive, updatedAt
       </Tile>
 
       {/* Links */}
-      <Tile wall={wall} label="Links" icon={<Cable className="h-3 w-3" />} className="hidden md:flex">
+      <Tile wall={wall} label="Links" icon={<Cable className="h-3 w-3" />} className={wall ? '' : 'hidden lg:flex'}>
         <div className="flex items-baseline gap-2.5">
           <Count n={stats.faulted} label="down" tone="danger" wall={wall} />
           <Count n={stats.saturated} label="≥85%" tone="warning" wall={wall} />
@@ -207,7 +207,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, sitesLive, updatedAt
       </Tile>
 
       {/* Aggregate traffic + busiest link */}
-      <Tile wall={wall} label="Traffic" icon={<Activity className="h-3 w-3" />} className="hidden lg:flex">
+      <Tile wall={wall} label="Traffic" icon={<Activity className="h-3 w-3" />} className={wall ? '' : 'hidden 2xl:flex'}>
         <div className={cn('font-mono font-bold leading-tight text-text', wall ? 'text-2xl' : 'text-base')}>{formatBps(stats.totalBps)}</div>
         {stats.hot ? (
           <div className={cn('flex items-center gap-1 truncate text-2xs leading-none', wall ? 'max-w-[18rem]' : 'max-w-[12rem]')} title={`Busiest: ${stats.hot.label}`}>
@@ -220,7 +220,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, sitesLive, updatedAt
 
       {/* Sites */}
       {stats.sites > 0 && (
-        <Tile wall={wall} label="Sites" icon={<Building2 className="h-3 w-3" />} className="hidden xl:flex">
+        <Tile wall={wall} label="Sites" icon={<Building2 className="h-3 w-3" />} className={wall ? '' : 'hidden 2xl:flex'}>
           <div className="flex items-baseline gap-2.5">
             <Count n={stats.sitesWithProblems} label="impacted" tone="danger" wall={wall} />
             <Count n={stats.sites} label="sites" tone="muted" wall={wall} />

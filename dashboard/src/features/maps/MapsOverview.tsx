@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Bell, Copy, ExternalLink, Map as MapIcon, MonitorPlay, Network, Pencil, Radio, Search } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useBreadcrumbDetail } from '@/components/layout/breadcrumbDetail'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/Toast'
 import { Button } from '@/components/ui/Button'
@@ -22,6 +23,7 @@ function rank(m: Sorted) {
  * can open on its own (it cycles through the chosen maps). */
 export function MapsOverview() {
   const navigate = useNavigate()
+  useBreadcrumbDetail('All maps')
   const [q, setQ] = useState('')
   const [rotationOpen, setRotationOpen] = useState(false)
   const mapsQ = useQuery<{ data: ManualMapListItem[] }>({

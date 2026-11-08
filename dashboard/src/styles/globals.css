@@ -270,8 +270,11 @@ table, .font-mono, .tabular { font-variant-numeric: tabular-nums; }
 }
 .nm-fault { animation: nm-fault 1.4s ease-in-out infinite; }
 
-/* Hovered device rises above its neighbours so the health card isn't clipped. */
-.react-flow__node:hover { z-index: 1000 !important; }
+/* Hovered device (or site tile) rises above its neighbours so its card isn't
+ * clipped. Zones and other shapes keep their stacking: a hovered zone used to
+ * rise over the devices drawn inside it. */
+.react-flow__node-device:hover,
+.react-flow__node.nm-site-node:hover { z-index: 1000 !important; }
 
 /* Network map device tile: a lit surface so icons read on both themes. */
 .nm-tile {

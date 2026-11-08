@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
-import { ArrowLeft, ChevronRight, Loader2, Pause, Play, X } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, ChevronRight, Link2Off, Loader2, Pause, Play, ServerCrash, ShieldCheck, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { applyDensity, useDisplay, type Density } from '@/stores/display'
 import { MapCanvas } from './canvas/MapCanvas'
-import { NocStatusBar } from './canvas/NocOverlays'
+import { NocStatusBar, computeProblems } from './canvas/NocOverlays'
 import { useLiveLinks, useManualMap, useNodesLive, useSitesLive } from './useMapData'
 import type { ManualMapListItem } from './core'
 
@@ -118,6 +118,11 @@ export function MapWall({ maps, startId, rotateIds, rotateSec, onExit, showAtten
   const nameOf = (id: string) => maps.find((m) => m.id === id)?.name || (id === mapId ? detail?.name : undefined) || 'Map'
   const boost = scaleOverride ?? wallBoost(width)
   const crumbs = useMemo(() => [baseId, ...trail], [baseId, trail])
+  // The wall lists what needs action only; cables without bound ports are
+  // summarised in one line instead of filling the column.
+  const problems = useMemo(() => (detail ? computeProblems(detail, nodesLive, liveData, sitesLive) : []), [detail, nodesLive, liveData, sitesLive])
+  const urgent = problems.filter((p) => p.severity !== 'info')
+  const unbound = problems.length - urgent.length
 
   return (
     <div className={cn('dark map-wall fixed inset-0 z-[80] flex flex-col text-text', idle && 'cursor-idle')}>
@@ -155,6 +160,7 @@ export function MapWall({ maps, startId, rotateIds, rotateSec, onExit, showAtten
         </div>
       </div>
 
+      <div className="flex min-h-0 flex-1">
       {/* Canvas */}
       <div className="relative min-h-0 flex-1">
         {detail ? (
@@ -172,7 +178,7 @@ export function MapWall({ maps, startId, rotateIds, rotateSec, onExit, showAtten
               showThroughput
               showIfaceLabels={false}
               animate
-              showProblems={showAttention}
+              showProblems={false}
               maps={maps}
               onOpenMap={(id) => setTrail((t) => [...t, id])}
             />
@@ -194,6 +200,32 @@ export function MapWall({ maps, startId, rotateIds, rotateSec, onExit, showAtten
             <X className="h-4 w-4" /> Exit wall
           </button>
         </div>
+      </div>
+
+      {showAttention && detail && (
+        <aside className="flex w-[22rem] shrink-0 flex-col border-l border-border/70 bg-surface/40">
+          <div className={cn('flex items-center gap-2 px-4 py-2.5 text-sm font-bold uppercase tracking-wider', urgent.length ? (urgent.some((p) => p.severity === 'critical') ? 'text-danger' : 'text-warning') : 'text-success')}>
+            {urgent.length ? <AlertTriangle className="h-4 w-4" /> : <ShieldCheck className="h-4 w-4" />}
+            {urgent.length ? `Attention · ${urgent.length}` : 'All clear'}
+          </div>
+          <div className="min-h-0 flex-1 space-y-1.5 overflow-hidden px-3 pb-3">
+            {urgent.slice(0, 14).map((p) => (
+              <div key={p.id} className={cn('flex items-start gap-2.5 rounded-lg border px-3 py-2', p.severity === 'critical' ? 'border-danger/50 bg-danger/10' : 'border-warning/40 bg-warning/10')}>
+                <span className={cn('mt-0.5 shrink-0', p.severity === 'critical' ? 'text-danger' : 'text-warning')}>
+                  {p.kind === 'device' ? <ServerCrash className="h-4 w-4" /> : <Link2Off className="h-4 w-4" />}
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-semibold text-text">{p.title}</span>
+                  <span className="block truncate text-xs text-text2">{p.detail}</span>
+                </span>
+              </div>
+            ))}
+            {urgent.length > 14 && <div className="px-1 text-xs text-muted">+{urgent.length - 14} more</div>}
+            {!urgent.length && <div className="px-1 text-xs text-muted">Every device is up and no link is down or saturated.</div>}
+            {unbound > 0 && <div className="px-1 pt-1 text-xs text-muted">{unbound} cable{unbound > 1 ? 's have' : ' has'} no interface bound, so no live data.</div>}
+          </div>
+        </aside>
+      )}
       </div>
 
       {/* Rotation progress */}

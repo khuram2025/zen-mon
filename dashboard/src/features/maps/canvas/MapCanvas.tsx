@@ -630,6 +630,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
         draggable: !liveMode && !s.metadata?.locked,
         selected: selectedIds.current.has(s.id),
         zIndex: s.z_index || 0,
+        className: isSiteShape(s) ? 'nm-site-node' : undefined,
         // Locked zones are background: clicks and box-select go through to
         // the canvas; ShapeNode keeps the caption and lock badge grabbable.
         ...(isBackgroundZone(s, liveMode) ? { style: { width: Math.round(r.w), height: Math.round(r.h), pointerEvents: 'none' as const } } : {}),
