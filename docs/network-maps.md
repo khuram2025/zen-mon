@@ -102,6 +102,9 @@ The full description is in `Documentation/29-NETWORK-MAPS.md`. The rules:
   and the picked devices, each counted once. `GET /maps/{id}/sites-live` aggregates them; devices outside the
   viewer's visibility scope are never counted, and a drill-down map outside the viewer's page-access role is
   neither expanded nor named. Members are sorted worst first and capped at 2000 per site; counts cover all of them.
+- In **Live** and **NOC wall** modes, click the site tile to open its accessible detail map.
+  Enter or Space works when the tile has focus. Open, Devices/Hide and member buttons retain
+  their separate actions. Tile clicks in Design mode do not navigate; inaccessible or missing detail maps stay inert.
 - **Group into a site** may move the selection into a new site map: it copies the nodes, shapes and the cables
   between them with one bulk request, then deletes them here through the normal delete-with-undo path.
 - The **NOC wall** (`?wall=1`, optional `maps=…&rotate=…`, `attention=0`, `scale=…`) is a read-only live view with

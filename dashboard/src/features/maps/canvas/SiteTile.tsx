@@ -94,6 +94,7 @@ function SiteTileImpl({ shape, live, w, h, selected, onDrill, onOpenMember, desi
   const accent = STATUS_HEX[tone] || STATUS_HEX.unknown
   const title = siteTitle(shape, live)
   const drillId = live?.map_id || null
+  const canDrill = !designMode && !!drillId && !!onDrill
 
   // Sizes follow the tile, so a resized site stays balanced.
   const base = Math.max(10, Math.min(w * 0.06, h * 0.11, 26))
@@ -108,8 +109,19 @@ function SiteTileImpl({ shape, live, w, h, selected, onDrill, onOpenMember, desi
         className={cn(
           'flex h-full w-full flex-col overflow-hidden rounded-xl border-2 bg-surface/95 shadow-lg backdrop-blur',
           selected && 'ring-2 ring-primary/70 ring-offset-2 ring-offset-surface',
+          canDrill && 'nodrag nopan cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
         )}
-        style={{ borderColor: `${accent}cc`, boxShadow: !designMode && hasProblems ? `0 0 0 3px ${accent}33, 0 0 24px ${accent}55` : undefined }}
+        style={{ borderColor: `${accent}cc`, boxShadow: !designMode && hasProblems ? `0 0 0 3px ${accent}33, 0 0 24px ${accent}55` : undefined, pointerEvents: canDrill ? 'auto' : undefined }}
+        role={canDrill ? 'link' : undefined}
+        tabIndex={canDrill ? 0 : undefined}
+        aria-label={canDrill ? `Open ${title} site map` : undefined}
+        onClick={canDrill ? (e) => { e.stopPropagation(); onDrill!(drillId!) } : undefined}
+        onKeyDown={canDrill ? (e) => {
+          if (e.target !== e.currentTarget || (e.key !== 'Enter' && e.key !== ' ')) return
+          e.preventDefault()
+          e.stopPropagation()
+          onDrill!(drillId!)
+        } : undefined}
       >
         {/* Header */}
         <div className="flex items-center gap-[0.4em] px-[0.6em] py-[0.35em]" style={{ background: `linear-gradient(90deg, ${accent}2e, transparent 75%)` }}>
