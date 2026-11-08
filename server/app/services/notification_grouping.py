@@ -195,7 +195,7 @@ def reset_for_tests() -> None:
 FAMILY_LABELS = {
     "cpu": "CPU", "memory": "Memory", "storage": "Storage", "interface": "Interfaces",
     "reachability": "Reachability", "latency": "Latency and loss", "service": "Service checks",
-    "hardware": "Hardware", "reboot": "Reboots", "network": "Network protocols",
+    "hardware": "Hardware", "reboot": "Reboots and restarts", "network": "Network protocols",
     "process": "Processes and services", "apm": "Application performance",
     "endpoint": "Endpoints", "netpath": "Network paths", "netflow": "Traffic",
     "trap": "SNMP traps", "syslog": "Syslog", "template": "Template metrics", "other": "Other",
@@ -210,7 +210,7 @@ _FAMILY_EXACT = {
     "rtt": "latency", "packet_loss": "latency", "jitter": "latency",
     "service_status": "service",
     "temperature": "hardware", "fan_state": "hardware", "psu_state": "hardware",
-    "uptime_reset": "reboot",
+    "uptime_reset": "reboot", "host_restart": "reboot", "host_shutdown": "reboot",
     "session_count": "network", "vpn_tunnel_state": "network", "ha_state": "network",
     "bgp_neighbor_down": "network",
     "host_service_down": "process", "host_process_down": "process",
@@ -670,7 +670,7 @@ async def gate_for(db: AsyncSession, ctx: dict, keyed) -> Gate | None:
     """The grouping/budget gate for one dispatch, or None when every send of
     it goes out as before (the common case costs no query unless the caller
     marked the send groupable or it is a recovery)."""
-    if not keyed:
+    if not keyed or ctx.get("storm"):
         return None
     alert_id, event = str(keyed[0]), str(keyed[1])
     recovery = _is_recovery(ctx)
@@ -779,6 +779,9 @@ async def _finish(db, digest_id, status: str, *, error: str | None = None, sent:
 async def _release_one(db: AsyncSession, d, dispatch: Callable | None = None) -> str:
     from app.services import host_alert_service as has
 
+    if d.reason == "storm":
+        from app.services import alert_storm
+        return await alert_storm.release_one(db, d, dispatch)
     items = await _items(db, d.id)
     active = [i for i in items if not _recovered(i)]
     detail = {"digest_id": str(d.id), "items": len(items), "group_label": d.group_label}
@@ -889,6 +892,12 @@ async def release_due(db: AsyncSession, *, dispatch: Callable | None = None) -> 
     """Send (or cancel) every digest whose release time has passed."""
     if not await available(db):
         return {"claimed": 0}
+    try:
+        from app.services import alert_storm
+        await alert_storm.sweep(db)        # end quiet storms, queue closing summaries
+    except Exception:
+        await db.rollback()
+        logger.exception("alert storm sweep failed")
     counts = {"claimed": 0, "sent": 0, "failed": 0, "cancelled": 0, "retrying": 0}
     while True:
         batch = await _claim(db)
@@ -1037,7 +1046,10 @@ async def digest_context(db: AsyncSession, d, items: list, *, max_items: int = 5
 
 
 def digest_email_html(rows: list[dict], *, head: str, extra: str, severity: str, priority: str,
-                      reason_line: str, digest_url: str, max_items: int = 50, branding=None) -> str:
+                      reason_line: str, digest_url: str, max_items: int = 50, branding=None,
+                      chip: str = "DIGEST", button: str = "View digest", recovered_title: str = "Already recovered",
+                      footer: str = ("This summary replaces the individual notifications listed above. "
+                                     "Critical (P1/P2) notifications are never held.")) -> str:
     """One summary mail in the house style (email_render's shell)."""
     from app.services import email_render as er
 
@@ -1075,7 +1087,7 @@ def digest_email_html(rows: list[dict], *, head: str, extra: str, severity: str,
     recovered = [s for s in rows if s.get("recovered")]
     shown = active[:max_items]
     more = len(active) - len(shown)
-    inner = (er._header("ZenPlus", chip_label="DIGEST", chip_color=er._STATUS_CHIP,
+    inner = (er._header("ZenPlus", chip_label=chip, chip_color=er._STATUS_CHIP,
                         severity_label=f"{severity.upper()} · {priority}", severity_color=accent)
              + er._hero(esc(head), esc(extra.strip(" ()") or "Summary of held notifications"),
                         icon="Σ", accent=accent)
@@ -1087,10 +1099,9 @@ def digest_email_html(rows: list[dict], *, head: str, extra: str, severity: str,
     if recovered:
         inner += (f'  <tr><td style="padding:18px 28px 0;font-size:12px;font-weight:700;'
                   f'letter-spacing:.6px;text-transform:uppercase;color:{er._MUTED};">'
-                  f'Already recovered ({len(recovered)})</td></tr>' + table(recovered[:max_items], muted=True))
-    inner += er._button(digest_url, "View digest", color=er._BRAND)
-    inner += er._footer("ZenPlus", "This summary replaces the individual notifications listed above. "
-                                   "Critical (P1/P2) notifications are never held.")
+                  f'{esc(recovered_title)} ({len(recovered)})</td></tr>' + table(recovered[:max_items], muted=True))
+    inner += er._button(digest_url, button, color=er._BRAND)
+    inner += er._footer("ZenPlus", footer)
     return er._shell(inner, title=head, preheader=head, accent=accent)
 
 

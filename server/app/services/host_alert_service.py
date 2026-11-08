@@ -362,6 +362,7 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
     from app.api.v1.alert_engine import _send_email, _send_sms, _dispatch_channel_result
     from app.services import alert_delivery_log as dl
     from app.services.alert_phrasing import sms_with_timestamp
+    from app.services import alert_storm
     from app.services import notification_grouping as ng
     from app.services.email_render import alert_subject, build_alert_email_html, build_alert_email_text
     from app.services.regional_time import notification_branding, localize_text
@@ -378,7 +379,9 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
     covered.update(prior)
     raw_only = ctx.get("only_recipients")
     only = None if raw_only is None else {str(k) for k in raw_only}
-    gate = await ng.gate_for(db, ctx, keyed)
+    # An alert storm replaces per-asset sends with one combined notification;
+    # otherwise warning grouping / budgets may hold the send.
+    gate = await alert_storm.gate_for(db, ctx, keyed) or await ng.gate_for(db, ctx, keyed)
     # Channels / direct recipients that accepted (or hold) this notification.
     credited: set[str] = set()
 
