@@ -87,6 +87,7 @@ jobs:
       - run: npm run test:baseline-details
       - run: npm run test:manual-updates
       - run: npm run test:apm-event-rules
+      - run: node scripts/test-synthetics-ui.mjs
       - run: node scripts/test-event-log-policy.mjs
       - run: node scripts/test-role-model.mjs
       - run: node scripts/test-inventory-ui.mjs

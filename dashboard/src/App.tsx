@@ -66,6 +66,7 @@ import { ErrorsInboxPage } from '@/pages/apm/ErrorsInboxPage'
 import { SlosPage } from '@/pages/apm/SlosPage'
 import { SloDetailPage } from '@/pages/apm/SloDetailPage'
 import { SyntheticsPage } from '@/pages/apm/SyntheticsPage'
+import { SyntheticDetailPage } from '@/pages/apm/SyntheticDetailPage'
 import { RumPage } from '@/pages/apm/RumPage'
 import { UsagePage } from '@/pages/apm/UsagePage'
 import { ErrorIssueDetailPage } from '@/pages/apm/ErrorIssueDetailPage'
@@ -246,6 +247,7 @@ export default function App() {
           <Route path="slos" element={<SlosPage />} />
           <Route path="slos/:id" element={<SloDetailPage />} />
           <Route path="synthetics" element={<SyntheticsPage />} />
+          <Route path="synthetics/:id" element={<SyntheticDetailPage />} />
           <Route path="rum" element={<RumPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="errors" element={<ErrorsInboxPage />} />
