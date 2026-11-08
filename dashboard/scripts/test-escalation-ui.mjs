@@ -478,7 +478,7 @@ const ROUTE = {
 
 assert.equal(M.tabFromSearch('?tab=oncall'), 'oncall')
 assert.equal(M.tabFromSearch('?tab=nope'), 'matrix')
-assert.deepEqual(M.ESCALATION_TABS, ['matrix', 'policies', 'oncall', 'targets', 'grouping', 'coverage'])
+assert.deepEqual(M.ESCALATION_TABS, ['matrix', 'policies', 'oncall', 'targets', 'grouping', 'storms', 'coverage'])
 
 console.log('Escalation model: priorities (P1 never derived), response targets, policies and server limits, outline, routing and conflicts, route explanation, ?ack=1 state, time zones and DST, timeline, grouping, coverage, contacts, recommended matrix.')
 

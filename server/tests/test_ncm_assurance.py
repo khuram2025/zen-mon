@@ -11,7 +11,9 @@ from app.api.v1.ncm import NcmEnroll, ConfigCapture
 @pytest.mark.parametrize('before,after', [
     ('enable secret 9 first', 'enable secret 9 second'),
     ('snmp-server community old RO','snmp-server community new RO'),
-    ('set password ENC old','set password ENC new'),
+    # FortiOS administrator password hashes print identically every time.
+    ('config system admin\n    edit "admin"\n        set password ENC SH2old\n    next\nend',
+     'config system admin\n    edit "admin"\n        set password ENC SH2new\n    next\nend'),
     ('-----BEGIN PRIVATE KEY-----\naaaa\n-----END PRIVATE KEY-----',
      '-----BEGIN PRIVATE KEY-----\nbbbb\n-----END PRIVATE KEY-----'),
 ])
