@@ -292,7 +292,7 @@ function VersionsTab({ device }: { device: any }) {
         <summary className="cursor-pointer font-semibold">Compare with another device</summary>
         <div className="mt-3"><CrossDeviceCompare initialDeviceId={deviceId} /></div>
       </details>
-      <CompareDialog deviceId={deviceId} pair={cmp} onClose={() => setCmp(null)} />
+      <CompareDialog deviceId={deviceId} hostname={device.hostname} pair={cmp} onClose={() => setCmp(null)} />
       <BaselineDialog deviceId={deviceId} version={baselineFor} onClose={() => setBaselineFor(null)} />
       <RestoreTestDialog deviceId={deviceId} version={restoreFor} onClose={() => setRestoreFor(null)} />
     </div>
@@ -336,7 +336,7 @@ function ConfigViewer({ device, version, onClose, onDownload }: { device: any; v
   )
 }
 
-function CompareDialog({ deviceId, pair, onClose }: { deviceId: string; pair: { a: any; b: any } | null; onClose: () => void }) {
+function CompareDialog({ deviceId, hostname, pair, onClose }: { deviceId: string; hostname?: string; pair: { a: any; b: any } | null; onClose: () => void }) {
   const [normalized, setNormalized] = useState(true)
   const diff = useQuery<any>({
     queryKey: ['ncm', 'diff', deviceId, pair?.a?.id, pair?.b?.id, normalized],
@@ -353,7 +353,9 @@ function CompareDialog({ deviceId, pair, onClose }: { deviceId: string; pair: { 
         <label className="flex items-center gap-2 text-sm"><Switch aria-label="Ignore runtime noise" checked={normalized} onCheckedChange={setNormalized} />Ignore runtime noise (timestamps, counters)</label>
         {diff.isError ? <SectionError what="The comparison" onRetry={() => diff.refetch()} /> : diff.isPending ? <p className="text-sm text-muted">Comparing…</p> : (
           <DiffView diff={diff.data.diff} added={diff.data.added} removed={diff.data.removed} identical={diff.data.identical}
-            sensitiveChanged={diff.data.sensitive_changed} redacted={diff.data.redacted} normalized={diff.data.normalized} />
+            sensitiveChanged={diff.data.sensitive_changed} redacted={diff.data.redacted} normalized={diff.data.normalized}
+            tooLarge={diff.data.too_large} message={diff.data.message}
+            sides={pair ? [{ deviceId, versionId: pair.a.id, hostname }, { deviceId, versionId: pair.b.id, hostname }] : undefined} />
         )}
       </DialogContent>
     </Dialog>
@@ -483,7 +485,7 @@ function BaselinesTab({ device }: { device: any }) {
           <DialogFooter><Button variant="outline" onClick={() => setRetire(null)}>Cancel</Button><Button disabled={reason.trim().length < 3 || doRetire.isPending} onClick={() => doRetire.mutate()}>Retire baseline</Button></DialogFooter>
         </DialogContent>
       </Dialog>
-      <CompareDialog deviceId={deviceId} pair={cmp} onClose={() => setCmp(null)} />
+      <CompareDialog deviceId={deviceId} hostname={device.hostname} pair={cmp} onClose={() => setCmp(null)} />
     </div>
   )
 }
