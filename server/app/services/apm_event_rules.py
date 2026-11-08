@@ -59,15 +59,13 @@ def phrasing(metric, name, details, *, recovery=False, duration=''):
                     f'{details.get("short_burn")}× in the {details.get("tier", "configured")} tier '
                     f'(threshold {details.get("factor")}× in both windows).')
         condition = 'SLO multi-window burn threshold exceeded'
-    if recovery and duration:
-        sentence += f' The condition was active for {duration}.'
     return {**details, 'scenario_name': name if metric == SYNTHETIC else '',
             'slo_name': name if metric == SLO else '', 'hostname': name, 'host_suffix': '',
             'event_sentence': sentence, 'condition_sentence': condition + '.',
             'condition_label': condition, 'condition': condition,
             'reading': 'Passing' if recovery else 'Confirmed failure',
-            'duration': duration, 'duration_sentence': f'Active for {duration}.' if duration else '',
-            'duration_suffix': f' Active for {duration}.' if duration else '',
+            'duration': duration, 'duration_sentence': f' Lasted {duration}.' if duration else '',
+            'duration_suffix': f' Lasted {duration}.' if duration else '',
             'status': 'RESOLVED' if recovery else 'DOWN', 'ip_address': ''}
 
 

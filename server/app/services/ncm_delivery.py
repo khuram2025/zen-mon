@@ -97,7 +97,10 @@ async def send(db, channel_ids, payload):
     human = dict(payload)
     if payload.get('timestamp'):
         human['body'] = (payload.get('body') or payload['subject']) + '\nTime: ' + timestamp_label(payload['timestamp'], branding)
-        human['sms_body'] = sms_with_timestamp(payload['subject'][:300], payload['timestamp'], branding)
+        # The SMS is the sentence ("Configuration backup of Switch sw-01 ... failed: ..."),
+        # older queued events without one fall back to the subject.
+        human['sms_body'] = sms_with_timestamp((payload.get('sms_body') or payload['subject'])[:300],
+                                               payload['timestamp'], branding)
     accepted = 0
     for channel_id in channel_ids:
         ch = (await db.execute(text('SELECT type,config,gateway_id,enabled FROM notification_channels WHERE id=:id'),

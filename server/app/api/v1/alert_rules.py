@@ -1133,10 +1133,21 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False, branding=No
         "error": "" if is_recovery else "connection timed out after 5s",
         "trap_message": "Link state changed on the monitored interface.",
         **ap.service_check_variables(device_status, "" if is_recovery else "Connection timed out after 5 seconds"),
-        **ap.rule_phrasing(rule_dict, hostname=hostname, is_recovery=is_recovery,
-                           subject_noun=f"{hostname} / uplink" if metric.startswith("if_") else None,
+        **ap.rule_phrasing(rule_dict, hostname=ap.host_label(hostname, "10.0.0.1")
+                           if kind == "device" and not metric.startswith("apm_") else hostname,
+                           is_recovery=is_recovery,
+                           subject_noun=f"{ap.host_label(hostname, '10.0.0.1')} / uplink" if metric.startswith("if_") else None,
                            reading=reading, duration=sample_duration,
-                           device_status=device_status.lower() if kind == "device" else None),
+                           device_status=device_status.lower() if kind == "device" else None,
+                           # Reboots and restarts are events: the preview shows
+                           # a worked example of when it happened and what now.
+                           value_context=ap.sample_event_context(metric, recovered=is_recovery, now=now),
+                           asset_type=("Server" if metric.startswith("host_") else
+                                       ap.asset_type_label(rule_dict.get("device_type") or "router")
+                                       if kind == "device" and not metric.startswith(("apm_", "netflow_", "udt_", "netpath_"))
+                                       else None),
+                           branding=branding, now=now,
+                           event_time=now if metric == "ping_status" else None),
     }
 
     if metric in aer.EVENT_METRICS:

@@ -177,6 +177,18 @@ async def _servers(db: AsyncSession) -> dict[str, str]:
     return {str(r[0]): (r[1] or "server") for r in rows}
 
 
+async def _server_ips(db: AsyncSession) -> dict[str, str]:
+    """{server_id: primary IP} so a message names "Server app-01 (10.0.0.5)"."""
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text(
+                "SELECT id, host(primary_ip) FROM servers WHERE primary_ip IS NOT NULL"))).all()
+    except Exception:
+        logger.debug("server IPs unavailable for alert wording", exc_info=True)
+        return {}
+    return {str(r[0]): str(r[1] or "") for r in rows}
+
+
 async def _gateway_config(db: AsyncSession, ch, gw_type: str) -> dict | None:
     gw_id = ch.gateway_id or (decrypt_config(ch.config)).get("gateway_id")
     if gw_id:
@@ -730,21 +742,34 @@ async def _open_alert_started(db: AsyncSession, server_id: str, dedupe: str):
 async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | None = None,
                        detail: str = "", is_recovery: bool = False,
                        duration: str = "", alert_id=None, first_seen=None,
-                       event: str | None = None) -> int:
+                       event: str | None = None, ip_address: str = "",
+                       context: dict | None = None, branding=None,
+                       lifecycle: str | None = None) -> int:
     """Send a host metric alert, or its all-clear, in the shared house style.
-    Returns how many channels accepted it."""
+    Returns how many channels accepted it. ``context`` carries a restart or
+    shutdown's own facts; ``lifecycle`` "changed" announces a further event
+    on an open incident."""
     sev = rule.severity or "warning"
     threshold = _float(rule.threshold)
     numeric = value is not None and rule.metric in THRESHOLD_METRICS
     reading = ap.format_reading(rule.metric, value, rule.operator, threshold) if numeric else ""
     now = datetime.now(timezone.utc)
     incident = ap.incident_context(alert_id=alert_id, first_seen=first_seen, now=now,
-                                   lifecycle="recovered" if is_recovery else "new") if alert_id else {}
-    v = ap.rule_phrasing(_phrasing_rule(rule), hostname=hostname, is_recovery=is_recovery,
+                                   lifecycle=lifecycle or ("recovered" if is_recovery else "new")) if alert_id else {}
+    label = ap.host_label(hostname, ip_address)
+    target = (getattr(rule, "target", None) or "").strip()
+    status_detail = None
+    if target and rule.metric == "host_service_down":
+        status_detail = f"service {target} " + ("is running again" if is_recovery else "has stopped")
+    elif target and rule.metric == "host_process_down":
+        status_detail = f"process {target} " + ("is running again" if is_recovery else "is not running")
+    v = ap.rule_phrasing(_phrasing_rule(rule), hostname=label, is_recovery=is_recovery,
                          reading=reading, duration=duration,
-                         value=value if numeric else None)
+                         value=value if numeric else None, value_context=context,
+                         asset_type="Server", branding=branding, now=now,
+                         status_detail=status_detail)
     v.update({"rule_name": rule.name or "Alert", "hostname": hostname,
-              "ip_address": "", "severity": sev.upper(),
+              "ip_address": ip_address or "", "severity": sev.upper(),
               "status": "RESOLVED" if is_recovery else "ALERT"})
     v.update(incident)
     return await dispatch_to_channels(db, rule.notify_channels or [], {
@@ -753,7 +778,7 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
         "body": _render(ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery
                         else ap.DEFAULT_EMAIL_BODY, v),
         "message": _render(ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS, v),
-        "hostname": hostname, "ip_address": "",
+        "hostname": hostname, "ip_address": ip_address or "",
         "status": "RESOLVED" if is_recovery else "ALERT",
         "severity": sev, "resolved": is_recovery,
         "headline_metric": ap.headline_metric(rule.metric, value, rule.operator, threshold)
@@ -762,8 +787,8 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, value: float | 
                     ("Condition", v.get("condition_label")),
                     # `detail` carries what the evaluator measured — which
                     # filesystem, which service — and nothing else knows it.
-                    ("Measured", detail),
-                    ("Active for", duration if is_recovery else None)],
+                    ("Measured", None if context is not None else detail),
+                    ("Active for", duration if is_recovery and context is None else None)],
         "triggered_at": now.isoformat(),
         "rule_id": str(rule.id), "rule_name": rule.name,
         "alert_id": str(alert_id) if alert_id else None,
@@ -835,7 +860,9 @@ async def _lock(db: AsyncSession, rule, sid: str, dimension: str | None) -> None
 async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimension: str | None,
                        breach: bool, value: float | None, detail: str, *, allowed: bool,
                        counts: dict, opened: _Open | None, extra: dict | None = None,
-                       availability_now: float | None = None) -> None:
+                       availability_now: float | None = None, ip_address: str = "",
+                       branding=None, message: str | None = None,
+                       context: dict | None = None) -> None:
     """Raise, continue or resolve one rule/server/dimension incident.
 
     ``opened`` is the open incident the pass read (None = none). A new one is
@@ -843,6 +870,7 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
     re-checks for an open row under it; every send happens after a commit.
     """
     dedupe = _dedupe(rule, dimension)
+    say = dict(ip_address=ip_address, branding=branding, context=context)
     if breach:
         if opened is None:
             await _lock(db, rule, sid, dimension)
@@ -856,7 +884,7 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
                 meta["mount"] = dimension
             new_id = await create_server_alert(
                 db, sid, severity=rule.severity or "warning",
-                message=_message(rule, hostname, detail),
+                message=message or _message(rule, ap.host_label(hostname, ip_address), detail),
                 source="host_metric", dedupe=dedupe, metadata=meta,
             )
             if new_id:
@@ -875,17 +903,17 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
             if allowed:
                 await _notify_rule(db, rule, hostname, value=value, detail=detail,
                                    alert_id=new_id,
-                                   first_seen=await _open_alert_started(db, sid, dedupe))
+                                   first_seen=await _open_alert_started(db, sid, dedupe), **say)
             await ns.stamp(db, new_id, allowed)
             await db.commit()
             return
-        if rule.metric in {"host_restart", "host_shutdown"}:
-            # One incident may cover several lifecycle signals in the observation
-            # window. Keep its text aligned with the newest signal, without
-            # changing its identity, acknowledgement or notification state.
+        if rule.metric in {"host_restart", "host_shutdown"} and message:
+            # One incident may cover several lifecycle signals in its hold.
+            # Keep its text aligned with the newest signal, without changing
+            # its identity, acknowledgement or notification state.
             await db.execute(text("""UPDATE alerts SET message=:message
                 WHERE id=:id AND message IS DISTINCT FROM :message"""),
-                             {"id": opened.id, "message": _message(rule, hostname, detail)})
+                             {"id": opened.id, "message": message})
         await _stamp_state(db, opened.id, {"value": round(value, 2) if value is not None else None,
                                            "data_state": "current", **(extra or {})})
         if (opened.status == "active" and allowed and await ns.is_pending(db, opened.id)
@@ -902,7 +930,7 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
                 await db.commit()
                 return
             await _notify_rule(db, rule, hostname, value=value, detail=detail,
-                               alert_id=opened.id, first_seen=opened.triggered_at)
+                               alert_id=opened.id, first_seen=opened.triggered_at, **say)
             await ns.stamp(db, opened.id, True)
             await db.commit()
         return
@@ -916,7 +944,7 @@ async def _apply_state(db: AsyncSession, rule, sid: str, hostname: str, dimensio
     if n and ns.flag_means_notified(opened.notified) and getattr(rule, "recovery_alert", False):
         await _notify_rule(db, rule, hostname, value=value, detail=detail,
                            is_recovery=True, duration=ap.duration_between(opened.triggered_at),
-                           alert_id=opened.id, first_seen=opened.triggered_at)
+                           alert_id=opened.id, first_seen=opened.triggered_at, **say)
 
 
 async def _adopt_legacy_mount_incident(db: AsyncSession, rule, sid: str,
@@ -980,7 +1008,8 @@ async def _availability_still_breaching(db, rule, sid, now=None):
 
 
 async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: dict, *,
-                                 now: float, since: float, allowed: bool, counts: dict) -> None:
+                                 now: float, since: float, allowed: bool, counts: dict,
+                                 ips: dict | None = None, branding=None) -> None:
     """Raise or resolve one availability rule against every server it covers."""
     after_s = sa.down_after_seconds(rule)
     for sid, sig in signals.items():
@@ -1009,10 +1038,113 @@ async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: 
                            sa.describe(rule, state, sig, after_s),
                            allowed=allowed and not held, counts=counts,
                            opened=opened.get((sid, _dedupe(rule, None))), extra=extra,
-                           availability_now=now)
+                           availability_now=now, ip_address=(ips or {}).get(sid, ""),
+                           branding=branding)
         if breach:
             # This incident replaces the sweep's built-in, unrouted alert.
             await resolve_server_alerts(db, sid, "agent_offline")
+
+
+async def _lifecycle_meta(db: AsyncSession, sid: str, dedupe: str):
+    """(open incident metadata, newest evidence already announced, epoch s)."""
+    rows = (await db.execute(text(
+        """SELECT status, metadata, triggered_at FROM alerts
+           WHERE server_id = :sid AND metadata->>'dedupe' = :dedupe
+           ORDER BY triggered_at DESC LIMIT 20"""), {"sid": sid, "dedupe": dedupe})).all()
+    known, meta = 0.0, None
+    for status, raw, triggered in rows:
+        m = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+        seen = m.get("lifecycle_latest_at")
+        # Incidents from before 1.25.3 carry no evidence time: their trigger
+        # time is at or after the evidence they announced.
+        known = max(known, float(seen) if seen is not None
+                    else (triggered.timestamp() if triggered else 0.0))
+        if meta is None and status in ("active", "acknowledged"):
+            meta = m
+    return meta, known
+
+
+async def _evaluate_lifecycle(db: AsyncSession, rule, sid: str, hostname: str, ip: str,
+                              events: list, sig, *, now: float, hold_s: int, allowed: bool,
+                              counts: dict, opened: _Open | None, branding) -> None:
+    """Raise, extend or close one server restart/shutdown incident.
+
+    A restart is an event. Its incident opens on new evidence (newer than
+    anything already announced and inside the fire window, so agent backlog
+    never pages), stays open for ``hold_s`` after the newest evidence, says
+    "restarted again" (one notification per new boot) while open, and closes
+    itself afterwards with what is known now: the agent reporting normally,
+    or honestly not reporting.
+    """
+    from app.services import server_event_service as sev
+
+    dedupe = _dedupe(rule, None)
+    ctx = sev.lifecycle_context(rule.metric, events)
+    meta, known = await _lifecycle_meta(db, sid, dedupe)
+    who = ap.asset_label(hostname, ip, "Server")
+    heartbeat = getattr(sig, "heartbeat_at", None) if sig is not None else None
+    hb = heartbeat.timestamp() if heartbeat is not None else None
+    reporting = hb is not None and now - hb < sa.DOWN_AFTER_S
+
+    if opened is None:
+        if ctx is None or ctx["latest_at"] <= known + 1e-6:
+            return
+        if now - ctx["latest_at"] >= min(sev.LIFECYCLE_FIRE_WINDOW_S, max(hold_s, 60)):
+            return
+        if ctx.get("boot_at") is not None:
+            ctx["uptime_s"] = max(0.0, now - ctx["boot_at"])
+        sentence = ap.event_sentence(rule.metric, who, ctx, branding=branding, now=now)
+        extra = {"lifecycle_latest_at": ctx["latest_at"], "lifecycle_kind": ctx["kind"],
+                 "boot_at": ctx.get("boot_at"), "first_boot_at": ctx.get("first_boot_at"),
+                 "restart_count": ctx.get("restart_count"), "requested_at": ctx.get("requested_at"),
+                 "event_at": ctx.get("event_at"), "hold_seconds": hold_s}
+        await _apply_state(db, rule, sid, hostname, None, True, float(ctx["count"]), sentence,
+                           allowed=allowed, counts=counts, opened=None, extra=extra,
+                           ip_address=ip, branding=branding, message=sentence, context=ctx)
+        return
+
+    meta = meta or {}
+    if ctx is not None and ctx["latest_at"] > float(meta.get("lifecycle_latest_at") or known) + 1e-6:
+        # Newer evidence on the open incident. A new OS boot more than two
+        # minutes after the one already announced is a further restart.
+        old_boot = meta.get("boot_at")
+        new_boot = ctx.get("boot_at")
+        again = (rule.metric == "host_restart" and new_boot is not None and old_boot is not None
+                 and new_boot > float(old_boot) + 120)
+        count = int(meta.get("restart_count") or 1) + (1 if again else 0)
+        merged = {**ctx, "restart_count": count,
+                  "first_boot_at": meta.get("first_boot_at") or ctx.get("first_boot_at"),
+                  "uptime_s": max(0.0, now - new_boot) if new_boot is not None else None}
+        sentence = ap.event_sentence(rule.metric, who, merged, branding=branding, now=now)
+        await _stamp_state(db, opened.id, {
+            "lifecycle_latest_at": ctx["latest_at"], "lifecycle_kind": ctx["kind"],
+            "boot_at": new_boot if new_boot is not None else old_boot,
+            "restart_count": count, "event_at": ctx.get("event_at"), "hold_seconds": hold_s,
+            "data_state": "current"})
+        await db.execute(text("UPDATE alerts SET message=:m WHERE id=:id"),
+                         {"id": opened.id, "m": sentence})
+        await db.commit()
+        if again and allowed and ns.flag_means_notified(opened.notified):
+            await _notify_rule(db, rule, hostname, alert_id=opened.id, first_seen=opened.triggered_at,
+                               ip_address=ip, context=merged, branding=branding, lifecycle="changed",
+                               event=f"restart:{int(new_boot)}")
+        return
+
+    newest = float(meta.get("lifecycle_latest_at") or known or now)
+    if now - newest < hold_s:
+        # Still inside the hold: continue (and announce a quiet-hours trigger).
+        await _apply_state(db, rule, sid, hostname, None, True, None, "", allowed=allowed,
+                           counts=counts, opened=opened, ip_address=ip, branding=branding,
+                           context={**meta, "kind": meta.get("lifecycle_kind")})
+        return
+    closing = {"boot_at": meta.get("boot_at"), "event_at": meta.get("event_at"),
+               "kind": meta.get("lifecycle_kind"), "heartbeat_at": hb,
+               "agent_reporting": reporting and (meta.get("boot_at") is None or hb >= float(meta["boot_at"]))
+               and (meta.get("event_at") is None or rule.metric != "host_shutdown"
+                    or hb > float(meta["event_at"]))}
+    await _apply_state(db, rule, sid, hostname, None, False, None, "", allowed=allowed,
+                       counts=counts, opened=opened, ip_address=ip, branding=branding,
+                       context=closing)
 
 
 async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> dict[str, int]:
@@ -1022,8 +1154,15 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
 
     from app.services.alert_schedule import notifications_allowed, get_configured_timezone
     from app.services.network_conditions import clear_hold_seconds, evaluate, validate_conditions
+    from app.services.regional_time import notification_branding
+    from app.services import server_event_service as sev
     _tz = await get_configured_timezone(db)
+    branding = await notification_branding(db)
     servers = await _servers(db)
+    ips = await _server_ips(db)
+    lifecycle_window = max([sev.LIFECYCLE_FIRE_WINDOW_S] + [
+        sev.lifecycle_hold_seconds(getattr(r, "clear_duration", None)) + 60
+        for r in rules if r.metric in {"host_restart", "host_shutdown"}])
     budgets = await _freshness_budgets(db)
     default_budget = telemetry_freshness_seconds(30, 60)
     max_budget = max([default_budget, *budgets.values()])
@@ -1044,7 +1183,6 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
         opened = await _open_incidents(db, rule)
 
         if rule.metric in {"host_restart", "host_shutdown"}:
-            from app.services.server_event_service import recent_lifecycle, lifecycle_value
             if lifecycle is None:
                 if signals is None:
                     signals = await sa.load_signals(db)
@@ -1054,11 +1192,14 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                     await db.execute(text("""UPDATE server_lifecycle_events SET maintenance_suppressed=TRUE
                         WHERE server_id=ANY(CAST(:ids AS uuid[])) AND event_time>=:since"""),
                         {"ids":maintained,"since":datetime.fromtimestamp(now-900,timezone.utc)})
-                lifecycle = await recent_lifecycle(db, now)
+                lifecycle = await sev.recent_lifecycle(db, now, lifecycle_window)
+            hold_s = sev.lifecycle_hold_seconds(getattr(rule, "clear_duration", None))
             for sid in targets:
-                breach,value,detail = lifecycle_value(rule.metric,lifecycle.get(sid,[]),_tz)
-                await _apply_state(db,rule,sid,servers.get(sid,"server"),None,breach,value,detail,
-                                   allowed=allowed,counts=counts,opened=opened.get((sid,_dedupe(rule,None))))
+                await _evaluate_lifecycle(db, rule, sid, servers.get(sid, "server"), ips.get(sid, ""),
+                                          lifecycle.get(sid, []), signals.get(sid), now=now,
+                                          hold_s=hold_s, allowed=allowed, counts=counts,
+                                          opened=opened.get((sid, _dedupe(rule, None))),
+                                          branding=branding)
             await db.commit()
             continue
 
@@ -1068,7 +1209,7 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                 since = await sa.paging_since(db)
                 await db.commit()
             await _evaluate_availability(db, rule, signals, opened, now=now, since=since,
-                                         allowed=allowed, counts=counts)
+                                         allowed=allowed, counts=counts, ips=ips, branding=branding)
             await db.commit()
             continue
 
@@ -1080,7 +1221,8 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                 breach, value, detail = res
                 await _apply_state(db, rule, sid, servers.get(sid, "server"), None,
                                    breach, value, detail, allowed=allowed, counts=counts,
-                                   opened=opened.get((sid, _dedupe(rule, None))))
+                                   opened=opened.get((sid, _dedupe(rule, None))),
+                                   ip_address=ips.get(sid, ""), branding=branding)
             await db.commit()
             continue
 
@@ -1149,7 +1291,8 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                 await _apply_state(db, rule, sid, hostname, dim, result.breach, value,
                                    _detail(rule, value, dim), allowed=allowed, counts=counts,
                                    opened=current,
-                                   extra={"held_seconds": round(result.held_seconds)})
+                                   extra={"held_seconds": round(result.held_seconds)},
+                                   ip_address=ips.get(sid, ""), branding=branding)
         await db.commit()
 
     if counts["raised"] or counts["resolved"]:

@@ -174,11 +174,11 @@ async def test_the_device_ctx_carries_the_mail_and_webhook_fields_it_always_did(
         "hostname": "edge-1", "ip_address": "10.0.0.1", "status": "DOWN", "severity": "warning",
         "is_recovery": False, "device_id": DEVICE, "rule_id": str(rule.id),
         "rule_name": "Packet Loss", "event_type": "trigger"}
-    assert ctx["message"] == ("ZenPlus WARNING — Packet Loss: Packet loss on edge-1 (10.0.0.1) "
-                              "rose above 5% (currently 100%).")
+    assert ctx["message"] == ("ZenPlus WARNING — Packet Loss: Packet loss on Switch edge-1 (10.0.0.1) "
+                              "rose to 100% (limit 5%).")
     # Mail: subject, prose, headline, details and the dashboard link.
     assert ctx["subject"] == "[WARNING] DOWN: Packet Loss — edge-1 (10.0.0.1)"
-    assert ctx["body"] == "Packet loss on edge-1 (10.0.0.1) rose above 5% (currently 100%)."
+    assert ctx["body"] == "Packet loss on Switch edge-1 (10.0.0.1) rose to 100% (limit 5%)."
     assert ctx["headline_metric"]["label"] == "Packet loss"
     assert ctx["headline_metric"]["detail"] == "Threshold 5%"
     assert dict(ctx["details"])["Reachability"] == "Down (no reply)"

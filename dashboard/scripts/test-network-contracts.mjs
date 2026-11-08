@@ -45,9 +45,17 @@ payload = stateToPayload(ruleToState({name:'CPU',metric:'cpu',operator:'>',thres
 assert.equal(payload.clear_duration, null)
 payload = stateToPayload(ruleToState({name:'Down',metric:'ping_status',operator:'==',threshold:0,trigger_on:'down',clear_duration:600}))
 assert.equal(payload.clear_duration, null)
+// A reboot is an event: its "Auto-clear after" (clear_duration) round-trips,
+// null = the 15-minute default, and a breach hold never applies (the uptime
+// flag is set for one poll only, so a hold would never be met).
+payload = stateToPayload(ruleToState({name:'Reboot',metric:'uptime_reset',operator:'eq',threshold:1,clear_duration:600,min_duration:300}))
+assert.equal(payload.clear_duration, 600)
+assert.equal(payload.min_duration, 0)
+payload = stateToPayload(ruleToState({name:'Reboot',metric:'uptime_reset',operator:'eq',threshold:1}))
+assert.equal(payload.clear_duration, null)
 // Auto clear hint: device CPU/memory clear 2 points on the healthy side unless a reset value is set.
 assert.equal(autoResetThreshold({metric:'memory',operator:'>',threshold:90}), 88)
 assert.equal(autoResetThreshold({metric:'cpu',operator:'<',threshold:10}), 12)
 assert.equal(autoResetThreshold({metric:'cpu',operator:'>',threshold:90,reset_threshold:80}), null)
 assert.equal(autoResetThreshold({metric:'if_errors',operator:'>',threshold:100}), null)
-console.log('Network editor contracts passed: single-condition reset round-trip, clear hold round-trip, auto clear hint, syslog filters/scope/channels and manual resolution.')
+console.log('Network editor contracts passed: single-condition reset round-trip, clear hold round-trip, reboot auto-clear, auto clear hint, syslog filters/scope/channels and manual resolution.')

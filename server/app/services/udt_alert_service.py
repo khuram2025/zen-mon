@@ -44,6 +44,38 @@ _EVENT_LABEL = {
     "watch_seen": "Watched endpoint seen",
     "endpoint_moved": "Endpoint moved",
 }
+# What happened, as a sentence about the endpoint.
+_EVENT_VERB = {
+    "new_endpoint": "connected for the first time",
+    "rogue_detected": "is not authorised and was seen",
+    "watch_seen": "(on the watch list) was seen",
+    "endpoint_moved": "moved",
+}
+
+
+def endpoint_message(event_type: str, ep: dict, device: dict | None, port: str | None,
+                     at: str = "") -> str:
+    """What the tracker saw, as a sentence: "New endpoint laptop-7 (10.1.2.3,
+    MAC aa:bb:..) connected for the first time on Switch sw-01 (10.0.0.2) port
+    Gi1/0/12 at 14:44."
+    """
+    from app.services import alert_phrasing as ap
+    name = ep.get("hostname") or ""
+    ids = ", ".join(x for x in (ep.get("ip") if ep.get("ip") != name else "",
+                                f"MAC {ep.get('mac')}" if ep.get("mac") else "") if x)
+    who = f"{name} ({ids})" if name and ids else (name or ids or "unknown endpoint")
+    verb = _EVENT_VERB.get(event_type, "was seen")
+    where = ""
+    if device:
+        where = " on " + ap.asset_label(device.get("hostname"), str(device.get("ip_address") or "").split("/")[0],
+                                        ap.asset_type_label(device.get("device_type"), "Switch"))
+        if port:
+            where += f" port {port}"
+    if event_type == "endpoint_moved" and where:
+        where = " to" + where[3:]
+    lead = {"new_endpoint": "New endpoint", "rogue_detected": "Endpoint",
+            "watch_seen": "Endpoint", "endpoint_moved": "Endpoint"}.get(event_type, "Endpoint")
+    return f"{lead} {who} {verb}{where}" + (f" at {at}" if at else "") + "."
 
 
 async def _udt_rules(db: AsyncSession) -> list:
@@ -111,7 +143,7 @@ async def _notify(db: AsyncSession, rule, message: str, device: dict | None, *,
             "severity": sev,
             "status": "ALERT",
             "hostname": hostname,
-            "ip_address": str((device or {}).get("ip_address") or ""),
+            "ip_address": str((device or {}).get("ip_address") or "").split("/")[0],
             "message": f"ZenPlus {sev.upper()} — {rule['name']}: {message}",
             "subject": f"[{sev.upper()}] ALERT: {rule['name']}",
             "body": message if message.endswith(".") else f"{message}.",
@@ -204,10 +236,13 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None) -
                 ), {"id": ev["endpoint_id"]})).mappings().first()
                 device = await get_device(ev["device_id"])
                 if ep and not ep["ignored"]:
-                    label = ep["hostname"] or ep["ip"] or ep["mac"]
-                    port = f" port {ev['if_index']}" if ev["if_index"] else ""
-                    where = f" on {device['hostname']}{port}" if device else ""
-                    message = f"{_EVENT_LABEL[ev['event_type']]}: {label} ({ep['mac']}){where}"
+                    port = None
+                    if ev["if_index"] and ev["device_id"]:
+                        port = (await db.execute(text(
+                            "SELECT COALESCE(NULLIF(if_name, ''), if_descr) FROM device_interfaces "
+                            "WHERE device_id = :d AND if_index = :i"),
+                            {"d": str(ev["device_id"]), "i": int(ev["if_index"])})).scalar() or str(ev["if_index"])
+                    message = endpoint_message(ev["event_type"], dict(ep), device, port)
                     for rule in matching:
                         if not _rule_scope_ok(rule, device):
                             continue
@@ -255,8 +290,11 @@ async def _process_capacity(db: AsyncSession, rules, outbox: list | None = None)
             ), {"rid": str(rule["id"]), "dk": dedupe})).first()
             breach = pct >= thr if (rule["operator"] or ">=") in (">", ">=") else pct <= thr
             if breach and not active:
-                msg = (f"Port capacity {pct:.0f}% on {dev['hostname']} "
-                       f"({dev['used']}/{total} ports up, threshold {thr:.0f}%)")
+                from app.services import alert_phrasing as ap
+                who = ap.asset_label(dev["hostname"], str(dev["ip_address"] or "").split("/")[0],
+                                     ap.asset_type_label(dev["device_type"], "Switch"))
+                msg = (f"{who} has {dev['used']} of {total} access ports in use ({pct:.0f}%, "
+                       f"limit {thr:.0f}%)")
                 alert_id = await _raise_alert(db, rule, dev["id"], msg,
                                               {"udt_dedupe": dedupe, "value": round(pct, 1)})
                 await _notify(db, rule, msg, dict(dev), alert_id=alert_id, outbox=outbox)

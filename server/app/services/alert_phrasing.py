@@ -28,8 +28,9 @@ _PERCENT = {"unit": "%", "decimals": 0}
 METRICS: dict[str, dict] = {
     # Reachability / ICMP
     "ping_status": {"noun": "ICMP reachability", "healthy": 1.0, "subject": "the device",
-                    "narrative": {"down": "is down (no response to ICMP probes)",
-                                  "up": "is reachable again (ICMP probes are succeeding)"},
+                    "lasted": "Down for",
+                    "narrative": {"down": "is down: it does not answer ping",
+                                  "up": "is reachable again: it answers ping"},
                     "state": {"down": "stops responding to ping",
                               "up": "responds to ping again"},
                     "state_label": {"down": "Device unreachable (no ICMP response)",
@@ -53,9 +54,11 @@ METRICS: dict[str, dict] = {
                             "up": "reports every power supply healthy"},
                   "state_label": {"down": "Power supply failure reported",
                                   "up": "All power supplies healthy"}},
-    "uptime_reset": {"noun": "Device uptime", "subject": "the device",
-                     "narrative": {"down": "reported an uptime reset (possible reboot)",
-                                   "up": "reported no further uptime reset"},
+    # A reboot is an event (the uptime counter went back to zero), not a level:
+    # the stored rule is a 0/1 flag, so no comparison of it means anything.
+    "uptime_reset": {"noun": "Device reboot", "subject": "the device", "event": True,
+                     "narrative": {"down": "rebooted",
+                                   "up": "has stayed up with no further reboots"},
                      "state": {"down": "reports a reboot", "up": "stays up"},
                      "state_label": {"down": "Device reboot detected",
                                      "up": "No reboot detected"}},
@@ -68,7 +71,8 @@ METRICS: dict[str, dict] = {
     "if_errors": {"noun": "Interface errors", "unit": " errors", "decimals": 0},
     "if_discards": {"noun": "Interface discards", "unit": " discards", "decimals": 0},
     "if_oper_status": {"noun": "Interface state", "healthy": 1.0, "subject": "the interface",
-                       "narrative": {"down": "is down", "up": "is operational again"},
+                       "lasted": "Down for",
+                       "narrative": {"down": "is down (link not operational)", "up": "is up again"},
                        "state": {"down": "goes operationally down",
                                  "up": "comes back up"},
                        "state_label": {"down": "Interface operationally down",
@@ -95,6 +99,7 @@ METRICS: dict[str, dict] = {
 
     # Service checks and traps
     "service_status": {"noun": "Service check", "healthy": 1.0, "subject": "the service",
+                       "lasted": "Failing for",
                        "narrative": {"down": "failed its availability check", "up": "passed its availability check again"},
                        "state": {"down": "fails its check",
                                  "up": "passes its check again"},
@@ -134,28 +139,31 @@ METRICS: dict[str, dict] = {
     # Server availability (server_availability.py). host_unreachable phrases a
     # Device Down rule firing for an agent server: it is not a stored metric.
     "host_unreachable": {"noun": "Server availability", "healthy": 1.0, "subject": "the server",
-                         "narrative": {"down": "has stopped sending agent heartbeats. Network reachability is unknown",
-                                       "up": "is sending agent heartbeats again"},
+                         "lasted": "Not reporting for",
+                         "narrative": {"down": "has stopped reporting: its agent is silent and no ping "
+                                               "check can confirm whether it is up",
+                                       "up": "is reporting again"},
                          "state": {"down": "stops reporting and cannot be reached",
                                    "up": "reports again"},
                          "state_label": {"down": "Server down (agent silent, reachability unknown)",
                                          "up": "Server reachable"}},
     "host_agent_offline": {"noun": "Server agent", "subject": "the server",
-                           "narrative": {"down": "is reachable, but its monitoring agent has stopped reporting",
-                                         "up": "is receiving reports from its monitoring agent again"},
+                           "lasted": "Agent silent for",
+                           "narrative": {"down": "still answers ping, but its monitoring agent has stopped reporting",
+                                         "up": "has its monitoring agent reporting again"},
                            "state": {"down": "loses its agent while still answering ping",
                                      "up": "has its agent reporting again"},
                            "state_label": {"down": "Agent offline (server still answers ping)",
                                            "up": "Agent reporting"}},
 
     "host_restart": {"noun": "Server restart", "subject": "the server", "event": True,
-                     "narrative": {"down": "reported a new boot or restart event", "up": "has reached the end of the 15-minute restart observation window; this does not confirm its current power or health state"},
+                     "narrative": {"down": "restarted", "up": "has had no further restarts"},
                      "state": {"down": "reports a boot or restart event", "up": "has no recent restart event"},
-                     "state_label": {"down": "Restart event detected", "up": "Restart observation window ended"}},
+                     "state_label": {"down": "Server restarted", "up": "No further restarts"}},
     "host_shutdown": {"noun": "Server shutdown", "subject": "the server", "event": True,
-                      "narrative": {"down": "reported a shutdown or power transition request", "up": "has reached the end of the 15-minute shutdown observation window; this does not confirm its current power or health state"},
+                      "narrative": {"down": "reported a shutdown", "up": "has had no further shutdowns"},
                       "state": {"down": "reports a shutdown or power transition request", "up": "has no recent shutdown event"},
-                      "state_label": {"down": "Shutdown event detected", "up": "Shutdown observation window ended"}},
+                      "state_label": {"down": "Server shutdown reported", "up": "No further shutdowns"}},
 
     # Application monitoring
     "apm_latency_p50": {"noun": "Median (p50) latency", "unit": " ms", "decimals": 0},
@@ -693,6 +701,211 @@ def host_label(hostname: Optional[str], ip_address: Optional[str] = None) -> str
     return f"{name} ({ip})" if name else ip
 
 
+# ── Which asset, and when ────────────────────────────────────────────────────
+#
+# A message names the asset the way an operator would: "Switch core-sw-01
+# (10.0.0.1)", "Server app-01 (10.0.0.5)". The type comes from the device's
+# own device_type; an unknown or generic type reads as "Device".
+
+ASSET_TYPES = {
+    "router": "Router", "switch": "Switch", "l3_switch": "Switch", "firewall": "Firewall",
+    "server": "Server", "access_point": "Access point", "wireless_controller": "Wireless controller",
+    "printer": "Printer", "load_balancer": "Load balancer", "ups": "UPS", "hypervisor": "Hypervisor",
+    "storage": "Storage", "database": "Database", "camera": "Camera", "phone": "Phone",
+}
+
+
+def asset_type_label(device_type: Optional[str], default: str = "Device") -> str:
+    """"Switch" for device_type "switch"; ``default`` for unknown/other."""
+    key = str(device_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return ASSET_TYPES.get(key, default)
+
+
+def asset_label(hostname: Optional[str], ip_address: Optional[str] = None,
+                asset_type: Optional[str] = None) -> str:
+    """"Switch core-sw-01 (10.0.0.1)": type, name and IP, each once."""
+    who = host_label(hostname, ip_address)
+    kind = (asset_type or "").strip()
+    return f"{kind} {who}".strip() if who else kind
+
+
+def short_duration(seconds) -> str:
+    """Compact span for SMS-sized sentences: "45 s", "3 min", "2 h 10 min", "41 days"."""
+    secs = _finite(seconds)
+    if secs is None or secs < 0:
+        return ""
+    total = int(round(secs))
+    if total < 60:
+        return f"{total} s"
+    minutes = total // 60
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+    days, hours = divmod(hours, 24)
+    if days == 1:
+        return f"1 day {hours} h" if hours else "1 day"
+    return f"{days} days"
+
+
+def clock(ts, branding=None, now=None) -> str:
+    """Appliance-local time of an event: "14:44", or "Nov 07 14:44" when it
+    was not today. Uses the organisation's time zone and 12/24 h format
+    (``branding``, as notification_branding loads it); "" for no time."""
+    at = _as_utc(ts) if not isinstance(ts, (int, float)) else datetime.fromtimestamp(float(ts), timezone.utc)
+    if at is None:
+        return ""
+    if branding is None:
+        from app.services.branding import Branding
+        branding = Branding()
+    ref = _as_utc(now) if not isinstance(now, (int, float)) else datetime.fromtimestamp(float(now), timezone.utc)
+    ref = ref or datetime.now(timezone.utc)
+    if branding.localize(at).date() == branding.localize(ref).date():
+        return branding.fmt_time(at)
+    return branding.fmt_short(at)
+
+
+def _epoch(ts) -> Optional[float]:
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return float(ts)
+    at = _as_utc(ts)
+    return at.timestamp() if at else None
+
+
+# ── Event sentences (reboots, server restarts and shutdowns) ─────────────────
+#
+# These are events, not levels: the sentence says when it happened and what
+# the asset looks like now, never a 0/1 flag ("currently 1") or the end of an
+# internal observation window. ``ctx`` is what the evaluator measured; every
+# key is optional and a missing one drops its clause rather than inventing it.
+
+EVENT_SENTENCE_METRICS = frozenset({"uptime_reset", "host_restart", "host_shutdown"})
+
+
+def reboot_sentence(who: str, ctx: Optional[dict], *, recovery: bool = False,
+                    branding=None, now=None) -> str:
+    """Device reboot (sysUpTime went back) — fire or clear.
+
+    ctx: ``rebooted_at`` (boot time), ``uptime_s`` (uptime now),
+    ``previous_uptime_s`` (before the reboot), ``reboot_count`` (reboots in
+    this incident), ``first_rebooted_at``, ``hold_s`` and, on a clear,
+    ``last_seen_at`` when no current uptime reading exists.
+    """
+    c = ctx or {}
+    at = clock(c.get("rebooted_at"), branding, now)
+    count = int(c.get("reboot_count") or 1)
+    uptime = short_duration(c.get("uptime_s"))
+    if not recovery:
+        if count > 1:
+            first = clock(c.get("first_rebooted_at"), branding, now)
+            text_ = f"{who} rebooted again" + (f" at {at}" if at else "")
+            text_ += f" ({count} reboots since {first})" if first else f" ({count} reboots)"
+        else:
+            text_ = f"{who} rebooted" + (f" at {at}" if at else "")
+        if uptime:
+            prev = short_duration(c.get("previous_uptime_s"))
+            text_ += f" — uptime is now {uptime}" + (f" (was {prev})" if prev and count == 1 else "")
+        return text_ + "."
+    since = f" since its {at} reboot" if at else " since its reboot"
+    if c.get("uptime_s") is not None:
+        text_ = f"{who} has stayed up for {uptime}{since}"
+        text_ += "; no further reboots." if count <= 1 else f"; no further reboots ({count} in total)."
+        return text_
+    seen = clock(c.get("last_seen_at"), branding, now)
+    text_ = f"Reboot alert for {who} closed: no further reboots" + (f" since {at}" if at else "")
+    text_ += (f", but no uptime reading since {seen} (current state unknown)."
+              if seen else ", but there is no current uptime reading (current state unknown).")
+    return text_
+
+
+_LIFECYCLE_EVENT_TEXT = {
+    "unexpected_restart": "after an unexpected shutdown or power loss",
+    "restart_requested": "after a requested restart",
+}
+
+
+def restart_sentence(who: str, ctx: Optional[dict], *, recovery: bool = False,
+                     branding=None, now=None) -> str:
+    """Server restart (OS boot evidence from the agent) — fire or clear.
+
+    ctx: ``kind`` (newest lifecycle evidence), ``boot_at`` (the OS start, if
+    reported), ``requested_at`` (a restart request), ``restart_count``,
+    ``first_boot_at``, ``hold_s``, and on a clear ``agent_reporting`` /
+    ``heartbeat_at``.
+    """
+    c = ctx or {}
+    boot = c.get("boot_at")
+    boot_at = clock(boot, branding, now)
+    if not recovery:
+        count = int(c.get("restart_count") or 1)
+        if boot_at:
+            how = _LIFECYCLE_EVENT_TEXT.get(c.get("boot_kind") or "", "")
+            if count > 1:
+                first = clock(c.get("first_boot_at"), branding, now)
+                text_ = f"{who} restarted again at {boot_at}" + (
+                    f" ({count} restarts since {first})" if first else f" ({count} restarts)")
+            else:
+                text_ = f"{who} restarted at {boot_at}" + (f" {how}" if how else "")
+            uptime = short_duration(c.get("uptime_s"))
+            return text_ + (f" — up for {uptime}." if uptime else ".")
+        requested = clock(c.get("requested_at"), branding, now)
+        if requested:
+            return f"{who} is restarting: a restart was requested at {requested}."
+        return f"{who} restarted."
+    reporting = c.get("agent_reporting")
+    since = f" its {boot_at} restart" if boot_at else " the restart"
+    if reporting and boot is not None and _epoch(now) is not None:
+        up = short_duration(_epoch(now) - _epoch(boot))
+        return f"{who} has stayed up since{since} and is reporting normally (up {up})."
+    if reporting:
+        return f"{who} is reporting normally; no further restarts since{since}."
+    seen = clock(c.get("heartbeat_at"), branding, now)
+    return (f"Restart alert for {who} closed with no further restarts, but its agent has not "
+            f"reported since {seen or 'the restart'} — its current state is unknown.")
+
+
+def shutdown_sentence(who: str, ctx: Optional[dict], *, recovery: bool = False,
+                      branding=None, now=None) -> str:
+    """Server shutdown (OS shutdown or a shutdown request) — fire or clear."""
+    c = ctx or {}
+    at = clock(c.get("event_at"), branding, now)
+    if not recovery:
+        if c.get("kind") == "shutdown_requested":
+            return f"{who}: a shutdown was requested" + (f" at {at}." if at else ".")
+        return f"{who} began shutting down" + (f" at {at}." if at else ".")
+    if c.get("agent_reporting"):
+        return f"{who} is running again and reporting normally (shutdown at {at or 'an earlier time'})."
+    seen = clock(c.get("heartbeat_at"), branding, now)
+    return (f"Shutdown alert for {who} closed; its agent has not reported since "
+            f"{seen or 'the shutdown'}, so it may still be powered off.")
+
+
+def event_sentence(metric: str, who: str, ctx: Optional[dict], *, recovery: bool = False,
+                   branding=None, now=None) -> str:
+    fn = {"uptime_reset": reboot_sentence, "host_restart": restart_sentence,
+          "host_shutdown": shutdown_sentence}[metric]
+    return fn(who, ctx, recovery=recovery, branding=branding, now=now)
+
+
+def sample_event_context(metric: Optional[str], *, recovered: bool = False, now=None) -> Optional[dict]:
+    """A plausible event context for previews (reboot/restart/shutdown)."""
+    key = (metric or "").strip()
+    at = _epoch(now) or datetime.now(timezone.utc).timestamp()
+    if key == "uptime_reset":
+        return ({"rebooted_at": at - 480, "uptime_s": 480, "reboot_count": 1} if recovered
+                else {"rebooted_at": at - 180, "uptime_s": 180, "previous_uptime_s": 41 * 86400 + 3600,
+                      "reboot_count": 1})
+    if key == "host_restart":
+        return ({"boot_at": at - 780, "agent_reporting": True} if recovered
+                else {"kind": "restart", "boot_at": at - 120, "boot_kind": "restart", "restart_count": 1,
+                      "uptime_s": 120})
+    if key == "host_shutdown":
+        return ({"event_at": at - 900, "agent_reporting": True} if recovered
+                else {"kind": "shutdown", "event_at": at - 60})
+    return None
+
+
 # ── Default message bodies ───────────────────────────────────────────────────
 #
 # These are `{placeholder}` templates, not finished prose: a rule may override
@@ -1026,13 +1239,25 @@ def _threshold_text(metric: Optional[str], operator: Optional[str], threshold,
     return f"{text_}{unit}"
 
 
+# Numeric sentences: "<Noun> on <asset> rose to 97% (limit 90%)." The verb
+# follows the rule's direction; a recovery says what it returned to.
+_READING_VERBS = {
+    ">": ("rose to", "returned to"), ">=": ("rose to", "returned to"),
+    "<": ("fell to", "returned to"), "<=": ("fell to", "returned to"),
+    "==": ("is", "changed to"), "!=": ("changed to", "returned to"),
+}
+
+
 def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] = None,
                        threshold=None, conditions: Optional[Iterable[dict]] = None,
                        condition_logic: str = "AND", reading: Optional[str] = None,
                        duration: str = "", is_recovery: bool = False,
                        subject_noun: Optional[str] = None, value=None,
                        value_context: Optional[dict] = None,
-                       device_status: Optional[str] = None) -> dict:
+                       device_status: Optional[str] = None,
+                       asset_type: Optional[str] = None, event_time=None,
+                       branding=None, status_detail: Optional[str] = None,
+                       now=None) -> dict:
     """The condition/duration half of the template variables.
 
     Kept separate from the identity half (host, severity, timestamps) because
@@ -1046,10 +1271,21 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
     states its interval and direction (``value_context``: ``interval_s``,
     ``in``, ``out``). The threshold is shown with the reading's precision in
     the sentence, the condition label and ``{threshold_value}``.
+
+    The event sentence names the asset with its type (``asset_type``, e.g.
+    "Switch") ahead of ``subject_noun``; ``{host_suffix}`` keeps the plain
+    "name (IP)". ``event_time`` (with the organisation ``branding``) adds when
+    a state change happened in appliance-local time. On/off states never show
+    their raw flag value, and reboot/restart/shutdown events are phrased from
+    ``value_context`` (see :func:`event_sentence`).
     """
     key = (metric or "").strip()
-    is_state = "state" in METRICS.get(key, {})
-    if reading is None and value is not None and not is_state:
+    info = METRICS.get(key, {})
+    is_state = "state" in info
+    if is_state:
+        # A state's stored value (1/0/2) is an internal flag, never a reading.
+        reading = None
+    elif reading is None and value is not None:
         reading = reading_text(key, value, operator, threshold, value_context)
     thr_text = None if is_state else _threshold_text(key, operator, threshold, value, reading)
 
@@ -1062,50 +1298,87 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
                              threshold_text=thr_text)
 
     noun_ = metric_noun(key)
+    who_plain = subject_noun or None
+    who = (f"{asset_type} {subject_noun}".strip() if asset_type and subject_noun
+           else (subject_noun or None))
+    at = clock(event_time, branding, now) if event_time is not None and branding is not None else ""
 
-    def _finish(text_: str) -> str:
+    def _finish(text_: str, *, with_reading: bool = True) -> str:
         """Sentence-case and punctuate, then hang the reading off the end."""
         if not text_:
             return ""
         # Openings that already carry their own casing are left alone: a
         # hostname ("core-router-01 is not responding", never "Core-router-01")
         # and a metric noun the catalogue deliberately lower-cases ("p95").
-        keeps_case = (subject_noun and text_.startswith(subject_noun)) or text_.startswith(noun_)
+        keeps_case = ((who and text_.startswith(who)) or (who_plain and text_.startswith(who_plain))
+                      or text_.startswith(noun_))
         if not keeps_case:
             text_ = text_[0].upper() + text_[1:]
-        if reading:
-            shown = str(reading)
-            # "152 errors in the last 60 s (150 in, 2 out)" inside the
-            # sentence's own parentheses reads as "...60 s: 150 in, 2 out".
-            if shown.endswith(")") and shown.count(" (") == 1:
-                shown = shown[:-1].replace(" (", ": ")
-            text_ += f" ({'now' if is_recovery else 'currently'} {shown})"
+        text_ = text_.rstrip(".")
+        if reading and with_reading:
+            text_ += f" ({'now' if is_recovery else 'currently'} {reading})"
         return text_ + "."
 
+    def _numeric(target: Optional[str]) -> str:
+        """"Memory on Server srv-a (10.0.0.5) rose to 97% (limit 90%)"."""
+        lead = f"{noun_} on {target}" if target else noun_
+        if not reading or reading == UNAVAILABLE:
+            rest = phrase[len(noun_):].lstrip() if phrase.startswith(noun_) else phrase
+            text_ = f"{lead} {rest}".strip()
+            if reading == UNAVAILABLE and not is_recovery:
+                text_ += " (no current reading)"
+            return text_
+        verbs = _READING_VERBS.get(normalize_operator(operator), _READING_VERBS[">"])
+        shown = str(reading)
+        text_ = f"{lead} {verbs[1] if is_recovery else verbs[0]} {shown}"
+        if thr_text:
+            text_ = (f"{text_[:-1]}; limit {thr_text})" if shown.endswith(")")
+                     else f"{text_} (limit {thr_text})")
+        return text_
+
     # One sentence that names who it is about, so a template needs nothing else:
-    #   "core-router-01 is down (no response to ICMP probes)."
-    #   "Interface utilisation on core-router-01 rose above 80% (currently 87%)."
-    if key == "ping_status" and device_status in ("up", "down", "degraded"):
-        who = subject_noun or METRICS[key]["subject"]
-        narrative = METRICS[key]["narrative"]
-        state_text = ("has degraded connectivity" if device_status == "degraded"
-                      else narrative[device_status])
-        event = f"{who} {state_text}"
+    #   "Router core-router-01 (10.0.0.1) is down: it does not answer ping (since 14:44)."
+    #   "Interface utilisation on core-router-01 rose to 87% (limit 80%)."
+    if key in EVENT_SENTENCE_METRICS and value_context is not None:
+        event = event_sentence(key, who or info.get("subject", "the device"), value_context,
+                               recovery=is_recovery, branding=branding, now=now)
+    elif key == "ping_status" and device_status in ("up", "down", "degraded"):
+        subject = who or METRICS[key]["subject"]
+        detail = (status_detail or "").strip()
+        detail = detail[:1].lower() + detail[1:]
+        if device_status == "degraded":
+            event = f"{subject} has degraded connectivity" + (f" since {at}" if at else "")
+            if detail:
+                event += f": {detail}"
+        elif device_status == "down":
+            event = (f"{subject} went down at {at}: it does not answer ping" if at
+                     else f"{subject} {METRICS[key]['narrative']['down']}")
+        elif detail and detail not in ("responding again", "up"):
+            event = f"{subject} is back to normal" + (f" at {at}" if at else "") + f": {detail}"
+        else:
+            event = (f"{subject} came back up at {at}: it answers ping again" if at
+                     else f"{subject} {METRICS[key]['narrative']['up']}")
+    elif is_state and status_detail:
+        # The evaluator knows which service/process: "Server srv-a (10.0.0.5):
+        # service MSSQLSERVER has stopped."
+        event = f"{who or info.get('subject', 'the device')}: {status_detail}"
+        if at:
+            event += f" (since {at})"
     elif is_state:
-        event = condition_phrase(metric, operator, threshold, tense=tense, subject=subject_noun)
-    elif subject_noun:
-        noun = metric_noun(key)
-        rest = phrase[len(noun):].lstrip() if phrase.startswith(noun) else phrase
-        event = f"{noun} on {subject_noun} {rest}".strip()
+        event = condition_phrase(metric, operator, threshold, tense=tense, subject=who)
+        if at:
+            event += f" (since {at})"
     else:
-        event = phrase
+        event = _numeric(who)
 
     sentence = _finish(phrase)
     reading_value = (format_reading(key, value, operator, threshold)
                      if value is not None and not is_state else (reading or ""))
+    # Events carry their own "when" and "now"; a duration would be the hold.
+    lasted = "" if info.get("event") else f" {info.get('lasted', 'Lasted')} {duration}." if duration else ""
 
     return {
-        "event_sentence": _finish(event),
+        "event_sentence": _finish(event, with_reading=False),
         "metric": metric or "",
         "metric_label": metric_noun(metric),
         "operator": operator or "",
@@ -1128,9 +1401,11 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
         "duration": duration,
         # Both read as a clause appended after a finished sentence, so a
         # template can end with one without gluing words together.
-        "duration_sentence": f" The condition was active for {duration}." if duration else "",
-        "duration_suffix": f" Active for {duration}." if duration else "",
+        "duration_sentence": lasted,
+        "duration_suffix": lasted,
         "host_suffix": f" — {subject_noun}" if subject_noun else "",
+        "asset": who or "",
+        "event_time": at,
     }
 
 
@@ -1172,8 +1447,11 @@ def rule_phrasing(rule, *, hostname: str = "", is_recovery: bool = False,
                   reading: Optional[str] = None, duration: str = "",
                   subject_noun: Optional[str] = None, value=None,
                   value_context: Optional[dict] = None,
-                  device_status: Optional[str] = None) -> dict:
-    """`phrasing_variables` for an alert_rules row (ORM row, mapping or dict)."""
+                  device_status: Optional[str] = None, **extra) -> dict:
+    """`phrasing_variables` for an alert_rules row (ORM row, mapping or dict).
+
+    ``extra`` passes asset_type, event_time, branding, status_detail and now
+    through to :func:`phrasing_variables`."""
     def field(name, default=None):
         if isinstance(rule, dict):
             return rule.get(name, default)
@@ -1192,7 +1470,7 @@ def rule_phrasing(rule, *, hostname: str = "", is_recovery: bool = False,
         conditions=conditions, condition_logic=field("condition_logic") or "AND",
         reading=reading, duration=duration, is_recovery=is_recovery,
         subject_noun=subject_noun or (hostname or None),
-        value=value, value_context=value_context, device_status=device_status,
+        value=value, value_context=value_context, device_status=device_status, **extra,
     )
 
 

@@ -98,6 +98,13 @@ for (const metric of ['host_restart', 'host_shutdown']) {
   assert.equal(S.serverRulePayload({ ...life, reset_mode: 'auto' }).recovery_alert, true)
   assert.equal(S.serverRuleCopy({ ...seeded, metric, recovery_alert: true }).recovery_alert, true)
 }
+// Restart/shutdown alerts close on their own after "Auto-clear after" (clear_duration; null = 15 min).
+for (const metric of ['host_restart', 'host_shutdown']) {
+  const life = W.ruleToState({ ...seeded, metric, clear_duration: 1800 })
+  assert.equal(S.serverRulePayload(life).clear_duration, 1800, `${metric} keeps its auto-clear time`)
+  assert.equal(S.serverRulePayload({ ...life, clear_duration: null }).clear_duration, null)
+}
+assert.equal(S.serverRulePayload(W.ruleToState({ ...seeded, metric: 'host_service_down', target: 'x', clear_duration: 600 })).clear_duration, null)
 const zero = { ...W.ruleToState({ ...seeded, metric: 'host_cpu_pct', threshold: 0, operator: 'eq', min_duration: 0 }) }
 const memory = S.serverWatchChange(zero, 'host_memory_pct')
 assert.equal(memory.conditions[0].threshold, 0, 'changing percent metrics preserves a valid zero threshold')

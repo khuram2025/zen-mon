@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -113,7 +115,7 @@ def test_preview_returns_rendered_email(preview_client):
     body = resp.json()
 
     alert = body["alert"]
-    assert alert["subject"] == "[CRITICAL] DOWN: Core router down — core-router-01"
+    assert alert["subject"] == "[CRITICAL] DOWN: Core router down — core-router-01 (10.0.0.1)"
     # The HTML mail, not just the template sentence.
     assert alert["email_html"].lstrip().startswith("<!DOCTYPE html>")
     assert "Core router down" in alert["email_html"]
@@ -128,7 +130,7 @@ def test_preview_returns_rendered_email(preview_client):
     assert "unavailable (no reply)" in alert["email_text"]
 
     # recovery_alert is on, so the resolved mail renders too.
-    assert body["recovery"]["subject"] == "[CRITICAL] Resolved: Core router down — core-router-01"
+    assert body["recovery"]["subject"] == "[CRITICAL] Resolved: Core router down — core-router-01 (10.0.0.1)"
 
     # The editor needs both what is stored (all defaults here) and the text
     # those defaults resolve to.
@@ -189,7 +191,7 @@ def test_preview_bodies_read_as_english(preview_client):
 
     alert = body["alert"]
     assert alert["email_body"] == (
-        "Interface utilisation on core-router-01 / uplink rose above 80% (currently 87%)."
+        "Interface utilisation on Router core-router-01 (10.0.0.1) / uplink rose to 87% (limit 80%)."
     )
     # The stored metric key never reaches the reader — in any channel.
     for text_ in (alert["email_body"], alert["sms_body"], alert["email_text"],
@@ -205,8 +207,8 @@ def test_recovery_preview_states_how_long_the_condition_held(preview_client):
 
     recovery = client.post(f"/api/v1/alert-rules/{RULE_ID}/preview").json()["recovery"]
 
-    assert "is back below 80%" in recovery["email_body"]
-    assert "active for 3 minutes 25 seconds" in recovery["email_body"]
+    assert "returned to 42% (limit 80%)" in recovery["email_body"]
+    assert "Lasted 3 minutes 25 seconds" in recovery["email_body"]
     # And as its own row in the details table, not only buried in the prose.
     assert "Active for" in recovery["email_html"]
     assert "3 minutes 25 seconds" in recovery["sms_body"]
@@ -232,7 +234,8 @@ def test_wizard_seeded_template_is_treated_as_no_template(preview_client):
 
     alert = client.post(f"/api/v1/alert-rules/{RULE_ID}/preview").json()["alert"]
 
-    assert alert["email_body"] == "core-router-01 is down (no response to ICMP probes)."
+    assert re.fullmatch(r"Router core-router-01 \(10\.0\.0\.1\) went down at \d\d:\d\d: "
+                        r"it does not answer ping\.", alert["email_body"])
     assert "Metric: ping_status" not in alert["email_body"]
     assert alert["sms_body"].startswith("ZenPlus CRITICAL — Core router down:")
 
@@ -253,7 +256,8 @@ def test_recovery_never_falls_back_to_the_trigger_body(preview_client):
     body = client.post(f"/api/v1/alert-rules/{RULE_ID}/preview").json()
     assert body["alert"]["email_body"] == "core-router-01 is DOWN."
     assert "is DOWN" not in body["recovery"]["email_body"]
-    assert body["recovery"]["email_body"].startswith("core-router-01 is reachable again (ICMP probes are succeeding).")
+    assert re.match(r"Router core-router-01 \(10\.0\.0\.1\) came back up at \d\d:\d\d: "
+                    r"it answers ping again\. Down for 3 minutes 25 seconds\.", body["recovery"]["email_body"])
 
 
 def test_preview_uses_posted_templates_without_saving(preview_client):
@@ -284,7 +288,7 @@ def test_preview_blank_override_falls_back_to_default(preview_client):
     cleared = client.post(
         f"/api/v1/alert-rules/{RULE_ID}/preview", json={"email_subject": ""},
     ).json()
-    assert cleared["alert"]["subject"] == "[CRITICAL] DOWN: Core router down — core-router-01"
+    assert cleared["alert"]["subject"] == "[CRITICAL] DOWN: Core router down — core-router-01 (10.0.0.1)"
 
 
 def test_preview_unknown_rule_is_404(preview_client):
@@ -305,8 +309,11 @@ def test_server_preview_uses_the_built_in_wording_that_the_host_sender_uses(prev
     assert data['templates']['effective']==ap.default_templates('device')
     assert 'UNUSED STORED TEXT' not in data['alert']['email_body']
     assert 'UNSUPPORTED EDIT' not in data['alert']['email_body']
-    assert 'shutdown' in data['alert']['email_body'].lower()
-    assert 'observation window' in data['recovery']['email_body']
+    assert 'shutting down' in data['alert']['email_body'].lower()
+    assert 'Server app-server-01' in data['alert']['email_body']
+    # The closing notice says what is known now, not that a window ended.
+    assert 'observation window' not in data['recovery']['email_body']
+    assert 'running again and reporting normally' in data['recovery']['email_body']
     assert db.writes==[]
 
 

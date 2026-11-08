@@ -101,6 +101,17 @@ async def _resolve(db: AsyncSession, alert_id) -> None:
         "UPDATE alerts SET status = 'resolved', resolved_at = NOW() WHERE id = :id"), {"id": alert_id})
 
 
+_OP_WORD = {">": "above", "gt": "above", ">=": "at or above", "gte": "at or above",
+            "<": "below", "lt": "below", "<=": "at or below", "lte": "at or below"}
+
+
+def _path_label(probe: dict) -> str:
+    """"Path to Office-365 (40.97.1.1)": the probe and its target."""
+    from app.services.alert_phrasing import host_label
+    target = str(probe.get("target_ip") or probe.get("target_host") or "")
+    return f"Path to {host_label(probe.get('name') or '', target)}"
+
+
 async def _notify(db: AsyncSession, rule, probe: dict, message: str, *, is_recovery: bool = False,
                   headline: dict | None = None, details: list | None = None,
                   alert_id=None, outbox: list | None = None) -> None:
@@ -133,7 +144,7 @@ async def _notify(db: AsyncSession, rule, probe: dict, message: str, *, is_recov
             "resolved": is_recovery,
             "hostname": name,
             "ip_address": str(probe.get("target_ip") or probe.get("target_host") or ""),
-            "message": f"ZenPlus {'RECOVERY' if is_recovery else sev.upper()} — {rule['name']}: {message}",
+            "message": f"ZenPlus {'resolved' if is_recovery else sev.upper()} — {rule['name']}: {message}",
             "subject": f"[{sev.upper()}] {'RESOLVED' if is_recovery else 'ALERT'}: {rule['name']}",
             "body": message if message.endswith(".") else f"{message}.",
             "rule_name_display": rule["name"],
@@ -194,7 +205,7 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None) -
                 active = await _active_alert(db, rule["id"], f"unreachable:{ev['probe_id']}")
                 if active:
                     await _resolve(db, active[0])
-                    await _notify(db, rule, probe, f"Path to {ev['probe_name']} is reachable again",
+                    await _notify(db, rule, probe, f"{_path_label(probe)} is reachable again",
                                   is_recovery=True, alert_id=active[0], outbox=outbox)
             await db.execute(text("UPDATE netpath_events SET alerted = TRUE WHERE id = :id"), {"id": ev["id"]})
             continue
@@ -209,13 +220,14 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None) -
                 if await _recent_alert_exists(db, rule["id"], dedupe, rule.get("cooldown") or 300):
                     continue
                 if metric == "netpath_path_change":
-                    msg = (f"Network path to {ev['probe_name']} changed "
-                           f"({det.get('hop_count', '?')} hops, {det.get('num_paths', '?')} route(s))")
+                    msg = (f"{_path_label(probe)} changed route: now {det.get('hop_count', '?')} hops"
+                           f" over {det.get('num_paths', '?')} route(s)")
                     details = [("Alert rule", rule["name"]), ("Probe", ev["probe_name"]),
                                ("Hops", str(det.get("hop_count", "?"))),
                                ("Routes", str(det.get("num_paths", "?")))]
                 else:
-                    msg = f"Target {ev['probe_name']} became unreachable"
+                    msg = (f"{_path_label(probe)} is unreachable: the target stopped answering"
+                           f" after {det.get('last_hop_count', '?')} hops")
                     details = [("Alert rule", rule["name"]), ("Probe", ev["probe_name"]),
                                ("Last hops", str(det.get("last_hop_count", "?")))]
                 alert_id = await _raise(db, rule, msg, {"netpath_dedupe": dedupe,
@@ -266,7 +278,8 @@ async def _process_numeric(db: AsyncSession, rules, outbox: list | None = None) 
             probe = {"name": pr["name"], "target_ip": pr["target_ip"], "target_host": pr["target_host"]}
             if breach and not active:
                 disp = f"{value:g}{unit}" if unit != "hops" else f"{value:g} hops"
-                msg = f"{label} to {pr['name']} is {disp} (threshold {rule['operator']} {rule['threshold']:g}{unit if unit!='hops' else ''})"
+                msg = (f"{label} on {_path_label(probe)} is {disp} "
+                       f"(limit {_OP_WORD.get(str(rule['operator']), rule['operator'])} {rule['threshold']:g}{unit if unit!='hops' else ' hops'})")
                 headline = {"label": label, "value": disp,
                             "secondary_label": "Threshold", "secondary_value": f"{rule['operator']} {rule['threshold']:g}{unit if unit!='hops' else ''}"}
                 alert_id = await _raise(db, rule, msg, {"netpath_dedupe": dedupe,
@@ -278,7 +291,7 @@ async def _process_numeric(db: AsyncSession, rules, outbox: list | None = None) 
                                        (label, disp)], alert_id=alert_id, outbox=outbox)
             elif not breach and active:
                 await _resolve(db, active[0])
-                await _notify(db, rule, probe, f"{label} to {pr['name']} recovered ({value:g}{unit if unit!='hops' else ' hops'})",
+                await _notify(db, rule, probe, f"{label} on {_path_label(probe)} is back to normal ({value:g}{unit if unit!='hops' else ' hops'})",
                               is_recovery=True, alert_id=active[0], outbox=outbox)
 
 

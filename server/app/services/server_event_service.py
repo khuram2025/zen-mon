@@ -122,25 +122,83 @@ async def ingest_state(db, server_id: str, agent_id: str, rows: list[dict], inve
              "status": encoded, "gap": any(q.get("gap") for q in clean["queries"])})
 
 
-async def recent_lifecycle(db, now: float) -> dict:
+# A lifecycle event older than this when ZenPlus first sees it is history
+# (agent backlog after a long outage), never a page.
+LIFECYCLE_FIRE_WINDOW_S = 900
+# How long a restart/shutdown incident stays open after its newest evidence
+# when the rule's "Auto-clear after" (clear_duration) is empty.
+LIFECYCLE_HOLD_DEFAULT_S = 900
+RESTART_KINDS = frozenset({"restart", "unexpected_restart", "restart_requested"})
+SHUTDOWN_KINDS = frozenset({"shutdown", "shutdown_requested"})
+BOOT_KINDS = frozenset({"restart", "unexpected_restart"})
+
+
+def lifecycle_hold_seconds(clear_duration) -> int:
+    """How long a lifecycle incident stays open after its newest evidence."""
+    if clear_duration is None:
+        return LIFECYCLE_HOLD_DEFAULT_S
+    return max(0, int(clear_duration))
+
+
+async def recent_lifecycle(db, now: float, window_s: int = LIFECYCLE_FIRE_WINDOW_S) -> dict:
+    """{server_id: [(kind, newest event time, count, oldest event time)]} for
+    the last ``window_s`` (at least the fire window)."""
     # One fleet query per pass, not one query per server/rule. Old backlog is
     # searchable history, but never pages operators when collection resumes.
-    rows = (await db.execute(text("""SELECT server_id::text,kind,max(event_time),count(*)
+    window_s = max(int(window_s), LIFECYCLE_FIRE_WINDOW_S)
+    rows = (await db.execute(text("""SELECT server_id::text,kind,max(event_time),count(*),min(event_time)
         FROM server_lifecycle_events
         WHERE event_time >= :since AND event_time <= :until AND maintenance_suppressed=FALSE
         GROUP BY server_id,kind"""),
-        {"since": datetime.fromtimestamp(now-900,timezone.utc), "until": datetime.fromtimestamp(now+60,timezone.utc)})).all()
+        {"since": datetime.fromtimestamp(now-window_s,timezone.utc), "until": datetime.fromtimestamp(now+60,timezone.utc)})).all()
     result = {}
-    for sid,kind,stamp,count in rows:
-        result.setdefault(sid,[]).append((kind,stamp,count))
+    for row in rows:
+        sid, kind, stamp, count = row[0], row[1], row[2], row[3]
+        first = row[4] if len(row) > 4 else stamp
+        result.setdefault(sid,[]).append((kind,stamp,count,first))
     await db.execute(text("""DELETE FROM server_lifecycle_events WHERE (server_id,event_uid) IN
         (SELECT server_id,event_uid FROM server_lifecycle_events WHERE observed_at<NOW()-INTERVAL '90 days' LIMIT 1000)"""))
     return result
 
 
+def lifecycle_context(metric: str, events: list) -> dict | None:
+    """What the newest lifecycle evidence says, for alerting and wording.
+
+    None without matching evidence. Otherwise ``latest_at`` (epoch s of the
+    newest matching event), ``kind``, ``count`` and, for restarts,
+    ``boot_at``/``boot_kind`` (the OS start, when reported), ``first_boot_at``,
+    ``restart_count`` and ``requested_at``; for shutdowns ``event_at``.
+    """
+    wanted = RESTART_KINDS if metric == "host_restart" else SHUTDOWN_KINDS
+    selected = [(e[0], utc(e[1]), int(e[2] or 0), utc(e[3] if len(e) > 3 and e[3] else e[1]))
+                for e in events if e[0] in wanted]
+    if not selected:
+        return None
+    latest = max(selected, key=lambda x: x[1])
+    ctx = {"kind": latest[0], "latest_at": latest[1].timestamp(), "event_at": latest[1].timestamp(),
+           "count": sum(x[2] for x in selected)}
+    if metric == "host_restart":
+        boots = [x for x in selected if x[0] in BOOT_KINDS]
+        if boots:
+            boot = max(boots, key=lambda x: x[1])
+            # Kernel-Power 41 / EventLog 6008 are logged at the boot that
+            # follows an unclean shutdown: that boot was unexpected.
+            unexpected = any(x[0] == "unexpected_restart" and abs((x[1] - boot[1]).total_seconds()) <= 300
+                             for x in boots)
+            started = [x for x in boots if x[0] == "restart"]
+            ctx.update(boot_at=boot[1].timestamp(),
+                       boot_kind="unexpected_restart" if unexpected else boot[0],
+                       first_boot_at=min(x[3] for x in boots).timestamp(),
+                       restart_count=max(1, sum(x[2] for x in started) or 1))
+        requests = [x for x in selected if x[0] == "restart_requested"]
+        if requests:
+            ctx["requested_at"] = max(x[1] for x in requests).timestamp()
+    return ctx
+
+
 def lifecycle_value(metric: str, events: list, timezone_name: str = "UTC") -> tuple:
-    wanted = {"restart", "unexpected_restart", "restart_requested"} if metric == "host_restart" else {"shutdown", "shutdown_requested"}
-    selected = [(k,t,n) for k,t,n in events if k in wanted]
+    wanted = RESTART_KINDS if metric == "host_restart" else SHUTDOWN_KINDS
+    selected = [(e[0], e[1], e[2]) for e in events if e[0] in wanted]
     if not selected:
         return False, 0.0, "no recent lifecycle event"
     latest = max(selected,key=lambda x:x[1])
