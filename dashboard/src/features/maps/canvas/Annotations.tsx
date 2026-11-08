@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import {
+import { Building2,
   Activity, ArrowRight, ChevronDown, Circle, Diamond, Hexagon, Image as ImageIcon, Lock, LockOpen, Minus, Shapes,
   Square, Sticker, Trash2, Type as TypeIcon,
 } from 'lucide-react'
@@ -48,7 +48,7 @@ export function iconSpec(icon: IconKey): ShapeSpec {
 }
 
 /* ── Insert menu (toolbar dropdown) ──────────────────────────────────────── */
-export function InsertMenu({ onAdd }: { onAdd: (spec: ShapeSpec) => void }) {
+export function InsertMenu({ onAdd, onSite }: { onAdd: (spec: ShapeSpec) => void; onSite?: () => void }) {
   const [open, setOpen] = useState(false)
   const [iconOpen, setIconOpen] = useState(false)
   const [imgOpen, setImgOpen] = useState(false)
@@ -70,6 +70,8 @@ export function InsertMenu({ onAdd }: { onAdd: (spec: ShapeSpec) => void }) {
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className="absolute left-0 top-9 z-50 w-52 overflow-hidden rounded-lg border border-border bg-surface p-1 shadow-xl">
+            {onSite && <MenuRow icon={<Building2 className="h-4 w-4" />} label="Site (grouped devices)…" onClick={() => { setOpen(false); onSite() }} />}
+            {onSite && <div className="my-1 h-px bg-border" />}
             <MenuRow icon={<Shapes className="h-4 w-4" />} label="Network icon…" onClick={() => { setOpen(false); setIconOpen(true) }} />
             <MenuRow icon={<ImageIcon className="h-4 w-4" />} label="Image…" onClick={() => { setOpen(false); setImgOpen(true) }} />
             <div className="my-1 h-px bg-border" />

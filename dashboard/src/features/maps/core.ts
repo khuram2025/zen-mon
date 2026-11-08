@@ -23,6 +23,9 @@ export type ManualMapListItem = {
   node_count: number
   link_count: number
   status_counts: Record<string, number>
+  /** Active alerts on the map's nodes (newer backends). */
+  alerts?: { active: number; critical: number }
+  metadata?: Record<string, unknown> | null
 }
 
 export type NodeLabelStyle = {
@@ -45,6 +48,8 @@ export type NodeMetadata = {
   locked?: boolean
   /** Hide the IP line under the label. */
   hide_ip?: boolean
+  /** Custom icon image (data URL or same-origin URL) drawn instead of the built-in icon. */
+  image_src?: string | null
   [k: string]: unknown
 }
 
@@ -200,7 +205,9 @@ export type ShapeStyle = {
   align?: 'left' | 'center' | 'right'
   rounded?: boolean
   /* Live data widgets (rendered by ShapeNode instead of a plain shape). */
-  widget?: 'conversations'
+  widget?: 'conversations' | 'site'
+  /** Site node membership (widget = 'site'). */
+  site?: SiteSpec | null
   limit?: number            // top-N rows for widgets
   hours?: number            // lookback window for widgets
   exporter?: string | null  // bind widget to one exporter/device IP
@@ -217,6 +224,60 @@ export type ShapeStyle = {
   /** A neighbour seen over CDP/LLDP that ZenPlus does not monitor. */
   unmanaged?: { hostname?: string | null; chassis_id?: string | null; port_id?: string | null } | null
   [k: string]: unknown
+}
+
+/** What a site node stands for: devices at a location, every node of its
+ *  drill-down map and/or devices picked by hand (the union is counted once). */
+export type SiteSpec = {
+  location?: string | null
+  map_id?: string | null
+  device_ids?: string[] | null
+  /** Live mode opens the member grid under the tile by default. */
+  expanded?: boolean | null
+}
+
+export type SiteMember = {
+  kind: NodeKind
+  id: string
+  hostname: string | null
+  ip_address: string | null
+  device_type: string | null
+  status: NodeStatus
+  alerts: { active: number; critical: number; warning: number }
+}
+
+/** Aggregate status for one site node (GET /maps/{id}/sites-live). */
+export type SiteLive = {
+  total: number
+  counts: Record<'up' | 'down' | 'degraded' | 'maintenance' | 'unknown', number>
+  alerts: { active: number; critical: number; warning: number }
+  worst: NodeStatus
+  members: SiteMember[]
+  truncated: boolean
+  /** The drill-down map, when it exists and the viewer may open it. */
+  map_id: string | null
+  map_name: string | null
+}
+
+/** Per-map background image (manual_maps.metadata.background_image). The
+ *  image is laid over the logical canvas: `x_pct`/`y_pct` is its top-left and
+ *  `w_pct` its width, all in percent of the canvas; the height follows the
+ *  image's aspect ratio. */
+export type MapBackgroundImage = {
+  src: string
+  opacity?: number
+  x_pct?: number
+  y_pct?: number
+  w_pct?: number
+}
+
+export function backgroundImageOf(md: Record<string, unknown> | null | undefined): MapBackgroundImage | null {
+  const bg = md?.background_image as MapBackgroundImage | undefined
+  return bg && typeof bg.src === 'string' && bg.src ? bg : null
+}
+
+export function isSiteShape(s: { metadata?: { widget?: unknown } | null }): boolean {
+  return s.metadata?.widget === 'site'
 }
 
 export type MapShape = {
@@ -380,6 +441,15 @@ export const STATUS_COLOR: Record<
   degraded: { ring: 'border-warning/70 text-warning', fill: 'bg-warning/10', line: 'stroke-warning/55', dot: 'bg-warning', badge: 'warning' },
   maintenance: { ring: 'border-info/60 text-info', fill: 'bg-info/10', line: 'stroke-info/55', dot: 'bg-info', badge: 'info' },
   unknown: { ring: 'border-border text-muted', fill: 'bg-surface2/40', line: 'stroke-muted/35', dot: 'bg-muted', badge: 'outline' },
+}
+
+/** Solid status colours for SVG/canvas drawing (same hues as the tokens). */
+export const STATUS_HEX: Record<string, string> = {
+  up: '#22c55e', down: '#ef4444', degraded: '#f59e0b', maintenance: '#3b82f6', unknown: '#64748b',
+}
+
+export const STATUS_LABEL: Record<string, string> = {
+  up: 'Up', down: 'Down', degraded: 'Warning', maintenance: 'Maintenance', unknown: 'Unknown',
 }
 
 export const STATUS_ORDER: NodeStatus[] = ['down', 'degraded', 'maintenance', 'unknown', 'up']

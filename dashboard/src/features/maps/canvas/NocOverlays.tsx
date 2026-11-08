@@ -1,10 +1,11 @@
 import { regionalDate } from '@/lib/regionalTime'
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, ChevronDown, ChevronUp, Flame, Link2Off, ServerCrash, ShieldCheck, Unplug } from 'lucide-react'
+import { Activity, AlertTriangle, Building2, Cable, ChevronDown, ChevronUp, Flame, HeartPulse, Link2Off, ServerCrash, ShieldCheck, Unplug } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { iconLabel } from '@/components/network-icons'
 import {
-  STATUS_ORDER,
+  STATUS_HEX,
+  STATUS_LABEL,
   formatBps,
   linkFlow,
   statusKey,
@@ -13,6 +14,7 @@ import {
   type LiveLinkData,
   type ManualMapDetail,
   type NodeLiveData,
+  type SiteLive,
 } from '../core'
 
 function annotationLinksOf(detail: ManualMapDetail): AnnotationLink[] {
@@ -44,20 +46,109 @@ export function shapeName(s: { text?: string | null; kind?: string; metadata?: R
 const STATUS_DOT: Record<string, string> = {
   up: 'bg-success', down: 'bg-danger', degraded: 'bg-warning', maintenance: 'bg-info', unknown: 'bg-muted',
 }
-const STATUS_TEXT: Record<string, string> = {
-  up: 'text-success', down: 'text-danger', degraded: 'text-warning', maintenance: 'text-info', unknown: 'text-muted',
+
+/* ── Map statistics ─────────────────────────────────────────────────────────
+ * One pass over the map and its live feeds; drives the summary tiles on the
+ * desk view and the NOC wall header. */
+export type MapStats = {
+  counts: Record<string, number>
+  nodes: number
+  healthPct: number | null
+  totalBps: number
+  hot: { bps: number; util: number | null; label: string } | null
+  alerts: number
+  critical: number
+  warning: number
+  faulted: number
+  saturated: number
+  linkCount: number
+  bound: number
+  sites: number
+  sitesWithProblems: number
+  siteDevices: number
 }
 
-/* ── NOC status bar ─────────────────────────────────────────────────────────
- * Always-on operations summary across the top of the live canvas: fleet
- * status, aggregate traffic, hottest link, alarm totals and a live clock —
- * the numbers a wall display needs at a glance. */
-export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAlerts }: {
+export function computeMapStats(
+  detail: ManualMapDetail,
+  nodesLive: Record<string, NodeLiveData>,
+  liveData: Record<string, LiveLinkData>,
+  sitesLive: Record<string, SiteLive> = {},
+): MapStats {
+  const counts: Record<string, number> = {}
+  for (const n of detail.nodes) {
+    const sk = statusKey(nodesLive[n.id]?.status ?? n.status)
+    counts[sk] = (counts[sk] || 0) + 1
+  }
+  let totalBps = 0
+  let hot: MapStats['hot'] = null
+  const nodeById = new Map(detail.nodes.map((n) => [n.id, n]))
+  // Context cables (annotation cables with no port on either end) never carry
+  // live data by design, so they don't count against "links bound".
+  const annLinks = annotationLinksOf(detail).filter((al) => al.metadata?.src_interface || al.metadata?.dst_interface)
+  const linkCount = detail.links.length + annLinks.length
+  let bound = 0, faulted = 0, saturated = 0
+
+  const considerLink = (id: string, label: string) => {
+    const ld = liveData[id]
+    if (ld && (ld.source.matched || ld.target.matched)) bound++
+    const f = linkFlow(ld)
+    if (!f) return
+    if (f.ifaceDown) faulted++
+    else if (f.utilPct != null && f.utilPct >= 85) saturated++
+    totalBps += f.total
+    if (!hot || f.total > hot.bps) hot = { bps: f.total, util: f.utilPct, label }
+  }
+  for (const l of detail.links) {
+    const s = nodeById.get(l.source_node_id)
+    const t = nodeById.get(l.target_node_id)
+    considerLink(l.id, `${(s?.label || s?.hostname || '?').slice(0, 18)} ⇄ ${(t?.label || t?.hostname || '?').slice(0, 18)}`)
+  }
+  for (const al of annLinks) {
+    considerLink(al.id, `${endpointLabel(detail, al.source, al.source_type)} ⇄ ${endpointLabel(detail, al.target, al.target_type)}`)
+  }
+
+  let alerts = 0, critical = 0, warning = 0
+  for (const nl of Object.values(nodesLive)) {
+    alerts += nl.alerts?.active || 0
+    critical += nl.alerts?.critical || 0
+    warning += nl.alerts?.warning || 0
+  }
+  // Sites add their members to the device and alert totals.
+  let sites = 0, sitesWithProblems = 0, siteDevices = 0
+  for (const sh of detail.shapes || []) {
+    if (sh.metadata?.widget !== 'site') continue
+    sites++
+    const sl = sitesLive[sh.id]
+    if (!sl) continue
+    siteDevices += sl.total
+    if ((sl.counts.down || 0) + (sl.counts.degraded || 0) > 0) sitesWithProblems++
+    for (const k of Object.keys(sl.counts)) counts[k] = (counts[k] || 0) + (sl.counts as Record<string, number>)[k]
+    alerts += sl.alerts.active
+    critical += sl.alerts.critical
+    warning += sl.alerts.warning
+  }
+  const nodes = Object.values(counts).reduce((a, b) => a + b, 0)
+  const healthPct = nodes ? ((counts.up || 0) / nodes) * 100 : null
+  const hotV = hot as MapStats['hot']
+  return {
+    counts, nodes, healthPct, totalBps, hot: hotV && hotV.bps > 0 ? hotV : null, alerts, critical, warning,
+    faulted, saturated, linkCount, bound, sites, sitesWithProblems, siteDevices,
+  }
+}
+
+/* ── Summary tiles ──────────────────────────────────────────────────────────
+ * Always-on operations summary across the top of the live canvas: health,
+ * device states, links, traffic, the busiest link, alerts and sites, plus the
+ * live clock and data age. `size="wall"` draws the same tiles larger for a
+ * NOC video wall; on a narrow desk screen the secondary tiles drop out. */
+export function NocStatusBar({ detail, nodesLive, liveData, sitesLive, updatedAt, onOpenAlerts, size = 'desk' }: {
   detail: ManualMapDetail
   nodesLive: Record<string, NodeLiveData>
   liveData: Record<string, LiveLinkData>
+  sitesLive?: Record<string, SiteLive>
   updatedAt: number
   onOpenAlerts?: () => void
+  size?: 'desk' | 'wall'
 }) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -65,66 +156,18 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
     return () => clearInterval(t)
   }, [])
 
-  const stats = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const n of detail.nodes) {
-      const sk = statusKey(nodesLive[n.id]?.status ?? n.status)
-      counts[sk] = (counts[sk] || 0) + 1
-    }
-    let totalBps = 0
-    const hottest: { value: { bps: number; util: number | null; label: string } | null } = { value: null }
-    const nodeById = new Map(detail.nodes.map((n) => [n.id, n]))
-    // Context cables (annotation cables with no port on either end) never carry
-    // live data by design, so they don't count against "links bound".
-    const annLinks = annotationLinksOf(detail).filter((al) => al.metadata?.src_interface || al.metadata?.dst_interface)
-    const linkCount = detail.links.length + annLinks.length
-    let bound = 0
-
-    const considerLink = (id: string, label: string) => {
-      const ld = liveData[id]
-      if (ld && (ld.source.matched || ld.target.matched)) bound++
-      const f = linkFlow(ld)
-      if (!f) return
-      totalBps += f.total
-      if (!hottest.value || f.total > hottest.value.bps) {
-        hottest.value = { bps: f.total, util: f.utilPct, label }
-      }
-    }
-
-    for (const l of detail.links) {
-      const s = nodeById.get(l.source_node_id)
-      const t = nodeById.get(l.target_node_id)
-      considerLink(
-        l.id,
-        `${(s?.label || s?.hostname || '?').slice(0, 18)} ⇄ ${(t?.label || t?.hostname || '?').slice(0, 18)}`,
-      )
-    }
-    for (const al of annLinks) {
-      considerLink(
-        al.id,
-        `${endpointLabel(detail, al.source, al.source_type)} ⇄ ${endpointLabel(detail, al.target, al.target_type)}`,
-      )
-    }
-
-    let alerts = 0, critical = 0
-    for (const nl of Object.values(nodesLive)) {
-      alerts += nl.alerts?.active || 0
-      critical += nl.alerts?.critical || 0
-    }
-    const faulted =
-      detail.links.reduce((acc, l) => acc + (linkFlow(liveData[l.id])?.ifaceDown ? 1 : 0), 0) +
-      annLinks.reduce((acc, al) => acc + (linkFlow(liveData[al.id])?.ifaceDown ? 1 : 0), 0)
-    return { counts, totalBps, hot: hottest.value && hottest.value.bps > 0 ? hottest.value : null, alerts, critical, faulted, linkCount, bound }
-  }, [detail, nodesLive, liveData])
-
+  const stats = useMemo(() => computeMapStats(detail, nodesLive, liveData, sitesLive), [detail, nodesLive, liveData, sitesLive])
   const age = Math.max(0, Math.round((now - updatedAt) / 1000))
   const clock = regionalDate(new Date(now), 'time', [], { hour12: false })
   const stale = age > 60
+  const wall = size === 'wall'
+  const health = stats.healthPct
+  const healthTone = health == null ? 'text-muted' : (stats.counts.down || 0) > 0 ? 'text-danger' : (stats.counts.degraded || 0) > 0 ? 'text-warning' : 'text-success'
 
   return (
-    <div className="flex items-stretch gap-3 rounded-xl border border-border bg-surface/90 px-3.5 py-2 shadow-xl backdrop-blur">
+    <div className={cn('flex flex-wrap items-stretch', wall ? 'gap-2.5' : 'gap-1.5')}>
       {/* LIVE beacon + clock */}
-      <div className="flex flex-col justify-center pr-3">
+      <Tile wall={wall} className="min-w-[6.5rem]">
         <div className="flex items-center gap-1.5">
           <span className="relative flex h-2 w-2">
             <span className={cn('absolute inline-flex h-full w-full animate-ping rounded-full opacity-60', stale ? 'bg-warning' : 'bg-success')} />
@@ -132,68 +175,106 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
           </span>
           <span className={cn('text-2xs font-bold tracking-[0.18em]', stale ? 'text-warning' : 'text-success')}>{stale ? 'STALE' : 'LIVE'}</span>
         </div>
-        <div className="font-mono text-base font-semibold leading-tight text-text">{clock}</div>
-        <div className="text-[8.5px] leading-none text-muted">data {age < 2 ? 'now' : `${age}s ago`}</div>
-      </div>
+        <div className={cn('font-mono font-semibold leading-tight text-text', wall ? 'text-2xl' : 'text-base')}>{clock}</div>
+        <div className="text-2xs leading-none text-muted">data {age < 2 ? 'now' : `${age}s ago`}</div>
+      </Tile>
 
-      <Divider />
+      {/* Health */}
+      <Tile wall={wall} label="Health" icon={<HeartPulse className="h-3 w-3" />}>
+        <div className={cn('font-mono font-bold leading-tight', healthTone, wall ? 'text-3xl' : 'text-xl')}>{health == null ? '—' : `${health >= 99.95 ? 100 : health.toFixed(1)}%`}</div>
+        <StatusBar counts={stats.counts} total={stats.nodes} />
+      </Tile>
 
-      {/* Fleet status */}
-      <div className="flex flex-col justify-center gap-1 pr-1">
-        <div className="text-[8.5px] font-bold uppercase tracking-wider text-muted">Devices</div>
-        <div className="flex items-center gap-2.5">
-          {STATUS_ORDER.filter((s) => stats.counts[s as string]).map((s) => (
-            <span key={s as string} className="flex items-center gap-1" title={String(s)}>
-              <span className={cn('h-1.5 w-1.5 rounded-full', STATUS_DOT[s as string])} />
-              <span className={cn('font-mono text-sm font-bold leading-none', STATUS_TEXT[s as string])}>{stats.counts[s as string]}</span>
-            </span>
-          ))}
-          <span className="font-mono text-2xs text-muted">/ {detail.nodes.length}</span>
+      {/* Device states */}
+      <Tile wall={wall} label="Devices" icon={<ServerCrash className="h-3 w-3" />}>
+        <div className="flex items-baseline gap-2.5">
+          <Count n={stats.counts.down || 0} label="down" tone="danger" wall={wall} />
+          <Count n={stats.counts.degraded || 0} label="warn" tone="warning" wall={wall} />
+          <Count n={stats.counts.up || 0} label="up" tone="success" wall={wall} />
         </div>
-      </div>
-
-      <Divider />
-
-      {/* Aggregate traffic */}
-      <div className="flex flex-col justify-center gap-0.5">
-        <div className="flex items-center gap-1 text-[8.5px] font-bold uppercase tracking-wider text-muted"><Activity className="h-2.5 w-2.5" /> Traffic</div>
-        <div className="font-mono text-base font-bold leading-tight text-text">{formatBps(stats.totalBps)}</div>
-        <div className="text-[8.5px] leading-none text-muted">
-          {stats.bound}/{stats.linkCount} links bound
-          {stats.faulted > 0 ? <span className="text-danger"> · {stats.faulted} down</span> : ''}
+        <div className="text-2xs leading-none text-muted">
+          {stats.nodes} total{(stats.counts.maintenance || 0) > 0 ? ` · ${stats.counts.maintenance} maint` : ''}{(stats.counts.unknown || 0) > 0 ? ` · ${stats.counts.unknown} unknown` : ''}
         </div>
-      </div>
+      </Tile>
 
-      {/* Busiest link */}
-      {stats.hot && (
-        <>
-          <Divider />
-          <div className="flex max-w-56 flex-col justify-center gap-0.5">
-            <div className="flex items-center gap-1 text-[8.5px] font-bold uppercase tracking-wider text-muted"><Flame className="h-2.5 w-2.5" /> Busiest</div>
-            <div className="truncate text-xs font-semibold leading-tight text-text2" title={stats.hot.label}>{stats.hot.label}</div>
-            <div className="flex items-center gap-1.5 font-mono text-2xs leading-none">
-              <span className="font-bold" style={{ color: utilHex(stats.hot.util) }}>{formatBps(stats.hot.bps)}</span>
-              {stats.hot.util != null && <span className="text-muted">{stats.hot.util.toFixed(1)}%</span>}
-            </div>
+      {/* Links */}
+      <Tile wall={wall} label="Links" icon={<Cable className="h-3 w-3" />} className="hidden md:flex">
+        <div className="flex items-baseline gap-2.5">
+          <Count n={stats.faulted} label="down" tone="danger" wall={wall} />
+          <Count n={stats.saturated} label="≥85%" tone="warning" wall={wall} />
+        </div>
+        <div className="text-2xs leading-none text-muted">{stats.bound}/{stats.linkCount} with live data</div>
+      </Tile>
+
+      {/* Aggregate traffic + busiest link */}
+      <Tile wall={wall} label="Traffic" icon={<Activity className="h-3 w-3" />} className="hidden lg:flex">
+        <div className={cn('font-mono font-bold leading-tight text-text', wall ? 'text-2xl' : 'text-base')}>{formatBps(stats.totalBps)}</div>
+        {stats.hot ? (
+          <div className={cn('flex items-center gap-1 truncate text-2xs leading-none', wall ? 'max-w-[18rem]' : 'max-w-[12rem]')} title={`Busiest: ${stats.hot.label}`}>
+            <Flame className="h-2.5 w-2.5 shrink-0 text-muted" />
+            <span className="truncate text-text2">{stats.hot.label}</span>
+            <span className="shrink-0 font-mono font-bold" style={{ color: utilHex(stats.hot.util) }}>{stats.hot.util != null ? `${stats.hot.util.toFixed(0)}%` : formatBps(stats.hot.bps)}</span>
           </div>
-        </>
+        ) : <div className="text-2xs leading-none text-muted">across all cables</div>}
+      </Tile>
+
+      {/* Sites */}
+      {stats.sites > 0 && (
+        <Tile wall={wall} label="Sites" icon={<Building2 className="h-3 w-3" />} className="hidden xl:flex">
+          <div className="flex items-baseline gap-2.5">
+            <Count n={stats.sitesWithProblems} label="impacted" tone="danger" wall={wall} />
+            <Count n={stats.sites} label="sites" tone="muted" wall={wall} />
+          </div>
+          <div className="text-2xs leading-none text-muted">{stats.siteDevices} devices inside sites</div>
+        </Tile>
       )}
 
-      <Divider />
-
       {/* Alerts (click → alert list) */}
-      <button
-        type="button"
-        onClick={onOpenAlerts}
-        className={cn('flex flex-col justify-center gap-0.5 rounded-md px-1 text-left transition', onOpenAlerts && 'hover:bg-primary/10')}
-        title="Open active alerts"
-      >
-        <div className="flex items-center gap-1 text-[8.5px] font-bold uppercase tracking-wider text-muted"><AlertTriangle className="h-2.5 w-2.5" /> Alerts</div>
-        <div className={cn('font-mono text-base font-bold leading-tight', stats.critical > 0 ? 'text-danger' : stats.alerts > 0 ? 'text-warning' : 'text-success')}>
-          {stats.alerts}
-        </div>
-        <div className="text-[8.5px] leading-none text-muted">{stats.critical > 0 ? `${stats.critical} critical` : 'active'}</div>
+      <button type="button" onClick={onOpenAlerts} className="flex text-left" title="Open active alerts">
+        <Tile wall={wall} label="Alerts" icon={<AlertTriangle className="h-3 w-3" />} className={cn(onOpenAlerts && 'transition hover:border-primary/50', stats.critical > 0 && 'border-danger/60 bg-danger/10')}>
+          <div className="flex items-baseline gap-2.5">
+            <Count n={stats.critical} label="crit" tone="danger" wall={wall} />
+            <Count n={stats.warning} label="warn" tone="warning" wall={wall} />
+          </div>
+          <div className="text-2xs leading-none text-muted">{stats.alerts} active</div>
+        </Tile>
       </button>
+    </div>
+  )
+}
+
+function Tile({ label, icon, children, wall, className }: { label?: string; icon?: React.ReactNode; children: React.ReactNode; wall?: boolean; className?: string }) {
+  return (
+    <div className={cn(
+      'flex flex-col justify-center gap-1 rounded-xl border border-border bg-surface/92 shadow-lg backdrop-blur',
+      wall ? 'min-w-[9rem] px-4 py-2.5' : 'min-w-[5.5rem] px-3 py-1.5',
+      className,
+    )}>
+      {label && <div className="flex items-center gap-1 text-2xs font-bold uppercase tracking-wider text-muted">{icon}{label}</div>}
+      {children}
+    </div>
+  )
+}
+
+const TONE_TEXT: Record<string, string> = { danger: 'text-danger', warning: 'text-warning', success: 'text-success', muted: 'text-text2' }
+
+function Count({ n, label, tone, wall }: { n: number; label: string; tone: 'danger' | 'warning' | 'success' | 'muted'; wall?: boolean }) {
+  return (
+    <span className="flex items-baseline gap-0.5">
+      <span className={cn('font-mono font-bold leading-tight', wall ? 'text-2xl' : 'text-base', n > 0 || tone === 'muted' ? TONE_TEXT[tone] : 'text-muted')}>{n}</span>
+      <span className="text-2xs text-muted">{label}</span>
+    </span>
+  )
+}
+
+/** One bar split by status (down → up), the at-a-glance mix. */
+export function StatusBar({ counts, total, className }: { counts: Record<string, number>; total: number; className?: string }) {
+  return (
+    <div className={cn('flex h-1.5 w-full min-w-[4rem] overflow-hidden rounded-full bg-surface3', className)}>
+      {total > 0 && (['down', 'degraded', 'maintenance', 'unknown', 'up'] as const).map((k) => {
+        const n = counts[k] || 0
+        return n ? <div key={k} style={{ width: `${(n / total) * 100}%`, background: STATUS_HEX[k] }} title={`${n} ${STATUS_LABEL[k].toLowerCase()}`} /> : null
+      })}
     </div>
   )
 }
@@ -217,8 +298,16 @@ export type Problem = {
   targetId: string
 }
 
-export function computeProblems(detail: ManualMapDetail, nodesLive: Record<string, NodeLiveData>, liveData: Record<string, LiveLinkData>): Problem[] {
+export function computeProblems(detail: ManualMapDetail, nodesLive: Record<string, NodeLiveData>, liveData: Record<string, LiveLinkData>, sitesLive: Record<string, SiteLive> = {}): Problem[] {
   const out: Problem[] = []
+  for (const sh of detail.shapes || []) {
+    const sl = sh.metadata?.widget === 'site' ? sitesLive[sh.id] : undefined
+    if (!sl) continue
+    const name = shapeName(sh) === 'rectangle' ? (sh.metadata?.site?.location || 'Site') : shapeName(sh)
+    const down = sl.counts.down || 0, warn = sl.counts.degraded || 0
+    if (down) out.push({ id: `site-${sh.id}`, kind: 'device', severity: 'critical', title: name, detail: `Site · ${down} of ${sl.total} devices down${warn ? ` · ${warn} warning` : ''}`, targetId: sh.id })
+    else if (warn) out.push({ id: `site-${sh.id}`, kind: 'device', severity: 'warning', title: name, detail: `Site · ${warn} of ${sl.total} devices warning`, targetId: sh.id })
+  }
   const nodeById = new Map(detail.nodes.map((n) => [n.id, n]))
   for (const n of detail.nodes) {
     const nl = nodesLive[n.id]

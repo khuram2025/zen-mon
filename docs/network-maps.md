@@ -1,6 +1,6 @@
 # Network maps (Network Studio)
 
-`/maps/manual` is the hand-built topology editor (React Flow, `dashboard/src/features/maps/`) backed by
+`/maps` lists every map with its live health; `/maps/manual` is the hand-built topology editor (React Flow, `dashboard/src/features/maps/`) backed by
 `/api/v1/maps` (`server/app/api/v1/manual_maps.py`, topology logic in `server/app/services/map_topology.py`).
 This page records the rules the map follows since 1.24.25, which came out of building the Al Aridh branch
 map on a customer appliance (assessment D1–D15, F1–F12).
@@ -92,3 +92,20 @@ The link drill-down (click a cable) shows both ends' port state, speed, rates, u
 sparkline from `/devices/{id}/interfaces/{if_index}/metrics`. Throughput pills slide along their cable to
 avoid each other and device tiles; port chips hide below 45 % zoom unless the cable is hovered or selected.
 Fiber cables carry an amber centre stripe that stays visible under the utilisation colour.
+
+## Sites, NOC wall and images (1.25.x)
+
+The full description is in `Documentation/29-NETWORK-MAPS.md`. The rules:
+
+- A **site** is a shape with `metadata.widget = "site"` and `metadata.site = {location, map_id, device_ids, expanded}`.
+  Its members are the union of devices at the location (case-insensitive, trimmed), every node of its drill-down map
+  and the picked devices, each counted once. `GET /maps/{id}/sites-live` aggregates them; devices outside the
+  viewer's visibility scope are never counted, and a drill-down map outside the viewer's page-access role is
+  neither expanded nor named. Members are sorted worst first and capped at 2000 per site; counts cover all of them.
+- **Group into a site** may move the selection into a new site map: it copies the nodes, shapes and the cables
+  between them with one bulk request, then deletes them here through the normal delete-with-undo path.
+- The **NOC wall** (`?wall=1`, optional `maps=…&rotate=…`, `attention=0`, `scale=…`) is a read-only live view with
+  its own dark palette (`.map-wall`). It never depends on the browser's full-screen API.
+- Device icons may carry `metadata.image_src`; maps may carry `metadata.background_image = {src, opacity, x_pct,
+  y_pct, w_pct}`. Both are data URLs scaled in the browser. `GET /maps` strips annotation cables and the background
+  image bytes from each map's metadata (`background_image.present` says one exists); `GET /maps/{id}` returns them.

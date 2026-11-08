@@ -30,6 +30,7 @@ identifies the pushed source baseline, destination requirements and validation g
 | 19 | [**Production Remote Sensors**](19-PRODUCTION-REMOTE-SENSORS.md) | **Market assessment and OVA/OVF remote sensor appliance design.** |
 | 24 | [Virtualization Monitoring](24-VIRTUALIZATION-MONITORING.md) | Nutanix Prism, VMware and Hyper-V connectors, permissions, TLS, SNIH firewall scope and validation. |
 | 26 | [**GitHub, Multi-Machine & Publishing Runbook**](26-GITHUB-MULTI-MACHINE-AND-PUBLISHING-RUNBOOK.md) | **Two-appliance development, GitHub synchronization, safe merges, signed OTA releases, and zentryc.com KB publishing.** |
+| 29 | [Network Maps](29-NETWORK-MAPS.md) | Maps overview, live summary tiles and inspector, site (grouped) nodes with drill-down, NOC wall mode and rotation, custom icons and background images. |
 
 ## Quick Start (Phase 1)
 
