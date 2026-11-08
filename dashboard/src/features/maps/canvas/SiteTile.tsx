@@ -111,7 +111,7 @@ function SiteTileImpl({ shape, live, w, h, selected, onDrill, onOpenMember, desi
           selected && 'ring-2 ring-primary/70 ring-offset-2 ring-offset-surface',
           canDrill && 'nodrag nopan cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
         )}
-        style={{ borderColor: `${accent}cc`, boxShadow: !designMode && hasProblems ? `0 0 0 3px ${accent}33, 0 0 24px ${accent}55` : undefined }}
+        style={{ borderColor: `${accent}cc`, boxShadow: !designMode && hasProblems ? `0 0 0 3px ${accent}33, 0 0 24px ${accent}55` : undefined, pointerEvents: canDrill ? 'auto' : undefined }}
         role={canDrill ? 'link' : undefined}
         tabIndex={canDrill ? 0 : undefined}
         aria-label={canDrill ? `Open ${title} site map` : undefined}

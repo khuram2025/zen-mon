@@ -41,7 +41,9 @@ try {
   }
   let drills = [], members = [], ancestorClicks = 0
   const render = async (extra = {}) => {
-    await act(async () => root.render(React.createElement('div', { onClick: () => ancestorClicks++ },
+    await act(async () => root.render(React.createElement('div', {
+      onClick: () => ancestorClicks++, style: { pointerEvents: extra.designMode ? 'auto' : 'none' },
+    },
       React.createElement(SiteTile, { key: JSON.stringify(extra), shape, live, w: 400, h: 180,
         designMode: false, onDrill: id => drills.push(id), onOpenMember: m => members.push(m.id), ...extra }))))
   }
@@ -61,6 +63,7 @@ try {
   const card = document.querySelector('[role="link"]')
   assert.equal(card.getAttribute('aria-label'), 'Open Al Aridh site map')
   assert.equal(card.tabIndex, 0)
+  assert.equal(window.getComputedStyle(card).pointerEvents, 'auto', 'Linked live tiles accept pointer input inside the read-only canvas')
   for (const target of [card, card.querySelector('[title="Al Aridh"]'), card.querySelector('svg')]) {
     reset(); await click(target)
     assert.deepEqual(drills, ['detail'], 'Card, title and health ring each navigate exactly once')
