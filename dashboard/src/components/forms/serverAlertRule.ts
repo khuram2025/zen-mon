@@ -158,7 +158,9 @@ export function serverRulePayload(s: ServerDraft): Record<string, unknown> {
     severity: s.severity,
     // flag: heartbeat silence before it fires (0 = the default); svc/proc fire on the reported state.
     min_duration: pct || kind === 'flag' ? Math.max(0, Math.round(Number(s.min_duration) || 0)) : 0,
-    clear_duration: pct ? s.clear_duration : null,
+    // pct: how long the cleared condition must hold; event: how long the
+    // restart/shutdown alert stays open after the last event (auto-clear).
+    clear_duration: pct || kind === 'event' ? s.clear_duration : null,
     reset_threshold: pct && c.reset_threshold != null ? Number(c.reset_threshold) : null,
     recovery_alert: s.reset_mode === 'auto',
     cooldown: s.cooldown,

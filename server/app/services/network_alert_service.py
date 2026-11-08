@@ -497,32 +497,41 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
                   duration: str = "", device_id=None, if_index=None,
                   ip_address: str = "", value=None, value_context: dict | None = None,
                   alert_id=None, first_seen=None, event: str | None = None,
-                  checked: bool = False) -> bool:
+                  checked: bool = False, asset_type: str | None = None,
+                  branding=None, context: dict | None = None,
+                  lifecycle: str | None = None) -> bool:
     """Send one metric alert — or its all-clear. True when it was dispatched.
 
     ``alert_id`` + ``event`` key the delivery (one send per incident event,
     channel and recipient). ``checked`` means the caller already asked
-    :func:`_trigger_allowed`.
+    :func:`_trigger_allowed`. ``context`` is an event's own facts (a reboot:
+    when, uptime now and before); ``lifecycle`` "changed" announces a further
+    event on an open incident ("rebooted again").
     """
     # Quiet hours: the alert row is already recorded; only the outbound
     # notification is gated by the rule's schedule window. A recovery notice is
     # never suppressed, or an operator is left believing it is still breached.
-    if not is_recovery and not checked and not await _trigger_allowed(
+    if not is_recovery and not checked and lifecycle is None and not await _trigger_allowed(
             db, rule, device_id=device_id, if_index=if_index):
         return False
     sev = (rule.severity or "warning")
     threshold = float(rule.threshold) if rule.threshold is not None else None
-    if value is not None and not reading:
+    event_metric = rule.metric in ap.EVENT_SENTENCE_METRICS
+    if event_metric:
+        # A reboot is an event: the 0/1 flag is not a reading anyone wants.
+        reading, value = "", None
+    elif value is not None and not reading:
         reading = ap.reading_text(rule.metric, value, rule.operator, threshold, value_context)
     now = datetime.now(timezone.utc)
     incident = ap.incident_context(alert_id=alert_id, first_seen=first_seen, now=now,
-                                   lifecycle="recovered" if is_recovery else "new") if alert_id else {}
+                                   lifecycle=lifecycle or ("recovered" if is_recovery else "new")) if alert_id else {}
     # An interface rule is about the port, not the chassis, so the sentence
     # names "core-router-01 (10.0.0.1) / port14" and the details table repeats it.
     label = ap.host_label(hostname, ip_address)
     v = ap.rule_phrasing(rule, hostname=f"{label} / {iface_label}" if iface_label else label,
                          is_recovery=is_recovery, reading=reading, duration=duration,
-                         value=value, value_context=value_context)
+                         value=value, value_context=context if event_metric else value_context,
+                         asset_type=asset_type, branding=branding, now=now)
     v.update({"rule_name": rule.name or "Alert",
               "hostname": f"{hostname} / {iface_label}" if iface_label else hostname,
               "ip_address": ip_address or "",
@@ -550,7 +559,7 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         "details": [("Alert rule", rule.name),
                     ("Interface", iface_label),
                     ("Condition", v.get("condition_label")),
-                    ("Active for", duration if is_recovery else None)],
+                    ("Active for", duration if is_recovery and not event_metric else None)],
         "triggered_at": now.isoformat(),
         "rule_id": str(rule.id),
         "alert_id": str(alert_id) if alert_id else None,
@@ -625,6 +634,8 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
     from app.services.network_conditions import clear_hold_seconds, evaluate, validate_conditions
     from app.services.network_history import fetch_history, entities
     from app.api.v1.alert_engine import _find_suppressing_dependency, _device_in_maintenance
+    from app.services.regional_time import notification_branding
+    branding = await notification_branding(db)
 
     raised = resolved = 0
     now = datetime.now(timezone.utc).timestamp() if now is None else now
@@ -643,8 +654,10 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
             logger.error("Network rule %s skipped: %s", rule.id, exc)
             continue
         metrics = tuple(sorted({c['metric'] for c in conditions}))
-        hold = int(rule.min_duration or 0)
-        clear_hold = clear_hold_seconds(getattr(rule, 'clear_duration', None))
+        reboot_rule = metrics == ('uptime_reset',)
+        hold = 0 if reboot_rule else int(rule.min_duration or 0)
+        clear_hold = (event_hold_seconds(getattr(rule, 'clear_duration', None)) if reboot_rule
+                      else clear_hold_seconds(getattr(rule, 'clear_duration', None)))
         # Include enough context for the first breach (or the whole clear
         # hold) and freshness expiry.
         max_gap = max(max(freshness_budgets(d, metrics).values()) for d in devices.values())
@@ -685,6 +698,15 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 "WHERE device_id = :did AND rule_id = :rid AND status IN ('active','acknowledged') "
                 "AND metadata->>'suppressed_by_dependency' = 'true'"
             ), {'did': did, 'rid': str(rule.id)})
+            if reboot_rule:
+                counts = await _evaluate_reboot(
+                    db, rule, did, dev, scalar.get(did, {}), now=now, hold_s=clear_hold,
+                    max_gap=freshness_budgets(dev, ('uptime',))['uptime'],
+                    silences=silences, branding=branding)
+                raised += counts[0]
+                resolved += counts[1]
+                await db.commit()
+                continue
             device_ifs = {idx: series for (device, idx), series in if_data.items() if device == did}
             bound_entities = list(entities(
                     conditions, scalar.get(did, {}), device_ifs, interfaces.get(did, []),
@@ -727,8 +749,8 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 value = result.values.get(rule.metric)
                 if value is None:
                     value = next((v for v in result.values.values() if v is not None), 0)
-                detail = ', '.join(f"{m}={v:g}" if v is not None else f"{m}=unknown"
-                                   for m, v in result.values.items())
+                context = _counter_context(history, rule.metric, now)
+                detail = _detail_text(rule, conditions, result.values, context)
                 extra.update({'held_seconds': result.held_seconds, 'values': result.values,
                               'data_state': 'current',
                               'suppressed_by_dependency': False})
@@ -736,14 +758,205 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 # the inserted/resolved row before releasing the transaction lock.
                 raised, resolved = await _apply(db, rule, did, dev['hostname'], identity,
                     label, result.breach, value, detail, extra, raised, resolved, silences,
-                    ip_address=dev.get('ip', ''),
-                    value_context=_counter_context(history, rule.metric, now))
+                    ip_address=dev.get('ip', ''), value_context=context,
+                    asset_type=ap.asset_type_label(dev.get('device_type')), branding=branding)
                 await db.commit()
         await db.commit()
 
     if raised or resolved:
         logger.info("network alert eval: %d rules, %d raised, %d resolved", len(rules), raised, resolved)
     return {"rules": len(rules), "raised": raised, "resolved": resolved}
+
+
+def _detail_text(rule, conditions, values: dict, context: dict | None = None) -> str:
+    """What was measured, in words, for the stored alert message:
+    "Device CPU 97% (limit 90%)", "the interface is down (link not
+    operational)" — never "cpu=97" or a 0/1 flag."""
+    parts = []
+    for c in conditions:
+        m = c.get('metric')
+        v = values.get(m)
+        if 'state' in ap.METRICS.get(m, {}):
+            parts.append(ap.condition_phrase(m, c.get('operator'), c.get('threshold'), tense='past'))
+        elif v is None:
+            parts.append(f"{ap.metric_noun(m)} unknown (no current reading)")
+        else:
+            shown = ap.reading_text(m, v, c.get('operator'), c.get('threshold'),
+                                    context if m == rule.metric else None)
+            limit = ap.format_threshold(m, c.get('threshold'), c.get('operator'), v)
+            parts.append(f"{ap.metric_noun(m)} {shown} (limit {limit})")
+    text_ = '; '.join(p for p in parts if p)
+    return text_[:1].upper() + text_[1:]
+
+
+# ─── Reboots (sysUpTime went back) ───────────────────────────────────────────
+#
+# A reboot is an event, not a level. The stored rule is `uptime_reset == 1`
+# (a 0/1 flag per poll), so its operator, threshold, reset level and breach
+# hold mean nothing: the flag is 1 for exactly one poll. Instead:
+#
+# * A reboot is a poll whose uptime is more than REBOOT_MIN_DROP_S below the
+#   previous one (not a 32-bit TimeTicks wrap at ~497 days). Its boot time is
+#   that poll's time minus the new uptime.
+# * It raises one incident per rule + device. A further reboot while it is
+#   open updates the same incident ("rebooted again", one notification per
+#   reboot) and restarts the hold; it never opens a second incident.
+# * The incident closes itself once no further reboot was seen for the hold
+#   (``clear_duration``; NULL = EVENT_HOLD_DEFAULT_S), or when an operator
+#   resolves it. The all-clear says how long the device has stayed up, or
+#   honestly that there is no current uptime reading.
+# * A reboot already announced (open or resolved incident) is never paged
+#   twice, so a manual resolve inside the hold stays resolved.
+
+EVENT_HOLD_DEFAULT_S = 900
+REBOOT_MIN_DROP_S = 60
+# sysUpTime is TimeTicks (1/100 s, 32 bits): it wraps after ~497.1 days.
+_UPTIME_WRAP_S = 2 ** 32 / 100.0
+
+
+def event_hold_seconds(clear_duration) -> int:
+    """How long an event incident (reboot) stays open after the last event."""
+    if clear_duration is None:
+        return EVENT_HOLD_DEFAULT_S
+    return max(0, int(clear_duration))
+
+
+def reboot_events(series) -> list[dict]:
+    """Reboots in an uptime series [(epoch s, uptime s)], oldest first."""
+    out: list[dict] = []
+    prev = None
+    for stamp, value in sorted((float(t), v) for t, v in series or [] if v is not None):
+        value = float(value)
+        if prev is not None and value < prev[1] - REBOOT_MIN_DROP_S:
+            wrapped = prev[1] + (stamp - prev[0]) >= _UPTIME_WRAP_S - 3600
+            if not wrapped:
+                out.append({"detected_at": stamp, "rebooted_at": stamp - value,
+                            "uptime_s": value, "previous_uptime_s": prev[1]})
+        prev = (stamp, value)
+    return out
+
+
+async def _reboot_incident(db: AsyncSession, rule_id, device_id: str):
+    """(open incident id, triggered_at, metadata) and the newest reboot this
+    rule already announced for the device (epoch s; open or resolved)."""
+    rows = (await db.execute(text(
+        "SELECT id, triggered_at, status, metadata FROM alerts "
+        "WHERE rule_id = :rid AND device_id = :did "
+        "ORDER BY triggered_at DESC LIMIT 20"
+    ), {"rid": str(rule_id), "did": device_id})).all()
+    known = 0.0
+    open_row = None
+    for r in rows:
+        meta = r[3] if isinstance(r[3], dict) else json.loads(r[3] or "{}")
+        seen = meta.get("reboot_detected_at")
+        stamp = r[1].timestamp() if r[1] is not None else 0.0
+        # Before 1.25.3 a reboot incident carried no detection time; its
+        # trigger time is at or after the reboot it announced.
+        known = max(known, float(seen) if seen is not None else stamp)
+        if open_row is None and r[2] in ("active", "acknowledged"):
+            open_row = (r[0], r[1], meta)
+    return open_row, known
+
+
+async def _evaluate_reboot(db: AsyncSession, rule, did: str, dev: dict, series: dict, *,
+                           now: float, hold_s: int, max_gap: float,
+                           silences: set | None, branding) -> tuple[int, int]:
+    """Raise, extend or close one rule/device reboot incident. (raised, resolved)."""
+    from app.services.alert_schedule import notifications_allowed, get_configured_timezone
+
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                     {'key': f'network:{rule.id}:{did}:None'})
+    uptime = [(float(t), v) for t, v in series.get('uptime', []) if v is not None and float(t) <= now]
+    events = reboot_events(uptime)
+    latest_sample = max(uptime, default=None)
+    current = None
+    if latest_sample and now - latest_sample[0] < max_gap:
+        current = float(latest_sample[1]) + (now - latest_sample[0])
+    opened, known = await _reboot_incident(db, rule.id, did)
+    fresh = [e for e in events if e["detected_at"] > known + 1e-6]
+    asset_type = ap.asset_type_label(dev.get('device_type'))
+    ip = dev.get('ip', '')
+    who = ap.asset_label(dev['hostname'], ip, asset_type)
+    common = dict(device_id=did, ip_address=ip, asset_type=asset_type, branding=branding)
+
+    if opened is None:
+        recent = [e for e in fresh if now - e["detected_at"] < max(hold_s, 60)]
+        if not recent:
+            return 0, 0
+        if silences and (did, f"rule:{rule.id}") in silences:
+            return 0, 0
+        first, last = recent[0], recent[-1]
+        ctx = {"rebooted_at": last["rebooted_at"], "uptime_s": current if current is not None else last["uptime_s"],
+               "previous_uptime_s": first["previous_uptime_s"], "reboot_count": len(recent),
+               "first_rebooted_at": first["rebooted_at"]}
+        message = ap.reboot_sentence(who, ctx, branding=branding, now=now)
+        meta = {"reboot_detected_at": last["detected_at"], "rebooted_at": last["rebooted_at"],
+                "first_rebooted_at": first["rebooted_at"], "reboot_count": len(recent),
+                "previous_uptime_s": first["previous_uptime_s"], "hold_seconds": hold_s,
+                "data_state": "current", "event": "reboot"}
+        alert_id = await _raise(db, rule, did, message, 1.0, None, meta)
+        if alert_id is None:
+            return 0, 0
+        await db.commit()
+        sent = await _notify(db, rule, dev['hostname'], alert_id=alert_id,
+                             first_seen=datetime.now(timezone.utc), context=ctx, **common)
+        await ns.stamp(db, alert_id, sent)
+        await db.commit()
+        return 1, 0
+
+    alert_id, started_at, meta = opened
+    if fresh:
+        # Rebooted again while the incident is open: same incident, new facts,
+        # one notification per further reboot; the hold restarts.
+        last = fresh[-1]
+        count = int(meta.get("reboot_count") or 1) + len(fresh)
+        ctx = {"rebooted_at": last["rebooted_at"], "uptime_s": current if current is not None else last["uptime_s"],
+               "reboot_count": count,
+               "first_rebooted_at": meta.get("first_rebooted_at") or meta.get("rebooted_at")
+               or (started_at.timestamp() if started_at else None)}
+        message = ap.reboot_sentence(who, ctx, branding=branding, now=now)
+        await db.execute(text(
+            "UPDATE alerts SET message = :msg, metadata = COALESCE(metadata,'{}'::jsonb) || CAST(:meta AS jsonb) "
+            "WHERE id = :id"), {"id": alert_id, "msg": message, "meta": json.dumps({
+                "reboot_detected_at": last["detected_at"], "rebooted_at": last["rebooted_at"],
+                "reboot_count": count, "hold_seconds": hold_s, "data_state": "current"})})
+        await db.commit()
+        tz = await get_configured_timezone(db)
+        if (await ns.was_notified(db, alert_id) and notifications_allowed(
+                getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
+                getattr(rule, "schedule_days", None), tz)):
+            await _notify(db, rule, dev['hostname'], alert_id=alert_id, first_seen=started_at,
+                          context=ctx, lifecycle="changed",
+                          event=f"reboot:{int(last['detected_at'])}", **common)
+        return 0, 0
+
+    last_at = float(meta.get("reboot_detected_at") or (started_at.timestamp() if started_at else now))
+    if now - last_at < hold_s:
+        if await ns.is_pending(db, alert_id) and rule.notify_channels and \
+                await _trigger_allowed(db, rule, device_id=did) and await ns.claim_pending(db, alert_id):
+            # Quiet hours held the trigger and the hold is still running.
+            await db.commit()
+            ctx = {"rebooted_at": meta.get("rebooted_at"), "uptime_s": current,
+                   "previous_uptime_s": meta.get("previous_uptime_s"),
+                   "reboot_count": meta.get("reboot_count") or 1,
+                   "first_rebooted_at": meta.get("first_rebooted_at")}
+            sent = await _notify(db, rule, dev['hostname'], alert_id=alert_id, first_seen=started_at,
+                                 checked=True, context=ctx, **common)
+            await ns.stamp(db, alert_id, sent)
+            await db.commit()
+        return 0, 0
+    # No further reboot for the whole hold: the event is over.
+    notified = await ns.was_notified(db, alert_id)
+    n = await _resolve(db, alert_id)
+    await db.commit()
+    if n and notified and getattr(rule, "recovery_alert", True):
+        ctx = {"rebooted_at": meta.get("rebooted_at"), "uptime_s": current,
+               "reboot_count": meta.get("reboot_count") or 1, "hold_s": hold_s,
+               "last_seen_at": latest_sample[0] if latest_sample else None}
+        await _notify(db, rule, dev['hostname'], is_recovery=True,
+                      duration=ap.duration_between(started_at), alert_id=alert_id,
+                      first_seen=started_at, context=ctx, **common)
+    return 0, n
 
 
 def _counter_context(history, metric, now):
@@ -759,7 +972,8 @@ def _counter_context(history, metric, now):
 async def _apply(db, rule, device_id, hostname, if_index, iface_label,
                  breach, value, detail, extra, raised, resolved,
                  silences: set[tuple[str, str]] | None = None, *, ip_address: str = "",
-                 value_context: dict | None = None):
+                 value_context: dict | None = None, asset_type: str | None = None,
+                 branding=None):
     """Raise (if breaching and not already open) or resolve one rule/device/iface."""
     existing = await _active_alert(db, rule.id, device_id, if_index)
     if existing:
@@ -772,6 +986,8 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
     notify = dict(reading=reading, iface_label=iface_label, device_id=device_id,
                   if_index=if_index, ip_address=ip_address, value=value,
                   value_context=value_context)
+    if asset_type is not None or branding is not None:
+        notify.update(asset_type=asset_type, branding=branding)
     if breach:
         # An active snooze suppresses re-raising this exact condition; the
         # resolve branch below still runs so a snoozed condition that clears

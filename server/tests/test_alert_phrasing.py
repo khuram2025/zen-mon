@@ -96,13 +96,13 @@ def test_event_sentence_names_the_subject_once():
     v = ap.phrasing_variables(metric="if_util_pct", operator=">", threshold=80,
                               reading="87%", subject_noun="core-router-01")
     assert v["event_sentence"] == (
-        "Interface utilisation on core-router-01 rose above 80% (currently 87%)."
+        "Interface utilisation on core-router-01 rose to 87% (limit 80%)."
     )
 
     # A state metric puts the subject first and keeps the host's own casing.
     v = ap.phrasing_variables(metric="ping_status", operator="==", threshold=0,
                               subject_noun="core-router-01")
-    assert v["event_sentence"] == "core-router-01 is down (no response to ICMP probes)."
+    assert v["event_sentence"] == "core-router-01 is down: it does not answer ping."
 
 
 def test_recovery_phrasing_flips_the_verb_and_carries_the_duration():
@@ -110,10 +110,14 @@ def test_recovery_phrasing_flips_the_verb_and_carries_the_duration():
                               reading="42%", subject_noun="core-router-01",
                               is_recovery=True, duration="12 minutes")
     assert v["event_sentence"] == (
-        "Interface utilisation on core-router-01 is back below 80% (now 42%)."
+        "Interface utilisation on core-router-01 returned to 42% (limit 80%)."
     )
-    assert v["duration_sentence"] == " The condition was active for 12 minutes."
-    assert v["duration_suffix"] == " Active for 12 minutes."
+    assert v["duration_sentence"] == " Lasted 12 minutes."
+    assert v["duration_suffix"] == " Lasted 12 minutes."
+    # Without a reading the cleared comparison is still a sentence.
+    bare = ap.phrasing_variables(metric="if_util_pct", operator=">", threshold=80,
+                                 subject_noun="core-router-01", is_recovery=True)
+    assert bare["event_sentence"] == "Interface utilisation on core-router-01 is back below 80%."
 
 
 def test_multi_condition_rules_join_on_their_logic():
@@ -240,7 +244,7 @@ def test_format_value_is_unchanged_for_existing_callers():
 def test_headline_condition_and_sentence_share_one_precision():
     v = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90,
                               value=90.3, subject_noun="srv-a")
-    assert v["event_sentence"] == "Host memory on srv-a rose above 90.0% (currently 90.3%)."
+    assert v["event_sentence"] == "Host memory on srv-a rose to 90.3% (limit 90.0%)."
     assert v["condition_label"] == "Host memory above 90.0%"
     assert v["threshold_value"] == "90.0%"
     assert v["reading"] == v["reading_value"] == "90.3%"
@@ -254,13 +258,13 @@ def test_headline_condition_and_sentence_share_one_precision():
     # A clear breach keeps the catalogue wording.
     clear = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90,
                                   value=97.2, subject_noun="srv-a")
-    assert clear["event_sentence"] == "Host memory on srv-a rose above 90% (currently 97%)."
+    assert clear["event_sentence"] == "Host memory on srv-a rose to 97% (limit 90%)."
 
 
 def test_old_callers_get_the_same_text_as_before():
     v = ap.phrasing_variables(metric="if_util_pct", operator=">", threshold=80,
                               reading="87%", subject_noun="core-1")
-    assert v["event_sentence"] == "Interface utilisation on core-1 rose above 80% (currently 87%)."
+    assert v["event_sentence"] == "Interface utilisation on core-1 rose to 87% (limit 80%)."
     assert v["threshold_value"] == "80%" and v["condition_label"] == "Interface utilisation above 80%"
 
 
@@ -280,9 +284,8 @@ def test_interface_errors_state_the_interval_and_direction():
         "152 errors in the last 60 s (150 in, 2 out)"
     v = ap.phrasing_variables(metric="if_errors", operator=">", threshold=100, value=152,
                               value_context=ctx, subject_noun="sw-1 (10.0.0.1) / Gi0/1")
-    assert v["event_sentence"] == ("Interface errors on sw-1 (10.0.0.1) / Gi0/1 rose above "
-                                   "100 errors (currently 152 errors in the last 60 s: "
-                                   "150 in, 2 out).")
+    assert v["event_sentence"] == ("Interface errors on sw-1 (10.0.0.1) / Gi0/1 rose to "
+                                   "152 errors in the last 60 s (150 in, 2 out; limit 100 errors).")
     assert v["reading_value"] == "152 errors"
     assert v["reading_detail"] == "in the last 60 s (150 in, 2 out)"
     head = ap.headline_metric("if_errors", 152, ">", 100, context=ctx)
@@ -323,3 +326,190 @@ def test_sms_uses_event_time_and_keeps_existing_timestamp():
     assert ap.sms_with_timestamp("At {timestamp}", timestamp) == "At 03 Nov 2026 13:42 UTC"
     custom = "Device recovered at 2026-11-03 13:42:00 UTC."
     assert ap.sms_with_timestamp(custom, timestamp) == custom
+
+
+# ── Message wording 1.25.3: what, which asset, when, and what it means now ───
+
+from app.services.branding import Branding
+
+RIYADH = Branding(timezone="Asia/Riyadh")
+# 14:47 in Riyadh.
+NOW = datetime(2026, 11, 8, 11, 47, tzinfo=timezone.utc).timestamp()
+SW = "New_ACC_AdminB_SW09 (192.168.24.34)"
+SRV = "OC-MW-INF-FS-1 (10.1.1.5)"
+
+
+def _sms(v, rule, recovery=False):
+    v = dict(v, severity="WARNING", rule_name=rule)
+    return (ap.DEFAULT_RECOVERY_SMS if recovery else ap.DEFAULT_SMS).format_map(v)
+
+
+@pytest.mark.parametrize("device_type,expected", [
+    ("switch", "Switch"), ("l3_switch", "Switch"), ("router", "Router"), ("firewall", "Firewall"),
+    ("access_point", "Access point"), ("other", "Device"), (None, "Device"), ("", "Device"),
+])
+def test_asset_type_labels(device_type, expected):
+    assert ap.asset_type_label(device_type) == expected
+    assert ap.asset_label("sw-1", "10.0.0.1", expected) == f"{expected} sw-1 (10.0.0.1)"
+
+
+def test_clock_is_appliance_local_and_dated_when_not_today():
+    assert ap.clock(NOW - 180, RIYADH, NOW) == "14:44"
+    assert ap.clock(NOW - 86400, RIYADH, NOW) == "Nov 07 14:47"
+    assert ap.clock(NOW, Branding(timezone="Asia/Riyadh", time_format="12h"), NOW) == "2:47 PM"
+    assert ap.clock(None, RIYADH, NOW) == ""
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (45, "45 s"), (180, "3 min"), (3600, "1 h"), (7800, "2 h 10 min"), (90000, "1 day 1 h"),
+    (41 * 86400 + 5000, "41 days"), (None, ""),
+])
+def test_short_duration(seconds, expected):
+    assert ap.short_duration(seconds) == expected
+
+
+@pytest.mark.parametrize("metric,operator,threshold,reading", [
+    ("uptime_reset", "eq", 1, "1"), ("uptime_reset", "eq", 1, "0"),
+    ("if_oper_status", "eq", 2, "2"), ("ping_status", "==", 0, "0"),
+])
+def test_state_flags_never_appear_as_readings(metric, operator, threshold, reading):
+    """The field complaint: "(currently 1)", "(now 0)" for a reboot flag."""
+    for recovery in (False, True):
+        v = ap.phrasing_variables(metric=metric, operator=operator, threshold=threshold,
+                                  reading=reading, subject_noun="sw (10.0.0.1)", is_recovery=recovery)
+        assert "currently" not in v["event_sentence"] and "(now " not in v["event_sentence"]
+        assert v["reading"] == ""
+
+
+def test_reboot_fires_with_time_and_uptime():
+    v = ap.phrasing_variables(metric="uptime_reset", operator="eq", threshold=1, subject_noun=SW,
+                              asset_type="Switch", branding=RIYADH, now=NOW, value_context={
+                                  "rebooted_at": NOW - 180, "uptime_s": 180,
+                                  "previous_uptime_s": 41 * 86400 + 5000, "reboot_count": 1})
+    assert v["event_sentence"] == (f"Switch {SW} rebooted at 14:44 — uptime is now 3 min (was 41 days).")
+    sms = _sms(v, "Device reboot detected")
+    assert sms == ("ZenPlus WARNING — Device reboot detected: Switch New_ACC_AdminB_SW09 "
+                   "(192.168.24.34) rebooted at 14:44 — uptime is now 3 min (was 41 days).")
+    assert len(sms) <= 160
+
+
+def test_reboot_again_names_the_count_and_the_first_reboot():
+    v = ap.phrasing_variables(metric="uptime_reset", operator="eq", threshold=1, subject_noun=SW,
+                              asset_type="Switch", branding=RIYADH, now=NOW, value_context={
+                                  "rebooted_at": NOW - 60, "uptime_s": 60, "reboot_count": 2,
+                                  "first_rebooted_at": NOW - 600})
+    assert v["event_sentence"] == (f"Switch {SW} rebooted again at 14:46 (2 reboots since 14:37)"
+                                   " — uptime is now 1 min.")
+
+
+def test_reboot_clear_says_how_long_it_stayed_up_not_a_counter():
+    v = ap.phrasing_variables(metric="uptime_reset", operator="eq", threshold=1, subject_noun=SW,
+                              asset_type="Switch", branding=RIYADH, now=NOW, is_recovery=True,
+                              duration="15 minutes", value_context={
+                                  "rebooted_at": NOW - 1000, "uptime_s": 1000, "reboot_count": 1})
+    assert v["event_sentence"] == (f"Switch {SW} has stayed up for 16 min since its 14:30 reboot;"
+                                   " no further reboots.")
+    # An event has no "active for": the sentence already says what matters.
+    assert v["duration_suffix"] == ""
+    sms = _sms(v, "Device reboot detected", recovery=True)
+    assert "now 0" not in sms and "Active for" not in sms and len(sms) <= 160
+
+
+def test_reboot_clear_without_a_current_reading_says_so():
+    v = ap.phrasing_variables(metric="uptime_reset", operator="eq", threshold=1, subject_noun=SW,
+                              asset_type="Switch", branding=RIYADH, now=NOW, is_recovery=True,
+                              value_context={"rebooted_at": NOW - 1000, "uptime_s": None,
+                                             "last_seen_at": NOW - 950, "hold_s": 900})
+    assert v["event_sentence"] == (f"Reboot alert for Switch {SW} closed: no further reboots since"
+                                   " 14:30, but no uptime reading since 14:31 (current state unknown).")
+
+
+def test_server_restart_fire_and_clear():
+    fire = ap.phrasing_variables(metric="host_restart", operator="gt", threshold=0, subject_noun=SRV,
+                                 asset_type="Server", branding=RIYADH, now=NOW, value_context={
+                                     "boot_at": NOW - 120, "boot_kind": "unexpected_restart",
+                                     "restart_count": 1, "uptime_s": 120})
+    assert fire["event_sentence"] == (f"Server {SRV} restarted at 14:45 after an unexpected shutdown"
+                                      " or power loss — up for 2 min.")
+    requested = ap.phrasing_variables(metric="host_restart", operator="gt", threshold=0,
+                                      subject_noun=SRV, asset_type="Server", branding=RIYADH,
+                                      now=NOW, value_context={"requested_at": NOW - 30})
+    assert requested["event_sentence"] == f"Server {SRV} is restarting: a restart was requested at 14:46."
+    up = ap.phrasing_variables(metric="host_restart", operator="gt", threshold=0, subject_noun=SRV,
+                               asset_type="Server", branding=RIYADH, now=NOW, is_recovery=True,
+                               duration="13 minutes",
+                               value_context={"boot_at": NOW - 780, "agent_reporting": True})
+    assert up["event_sentence"] == (f"Server {SRV} has stayed up since its 14:34 restart and is"
+                                    " reporting normally (up 13 min).")
+    silent = ap.phrasing_variables(metric="host_restart", operator="gt", threshold=0, subject_noun=SRV,
+                                   asset_type="Server", branding=RIYADH, now=NOW, is_recovery=True,
+                                   value_context={"boot_at": NOW - 780, "agent_reporting": False,
+                                                  "heartbeat_at": NOW - 700})
+    assert silent["event_sentence"] == (f"Restart alert for Server {SRV} closed with no further restarts,"
+                                        " but its agent has not reported since 14:35 — its current"
+                                        " state is unknown.")
+    for v in (fire, requested, up, silent):
+        text_ = v["event_sentence"]
+        assert "observation window" not in text_ and "does not confirm" not in text_
+
+
+def test_server_shutdown_fire_and_clear():
+    fire = ap.phrasing_variables(metric="host_shutdown", operator="gt", threshold=0, subject_noun=SRV,
+                                 asset_type="Server", branding=RIYADH, now=NOW,
+                                 value_context={"kind": "shutdown", "event_at": NOW - 60})
+    assert fire["event_sentence"] == f"Server {SRV} began shutting down at 14:46."
+    gone = ap.phrasing_variables(metric="host_shutdown", operator="gt", threshold=0, subject_noun=SRV,
+                                 asset_type="Server", branding=RIYADH, now=NOW, is_recovery=True,
+                                 value_context={"event_at": NOW - 900, "agent_reporting": False,
+                                                "heartbeat_at": NOW - 910})
+    assert gone["event_sentence"] == (f"Shutdown alert for Server {SRV} closed; its agent has not"
+                                      " reported since 14:31, so it may still be powered off.")
+
+
+def test_device_status_names_type_and_time():
+    down = ap.phrasing_variables(metric="ping_status", operator="==", threshold=0,
+                                 subject_noun="core-sw (10.0.0.1)", asset_type="Switch",
+                                 device_status="down", event_time=NOW, branding=RIYADH, now=NOW)
+    assert down["event_sentence"] == "Switch core-sw (10.0.0.1) went down at 14:47: it does not answer ping."
+    up = ap.phrasing_variables(metric="ping_status", operator="==", threshold=0,
+                               subject_noun="core-sw (10.0.0.1)", asset_type="Switch",
+                               device_status="up", event_time=NOW, branding=RIYADH, now=NOW,
+                               is_recovery=True, duration="8 minutes")
+    assert up["event_sentence"] + up["duration_suffix"] == (
+        "Switch core-sw (10.0.0.1) came back up at 14:47: it answers ping again. Down for 8 minutes.")
+    degraded = ap.phrasing_variables(metric="ping_status", operator="==", threshold=0,
+                                     subject_noun="fw (10.0.0.9)", asset_type="Firewall",
+                                     device_status="degraded", event_time=NOW, branding=RIYADH,
+                                     now=NOW, status_detail="Packet loss 33% (limit 10%)")
+    assert degraded["event_sentence"] == ("Firewall fw (10.0.0.9) has degraded connectivity since 14:47:"
+                                          " packet loss 33% (limit 10%).")
+    # The subject keeps the plain "name (IP)".
+    assert down["host_suffix"] == " — core-sw (10.0.0.1)"
+
+
+def test_metric_sentences_name_the_server_and_limit():
+    fire = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90, value=97.2,
+                                 subject_noun="srv-a (10.0.0.5)", asset_type="Server")
+    assert fire["event_sentence"] == "Host memory on Server srv-a (10.0.0.5) rose to 97% (limit 90%)."
+    clear = ap.phrasing_variables(metric="host_memory_pct", operator=">", threshold=90, value=41.8,
+                                  subject_noun="srv-a (10.0.0.5)", asset_type="Server",
+                                  is_recovery=True, duration="12 minutes")
+    assert clear["event_sentence"] + clear["duration_suffix"] == (
+        "Host memory on Server srv-a (10.0.0.5) returned to 42% (limit 90%). Lasted 12 minutes.")
+    low = ap.phrasing_variables(metric="apm_apdex", operator="<", threshold=0.85, value=0.55,
+                                subject_noun="checkout-api")
+    assert low["event_sentence"] == "Apdex score on checkout-api fell to 0.55 (limit 0.85)."
+
+
+def test_service_and_process_sentences_name_what_stopped():
+    v = ap.phrasing_variables(metric="host_service_down", operator="gt", threshold=0,
+                              subject_noun="srv-a (10.0.0.5)", asset_type="Server",
+                              status_detail="service MSSQLSERVER has stopped")
+    assert v["event_sentence"] == "Server srv-a (10.0.0.5): service MSSQLSERVER has stopped."
+
+
+def test_preview_event_samples_exist_for_every_event_metric():
+    for metric in ap.EVENT_SENTENCE_METRICS:
+        for recovered in (False, True):
+            assert ap.sample_event_context(metric, recovered=recovered, now=NOW)
+    assert ap.sample_event_context("cpu") is None

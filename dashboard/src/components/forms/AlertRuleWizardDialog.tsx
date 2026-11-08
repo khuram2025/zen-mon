@@ -281,6 +281,26 @@ const STATUS_EVENT_METRICS = new Set(['ping_status', 'rtt', 'packet_loss'])
 
 /** Default clear hold the evaluator applies when a metric rule leaves clear_duration empty. */
 const DEFAULT_CLEAR_SECONDS = 300
+/**
+ * Reboot (and server restart/shutdown) alerts are events: they close on their own this long after the last
+ * event when "Auto-clear after" is empty (network_alert_service.EVENT_HOLD_DEFAULT_S,
+ * server_event_service.LIFECYCLE_HOLD_DEFAULT_S).
+ */
+const DEFAULT_EVENT_HOLD_SECONDS = 900
+/** A reboot is detected from the device's uptime counter: an event, not a level with an operator or a reset value. */
+const REBOOT_METRIC = 'uptime_reset'
+
+/** A device rule whose only condition is "Reboot detected". */
+function isRebootRule(s: WizardState): boolean {
+  return s.source === 'device' && s.conditions.length === 1 && s.conditions[0]?.metric === REBOOT_METRIC
+}
+
+/** "15 min", "90 s": the event hold as the reset text reads it. */
+function holdLabel(seconds: number | null): string {
+  const v = seconds ?? DEFAULT_EVENT_HOLD_SECONDS
+  if (v === 0) return 'at the next check'
+  return v % 60 === 0 ? `${v / 60} min` : `${v} s`
+}
 // Percent metrics that clear 2 points on the healthy side of the trigger when no reset value is set.
 const AUTO_CLEAR_METRICS = new Set(['cpu', 'memory'])
 const AUTO_CLEAR_POINTS = 2
@@ -432,8 +452,8 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
       : isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric))
       ? s.target.trim() || null
       : null,
-    min_duration: isSyslog || isTrap || (isApm && isApmEvent(first.metric)) ? 0 : s.min_duration,
-    clear_duration: usesMetricLifecycle(s) ? s.clear_duration : null,
+    min_duration: isSyslog || isTrap || (isApm && isApmEvent(first.metric)) || isRebootRule(s) ? 0 : s.min_duration,
+    clear_duration: usesMetricLifecycle(s) || isRebootRule(s) ? s.clear_duration : null,
     notify_while_flapping: flapHoldApplies(s) ? s.notify_while_flapping : false,
     severity: s.severity,
     priority: s.priority || null,
@@ -521,6 +541,7 @@ export function AlertRuleWizardDialog({
   const isServer = s.source === 'server'
   const serverKind = isServer ? serverMetricKind(s.conditions[0]?.metric) : null
   const isLifecycle = isServer && serverKind === 'event'
+  const rebootRule = isRebootRule(s)
   const nfErrors = useMemo(() => (s.source === 'netflow' ? validateNetflowForm(s.nf) : {}), [s.source, s.nf])
 
   // Which default wording this rule's notifications are built from. Service
@@ -1133,7 +1154,15 @@ export function AlertRuleWizardDialog({
                       <div key={i} className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
                         <div className="grid flex-1 grid-cols-3 gap-2">
                           <FormField label={i === 0 ? 'Field' : ' '}>
-                            <Select value={c.metric} onValueChange={(v) => updateCond(i, { metric: v })}>
+                            <Select value={c.metric} onValueChange={(v) => {
+                              if (v === REBOOT_METRIC) {
+                                // An event: the stored comparison is fixed and a breach hold would never be met.
+                                setS((st) => ({ ...st, min_duration: s.conditions.length === 1 ? 0 : st.min_duration,
+                                  conditions: st.conditions.map((x, idx) => (idx === i ? { metric: v, operator: '==', threshold: 1, reset_threshold: null } : x)) }))
+                              } else {
+                                updateCond(i, { metric: v })
+                              }
+                            }}>
                               <SelectTrigger><SelectValue /></SelectTrigger>
                               <SelectContent>
                                 <SelectItem value="ping_status">Ping status</SelectItem>
@@ -1146,6 +1175,11 @@ export function AlertRuleWizardDialog({
                               </SelectContent>
                             </Select>
                           </FormField>
+                          {c.metric === REBOOT_METRIC ? (
+                            <p className="col-span-2 self-center text-xs text-muted">
+                              Fires when the device&apos;s uptime goes back to zero (it restarted). There is no value to compare.
+                            </p>
+                          ) : (<>
                           <FormField label={i === 0 ? 'Operator' : ' '}>
                             <Select value={c.operator} onValueChange={(v) => updateCond(i, { operator: v })}>
                               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1159,7 +1193,8 @@ export function AlertRuleWizardDialog({
                           <FormField label={i === 0 ? 'Value' : ' '}>
                             <Input type="number" step="any" value={c.threshold} onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })} />
                           </FormField>
-                          {NETWORK_METRICS.some(m => m.value === c.metric) && ['>', '>=', '<', '<='].includes(c.operator) && (() => {
+                          </>)}
+                          {NETWORK_METRICS.some(m => m.value === c.metric) && c.metric !== REBOOT_METRIC && ['>', '>=', '<', '<='].includes(c.operator) && (() => {
                             const auto = autoResetThreshold(c)
                             return (
                               <FormField label="Reset value (optional)" hint={auto != null ? `Empty = auto: clears ${c.operator.startsWith('>') ? 'below' : 'above'} ${auto}%` : undefined}>
@@ -1224,7 +1259,7 @@ export function AlertRuleWizardDialog({
                           <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder={serverKind === 'svc' ? 'e.g. MSSQLSERVER' : 'e.g. nginx.exe'} />
                         </FormField>
                       )}
-                      {serverKind === 'event' && <p className="text-xs text-muted">Notifies on new OS lifecycle evidence, grouped into one incident for 15 minutes. Historical backfill does not page. Shutdown evidence may arrive after the next boot.</p>}
+                      {serverKind === 'event' && <p className="text-xs text-muted">Notifies when the agent reports a new OS boot, restart request or shutdown, with the time it happened. A further restart while the alert is open updates the same alert. Historical backfill does not page. Shutdown evidence may arrive after the next boot.</p>}
                       {serverKind === 'flag' && (
                         <p className="text-xs text-muted">
                           Fires when a server&apos;s agent stops reporting but the server still answers ping: the server is up and
@@ -1282,7 +1317,7 @@ export function AlertRuleWizardDialog({
                   <NetflowConditionFields form={s.nf} errors={nfErrors} onChange={(nf) => setS((st) => ({ ...st, nf }))} />
                 )}
 
-                {!apmEvent && s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && !(isServer && serverKind !== 'pct' && serverKind !== 'flag') && (
+                {!apmEvent && !rebootRule && s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && !(isServer && serverKind !== 'pct' && serverKind !== 'flag') && (
                   serverKind === 'flag' ? (
                     <FormField label="Agent silent for" hint={`How long the agent may miss its heartbeats (every 30 seconds) before the alert is raised. 0 = the default ${DEFAULT_SILENCE_SECONDS} seconds; never less than ${MIN_SILENCE_SECONDS}.`}>
                       <div className="flex items-center gap-3">
@@ -1301,7 +1336,22 @@ export function AlertRuleWizardDialog({
                     </FormField>
                   )
                 )}
-                {(usesMetricLifecycle(s) || serverKind === 'pct') && (
+                {(rebootRule || isLifecycle) && (
+                  <FormField
+                    label="Auto-clear after"
+                    hint={`The ${rebootRule ? 'reboot' : isLifecycle && s.conditions[0]?.metric === 'host_shutdown' ? 'shutdown' : 'restart'} alert closes on its own once this long passes without another one; a further ${rebootRule ? 'reboot' : 'event'} in the meantime updates the same alert ("${rebootRule ? 'rebooted' : 'restarted'} again") and starts the time again. You can also resolve it by hand at any time. Empty = ${DEFAULT_EVENT_HOLD_SECONDS / 60} minutes.`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Input
+                        type="number" min={0} className="w-28" placeholder={String(DEFAULT_EVENT_HOLD_SECONDS)}
+                        value={s.clear_duration ?? ''}
+                        onChange={(e) => setS({ ...s, clear_duration: e.target.value === '' ? null : Math.max(0, Number(e.target.value)) })}
+                      />
+                      <span className="text-sm text-muted">seconds after the last {rebootRule ? 'reboot' : 'event'}</span>
+                    </div>
+                  </FormField>
+                )}
+                {!rebootRule && (usesMetricLifecycle(s) || serverKind === 'pct') && (
                   <FormField
                     label="Clear after"
                     hint={`The cleared condition must hold this long before the alert resolves; a breach in the meantime continues the same alert without a new notification. Missing data never counts as cleared. Empty = ${DEFAULT_CLEAR_SECONDS} seconds.`}
@@ -1333,15 +1383,15 @@ export function AlertRuleWizardDialog({
                 <SectionTitle title="Reset Conditions" hint="How the notice closes, and whether a closing notification is sent." />
                 {s.source !== 'syslog' && s.source !== 'trap' && (
                   <p className="text-sm text-muted">
-                    {isLifecycle
-                      ? 'Lifecycle notices close 15 minutes after the last matching event. Closing a notice does not confirm that the server is powered off, back online, or healthy.'
+                    {isLifecycle || rebootRule
+                      ? `The alert closes on its own ${holdLabel(s.clear_duration)} after the last ${rebootRule ? 'reboot' : 'event'} (Auto-clear after), or when someone resolves it. The closing notice says what is known now: ${rebootRule ? 'how long the device has stayed up, or that it has no current uptime reading' : 'whether the server is reporting normally again, or that its agent is still silent'}. These options control the notification only.`
                       : 'Alerts resolve according to their clear conditions, even when recovery notifications are off. These options control the notification only.'}
                   </p>
                 )}
                 <div className="space-y-2">
                   {s.source === 'syslog' || s.source === 'trap' ? <p className="text-sm text-muted">Event alerts require manual resolution. No automatic recovery notification is sent.</p> : [
-                    { id: 'auto' as const, title: isLifecycle ? 'Notify when the observation window ends' : 'Send a recovery notification', desc: isLifecycle ? 'Notify the configured routes when the event notice closes; this is not a server recovery confirmation.' : 'Notify the configured routes after the alert condition clears.' },
-                    { id: 'none' as const, title: isLifecycle ? 'No end-of-window notification' : 'No recovery notification', desc: 'The alert still closes in the system; no closing notification is sent.' },
+                    { id: 'auto' as const, title: isLifecycle || rebootRule ? 'Notify when the alert closes' : 'Send a recovery notification', desc: isLifecycle || rebootRule ? 'Notify the configured routes when the alert closes after the auto-clear time.' : 'Notify the configured routes after the alert condition clears.' },
+                    { id: 'none' as const, title: isLifecycle || rebootRule ? 'No closing notification' : 'No recovery notification', desc: 'The alert still closes in the system; no closing notification is sent.' },
                   ].map((opt) => (
                     <button
                       key={opt.id}
@@ -1732,7 +1782,7 @@ export function AlertRuleWizardDialog({
             {step === 'reset_actions' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <SectionTitle title="Reset Actions" hint={isLifecycle ? 'Optional notification when the event observation window ends.' : 'Notifications when the alert clears (recovery).'} />
+                  <SectionTitle title="Reset Actions" hint={isLifecycle ? 'Optional notification when the alert closes after the auto-clear time.' : 'Notifications when the alert clears (recovery).'} />
                   {!isServer && (
                     <Button type="button" variant="outline" size="sm" onClick={copyTriggerToReset}>
                       <Copy className="h-3.5 w-3.5" />Copy from trigger
@@ -1743,8 +1793,8 @@ export function AlertRuleWizardDialog({
                   <p className="rounded-lg border border-border bg-surface2/40 p-3 text-xs text-muted">
                     {isLifecycle
                       ? s.reset_mode === 'auto'
-                        ? 'The configured routes receive a notice when the 15-minute observation window ends. The built-in wording does not claim that the server has recovered or powered off.'
-                        : 'Closing notices are off. Select "Notify when the observation window ends" on the Reset step to enable them.'
+                        ? 'The configured routes receive a notice when the alert closes. It says whether the server is reporting normally again or its agent is still silent; it never guesses.'
+                        : 'Closing notices are off. Select "Notify when the alert closes" on the Reset step to enable them.'
                       : s.reset_mode === 'auto'
                         ? 'When the condition clears, the configured routes receive a recovery notice in the built-in wording, stating how long the condition lasted.'
                         : 'Recovery notices are off. Select "Send a recovery notification" on the Reset step to enable them.'}
@@ -1821,15 +1871,18 @@ export function AlertRuleWizardDialog({
                       : (() => { const x = servers.find((v: any) => v.id === s.server_id); return x ? (x.display_name || x.hostname) : 'One server' })()} />
                     {serverKind === 'pct' && <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />}
                   </>
-                ) : (
+                ) : rebootRule ? null : (
                   <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
                 )}
-                {(usesMetricLifecycle(s) || serverKind === 'pct') && (
+                {(rebootRule || isLifecycle) && (
+                  <ReviewRow label="Auto-clear after" value={`${holdLabel(s.clear_duration)} after the last ${rebootRule ? 'reboot' : 'event'}${s.clear_duration == null ? ' (default)' : ''}`} />
+                )}
+                {!rebootRule && (usesMetricLifecycle(s) || serverKind === 'pct') && (
                   <ReviewRow label="Clear after" value={s.clear_duration === 0 ? 'First healthy reading' : `${s.clear_duration ?? DEFAULT_CLEAR_SECONDS}s${s.clear_duration == null ? ' (default)' : ''}`} />
                 )}
                 {flapHold && <ReviewRow label="While flapping" value={s.notify_while_flapping ? 'Notify immediately' : 'Held until a status lasts the flap stability time'} />}
                 <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution'
-                  : isLifecycle ? `Auto-close after 15 minutes; ${s.reset_mode === 'auto' ? 'notify when the window ends' : 'no closing notification'}`
+                  : isLifecycle || rebootRule ? `Auto-close ${holdLabel(s.clear_duration)} after the last ${rebootRule ? 'reboot' : 'event'}; ${s.reset_mode === 'auto' ? 'notify when it closes' : 'no closing notification'}`
                   : s.reset_mode === 'auto' ? 'Auto-resolve + recovery notification' : 'Auto-resolve without recovery notification'} />
                 <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None selected (escalation may still notify)'} />
                 <ReviewRow label="Priority" value={<span className="inline-flex items-center gap-1.5"><PriorityBadge priority={effPriority} />{s.priority ? '' : <span className="text-xs text-muted">auto from severity</span>}</span>} />

@@ -22,18 +22,84 @@ async def audit(db, actor, action, *, device_id=None, resource_id=None, metadata
 
 
 async def _device(db, device_id):
-    return (await db.execute(text('''SELECT d.hostname,host(d.ip_address) AS ip,n.notify_channels
+    return (await db.execute(text('''SELECT d.hostname,host(d.ip_address) AS ip,d.device_type,n.notify_channels
         FROM devices d JOIN device_ncm n ON n.device_id=d.id WHERE d.id=:id'''),{'id':device_id})).first()
 
 
-def _payload(row, device_id, key, kind, summary, *, metadata=None, severity='warning', status='ACTIVE'):
+# Why a backup failed, in words (ncm_errors categories). Never the raw
+# exception text, which may carry CLI output or provider details.
+FAILURE_LABELS = {
+    'blocked': 'the device is not ready for backups', 'not_enrolled': 'the device is not enrolled',
+    'credentials': 'the stored credentials could not be read', 'authentication': 'login was refused',
+    'key': 'the SSH key could not be loaded', 'unreachable': 'the device could not be reached over SSH',
+    'timeout': 'the device did not answer in time', 'negotiation': 'the SSH handshake failed',
+    'privilege': 'the account cannot read the full configuration',
+    'driver': 'no matching platform driver', 'unsupported_type': 'a capture type is not supported',
+    'incomplete': 'the device output ended early', 'format': 'the output did not look like a configuration',
+    'interrupted': 'the SSH session dropped', 'archive': 'the copy could not be stored',
+    'cancelled': 'the job was cancelled',
+}
+
+
+def describe(kind, row, metadata=None, *, at=''):
+    """(short summary, sentence) for an NCM event on a device.
+
+    "Running configuration of Switch sw-01 (10.0.0.2) changed at 14:44:
+    5 lines added, 2 removed, by admin."
+    """
+    from app.services import alert_phrasing as ap
+    m = metadata or {}
+    who = ap.asset_label(row.hostname, row.ip, ap.asset_type_label(getattr(row, 'device_type', None)))
+    when = f' at {at}' if at else ''
+    if kind == 'config.changed':
+        ctype = str(m.get('config_type') or 'running').lower()
+        parts = []
+        if m.get('added') is not None:
+            parts.append(f"{m['added']} line{'s' if m['added'] != 1 else ''} added")
+        if m.get('removed') is not None:
+            parts.append(f"{m['removed']} removed")
+        detail = ', '.join(parts)
+        if m.get('sensitive_changed'):
+            detail += (', ' if detail else '') + 'including credential or key lines'
+        if m.get('reported_user'):
+            detail += (', ' if detail else '') + f"by {m['reported_user']}"
+        sentence = f'The {ctype} configuration of {who} changed{when}' + (f': {detail}.' if detail else '.')
+        return f'{ctype.capitalize()} configuration changed', sentence
+    if kind == 'backup.failed':
+        why = FAILURE_LABELS.get(str(m.get('failure_category') or ''), '')
+        sentence = (f'Configuration backup of {who} failed{when}' + (f': {why}.' if why else '.')
+                    + ' The last saved configuration is still available.')
+        return 'Configuration backup failed', sentence
+    if kind == 'backup.recovered':
+        n = int(m.get('occurrences') or 0)
+        sentence = f'Configuration backup of {who} is working again{when}' + (
+            f' after {n} failed attempt{"s" if n != 1 else ""}.' if n else '.')
+        return 'Configuration backup recovered', sentence
+    summary = kind.replace('.', ' ').capitalize()
+    return summary, f'{summary} on {who}{when}.'
+
+
+def _payload(row, device_id, key, kind, summary, *, metadata=None, severity='warning', status='ACTIVE',
+             sentence=None):
     # Raw CLI content and exception strings never enter outbound payloads.
+    sentence = sentence or summary
     return {'event_id':key,'event_type':kind,'device_id':str(device_id),
             'hostname':row.hostname,'ip_address':row.ip,'rule_name':summary,
-            'subject':f'NCM: {summary} - {row.hostname}','message':summary,
-            'body':summary,'severity':severity,'status':status,
+            'subject':f'NCM: {summary} - {row.hostname}' + (f' ({row.ip})' if row.ip and row.ip != row.hostname else ''),
+            'message':sentence,'sms_body':f'ZenPlus {"resolved" if status == "RESOLVED" else severity.upper()} — {sentence}',
+            'body':sentence,'severity':severity,'status':status,
             'timestamp':datetime.now(timezone.utc).isoformat(),
             'metadata':metadata or {}}
+
+
+async def _clock(db):
+    """Local "14:44" for now, in the organisation time zone ("" if unknown)."""
+    try:
+        from app.services.alert_phrasing import clock
+        from app.services.regional_time import notification_branding
+        return clock(datetime.now(timezone.utc), await notification_branding(db))
+    except Exception:
+        return ''
 
 
 async def _outbox(db, device_id, row, key, payload):
@@ -47,8 +113,9 @@ async def event(db, device_id, kind, key, *, metadata=None, message=None, severi
     row=await _device(db,device_id)
     if not row:
         return None
-    summary=message or kind.replace('.',' ').capitalize()
-    payload=_payload(row,device_id,key,kind,summary,metadata=metadata,severity=severity)
+    default_summary, sentence = describe(kind, row, metadata, at=await _clock(db))
+    summary=message or default_summary
+    payload=_payload(row,device_id,key,kind,summary,metadata=metadata,severity=severity,sentence=sentence)
     alert=(await db.execute(text('''INSERT INTO alerts(device_id,rule_id,status,severity,message,triggered_at,metadata)
         VALUES (:id,NULL,'active',:severity,:message,now(),CAST(:metadata AS jsonb)) RETURNING id'''),
         {'id':device_id,'severity':severity,'message':payload['subject'],
@@ -97,9 +164,10 @@ async def resolve_incident(db, device_id, *, run_id=None):
     device=await _device(db,device_id)
     if device:
         key=f'incident:{row.id}:recovered'
-        payload=_payload(device,device_id,key,'backup.recovered','Configuration backup recovered',
-                         metadata={'incident_id':str(row.id),'occurrences':row.occurrences},
-                         severity='info',status='RESOLVED')
+        meta={'incident_id':str(row.id),'occurrences':row.occurrences}
+        summary, sentence = describe('backup.recovered', device, meta, at=await _clock(db))
+        payload=_payload(device,device_id,key,'backup.recovered',summary,
+                         metadata=meta,severity='info',status='RESOLVED',sentence=sentence)
         await _outbox(db,device_id,device,key,payload)
     return row.id
 

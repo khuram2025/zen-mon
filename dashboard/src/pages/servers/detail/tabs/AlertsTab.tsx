@@ -670,7 +670,8 @@ export function CreateHostRuleDialog({
         // flag: heartbeat silence before it fires; 0 = the 3-minute default.
         min_duration: kind === 'pct' || kind === 'flag' ? Math.round(Number(minutes || 0) * 60) : 0,
         // Empty = the evaluator defaults: clear after 5 minutes, 2 points on the healthy side.
-        clear_duration: kind === 'pct' && clearMinutes.trim() !== '' ? Math.round(Number(clearMinutes) * 60) : null,
+        // event: how long the restart/shutdown alert stays open after the last event (empty = 15 min).
+        clear_duration: (kind === 'pct' || kind === 'event') && clearMinutes.trim() !== '' ? Math.round(Number(clearMinutes) * 60) : null,
         reset_threshold: kind === 'pct' && resetLevel.trim() !== '' ? Number(resetLevel) : null,
         recovery_alert: kind === 'event' ? false : recovery,
         target: (kind === 'svc' || kind === 'proc') ? target.trim() : null,
@@ -816,7 +817,20 @@ export function CreateHostRuleDialog({
               </label>
             </div>
           ) : kind === 'event' ? (
-            <p className="text-xs text-muted">Notifies on new OS lifecycle evidence. Repeated evidence is grouped into one incident for 15 minutes. Historical backfill does not page. A shutdown notification may arrive after the next boot.</p>
+            <div className="space-y-1.5">
+              <Label>Auto-clear after (min)</Label>
+              <Input
+                type="number" min={0} className="w-32" value={clearMinutes}
+                onChange={(e) => setClearMinutes(e.target.value)}
+                placeholder="15 (default)"
+              />
+              <p className="text-xs text-muted">
+                Notifies when the agent reports a new OS boot, restart request or shutdown, with the time it happened.
+                The alert closes on its own once this long passes without another one; a further restart in the
+                meantime updates the same alert. You can also resolve it by hand. Historical backfill does not page.
+                A shutdown notification may arrive after the next boot.
+              </p>
+            </div>
           ) : kind === 'flag' ? (
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">

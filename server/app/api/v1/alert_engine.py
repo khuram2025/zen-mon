@@ -35,6 +35,7 @@ from app.services.alert_phrasing import (
     service_check_variables,
     conditions_label, default_templates, duration_between, effective_template,
     format_reading, format_threshold, host_label, incident_context, rule_phrasing,
+    asset_type_label,
 )
 from pydantic import BaseModel
 
@@ -1074,6 +1075,7 @@ async def evaluate_status_change(
     # loaded once per evaluation and only when a held trigger needs it.
     flap_hold_s: int | None = None
     flap_held_alerts = 0
+    branding = None  # notification time zone, loaded when a rule first matches
     # (channel ids, dispatch ctx) per notifying rule, sent after the commit.
     planned: list[tuple[list, dict]] = []
 
@@ -1121,11 +1123,18 @@ async def evaluate_status_change(
         # packet-loss rule the loss.
         rule_metric = rule.metric or "ping_status"
         rule_value = {"rtt": rtt_value, "packet_loss": loss_pct}.get(rule_metric)
+        if branding is None:
+            from app.services.regional_time import notification_branding
+            branding = await notification_branding(db)
         variables.update(rule_phrasing(
             rule, hostname=host_label(event.hostname, event.ip_address), is_recovery=is_recovery,
             reading=RTT_UNAVAILABLE if rule_metric == "rtt" and rtt_value is None else None,
             value=rule_value, duration=variables.get("duration", ""),
             device_status=event.new_status,
+            # "Switch core-sw (10.0.0.1) is down: it does not answer ping (since 14:44)."
+            asset_type=asset_type_label(device_type), event_time=now, branding=branding, now=now,
+            status_detail=(condition.get("title") if event.new_status == "degraded"
+                           or (is_recovery and event.old_status == "degraded") else None),
         ))
 
         p_col, p_val, p_params = funnel.priority_insert(
@@ -1655,6 +1664,10 @@ async def evaluate_service_status_change(
         # A service check reports its own failure reason, so the phrasing leads
         # with the check and the error rather than with a threshold.
         variables.update(service_check_variables(event.new_status, event.error))
+        # How long it failed, on the all-clear ("... is passing again. Failing for 6 minutes.").
+        failed_for = variables.get("duration") or ""
+        variables["duration_sentence"] = variables["duration_suffix"] = (
+            f" Failing for {failed_for}." if is_recovery and failed_for else "")
         # Defaults live in alert_phrasing so the rule editors advertise exactly
         # the text this path sends.
         svc_defaults = default_templates("service")
@@ -1700,9 +1713,10 @@ async def evaluate_service_status_change(
                 # SMS is a transport payload and made every alert list read
                 # like "[ZenPlus WARNING] ..." template dumps.
                 "message": (
-                    f"{rule.name}: {event.check_name} is passing again — recovered"
+                    f"{rule.name}: {event.check_name} ({target}) is passing again"
                     if is_recovery else
-                    f"{rule.name}: {event.check_name} ({target}) is {event.new_status.upper()}"
+                    f"{rule.name}: {event.check_name} ({target}) {variables['check_result']}"
+                    + (variables.get("error_sentence") or "")
                 ),
                 "triggered_at": now,
                 "resolved_at": now if is_recovery else None,
@@ -1827,9 +1841,10 @@ async def evaluate_trap(
     device_tags: set[str] = set()
     hostname = ""
     device_ip = ""
+    dev = None
     if did:
         dev = (await db.execute(
-            text("SELECT group_id, tags, hostname, host(ip_address) AS ip "
+            text("SELECT group_id, tags, hostname, host(ip_address) AS ip, device_type "
                  "FROM devices WHERE id = :id"), {"id": did}
         )).first()
         group_id = str(dev.group_id) if dev and dev.group_id else None
@@ -1977,7 +1992,8 @@ async def evaluate_trap(
             "trap_name": event.trap_name or "",
             "source_ip": event.source_ip or "",
             "trap_message": message,
-            **rule_phrasing(rule, hostname=host_label(subject_name, device_ip or event.source_ip)),
+            **rule_phrasing(rule, hostname=host_label(subject_name, device_ip or event.source_ip),
+                            asset_type=asset_type_label(getattr(dev, "device_type", None)) if dev else None),
         }
         trap_defaults = default_templates("trap")
         email_subject = _render(effective_template(rule.email_subject, trap_defaults["email_subject"]), variables)

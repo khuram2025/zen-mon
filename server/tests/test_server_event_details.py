@@ -10,7 +10,7 @@ from app.services import host_alert_service as host
 from app.schemas.agent import MetricSample
 from inventory_fleet import api_client
 from pg_fixture import pg_cluster, pg_db  # noqa: F401
-from test_server_availability_alerts import add_server, add_rule, add_device, run, incidents, session
+from test_server_availability_alerts import add_server, add_rule, add_device, beat, run, incidents, session
 
 
 def event(**changes):
@@ -123,8 +123,11 @@ async def test_replayed_lifecycle_batch_notifies_once_and_backfill_stays_quiet(w
         await db.commit()
     await run(world,now+71)
     assert len(incidents(world,sid))==1 and len(world.sent)==1
-    assert "The server started on" in incidents(world,sid)[0].message
-    assert "unexpected" not in incidents(world,sid)[0].message
+    # Kernel-General 12 logged at the same boot as Kernel-Power 41: one
+    # restart, still described as unexpected, with the OS start time.
+    msg = incidents(world,sid)[0].message
+    assert msg.startswith("Server events-01 restarted at ") and "unexpected" in msg
+    assert "observation window" not in msg
     await run(world,now+1000)
     assert incidents(world,sid)[0].status=="resolved" and len(world.sent)==1
     async with session(world.db) as db:
@@ -163,8 +166,75 @@ async def test_optional_lifecycle_closing_notice_is_not_a_power_or_health_confir
     await run(world,now+1000)
     assert len(incidents(world,sid))==1 and incidents(world,sid)[0].status=='resolved'
     assert len(world.sent)==2 and world.sent[1]['is_recovery'] is True
-    assert 'observation window' in world.sent[1]['body']
-    assert 'does not confirm its current power or health state' in world.sent[1]['body']
+    body = world.sent[1]['body']
+    # The agent last reported at "now", 1000 s before the close: say so.
+    assert 'observation window' not in body and 'Server closing-notice' in body
+    assert "has not reported since" in body
+    assert ('current state is unknown' if metric == 'host_restart' else 'may still be powered off') in body
+
+
+@pytest.mark.parametrize('metric,event_id,phrase', [
+    ('host_restart', 12, 'has stayed up since its'),
+    ('host_shutdown', 13, 'is running again and reporting normally'),
+])
+@pytest.mark.asyncio
+async def test_lifecycle_closing_notice_reports_a_server_that_is_back(world, metric, event_id, phrase):
+    now = datetime.now(timezone.utc).timestamp()
+    sid = add_server(world, 'back-up', heartbeat=now, ip='192.0.2.31')
+    aid = str(world.db.scalar('SELECT id FROM agents WHERE server_id=$1', sid))
+    add_rule(world, metric, recovery=True)
+    async with session(world.db) as db:
+        await events.ingest_state(db, sid, aid, [event(provider='Microsoft-Windows-Kernel-General', event_id=event_id)], None)
+        await db.commit()
+    await run(world, now + 1)
+    assert world.sent[0]['message'].startswith(f"ZenPlus CRITICAL — {metric}: Server back-up (192.0.2.31) ")
+    beat(world, sid, now + 990)
+    await run(world, now + 1000)
+    assert incidents(world, sid)[0].status == 'resolved'
+    assert phrase in world.sent[1]['body'] and 'Server back-up (192.0.2.31)' in world.sent[1]['body']
+
+
+@pytest.mark.asyncio
+async def test_restart_again_updates_the_same_incident_and_extends_the_hold(world):
+    now = datetime.now(timezone.utc).timestamp()
+    sid = add_server(world, 'loop-01', heartbeat=now)
+    aid = str(world.db.scalar('SELECT id FROM agents WHERE server_id=$1', sid))
+    add_rule(world, 'host_restart', recovery=False, clear_duration=300)
+    boot = lambda at, rec: event(provider='Microsoft-Windows-Kernel-General', event_id=12, record_id=rec,
+                                 event_time=datetime.fromtimestamp(at, timezone.utc))
+    async with session(world.db) as db:
+        await events.ingest_state(db, sid, aid, [boot(now, 500)], None)
+        await db.commit()
+    await run(world, now + 1)
+    assert len(incidents(world, sid)) == 1 and len(world.sent) == 1
+    async with session(world.db) as db:
+        await events.ingest_state(db, sid, aid, [boot(now + 200, 501)], None)
+        await db.commit()
+    await run(world, now + 201)
+    [row] = incidents(world, sid)
+    assert row.status == 'active' and 'restarted again' in row.message and '2 restarts' in row.message
+    assert len(world.sent) == 2 and world.sent[1]['lifecycle'] == 'changed'
+    assert 'restarted again' in world.sent[1]['body']
+    # The 300 s hold runs from the newest restart, not the first one.
+    await run(world, now + 450)
+    assert incidents(world, sid)[0].status == 'active'
+    await run(world, now + 501)
+    assert incidents(world, sid)[0].status == 'resolved' and len(incidents(world, sid)) == 1
+
+
+@pytest.mark.asyncio
+async def test_manually_resolved_restart_is_not_paged_again_inside_the_hold(world):
+    now = datetime.now(timezone.utc).timestamp()
+    sid = add_server(world, 'manual-01', heartbeat=now)
+    aid = str(world.db.scalar('SELECT id FROM agents WHERE server_id=$1', sid))
+    add_rule(world, 'host_restart', recovery=False)
+    async with session(world.db) as db:
+        await events.ingest_state(db, sid, aid, [event(provider='Microsoft-Windows-Kernel-General', event_id=12)], None)
+        await db.commit()
+    await run(world, now + 1)
+    world.db.execute("UPDATE alerts SET status='resolved', resolved_at=now() WHERE server_id=$1", sid)
+    await run(world, now + 60)
+    assert len(incidents(world, sid)) == 1 and len(world.sent) == 1
 
 
 @pytest.mark.parametrize('metric',['host_restart','host_shutdown'])

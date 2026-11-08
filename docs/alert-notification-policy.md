@@ -51,6 +51,52 @@ total duration). The subject keeps the severity first:
   reply)*, never 0.0 ms. Latency rules never fire on an unreachable device. The
   banner shows reachability (e.g. DOWN) and the rule's severity separately.
 
+## Message wording (1.25.3)
+
+Every notification (mail, SMS, chat/webhook, escalation and the in-app alert
+text) says what happened, to which asset, when, and what it means now. The
+shared wording lives in `app.services.alert_phrasing`.
+
+* **Asset**: type, name and IP — "Switch core-sw-01 (10.0.0.1)", "Server
+  app-01 (10.0.0.5)". The type comes from the device type (unknown = "Device").
+  Subjects keep the plain "name (IP)" so existing inbox rules still match.
+* **When**: state changes and events carry the appliance-local time from the
+  organisation's regional settings ("went down at 14:44"); an event on another
+  day reads "Nov 07 14:44". SMS also ends with the full local timestamp.
+* **Readings**: "Host memory on Server srv-a (10.0.0.5) rose to 97% (limit
+  90%)", and on recovery "returned to 42% (limit 90%). Lasted 12 minutes."
+  On/off states (ping, interface, reboot flags) never show a raw value such as
+  "currently 1" or "now 0".
+* **Events** (reboots, server restarts and shutdowns) say when and what now:
+  "Switch sw-09 (192.168.24.34) rebooted at 14:44 — uptime is now 3 min (was
+  41 days)", "… rebooted again at 14:52 (2 reboots since 14:44)", and on close
+  "… has stayed up for 16 min since its 14:44 reboot; no further reboots". A
+  server restart closes with "has stayed up since its 14:34 restart and is
+  reporting normally (up 13 min)", or, when its agent is silent, says that the
+  current state is unknown. Nothing refers to an internal observation window.
+* Messages stay short enough for one or two SMS segments (no SMS length limit is
+  enforced by the gateway code; the defaults stay near 160 characters).
+
+### Reboot and restart alerts: auto-clear
+
+A reboot (sysUpTime went back by more than 60 s; a 497-day TimeTicks wrap is not
+a reboot) and a server restart/shutdown (agent OS lifecycle evidence) are
+events, not levels. The rule's operator, threshold, reset level and breach hold
+do not apply to them and are no longer offered in the editor; stored values are
+kept as they are.
+
+* One incident per rule + device/server. A further reboot or OS boot while it is
+  open updates the same incident, says "rebooted again" / "restarted again"
+  (one notification per further event, lifecycle *Changed*) and restarts the hold.
+* **Auto-clear after** (`clear_duration`, empty = 15 minutes): the incident closes
+  once that long passed without another event; operators can resolve it by hand
+  at any time. A reboot or restart already announced is never paged again, also
+  after a manual resolve.
+* The optional closing notice says what is known now (stayed up / reporting
+  normally, or no current reading), never "end of the observation window".
+* Restart evidence older than 15 minutes when it first arrives (agent backlog)
+  never pages.
+
 ## Each event is sent once
 
 Both API workers run the evaluators. Each evaluator pass, and the escalation

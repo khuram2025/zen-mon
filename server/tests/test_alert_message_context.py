@@ -280,7 +280,7 @@ async def test_complete_loss_never_shows_as_excellent_latency(mail):
     assert details["Round-trip time"] == "unavailable (no reply)"
     for text_ in (m["html"], m["body"], m["subject"]):
         assert "0.0ms" not in text_ and "0.0 ms" not in text_ and "0 ms" not in text_
-    assert m["ctx"]["message"] == "Packet loss on edge-1 (10.0.0.1) rose above 5% (currently 100%)."
+    assert m["ctx"]["message"] == "Packet loss on Switch edge-1 (10.0.0.1) rose to 100% (limit 5%)."
     assert m["ctx"]["message"] in m["body"] and "Time:" in m["body"]
     # State and severity as separate pills: "DOWN" neutral, "WARNING" amber.
     assert _chips(m["html"]) == ["DOWN", "WARNING"]
@@ -304,8 +304,8 @@ async def test_a_degraded_latency_alert_reports_the_reply(mail):
     assert head["label"] == "Round-trip time" and head["value"] == "100.04 ms"
     assert head["detail"] == "Threshold 100.00 ms"
     assert head["secondary_label"] == "Packet loss" and head["secondary_value"] == "0%"
-    assert m["ctx"]["message"] == ("Round-trip time on edge-1 (10.0.0.1) rose above 100.00 ms "
-                         "(currently 100.04 ms).")
+    assert m["ctx"]["message"] == ("Round-trip time on Switch edge-1 (10.0.0.1) rose to 100.04 ms "
+                         "(limit 100.00 ms).")
     assert dict(m["ctx"]["details"])["Reachability"] == "Degraded (responding)"
 
 
