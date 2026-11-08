@@ -125,9 +125,10 @@ export const CALIBRATION_WAIT_MS = 4_000
  *   ?range=1h           → preset
  *   ?range=custom&from=ISO&to=ISO  → custom window
  *
- * Default is 1h when nothing is set.
+ * Default is 1h when nothing is set; a page may pass another rolling preset
+ * (e.g. Synthetics defaults to '24h').
  */
-export function useTimeRange(): {
+export function useTimeRange(defaultPreset: typeof TIME_RANGE_OPTIONS[number]['key'] = '1h'): {
   range: TimeRange
   rangeIdx: number
   isCustom: boolean
@@ -146,7 +147,9 @@ export function useTimeRange(): {
 
   const idx = (() => {
     const i = TIME_RANGE_OPTIONS.findIndex((r) => r.key === key)
-    return i >= 0 ? i : 0
+    if (i >= 0) return i
+    const d = TIME_RANGE_OPTIONS.findIndex((r) => r.key === defaultPreset)
+    return d >= 0 ? d : 0
   })()
 
   // Preset ranges slide with the appliance clock (B01); bucket to the minute so

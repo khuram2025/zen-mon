@@ -31,7 +31,7 @@ const plugins = [{ name: 'fixtures', setup(b) {
   b.onResolve({ filter: /^(react(?:\/.*)?|react-dom(?:\/.*)?|@tanstack\/react-query)$/ }, arg => ({ path: import.meta.resolve(arg.path), external: true }))
   b.onResolve({ filter: /^@\/lib\/api$/ }, () => ({ path: 'api', namespace: 'fixture' }))
   b.onResolve({ filter: /^@\/components\/ui\/Toast$/ }, () => ({ path: 'toast', namespace: 'fixture' }))
-  b.onLoad({ filter: /.*/, namespace: 'fixture' }, arg => ({ contents: arg.path === 'api' ? 'export const api=globalThis.__apmFixture' : 'export const toast={success(){},error(){}}', loader: 'js' }))
+  b.onLoad({ filter: /.*/, namespace: 'fixture' }, arg => ({ contents: arg.path === 'api' ? 'export const api=globalThis.__apmFixture;export function setApiToken(){};export function getApiToken(){return null}' : 'export const toast={success(){},error(){}}', loader: 'js' }))
   b.onResolve({ filter: /^@\// }, arg => b.resolve(`./${arg.path.slice(2)}`, { resolveDir: path.resolve('src'), kind: arg.kind }))
 } }]
 async function compile(options, name) {
