@@ -21,7 +21,12 @@ import { useDirtyGuard } from '@/hooks/useDirtyGuard'
 import { RiskBadge } from './PermissionMatrix'
 import { AccessLevelPicker } from './AccessLevelPicker'
 import { MenuPreview, ScopeChips } from './MenuPreview'
-import { cleanTags, fullLabel, groupByArea, levelsFor, moduleLevel, sameTags } from './roleModel'
+import { PAGE_ENTRIES, PageAccessStep, reachablePages } from './PageAccessStep'
+import { restrictPermissions } from '@/components/layout/navAccess'
+import {
+  cleanTags, fullLabel, groupByArea, impliesOf, levelsFor, moduleLevel, pageAccessErrors, pageAccessPayload, sameTags,
+  samePageAccess, type PageAccessValue,
+} from './roleModel'
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{1,49}$/
 const RESERVED = new Set([
@@ -41,10 +46,11 @@ type Impact = {
   grants_beyond_you: string[]
 }
 
-type Step = 'details' | 'access' | 'visibility' | 'review'
+type Step = 'details' | 'access' | 'pages' | 'visibility' | 'review'
 const STEPS: { id: Step; label: string; hint: string; icon: typeof IdCard }[] = [
   { id: 'details', label: 'Details', hint: 'Name and starting point', icon: IdCard },
   { id: 'access', label: 'Access', hint: 'What members can open and change', icon: KeyRound },
+  { id: 'pages', label: 'Pages', hint: 'Only selected pages and maps', icon: PanelsTopLeft },
   { id: 'visibility', label: 'Visibility', hint: 'Which resources they see', icon: Tags },
   { id: 'review', label: 'Review', hint: 'Check and save', icon: ClipboardCheck },
 ]
@@ -94,6 +100,11 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
   const [scopeMode, setScopeMode] = useState<'all' | 'tags'>('all')
   const [scopeTags, setScopeTags] = useState<string[]>([])
   const [baselineScope, setBaselineScope] = useState<string[]>([])
+  const [limitPages, setLimitPages] = useState(false)
+  const [pages, setPages] = useState<Set<string>>(new Set())
+  const [limitMaps, setLimitMaps] = useState(false)
+  const [maps, setMaps] = useState<Set<string>>(new Set())
+  const [baselineAccess, setBaselineAccess] = useState<PageAccessValue | null>(null)
   const [startFrom, setStartFrom] = useState<string | null>(null)
   const [reason, setReason] = useState('')
   const [revision, setRevision] = useState<number | undefined>(undefined)
@@ -117,6 +128,8 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
     setScopeTags(tags)
     setScopeMode(tags.length ? 'tags' : 'all')
     setBaselineScope(role ? role.scope_tags || [] : [])
+    loadAccess(src?.page_access ?? null)
+    setBaselineAccess(role?.page_access ?? null)
     setStartFrom(template ? template.name : null)
     setRevision(role?.revision)
     setReason('')
@@ -125,6 +138,13 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
     setSubmitted(false)
     setTriedReview(false)
   }, [open, role, template])
+
+  function loadAccess(a: PageAccessValue | null) {
+    setLimitPages(Array.isArray(a?.pages))
+    setPages(new Set(a?.pages || []))
+    setLimitMaps(Array.isArray(a?.maps))
+    setMaps(new Set((a?.maps || []).map((m) => m.toLowerCase())))
+  }
 
   const generated = useMemo(() => slugify(displayName), [displayName])
   const identifier = nameTouched ? name : generated
@@ -144,10 +164,22 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
     description: description.length > 2000 ? 'Description can be at most 2000 characters' : undefined,
     scope: scopeMode === 'tags' && cleanTags(scopeTags).length === 0 ? 'Choose at least one tag, or allow all resources' : undefined,
   }
-  const detailsValid = !errors.display_name && !errors.name && !errors.description
-  const valid = detailsValid && !errors.scope
-
   const full = granted.has(superPerm)
+  const reachable = useMemo(() => reachablePages(granted), [granted])
+  const pageErrors = full ? {} : pageAccessErrors({ limitPages, pages, reachable, limitMaps, maps })
+  const pagesValid = !pageErrors.pages && !pageErrors.maps
+  const detailsValid = !errors.display_name && !errors.name && !errors.description
+  const valid = detailsValid && !errors.scope && pagesValid
+
+  const accessPayload = useMemo(
+    () => pageAccessPayload({ limitPages, pages: [...pages].filter((p) => reachable.has(p)), limitMaps, maps, fullAdmin: full }),
+    [limitPages, pages, reachable, limitMaps, maps, full],
+  )
+  const accessChanged = !samePageAccess(accessPayload, baselineAccess)
+  const previewPages = useMemo(() => (accessPayload?.pages ? new Set(accessPayload.pages) : null), [accessPayload])
+  const implies = useMemo(() => impliesOf(modules), [modules])
+  const keptPermissions = useMemo(() => restrictPermissions(granted, previewPages, PAGE_ENTRIES, implies), [granted, previewPages, implies])
+  const withdrawn = useMemo(() => [...granted].filter((p) => !keptPermissions.includes(p)).sort(), [granted, keptPermissions])
   const effectiveScope = scopeMode === 'tags' ? cleanTags(scopeTags) : []
   const scopeChanged = !sameTags(effectiveScope, baselineScope)
   const added = useMemo(() => [...granted].filter((p) => !baseline.has(p)).sort(), [granted, baseline])
@@ -157,8 +189,8 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
   const beyondYou = [...granted].filter((p) => !canGrant(p) && !baseline.has(p))
   const permissionsChanged = added.length > 0 || removed.length > 0
   const dirty = isEdit
-    ? permissionsChanged || scopeChanged || displayName !== role!.display_name || description !== (role!.description || '') || identifier !== role!.name
-    : displayName.trim() !== '' || description !== '' || granted.size > 0 || effectiveScope.length > 0
+    ? permissionsChanged || scopeChanged || accessChanged || displayName !== role!.display_name || description !== (role!.description || '') || identifier !== role!.name
+    : displayName.trim() !== '' || description !== '' || granted.size > 0 || effectiveScope.length > 0 || accessPayload !== null
 
   const templates = useMemo(() => {
     const byName = new Map((roles || []).map((r) => [r.name, r]))
@@ -185,6 +217,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
         description: description.trim(),
         permissions: [...granted],
         scope_tags: effectiveScope,
+        page_access: accessPayload,
         reason: reason.trim() || undefined,
       }
       if (nameTouched || isEdit) { if (!autoIdentifier) payload.name = identifier }
@@ -224,7 +257,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
     // Leaving Details needs a valid name; every other step can be revisited freely.
     if (step === 'details' && next !== 'details' && !detailsValid) return
     if (next === 'review') setTriedReview(true)
-    if (next === 'review' && !valid) { if (!detailsValid) setStep('details'); else setStep('visibility'); return }
+    if (next === 'review' && !valid) { setStep(!detailsValid ? 'details' : !pagesValid ? 'pages' : 'visibility'); return }
     setServerErrors((e) => ({ ...e, general: undefined }))
     setStep(next)
   }
@@ -232,7 +265,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
     setSubmitted(true)
     setTriedReview(true)
     setServerErrors({})
-    if (!valid || !catalog) { setStep(!detailsValid ? 'details' : 'visibility'); return }
+    if (!valid || !catalog) { setStep(!detailsValid ? 'details' : !pagesValid ? 'pages' : 'visibility'); return }
     save.mutate(undefined)
   }
 
@@ -258,7 +291,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
                 {STEPS.map((s, i) => {
                   const active = s.id === step
                   const done = i < stepIndex
-                  const bad = (s.id === 'details' && submitted && !detailsValid) || (s.id === 'visibility' && triedReview && !!errors.scope)
+                  const bad = (s.id === 'details' && submitted && !detailsValid) || (s.id === 'visibility' && triedReview && !!errors.scope) || (s.id === 'pages' && triedReview && !pagesValid)
                   return (
                     <li key={s.id} className="shrink-0">
                       <button
@@ -288,6 +321,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
               {/* Running summary */}
               <div className="hidden space-y-3 border-t border-border px-4 py-3 md:block">
                 <SummaryLine label="Permissions" value={full ? 'Full administration' : `${granted.size} selected`} warn={full || elevatedAdded.length > 0} />
+                <SummaryLine label="Pages" value={pagesSummary(full, accessPayload)} />
                 <div>
                   <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Visibility</div>
                   {full ? <span className="text-xs text-muted">Everything (bypasses scope)</span> : <ScopeChips tags={effectiveScope} empty="All resources" max={4} />}
@@ -295,7 +329,7 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
                 {step !== 'access' && (
                   <div>
                     <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Menu</div>
-                    <MenuPreview permissions={granted} compact />
+                    <MenuPreview permissions={granted} pages={previewPages} compact />
                   </div>
                 )}
               </div>
@@ -313,10 +347,11 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
                       setGranted(new Set(conflict.permissions)); setBaseline(new Set(conflict.permissions))
                       const t = conflict.scope_tags || []
                       setScopeTags(t); setScopeMode(t.length ? 'tags' : 'all'); setBaselineScope(t)
+                      loadAccess(conflict.page_access ?? null); setBaselineAccess(conflict.page_access ?? null)
                       setName(conflict.name); setRevision(conflict.revision); setConflict(null)
                     }}><RefreshCw className="h-3.5 w-3.5" /> Reload latest (discard my edits)</Button>
                     <Button type="button" size="sm" variant="outline" onClick={() => {
-                      setRevision(conflict.revision); setBaseline(new Set(conflict.permissions)); setBaselineScope(conflict.scope_tags || []); setConflict(null)
+                      setRevision(conflict.revision); setBaseline(new Set(conflict.permissions)); setBaselineScope(conflict.scope_tags || []); setBaselineAccess(conflict.page_access ?? null); setConflict(null)
                     }}>Keep my edits and overwrite</Button>
                   </div>
                 </div>
@@ -409,7 +444,33 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
                   </div>
                   <aside className="h-fit rounded-lg border border-border bg-surface2/30 p-3 lg:sticky lg:top-0">
                     <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold"><PanelsTopLeft className="h-3.5 w-3.5 text-primary" aria-hidden /> Menu members will see</div>
-                    <MenuPreview permissions={granted} />
+                    <MenuPreview permissions={granted} pages={previewPages} />
+                  </aside>
+                </div>
+              )}
+
+              {step === 'pages' && (
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_15rem]">
+                  <div className="min-w-0">
+                    <PageAccessStep
+                      granted={granted}
+                      full={full}
+                      limitPages={limitPages}
+                      onLimitPages={setLimitPages}
+                      pages={pages}
+                      onPages={setPages}
+                      limitMaps={limitMaps}
+                      onLimitMaps={setLimitMaps}
+                      maps={maps}
+                      onMaps={setMaps}
+                      removedPermissions={withdrawn}
+                      canListMaps={hasPermission(me, 'maps.view')}
+                      errors={triedReview ? pageErrors : {}}
+                    />
+                  </div>
+                  <aside className="h-fit rounded-lg border border-border bg-surface2/30 p-3 lg:sticky lg:top-0">
+                    <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold"><PanelsTopLeft className="h-3.5 w-3.5 text-primary" aria-hidden /> Menu members will see</div>
+                    <MenuPreview permissions={granted} pages={previewPages} />
                   </aside>
                 </div>
               )}
@@ -444,8 +505,13 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
                     <ReviewCard title="Access by area">
                       <AccessSummary catalog={catalog} granted={granted} superPerm={superPerm} />
                     </ReviewCard>
+                    <ReviewCard title="Pages and network maps">
+                      <p className="text-xs text-text2">{pagesSummary(full, accessPayload, true)}</p>
+                      {withdrawn.length > 0 && <p className="mt-1 text-xs text-muted">Not used because no listed page needs them: {withdrawn.join(', ')}</p>}
+                      {isEdit && accessChanged && <p className="mt-1 text-xs font-medium text-primary">Changed from: {pagesSummary(false, baselineAccess, true)}</p>}
+                    </ReviewCard>
                     <ReviewCard title="Menu members will see">
-                      <MenuPreview permissions={granted} />
+                      <MenuPreview permissions={granted} pages={previewPages} />
                     </ReviewCard>
                   </div>
 
@@ -530,6 +596,15 @@ export function RoleEditorDialog({ open, onOpenChange, role, template, catalog, 
       {guard.confirm}
     </>
   )
+}
+
+/** "Every page the permissions allow" / "4 pages · 2 maps" for the summary rail and the review. */
+function pagesSummary(full: boolean, a: PageAccessValue | null | undefined, long = false): string {
+  if (full) return 'Every page (Full administration)'
+  if (!a || (a.pages == null && a.maps == null)) return long ? 'Every page and network map the permissions allow.' : 'Every page'
+  const p = a.pages == null ? (long ? 'every page the permissions allow' : 'every page') : `${a.pages.length} ${a.pages.length === 1 ? 'page' : 'pages'}`
+  const m = a.maps == null ? (long ? 'every network map' : 'all maps') : `${a.maps.length} ${a.maps.length === 1 ? 'map' : 'maps'}`
+  return long ? `Only ${p}; ${m}.` : `${p} · ${m}`
 }
 
 function SummaryLine({ label, value, warn }: { label: string; value: string; warn?: boolean }) {

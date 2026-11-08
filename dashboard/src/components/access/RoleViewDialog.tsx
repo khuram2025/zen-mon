@@ -17,6 +17,11 @@ import { PermissionMatrix } from './PermissionMatrix'
 import { MenuPreview, ScopeChips } from './MenuPreview'
 import { AccessSummary } from './RoleEditorDialog'
 
+/** The page list a role is limited to, for the menu preview (null = every page). */
+function pagesOf(role: Role | null | undefined): Set<string> | null {
+  return role?.page_access?.pages ? new Set(role.page_access.pages) : null
+}
+
 type Member = { id: string; username: string; full_name: string | null; email: string; is_active: boolean; auth_source: string; scope_tags: string[]; last_login: string | null; mfa_enabled: boolean }
 type HistoryRow = { revision: number; action: string; actor: string | null; at: string; added: string[]; removed: string[]; affected_users: number; reason: string | null }
 
@@ -90,7 +95,9 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
               </section>
               <section className="rounded-lg border border-border p-3">
                 <h4 className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Menu members see</h4>
-                <MenuPreview permissions={granted} />
+                {role?.page_access?.pages && <p className="mb-1.5 text-xs text-muted">Limited to {role.page_access.pages.length} selected {role.page_access.pages.length === 1 ? 'page' : 'pages'}; permissions no listed page needs are not used.</p>}
+                {role?.page_access?.maps && <p className="mb-1.5 text-xs text-muted">Limited to {role.page_access.maps.length} network {role.page_access.maps.length === 1 ? 'map' : 'maps'}.</p>}
+                <MenuPreview permissions={granted} pages={pagesOf(role)} />
               </section>
             </div>
           </TabsContent>

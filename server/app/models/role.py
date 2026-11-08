@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 from sqlalchemy import String, Boolean, DateTime, Text, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -20,6 +21,10 @@ class Role(Base):
     # Visibility scope shared by every member (migrate-154): tag names, unioned
     # with each user's own scope_tags. Empty = the role adds no limit.
     scope_tags: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]", nullable=False)
+    # Page limit (migrate-185): {"pages": [...]|null, "maps": [...]|null}, or
+    # NULL = every page and map the permissions allow (see app.core.page_access).
+    # none_as_null: Python None must be SQL NULL, never a JSON 'null' value.
+    page_access: Mapped[Optional[dict]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # Optimistic concurrency token (bumped on every change) and the version of
     # the built-in definition this row was last reconciled to (migrate-150).
     revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)

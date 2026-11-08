@@ -2790,7 +2790,11 @@ async def get_device_related(
             JOIN devices d ON d.id = other.device_id
             WHERE me.device_id = :id AND other.device_id <> :id
         """), {"id": device_id})).mappings().all()
-        maps = {"maps": [{"id": str(r["id"]), "name": r["name"]} for r in map_rows],
+        # A role limited to selected network maps only learns about those.
+        from app.api.v1.manual_maps import allowed_map_ids
+        allowed_maps = await allowed_map_ids(db, user)
+        maps = {"maps": [{"id": str(r["id"]), "name": r["name"]} for r in map_rows
+                         if allowed_maps is None or str(r["id"]).lower() in allowed_maps],
                 "neighbours": _related.by_status_then_name(
                     [_related.device_brief(r) for r in neighbour_rows if visible(r["tags"])])[:_related.MAX_LISTED]}
 

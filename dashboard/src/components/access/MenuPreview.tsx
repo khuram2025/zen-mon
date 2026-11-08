@@ -2,15 +2,16 @@ import { useMemo } from 'react'
 import { EyeOff, Tags } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { NAV_GROUPS } from '@/components/layout/navigation'
-import { canFromPermissions, filterNavGroups } from '@/components/layout/navAccess'
+import { canFromPermissions, filterNavGroups, firstAllowedPath, type PageSet } from '@/components/layout/navAccess'
 import { TagBadge } from '@/components/tags/TagBadge'
 import { tagColorMap, useTags } from '@/hooks/useTags'
 
 /** The sidebar a role's members will get: the same filter the real sidebar
- *  applies, run over the permissions being edited. */
-export function MenuPreview({ permissions, compact, className }: { permissions: Iterable<string>; compact?: boolean; className?: string }) {
+ *  applies, run over the permissions (and page list) being edited. */
+export function MenuPreview({ permissions, pages = null, compact, className }: { permissions: Iterable<string>; pages?: PageSet; compact?: boolean; className?: string }) {
   const perms = useMemo(() => [...permissions], [permissions])
-  const groups = useMemo(() => filterNavGroups(NAV_GROUPS, canFromPermissions(perms)), [perms])
+  const groups = useMemo(() => filterNavGroups(NAV_GROUPS, canFromPermissions(perms), pages), [perms, pages])
+  const landing = useMemo(() => (pages ? firstAllowedPath(NAV_GROUPS, canFromPermissions(perms), pages) : null), [perms, pages])
   const hidden = NAV_GROUPS.filter((g) => !groups.some((x) => x.id === g.id))
 
   return (
@@ -30,12 +31,15 @@ export function MenuPreview({ permissions, compact, className }: { permissions: 
               </div>
               {!compact && (
                 <div className="ml-5 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted">
-                  {g.items.map((i) => <span key={i.to}>{i.label}</span>)}
+                  {g.items.map((i) => <span key={i.to}>{i.label}{pages && i.children && i.children.length > 1 ? ` (${i.children.length})` : ''}</span>)}
                 </div>
               )}
             </li>
           ))}
         </ul>
+      )}
+      {landing && !compact && (
+        <p className="text-xs text-muted">Members land on: <span className="font-medium text-text">{landingLabel(landing)}</span></p>
       )}
       {hidden.length > 0 && groups.length > 0 && (
         <p className="text-xs text-muted">
@@ -44,6 +48,14 @@ export function MenuPreview({ permissions, compact, className }: { permissions: 
       )}
     </div>
   )
+}
+
+function landingLabel(to: string): string {
+  for (const g of NAV_GROUPS) for (const i of g.items) {
+    if (i.to === to && !i.children) return `${g.label} › ${i.label}`
+    for (const c of i.children || []) if (c.to === to) return `${g.label} › ${i.label} › ${c.label}`
+  }
+  return to
 }
 
 /** Scope tags as coloured chips, or a muted "All resources" label. */

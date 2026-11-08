@@ -6,18 +6,18 @@ import { DataStatusBanner } from '@/components/inventory/DataStatusBanner'
 import { InventoryKbLink, kbArticleForPath } from '@/components/inventory/InventoryKbLink'
 import { InventoryMetaLine } from '@/components/inventory/InventoryMetaLine'
 import { NAV_GROUPS, type NavNode } from '@/components/layout/navigation'
-import { filterNavGroups, type Can } from '@/components/layout/navAccess'
+import { filterNavGroups, type Can, type PageSet } from '@/components/layout/navAccess'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/Skeleton'
-import { useCan } from '@/stores/auth'
+import { useAllowedPages, useCan } from '@/stores/auth'
 import { useInventoryMeta, useRefreshWhenNormalised } from './useInventoryMeta'
 
 /**
  * The tab strip mirrors the sidebar rows of the Inventory group, so the two never drift: same labels,
  * same order, and a role only gets the tabs it may open (Inventory Settings needs inventory.view; saving needs inventory.manage).
  */
-export function inventoryTabs(can: Can): NavNode[] {
-  return filterNavGroups(NAV_GROUPS, can).find((g) => g.id === 'inventory')?.items ?? []
+export function inventoryTabs(can: Can, pages: PageSet = null): NavNode[] {
+  return filterNavGroups(NAV_GROUPS, can, pages).find((g) => g.id === 'inventory')?.items ?? []
 }
 
 /** The product page (`/inventory/software/:productKey`) owns the full canvas: no heading, no tab strip. */
@@ -59,11 +59,12 @@ export function PageFallback() {
 export function InventoryLayout() {
   const { pathname, search } = useLocation()
   const can = useCan()
+  const pages = useAllowedPages()
   const meta = useInventoryMeta()
   // The data pages refetch only every few minutes: when the backlog clears, refetch them now.
   useRefreshWhenNormalised(meta.summary?.data_status?.normalising)
   const product = isProductPath(pathname)
-  const tabs = inventoryTabs(can)
+  const tabs = inventoryTabs(can, pages)
   const article = kbArticleForPath(pathname)
 
   // On a narrow screen the strip scrolls sideways; bring the current tab into view so a deep link

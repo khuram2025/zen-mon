@@ -11,6 +11,9 @@ An actor may only hand out, or touch, access that does not exceed their own:
   unrestricted account. The same holds for role scopes (roles.scope_tags,
   which every member inherits): a scoped actor cannot assign or edit a role
   scoped outside their own tags, nor lift a role's scope.
+* **page ceiling** - an actor whose own role is limited to selected pages or
+  network maps (roles.page_access) can only assign, create or edit roles whose
+  pages and maps lie within their own, and never lift such a limit.
 
 These checks are the server-side policy; the UI only mirrors them by listing
 the assignable roles returned from ``GET /roles/assignable``.
@@ -21,9 +24,10 @@ from __future__ import annotations
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import page_access
 from app.core.permissions import SUPERUSER_PERMISSION, exceeds
 from app.core.scoping import visible_tags
-from app.core.security import get_role_permissions
+from app.core.security import get_role_page_access, get_role_permissions
 from app.models.user import User
 
 
@@ -65,14 +69,27 @@ def _lower(tags) -> set[str]:
     return {str(t).strip().lower() for t in (tags or []) if str(t).strip()}
 
 
+async def actor_page_access(db: AsyncSession, actor: User):
+    """The pages / maps the actor's own role is limited to (None = not limited)."""
+    if await is_full_admin(db, actor):
+        return None
+    return await get_role_page_access(db, actor.role)
+
+
+def _role_page_access(role):
+    return page_access.normalize(getattr(role, "page_access", None))
+
+
 async def assignable_role_names(db: AsyncSession, actor: User, roles) -> set[str]:
     """Names of ``roles`` (rows with .name/.permissions/.scope_tags) the actor may assign."""
     ceiling = await actor_permissions(db, actor)
     scope = await visible_tags(db, actor)
+    limit = await actor_page_access(db, actor)
     return {
         r.name for r in roles
         if not exceeds(r.permissions or [], ceiling)
         and (scope is None or _lower(getattr(r, "scope_tags", None)) <= set(scope))
+        and page_access.within(_role_page_access(r), limit)
     }
 
 
@@ -90,6 +107,26 @@ async def assert_can_assign_role(db: AsyncSession, actor: User, role) -> None:
                 f"You cannot assign the '{role.name}' role: its visibility scope includes tags "
                 f"outside your own ({', '.join(outside)})"
             )
+    if not page_access.within(_role_page_access(role), await actor_page_access(db, actor)):
+        raise _forbidden(
+            f"You cannot assign the '{role.name}' role: it opens pages or network maps outside your own"
+        )
+
+
+async def validate_role_page_access(db: AsyncSession, actor: User, before, after, *, creating: bool = False) -> None:
+    """Page limit the actor may put on a role. An actor limited to selected
+    pages or maps may only create roles inside their own pages / maps, may not
+    change a role that opens more than they do, and may not lift a limit."""
+    limit = await actor_page_access(db, actor)
+    if not page_access.is_limited(limit):
+        return
+    before, after = page_access.normalize(before), page_access.normalize(after)
+    if before == after and not creating:
+        return
+    if before is not None and not page_access.within(before, limit):
+        raise _forbidden("This role opens pages or network maps outside your own, so you cannot change its page access")
+    if not page_access.within(after, limit):
+        raise _forbidden("You cannot give a role pages or network maps you cannot open yourself")
 
 
 async def validate_role_scope(db: AsyncSession, actor: User, before, after: list[str]) -> list[str]:

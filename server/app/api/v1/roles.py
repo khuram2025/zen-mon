@@ -16,6 +16,12 @@ resources carrying at least one of those tags, on top of each user's own
 scope tags (see ``app.core.scoping``). Built-in roles are never scoped; scope
 a custom copy instead.
 
+Page access: ``roles.page_access`` (migrate-185) optionally limits members to
+selected sidebar pages and network maps; the role's permissions are narrowed
+to what those pages need, so the API of a hidden page is refused (see
+``app.core.page_access``). NULL = not limited. Full administration cannot be
+limited.
+
 Delegation: a role manager can only grant permissions they hold, and can only
 change or delete roles that are within their own access (see
 ``app.core.delegation``). Every change is versioned (``roles.revision``),
@@ -36,7 +42,7 @@ from sqlalchemy import select, func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import admin_guard, delegation
+from app.core import admin_guard, delegation, page_access
 from app.core.database import get_db
 from app.core.permissions import (
     ACCESS_CONTROL_PERMISSIONS,
@@ -78,6 +84,9 @@ class RoleCreate(BaseModel):
     permissions: list[str] = Field(default_factory=list)
     # Visibility scope every member inherits. Empty = no role-level limit.
     scope_tags: list[str] = Field(default_factory=list, max_length=100)
+    # Pages / network maps members are limited to: {"pages": [...]|null,
+    # "maps": [...]|null}. Omitted or null = every page the permissions allow.
+    page_access: Optional[dict] = None
     reason: Optional[str] = Field(None, max_length=500)
 
 
@@ -87,6 +96,8 @@ class RoleUpdate(BaseModel):
     description: Optional[str] = Field(None, max_length=2000)
     permissions: Optional[list[str]] = None
     scope_tags: Optional[list[str]] = Field(None, max_length=100)
+    # Omitted = unchanged; null (or both fields null) = remove the page limit.
+    page_access: Optional[dict] = None
     # Revision the editor loaded. When supplied, a stale save is refused (409)
     # instead of silently overwriting a concurrent change.
     expected_revision: Optional[int] = None
@@ -104,6 +115,7 @@ class RoleOut(BaseModel):
     description: str
     permissions: list[str]
     scope_tags: list[str] = []
+    page_access: Optional[dict] = None
     is_system: bool
     user_count: int = 0
     revision: int = 1
@@ -117,6 +129,7 @@ class RoleOut(BaseModel):
 
 def _out(role: Role, user_count: int = 0) -> RoleOut:
     item = RoleOut.model_validate(role)
+    item.page_access = page_access.normalize(getattr(role, "page_access", None))
     item.user_count = user_count
     item.revision = role.revision or 1
     item.privileged = bool(effective_permissions(role.permissions) & ACCESS_CONTROL_PERMISSIONS)
@@ -134,6 +147,31 @@ def _validate_permissions(perms: list[str]) -> list[str]:
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unknown permissions: {', '.join(unknown)}")
     return cleaned
+
+
+_FULL_ADMIN_UNLIMITED = (
+    "Full administration always opens every page and map. Remove it from the role to limit members to selected pages."
+)
+
+
+async def _clean_page_access(db: AsyncSession, actor: User, raw, perms: list[str], before=None,
+                             *, creating: bool = False) -> Optional[dict]:
+    """Validate an editor's page limit: known pages, existing maps, never on
+    Full administration, and within the actor's own page limit."""
+    try:
+        access = page_access.validate(raw)
+    except page_access.PageAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if access is not None and SUPERUSER_PERMISSION in perms:
+        raise HTTPException(status_code=400, detail=_FULL_ADMIN_UNLIMITED)
+    if access is not None and access.get("maps"):
+        found = {str(r[0]) for r in (await db.execute(
+            text("SELECT id::text FROM manual_maps WHERE id::text = ANY(:ids)"), {"ids": access["maps"]})).all()}
+        missing = [m for m in access["maps"] if m not in found]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Unknown network maps: {', '.join(missing[:6])}")
+    await delegation.validate_role_page_access(db, actor, before, access, creating=creating)
+    return access
 
 
 def _check_name(name: str) -> str:
@@ -218,6 +256,7 @@ async def assignable_roles(
     allowed = await delegation.assignable_role_names(db, current_user, roles)
     return [{"name": r.name, "display_name": r.display_name, "description": r.description,
              "scope_tags": list(r.scope_tags or []),
+             "page_limited": page_access.is_limited(page_access.normalize(getattr(r, "page_access", None))),
              "permission_count": len(effective_permissions(r.permissions)),
              "privileged": bool(effective_permissions(r.permissions) & ACCESS_CONTROL_PERMISSIONS)}
             for r in roles if r.name in allowed]
@@ -335,6 +374,7 @@ async def create_role(
     await delegation.assert_can_grant(db, current_user, perms)
     scope_tags = await delegation.validate_role_scope(
         db, current_user, [], await tag_service.canonicalize_tags(db, data.scope_tags))
+    access = await _clean_page_access(db, current_user, data.page_access, perms, creating=True)
 
     if (await db.execute(select(Role).where(Role.name == name))).scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"A role with the identifier '{name}' already exists")
@@ -345,6 +385,7 @@ async def create_role(
         description=(data.description or "").strip(),
         permissions=perms,
         scope_tags=scope_tags,
+        page_access=access,
         is_system=False,
         revision=1,
         updated_by=current_user.username,
@@ -357,7 +398,8 @@ async def create_role(
         raise HTTPException(status_code=409, detail=f"A role with the identifier '{name}' already exists")
     await _record_history(db, role, "create", current_user, before=[], after=perms, affected=0,
                           reason=data.reason, changes={"name": name, "display_name": display_name,
-                                                       "scope_tags": scope_tags})
+                                                       "scope_tags": scope_tags,
+                                                       **({"page_access": page_access.describe(access)} if access else {})})
     await write_audit_log(
         db,
         actor=current_user,
@@ -365,6 +407,7 @@ async def create_role(
         resource_type="role",
         resource_id=str(role.id),
         metadata={"name": role.name, "permissions": perms, "scope_tags": scope_tags, "reason": data.reason,
+                  "page_access": page_access.describe(access),
                   "privileged": [p for p in perms if risk_of(p) in ("privileged", "critical")]},
     )
     await db.commit()
@@ -418,6 +461,18 @@ async def update_role(
             await delegation.validate_role_scope(db, current_user, current, canonical)
             changes["scope_tags"] = {"from": current, "to": canonical}
             role.scope_tags = canonical
+
+    current_access = page_access.normalize(role.page_access)
+    if "page_access" in data.model_fields_set:
+        new_access = await _clean_page_access(db, current_user, data.page_access, list(role.permissions or []),
+                                              before=current_access)
+        if new_access != current_access:
+            changes["page_access"] = {"from": page_access.describe(current_access),
+                                      "to": page_access.describe(new_access)}
+            role.page_access = new_access
+            current_access = new_access
+    if current_access is not None and SUPERUSER_PERMISSION in (role.permissions or []):
+        raise HTTPException(status_code=400, detail=_FULL_ADMIN_UNLIMITED)
 
     if data.name is not None and data.name.strip().lower() != role.name:
         new_name = _check_name(data.name)

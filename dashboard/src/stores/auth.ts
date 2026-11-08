@@ -1,6 +1,8 @@
+import { useMemo } from 'react'
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { api, setApiToken } from '@/lib/api'
+import type { PageSet } from '@/components/layout/navAccess'
 
 export type User = {
   id: string
@@ -15,6 +17,8 @@ export type User = {
   scope_tags?: string[]
   /** Scope inherited from the role; the effective scope is both lists together. */
   role_scope_tags?: string[]
+  /** Pages / network maps the role is limited to (null = not limited). `permissions` are already narrowed to them. */
+  page_access?: { pages: string[] | null; maps: string[] | null } | null
   must_change_password?: boolean
   mfa_enabled?: boolean
   /** Policy requires MFA and this account has not enrolled yet. */
@@ -44,6 +48,18 @@ type AuthState = {
 export function hasPermission(user: User | null, permission: string): boolean {
   if (!user || !user.permissions) return false
   return user.permissions.includes('system.admin') || user.permissions.includes(permission)
+}
+
+/** Pages the signed-in role is limited to (by navigation address), or null for every page its permissions allow. */
+export function allowedPages(user: User | null): PageSet {
+  const pages = user?.page_access?.pages
+  return Array.isArray(pages) ? new Set(pages) : null
+}
+
+/** Hook: the role's page list (see {@link allowedPages}), stable while the account is unchanged. */
+export function useAllowedPages(): PageSet {
+  const pages = useAuth((s) => s.user?.page_access?.pages)
+  return useMemo(() => (Array.isArray(pages) ? new Set(pages) : null), [pages])
 }
 
 export function hasAnyPermission(user: User | null, permissions: readonly string[]): boolean {

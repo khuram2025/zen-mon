@@ -145,10 +145,13 @@ export const NAV_GROUPS: NavGroup[] = [
     icon: LayoutDashboard,
     zone: 'operate',
     items: [
-      { to: '/', label: 'Network Operations', icon: LayoutDashboard, end: true, hint: 'Network operations at a glance', requireAll: ['dashboard.view'], permission: 'devices.view' },
-      { to: '/dashboards/network', label: 'Network & Security', icon: ShieldCheck, hint: 'Reachability, traffic, WAN paths and threat signals', requireAll: ['dashboard.view'], permission: ['devices.view', 'netflow.view'] },
-      { to: '/dashboards/servers', label: 'Server Team', icon: Server, hint: 'Fleet health, resource pressure and agents', requireAll: ['dashboard.view'], permission: 'servers.view' },
-      { to: '/dashboards/apps', label: 'Application Team', icon: Layers, hint: 'Golden signals, SLOs and user journeys', requireAll: ['dashboard.view'], permission: 'apm.view' },
+      // Dashboards only display data (`viewOnly`); `uses` lists the widgets' other data, read-only. A role limited to
+      // selected pages keeps exactly those view permissions for a dashboard, so a NOC wall allowed just this
+      // dashboard still fills every widget but cannot change anything.
+      { to: '/', label: 'Network Operations', icon: LayoutDashboard, end: true, hint: 'Network operations at a glance', requireAll: ['dashboard.view'], viewOnly: true, permission: 'devices.view', uses: ['alerts.view', 'service_checks.view', 'netflow.view', 'apm.view', 'reports.view'] },
+      { to: '/dashboards/network', label: 'Network & Security', icon: ShieldCheck, hint: 'Reachability, traffic, WAN paths and threat signals', requireAll: ['dashboard.view'], viewOnly: true, permission: ['devices.view', 'netflow.view'], uses: ['alerts.view', 'ncm.view', 'netpath.view', 'udt.view', 'reports.view'] },
+      { to: '/dashboards/servers', label: 'Server Team', icon: Server, hint: 'Fleet health, resource pressure and agents', requireAll: ['dashboard.view'], viewOnly: true, permission: 'servers.view', uses: ['alerts.view'] },
+      { to: '/dashboards/apps', label: 'Application Team', icon: Layers, hint: 'Golden signals, SLOs and user journeys', requireAll: ['dashboard.view'], viewOnly: true, permission: 'apm.view', uses: ['alerts.view', 'service_checks.view'] },
     ],
   },
   {
@@ -368,7 +371,7 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           settingsTab('company', 'Company', Building2, 'settings.manage'),
           settingsTab('smtp', 'SMTP / Email', Mail, 'settings.manage'),
-          settingsTab('appearance', 'Appearance', Palette),
+          { ...settingsTab('appearance', 'Appearance', Palette), personal: true },
           settingsTab('users', 'Users & Access', Users, ['users.view', 'users.manage', 'roles.view', 'roles.manage', 'system.admin']),
           settingsTab('security', 'Security & TLS', ShieldCheck, 'system.admin'),
           settingsTab('licenses', 'Licenses', KeyRound, 'system.admin'),
@@ -377,8 +380,8 @@ export const NAV_GROUPS: NavGroup[] = [
           settingsTab('sensors', 'Sensors', Plug, 'settings.manage'),
           settingsTab('templates', 'Monitoring Templates', LayoutTemplate, 'settings.manage'),
           settingsTab('mibs', 'MIB Library', Upload, 'settings.manage'),
-          settingsTab('support', 'Support', LifeBuoy),
-          settingsTab('profile', 'My Profile', UserRound),
+          { ...settingsTab('support', 'Support', LifeBuoy), personal: true },
+          { ...settingsTab('profile', 'My Profile', UserRound), personal: true },
         ],
       },
       { to: '/credentials', label: 'Credentials', icon: KeyRound, hint: 'SNMP, Windows, and service credentials', permission: ['devices.manage', 'service_checks.manage'] },

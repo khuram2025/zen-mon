@@ -19,6 +19,8 @@ def perms(monkeypatch):
              "viewer": ["devices.view"], "scoped": ["users.manage", "devices.view"]}
     async def get(db, role): return table.get(role, [])
     monkeypatch.setattr(delegation, "get_role_permissions", get)
+    async def no_page_limit(db, role): return None
+    monkeypatch.setattr(delegation, "get_role_page_access", no_page_limit)
     async def vis(db, user): return sorted(user.scope_tags) or None
     monkeypatch.setattr(delegation, "visible_tags", vis)
     return table

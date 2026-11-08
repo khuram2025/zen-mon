@@ -44,6 +44,10 @@ class UserResponse(BaseModel):
     # Scope inherited from the role (roles.scope_tags); the effective scope is
     # scope_tags plus these, unless the role carries system.admin.
     role_scope_tags: list[str] = []
+    # Pages and network maps the role is limited to (roles.page_access):
+    # {"pages": [...]|null, "maps": [...]|null}, or None = not limited. The
+    # permissions above are already narrowed to what the listed pages need.
+    page_access: Optional[dict] = None
     last_login: Optional[datetime]
     # Personal IANA time zone (None = the appliance zone).
     timezone: Optional[str] = None

@@ -1,7 +1,7 @@
 import { useMemo, type ReactNode } from 'react'
 import { Link, Navigate, useLocation } from 'react-router-dom'
 import { ShieldOff } from 'lucide-react'
-import { hasPermission, useAuth } from '@/stores/auth'
+import { allowedPages, hasPermission, useAuth, type User } from '@/stores/auth'
 import { NAV_GROUPS, trailForLocation } from './navigation'
 import { deniedPageName } from './deniedWording'
 import { firstAllowedPath, gatePermissions, trailAllows } from './navAccess'
@@ -23,18 +23,37 @@ export function RouteGate({ children }: { children: ReactNode }) {
   if (!user?.permissions) return <>{children}</>
 
   const can = (p: string) => hasPermission(user, p)
+  const pages = allowedPages(user)
   const trail = trailForLocation(pathname, params)
-  if (trailAllows(trail, can)) return <>{children}</>
+  if (trailAllows(trail, can, pages)) return <>{children}</>
 
-  const landing = firstAllowedPath(NAV_GROUPS, can)
+  // The home page sends a role without the overview dashboard (or limited to selected pages) to its first page.
+  const landing = firstAllowedPath(NAV_GROUPS, can, pages)
   if (pathname === '/' && landing && landing !== '/') return <Navigate to={landing} replace />
+
+  // Limited to selected pages: the role holds the permission, the page is simply not on its list.
+  if (pages && trail && pathname !== '/' && trailAllows(trail, can, null)) return <NoAccess page={deniedPageName(trail)} needed={[]} landing={landing} listed />
 
   const leaf = trail ? (trail.child ?? trail.item) : null
   const needed = leaf ? [...new Set([...gatePermissions(trail!.item), ...(trail!.child ? gatePermissions(trail!.child) : [])])] : []
   return <NoAccess page={deniedPageName(trail)} needed={needed} landing={landing} />
 }
 
-function NoAccess({ page, needed, landing }: { page?: string; needed: string[]; landing: string | null }) {
+/** Whether the signed-in account may open `to` (a navigation address, query allowed): the same rule as the route
+ *  gate, for links and header widgets that lead to a page. */
+export function canOpenPath(user: User | null, to: string): boolean {
+  if (!user?.permissions) return false
+  const u = new URL(to, 'http://local')
+  return trailAllows(trailForLocation(u.pathname, u.searchParams), (p) => hasPermission(user, p), allowedPages(user))
+}
+
+/** Hook form of {@link canOpenPath}. */
+export function useCanOpen(): (to: string) => boolean {
+  const user = useAuth((s) => s.user)
+  return (to: string) => canOpenPath(user, to)
+}
+
+function NoAccess({ page, needed, landing, listed }: { page?: string; needed: string[]; landing: string | null; listed?: boolean }) {
   return (
     <div className="mx-auto mt-10 max-w-xl rounded-lg border border-border bg-surface p-6 shadow-card" role="status">
       <div className="flex items-start gap-3">
@@ -46,7 +65,9 @@ function NoAccess({ page, needed, landing }: { page?: string; needed: string[]; 
             {landing ? `Your role does not include ${page ? `“${page}”` : 'this page'}` : 'No pages are assigned to your role'}
           </h1>
           <p className="text-sm text-text2">
-            {landing
+            {listed && landing
+              ? 'Your role is limited to selected pages, and this one is not among them, so it is hidden from your menu.'
+              : landing
               ? 'This area is outside the access your administrator assigned, so it is hidden from your menu.'
               : 'Your account can sign in, but its role does not grant access to any part of the application yet.'}
             {' '}Ask an administrator to change your role if you need it.

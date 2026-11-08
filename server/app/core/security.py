@@ -11,6 +11,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 
+from app.core import page_access as _page_access
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.permissions import (
@@ -42,6 +43,7 @@ ROLE_POLICY_MAX_STALENESS_SECONDS = 5.0
 
 _ROLE_CACHE: dict[str, tuple[float, list[str]]] = {}
 _ROLE_SCOPE_CACHE: dict[str, tuple[float, list[str]]] = {}
+_ROLE_PAGE_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
 
 # Scope used when a role's scope cannot be read and nothing was cached: longer
 # than any tag may be (tag_service.MAX_TAG_LEN = 64), so no entity can carry
@@ -52,6 +54,7 @@ SCOPE_LOOKUP_FAILED = "zenplus:role-scope-unavailable:" + "0" * 48
 def invalidate_role_cache() -> None:
     _ROLE_CACHE.clear()
     _ROLE_SCOPE_CACHE.clear()
+    _ROLE_PAGE_CACHE.clear()
 
 
 def _is_missing_relation(exc: BaseException) -> bool:
@@ -65,7 +68,11 @@ def _is_missing_relation(exc: BaseException) -> bool:
 
 
 async def get_role_permissions(db: AsyncSession, role_name: str) -> list[str]:
-    """Permissions granted by ``role_name``.
+    """Permissions granted by ``role_name``, narrowed by the role's page limit
+    (``roles.page_access``, see :mod:`app.core.page_access`): a role limited to
+    selected pages keeps only the permissions those pages need, so every guard
+    refuses the API of a page it does not list. Unlimited roles get exactly
+    their permission list.
 
     Fail-closed: a lookup error never widens access. The last successfully
     resolved policy is reused (even when stale) and, with none, the role is
@@ -99,8 +106,53 @@ async def get_role_permissions(db: AsyncSession, role_name: str) -> list[str]:
         # that account has no authority, whatever its name suggests.
         perms = []
 
+    if perms:
+        perms = _page_access.restrict_permissions(perms, await get_role_page_access(db, role_name))
     _ROLE_CACHE[role_name] = (now, perms)
     return perms
+
+
+def _is_missing_page_access_column(exc: BaseException) -> bool:
+    """True when roles.page_access does not exist yet (before migrate-185)."""
+    orig = getattr(exc, "orig", exc)
+    if type(orig).__name__ == "UndefinedColumnError":
+        return True
+    msg = str(orig).lower()
+    return "page_access" in msg and "does not exist" in msg
+
+
+async def get_role_page_access(db: AsyncSession, role_name: str) -> Optional[dict]:
+    """The pages and network maps ``role_name`` is limited to
+    (``roles.page_access``, migrate-185), normalised by
+    :func:`app.core.page_access.normalize`; None = not limited.
+
+    Same caching and staleness bound as :func:`get_role_permissions`.
+    Fail-closed: on a lookup error the last resolved value is reused, and with
+    none the role is limited to no page and no map. A database without the
+    column (or without the roles table) has no page limits.
+    """
+    now = time.monotonic()
+    hit = _ROLE_PAGE_CACHE.get(role_name)
+    if hit and now - hit[0] < ROLE_POLICY_MAX_STALENESS_SECONDS:
+        return hit[1]
+
+    try:
+        async with db.begin_nested():
+            row = (await db.execute(
+                text("SELECT page_access FROM roles WHERE name = :name"),
+                {"name": role_name},
+            )).first()
+    except Exception as exc:
+        if _is_missing_relation(exc) or _is_missing_page_access_column(exc):
+            _ROLE_PAGE_CACHE[role_name] = (now, None)
+            return None
+        logger.error("role page access lookup failed for %r; keeping last valid value",
+                     role_name, exc_info=True)
+        return hit[1] if hit else dict(_page_access.LOOKUP_FAILED)
+
+    access = _page_access.normalize(row[0] if row is not None else None)
+    _ROLE_PAGE_CACHE[role_name] = (now, access)
+    return access
 
 
 def _is_missing_scope_column(exc: BaseException) -> bool:
