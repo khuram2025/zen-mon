@@ -50,6 +50,7 @@ import { ClassificationPage as UdtClassificationPage } from '@/pages/udt/Classif
 import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
 import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
+import { MapsOverview } from '@/features/maps/MapsOverview'
 import { LegacyReportRedirect } from '@/features/reports/library/LegacyRedirect'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { SensorDetailPage } from '@/pages/SensorDetailPage'
@@ -219,7 +220,7 @@ export default function App() {
         </Route>
         <Route path="netpath" element={<NetPathProbesPage />} />
         <Route path="netpath/probes/:id" element={<NetPathDetailPage />} />
-        <Route path="maps" element={<Navigate to="/maps/manual" replace />} />
+        <Route path="maps" element={<MapsOverview />} />
         <Route path="maps/manual" element={<ManualMapsEntry />} />
         {/* One access-denied state without netflow.view; empty-scope banner (NetflowAccess.tsx). */}
         <Route element={<NetflowAccessGate />}>

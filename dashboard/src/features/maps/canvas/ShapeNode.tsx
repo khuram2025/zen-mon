@@ -4,9 +4,10 @@ import { Handle, NodeResizer, Position, useStore, type NodeProps } from '@xyflow
 import { ExternalLink, Lock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { NetworkIcon } from '@/components/network-icons'
-import { LINK_DASH_PATTERN, textScaleFor, type MapShape } from '../core'
+import { LINK_DASH_PATTERN, textScaleFor, type MapShape, type SiteLive, type SiteMember } from '../core'
 import { useMapMode } from './MapModeContext'
 import { ConversationsWidget } from './ConversationsWidget'
+import { SiteTile } from './SiteTile'
 
 export type ShapeNodeData = {
   shape: MapShape
@@ -15,6 +16,12 @@ export type ShapeNodeData = {
   onEditText?: (text: string) => void
   /** Persist new geometry after a resize. */
   onResizeEnd?: (rect: { x: number; y: number; width: number; height: number }) => void
+  /** Site nodes: aggregate status from /sites-live. */
+  siteLive?: SiteLive
+  /** Open another map (site drill-down, linked map) keeping the current mode. */
+  onOpenMap?: (mapId: string) => void
+  /** Open a site member's own page. */
+  onOpenMember?: (m: SiteMember) => void
 }
 
 const GEOMETRIC = new Set(['rectangle', 'circle', 'diamond', 'hexagon'])
@@ -31,12 +38,12 @@ export function isBackgroundZone(shape: MapShape, live: boolean): boolean {
  * NodeResizer persists changes); positioned by its top-left like a box.
  * Geometric shapes can carry a caption (double-click to edit) so they work as
  * zone/group boxes the way draw.io shapes do. */
-function ShapeNodeImpl({ data, selected }: NodeProps) {
-  const { shape, live, onEditText, onResizeEnd } = data as ShapeNodeData
-  const { connectMode } = useMapMode()
+function ShapeNodeImpl({ data, selected, width, height }: NodeProps) {
+  const { shape, live, onEditText, onResizeEnd, siteLive, onOpenMap, onOpenMember } = data as ShapeNodeData
+  const { connectMode, textBoost = 1 } = useMapMode()
   const navigate = useNavigate()
   const zoom = useStore((s) => s.transform[2])
-  const ts = textScaleFor(zoom)
+  const ts = textScaleFor(zoom) * textBoost
   const m = shape.metadata || {}
   const locked = !!m.locked
   const zone = isBackgroundZone(shape, live)
@@ -128,7 +135,20 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
   const placeholder = editable && !editing && !(shape.text || '').trim()
 
   let content: React.ReactNode
-  if (m.widget === 'conversations') {
+  if (m.widget === 'site') {
+    content = (
+      <SiteTile
+        shape={shape}
+        live={siteLive}
+        w={width ?? 220}
+        h={height ?? 130}
+        selected={!!selected}
+        designMode={!live}
+        onDrill={onOpenMap}
+        onOpenMember={onOpenMember}
+      />
+    )
+  } else if (m.widget === 'conversations') {
     content = (
       <div className={cn('h-full w-full', selected && 'rounded-lg ring-2 ring-primary/70')}>
         <ConversationsWidget shape={shape} />
@@ -238,6 +258,10 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
     ? { left: 0, top: 0, width: '100%', height: '100%', transform: 'none', borderRadius: 6, background: 'transparent', border: 'none', opacity: 0, cursor: 'crosshair', zIndex: 5 } as const
     : { width: 1, height: 1, minWidth: 1, minHeight: 1, background: 'transparent', border: 'none', opacity: 0 } as const
   const quickHandleVisible = !live && !connectMode && !locked && m.widget !== 'conversations'
+  const openLinked = (id: string) => {
+    if (onOpenMap) onOpenMap(id)
+    else navigate(`/maps/manual?map=${encodeURIComponent(id)}${live ? '&mode=live' : ''}`)
+  }
 
   return (
     <div className="group relative h-full w-full" style={{ opacity }}>
@@ -271,13 +295,13 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
           <Lock className="h-2.5 w-2.5" />
         </span>
       )}
-      {linkMapId && (
+      {linkMapId && m.widget !== 'site' && (
         <button
           type="button"
           className="nodrag pointer-events-auto absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-border bg-surface/95 px-1.5 py-0.5 text-2xs font-semibold text-text2 shadow-sm hover:border-primary/60 hover:text-text"
           style={{ transform: `scale(${ts})`, transformOrigin: 'top right' }}
           title="Open the linked map"
-          onClick={(e) => { e.stopPropagation(); navigate(`/maps/manual?map=${encodeURIComponent(linkMapId)}${live ? '&mode=live' : ''}`) }}
+          onClick={(e) => { e.stopPropagation(); openLinked(linkMapId) }}
         >
           Open map <ExternalLink className="h-3 w-3" />
         </button>

@@ -20,6 +20,7 @@ import {
 import { ColorInput } from './Annotations'
 import { useDevices } from '../useMapData'
 import { IfaceSelect, PortText, SPEEDS, findIface, useInterfaces } from './IfacePicker'
+import { pickImageFile, readImageFile } from './imageUpload'
 
 const KINDS: LinkKind[] = ['ethernet', 'fiber', 'trunk', 'wireless', 'vpn', 'serial']
 const SHAPES: { value: LinkShape; label: string }[] = [
@@ -61,6 +62,13 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   const [iconFill, setIconFill] = useState(md.icon_fill ?? DEFAULT_ICON_FILL)
   const [frame, setFrame] = useState<'circle' | 'rounded'>(md.frame === 'rounded' ? 'rounded' : 'circle')
   const [hideIp, setHideIp] = useState(!!md.hide_ip)
+  const [imageSrc, setImageSrc] = useState<string | null>(typeof md.image_src === 'string' && md.image_src ? md.image_src : null)
+  const [imageErr, setImageErr] = useState<string | null>(null)
+  const uploadImage = async () => {
+    const file = await pickImageFile()
+    if (!file) return
+    try { setImageSrc(await readImageFile(file, 'icon')); setImageErr(null) } catch (e) { setImageErr((e as Error).message) }
+  }
   const [deviceId, setDeviceId] = useState<string>(node.device_id || '')
   const devices = useDevices()
   const deviceList = (devices.data?.data || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname))
@@ -80,7 +88,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   const save = () => onSave({
     label: effectiveLabel(),
     icon,
-    metadata: { ...md, size_scale: scale, icon_fill: iconFill, frame, hide_ip: hideIp, label_style: { color, fontFamily: font, fontSize, bold } },
+    metadata: { ...md, size_scale: scale, icon_fill: iconFill, frame, hide_ip: hideIp, image_src: imageSrc, label_style: { color, fontFamily: font, fontSize, bold } },
     ...(profileChanged ? { device_id: deviceId } : {}),
   })
 
@@ -159,13 +167,26 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
               )}
               style={{ width: 64 * scale, height: 64 * scale }}
             >
-              <NetworkIcon
-                name={iconForNode({ ...node, icon })}
-                style={{ width: 64 * scale * iconFill, height: 64 * scale * iconFill }}
-              />
+              {imageSrc ? (
+                <img src={imageSrc} alt="" className="object-contain" style={{ width: 64 * scale * iconFill, height: 64 * scale * iconFill }} />
+              ) : (
+                <NetworkIcon
+                  name={iconForNode({ ...node, icon })}
+                  style={{ width: 64 * scale * iconFill, height: 64 * scale * iconFill }}
+                />
+              )}
             </div>
           </div>
         </div>
+
+        <Field label="Custom icon image (replaces the built-in icon)">
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => void uploadImage()}>{imageSrc ? 'Replace image…' : 'Upload image…'}</Button>
+            {imageSrc && <Button type="button" variant="outline" size="sm" onClick={() => setImageSrc(null)}>Use built-in icon</Button>}
+            <span className="text-2xs text-muted">PNG, SVG, JPEG or WebP · scaled to 256 px</span>
+          </div>
+          {imageErr && <span className="text-2xs text-danger">{imageErr}</span>}
+        </Field>
 
         <Field label="Frame">
           <div className="flex gap-1">

@@ -270,8 +270,39 @@ table, .font-mono, .tabular { font-variant-numeric: tabular-nums; }
 }
 .nm-fault { animation: nm-fault 1.4s ease-in-out infinite; }
 
-/* Hovered device rises above its neighbours so the health card isn't clipped. */
-.react-flow__node:hover { z-index: 1000 !important; }
+/* Hovered device (or site tile) rises above its neighbours so its card isn't
+ * clipped. Zones and other shapes keep their stacking: a hovered zone used to
+ * rise over the devices drawn inside it. */
+.react-flow__node-device:hover,
+.react-flow__node.nm-site-node:hover { z-index: 1000 !important; }
+
+/* Network map device tile: a lit surface so icons read on both themes. */
+.nm-tile {
+  background: linear-gradient(160deg, rgb(var(--surface)) 0%, rgb(var(--surface2)) 100%);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.18);
+}
+.nm-tile-down { background: linear-gradient(160deg, rgb(var(--danger) / 0.16) 0%, rgb(var(--surface)) 90%); }
+
+/* Site node member grid: one cell per device, worst first. */
+.nm-site-cell { transition: transform 120ms ease; }
+.nm-site-cell:hover { transform: scale(1.35); z-index: 1; }
+
+/* NOC wall: near-black, higher-contrast surfaces and no chrome. */
+.map-wall {
+  --bg: 4 6 10;
+  --surface: 11 14 21;
+  --surface2: 20 25 36;
+  --surface3: 28 34 48;
+  --border: 40 48 66;
+  --text: 241 245 251;
+  --text2: 206 214 228;
+  --muted: 140 152 174;
+  background: rgb(var(--bg));
+}
+.map-wall .react-flow { --xy-background-color: transparent; background: transparent; }
+.map-wall.cursor-idle, .map-wall.cursor-idle * { cursor: none !important; }
+@keyframes nm-wall-progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.nm-wall-progress { transform-origin: left center; animation-name: nm-wall-progress; animation-timing-function: linear; animation-fill-mode: forwards; }
 
 /* Network map: draw.io-style quick-connect plug on device/shape hover */
 .react-flow__node:hover .nm-quick-handle,

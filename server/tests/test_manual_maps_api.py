@@ -713,3 +713,92 @@ def test_live_interface_matching_respects_port_number_boundaries():
     assert manual_maps._match_interface("Gi1/0/5", ifaces) is None
     assert manual_maps._match_interface("FortyGigabitEthernet1/1/1", ifaces)["if_name"] == "Fo1/1/1"
     assert manual_maps._match_interface("gigabitethernet1/0/50", ifaces)["if_name"] == "Gi1/0/50"
+
+
+# ── sites (grouped nodes) ────────────────────────────────────────────
+
+def test_sites_live_aggregates_location_child_map_and_picked_devices(api):
+    north = [device(api.db, f"north-{i}", location="North Campus", status=st)
+             for i, st in enumerate(["up", "up", "down", "degraded"])]
+    device(api.db, "elsewhere", location="South", status="down")
+    picked = device(api.db, "picked-fw", dtype="firewall", location="Other", status="maintenance")
+    api.db.execute("INSERT INTO alerts (device_id, status, severity, message) VALUES ($1, 'active', 'critical', 'down')",
+                   uuid.UUID(north[2]))
+    api.db.execute("INSERT INTO alerts (device_id, status, severity, message) VALUES ($1, 'active', 'warning', 'cpu')",
+                   uuid.UUID(north[3]))
+
+    child = new_map(api, "North Campus detail")
+    srv = server(api.db, "north-app", status="critical")
+    add_node(api, child, server_id=srv)
+    add_node(api, child, device_id=north[0])  # also a location member: counted once
+
+    m = new_map(api, "Region")
+    by_location = add_shape(api, m, metadata={"widget": "site", "site": {"location": " north campus "}})
+    by_map = add_shape(api, m, metadata={"widget": "site", "site": {"map_id": child}})
+    mixed = add_shape(api, m, metadata={"widget": "site", "site": {
+        "location": "North Campus", "map_id": child, "device_ids": [picked, "not-a-uuid"]}})
+    add_shape(api, m, metadata={"widget": "conversations"})  # not a site
+
+    r = api.client.get(f"/api/v1/maps/{m}/sites-live")
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert set(data) == {by_location, by_map, mixed}
+
+    loc = data[by_location]
+    assert loc["total"] == 4
+    assert loc["counts"] == {"down": 1, "degraded": 1, "maintenance": 0, "unknown": 0, "up": 2}
+    assert loc["alerts"] == {"active": 2, "critical": 1, "warning": 1}
+    assert loc["worst"] == "down"
+    assert [x["status"] for x in loc["members"]] == ["down", "degraded", "up", "up"]
+    assert loc["map_id"] is None
+
+    sub = data[by_map]
+    assert sub["map_id"] == child and sub["map_name"] == "North Campus detail"
+    assert sub["total"] == 2 and sub["counts"]["down"] == 1  # critical server → down
+    assert {x["kind"] for x in sub["members"]} == {"server", "device"}
+
+    mix = data[mixed]
+    assert mix["total"] == 6  # 4 location + server + picked firewall; north-0 de-duplicated
+    assert mix["counts"]["maintenance"] == 1
+
+
+def test_sites_live_hides_drill_down_map_outside_role_and_scope(api, monkeypatch):
+    child = new_map(api, "Secret site")
+    d = device(api.db, "secret-sw", location="Vault")
+    add_node(api, child, device_id=d)
+    m = new_map(api, "Region")
+    sid = add_shape(api, m, metadata={"widget": "site", "site": {"map_id": child, "location": "Vault"}})
+
+    async def only_region(db, user):
+        return {m}
+
+    async def no_scope_overlap(db, user):
+        return ["tag-nobody-has"]
+
+    monkeypatch.setattr(manual_maps, "allowed_map_ids", only_region)
+    monkeypatch.setattr(manual_maps.scoping, "visible_tags", no_scope_overlap)
+    data = api.client.get(f"/api/v1/maps/{m}/sites-live").json()["data"][sid]
+    assert data["map_id"] is None and data["map_name"] is None
+    assert data["total"] == 0 and data["members"] == []
+
+
+def test_map_list_reports_active_alert_totals(api):
+    d = device(api.db, "alerting", status="down")
+    m = new_map(api, "With alerts")
+    add_node(api, m, device_id=d)
+    api.db.execute("INSERT INTO alerts (device_id, status, severity, message) VALUES ($1, 'active', 'critical', 'x')",
+                   uuid.UUID(d))
+    api.db.execute("INSERT INTO alerts (device_id, status, severity, message) VALUES ($1, 'resolved', 'critical', 'y')",
+                   uuid.UUID(d))
+    listed = next(x for x in api.client.get("/api/v1/maps").json()["data"] if x["id"] == m)
+    assert listed["alerts"] == {"active": 1, "critical": 1}
+
+
+def test_map_list_leaves_out_background_bytes_and_cables(api):
+    big = "data:image/png;base64," + "A" * 5000
+    r = api.client.post("/api/v1/maps", json={"name": "Floor plan", "metadata": {
+        "background_image": {"src": big, "opacity": 0.4}, "annotation_links": [], "theme": "dark"}})
+    m = r.json()["id"]
+    listed = next(x for x in api.client.get("/api/v1/maps").json()["data"] if x["id"] == m)
+    assert listed["metadata"] == {"background_image": {"opacity": 0.4, "present": True}, "theme": "dark"}
+    assert get_map(api, m)["metadata"]["background_image"]["src"] == big

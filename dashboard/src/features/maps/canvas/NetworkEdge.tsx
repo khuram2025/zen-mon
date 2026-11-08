@@ -35,6 +35,7 @@ import {
   type NodeStatus,
   type Pt,
 } from '../core'
+import { useMapMode } from './MapModeContext'
 
 export type NetworkEdgeData = {
   link: ManualMapLink
@@ -70,6 +71,16 @@ const LIVE_CHIP_MIN_ZOOM = 0.45
 /* Below this zoom the throughput pill shrinks to its utilisation figure: the
  * full ▲/▼ rates are unreadable at wall scale and three times as wide. */
 export const COMPACT_PILL_ZOOM = 0.55
+
+/** Cable weight by nominal speed: 100M thin, 1G normal, 10G+ heavier. */
+function speedWidth(speed?: string | null): number {
+  if (!speed) return 1
+  const s = String(speed).toUpperCase()
+  if (s === '10M' || s === '100M') return 0.8
+  if (s === '10G' || s === '25G') return 1.3
+  if (s === '40G' || s === '100G' || s === '400G') return 1.6
+  return 1
+}
 
 /** Centre + shape info for an endpoint — devices are discs (radius follows the
  *  user's size scale), annotations are boxes (anchor on the rectangle border). */
@@ -121,7 +132,8 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   } = d
   const rf = useReactFlow()
   const zoom = useStore((s) => s.transform[2])
-  const ts = textScaleFor(zoom)
+  const { textBoost = 1 } = useMapMode()
+  const ts = textScaleFor(zoom) * textBoost
   const [hover, setHover] = useState(false)
   /** While dragging a bend, freeze anchor positions so the port doesn't chase the cursor. */
   const [anchorFreeze, setAnchorFreeze] = useState<{ sa: Pt; ta: Pt } | null>(null)
@@ -179,7 +191,8 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   const kind = linkKindOf(link)
   const kindStyle = LINK_KIND_STYLE[kind] || {}
   const widthScale = Math.max(0.4, Math.min(4, Number(link.metadata?.width_scale) || 1))
-  const baseWidth = (kindStyle.widthMul || 1) * 3 * widthScale
+  // Faster links draw thicker, so the backbone stands out from access ports.
+  const baseWidth = (kindStyle.widthMul || 1) * 3 * widthScale * speedWidth(link.metadata?.speed)
   const customColor = link.metadata?.color || null
   const dashOverride = link.metadata?.dash ? LINK_DASH_PATTERN[link.metadata.dash] : undefined
   const arrows = link.metadata?.arrows || 'none'

@@ -550,6 +550,17 @@ def _ann_record(data: dict, al_id: str) -> dict:
 
 # ─── Maps ──────────────────────────────────────────────────────────────────
 
+def _list_metadata(value: Any) -> dict:
+    """Map metadata for the list view without the heavy parts: annotation
+    cables and the background image bytes (only its presence is reported)."""
+    md = dict(_md(value))
+    md.pop("annotation_links", None)
+    bg = md.get("background_image")
+    if isinstance(bg, dict):
+        md["background_image"] = {k: v for k, v in bg.items() if k != "src"} | {"present": bool(bg.get("src"))}
+    return md
+
+
 @router.get("")
 async def list_maps(
     db: AsyncSession = Depends(get_db),
@@ -566,7 +577,9 @@ async def list_maps(
                    COALESCE(st.degraded_count, 0) AS degraded_count,
                    COALESCE(st.up_count, 0) AS up_count,
                    COALESCE(st.unknown_count, 0) AS unknown_count,
-                   COALESCE(st.maintenance_count, 0) AS maintenance_count
+                   COALESCE(st.maintenance_count, 0) AS maintenance_count,
+                   COALESCE(al.alert_count, 0) AS alert_count,
+                   COALESCE(al.critical_count, 0) AS critical_count
             FROM manual_maps m
             LEFT JOIN (
                 SELECT map_id, COUNT(*) AS node_count
@@ -592,6 +605,17 @@ async def list_maps(
                 ) ns
                 GROUP BY ns.map_id
             ) st ON st.map_id = m.id
+            LEFT JOIN (
+                SELECT mn.map_id,
+                       COUNT(a.id) AS alert_count,
+                       COUNT(a.id) FILTER (WHERE a.severity = 'critical') AS critical_count
+                FROM manual_map_nodes mn
+                JOIN alerts a ON a.status = 'active'
+                 AND ((mn.device_id IS NOT NULL AND a.device_id = mn.device_id)
+                      OR (mn.server_id IS NOT NULL AND a.server_id = mn.server_id)
+                      OR (mn.service_check_id IS NOT NULL AND a.service_check_id = mn.service_check_id))
+                GROUP BY mn.map_id
+            ) al ON al.map_id = m.id
             {only}
             ORDER BY m.updated_at DESC, m.name
         """),
@@ -601,6 +625,7 @@ async def list_maps(
         "data": [
             {
                 **_row_map(row),
+                "metadata": _list_metadata(row["metadata"]),
                 "node_count": row["node_count"],
                 "link_count": row["link_count"],
                 "status_counts": {
@@ -610,6 +635,7 @@ async def list_maps(
                     "unknown": row["unknown_count"],
                     "maintenance": row["maintenance_count"],
                 },
+                "alerts": {"active": row["alert_count"], "critical": row["critical_count"]},
             }
             for row in rows
         ]
@@ -2048,6 +2074,212 @@ async def nodes_live(
             "temperature_c": m.get("temperature_c"),
             "alerts": alerts_by.get((col, eid), {"active": 0, "critical": 0, "warning": 0}),
         }
+    return {"data": data, "generated_at": datetime.now(timezone.utc).isoformat()}
+
+
+# ─── Sites (grouped nodes) ─────────────────────────────────────────────────
+#
+# A site node is an annotation shape whose metadata carries ``widget: "site"``
+# and a ``site`` membership spec. It stands in for many devices at once: the
+# map draws one tile with the aggregate status and drills down into the site's
+# own map. Membership is the union of
+#   * ``site.location``   – every device whose location matches (case-insensitive),
+#   * ``site.map_id``     – every node on another map (the site's drill-down map),
+#   * ``site.device_ids`` – devices picked by hand.
+# Devices outside the caller's visibility scope are never counted or listed.
+
+SITE_MEMBER_CAP = 2000
+_SEVERITY_ORDER = {"down": 0, "degraded": 1, "maintenance": 2, "unknown": 3, "up": 4}
+
+
+def _site_spec(md: dict) -> Optional[dict]:
+    if md.get("widget") != "site":
+        return None
+    spec = md.get("site")
+    spec = spec if isinstance(spec, dict) else {}
+    location = spec.get("location")
+    location = location.strip() if isinstance(location, str) and location.strip() else None
+    child = spec.get("map_id")
+    try:
+        child = str(uuid.UUID(str(child))) if child else None
+    except (ValueError, TypeError):
+        child = None
+    ids: list[str] = []
+    for raw in spec.get("device_ids") or []:
+        try:
+            ids.append(str(uuid.UUID(str(raw))))
+        except (ValueError, TypeError):
+            continue
+    return {"location": location, "map_id": child, "device_ids": ids}
+
+
+def _empty_site() -> dict:
+    return {
+        "total": 0,
+        "counts": {k: 0 for k in _SEVERITY_ORDER},
+        "alerts": {"active": 0, "critical": 0, "warning": 0},
+        "worst": "unknown",
+        "members": [],
+        "truncated": False,
+        "map_id": None,
+        "map_name": None,
+    }
+
+
+@router.get("/{map_id}/sites-live")
+async def sites_live(
+    map_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("maps.view")),
+):
+    """Aggregate status for every site node on the map.
+
+    Response: {"data": {<shape_id>: {total, counts: {up, down, degraded,
+    maintenance, unknown}, alerts: {active, critical, warning}, worst,
+    members: [{kind, id, hostname, ip_address, device_type, status, alerts}],
+    truncated, map_id, map_name}}}
+
+    ``members`` is sorted worst-first and capped at SITE_MEMBER_CAP; the counts
+    always cover every member. A drill-down map the caller's role may not open
+    is neither expanded nor named.
+    """
+    shape_rows = (await db.execute(
+        text("SELECT id, metadata FROM manual_map_shapes WHERE map_id = :map_id"),
+        {"map_id": map_id},
+    )).mappings().all()
+    specs = {str(r["id"]): sp for r in shape_rows if (sp := _site_spec(_md(r["metadata"])))}
+    if not specs:
+        return {"data": {}, "generated_at": datetime.now(timezone.utc).isoformat()}
+
+    allowed = await allowed_map_ids(db, user)
+    scope = await scoping.visible_tags(db, user)
+    dev_scope = f" AND {scoping.jsonb_tags_visible('d.tags')}" if scope is not None else ""
+    base_params: dict[str, Any] = {scoping.SCOPE_PARAM: scope} if scope is not None else {}
+
+    # Drill-down maps that exist and that the caller may open.
+    child_ids = sorted({sp["map_id"] for sp in specs.values() if sp["map_id"]})
+    if allowed is not None:
+        child_ids = [c for c in child_ids if c in allowed]
+    child_names: dict[str, str] = {}
+    if child_ids:
+        for r in (await db.execute(
+            text("SELECT id, name FROM manual_maps WHERE id::text = ANY(:ids)"), {"ids": child_ids},
+        )).mappings().all():
+            child_names[str(r["id"])] = r["name"]
+
+    # Members: (kind, entity id) → row, gathered once per source.
+    members_by_site: dict[str, dict[tuple[str, str], dict]] = {sid: {} for sid in specs}
+
+    def add(sid: str, row) -> None:
+        key = (row["kind"], str(row["entity_id"]))
+        members_by_site[sid].setdefault(key, {
+            "kind": row["kind"],
+            "id": str(row["entity_id"]),
+            "hostname": row["hostname"],
+            "ip_address": row["ip_address"],
+            "device_type": row["device_type"],
+            "status": row["status"] or "unknown",
+        })
+
+    locations = sorted({sp["location"].lower() for sp in specs.values() if sp["location"]})
+    if locations:
+        rows = (await db.execute(text(f"""
+            SELECT 'device' AS kind, d.id AS entity_id, d.hostname, host(d.ip_address) AS ip_address,
+                   d.device_type, COALESCE(d.status, 'unknown') AS status,
+                   lower(btrim(d.location)) AS loc
+            FROM devices d
+            WHERE lower(btrim(d.location)) = ANY(:locs){dev_scope}
+        """), {**base_params, "locs": locations})).mappings().all()
+        by_loc: dict[str, list] = {}
+        for r in rows:
+            by_loc.setdefault(r["loc"], []).append(r)
+        for sid, sp in specs.items():
+            if sp["location"]:
+                for r in by_loc.get(sp["location"].lower(), []):
+                    add(sid, r)
+
+    picked = sorted({i for sp in specs.values() for i in sp["device_ids"]})
+    if picked:
+        rows = (await db.execute(text(f"""
+            SELECT 'device' AS kind, d.id AS entity_id, d.hostname, host(d.ip_address) AS ip_address,
+                   d.device_type, COALESCE(d.status, 'unknown') AS status
+            FROM devices d
+            WHERE d.id::text = ANY(:ids){dev_scope}
+        """), {**base_params, "ids": picked})).mappings().all()
+        by_id = {str(r["entity_id"]): r for r in rows}
+        for sid, sp in specs.items():
+            for i in sp["device_ids"]:
+                if i in by_id:
+                    add(sid, by_id[i])
+
+    if child_names:
+        node_scope = f" AND (mn.device_id IS NULL OR {scoping.jsonb_tags_visible('d.tags')})" if scope is not None else ""
+        rows = (await db.execute(text(f"""
+            SELECT mn.map_id::text AS child, {_NODE_KIND_SQL} AS kind,
+                   COALESCE(mn.device_id, mn.server_id, mn.service_check_id) AS entity_id,
+                   COALESCE(d.hostname, s.display_name, sc.name) AS hostname,
+                   COALESCE(host(d.ip_address), host(s.primary_ip), sc.target_host) AS ip_address,
+                   CASE WHEN mn.device_id IS NOT NULL THEN d.device_type
+                        WHEN mn.server_id IS NOT NULL THEN 'server'
+                        ELSE 'service_check' END AS device_type,
+                   {_NODE_STATUS_SQL} AS status
+            FROM manual_map_nodes mn
+            {_NODE_JOINS}
+            WHERE mn.map_id::text = ANY(:ids){node_scope}
+        """), {**base_params, "ids": sorted(child_names)})).mappings().all()
+        by_child: dict[str, list] = {}
+        for r in rows:
+            by_child.setdefault(r["child"], []).append(r)
+        for sid, sp in specs.items():
+            if sp["map_id"] in child_names:
+                for r in by_child.get(sp["map_id"], []):
+                    add(sid, r)
+
+    # Active alerts for every member entity, in one query.
+    every = [m for site in members_by_site.values() for m in site.values()]
+    ids_of = lambda kind: sorted({m["id"] for m in every if m["kind"] == kind})  # noqa: E731
+    alerts_by: dict[tuple[str, str], dict] = {}
+    if every:
+        for r in (await db.execute(text("""
+            SELECT device_id, server_id, service_check_id,
+                   COUNT(*) AS active,
+                   COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+                   COUNT(*) FILTER (WHERE severity = 'warning') AS warning
+            FROM alerts
+            WHERE status = 'active'
+              AND (device_id::text = ANY(:dids) OR server_id::text = ANY(:sids)
+                   OR service_check_id::text = ANY(:cids))
+            GROUP BY device_id, server_id, service_check_id
+        """), {"dids": ids_of("device"), "sids": ids_of("server"), "cids": ids_of("service_check")})).mappings().all():
+            for col, kind in (("device_id", "device"), ("server_id", "server"), ("service_check_id", "service_check")):
+                if r[col] is None:
+                    continue
+                b = alerts_by.setdefault((kind, str(r[col])), {"active": 0, "critical": 0, "warning": 0})
+                for k in ("active", "critical", "warning"):
+                    b[k] += int(r[k])
+
+    data: dict[str, dict] = {}
+    for sid, sp in specs.items():
+        out = _empty_site()
+        if sp["map_id"] in child_names:
+            out["map_id"] = sp["map_id"]
+            out["map_name"] = child_names[sp["map_id"]]
+        members = list(members_by_site[sid].values())
+        for m in members:
+            st = m["status"] if m["status"] in _SEVERITY_ORDER else "unknown"
+            m["status"] = st
+            out["counts"][st] += 1
+            a = alerts_by.get((m["kind"], m["id"]), {"active": 0, "critical": 0, "warning": 0})
+            m["alerts"] = a
+            for k in ("active", "critical", "warning"):
+                out["alerts"][k] += a[k]
+        members.sort(key=lambda m: (_SEVERITY_ORDER[m["status"]], -m["alerts"]["critical"], -m["alerts"]["active"],
+                                    (m["hostname"] or "").lower()))
+        out["total"] = len(members)
+        out["truncated"] = len(members) > SITE_MEMBER_CAP
+        out["members"] = members[:SITE_MEMBER_CAP]
+        out["worst"] = members[0]["status"] if members else "unknown"
+        data[sid] = out
     return {"data": data, "generated_at": datetime.now(timezone.utc).isoformat()}
 
 

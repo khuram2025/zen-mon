@@ -10,6 +10,7 @@ import type {
   ManualMapDetail,
   ManualMapListItem,
   NodeLiveData,
+  SiteLive,
   SuggestedLink,
 } from './core'
 
@@ -153,6 +154,25 @@ export function useNodesLive(mapId: string | null, enabled: boolean) {
     queryFn: async () => {
       try {
         return (await api.get(`/maps/${mapId}/nodes-live`)).data
+      } catch {
+        return { data: {} }
+      }
+    },
+  })
+}
+
+/** Aggregate status of the map's site nodes. Polls in both modes (slower in
+ *  design) so a site tile never shows stale counts; fails soft on an older
+ *  backend without the endpoint. */
+export function useSitesLive(mapId: string | null, live: boolean, hasSites: boolean) {
+  return useQuery<{ data: Record<string, SiteLive> }>({
+    queryKey: ['manual-map-sites-live', mapId],
+    enabled: !!mapId && hasSites,
+    refetchInterval: hasSites ? (live ? 15_000 : 60_000) : false,
+    retry: false,
+    queryFn: async () => {
+      try {
+        return (await api.get(`/maps/${mapId}/sites-live`)).data
       } catch {
         return { data: {} }
       }
