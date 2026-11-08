@@ -1,71 +1,51 @@
-import { regionalDate } from '@/lib/regionalTime'
 /**
  * APM Synthetics — scripted user scenarios (multi-step HTTP journeys).
  *
- * Monitors live in apm_synthetic_monitors (PG); run history in ClickHouse.
- * Backend: /api/v1/apm/synthetics (+ /{id}/run, /{id}/results).
+ * The list shows every scenario's availability, timings and failures for the selected range (default 24h); the
+ * scenario name opens its detail page (SyntheticDetailPage) with the same range.
+ * Backend: /api/v1/apm/synthetics (list, /{id}, /{id}/summary, /{id}/runs, /{id}/run-detail, /{id}/run).
  */
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2,
-  Pencil, Play, Plus, Trash2, XCircle,
+  Activity, AlertTriangle, CheckCircle2, Loader2, Pencil, Play, Plus, Trash2, XCircle,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
-import { Badge } from '@/components/ui/Badge'
+import { regionalDate } from '@/lib/regionalTime'
+import { useCan } from '@/stores/auth'
 import { Button } from '@/components/ui/Button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
+import { Card, CardContent } from '@/components/ui/Card'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
+import { QueryFailure } from '@/components/ui/QueryState'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/Select'
+import { SkeletonTable } from '@/components/ui/Skeleton'
+import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { Textarea } from '@/components/ui/Textarea'
 import { toast } from '@/components/ui/Toast'
+import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
 import { fmtMs } from '@/components/apm/shared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
-import { ApmKpi, RankBar } from '@/components/apm/viz'
+import { ApmKpi, fmtCount } from '@/components/apm/viz'
 import { useNotificationChannels } from '@/hooks/useNotificationChannels'
+import {
+  type SynListResponse, type SynMonitor, type SynRunDetail, type SynStep,
+  detailHref, fmtInterval, fmtUptime, formatVariables, monitorPayload, parseVariables, uptimeTone,
+} from '@/features/apm/synthetics'
+import { AvailabilitySpark, StatusPill, TONE_TEXT } from './synthetics/parts'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-interface Assertion { type: string; operator?: string; value?: any; path?: string }
-interface Extract { var: string; from: string; path: string }
-interface Step {
-  name: string; method: string; url: string
-  headers?: Record<string, string>; body?: string
-  assertions?: Assertion[]; extract?: Extract[]
-}
-interface Monitor {
-  id: string; name: string; steps: Step[]
-  variables: Record<string, string>; verify_tls: boolean
-  notify_channels: string[]; check_interval: number; timeout: number
-  retry_count: number; enabled: boolean; status: string
-  last_check_at: string | null
-  runs: number; uptime_pct: number | null; avg_ms: number | null
-  last_run_at: string | null
-}
-interface StepResult {
-  name: string; method: string; url: string; ok: boolean
-  status_code: number; ms: number; error: string
-  asserts: { type: string; ok: boolean; detail: string }[]
-  body_snippet?: string
-}
-interface RunResult {
-  status: string; success: boolean; total_ms: number
-  steps_total: number; steps_passed: number
-  failed_step: string; error: string; steps: StepResult[]
-}
-interface HistoryRow {
-  timestamp: string; status: string; success: boolean; total_ms: number
-  steps_total: number; steps_passed: number; failed_step: string; error: string
-  steps?: StepResult[]
-}
+type Step = SynStep
+type Monitor = SynMonitor
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']
 const ASSERT_TYPES = [
@@ -80,18 +60,40 @@ function emptyStep(): Step {
   return { name: '', method: 'GET', url: '', assertions: [{ type: 'status_code', operator: 'eq', value: 200 }] }
 }
 
+// ─── Run now (shared with the detail page) ──────────────────────────────────
+
+/** POST /{id}/run with the result toast; `onDone` receives the run (shaped like run-detail). */
+export function useRunNow(m: Pick<Monitor, 'id' | 'name'>, onDone?: (r: SynRunDetail) => void) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async () => (await api.post(`/apm/synthetics/${m.id}/run`)).data as SynRunDetail,
+    onSuccess: (r: SynRunDetail) => {
+      r.success
+        ? toast.success(`${m.name} passed`, `${r.steps_passed}/${r.steps_total} steps in ${fmtMs(r.total_ms)}`)
+        : toast.error(`${m.name} failed`, `at "${r.failed_step}": ${r.error}`)
+      qc.invalidateQueries({ queryKey: ['apm', 'synthetics'] })
+      onDone?.(r)
+    },
+    onError: (e: unknown) => toast.error('Run failed', apiErrorMessage(e)),
+  })
+}
+
 // ─── Page ───────────────────────────────────────────────────────────────────
 
 export function SyntheticsPage() {
   const qc = useQueryClient()
+  const can = useCan()
+  const manage = can('apm.manage')
+  const [searchParams] = useSearchParams()
+  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange('24h')
   const [editor, setEditor] = useState<Monitor | 'new' | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Monitor | null>(null)
-  const [expanded, setExpanded] = useState<string | null>(null)
 
-  const q = useQuery<{ monitors: Monitor[]; summary: { total: number; up: number; down: number; disabled: number } }>({
-    queryKey: ['apm', 'synthetics'],
-    queryFn: async () => (await api.get('/apm/synthetics')).data,
-    refetchInterval: 15000,
+  const q = useQuery<SynListResponse>({
+    queryKey: ['apm', 'synthetics', 'list', range.fromISO, range.toISO],
+    queryFn: async () => (await api.get(`/apm/synthetics?${new URLSearchParams({ from: range.fromISO, to: range.toISO })}`)).data,
+    refetchInterval: 30_000,
+    placeholderData: (prev) => prev,
   })
 
   const remove = useMutation({
@@ -101,10 +103,14 @@ export function SyntheticsPage() {
       toast.success('Scenario deleted')
       qc.invalidateQueries({ queryKey: ['apm', 'synthetics'] })
     },
-    onError: (e: any) => { setDeleteTarget(null); toast.error('Delete failed', apiErrorMessage(e)) },
+    onError: (e: unknown) => { setDeleteTarget(null); toast.error('Delete failed', apiErrorMessage(e)) },
   })
 
   const s = q.data?.summary
+  const monitors = q.data?.monitors ?? []
+  const spanFrom = q.data?.range?.from ?? range.fromISO
+  const spanTo = q.data?.range?.to ?? range.toISO
+  const failRate = s?.runs ? (s.failures ?? 0) / s.runs : 0
 
   return (
     <div className="space-y-4">
@@ -113,74 +119,102 @@ export function SyntheticsPage() {
         description="Scripted user journeys run from the appliance on a schedule — multi-step HTTP flows with assertions, so you know a workflow is broken before users do."
         article="synthetics"
         actions={
-          <Button size="sm" onClick={() => setEditor('new')}>
-            <Plus className="h-4 w-4" /> New scenario
-          </Button>
+          <>
+            <TimeRangePicker
+              rangeIdx={rangeIdx}
+              isCustom={isCustom}
+              customFrom={range.fromISO}
+              customTo={range.toISO}
+              onPreset={setPreset}
+              onCustom={setCustom}
+            />
+            {manage && (
+              <Button size="sm" onClick={() => setEditor('new')}>
+                <Plus className="h-4 w-4" /> New scenario
+              </Button>
+            )}
+          </>
         }
       />
 
       {q.isError && (
-        <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-          Failed to load — {apiErrorMessage(q.error)}
-        </div>
+        <QueryFailure
+          compact={q.data !== undefined}
+          error={q.error}
+          what="synthetic scenarios"
+          onRetry={() => void q.refetch()}
+          retrying={q.isFetching}
+        />
       )}
 
-      <div className="grid gap-3 sm:grid-cols-4">
-        <ApmKpi label="Scenarios" tone="primary" value={s?.total ?? '—'} />
-        <ApmKpi label="Up" tone="success" value={s?.up ?? '—'} sub="passing journeys" />
-        <ApmKpi label="Down" tone={s?.down ? 'danger' : 'success'} value={s?.down ?? '—'} sub="failing now" />
-        <ApmKpi label="Disabled" tone="muted" value={s?.disabled ?? '—'} />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+        <ApmKpi label="Scenarios" tone="primary" value={s?.total ?? '—'} sub={s ? `${s.total - s.disabled} enabled` : undefined} />
+        <ApmKpi label="Up" tone="success" value={s?.up ?? '—'} sub="passing now" icon={<CheckCircle2 className="h-4 w-4" />} />
+        <ApmKpi label="Down" tone={s?.down ? 'danger' : 'success'} value={s?.down ?? '—'} sub="failing now" icon={<XCircle className="h-4 w-4" />} />
+        <ApmKpi label="Disabled" tone="muted" value={s?.disabled ?? '—'} sub="not scheduled" />
+        <ApmKpi label="Runs" tone="info" value={s?.runs != null ? fmtCount(s.runs) : '—'} sub={rangePhrase(range.label)} />
+        <ApmKpi
+          label="Failed runs"
+          tone={!s?.failures ? 'success' : failRate >= 0.05 ? 'danger' : 'warning'}
+          value={s?.failures != null ? fmtCount(s.failures) : '—'}
+          sub={s?.runs ? `${(failRate * 100).toFixed(failRate < 0.01 ? 2 : 1)}% of runs` : 'no runs'}
+          icon={<AlertTriangle className="h-4 w-4" />}
+        />
       </div>
 
       <Card>
         <CardContent className="p-0">
           {q.isLoading ? (
-            <div className="flex items-center gap-2 p-6 text-sm text-muted">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading scenarios…
-            </div>
-          ) : (q.data?.monitors ?? []).length === 0 ? (
+            <div className="p-4"><SkeletonTable rows={5} cols={7} /></div>
+          ) : q.isError && !q.data ? null : monitors.length === 0 ? (
             <div className="p-10 text-center">
               <Activity className="mx-auto h-8 w-8 text-muted" />
               <p className="mt-3 text-sm text-text2">No synthetic scenarios yet.</p>
               <p className="mt-1 text-xs text-muted">
-                Create one to continuously exercise a critical user journey — e.g. login →
-                add to cart → checkout — and alert the moment it breaks.
+                {manage
+                  ? 'Create one to continuously exercise a critical user journey — e.g. login → add to cart → checkout — and alert the moment it breaks.'
+                  : 'A user with APM management access can create scenarios that exercise critical user journeys.'}
               </p>
-              <Button className="mt-4" onClick={() => setEditor('new')}>
-                <Plus className="h-4 w-4" /> Create your first scenario
-              </Button>
+              {manage && (
+                <Button className="mt-4" onClick={() => setEditor('new')}>
+                  <Plus className="h-4 w-4" /> Create your first scenario
+                </Button>
+              )}
             </div>
           ) : (
-            <Table>
-              <THead>
-                <Tr>
-                  <Th className="w-8" />
-                  <Th>Scenario</Th>
-                  <Th>Status</Th>
-                  <Th className="text-right">Uptime (24h)</Th>
-                  <Th className="text-right">Avg duration</Th>
-                  <Th className="text-right">Interval</Th>
-                  <Th>Last run</Th>
-                  <Th className="text-right">Actions</Th>
-                </Tr>
-              </THead>
-              <TBody>
-                {q.data!.monitors.map((m) => (
-                  <MonitorRow
-                    key={m.id} m={m}
-                    expanded={expanded === m.id}
-                    onToggle={() => setExpanded(expanded === m.id ? null : m.id)}
-                    onEdit={() => setEditor(m)}
-                    onDelete={() => setDeleteTarget(m)}
-                  />
-                ))}
-              </TBody>
-            </Table>
+            <div className="overflow-x-auto">
+              <Table>
+                <THead>
+                  <Tr>
+                    <Th>Scenario</Th>
+                    <Th>Status</Th>
+                    <Th>Availability</Th>
+                    <Th className="text-right">Avg / p95</Th>
+                    <Th className="text-right">Failures</Th>
+                    <Th>Last failure</Th>
+                    <Th className="text-right">Interval</Th>
+                    <Th>Last run</Th>
+                    {manage && <Th className="text-right">Actions</Th>}
+                  </Tr>
+                </THead>
+                <TBody>
+                  {monitors.map((m) => (
+                    <MonitorRow
+                      key={m.id} m={m} manage={manage}
+                      href={detailHref(m.id, searchParams)}
+                      spanFrom={spanFrom} spanTo={spanTo}
+                      onEdit={() => setEditor(m)}
+                      onDelete={() => setDeleteTarget(m)}
+                    />
+                  ))}
+                </TBody>
+              </Table>
+            </div>
           )}
         </CardContent>
       </Card>
 
-      {editor && (
+      {editor && manage && (
         <ScenarioEditor
           monitor={editor === 'new' ? null : editor}
           onClose={() => setEditor(null)}
@@ -201,160 +235,72 @@ export function SyntheticsPage() {
   )
 }
 
-// ─── Row + expanded history ─────────────────────────────────────────────────
+// ─── Row ────────────────────────────────────────────────────────────────────
 
-function StatusPill({ status, enabled }: { status: string; enabled: boolean }) {
-  if (!enabled) return <Badge variant="outline">Disabled</Badge>
-  if (status === 'up') return <Badge variant="success"><CheckCircle2 className="h-3 w-3" /> Up</Badge>
-  if (status === 'down') return <Badge variant="danger"><XCircle className="h-3 w-3" /> Down</Badge>
-  return <Badge variant="outline">Pending</Badge>
-}
-
-function MonitorRow({ m, expanded, onToggle, onEdit, onDelete }: {
-  m: Monitor; expanded: boolean
-  onToggle: () => void; onEdit: () => void; onDelete: () => void
+function MonitorRow({ m, manage, href, spanFrom, spanTo, onEdit, onDelete }: {
+  m: Monitor; manage: boolean; href: string; spanFrom: string; spanTo: string
+  onEdit: () => void; onDelete: () => void
 }) {
-  const qc = useQueryClient()
-  const [runResult, setRunResult] = useState<RunResult | null>(null)
-
-  const run = useMutation({
-    mutationFn: async () => (await api.post(`/apm/synthetics/${m.id}/run`)).data as Promise<RunResult>,
-    onSuccess: (r: RunResult) => {
-      setRunResult(r)
-      if (!expanded) onToggle()
-      r.success
-        ? toast.success(`${m.name} passed`, `${r.steps_passed}/${r.steps_total} steps in ${fmtMs(r.total_ms)}`)
-        : toast.error(`${m.name} failed`, `at "${r.failed_step}": ${r.error}`)
-      qc.invalidateQueries({ queryKey: ['apm', 'synthetics'] })
-    },
-    onError: (e: any) => toast.error('Run failed', apiErrorMessage(e)),
-  })
+  const navigate = useNavigate()
+  const run = useRunNow(m)
+  const tone = uptimeTone(m.uptime_pct)
+  const failureTitle = m.last_failure_at
+    ? `${regionalDate(new Date(m.last_failure_at), 'datetime')}${m.last_failed_step ? ` — ${m.last_failed_step}` : ''}${m.last_error ? `: ${m.last_error}` : ''}`
+    : undefined
 
   return (
-    <>
-      <Tr className="cursor-pointer" onClick={onToggle}>
-        <Td>{expanded ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}</Td>
-        <Td>
-          <div className="font-medium text-text">{m.name}</div>
-          <div className="text-xs text-muted">{m.steps.length} step{m.steps.length === 1 ? '' : 's'}</div>
-        </Td>
-        <Td><StatusPill status={m.status} enabled={m.enabled} /></Td>
-        <Td className={cn('text-right tabular-nums',
-          m.uptime_pct != null && m.uptime_pct < 99 ? 'text-warning' : 'text-text2')}>
-          {m.uptime_pct != null ? (
-            <div className="min-w-[4.5rem]">
-              <div className={cn('text-right tabular-nums', m.uptime_pct < 99 ? 'text-warning' : 'text-text2')}>{m.uptime_pct}%</div>
-              <RankBar value={m.uptime_pct} max={100} color={m.uptime_pct < 99 ? '#f59e0b' : '#22c55e'} />
-            </div>
-          ) : '—'}
-        </Td>
-        <Td className="text-right tabular-nums text-text2">{m.avg_ms != null ? fmtMs(m.avg_ms) : '—'}</Td>
-        <Td className="text-right tabular-nums text-text2">{m.check_interval}s</Td>
-        <Td className="text-xs text-muted">{m.last_run_at ? relativeTime(m.last_run_at) : 'never'}</Td>
+    <Tr className="cursor-pointer" onClick={() => navigate(href)}>
+      <Td>
+        <Link to={href} className="font-medium text-text hover:text-primary hover:underline" onClick={(e) => e.stopPropagation()}>
+          {m.name}
+        </Link>
+        <div className="text-xs text-muted">
+          {m.steps.length} step{m.steps.length === 1 ? '' : 's'}
+          {(m.tags ?? []).length > 0 && <> · {(m.tags ?? []).join(', ')}</>}
+        </div>
+      </Td>
+      <Td><StatusPill status={m.status} enabled={m.enabled} /></Td>
+      <Td>
+        <div className="flex min-w-[10rem] items-center gap-2">
+          <span className={cn('w-14 shrink-0 text-right text-xs font-semibold tabular-nums', TONE_TEXT[tone])}>
+            {fmtUptime(m.uptime_pct)}
+          </span>
+          <AvailabilitySpark spark={m.spark} from={spanFrom} to={spanTo} className="w-32" />
+        </div>
+      </Td>
+      <Td className="whitespace-nowrap text-right text-xs tabular-nums text-text2">
+        {fmtMs(m.avg_ms)} <span className="text-muted">/</span> {fmtMs(m.p95_ms)}
+      </Td>
+      <Td className={cn('text-right text-xs tabular-nums', m.failures ? 'font-semibold text-danger-fg' : 'text-muted')}>
+        {m.failures ?? 0}
+        {m.runs ? <span className="font-normal text-muted"> / {fmtCount(m.runs)}</span> : null}
+      </Td>
+      <Td className="max-w-[16rem]" title={failureTitle}>
+        {m.last_failure_at ? (
+          <div className="min-w-0">
+            <div className="text-xs text-text2">{relativeTime(m.last_failure_at)}</div>
+            {(m.last_failed_step || m.last_error) && (
+              <div className="truncate text-2xs text-danger-fg">
+                {m.last_failed_step ? `${m.last_failed_step}: ` : ''}{m.last_error}
+              </div>
+            )}
+          </div>
+        ) : <span className="text-xs text-muted">none</span>}
+      </Td>
+      <Td className="text-right text-xs tabular-nums text-text2">{fmtInterval(m.check_interval)}</Td>
+      <Td className="whitespace-nowrap text-xs text-muted">{m.last_run_at ? relativeTime(m.last_run_at) : 'never'}</Td>
+      {manage && (
         <Td onClick={(e) => e.stopPropagation()}>
           <div className="flex justify-end gap-1">
-            <Button variant="ghost" size="icon" title="Run now" disabled={run.isPending} onClick={() => run.mutate()}>
+            <Button variant="ghost" size="icon" title="Run now" aria-label={`Run ${m.name} now`} disabled={run.isPending} onClick={() => run.mutate()}>
               {run.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             </Button>
-            <Button variant="ghost" size="icon" title="Edit" onClick={onEdit}><Pencil className="h-4 w-4" /></Button>
-            <Button variant="ghost" size="icon" title="Delete" onClick={onDelete}><Trash2 className="h-4 w-4 text-danger" /></Button>
+            <Button variant="ghost" size="icon" title="Edit" aria-label={`Edit ${m.name}`} onClick={onEdit}><Pencil className="h-4 w-4" /></Button>
+            <Button variant="ghost" size="icon" title="Delete" aria-label={`Delete ${m.name}`} onClick={onDelete}><Trash2 className="h-4 w-4 text-danger" /></Button>
           </div>
         </Td>
-      </Tr>
-      {expanded && (
-        <Tr>
-          <Td colSpan={8} className="bg-surface2/20 p-4">
-            <MonitorDetail m={m} freshRun={runResult} />
-          </Td>
-        </Tr>
       )}
-    </>
-  )
-}
-
-function MonitorDetail({ m, freshRun }: { m: Monitor; freshRun: RunResult | null }) {
-  const hist = useQuery<{ results: HistoryRow[] }>({
-    queryKey: ['apm', 'synthetics', m.id, 'results'],
-    queryFn: async () => (await api.get(`/apm/synthetics/${m.id}/results?hours=24`)).data,
-    refetchInterval: 30000,
-  })
-
-  const rows = hist.data?.results ?? []
-  const latestWithSteps = freshRun ?? rows.find((r) => r.steps && r.steps.length)
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <div>
-        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">
-          Latest run — step detail
-        </div>
-        {!latestWithSteps ? (
-          <p className="text-sm text-muted">No runs recorded yet. Click “Run now”.</p>
-        ) : (
-          <div className="space-y-1.5">
-            {(latestWithSteps.steps ?? []).map((s2, i) => (
-              <div key={i} className={cn(
-                'rounded-md border px-3 py-2',
-                s2.ok ? 'border-border/60 bg-surface' : 'border-danger/40 bg-danger/10',
-              )}>
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex min-w-0 items-center gap-2">
-                    {s2.ok
-                      ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
-                      : <XCircle className="h-3.5 w-3.5 shrink-0 text-danger" />}
-                    <span className="truncate text-sm text-text">{s2.name}</span>
-                    <span className="font-mono text-2xs text-muted">{s2.method}</span>
-                  </div>
-                  <span className="shrink-0 text-xs tabular-nums text-text2">
-                    {s2.status_code || '—'} · {fmtMs(s2.ms)}
-                  </span>
-                </div>
-                {(s2.asserts ?? []).length > 0 && (
-                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 pl-5">
-                    {s2.asserts.map((a, j) => (
-                      <span key={j} className={cn('text-xs', a.ok ? 'text-muted' : 'text-danger')}>
-                        {a.ok ? '✓' : '✗'} {a.detail}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {s2.error && <div className="mt-1 pl-5 text-xs text-danger">{s2.error}</div>}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div>
-        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">
-          Run history (24h{rows.length ? ` · ${rows.length} runs` : ''})
-        </div>
-        {/* success/failure strip, most recent first */}
-        <div className="flex flex-wrap gap-[3px]">
-          {rows.slice(0, 120).map((r, i) => (
-            <span
-              key={i}
-              title={`${regionalDate(new Date(r.timestamp), 'datetime')} — ${r.status}${r.error ? `: ${r.error}` : ''} (${fmtMs(r.total_ms)})`}
-              className={cn('h-5 w-2 rounded-sm', r.success ? 'bg-success/70' : 'bg-danger')}
-            />
-          ))}
-          {rows.length === 0 && <span className="text-sm text-muted">No history yet.</span>}
-        </div>
-        {rows.some((r) => !r.success) && (
-          <div className="mt-3 space-y-1">
-            {rows.filter((r) => !r.success).slice(0, 5).map((r, i) => (
-              <div key={i} className="flex items-baseline justify-between gap-2 text-xs">
-                <span className="truncate text-danger">
-                  <AlertTriangle className="mr-1 inline h-3 w-3" />
-                  {r.failed_step || 'run'}: {r.error}
-                </span>
-                <span className="shrink-0 tabular-nums text-muted">{relativeTime(r.timestamp)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
+    </Tr>
   )
 }
 
@@ -367,6 +313,8 @@ export function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; 
   const [timeout_, setTimeout_] = useState(String(monitor?.timeout ?? 30))
   const [retries, setRetries] = useState(String(monitor?.retry_count ?? 1))
   const [enabled, setEnabled] = useState(monitor?.enabled ?? true)
+  const [verifyTls, setVerifyTls] = useState(monitor?.verify_tls ?? true)
+  const [variables, setVariables] = useState(() => formatVariables(monitor?.variables))
   const [steps, setSteps] = useState<Step[]>(
     monitor?.steps?.length ? JSON.parse(JSON.stringify(monitor.steps)) : [emptyStep()],
   )
@@ -377,21 +325,18 @@ export function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; 
 
   const save = useMutation({
     mutationFn: async () => {
-      const body = {
+      // Every stored field goes back (variables, TLS verification, tags), so saving never resets them.
+      const body = monitorPayload(monitor ?? { name, steps }, {
         name,
         check_interval: Number(interval) || 60,
         timeout: Number(timeout_) || 30,
         retry_count: Number(retries) || 0,
         enabled,
+        verify_tls: verifyTls,
+        variables: parseVariables(variables),
         notify_channels: notify,
-        steps: steps.map((s) => ({
-          ...s,
-          headers: s.headers && Object.keys(s.headers).length ? s.headers : undefined,
-          body: s.body || undefined,
-          assertions: (s.assertions ?? []).filter((a) => a.type),
-          extract: (s.extract ?? []).filter((e) => e.var && e.path),
-        })),
-      }
+        steps,
+      })
       return monitor
         ? (await api.put(`/apm/synthetics/${monitor.id}`, body)).data
         : (await api.post('/apm/synthetics', body)).data
@@ -401,7 +346,7 @@ export function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; 
       qc.invalidateQueries({ queryKey: ['apm', 'synthetics'] })
       onClose()
     },
-    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
+    onError: (e: unknown) => toast.error('Save failed', apiErrorMessage(e)),
   })
 
   const updateStep = (i: number, patch: Partial<Step>) =>
@@ -464,6 +409,36 @@ export function ScenarioEditor({ monitor, onClose }: { monitor: Monitor | null; 
               <code className="rounded bg-surface2 px-1">{'{{var}}'}</code> to reference values
               extracted from earlier responses.
             </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block text-xs text-text2">
+              Variables (one per line, NAME=value)
+              <Textarea
+                className="mt-1 h-16 font-mono text-xs"
+                value={variables}
+                onChange={(e) => setVariables(e.target.value)}
+                placeholder={'base=https://app.example.com\nusername=monitor'}
+                spellCheck={false}
+              />
+              <span className="mt-1 block text-muted">Referenced as {'{{name}}'} in URLs, headers and bodies. Values are hidden from read-only users.</span>
+            </label>
+            <div className="space-y-2.5 text-xs text-text2">
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface2/30 px-3 py-2">
+                <span>
+                  Enabled
+                  <span className="block text-muted">Run on schedule and alert on failure</span>
+                </span>
+                <Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enabled" />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface2/30 px-3 py-2">
+                <span>
+                  Verify TLS certificates
+                  <span className="block text-muted">Turn off only for internal hosts with self-signed certificates</span>
+                </span>
+                <Switch checked={verifyTls} onCheckedChange={setVerifyTls} aria-label="Verify TLS certificates" />
+              </label>
+            </div>
           </div>
 
             <div>
@@ -578,7 +553,7 @@ function StepEditor({ step, index, total, onChange, onRemove, onMove }: {
             )}
             {a.operator !== 'exists' && (
               <Input className="h-7 w-32 text-xs" placeholder="value"
-                value={a.value ?? ''} onChange={(e) => {
+                value={a.value == null ? '' : String(a.value)} onChange={(e) => {
                   const raw = e.target.value
                   const num = Number(raw)
                   onChange({

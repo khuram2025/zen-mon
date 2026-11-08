@@ -25,7 +25,8 @@ export function ApmLayout() {
     /^\/apm\/traces\/[^/]+/.test(pathname) ||
     /^\/apm\/errors\/[^/]+/.test(pathname) ||
     /^\/apm\/services\/[^/]+/.test(pathname) ||
-    /^\/apm\/slos\/[^/]+/.test(pathname)
+    /^\/apm\/slos\/[^/]+/.test(pathname) ||
+    /^\/apm\/synthetics\/[^/]+/.test(pathname)
 
   return (
     <div className="space-y-4">
