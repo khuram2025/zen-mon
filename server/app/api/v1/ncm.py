@@ -24,7 +24,7 @@ from app.core.database import get_db
 from app.core.security import require_permission, user_has_permission
 from app.core.scoping import visible_tags, jsonb_tags_visible
 from app.services import ncm_events, ssh_host_keys
-from app.services.ncm_content import normalize_config as _normalize_config, read_content, encrypt_content, checked_content, config_diff, redact_config, safe_pattern
+from app.services.ncm_content import normalize_config as _normalize_config, read_content, encrypt_content, checked_content, config_diff_async, redact_config, safe_pattern
 from app.services.ncm_collection import (PLATFORM_COMMANDS, STARTUP_COMMANDS, DRIVERS, UNSUPPORTED, platform_catalog,
                                          fetch_config as _netmiko_fetch, CaptureError, key_fingerprint,
                                          load_private_key, CaptureProgress, capture_deadline,
@@ -153,7 +153,7 @@ async def _save_config_version(db, device_id, config_type, content, captured_by,
     if latest and is_change:
         enabled = (await db.execute(text('SELECT alert_on_change FROM device_ncm WHERE device_id=:d'), {'d': device_id})).scalar()
         if enabled:
-            summary = config_diff(prior, content)
+            summary = await config_diff_async(prior, content, display=False)
             attribution = (await db.execute(text('''SELECT reported_user FROM ncm_change_events
                 WHERE device_id=:d AND reported_user IS NOT NULL AND processed_at IS NULL
                 ORDER BY received_at DESC LIMIT 1'''), {'d': device_id})).scalar()
@@ -1074,7 +1074,7 @@ async def diff_configs(device_id: UUID, a: UUID, b: UUID, raw: bool = False, nor
     ra, rb = by_id[str(a)], by_id[str(b)]
     if raw and not await user_has_permission(db, user, 'ncm.export'):
         raise HTTPException(403, 'Raw configuration export permission required')
-    result = config_diff(read_content(ra), read_content(rb), raw=raw, normalized=normalized)
+    result = await config_diff_async(read_content(ra), read_content(rb), raw=raw, normalized=normalized)
     await ncm_events.audit(db, user, 'config.diff', device_id=device_id, metadata={'a': str(a), 'b': str(b), 'raw': raw})
     await db.commit()
     return result
@@ -1699,7 +1699,7 @@ async def compare_versions(device_a: UUID, version_a: UUID, device_b: UUID, vers
             raise HTTPException(404, 'Configuration version not found')
         contents.append(read_content(row))
         meta.append({'config_type': row.config_type, 'platform': row.platform})
-    result = config_diff(*contents, raw=raw, normalized=normalized)
+    result = await config_diff_async(*contents, raw=raw, normalized=normalized)
     warnings = []
     if meta[0]['platform'] and meta[1]['platform'] and meta[0]['platform'] != meta[1]['platform']:
         warnings.append('The versions come from different platform drivers; syntax differences are expected.')

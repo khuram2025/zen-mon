@@ -36,3 +36,21 @@ backups are still archived and are identical under the new comparison. Those
 closures are recorded as administrative with the reason on the incident timeline;
 nothing is sent. Older alerts whose backups were already pruned cannot be verified
 and are left for an operator to close.
+
+## Large comparisons
+
+Comparing two versions (**Compare with previous**, **Show drift**, **Compare with
+another device**) and counting the lines of a detected change run in the background,
+so a large comparison never delays other requests to the appliance. Large inputs use
+a line matcher that anchors on lines occurring once on each side (names, addresses,
+policy ids), so a multi-megabyte FortiGate configuration with thousands of changed
+lines compares in about a second. On repetitive text without such anchors it can
+show a section as replaced where a slower search would find a smaller edit; the
+added/removed counts remain accurate for the diff it shows.
+
+Each comparison has a 15-second budget and a 20,000-line display limit. A
+comparison over either limit shows "The differences are too large to show here"
+with buttons to download both versions (redacted copies) for comparison with a
+file comparison tool. The added/removed counts are still shown when counting
+finished within the budget. Change alerts are raised either way; their line counts
+are left out only when counting did not finish.
