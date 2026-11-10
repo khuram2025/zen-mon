@@ -971,6 +971,14 @@ def build_package(version: str, changelog: str, severity: str,
     if req_file.exists():
         shutil.copy2(req_file, build_dir / "requirements.txt")
         print(f"  + requirements.txt")
+        from offline_wheels import bundle_wheels
+        try:
+            bundled = bundle_wheels(build_dir, ZENPLUS_DIR, min_version)
+        except RuntimeError as exc:
+            print(f"  ERROR: {exc}")
+            sys.exit(1)
+        if bundled:
+            print(f"  + wheels/ ({len(bundled)} wheels for dependencies added since {min_version})")
     else:
         print("  No requirements.txt found")
 
