@@ -75,6 +75,7 @@ update-<version>.zup
 ├── go-binaries/             # compiled poller, netflow-collector
 ├── sensor-artifacts/        # remote-sensor binary + its own manifest
 ├── requirements.txt         # pip deps installed during update
+├── wheels/                  # bundled wheels for deps added since min_version
 └── migrations/              # ONLY when --migration FILE names one explicitly
 ```
 
@@ -108,7 +109,16 @@ appliance executor runs them in order. The current ZenPlus recipe is:
 3. `apt_install` — heal OS prerequisites (`snmp`, `iputils-ping`); idempotent
 4. `apply_code` — replace `/opt/zenplus` code from `code/`
 5. `run_hook` — `setup-support.sh`, `fetch-geoip.py` (idempotent, best-effort)
-6. `pip_install` — from `requirements.txt`
+6. `pip_install` — from `requirements.txt`. Requirements that are new or
+   re-pinned since the package's `min_version` are bundled as wheels in
+   `wheels/` (Python 3.10 and 3.12, manylinux up to glibc 2.35, with their
+   dependency closure), and `requirements.txt` gains `--find-links wheels`.
+   Current updaters install from the bundled wheels with `--no-index` first
+   and fall back to the package index; older updaters run plain
+   `pip install -r` and pip falls back to the bundled wheels when the index
+   is unreachable. Appliances therefore update without internet access to the
+   package index. The build fails if a changed requirement has no wheel for
+   the appliance platforms and is not pure Python.
 7. `run_migration` (per explicitly named migration, if any) — then `install_config` to drop the
    `.sql` into `/opt/zenplus/scripts/`
 8. **`run_hook` — `scripts/sync-schema.py`, the schema gate. Emitted on every release.** Converges
