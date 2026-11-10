@@ -15,6 +15,9 @@ index is unreachable. The updated `pip_install` step installs from the
 bundled wheels without contacting the index first and only falls back to the
 index if they are incomplete. This adds about 13 MB to the package.
 
+textfsm (installed with netmiko) is pinned to 2.1.0, the version already on
+appliances: 2.1.1 installs a stray top-level `tests` package.
+
 No migrations and no change to monitoring, alerting or configuration.
 Appliance-only package; preserve the signed Windows agent catalog and minimum
 upgrade base 1.24.36.

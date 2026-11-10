@@ -1,11 +1,12 @@
-import sys
+import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-import offline_wheels  # noqa: E402
+# Load by path: putting scripts/ on sys.path would shadow the tests package.
+_spec = importlib.util.spec_from_file_location("offline_wheels", ROOT / "scripts" / "offline_wheels.py")
+offline_wheels = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(offline_wheels)
 
 
 def test_only_new_or_repinned_requirements_are_bundled():
