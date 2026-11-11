@@ -334,7 +334,7 @@ async def _interfaces(db: AsyncSession) -> dict[str, list[dict]]:
     global _warned_missing_last_up
     sql = ("SELECT device_id, if_index, if_name, if_descr, if_alias, "
            "COALESCE(configured_speed_bps, if_speed) AS speed, admin_status, monitored, "
-           "{ever_up} FROM device_interfaces WHERE monitored = true")
+           "{ever_up}, tags FROM device_interfaces WHERE monitored = true")
     try:
         rows = (await db.execute(text(sql.format(ever_up="last_up_at IS NOT NULL")))).all()
     except Exception as exc:
@@ -356,7 +356,33 @@ async def _interfaces(db: AsyncSession) -> dict[str, list[dict]]:
             "speed": int(r[5]) if r[5] else 0,
             "admin_up": (str(r[6] or "").lower() == "up"),
             "ever_up": bool(r[8]),
+            "tags": _tag_set(r[9]),
         })
+    # A missing UDT row means unknown, not access. Keep unknown ports covered.
+    # Retain positive infrastructure evidence by stable port name. A failed
+    # uplink can lose LLDP/FDB evidence; that must not reclassify it as access.
+    await db.execute(text(
+        "INSERT INTO interface_alert_infrastructure (device_id, if_name) "
+        "SELECT i.device_id, i.if_name FROM device_interfaces i "
+        "JOIN udt_port_state p ON p.device_id=i.device_id AND p.if_index=i.if_index "
+        "WHERE p.is_uplink=true AND p.uplink_override IS DISTINCT FROM 'access' "
+        "AND i.if_name IS NOT NULL AND i.if_name <> '' "
+        "ON CONFLICT (device_id, if_name) DO NOTHING"
+    ))
+    ports = (await db.execute(text(
+        "SELECT i.device_id, i.if_index, "
+        "CASE WHEN b.if_name IS NOT NULL THEN true ELSE p.is_uplink END, p.uplink_override "
+        "FROM device_interfaces i "
+        "LEFT JOIN udt_port_state p ON p.device_id=i.device_id AND p.if_index=i.if_index "
+        "LEFT JOIN interface_alert_infrastructure b ON b.device_id=i.device_id AND b.if_name=i.if_name "
+        "WHERE i.monitored=true"
+    ))).all()
+    roles = {(str(r[0]), int(r[1])): (r[2], r[3]) for r in ports}
+    for did, ifaces in out.items():
+        for iface in ifaces:
+            uplink, override = roles.get((did, iface['if_index']), (None, None))
+            iface['is_uplink'] = (True if override == 'uplink' else
+                                  False if override == 'access' else uplink)
     return out
 
 
@@ -380,9 +406,33 @@ def _iface_matches_target(iface: dict, target: str | None) -> bool:
     if not target:
         return True
     t = target.strip().lower()
+    if t == 'role:infrastructure':
+        return (iface.get('is_uplink') is not False
+                or 'link-critical' in iface.get('tags', set()))
     if t.isdigit() and int(t) == iface["if_index"]:
         return True
     return any(t in (iface[k] or "").lower() for k in ("if_name", "if_descr", "if_alias"))
+
+
+async def _retire_access_alerts(db, rule, did, interfaces):
+    """Close excluded incidents as policy changes, never as link recoveries."""
+    if (rule.target or '').strip().lower() != 'role:infrastructure':
+        return 0
+    excluded = [str(i['if_index']) for i in interfaces
+                if not _iface_matches_target(i, rule.target)]
+    if not excluded:
+        return 0
+    result = await db.execute(text(
+        "UPDATE alerts SET status = 'resolved', resolved_at = now(), "
+        "metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:meta AS jsonb) "
+        "WHERE rule_id = :rid AND device_id = :did "
+        "AND status IN ('active','acknowledged') "
+        "AND metadata->>'if_index' = ANY(CAST(:indices AS text[]))"
+    ), {'rid': str(rule.id), 'did': did, 'indices': excluded,
+        'meta': json.dumps({'resolved_by': 'policy_scope_change',
+            'resolution_reason': 'Access port excluded from infrastructure link policy; not a link recovery',
+            'is_recovery': False})})
+    return result.rowcount or 0
 
 
 def _iface_label(iface: dict) -> str:
@@ -707,6 +757,7 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 resolved += counts[1]
                 await db.commit()
                 continue
+            resolved += await _retire_access_alerts(db, rule, did, interfaces.get(did, []))
             device_ifs = {idx: series for (device, idx), series in if_data.items() if device == did}
             bound_entities = list(entities(
                     conditions, scalar.get(did, {}), device_ifs, interfaces.get(did, []),
