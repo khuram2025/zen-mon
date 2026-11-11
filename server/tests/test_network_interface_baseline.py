@@ -67,10 +67,12 @@ class IfaceDB:
     async def execute(self, statement, params=None):
         sql = str(statement)
         self.sql.append(sql)
+        if 'interface_alert_infrastructure' in sql:
+            return _Rows([])
         if self.fail_first and 'last_up_at' in sql:
             raise Exception('column "last_up_at" does not exist')
         ever_up = 'last_up_at' not in sql  # baseline query: port never up
-        return _Rows([('d1', 1, 'Gi1/0/1', '', '', 1000, 'up', True, ever_up)])
+        return _Rows([('d1', 1, 'Gi1/0/1', '', '', 1000, 'up', True, ever_up, [])])
 
     async def rollback(self):
         self.rolled_back = True
