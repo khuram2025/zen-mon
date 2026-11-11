@@ -39,6 +39,8 @@
 
 ## Device Tracker
 
+- The default Interface down policy uses `role:infrastructure` and a 180-second hold (migration 186). Known access ports are excluded; uplinks, unknown roles and interfaces tagged `link-critical` remain covered. Preserve positive infrastructure evidence by device/interface name in `interface_alert_infrastructure` across LLDP/FDB loss and ifIndex changes. Manual UDT overrides win. Policy exclusions close incidents as `policy_scope_change`, without claiming recovery or deleting history. See `docs/interface-link-alert-policy.md`.
+
 - Sidebar groups and breadcrumb ownership are in `dashboard/src/components/layout/navigation.ts`. Device Tracker is separate from Monitoring.
 - Preserve prior IP observation periods. Summarize repeated addresses for display; do not delete history to remove duplicates.
 - ARP/ND sightings from separate reporters do not establish globally exclusive IP ownership. Interface indexes are reporter-local, not global subnet/VRF identifiers.
