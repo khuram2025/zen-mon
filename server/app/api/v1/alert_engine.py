@@ -25,6 +25,7 @@ from app.core.database import get_db
 from app.services.email_render import alert_subject, build_alert_email_html
 from app.services.tag_service import tag_set as _tag_set
 from app.services import alert_funnel as funnel
+from app.services import alert_rule_exclusions as rx
 from app.services import alert_notify_state as ns
 from app.services import device_status_machine as dsm
 from app.services import alert_condition
@@ -954,7 +955,8 @@ async def evaluate_status_change(
         gr_row = gr.first()
         group_name = gr_row.name if gr_row else ""
 
-    rules = await _load_device_rules(db)
+    # Shared rules disabled for this device only (migrate-187) do not run.
+    rules = rx.drop_device(await _load_device_rules(db), await rx.load(db), event.device_id)
     # alerts.priority is stamped when the row is raised (migrate-164).
     priority_ok = await funnel.priority_supported(db)
 
@@ -1884,6 +1886,8 @@ async def evaluate_trap(
             WHERE enabled = true AND metric = 'trap'
         """)
     )).fetchall()
+    if did:
+        rules = rx.drop_device(rules, await rx.load(db), did)
     _tz = await get_configured_timezone(db)
 
     alerts_created = 0

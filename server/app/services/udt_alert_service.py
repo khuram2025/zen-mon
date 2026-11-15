@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.services import alert_funnel
+from app.services import alert_rule_exclusions as rx
 
 logger = logging.getLogger("zenplus.udt_alerts")
 
@@ -89,8 +90,11 @@ async def _udt_rules(db: AsyncSession) -> list:
     ))).mappings().all()
 
 
-def _rule_scope_ok(rule, device: dict | None) -> bool:
-    """Device-scoped rule filters; a rule with no scope matches all."""
+def _rule_scope_ok(rule, device: dict | None, excluded: rx.Exclusions = rx.EMPTY) -> bool:
+    """Device-scoped rule filters; a rule with no scope matches all. A shared
+    rule disabled for this device only (migrate-187) does not match it."""
+    if device is not None and excluded.device(rule["id"], device.get("id")):
+        return False
     if rule["device_id"] is not None:
         return device is not None and str(device["id"]) == str(rule["device_id"])
     if rule["group_id"] is not None:
@@ -199,7 +203,8 @@ async def _raise_alert(db: AsyncSession, rule, device_id, message: str, meta: di
     return row[0] if row else None
 
 
-async def _process_events(db: AsyncSession, rules, outbox: list | None = None) -> int:
+async def _process_events(db: AsyncSession, rules, outbox: list | None = None,
+                          excluded: rx.Exclusions = rx.EMPTY) -> int:
     events = (await db.execute(text(
         f"""SELECT id, event_type, endpoint_id, device_id, if_index, details
             FROM udt_events WHERE NOT alerted
@@ -244,7 +249,7 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None) -
                             {"d": str(ev["device_id"]), "i": int(ev["if_index"])})).scalar() or str(ev["if_index"])
                     message = endpoint_message(ev["event_type"], dict(ep), device, port)
                     for rule in matching:
-                        if not _rule_scope_ok(rule, device):
+                        if not _rule_scope_ok(rule, device, excluded):
                             continue
                         dedupe = f"{ev['event_type']}:{ep['mac']}"
                         if await _recent_alert_exists(db, rule["id"], dedupe, rule["cooldown"] or 300):
@@ -263,7 +268,8 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None) -
     return raised
 
 
-async def _process_capacity(db: AsyncSession, rules, outbox: list | None = None) -> None:
+async def _process_capacity(db: AsyncSession, rules, outbox: list | None = None,
+                            excluded: rx.Exclusions = rx.EMPTY) -> None:
     cap_rules = [r for r in rules if r["metric"] == "udt_port_capacity_pct"]
     if not cap_rules:
         return
@@ -279,7 +285,7 @@ async def _process_capacity(db: AsyncSession, rules, outbox: list | None = None)
     for rule in cap_rules:
         thr = float(rule["threshold"] or 90)
         for dev in usage:
-            if not _rule_scope_ok(rule, dict(dev)):
+            if not _rule_scope_ok(rule, dict(dev), excluded):
                 continue
             total = dev["total"] or 0
             pct = (dev["used"] / total * 100.0) if total else 0.0
@@ -312,8 +318,9 @@ async def udt_alert_evaluator_loop() -> None:
             async with AsyncSessionLocal() as db:
                 rules = await _udt_rules(db)
                 outbox: list = []
-                raised = await _process_events(db, rules, outbox)
-                await _process_capacity(db, rules, outbox)
+                excluded = await rx.load(db)
+                raised = await _process_events(db, rules, outbox, excluded=excluded)
+                await _process_capacity(db, rules, outbox, excluded=excluded)
                 await db.commit()
                 await _flush(db, outbox)
                 if raised:

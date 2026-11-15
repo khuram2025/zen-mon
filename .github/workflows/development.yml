@@ -83,6 +83,7 @@ jobs:
       - run: node scripts/test-alert-storm-ui.mjs
       - run: node scripts/test-custom-time-range.mjs
       - run: node scripts/test-server-alert-rules.mjs
+      - run: node scripts/test-rule-exclusions.mjs
       - run: npm run test:alert-wizard
       - run: npm run test:list-ordering
       - run: npm run test:baseline-details

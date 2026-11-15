@@ -57,6 +57,10 @@ async def ingest_syslog(db, event, dispatch=None):
         await db.commit()
         return {'suppressed': True, 'alerts_created': 0}
     rules = (await db.execute(text("SELECT * FROM alert_rules WHERE enabled = true AND metric = 'syslog'"))).mappings().all()
+    if did and rules:
+        # Shared rules disabled for this device only (migrate-187).
+        from app.services import alert_rule_exclusions as rx
+        rules = rx.drop_device(rules, await rx.load(db), did)
     from app.services import alert_funnel as funnel
     priority_ok = await funnel.priority_supported(db) if rules else False
     tz = await get_configured_timezone(db)

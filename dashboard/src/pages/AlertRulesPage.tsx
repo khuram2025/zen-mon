@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bell, Copy, Eye, Pencil, Plus, Trash2, Zap } from 'lucide-react'
+import { Bell, BellOff, Copy, Eye, Pencil, Plus, Trash2, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -11,6 +11,8 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 import { AlertMessagePreviewDialog } from '@/components/alerts/AlertMessagePreviewDialog'
+import { RuleExclusionsDialog } from '@/components/alerts/RuleExclusions'
+import { exclusionBadge } from '@/components/alerts/exclusionModel'
 import { toast } from '@/components/ui/Toast'
 import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
 import { downRuleCoversServers, isServerMetric, serverMetricLabel, serverRuleCondition, serverRuleCopy } from '@/components/forms/serverAlertRule'
@@ -87,6 +89,8 @@ export function AlertRulesPage() {
   const [editing, setEditing] = useState<any>(null)
   const [deleting, setDeleting] = useState<any>(null)
   const [previewing, setPreviewing] = useState<any>(null)
+  // The assets a shared rule is turned off for (per-device/server exclusions).
+  const [exclusionsOf, setExclusionsOf] = useState<any>(null)
 
   const policiesQ = usePolicies()
   const { data: rules, isError, error } = useQuery<any[]>({
@@ -240,6 +244,13 @@ export function AlertRulesPage() {
                     </Td>
                     <Td>
                       <Badge variant="outline" className="text-2xs">{scopeLabel(r, serverNames)}</Badge>
+                      {exclusionBadge(r.exclusion_count) && (
+                        <button type="button" onClick={() => setExclusionsOf(r)}
+                          className="mt-1 flex items-center gap-1 text-2xs font-medium text-warning hover:underline"
+                          title="Devices or servers this rule is turned off for">
+                          <BellOff className="h-3 w-3" aria-hidden /> {exclusionBadge(r.exclusion_count)}
+                        </button>
+                      )}
                     </Td>
                     <Td>
                       <div className="flex flex-wrap items-center gap-1">
@@ -302,6 +313,11 @@ export function AlertRulesPage() {
       </Card>
 
       <AlertRuleWizardDialog open={formOpen} onOpenChange={setFormOpen} rule={editing} />
+      <RuleExclusionsDialog
+        open={!!exclusionsOf}
+        onOpenChange={(o) => !o && setExclusionsOf(null)}
+        rule={exclusionsOf}
+      />
       <AlertMessagePreviewDialog
         open={!!previewing}
         onOpenChange={(o) => !o && setPreviewing(null)}

@@ -7,7 +7,7 @@ from uuid import UUID
 from datetime import datetime, time, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,8 @@ from app.services import alert_phrasing as ap
 from app.services import alert_priority as prio
 from app.services import netflow_alert_service as nfa
 from app.services import apm_event_rules as aer
+from app.services import alert_rule_exclusions as rx
+from app.core import scoping
 
 
 def _validate_apm_event(rule):
@@ -539,6 +541,93 @@ async def get_template_defaults(user: User = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# Per-asset exclusions (migrate-187, docs/alert-rule-exclusions.md)
+# ---------------------------------------------------------------------------
+
+class ExclusionBody(BaseModel):
+    """Turn a shared rule off for one device or server only."""
+    asset_kind: str = Field(..., pattern="^(device|server)$")
+    asset_id: UUID
+    reason: Optional[str] = Field(default=None, max_length=rx.REASON_MAX)
+
+
+def _exclusion_http(exc: "rx.ExclusionError") -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@router.get("/for-asset")
+async def rules_for_asset(
+    asset_kind: str = Query(..., pattern="^(device|server)$"),
+    asset_id: UUID = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The alert rules that apply to one device or server: shared rules (with
+    whether they are disabled for this asset, by whom and when) and the
+    asset's own rules. ``active`` is the rule's effect on this asset."""
+    asset = await rx.asset_row(db, asset_kind, asset_id)
+    if asset is None or not scoping.entity_visible(asset.get("tags"), await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail=f"{asset_kind.capitalize()} not found")
+    return {"asset": {"kind": asset_kind, "id": str(asset["id"]), "name": asset.get("name")},
+            "items": await rx.rules_for_asset(db, asset_kind, asset)}
+
+
+@router.get("/{rule_id}/exclusions")
+async def list_rule_exclusions(
+    rule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The devices and servers this rule is disabled for (those the caller can
+    see; ``hidden`` counts the others)."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    out = await rx.for_rule(db, rule_id, await scoping.visible_tags(db, user))
+    return {"rule_id": str(rule_id), "kinds": sorted(rx.kinds_for_rule(rule)), **out}
+
+
+@router.post("/{rule_id}/exclusions")
+async def create_rule_exclusion(
+    rule_id: UUID,
+    body: ExclusionBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_rule_manager),
+):
+    """Disable a shared rule for one device or server. The rule keeps running
+    for every other asset; its open incidents on this one are resolved."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    try:
+        out = await rx.exclude(db, user, rule, body.asset_kind, body.asset_id, body.reason)
+    except rx.ExclusionError as exc:
+        raise _exclusion_http(exc)
+    await db.commit()
+    return out
+
+
+@router.delete("/{rule_id}/exclusions/{asset_kind}/{asset_id}")
+async def delete_rule_exclusion(
+    rule_id: UUID,
+    asset_kind: str,
+    asset_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_rule_manager),
+):
+    """Re-enable a shared rule for one device or server."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    try:
+        removed = await rx.include(db, user, rule, asset_kind, asset_id)
+    except rx.ExclusionError as exc:
+        raise _exclusion_http(exc)
+    await db.commit()
+    return {"removed": removed}
+
+
+# ---------------------------------------------------------------------------
 # NetFlow rule family (CR-07)
 # ---------------------------------------------------------------------------
 
@@ -624,7 +713,9 @@ async def list_alert_rules(
         text(f"SELECT {_RULE_COLUMNS} FROM alert_rules ORDER BY created_at DESC")
     )
     rows = result.fetchall()
-    return {"data": [_with_templates(_row_to_dict(r)) for r in rows]}
+    excluded = await rx.counts(db)
+    return {"data": [{**_with_templates(_row_to_dict(r)), "exclusion_count": excluded.get(str(r.id), 0)}
+                     for r in rows]}
 
 
 @router.post("", status_code=201)

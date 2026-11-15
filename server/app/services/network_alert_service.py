@@ -634,6 +634,9 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
     from app.services.network_conditions import clear_hold_seconds, evaluate, validate_conditions
     from app.services.network_history import fetch_history, entities
     from app.api.v1.alert_engine import _find_suppressing_dependency, _device_in_maintenance
+    from app.services import alert_rule_exclusions
+    # Shared rules disabled for single devices (migrate-187), once per pass.
+    excluded = await alert_rule_exclusions.load(db)
     from app.services.regional_time import notification_branding
     branding = await notification_branding(db)
 
@@ -673,6 +676,8 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
         scalar, if_data = history_cache[cache_key]
         for did, dev in devices.items():
             if not _device_in_scope(rule, did, dev):
+                continue
+            if excluded.device(rule.id, did):
                 continue
             if did not in maintenance_cache:
                 maintenance_cache[did] = await _device_in_maintenance(db, did)

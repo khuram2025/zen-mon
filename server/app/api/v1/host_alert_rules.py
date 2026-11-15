@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_permission
 from app.services import alert_rule_scope as rs
+from app.services import alert_rule_exclusions as rx
 from app.services.alert_priority import priority_for
 from app.services.audit_service import write_audit_log
 
@@ -209,13 +210,26 @@ async def list_host_rules(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List host rules. With server_id: rules that apply to it (its own + global)."""
+    """List host rules. With server_id: rules that apply to it (its own + global),
+    each global one with ``excluded`` (who disabled it for this server and
+    when, or null) and ``active`` (its effect on this server)."""
     if server_id:
         rows = (await db.execute(text(
             f"SELECT {_COLUMNS} FROM alert_rules "
             "WHERE metric LIKE 'host\\_%' AND (server_id = :sid OR server_id IS NULL) "
             "ORDER BY server_id NULLS FIRST, metric, threshold"
         ), {"sid": server_id})).all()
+        try:
+            async with db.begin_nested():
+                excluded = await rx.for_asset(db, "server", server_id)
+        except Exception:
+            excluded = {}      # before migrate-187
+        items = []
+        for r in rows:
+            row = _row(r)
+            ex = None if r.server_id else excluded.get(str(r.id))
+            items.append({**row, "excluded": ex, "active": bool(r.enabled) and ex is None})
+        return {"items": items}
     else:
         rows = (await db.execute(text(
             f"SELECT {_COLUMNS} FROM alert_rules WHERE metric LIKE 'host\\_%' "
