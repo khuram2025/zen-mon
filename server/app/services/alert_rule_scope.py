@@ -340,4 +340,12 @@ async def impact(db: AsyncSession, rule: dict) -> dict:
         "affected": await affected(db, rule),
         "open_alerts": int(open_alerts),
         "notify_channels": len(rule.get("notify_channels") or []),
+        # Assets this shared rule is disabled for (migrate-187).
+        "excluded_assets": (await rule_exclusion_counts(db)).get(str(rule["id"]), 0),
     }
+
+
+async def rule_exclusion_counts(db: AsyncSession) -> dict:
+    from app.services.alert_rule_exclusions import counts
+
+    return await counts(db)

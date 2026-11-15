@@ -63,6 +63,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import alert_engine as engine
 from app.services import alert_phrasing as ap
+from app.services import alert_rule_exclusions as rx
 from app.services import device_status_machine as dsm
 from app.services.alert_schedule import get_configured_timezone, notifications_allowed
 from app.services.tag_service import tag_set
@@ -221,6 +222,8 @@ class _Sweep:
     policy: dsm.Policy
     tz: str
     action_base: str
+    # Shared rules disabled for single devices (migrate-187).
+    excluded: rx.Exclusions = rx.EMPTY
 
 
 @dataclass
@@ -319,6 +322,7 @@ async def _load_sweep(db: AsyncSession) -> _Sweep:
         policy=await engine._status_policy(db),
         tz=await get_configured_timezone(db),
         action_base=await engine._dashboard_url(db, "/devices"),
+        excluded=await rx.load(db),
     )
 
 
@@ -400,6 +404,7 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
     candidates = [
         r for r in sweep.rules
         if rule_held(r, episode.kind)
+        and not sweep.excluded.device(r.id, did)
         and engine._rule_in_device_scope(
             r, device_id=did, group_id=str(device.group_id) if device.group_id else None,
             device_type=device.device_type, location=device.location,

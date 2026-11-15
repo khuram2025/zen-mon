@@ -18,6 +18,7 @@ import { inventoryApi } from '@/pages/inventory/api'
 import { Panel } from './charts'
 import { formatRelative, formatSpan } from './format'
 import { OwnerNotesCard } from './OwnerNotesCard'
+import { AssetAlertRules } from '@/components/alerts/RuleExclusions'
 import type { DeviceRecord, DeviceSummary, IdentityField } from './types'
 
 /* How the device is monitored and what it is: identity (one resolved answer
@@ -50,6 +51,11 @@ export function ConfigurationTab({ device, summary, onOpenHardware }: { device: 
       content: <Panel title="Configuration backups" meta="Network configuration management">
         <p className="text-sm text-muted">Backups, differences between versions and compliance for this device are kept in NCM.</p>
         <Link to={`/ncm/${device.id}`} className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"><Save className="h-3.5 w-3.5" />Open configuration history</Link>
+      </Panel> }] : []),
+    // Shared rules can be turned off for this device alone (never for every device).
+    ...(can('alerts.view') ? [{ id: 'alert-rules', title: 'Alert rules', width: 6, height: 9, minWidth: 3, minHeight: 4,
+      content: <Panel title="Alert rules" meta="Rules that apply to this device">
+        <AssetAlertRules kind="device" assetId={device.id} assetName={device.hostname} />
       </Panel> }] : []),
     ...(snmp && ['switch', 'router', 'firewall'].includes(device.device_type) ? [{ id: 'connected-endpoints', title: 'Connected endpoints', width: 6, height: 9, minWidth: 3, minHeight: 4,
       content: <ConnectedEndpointsCard deviceId={device.id} /> }] : []),

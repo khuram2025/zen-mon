@@ -14,7 +14,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ExternalLink, History, Loader2, Pencil, Power, TriangleAlert, Users } from 'lucide-react'
+import { BellOff, ExternalLink, History, Loader2, Pencil, Power, TriangleAlert, Users } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
 import { useCan } from '@/stores/auth'
@@ -30,6 +30,8 @@ import { toast } from '@/components/ui/Toast'
 import { SeverityBadge, focusRing } from './AlertBits'
 import { fmtDurExact, fmtMinutes } from './format'
 import type { AlertRuleDetail, RuleCondition, RuleImpact } from './types'
+import { ExcludeRuleDialog, useRuleExclusion } from './RuleExclusions'
+import type { AssetKind } from './exclusionModel'
 
 const OPERATORS = ['>', '>=', '<', '<=', '==', '!=']
 
@@ -114,14 +116,18 @@ function snapshotDiff(snap: Partial<AlertRuleDetail> | null, rule: AlertRuleDeta
 /* ── Card ─────────────────────────────────────────────────────────────── */
 
 export function PolicyCard({
-  rule, snapshot,
+  rule, snapshot, asset,
 }: {
   rule: AlertRuleDetail | null
   snapshot: Partial<AlertRuleDetail> | null
+  /** The device or server this incident is about: a shared rule can be turned off for it alone. */
+  asset?: { kind: AssetKind; id: string; name?: string | null } | null
 }) {
   const can = useCan()
   const [editOpen, setEditOpen] = useState(false)
   const [toggleOpen, setToggleOpen] = useState(false)
+  const [excludeOpen, setExcludeOpen] = useState(false)
+  const { exclude } = useRuleExclusion(asset?.kind ?? 'device', asset?.id ?? '')
   const diff = useMemo(() => snapshotDiff(snapshot, rule), [snapshot, rule])
 
   if (!rule) {
@@ -138,6 +144,8 @@ export function PolicyCard({
   }
 
   const canEdit = rule.editable && can('alerts.manage')
+  // Per-asset exclusion: alerts.manage and the asset in scope (checked server-side), not fleet-wide rule scope.
+  const canExcludeHere = !!asset && rule.enabled && !!rule.affected?.shared && can('alerts.manage')
   const conditions = rule.conditions?.length ? rule.conditions : [{ metric: rule.metric, operator: rule.operator, threshold: rule.threshold } as RuleCondition]
   const compound = (rule.conditions?.length ?? 0) > 1
   const affected = rule.affected
@@ -155,10 +163,17 @@ export function PolicyCard({
             <h2 className="text-base font-semibold">Policy</h2>
             <p className="text-xs text-muted">Current rule — changes affect every target in scope, not just this incident.</p>
           </div>
-          {canEdit && (
-            <div className="flex shrink-0 items-center gap-1">
+          {(canEdit || canExcludeHere) && (
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+              {canExcludeHere && (
+                <Button size="sm" variant="outline" className={cn('h-8', focusRing)} onClick={() => setExcludeOpen(true)}
+                  aria-label={`Disable rule ${rule.name} for this ${asset!.kind} only`} title={`Turn this rule off for this ${asset!.kind} only`}>
+                  <BellOff className="h-3.5 w-3.5 text-warning" /> Off for this {asset!.kind}
+                </Button>
+              )}
+              {canEdit && <>
               <Button size="sm" variant="outline" className={cn('h-8', focusRing)} onClick={() => setToggleOpen(true)} aria-label={`${rule.enabled ? 'Disable' : 'Enable'} rule ${rule.name}`}>
-                <Power className={cn('h-3.5 w-3.5', rule.enabled ? 'text-success' : 'text-muted')} /> {rule.enabled ? 'Disable' : 'Enable'}
+                <Power className={cn('h-3.5 w-3.5', rule.enabled ? 'text-success' : 'text-muted')} /> {rule.enabled ? (affected?.shared ? 'Disable for all' : 'Disable') : 'Enable'}
               </Button>
               {compound ? (
                 <Button size="sm" variant="outline" className={cn('h-8', focusRing)} asChild>
@@ -169,6 +184,7 @@ export function PolicyCard({
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </Button>
               )}
+              </>}
             </div>
           )}
         </div>
@@ -262,6 +278,17 @@ export function PolicyCard({
       </CardContent>
 
       {canEdit && <RuleToggleDialog open={toggleOpen} onOpenChange={setToggleOpen} rule={rule} />}
+      {canExcludeHere && (
+        <ExcludeRuleDialog
+          open={excludeOpen}
+          onOpenChange={setExcludeOpen}
+          rule={{ name: rule.name, scope: rule.scope ?? null }}
+          kind={asset!.kind}
+          assetName={asset!.name}
+          loading={exclude.isPending}
+          onConfirm={(reason) => exclude.mutate({ ruleId: rule.id, reason }, { onSuccess: () => setExcludeOpen(false) })}
+        />
+      )}
       {canEdit && !compound && editOpen && (
         <RuleEditDialog key={rule.id} onClose={() => setEditOpen(false)} rule={rule} />
       )}

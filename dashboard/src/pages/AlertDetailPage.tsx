@@ -232,7 +232,9 @@ export function AlertDetailPage() {
         <div className="min-w-0 space-y-4">
           <EntityCard alert={alert} />
           <RoutePanel alert={alert} now={now} />
-          <PolicyCard rule={alert.rule} snapshot={alert.policy_snapshot} />
+          <PolicyCard rule={alert.rule} snapshot={alert.policy_snapshot}
+            asset={alert.device_id ? { kind: 'device', id: alert.device_id, name: alert.device_hostname }
+              : alert.server_id ? { kind: 'server', id: alert.server_id, name: alert.server_hostname } : null} />
           <RoutingCard alert={alert} now={now} />
           {alert.rule && <MessagePreviewCard ruleId={alert.rule.id} />}
         </div>

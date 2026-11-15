@@ -1012,11 +1012,14 @@ async def _availability_still_breaching(db, rule, sid, now=None):
 
 async def _evaluate_availability(db: AsyncSession, rule, signals: dict, opened: dict, *,
                                  now: float, since: float, allowed: bool, counts: dict,
-                                 ips: dict | None = None, branding=None) -> None:
-    """Raise or resolve one availability rule against every server it covers."""
+                                 ips: dict | None = None, branding=None, excluded=None) -> None:
+    """Raise or resolve one availability rule against every server it covers
+    (except servers this shared rule is disabled for)."""
     after_s = sa.down_after_seconds(rule)
     for sid, sig in signals.items():
         if not sa.rule_covers(rule, sig):
+            continue
+        if excluded and excluded.server(rule.id, sid):
             continue
         # A slow send for another target must not make this snapshot authoritative.
         from app.services import controller_recovery as cr
@@ -1176,12 +1179,17 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
     signals: dict | None = None
     since = 0.0
     counts = {"raised": 0, "resolved": 0}
+    from app.services import alert_rule_exclusions
+    excluded = await alert_rule_exclusions.load(db)
     for rule in rules:
         allowed = notifications_allowed(
             getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
             getattr(rule, "schedule_days", None), _tz,
         )
         targets = [str(rule.server_id)] if rule.server_id else list(servers)
+        if excluded:
+            # A shared rule disabled for single servers (migrate-187) skips them.
+            targets = [sid for sid in targets if not excluded.server(rule.id, sid)]
 
         opened = await _open_incidents(db, rule)
 
@@ -1212,7 +1220,8 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                 since = await sa.paging_since(db)
                 await db.commit()
             await _evaluate_availability(db, rule, signals, opened, now=now, since=since,
-                                         allowed=allowed, counts=counts, ips=ips, branding=branding)
+                                         allowed=allowed, counts=counts, ips=ips, branding=branding,
+                                         excluded=excluded)
             await db.commit()
             continue
 
