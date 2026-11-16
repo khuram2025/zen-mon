@@ -228,7 +228,7 @@ What each does well, and where it falls short:
 | Maintenance | `device_maintenance` by device, group, tag or all | One-off only |
 | Layouts | `device_widget_layouts` by user and device, or user and vendor + type | No shared default for everyone |
 | Servers | `agent_policies` assigned per agent, token or platform default; host rules for one server or all | No server groups; outside the device template |
-| Discovery rules (PR #160) | `discovery_engine_rules`, versions, runs, run items (migration 188); condition tree in `server/app/services/discovery_rules/conditions.py`; facts in `facts.py`; actions `decision`, `group`, `template`, `device_type`, `location`, `snmp_credential`, `ping_interval`, `snmp_interval`, `tags` | Acts on scan results only. Existing assets, ownership records and re-evaluation are its phases 2 and 3 |
+| Discovery rules (PR #160) | `discovery_engine_rules`, versions, runs, run items (migration 190); condition tree in `server/app/services/discovery_rules/conditions.py`; facts in `facts.py`; actions `decision`, `group`, `template`, `device_type`, `location`, `snmp_credential`, `ping_interval`, `snmp_interval`, `tags` | Acts on scan results only. Existing assets, ownership records and re-evaluation are its phases 2 and 3 |
 | Audit and versions | `write_audit_log` (`audit_logs`); per-feature history only (roles, maps, NCCM, discovery rule versions) | No template history |
 | Licence | `license_capacity.NODE_COUNT_SQL` equals the updater's copy; children and service checks never count | Unaffected by this plan |
 

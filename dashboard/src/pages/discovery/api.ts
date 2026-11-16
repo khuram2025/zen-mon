@@ -1,6 +1,17 @@
 import { api } from '@/lib/api'
 import {
   DiscoveryProfile,
+  DiscoveryRule,
+  EngineRun,
+  EngineRunItem,
+  EvaluateScanCounts,
+  PreviewRequest,
+  PreviewResponse,
+  RuleCatalog,
+  RuleDraft,
+  RuleEngineSettings,
+  RuleMode,
+  RuleVersion,
   DiscoveryResult,
   DiscoveryRun,
   DiscoverySchedule,
@@ -104,5 +115,75 @@ export const discoveryApi = {
   // Import batches
   async listImports(opts: { run_id?: string; profile_id?: string } = {}): Promise<ImportBatch[]> {
     return (await api.get(`${base}/imports`, { params: opts })).data
+  },
+}
+
+const rulesBase = `${base}/rules`
+
+/** The rule body the API takes for create / update (position or expected_revision added by the caller). */
+export function ruleBody(draft: RuleDraft) {
+  return {
+    name: draft.name.trim(),
+    description: draft.description?.trim() || null,
+    mode: draft.mode,
+    asset_kinds: draft.asset_kinds,
+    profile_ids: draft.profile_ids && draft.profile_ids.length ? draft.profile_ids : null,
+    condition: draft.condition,
+    actions: draft.actions,
+    stop_processing: draft.stop_processing,
+  }
+}
+
+export const rulesApi = {
+  async catalog(): Promise<RuleCatalog> {
+    return (await api.get(`${rulesBase}/catalog`)).data
+  },
+  async getSettings(): Promise<RuleEngineSettings> {
+    return (await api.get(`${rulesBase}/settings`)).data
+  },
+  async putSettings(payload: RuleEngineSettings): Promise<RuleEngineSettings> {
+    return (await api.put(`${rulesBase}/settings`, payload)).data
+  },
+  async list(): Promise<DiscoveryRule[]> {
+    return (await api.get(rulesBase)).data
+  },
+  async get(id: string): Promise<DiscoveryRule> {
+    return (await api.get(`${rulesBase}/${id}`)).data
+  },
+  async create(draft: RuleDraft, position: 'first' | 'last' = 'last'): Promise<DiscoveryRule> {
+    return (await api.post(rulesBase, { ...ruleBody(draft), position })).data
+  },
+  async update(id: string, draft: RuleDraft, expectedRevision: number | null): Promise<DiscoveryRule> {
+    return (await api.put(`${rulesBase}/${id}`, { ...ruleBody(draft), expected_revision: expectedRevision })).data
+  },
+  async remove(id: string): Promise<void> {
+    await api.delete(`${rulesBase}/${id}`)
+  },
+  async clone(id: string): Promise<DiscoveryRule> {
+    return (await api.post(`${rulesBase}/${id}/clone`)).data
+  },
+  async setMode(id: string, mode: RuleMode): Promise<DiscoveryRule> {
+    return (await api.post(`${rulesBase}/${id}/mode`, { mode })).data
+  },
+  async versions(id: string): Promise<RuleVersion[]> {
+    return (await api.get(`${rulesBase}/${id}/versions`)).data
+  },
+  async reorder(ids: string[]): Promise<DiscoveryRule[]> {
+    return (await api.post(`${rulesBase}/reorder`, { ids })).data
+  },
+  async preview(payload: PreviewRequest): Promise<PreviewResponse> {
+    return (await api.post(`${rulesBase}/preview`, payload)).data
+  },
+  async evaluateScan(runId: string, apply: boolean): Promise<EvaluateScanCounts> {
+    return (await api.post(`${rulesBase}/evaluate-scan/${runId}`, { apply })).data
+  },
+  async history(opts: { limit?: number; discovery_run_id?: string } = {}): Promise<EngineRun[]> {
+    return (await api.get(`${rulesBase}/history`, { params: opts })).data
+  },
+  async historyItems(
+    engineRunId: string,
+    opts: { outcome?: string; rule_id?: string; limit?: number; offset?: number } = {},
+  ): Promise<EngineRunItem[]> {
+    return (await api.get(`${rulesBase}/history/${engineRunId}/items`, { params: opts })).data
   },
 }

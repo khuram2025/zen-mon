@@ -175,3 +175,4 @@ f4a70b6ae47df0e9f37c23e5f29c3a674e4a62c30ee64b66f444e64ec574f417  migrate-183-nc
 cae83eb592870ca602fdd6f5342bac57b10982bfcb092a50420ba1354b9be152  migrate-185-role-page-access.sql
 9c1d57c47e67bd01893a46ac8ab11d8dcd33cd9f3e9955562ed8704afa6afbc7  migrate-187-alert-rule-exclusions.sql
 dd05631ff051784b9b2d9ba12799003bbeec0fb958dc24d290a19fb86ce380d4  migrate-189-device-templates.sql
+e2d19b8ba86ee9337963f32e5db82aa96f68c63d7cac629015e21b64d6d2429e  migrate-190-discovery-rule-engine.sql
