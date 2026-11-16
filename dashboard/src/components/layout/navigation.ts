@@ -208,6 +208,7 @@ export const NAV_GROUPS: NavGroup[] = [
       },
       { to: '/maps/manual', label: 'Network Maps', icon: MapPinned, hint: 'Hand-drawn topology views', permission: 'maps.view', extra: ['/maps'] },
       { to: '/ncm', label: 'Config Manager (NCCM)', icon: FileCode, section: 'Configuration', hint: 'NCCM configuration backups, change tracking and compliance', permission: 'ncm.view' },
+      { to: '/device-templates', label: 'Device Templates', icon: LayoutTemplate, hint: 'What each kind of device reports: templates, classification and device types', permission: 'devices.view' },
       {
         to: '/discovery',
         label: 'Discovery',
@@ -378,7 +379,6 @@ export const NAV_GROUPS: NavGroup[] = [
           settingsTab('updates', 'Updates', Download, 'system.admin'),
           settingsTab('storage', 'Storage', HardDrive, 'system.admin'),
           settingsTab('sensors', 'Sensors', Plug, 'settings.manage'),
-          settingsTab('templates', 'Monitoring Templates', LayoutTemplate, 'settings.manage'),
           settingsTab('mibs', 'MIB Library', Upload, 'settings.manage'),
           { ...settingsTab('support', 'Support', LifeBuoy), personal: true },
           { ...settingsTab('profile', 'My Profile', UserRound), personal: true },

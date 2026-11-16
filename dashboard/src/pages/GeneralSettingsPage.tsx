@@ -1,8 +1,8 @@
 import { regionalDate } from '@/lib/regionalTime'
 import { FormEvent, useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Navigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Building2, Download, HardDrive, Info, KeyRound, LayoutTemplate, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
+import { Activity, Building2, Download, HardDrive, Info, KeyRound, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import {
@@ -31,7 +31,6 @@ import { SecurityTabContent } from '@/components/SecurityTabContent'
 import { SshTerminalCard } from '@/components/settings/SshTerminalCard'
 import { CompanySettings } from '@/components/settings/CompanySettings'
 import { MibsTabContent } from '@/components/MibsTabContent'
-import { TemplatesTabContent } from '@/components/TemplatesTabContent'
 import { AccessTabContent, ACCESS_TAB_PERMISSIONS } from '@/components/access/AccessTabContent'
 import { MfaPanel } from '@/components/security/MfaPanel'
 import { NewPasswordFields, usePasswordCheck } from '@/components/security/PasswordFields'
@@ -51,7 +50,6 @@ const TABS = [
   { value: 'storage', label: 'Storage', icon: HardDrive, permission: 'system.admin' },
   { value: 'security', label: 'Security', icon: ShieldCheck, permission: 'system.admin' },
   { value: 'sensors', label: 'Sensors', icon: Plug, permission: 'settings.manage' },
-  { value: 'templates', label: 'Monitoring Templates', icon: LayoutTemplate, permission: 'settings.manage' },
   { value: 'mibs', label: 'MIB Library', icon: Upload, permission: 'settings.manage' },
   { value: 'support', label: 'Support', icon: LifeBuoy },
   { value: 'profile', label: 'Profile', icon: UserIcon },
@@ -84,6 +82,9 @@ export function GeneralSettingsPage() {
     setSearchParams(next, { replace: true })
   }
 
+  // Monitoring Templates moved to Network → Device Templates (1.25.10).
+  if (searchParams.get('tab') === 'templates') return <Navigate to="/device-templates" replace />
+
   return (
     <div className="space-y-5">
       <div>
@@ -91,7 +92,7 @@ export function GeneralSettingsPage() {
           <Settings className="h-5 w-5 text-primary" /> General Settings
         </h1>
         <p className="text-xs text-muted">
-          Company information, email, appearance, users &amp; access control, licenses, updates, sensors, monitoring templates, MIBs, and your profile
+          Company information, email, appearance, users &amp; access control, licenses, updates, sensors, MIBs, and your profile
         </p>
       </div>
 
@@ -135,9 +136,6 @@ export function GeneralSettingsPage() {
         </TabsContent>
         <TabsContent value="sensors">
           <SensorsCard />
-        </TabsContent>
-        <TabsContent value="templates">
-          <TemplatesTabContent />
         </TabsContent>
         <TabsContent value="mibs">
           <MibsTabContent />

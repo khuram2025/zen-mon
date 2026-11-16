@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
@@ -197,9 +198,10 @@ class OidGroupChildren(BaseModel):
     @field_validator("device_type")
     @classmethod
     def _dtype_ok(cls, v: str) -> str:
-        allowed = ("router", "switch", "firewall", "server", "access_point", "printer", "other")
-        if v not in allowed:
-            raise ValueError(f"device_type must be one of {allowed}")
+        # A key of the device type catalogue (device_types, migrate-189); the
+        # template service checks that it exists when the template is saved.
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,49}", v or ""):
+            raise ValueError("device_type must be a device type key (lowercase letters, digits, _)")
         return v
 
     @field_validator("status_map")
@@ -234,13 +236,41 @@ class OidGroup(BaseModel):
         return v
 
 class MatchRules(BaseModel):
-    sys_object_id_prefixes: list[str] = Field(default_factory=list)
+    """How a device is matched to a template (contract: docs/device-templates.md)."""
+    sys_object_id_prefixes: list[str] = Field(default_factory=list, max_length=100)
     sys_descr_regex: Optional[str] = None
-    default_vendor: Optional[str] = None
-    default_model: Optional[str] = None
+    require_sys_descr: bool = Field(
+        default=False, description="A sysObjectID prefix only counts when sys_descr_regex also matches")
+    default_vendor: Optional[str] = Field(default=None, max_length=100)
+    default_model: Optional[str] = Field(default=None, max_length=255)
     extract_vendor: Optional[str] = None
     extract_model: Optional[str] = None
     extract_os_version: Optional[str] = None
+
+    @field_validator("sys_object_id_prefixes")
+    @classmethod
+    def _prefixes_ok(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        for raw in v:
+            oid = (raw or "").strip().lstrip(".")
+            if not oid:
+                continue
+            if not re.fullmatch(r"\d+(\.\d+)*", oid):
+                raise ValueError(f"'{raw}' is not a numeric OID")
+            if oid not in out:
+                out.append(oid)
+        return out
+
+    @field_validator("sys_descr_regex", "extract_vendor", "extract_model", "extract_os_version")
+    @classmethod
+    def _regex_ok(cls, v: Optional[str]) -> Optional[str]:
+        from app.services.device_templates.classify import regex_problem
+        if v is None or v == "":
+            return None
+        problem = regex_problem(v)
+        if problem:
+            raise ValueError(problem)
+        return v
 
 class ProfileCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
@@ -268,5 +298,113 @@ class ProfileResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     device_count: int = 0
+    # Device Templates (migrate-189)
+    builtin_key: Optional[str] = None
+    parent_id: Optional[UUID] = None
+    parent_name: Optional[str] = None
+    device_type: Optional[str] = None
+    icon: Optional[str] = None
+    match_priority: int = 100
+    revision: int = 1
+    has_draft: bool = False
+    draft_updated_at: Optional[datetime] = None
+    pilot_device_count: int = 0
+    pilot_started_at: Optional[datetime] = None
+    suggestion_count: int = 0
+    customized_count: int = 0
 
     model_config = {"from_attributes": True}
+
+
+class TemplateContent(BaseModel):
+    """Everything a template publishes. For a customised template (one with a
+    parent) ``oid_groups`` are the edited effective groups; they are stored as
+    differences from the parent (``overlay``)."""
+    name: str = Field(..., min_length=1, max_length=255)
+    vendor: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    device_type: Optional[str] = Field(default=None, max_length=50)
+    icon: Optional[str] = Field(default=None, max_length=40)
+    match_priority: int = Field(default=100, ge=0, le=1000)
+    match_rules: MatchRules = Field(default_factory=MatchRules)
+    oid_groups: list[OidGroup] = Field(default_factory=list, max_length=200)
+
+
+class TemplatePublishRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
+    pilot_device_ids: Optional[list[UUID]] = Field(default=None, max_length=50)
+
+
+class TemplateRollbackRequest(BaseModel):
+    revision: int = Field(..., ge=1)
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class TemplateCustomizeRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    move_devices: bool = Field(default=True, description="Move the parent's devices to the customised template")
+
+
+class TemplateAssignRequest(BaseModel):
+    device_ids: list[UUID] = Field(..., max_length=5000)
+    set_device_type: bool = Field(default=False, description="Also set the template's device type on the devices")
+
+
+class TemplateTestRequest(BaseModel):
+    device_id: UUID
+    source: str = Field(default="draft", description="draft | published")
+    group_keys: Optional[list[str]] = Field(default=None, max_length=50)
+
+    @field_validator("source")
+    @classmethod
+    def _source_ok(cls, v: str) -> str:
+        if v not in ("draft", "published"):
+            raise ValueError("source must be draft|published")
+        return v
+
+
+class TemplateClassifyRequest(BaseModel):
+    device_id: Optional[UUID] = None
+    sys_object_id: Optional[str] = Field(default=None, max_length=255)
+    sys_descr: Optional[str] = Field(default=None, max_length=4000)
+
+
+# Device types seeded by migrate-189. Built-in types cannot be deleted, so
+# these keys always exist and need no catalogue lookup to validate.
+BUILTIN_DEVICE_TYPES = frozenset({
+    "router", "switch", "firewall", "load_balancer", "sdwan_edge", "wireless_controller", "access_point",
+    "server", "storage", "ups", "pdu", "printer", "ip_camera", "voip", "other",
+})
+
+DEVICE_TYPE_CATEGORIES = ("network", "security", "wireless", "server", "power", "storage", "endpoint", "other")
+
+
+class DeviceTypeCreate(BaseModel):
+    key: str = Field(..., pattern=r"^[a-z][a-z0-9_]{0,49}$")
+    label: str = Field(..., min_length=1, max_length=80)
+    category: str = "other"
+    icon: str = Field(default="other", max_length=40)
+    sort_order: int = Field(default=500, ge=0, le=10000)
+    description: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("category")
+    @classmethod
+    def _cat_ok(cls, v: str) -> str:
+        if v not in DEVICE_TYPE_CATEGORIES:
+            raise ValueError(f"category must be one of {DEVICE_TYPE_CATEGORIES}")
+        return v
+
+
+class DeviceTypeUpdate(BaseModel):
+    label: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    category: Optional[str] = None
+    icon: Optional[str] = Field(default=None, max_length=40)
+    sort_order: Optional[int] = Field(default=None, ge=0, le=10000)
+    description: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("category")
+    @classmethod
+    def _cat_ok(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in DEVICE_TYPE_CATEGORIES:
+            raise ValueError(f"category must be one of {DEVICE_TYPE_CATEGORIES}")
+        return v

@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react'
+import { DeviceTypeItems } from '@/components/forms/DeviceTypeItems'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Key, Layers, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -235,9 +236,7 @@ export function DeviceFormDialog({
                 <Select value={state.device_type} onValueChange={(v) => setState({ ...state, device_type: v })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {['router', 'switch', 'firewall', 'server', 'access_point', 'printer', 'other'].map((t) => (
-                      <SelectItem key={t} value={t}>{t.replace('_', ' ')}</SelectItem>
-                    ))}
+                    <DeviceTypeItems />
                   </SelectContent>
                 </Select>
               </FormField>

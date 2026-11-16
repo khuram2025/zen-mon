@@ -7,7 +7,8 @@ import "strings"
 // not operationally meaningful.
 func IsNetworkDeviceType(deviceType string) bool {
 	switch deviceType {
-	case "router", "switch", "firewall", "access_point":
+	case "router", "switch", "firewall", "access_point",
+		"load_balancer", "wireless_controller", "sdwan_edge":
 		return true
 	default:
 		return false

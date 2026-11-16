@@ -1,4 +1,5 @@
 import { formatDeviceAvailability } from '@/components/devices/availability'
+import { DeviceTypeItems } from '@/components/forms/DeviceTypeItems'
 import { compareIpAddresses, compareListValues, isIpQuery, nextListSort, searchRank } from '@/lib/listOrdering'
 import { useStableListRows } from '@/hooks/useStableListRows'
 import { FLAP_HOLD_FLEET_TEXT, isFlapping, type DeviceFlapFields } from '@/components/devices/deviceStatus'
@@ -49,7 +50,9 @@ import {
   X,
   XCircle,
   Database,
+  LayoutTemplate as TemplateIcon,
 } from 'lucide-react'
+import { AssignDialog as TemplateAssignDialog } from '@/pages/templates/TemplateDetailPage'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -321,6 +324,7 @@ export function DevicesPage() {
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [bulkTagOpen, setBulkTagOpen] = useState(false)
+  const [bulkTemplateOpen, setBulkTemplateOpen] = useState(false)
   const [columnsOpen, setColumnsOpen] = useState(false)
   // Arriving with a vendor / OS version in the address (a bookmark or a link) shows the panel that holds them.
   const [filtersOpen, setFiltersOpen] = useState(() => !!(params.get('vendor') || params.get('os_version')))
@@ -1062,6 +1066,9 @@ export function DevicesPage() {
                   <Button variant="outline" size="sm" onClick={() => setBulkTagOpen(true)}>
                     <Tags className="h-3.5 w-3.5" /> Tags
                   </Button>
+                  <Button variant="outline" size="sm" onClick={() => setBulkTemplateOpen(true)}>
+                    <TemplateIcon className="h-3.5 w-3.5" /> Template
+                  </Button>
                   <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
                     <Trash2 className="h-3.5 w-3.5" /> Delete
                   </Button>
@@ -1493,6 +1500,13 @@ export function DevicesPage() {
         onDone={() => setSelected(new Set())}
       />
       <ManageTagsDialog open={manageTagsOpen} onOpenChange={setManageTagsOpen} />
+      {bulkTemplateOpen && (
+        <TemplateAssignDialog
+          presetIds={Array.from(selected)}
+          onClose={() => setBulkTemplateOpen(false)}
+          onDone={() => { setSelected(new Set()); qc.invalidateQueries({ queryKey: ['devices'] }) }}
+        />
+      )}
     </div>
   )
 }
@@ -2558,11 +2572,7 @@ function BulkEditDialog({
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__keep__">Keep existing</SelectItem>
-                    {DEVICE_TYPES.map((t) => (
-                      <SelectItem key={t} value={t}>
-                        <span className="capitalize">{t.replace('_', ' ')}</span>
-                      </SelectItem>
-                    ))}
+                    <DeviceTypeItems />
                   </SelectContent>
                 </Select>
               </FormField>

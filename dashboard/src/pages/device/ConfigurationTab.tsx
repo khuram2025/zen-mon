@@ -135,7 +135,13 @@ export function InventoryConfigCard({
     {
       icon: Layers, label: 'Monitoring Template',
       value: device.profile_name
-        ? <Link to="/settings/general?tab=templates" className="text-primary hover:underline">{device.profile_name}</Link>
+        ? <span>
+            <Link to={device.profile_id ? `/device-templates/${device.profile_id}` : '/device-templates'} className="text-primary hover:underline">{device.profile_name}</Link>
+            {device.profile_source && <span className="block text-xs font-normal text-muted">
+              Assigned by {({ auto: 'the classifier', manual: 'an operator', rule: 'a discovery rule', import: 'import' } as Record<string, string>)[device.profile_source] || device.profile_source}
+            </span>}
+            {device.profile_suggested_id && <Link to="/device-templates?tab=suggestions" className="block text-xs font-normal text-warning-fg hover:underline">A better-matching template is suggested</Link>}
+          </span>
         : snmp
           ? <span>{auto.label}{auto.reason && <span className="block text-xs font-normal text-muted">{auto.reason}</span>}</span>
           : '—',
