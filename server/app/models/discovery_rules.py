@@ -81,6 +81,14 @@ class DiscoveryEngineRun(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
     counts: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    undone_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # migrate-191
+    targets: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    preview_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    undo_of: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovery_engine_runs.id", ondelete="SET NULL"), nullable=True)
 
 
 class DiscoveryEngineRunItem(Base):
@@ -104,3 +112,21 @@ class DiscoveryEngineRunItem(Base):
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DiscoveryEngineAssignment(Base):
+    """A value a rule set on a device or server (migrate-191)."""
+    __tablename__ = "discovery_engine_assignments"
+
+    asset_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    asset_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    action_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    item_key: Mapped[str] = mapped_column(Text, primary_key=True, default="")
+    value: Mapped[dict | list | str | int | bool | None] = mapped_column(JSONB, nullable=True)
+    previous: Mapped[dict | list | str | int | bool | None] = mapped_column(JSONB, nullable=True)
+    rule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    rule_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rule_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovery_engine_runs.id", ondelete="SET NULL"), nullable=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

@@ -47,11 +47,13 @@ import {
   Upload,
   Waves,
   Wifi,
+  Wand2,
   X,
   XCircle,
   Database,
   LayoutTemplate as TemplateIcon,
 } from 'lucide-react'
+import { useCan } from '@/stores/auth'
 import { AssignDialog as TemplateAssignDialog } from '@/pages/templates/TemplateDetailPage'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
@@ -266,6 +268,7 @@ function savePrefs(p: Prefs) {
 export function DevicesPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
+  const canRunRules = useCan()('discovery.manage_rules')
   const [params, setParams] = useSearchParams()
 
   // Global search uses search; keep older q bookmarks working as well.
@@ -1059,7 +1062,7 @@ export function DevicesPage() {
                     Clear
                   </button>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Button variant="outline" size="sm" onClick={() => setBulkEditOpen(true)}>
                     <Pencil className="h-3.5 w-3.5" /> Edit
                   </Button>
@@ -1069,6 +1072,16 @@ export function DevicesPage() {
                   <Button variant="outline" size="sm" onClick={() => setBulkTemplateOpen(true)}>
                     <TemplateIcon className="h-3.5 w-3.5" /> Template
                   </Button>
+                  {canRunRules && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      title="Preview and apply the active discovery rules to the selected devices"
+                      onClick={() => navigate(`/discovery/rules/run?devices=${Array.from(selected).join(',')}`)}
+                    >
+                      <Wand2 className="h-3.5 w-3.5" /> Run discovery rules
+                    </Button>
+                  )}
                   <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
                     <Trash2 className="h-3.5 w-3.5" /> Delete
                   </Button>

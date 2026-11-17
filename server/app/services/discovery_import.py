@@ -262,6 +262,7 @@ async def import_results(
                         hostname=hostname,
                         ip_address=str(result.ip_address),
                         device_type=setting(plan, "device_type") or result.device_type or "other",
+                        device_type_source="rule" if setting(plan, "device_type") else None,
                         location=(payload.location or setting(plan, "location")
                                   or (profile.default_location if profile else None)),
                         group_id=payload.group_id or result.suggested_group_id,

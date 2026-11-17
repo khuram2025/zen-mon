@@ -1,4 +1,4 @@
-# Discovery rules (phase 1)
+# Discovery rules (phases 1 and 2)
 
 Discovery rules classify what a discovery scan finds: auto-import it with the
 right group, template, tags and polling settings, keep it for review, or
@@ -6,8 +6,10 @@ ignore it. They live under **Discovery → Rules** and are off until an
 administrator turns the engine on.
 
 The research and the four-phase plan are in
-`docs/plans/discovery-rule-engine-plan.md`. Phase 1 (this document) acts only
-on scan results: it never changes a device or server that already exists.
+`docs/plans/discovery-rule-engine-plan.md`. Phase 1 (1.25.11) acts on scan
+results. Phase 2 also applies rules to devices and servers already in
+inventory: through a previewed manual run, and to every device or server when
+it is added (see "Rules on inventory").
 
 ## Rules
 
@@ -21,7 +23,14 @@ A rule is global (not owned by a discovery profile) and has:
   *All of* matches everything (a catch-all rule).
 * **Then**: actions (below).
 * **Stop processing**: a matching rule ends the evaluation.
-* **Mode**: Draft (never evaluated by scans), Active, Disabled.
+* **Runs automatically on** (`triggers`): discovery scan results
+  (`discovery`) and/or devices and servers when they are added (`created`).
+  A manual run on inventory can use any active rule.
+* **When a value was changed by hand** (`enforcement`): *Set once* (default)
+  leaves a later hand edit alone; *Enforce* puts the rule's value back.
+* **Mode**: Draft (never evaluated), Simulating (evaluated on scans and on new
+  devices, records what it would do as `simulated` run items, changes
+  nothing), Active, Disabled.
 
 ### Facts and operators
 
@@ -57,7 +66,13 @@ A rule is global (not owned by a discovery profile) and has:
 | --- | --- | --- |
 | Import decision: Auto-import (as device, server, both or auto), Keep for review, Ignore | single | `discovery.run` (+ `servers.manage` when it can create servers) |
 | Device group, monitoring template, device type, location, SNMP credential (by id), ping interval, SNMP poll interval | single | `devices.manage` |
-| Add tags | additive | `devices.manage` |
+| Owner | single | `devices.manage` / `servers.manage` |
+| Server environment (servers) | single | `servers.manage` |
+| Turn ping monitoring on (only ever on) | single | `devices.manage` |
+| Add tags (devices and servers) | additive | `devices.manage` / `servers.manage` |
+
+The permission follows the asset kinds the rule applies to: device settings
+need `devices.manage`, server settings `servers.manage`.
 
 Group, template and SNMP credential are stored as ids and checked when the
 rule is saved; no secret is ever copied into a rule, a run item or an export.
@@ -129,6 +144,61 @@ trace for each rule. Sample facts can be typed in to test one device. Preview
 and the real evaluation call the same functions (`engine.evaluate`,
 `engine.disposition`, `runner.assign_capacity`), and a test compares them.
 
+## Rules on inventory (phase 2)
+
+The same evaluation (`engine.evaluate`) decides what the rules want for a
+device or server already in inventory; `discovery_rules.inventory.plan_changes`
+turns that into changes, using the asset's current values and the
+**assignments** rules made before (`discovery_engine_assignments`: every value
+a rule set, with the value it replaced).
+
+| Situation | Result |
+| --- | --- |
+| No rule has set it, current value differs | changed; the assignment records the value replaced |
+| A rule set it and it still has that value | left alone; follows the rule if the rule's value changed |
+| A rule set it, then someone changed it by hand | *Set once*: kept, reported as `kept_manual_edit`; *Enforce*: the rule's value is put back |
+| Tags | only ever added; a rule-added tag removed by hand is a hand edit like the above |
+| SNMP credential on a device with its own (inline) SNMP settings | not changed (`not_reversible`); a rule only switches between saved credentials or fills an empty one |
+| Import decision | ignored on inventory |
+
+Inventory facts (the rule builder shows which facts apply to scan results,
+devices or servers): devices add tags, group, template, location, owner,
+status, ping/SNMP on; servers add OS type, environment, collection mode,
+owner, tags, status. Controller-managed children are not evaluated (phase 3).
+
+**Manual run** (Discovery → Rules → Run on inventory, or Devices → select →
+Run discovery rules, or the device page): choose the rules (all active, or
+some) and the devices/servers (kinds, groups, tags, subnet, name or the
+selected ones), preview, apply. The preview returns a digest of exactly those
+changes; apply recomputes them under a lock and refuses (409
+`preview_stale`) when anything changed since, so what is applied is what was
+previewed. Re-checked per value: a value changed between the plan and the
+write is skipped (`skipped_changed`). A second run of the same rules changes
+nothing.
+
+**When added**: a once-a-minute sweep (one API worker at a time,
+`zenplus:discovery_rules_pass`) applies the active rules with the "devices
+and servers when they are added" trigger to every device and server created
+since the upgrade, once each (`discovery_engine_asset_state`). It does not
+touch the add itself, so adding a device never waits for, or fails because of,
+the rules; the rules apply within about a minute. While the engine is off new
+assets are only marked as seen: turning the engine on never reaches back.
+
+**Undo** (run history): restores every value the run set that still equals
+what it set, skips values changed since and lists both; the assignment is
+removed (or set back). An undo is itself a run (`trigger = undo`); a run is
+undone once. For a scan's run, undo reverts nothing and lists the devices the
+scan imported so they can be deleted deliberately: undo never deletes a
+device.
+
+**Explain** (device page → Automation): which rule set each value, in which
+run, hand edits the rules kept, rules that match now and what a run would
+still change.
+
+**Conflicts** (Rules page): over the current inventory, which rule's value is
+overridden by which higher rule on how many assets, rules that match nothing,
+rules that match but never win.
+
 ## Engine settings
 
 `system_settings['discovery_rules']`, edited on the Rules page:
@@ -149,8 +219,13 @@ and the real evaluation call the same functions (`engine.evaluate`,
   use; `activated_by` is stored.
 * `discovery.run`: re-evaluate a past scan (it can import).
 * Rules are fleet-wide: a user whose view is limited by tags cannot change
-  them (403), the stance fleet-wide alert rules take. Discovery results are
-  not tag-scoped today, so history is not filtered in phase 1.
+  or run them (403), the stance fleet-wide alert rules take. Run history
+  shown to a scoped viewer leaves out items about devices and servers outside
+  the viewer's tags (scan results are not tag-scoped). The device/server
+  explain view follows the asset's visibility.
+* Running rules on inventory, and undoing a run, need `discovery.manage_rules`
+  plus the permissions of the values written (`devices.manage`,
+  `servers.manage`).
 * A subnet-to-tag rule is how a newly imported device becomes visible to the
   right team: untagged devices stay hidden from scoped users.
 
@@ -172,6 +247,10 @@ Under `/api/v1/discovery-v2/rules`:
 | `POST /preview` | Plans for an unsaved rule against a past scan or sample facts; writes nothing |
 | `POST /evaluate-scan/{run_id}` | Re-evaluate a finished scan; `apply` acts as the profile allows |
 | `GET /history`, `GET /history/{id}/items` | Rule runs and what each rule did |
+| `POST /inventory/preview`, `POST /inventory/apply` | Manual run on devices/servers: preview with a digest, apply exactly that |
+| `POST /history/{id}/undo` | Undo a run |
+| `GET /assets/{device\|server}/{id}` | Explain one asset |
+| `GET /conflicts` | Overridden rules, rules that match nothing or never win |
 
 ## Data
 
@@ -179,18 +258,33 @@ Migration 190: `discovery_engine_rules`, `discovery_engine_rule_versions`,
 `discovery_engine_runs`, `discovery_engine_run_items`, three columns on
 `discovery_results_v2`, the settings row. The legacy `discovery_rules` table
 (migration 017) was never written by any code path and is left in place,
-superseded. Columns for later phases (`enforcement`, `on_unmatch`,
-`max_changes_per_run`, mode `simulate`) exist but are not used yet.
+superseded.
 
-## Not in phase 1
+Migration 191: `discovery_engine_assignments`, `discovery_engine_asset_state`,
+`targets` / `preview_digest` / `undo_of` on runs, more run-item outcomes,
+`system_settings['discovery_rules_state']` (`created_since`, the upgrade
+time). Imported and rule-set templates and device types are recorded in
+`devices.profile_source` / `device_type_source` as `rule`. `on_unmatch` and
+`max_changes_per_run` are still unused (phase 3).
 
-Rules on existing devices and servers, ownership of rule-set values and undo,
-simulation mode, evaluation on Add Device / CSV import / agent enrolment,
-continuous re-evaluation, NCCM / Device Tracker / alert exclusion /
-maintenance / map actions, controller children, export/import and starter
-rules. See the plan, phases 2 to 4.
+## Not yet built
+
+Re-evaluation when an asset changes, keep-or-revert when an asset stops
+matching, NCCM / Device Tracker / alert exclusion / maintenance / map /
+service check actions, controller children, change caps with approval,
+export/import and starter rules (phase 3); interface, topology, sensor/site
+and server-policy rules (phase 4).
 
 ## Tests
+
+* `server/tests/test_discovery_rules_inventory.py`: the inventory change
+  planner (new values, hand edits under set-once and enforce, tags, inline
+  SNMP, servers, first match, digest) and inventory facts.
+* `server/tests/test_discovery_rules_inventory_pg.py` (disposable PostgreSQL):
+  the phase 2 acceptance (300 devices preview = apply, second run changes
+  nothing, stale preview refused, hand edits, undo, "when added" sweep once
+  and engine-off marking, Simulating rules write nothing, explain, servers,
+  permissions and tag scope, conflicts, scan undo lists imports).
 
 * `server/tests/test_discovery_rules_engine.py`: operators, groups, order,
   shadowing, merge, stop, dispositions, capacity assignment, 5,000 assets x

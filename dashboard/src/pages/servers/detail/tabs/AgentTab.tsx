@@ -9,7 +9,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity, AlertTriangle, ArrowUpCircle, Bot, CheckCircle2, Clock3, CloudOff, Download, FileDown,
   Info, KeyRound, Layers, Loader2, Pencil, RefreshCw, ScrollText, Settings2, ShieldCheck, Stethoscope,
-  Trash2, Zap,
+  Trash2, Wand2, Zap,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn, formatBytes, relativeTime } from '@/lib/utils'
@@ -27,6 +27,7 @@ import type {
   AgentItem, CollectionMode, MonitoringProfile, ServerCommand, ServerItem, UpdateRing,
 } from '@/types/servers'
 import { agentProfile, useServerAgent } from '../data'
+import { AssetAutomationBody, useAssetAutomation } from '@/pages/discovery/AssetAutomation'
 import {
   EmptyState, KeyValues, Panel, Pill, Segmented, StatTile, fmtNum, type Tone,
 } from '../ui'
@@ -1212,6 +1213,8 @@ function SettingsSection({ server, onEdit, onDecommission, onDelete }: {
 }) {
   const os = [server.os_name || server.os_type, server.os_version].filter(Boolean).join(' ')
   const decommissioned = server.status === 'disabled'
+  // Discovery rules: the panel appears once the explain call answers; a 403 / 404 leaves it out.
+  const { data: automation } = useAssetAutomation('server', server.id)
 
   return (
     <div className="space-y-4">
@@ -1258,6 +1261,12 @@ function SettingsSection({ server, onEdit, onDecommission, onDelete }: {
           </div>
         </div>
       </Panel>
+
+      {automation && (
+        <Panel title="Automation" subtitle="What discovery rules set on this server" icon={Wand2}>
+          <AssetAutomationBody data={automation} />
+        </Panel>
+      )}
 
       <Panel
         title="Danger zone"

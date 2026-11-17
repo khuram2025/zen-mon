@@ -1,5 +1,12 @@
 import { api } from '@/lib/api'
 import {
+  AssetAutomation,
+  AssetKind,
+  ConflictReport,
+  InventoryApplyResult,
+  InventoryPreview,
+  InventoryRunRequest,
+  UndoResult,
   DiscoveryProfile,
   DiscoveryRule,
   EngineRun,
@@ -11,6 +18,7 @@ import {
   RuleDraft,
   RuleEngineSettings,
   RuleMode,
+  RuleTrigger,
   RuleVersion,
   DiscoveryResult,
   DiscoveryRun,
@@ -131,6 +139,8 @@ export function ruleBody(draft: RuleDraft) {
     condition: draft.condition,
     actions: draft.actions,
     stop_processing: draft.stop_processing,
+    triggers: draft.triggers?.length ? draft.triggers : (['discovery'] as RuleTrigger[]),
+    enforcement: draft.enforcement || ('set_once' as const),
   }
 }
 
@@ -185,5 +195,25 @@ export const rulesApi = {
     opts: { outcome?: string; rule_id?: string; limit?: number; offset?: number } = {},
   ): Promise<EngineRunItem[]> {
     return (await api.get(`${rulesBase}/history/${engineRunId}/items`, { params: opts })).data
+  },
+
+  // Phase 2: rules on devices and servers already in inventory.
+  /** What the active (or chosen active) rules would change; writes nothing. */
+  async inventoryPreview(payload: InventoryRunRequest): Promise<InventoryPreview> {
+    return (await api.post(`${rulesBase}/inventory/preview`, payload)).data
+  },
+  /** Apply exactly the previewed changes; 409 `preview_stale` when anything changed since. */
+  async inventoryApply(payload: InventoryRunRequest & { digest: string }): Promise<InventoryApplyResult> {
+    return (await api.post(`${rulesBase}/inventory/apply`, payload)).data
+  },
+  async undo(engineRunId: string): Promise<UndoResult> {
+    return (await api.post(`${rulesBase}/history/${engineRunId}/undo`)).data
+  },
+  /** Which rules set what on a device or server, hand edits kept, rules that match now. */
+  async asset(kind: AssetKind, assetId: string): Promise<AssetAutomation> {
+    return (await api.get(`${rulesBase}/assets/${kind}/${assetId}`)).data
+  },
+  async conflicts(): Promise<ConflictReport> {
+    return (await api.get(`${rulesBase}/conflicts`)).data
   },
 }

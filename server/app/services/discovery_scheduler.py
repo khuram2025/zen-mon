@@ -148,3 +148,21 @@ async def discovery_scheduler_loop() -> None:
         except Exception:
             logger.exception("discovery scheduler tick failed")
         await asyncio.sleep(TICK_INTERVAL_S)
+
+
+async def discovery_rules_loop() -> None:
+    """Background task: discovery rules on devices and servers when they are
+    added (``discovery_rules.inventory.sweep_created``), once a minute, one
+    API worker at a time. Creating an asset never waits for or depends on it."""
+    from app.services import alert_worker_lock
+    from app.services.discovery_rules.inventory import sweep_created
+
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await alert_worker_lock.run_pass("zenplus:discovery_rules_pass", sweep_created)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("discovery rules sweep failed")
+        await asyncio.sleep(TICK_INTERVAL_S)
