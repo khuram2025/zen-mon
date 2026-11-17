@@ -20,12 +20,13 @@ import { Panel } from './charts'
 import { formatRelative, formatSpan } from './format'
 import { OwnerNotesCard } from './OwnerNotesCard'
 import { AssetAlertRules } from '@/components/alerts/RuleExclusions'
+import { AssetAutomationBody, useAssetAutomation } from '@/pages/discovery/AssetAutomation'
 import type { DeviceRecord, DeviceSummary, IdentityField } from './types'
 
 /* How the device is monitored and what it is: identity (one resolved answer
  * per field, with its source), polling and credentials status (never the
  * values), owner and notes, monitoring sites, the status policy explained, tags, configuration
- * backups and connected endpoints. */
+ * backups, alert rules, discovery-rule automation and connected endpoints. */
 
 const SOURCE: Record<string, string> = {
   inventory: 'from Inventory', device: 'reported by the device', template: 'from the template reading', entity: 'from ENTITY-MIB',
@@ -39,6 +40,8 @@ export function ConfigurationTab({ device, summary, onOpenHardware }: { device: 
     enabled: !!device.snmp_enabled,
   })
   const snmp = !!device.snmp_enabled
+  // Discovery rules: shown once the explain call answers; a 403 / 404 leaves the card out entirely.
+  const { data: automation } = useAssetAutomation('device', device.id)
   const widgets = [
     { id: 'inventory', title: 'Identity and monitoring', width: 6, height: 10, minWidth: 3, minHeight: 4,
       content: <InventoryConfigCard device={device} entities={entities || []} snmpHasData={undefined} identity={summary?.identity} onDetails={onOpenHardware} /> },
@@ -61,6 +64,8 @@ export function ConfigurationTab({ device, summary, onOpenHardware }: { device: 
       content: <Panel title="Alert rules" meta="Rules that apply to this device">
         <AssetAlertRules kind="device" assetId={device.id} assetName={device.hostname} />
       </Panel> }] : []),
+    ...(automation ? [{ id: 'automation', title: 'Automation', width: 6, height: 7, minWidth: 3, minHeight: 4,
+      content: <Panel title="Automation" meta="What discovery rules set on this device"><AssetAutomationBody data={automation} /></Panel> }] : []),
     ...(snmp && ['switch', 'router', 'firewall'].includes(device.device_type) ? [{ id: 'connected-endpoints', title: 'Connected endpoints', width: 6, height: 9, minWidth: 3, minHeight: 4,
       content: <ConnectedEndpointsCard deviceId={device.id} /> }] : []),
   ]

@@ -13,6 +13,7 @@ Every change is audit logged. See ``docs/discovery-rule-engine.md``.
 
 from __future__ import annotations
 
+import ipaddress
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -36,6 +37,8 @@ from app.models.user import User
 from app.schemas.discovery_rules import (
     EngineSettings,
     EvaluateScanRequest,
+    InventoryApplyRequest,
+    InventoryRunRequest,
     PreviewRequest,
     RuleCreate,
     RuleModeRequest,
@@ -47,8 +50,8 @@ from app.schemas.discovery_rules import (
 from app.services import tag_service
 from app.services.audit_service import write_audit_log
 from app.services.discovery_rules import actions as rule_actions
-from app.services.discovery_rules import conditions, runner
-from app.services.discovery_rules.facts import ENUM_VALUES, FIELDS, REFERENCE_SOURCES
+from app.services.discovery_rules import conditions, inventory, runner
+from app.services.discovery_rules.facts import ENUM_VALUES, FIELD_SOURCES, FIELDS, REFERENCE_SOURCES
 
 router = APIRouter(prefix="/discovery-v2/rules", tags=["Discovery rules"])
 
@@ -77,6 +80,7 @@ def _snapshot(row: DiscoveryEngineRule) -> dict:
         "name": row.name, "description": row.description, "priority": row.priority, "mode": row.mode,
         "asset_kinds": list(row.asset_kinds or []), "profile_ids": [str(p) for p in row.profile_ids or []] or None,
         "condition": row.condition, "actions": row.actions, "stop_processing": row.stop_processing,
+        "triggers": list(row.triggers or []), "enforcement": row.enforcement,
     }
 
 
@@ -135,14 +139,14 @@ async def _normalise(db: AsyncSession, payload) -> tuple[dict, list[dict], list[
     return condition, acts, profile_ids
 
 
-async def _check_activation(db: AsyncSession, user: User, acts: list[dict]) -> None:
+async def _check_activation(db: AsyncSession, user: User, acts: list[dict], kinds: list[str],
+                            verb: str = "Activating this rule") -> None:
     perms = set(await get_role_permissions(db, user.role))
     if SUPERUSER_PERMISSION in perms:
         return
-    missing = sorted(rule_actions.permissions_needed(acts) - perms)
+    missing = sorted(rule_actions.permissions_needed(acts, kinds) - perms)
     if missing:
-        raise HTTPException(403, "Activating this rule needs the permissions its actions use: "
-                                 + ", ".join(missing))
+        raise HTTPException(403, f"{verb} needs the permissions its actions use: " + ", ".join(missing))
 
 
 async def _record_version(db: AsyncSession, row: DiscoveryEngineRule, user: User, reason: str) -> None:
@@ -176,6 +180,7 @@ async def catalog(_user: User = Depends(require_permission("discovery.view"))):
             "operators": [{"key": op, "label": lbl, "value": kind}
                           for op, (lbl, kind) in conditions.OPERATORS[ftype].items()],
             "values": ENUM_VALUES.get(key), "source": REFERENCE_SOURCES.get(key),
+            "applies_to": FIELD_SOURCES.get(key, []),
         })
     return {
         "fields": fields,
@@ -185,6 +190,12 @@ async def catalog(_user: User = Depends(require_permission("discovery.view"))):
         "decisions": list(rule_actions.DECISIONS),
         "import_as": list(rule_actions.IMPORT_AS),
         "device_types": list(rule_actions.DEVICE_TYPES),
+        "modes": [{"key": "draft", "label": "Draft"}, {"key": "simulate", "label": "Simulating"},
+                  {"key": "active", "label": "Active"}, {"key": "disabled", "label": "Disabled"}],
+        "triggers": [{"key": "discovery", "label": "Discovery scan results"},
+                     {"key": "created", "label": "Devices and servers when they are added"}],
+        "enforcement": [{"key": "set_once", "label": "Set once (keep later hand edits)"},
+                        {"key": "enforce", "label": "Enforce (put the rule's value back)"}],
         "limits": {"max_depth": conditions.MAX_DEPTH, "max_leaves": conditions.MAX_LEAVES,
                    "max_regex": conditions.MAX_REGEX},
     }
@@ -225,15 +236,16 @@ async def create_rule(payload: RuleCreate, db: AsyncSession = Depends(get_db),
         raise HTTPException(409, "A rule with this name already exists")
     condition, acts, profile_ids = await _normalise(db, payload)
     if payload.mode == "active":
-        await _check_activation(db, user, acts)
+        await _check_activation(db, user, acts, list(payload.asset_kinds))
     edge = (await db.execute(select(func.min(DiscoveryEngineRule.priority) if payload.position == "first"
                                     else func.max(DiscoveryEngineRule.priority)))).scalar()
     priority = 10 if edge is None else (edge - 10 if payload.position == "first" else edge + 10)
     now = datetime.now(timezone.utc)
     row = DiscoveryEngineRule(
         name=payload.name.strip(), description=payload.description, priority=priority, mode=payload.mode,
-        asset_kinds=list(payload.asset_kinds), triggers=["discovery"], profile_ids=profile_ids,
+        asset_kinds=list(payload.asset_kinds), triggers=list(payload.triggers), profile_ids=profile_ids,
         condition=condition, actions=acts, stop_processing=payload.stop_processing, revision=1,
+        enforcement=payload.enforcement,
         created_by=user.id, updated_by=user.id, created_at=now, updated_at=now,
         activated_by=user.id if payload.mode == "active" else None,
         activated_at=now if payload.mode == "active" else None,
@@ -304,6 +316,7 @@ async def preview(payload: PreviewRequest, db: AsyncSession = Depends(get_db),
             "asset_kinds": list(draft.asset_kinds), "triggers": ["discovery"],
             "profile_ids": [str(p) for p in draft.profile_ids] if draft.profile_ids else None,
             "condition": condition, "actions": acts, "stop_processing": draft.stop_processing,
+            "enforcement": draft.enforcement,
         })
     try:
         return await runner.preview(db, rules, discovery_run_id=payload.discovery_run_id, facts=payload.facts,
@@ -364,7 +377,7 @@ async def history_items(engine_run_id: uuid.UUID, outcome: Optional[str] = None,
                         rule_id: Optional[uuid.UUID] = None,
                         limit: int = Query(default=500, ge=1, le=5000), offset: int = Query(default=0, ge=0),
                         db: AsyncSession = Depends(get_db),
-                        _user: User = Depends(require_permission("discovery.view"))):
+                        user: User = Depends(require_permission("discovery.view"))):
     if not await db.get(DiscoveryEngineRun, engine_run_id):
         raise HTTPException(404, "Run not found")
     q = (select(DiscoveryEngineRunItem).where(DiscoveryEngineRunItem.run_id == engine_run_id)
@@ -374,6 +387,9 @@ async def history_items(engine_run_id: uuid.UUID, outcome: Optional[str] = None,
     if rule_id:
         q = q.where(DiscoveryEngineRunItem.rule_id == rule_id)
     rows = (await db.execute(q)).scalars().all()
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        rows = await _visible_items(db, rows, scope)
     return [{
         "id": r.id, "asset_kind": r.asset_kind, "asset_id": str(r.asset_id) if r.asset_id else None,
         "discovery_result_id": r.discovery_result_id,
@@ -382,6 +398,149 @@ async def history_items(engine_run_id: uuid.UUID, outcome: Optional[str] = None,
         "rule_revision": r.rule_revision, "action_key": r.action_key, "before": r.before, "after": r.after,
         "outcome": r.outcome, "detail": r.detail, "created_at": r.created_at,
     } for r in rows]
+
+
+async def _visible_items(db: AsyncSession, rows, scope: list[str]):
+    """Items about devices/servers the viewer cannot see are left out; scan
+    results (discovery is not tag-scoped) stay."""
+    out, tags = [], {}
+    for kind, table in (("device", "devices"), ("server", "servers")):
+        ids = [str(r.asset_id) for r in rows if r.asset_kind == kind and r.asset_id]
+        if ids:
+            for aid, t in (await db.execute(text(
+                    f"SELECT id::text, tags FROM {table} WHERE id = ANY(CAST(:ids AS uuid[]))"), {"ids": ids})).all():
+                tags[(kind, aid)] = t
+    for r in rows:
+        if r.asset_kind in ("device", "server") and r.asset_id:
+            if not scoping.entity_visible(tags.get((r.asset_kind, str(r.asset_id))), scope):
+                continue
+        out.append(r)
+    return out
+
+
+# ── inventory: manual runs, undo, explain, conflicts (phase 2) ──────────────
+
+async def _run_rules(db: AsyncSession, rule_ids) -> list[dict]:
+    rules = await runner.load_rules(db)
+    if rule_ids:
+        wanted = {str(i) for i in rule_ids}
+        missing = wanted - {r["id"] for r in rules}
+        if missing:
+            raise HTTPException(422, "Only active rules can run on inventory; not active: " + ", ".join(sorted(missing)))
+        rules = [r for r in rules if r["id"] in wanted]
+    if not rules:
+        raise HTTPException(422, "There are no active rules to run")
+    return rules
+
+
+def _targets(payload) -> dict:
+    t = payload.targets.model_dump()
+    if t.get("subnet"):
+        try:
+            ipaddress.ip_network(t["subnet"], strict=False)
+        except ValueError:
+            raise HTTPException(422, f"Not a subnet: {t['subnet']}") from None
+    return t
+
+
+async def _check_run(db: AsyncSession, user: User, rules: list[dict], targets: dict) -> None:
+    kinds = list(targets.get("kinds") or ["device", "server"])
+    acts = [a for r in rules for a in r["actions"] if a["key"] != "decision"]
+    await _check_activation(db, user, acts, kinds, verb="Running these rules on inventory")
+
+
+@router.post("/inventory/preview")
+async def inventory_preview(payload: InventoryRunRequest, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(require_permission("discovery.manage_rules"))):
+    """What the active rules (or the chosen ones) would change on the devices
+    and servers the filter selects. Writes nothing; ``digest`` identifies this
+    exact set of changes for ``/inventory/apply``."""
+    await _fleet_guard(db, user)
+    rules = await _run_rules(db, payload.rule_ids)
+    return await inventory.preview_inventory(db, rules, _targets(payload))
+
+
+@router.post("/inventory/apply")
+async def inventory_apply(payload: InventoryApplyRequest, db: AsyncSession = Depends(get_db),
+                          user: User = Depends(require_permission("discovery.manage_rules"))):
+    """Apply exactly the previewed changes. 409 with the new preview when the
+    inventory or the rules changed since (preview again)."""
+    await _fleet_guard(db, user)
+    rules = await _run_rules(db, payload.rule_ids)
+    targets = _targets(payload)
+    await _check_run(db, user, rules, targets)
+    try:
+        out = await inventory.apply_inventory(db, rules, targets, expected_digest=payload.digest, actor_id=user.id)
+    except inventory.PreviewStale as e:
+        await db.rollback()
+        raise HTTPException(409, {"code": "preview_stale",
+                                  "message": "The inventory or the rules changed since the preview; preview again",
+                                  "summary": e.preview["summary"], "digest": e.preview["digest"]}) from None
+    await write_audit_log(db, actor=user, action="discovery.rules.run", resource_type="discovery_rules",
+                          resource_id=out["engine_run_id"],
+                          metadata={"rule_ids": [r["id"] for r in rules], "targets": inventory._jsonable(targets),
+                                    "applied": out.get("applied"), "kept_manual_edit": out.get("kept_manual_edit"),
+                                    "skipped_changed": out.get("skipped_changed")})
+    await db.commit()
+    return out
+
+
+@router.post("/history/{engine_run_id}/undo")
+async def undo(engine_run_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+               user: User = Depends(require_permission("discovery.manage_rules"))):
+    """Restore every value the run set that still equals what it set; values
+    changed since are listed and left alone. Devices a scan imported are
+    listed for a deliberate delete and never deleted here."""
+    await _fleet_guard(db, user)
+    kinds = [k for (k,) in (await db.execute(text(
+        "SELECT DISTINCT asset_kind FROM discovery_engine_run_items WHERE run_id = :r AND outcome = 'applied'"
+        " AND asset_kind IN ('device', 'server')"), {"r": engine_run_id})).all()]
+    perms = set(await get_role_permissions(db, user.role))
+    need = {"device": "devices.manage", "server": "servers.manage"}
+    missing = sorted(need[k] for k in kinds if need[k] not in perms)
+    if missing and SUPERUSER_PERMISSION not in perms:
+        raise HTTPException(403, "Undoing this run needs: " + ", ".join(missing))
+    try:
+        out = await inventory.undo_run(db, engine_run_id, actor_id=user.id)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from None
+    except inventory.UndoRefused as e:
+        raise HTTPException(409, str(e)) from None
+    await write_audit_log(db, actor=user, action="discovery.rules.undo", resource_type="discovery_engine_run",
+                          resource_id=str(engine_run_id),
+                          metadata={k: v for k, v in out.items() if k != "imported_devices"}
+                          | {"imported_devices": len(out["imported_devices"])})
+    await db.commit()
+    return out
+
+
+@router.get("/assets/{kind}/{asset_id}")
+async def explain_asset(kind: str, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                        user: User = Depends(require_permission("discovery.view", "devices.view", "servers.view"))):
+    """Which rules set what on this device or server, hand edits the rules
+    kept, rules that match it now and what they would still change."""
+    if kind not in ("device", "server"):
+        raise HTTPException(404, "Unknown asset kind")
+    table = "devices" if kind == "device" else "servers"
+    row = (await db.execute(text(f"SELECT tags FROM {table} WHERE id = :id"), {"id": asset_id})).first()
+    if row is None or not scoping.entity_visible(row[0], await scoping.visible_tags(db, user)):
+        raise HTTPException(404, "Not found")
+    out = await inventory.explain(db, kind, asset_id, await runner.load_rules(db))
+    if out is None:
+        raise HTTPException(404, "Not found")
+    out["engine_enabled"] = (await runner.load_settings(db))["enabled"]
+    return out
+
+
+@router.get("/conflicts")
+async def rule_conflicts(db: AsyncSession = Depends(get_db),
+                         user: User = Depends(require_permission("discovery.view"))):
+    """Over the current inventory: matches and wins per active rule, which
+    rules override which, rules that match nothing or never win."""
+    rules = await runner.load_rules(db)
+    if not rules:
+        return {"assets": 0, "truncated": False, "rules": [], "overridden": [], "never_match": [], "never_win": []}
+    return await inventory.conflicts(db, rules)
 
 
 # ── one rule ────────────────────────────────────────────────────────────────
@@ -404,7 +563,7 @@ async def update_rule(rule_id: uuid.UUID, payload: RuleUpdate, db: AsyncSession 
         raise HTTPException(409, "A rule with this name already exists")
     condition, acts, profile_ids = await _normalise(db, payload)
     if payload.mode == "active":
-        await _check_activation(db, user, acts)
+        await _check_activation(db, user, acts, list(payload.asset_kinds))
     before = _snapshot(row)
     now = datetime.now(timezone.utc)
     if payload.mode == "active" and (row.mode != "active" or acts != row.actions):
@@ -417,6 +576,8 @@ async def update_rule(rule_id: uuid.UUID, payload: RuleUpdate, db: AsyncSession 
     row.condition = condition
     row.actions = acts
     row.stop_processing = payload.stop_processing
+    row.triggers = list(payload.triggers)
+    row.enforcement = payload.enforcement
     row.revision = row.revision + 1
     row.updated_by = user.id
     row.updated_at = now
@@ -437,7 +598,7 @@ async def set_mode(rule_id: uuid.UUID, payload: RuleModeRequest, db: AsyncSessio
     if row.mode == payload.mode:
         return _out(row)
     if payload.mode == "active":
-        await _check_activation(db, user, list(row.actions or []))
+        await _check_activation(db, user, list(row.actions or []), list(row.asset_kinds or ["device"]))
         row.activated_by, row.activated_at = user.id, datetime.now(timezone.utc)
     previous = row.mode
     row.mode = payload.mode
@@ -469,7 +630,8 @@ async def clone_rule(rule_id: uuid.UUID, db: AsyncSession = Depends(get_db),
         name=name[:150], description=src.description, priority=edge + 10, mode="draft",
         asset_kinds=list(src.asset_kinds or ["device"]), triggers=list(src.triggers or ["discovery"]),
         profile_ids=src.profile_ids, condition=src.condition, actions=src.actions,
-        stop_processing=src.stop_processing, revision=1, created_by=user.id, updated_by=user.id,
+        stop_processing=src.stop_processing, enforcement=src.enforcement, revision=1, created_by=user.id,
+        updated_by=user.id,
         created_at=now, updated_at=now,
     )
     db.add(row)

@@ -54,6 +54,12 @@ ACTIONS: dict[str, ActionSpec] = {a.key: a for a in (
                min=10, max=3600),
     ActionSpec("snmp_interval", "SNMP poll interval (seconds)", "single", "int", ("devices.manage",),
                ("device",), min=30, max=3600),
+    ActionSpec("owner", "Owner", "single", "text", ("devices.manage",), ("device", "server"),
+               help="Owner of the device or server (free text)."),
+    ActionSpec("environment", "Server environment", "single", "text", ("servers.manage",), ("server",),
+               help="production, staging, development, ..."),
+    ActionSpec("ping_enabled", "Turn ping monitoring on", "single", "on", ("devices.manage",), ("device",),
+               help="Only turns ping on; a rule never turns monitoring off."),
     ActionSpec("tags", "Add tags", "additive", "tags", ("devices.manage",), ("device", "server"),
                help="Tags from every matching rule are merged. A tag is how a new device becomes "
                     "visible to a team whose view is limited by tags."),
@@ -95,6 +101,10 @@ def validate_action(raw: Any) -> dict:
             out["import_as"] = import_as
     elif spec.value == "ref":
         out["value"] = _uuid(value, spec.label)
+    elif spec.value == "on":
+        if value not in (True, "true", "on", 1):
+            raise ActionError(f"{spec.label}: a rule can only turn it on")
+        out["value"] = True
     elif spec.value == "int":
         try:
             n = int(value)
@@ -150,15 +160,27 @@ def validate_actions(raw: Any, asset_kinds: list[str]) -> list[dict]:
     return out
 
 
-def permissions_needed(actions: list[dict]) -> set[str]:
+def permissions_needed(actions: list[dict], asset_kinds: list[str] | None = None) -> set[str]:
+    """Permissions a user needs to activate (or run) a rule with ``actions``
+    on ``asset_kinds``: devices.manage for settings it writes on devices,
+    servers.manage for servers, discovery.run for the import decision."""
+    kinds = set(asset_kinds or ["device"])
     needed: set[str] = set()
     for a in actions:
         spec = ACTIONS.get(a.get("key"))
-        if spec:
-            needed.update(spec.permission)
-        if a.get("key") == "decision" and a.get("import_as") in ("server", "both", "auto"):
-            # "auto" creates a server for a server-class host; the default
-            # ("device") needs only the device permissions.
+        if not spec:
+            continue
+        if spec.key == "decision":
+            needed.add("discovery.run")
+            if a.get("import_as") in ("server", "both", "auto"):
+                # "auto" creates a server for a server-class host; the default
+                # ("device") needs only the device permissions.
+                needed.add("servers.manage")
+            continue
+        applies = kinds & set(spec.asset_kinds)
+        if "device" in applies:
+            needed.update(p for p in spec.permission if p != "servers.manage")
+        if "server" in applies:
             needed.add("servers.manage")
     return needed
 

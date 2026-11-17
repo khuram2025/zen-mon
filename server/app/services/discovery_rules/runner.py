@@ -92,6 +92,7 @@ def rule_dict(row: DiscoveryEngineRule) -> dict:
         "profile_ids": [str(p) for p in row.profile_ids] if row.profile_ids else None,
         "condition": row.condition, "actions": list(row.actions or []),
         "stop_processing": bool(row.stop_processing),
+        "enforcement": row.enforcement or "set_once",
     }
 
 
@@ -342,6 +343,7 @@ async def evaluate_discovery_run(db: AsyncSession, discovery_run_id: uuid.UUID, 
             match_counts[m["rule_id"]] = match_counts.get(m["rule_id"], 0) + 1
         _record_items(db, erun.id, r, plan, disp, reason, rule_by_id)
 
+    counts["simulated"] = await _record_scan_simulation(db, run, results, rules, mode)
     erun.counts = counts
     erun.status = "partial" if (counts["blocked_license"] or counts["blocked_cap"] or counts["errors"]) \
         else "completed"
@@ -396,6 +398,47 @@ def _record_items(db, run_id, r: DiscoveryResultV2, plan: dict, disp: str, reaso
         db.add(_item(run_id, r, rule_id=uuid.UUID(s["rule_id"]), rule_name=s["rule_name"],
                      rule_revision=rev(s["rule_id"]), action_key=s["key"], after=s["value"],
                      outcome="shadowed", detail=f"Set by higher-priority rule {s['winner_rule_name']}"))
+
+
+async def _record_scan_simulation(db: AsyncSession, run: DiscoveryRun, results: list, active: list[dict],
+                                  import_mode: str | None) -> int:
+    """Rules in Simulating mode: what they would decide for each scan result,
+    recorded as ``simulated`` items of a run in mode ``simulate``. Nothing on
+    the result or in inventory changes."""
+    simulating = await load_rules(db, modes=("simulate",))
+    if not simulating or not results:
+        return 0
+    sim_ids = {r["id"] for r in simulating}
+    srun = DiscoveryEngineRun(trigger="discovery", mode="simulate", discovery_run_id=run.id, status="completed",
+                              rules_revision=engine.rules_revision(active + simulating))
+    db.add(srun)
+    await db.flush()
+    n = 0
+    for r in results:
+        plan = engine.evaluate(facts_from_result(r), active + simulating, trigger="discovery")
+        entries = [(k, e) for k, e in plan["settings"].items() if e["rule_id"] in sim_ids]
+        for key, e in entries:
+            after = e["value"]
+            if key == "decision":
+                disp, reason = engine.disposition(plan, import_mode=import_mode, result_status=r.status,
+                                                  import_ready=bool(r.import_ready))
+                after = {"decision": e["value"], "import_as": e.get("import_as"), "result": disp}
+            db.add(_item(srun.id, r, rule_id=uuid.UUID(e["rule_id"]), rule_name=e["rule_name"], action_key=key,
+                         after=after, outcome="simulated"))
+            n += 1
+        tags: dict[str, list] = {}
+        for t in plan["tags"]:
+            if t["rule_id"] in sim_ids:
+                tags.setdefault(t["rule_id"], []).append(t)
+        for rid, ts in tags.items():
+            db.add(_item(srun.id, r, rule_id=uuid.UUID(rid), rule_name=ts[0]["rule_name"], action_key="tags",
+                         after=[t["value"] for t in ts], outcome="simulated"))
+            n += 1
+    srun.counts = {"simulated": n, "evaluated": len(results)}
+    srun.finished_at = datetime.now(timezone.utc)
+    if not n:
+        await db.delete(srun)
+    return n
 
 
 async def _prune(db: AsyncSession, days: int) -> None:
