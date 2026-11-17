@@ -312,6 +312,9 @@ class ProfileResponse(BaseModel):
     pilot_started_at: Optional[datetime] = None
     suggestion_count: int = 0
     customized_count: int = 0
+    # Interface roles and recommended rules (migrate-193); NULL on a customised template = the parent's.
+    interface_roles: Optional[list] = None
+    rule_pack: Optional[list] = None
 
     model_config = {"from_attributes": True}
 
@@ -328,6 +331,10 @@ class TemplateContent(BaseModel):
     match_priority: int = Field(default=100, ge=0, le=1000)
     match_rules: MatchRules = Field(default_factory=MatchRules)
     oid_groups: list[OidGroup] = Field(default_factory=list, max_length=200)
+    # Ordered interface role rules and recommended alert rules (migrate-193); validated by
+    # app.services.interface_roles / rule_packs. None = none (customised: the parent's).
+    interface_roles: Optional[list[dict]] = Field(default=None, max_length=50)
+    rule_pack: Optional[list[dict]] = Field(default=None, max_length=100)
 
 
 class TemplatePublishRequest(BaseModel):

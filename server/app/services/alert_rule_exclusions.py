@@ -149,8 +149,20 @@ def device_rule_covers(rule, device: dict) -> bool:
     (the matching the evaluators apply)."""
     if _get(rule, "device_id") and str(_get(rule, "device_id")) != str(device["id"]):
         return False
-    if _get(rule, "group_id") and str(_get(rule, "group_id")) != str(device.get("group_id") or ""):
-        return False
+    if _get(rule, "group_id"):
+        # Group membership with subgroups (migrate-192) when the caller loaded it
+        # ("_groups"); the primary group otherwise.
+        from app.services.device_groups.membership import in_group
+        if not in_group(_get(rule, "group_id"), device.get("_groups"), device.get("group_id")):
+            return False
+    if _get(rule, "profile_id"):
+        # Template scope (migrate-193): the template or one customised from it.
+        fam = device.get("_family")
+        if fam is not None:
+            if not fam.covers(_get(rule, "profile_id"), device.get("profile_id")):
+                return False
+        elif str(_get(rule, "profile_id")) != str(device.get("profile_id") or ""):
+            return False
     if _get(rule, "device_type") and _get(rule, "device_type") != device.get("device_type"):
         return False
     loc = (_get(rule, "location") or "").strip().lower()
@@ -190,7 +202,14 @@ async def asset_row(db: AsyncSession, kind: str, asset_id) -> Optional[dict]:
     if kind == "device":
         row = (await db.execute(text(
             "SELECT id, hostname AS name, host(ip_address) AS ip, group_id, device_type, location, tags,"
-            " managed_by_device_id FROM devices WHERE id = CAST(:id AS uuid)"), {"id": str(asset_id)})).mappings().first()
+            " managed_by_device_id, profile_id FROM devices WHERE id = CAST(:id AS uuid)"), {"id": str(asset_id)})).mappings().first()
+        if row:
+            from app.services.device_groups import membership
+            from app.services.device_templates import family
+            out = dict(row)
+            out["_groups"] = await membership.groups_of(db, "device", out["id"])
+            out["_family"] = await family.load(db)
+            return out
     elif kind == "server":
         row = (await db.execute(text(
             "SELECT id, COALESCE(display_name, hostname) AS name, host(primary_ip) AS ip, tags,"
@@ -274,7 +293,8 @@ async def counts(db: AsyncSession) -> dict[str, int]:
 _RULE_FIELDS = (
     "id, name, description, enabled, metric, operator, threshold, severity, trigger_on, "
     "device_id, group_id, device_type, location, scope_tag, server_id, target, trap_oid, "
-    "service_check_id, service_check_group_id, conditions, priority"
+    "service_check_id, service_check_group_id, conditions, priority, profile_id, if_role, "
+    "min_duration, clear_duration"
 )
 
 

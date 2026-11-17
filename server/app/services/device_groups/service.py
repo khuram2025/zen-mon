@@ -117,6 +117,10 @@ async def used_by(db: AsyncSession, gid: str) -> dict:
         "discovery_rules": await rows("""SELECT id::text, name FROM discovery_engine_rules
                                          WHERE actions::text LIKE '%' || :g || '%' ORDER BY name"""),
         "subgroups": await rows("SELECT id::text, name FROM device_groups WHERE parent_id = CAST(:g AS uuid) ORDER BY name"),
+        # Rule overrides for the group's members (migrate-193).
+        "alert_overrides": await rows("""SELECT o.id::text, r.id::text AS rule_id, r.name FROM alert_rule_overrides o
+                                         JOIN alert_rules r ON r.id = o.rule_id
+                                         WHERE o.group_id = CAST(:g AS uuid) ORDER BY r.name"""),
         "primary_devices": (await db.execute(text("SELECT count(*) FROM devices WHERE group_id = CAST(:g AS uuid)"), p)).scalar() or 0,
     }
 
@@ -125,7 +129,8 @@ def in_use(u: dict) -> list[str]:
     reasons = []
     for key, label in (("alert_rules", "alert rule"), ("maintenance", "maintenance window"),
                        ("sensor_assignments", "sensor assignment"), ("discovery_profiles", "discovery profile"),
-                       ("discovery_rules", "discovery rule"), ("subgroups", "subgroup")):
+                       ("discovery_rules", "discovery rule"), ("subgroups", "subgroup"),
+                       ("alert_overrides", "alert rule override")):
         if u.get(key):
             reasons.append(f"{len(u[key])} {label}(s)")
     if u.get("primary_devices"):

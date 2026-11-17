@@ -44,6 +44,7 @@ import ssl
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1181,6 +1182,13 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
     counts = {"raised": 0, "resolved": 0}
     from app.services import alert_rule_exclusions
     excluded = await alert_rule_exclusions.load(db)
+    # Per-server overrides (migrate-193), once per pass, with server group membership.
+    from app.services import alert_rule_overrides as ovr
+    overrides = await ovr.load(db)
+    server_groups: dict = {}
+    if overrides:
+        from app.services.device_groups import membership
+        server_groups = await membership.load(db, "server") or {}
     for rule in rules:
         allowed = notifications_allowed(
             getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
@@ -1250,8 +1258,10 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
         # filesystem readings are judged per sample with min_duration as hold.
         hold = 0 if averaged else int(rule.min_duration or 0)
         clear_hold = clear_hold_seconds(getattr(rule, "clear_duration", None))
-        lookback = max(window + max(hold, clear_hold) + 2 * min(max_budget, MAX_LOOKBACK_BUDGET_S),
-                       MIN_LOOKBACK_S)
+        o_hold, o_clear = overrides.longest_holds(rule.id)
+        lookback = max(max(window, o_hold if averaged else 0)
+                       + max(hold, clear_hold, 0 if averaged else o_hold, o_clear)
+                       + 2 * min(max_budget, MAX_LOOKBACK_BUDGET_S), MIN_LOOKBACK_S)
         cache_key = (rule.metric, lookback)
         if cache_key not in history_cache:
             try:
@@ -1282,13 +1292,27 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
             else:
                 dims = [None]
             for dim in dims:
+                # The first matching override for this server (and mount); none = the rule.
+                override = overrides.find(rule.id, server_id=sid, groups=server_groups.get(sid),
+                                          instance=dim) if overrides else None
+                e_rule, e_conditions, e_hold, e_clear, e_window = rule, conditions, hold, clear_hold, window
+                if override is not None:
+                    e_rule = ovr.apply(rule, override)
+                    e_conditions = ovr.effective_conditions(SimpleNamespace(
+                        conditions=conditions, metric=rule.metric, operator=rule.operator,
+                        threshold=rule.threshold), override)
+                    if averaged:
+                        e_window = max(int(e_rule.min_duration or 0), AVERAGE_WINDOW_S)
+                    else:
+                        e_hold = int(e_rule.min_duration or 0)
+                    e_clear = clear_hold_seconds(getattr(e_rule, "clear_duration", None))
                 series = series_by_dim.get(dim or "", [])
                 if averaged:
-                    series = rolling_mean(series, window)
+                    series = rolling_mean(series, e_window)
                 current = opened.get((sid, _dedupe(rule, dim)))
-                result = evaluate(conditions, "AND", {rule.metric: series}, now=now, hold=hold,
+                result = evaluate(e_conditions, "AND", {rule.metric: series}, now=now, hold=e_hold,
                                   max_gap=fresh, active=current is not None,
-                                  clear_hold=clear_hold)
+                                  clear_hold=e_clear)
                 value = result.values.get(rule.metric)
                 if result.breach is None:
                     # Unknown, a breach still inside its hold, or a clear
@@ -1300,10 +1324,11 @@ async def evaluate_host_rules(db: AsyncSession, *, now: float | None = None) -> 
                             **({"value": round(value, 2)} if value is not None else {}),
                             "cleared_seconds": round(result.cleared_seconds)})
                     continue
-                await _apply_state(db, rule, sid, hostname, dim, result.breach, value,
-                                   _detail(rule, value, dim), allowed=allowed, counts=counts,
+                await _apply_state(db, e_rule, sid, hostname, dim, result.breach, value,
+                                   _detail(e_rule, value, dim), allowed=allowed, counts=counts,
                                    opened=current,
-                                   extra={"held_seconds": round(result.held_seconds)},
+                                   extra={"held_seconds": round(result.held_seconds),
+                                          **({"override": override.summary()} if override else {})},
                                    ip_address=ips.get(sid, ""), branding=branding)
         await db.commit()
 
