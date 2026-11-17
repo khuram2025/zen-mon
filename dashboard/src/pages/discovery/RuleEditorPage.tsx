@@ -32,6 +32,7 @@ import { discoveryApi, ruleBody, rulesApi } from './api'
 import type {
   AssetKind,
   CatalogAction,
+  Enforcement,
   CatalogField,
   ConditionGroup,
   ConditionLeaf,
@@ -44,11 +45,20 @@ import type {
   RuleCatalog,
   RuleDraft,
   RuleMode,
+  RuleTrigger,
   RuleVersion,
 } from './types'
 import {
   DEFAULT_LIMITS,
   DECISION_LABEL,
+  ENFORCEMENT_HELP,
+  ENFORCEMENT_LABEL,
+  MODE_HELP,
+  MODE_LABEL,
+  MODE_ORDER,
+  TRIGGER_LABEL,
+  activationPermissions,
+  fieldSourceHint,
   IMPORT_AS_LABEL,
   IMPORT_MODE_TEXT,
   Lookups,
@@ -93,6 +103,8 @@ function draftOf(rule: DiscoveryRule): RuleDraft {
     condition: isGroup(rule.condition) ? rule.condition : { op: 'all', conditions: [] },
     actions: rule.actions || [],
     stop_processing: !!rule.stop_processing,
+    triggers: rule.triggers?.length ? rule.triggers.filter((t): t is RuleTrigger => t === 'discovery' || t === 'created') : ['discovery'],
+    enforcement: rule.enforcement === 'enforce' ? 'enforce' : 'set_once',
   }
 }
 
@@ -256,7 +268,7 @@ export function RuleEditorPage() {
         </Card>
 
         {/* When */}
-        <Section title="When" hint="Which scan results this rule looks at.">
+        <Section title="When" hint="Which scan results, devices and servers this rule looks at.">
           <div className="space-y-3">
             <div className="flex flex-wrap gap-4">
               {(['device', 'server'] as AssetKind[]).map((k) => (
@@ -281,6 +293,40 @@ export function RuleEditorPage() {
               options={options.discovery_profiles}
               onChange={(profile_ids) => update({ profile_ids })}
             />
+          </div>
+        </Section>
+
+        {/* Runs automatically on */}
+        <Section
+          title="Runs automatically on"
+          hint="Rules → Run on inventory can also run any active rule on the devices and servers you choose."
+        >
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-4">
+              {((catalog?.triggers?.map((t) => t.key) ?? ['discovery', 'created']) as RuleTrigger[]).map((t) => (
+                <label key={t} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={draft.triggers.includes(t)}
+                    onChange={(e) =>
+                      update({
+                        triggers: e.target.checked
+                          ? Array.from(new Set([...draft.triggers, t]))
+                          : draft.triggers.filter((x) => x !== t),
+                      })
+                    }
+                  />
+                  {catalog?.triggers?.find((x) => x.key === t)?.label ?? TRIGGER_LABEL[t] ?? t}
+                </label>
+              ))}
+            </div>
+            {draft.triggers.length === 0 && <div className="text-xs text-warning-fg">Choose at least one.</div>}
+            {draft.triggers.includes('created') && (
+              <div className="text-xs text-muted">
+                New devices and servers are checked shortly after they are added (Add Device, CSV import, agent
+                enrolment); the rule sets values and adds tags, it never removes anything or turns monitoring off.
+              </div>
+            )}
           </div>
         </Section>
 
@@ -331,15 +377,17 @@ export function RuleEditorPage() {
                 <span className="block text-xs text-muted">Rules below it are not evaluated for that result.</span>
               </span>
             </label>
-            <FormField label="Mode" hint="Draft and disabled rules never run on scans; preview works in every mode.">
+            <FormField label="Mode" hint={MODE_HELP[draft.mode] ?? 'Preview works in every mode.'}>
               <Select value={draft.mode} onValueChange={(v) => update({ mode: v as RuleMode })}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="draft">Draft</SelectItem>
-                  <SelectItem value="active">Active — runs on every scan</SelectItem>
-                  <SelectItem value="disabled">Disabled</SelectItem>
+                  {(catalog?.modes?.map((m) => m.key) ?? MODE_ORDER).map((m) => (
+                    <SelectItem key={m} value={m}>
+                      {catalog?.modes?.find((x) => x.key === m)?.label ?? MODE_LABEL[m] ?? m}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </FormField>
@@ -357,8 +405,23 @@ export function RuleEditorPage() {
               </FormField>
             )}
             {draft.mode === 'active' && catalog && (
-              <ActivationNote actions={draft.actions} catalog={catalog} can={can} />
+              <ActivationNote actions={draft.actions} assetKinds={draft.asset_kinds} catalog={catalog} can={can} />
             )}
+            <div className="space-y-1.5 md:col-span-3">
+              <div className="text-sm font-medium">When a value was changed by hand</div>
+              <div className="flex flex-wrap gap-4 text-sm">
+                {(['set_once', 'enforce'] as Enforcement[]).map((k) => (
+                  <label key={k} className="flex items-center gap-2">
+                    <input type="radio" name="enforcement" checked={draft.enforcement === k} onChange={() => update({ enforcement: k })} />
+                    {ENFORCEMENT_LABEL[k]}
+                  </label>
+                ))}
+              </div>
+              <div className="text-xs text-muted">
+                {ENFORCEMENT_HELP[draft.enforcement]} Tags are only ever added; a rule never deletes anything or turns
+                monitoring off.
+              </div>
+            </div>
           </div>
         </Section>
       </fieldset>
@@ -597,11 +660,15 @@ function LeafEditor({
             <SelectValue placeholder={leaf.field || 'Field'} />
           </SelectTrigger>
           <SelectContent>
-            {catalog.fields.map((f) => (
-              <SelectItem key={f.key} value={f.key}>
-                {f.label}
-              </SelectItem>
-            ))}
+            {catalog.fields.map((f) => {
+              const hint = fieldSourceHint(f)
+              return (
+                <SelectItem key={f.key} value={f.key}>
+                  {f.label}
+                  {hint && <span className="ml-1.5 text-2xs text-muted">· {hint}</span>}
+                </SelectItem>
+              )
+            })}
           </SelectContent>
         </Select>
         {field?.help && <div className="mt-0.5 px-1 text-2xs text-muted">{field.help}</div>}
@@ -958,6 +1025,13 @@ function ActionValue({
           onChange={(e) => onChange({ ...action, value: e.target.value === '' ? '' : Math.trunc(Number(e.target.value)) })}
         />
       )
+    case 'on':
+      return (
+        <div className="flex items-center gap-2">
+          <Badge variant="success">On</Badge>
+          <span className="text-xs text-muted">Turns it on where it is off; never turns it off.</span>
+        </div>
+      )
     case 'tags':
       return (
         <ListInput
@@ -988,8 +1062,18 @@ function ActionValue({
   }
 }
 
-function ActivationNote({ actions, catalog, can }: { actions: RuleAction[]; catalog: RuleCatalog; can: (p: string) => boolean }) {
-  const needed = Array.from(new Set(actions.flatMap((a) => catalog.actions.find((s) => s.key === a.key)?.permission || [])))
+function ActivationNote({
+  actions,
+  assetKinds,
+  catalog,
+  can,
+}: {
+  actions: RuleAction[]
+  assetKinds: AssetKind[]
+  catalog: RuleCatalog
+  can: (p: string) => boolean
+}) {
+  const needed = activationPermissions(actions, assetKinds, catalog)
   const missing = needed.filter((p) => !can(p))
   if (!needed.length) return null
   return (

@@ -232,8 +232,14 @@ export interface ImportResponse {
 
 // ── Discovery rules (/discovery-v2/rules) ─────────────────────────────────────
 
-export type RuleMode = 'draft' | 'active' | 'disabled'
+export type RuleMode = 'draft' | 'simulate' | 'active' | 'disabled'
 export type AssetKind = 'device' | 'server'
+/** When a rule runs by itself: on discovery scan results and/or on devices and servers as they are added. */
+export type RuleTrigger = 'discovery' | 'created'
+/** set_once: a value edited by hand after the rule set it is kept; enforce: the rule puts its value back. */
+export type Enforcement = 'set_once' | 'enforce'
+/** Where a condition field is known: scan results, devices, servers. */
+export type FieldSource = 'scan' | 'device' | 'server'
 export type GroupOp = 'all' | 'any' | 'none'
 export type Decision = 'auto_import' | 'review' | 'ignore'
 export type OperatorValueKind =
@@ -272,13 +278,16 @@ export interface CatalogField {
   operators: CatalogOperator[]
   values: string[] | null
   source: string | null
+  /** Where the field has a value (phase 2); missing on an older API = scan results only. */
+  applies_to?: FieldSource[]
 }
 
 export interface CatalogAction {
   key: string
   label: string
   kind: 'single' | 'additive'
-  value: 'decision' | 'ref' | 'text' | 'int' | 'tags'
+  /** `on`: the only value is true ("Turn ping monitoring on"); a rule never turns monitoring off. */
+  value: 'decision' | 'ref' | 'text' | 'int' | 'tags' | 'on'
   permission: string[]
   asset_kinds: AssetKind[]
   source: string | null
@@ -295,6 +304,9 @@ export interface RuleCatalog {
   import_as: ImportTarget[]
   device_types: string[]
   limits: { max_depth: number; max_leaves: number; max_regex: number }
+  modes?: { key: RuleMode; label: string }[]
+  triggers?: { key: RuleTrigger; label: string }[]
+  enforcement?: { key: Enforcement; label: string }[]
 }
 
 export interface ConditionLeaf {
@@ -333,12 +345,13 @@ export interface RuleDraft {
   condition: ConditionGroup
   actions: RuleAction[]
   stop_processing: boolean
+  triggers: RuleTrigger[]
+  enforcement: Enforcement
 }
 
 export interface DiscoveryRule extends RuleDraft {
   id: string
   priority: number
-  triggers: string[]
   revision: number
   created_by: string | null
   updated_by: string | null
@@ -475,6 +488,11 @@ export interface EvaluateScanCounts {
 
 export type EngineRunOutcome =
   | 'applied'
+  | 'kept_manual_edit'
+  | 'not_reversible'
+  | 'skipped_changed'
+  | 'reverted'
+  | 'unchanged'
   | 'simulated'
   | 'shadowed'
   | 'blocked_license'
@@ -482,10 +500,14 @@ export type EngineRunOutcome =
   | 'not_ready'
   | 'error'
 
+export type EngineRunTrigger = 'discovery' | 'manual' | 'created' | 'undo'
+export type EngineRunMode = 'apply' | 'annotate' | 'simulate'
+
 export interface EngineRun {
   id: string
-  trigger: 'discovery' | 'manual'
-  mode: 'apply' | 'annotate'
+  trigger: EngineRunTrigger
+  mode: EngineRunMode
+  /** completed | partial | failed | running | undone */
   status: string
   discovery_run_id: string | null
   profile_name: string | null
@@ -499,13 +521,163 @@ export interface EngineRunItem {
   ip_address: string | null
   discovery_result_id: number | null
   asset_id: string | null
+  /** device | server | discovery_result */
   asset_kind?: string
   rule_id: string | null
   rule_name: string | null
+  rule_revision?: number | null
   action_key: string | null
+  item_key?: string | null
   before?: any
   after: any
   outcome: EngineRunOutcome | string
   detail: string | null
   created_at: string
+}
+
+// ── Phase 2: rules on inventory, undo, explain, conflicts ────────────────────
+
+export interface InventoryTargets {
+  kinds: AssetKind[]
+  device_ids?: string[]
+  server_ids?: string[]
+  group_ids?: string[]
+  tags?: string[]
+  /** "10.0.0.0/16" */
+  subnet?: string
+  query?: string
+}
+
+export interface InventoryRunRequest {
+  /** Omitted: every active rule, in order. Otherwise only these active rules. */
+  rule_ids?: string[]
+  targets: InventoryTargets
+}
+
+export type ChangeOutcome = 'apply' | 'kept_manual_edit' | 'not_reversible'
+
+/** One value a rule would set on one device or server. */
+export interface InventoryChange {
+  asset_kind: AssetKind
+  asset_id: string
+  asset_name: string | null
+  ip_address: string | null
+  action_key: string
+  /** "" for a single value, the lower-cased tag for a tag */
+  item_key: string
+  before: any
+  after: any
+  rule_id: string
+  rule_name: string | null
+  rule_revision: number | null
+  outcome: ChangeOutcome
+  detail: string | null
+}
+
+export interface InventorySummary {
+  assets: number
+  matched: number
+  changes: number
+  kept_manual_edit: number
+  not_reversible: number
+  assets_changed: number
+  by_action: Record<string, number>
+}
+
+export interface InventoryPreview {
+  changes: InventoryChange[]
+  summary: InventorySummary
+  digest: string
+  truncated: boolean
+}
+
+export interface InventoryApplyResult extends Partial<InventorySummary> {
+  engine_run_id: string
+  status: string
+  applied: number
+  kept_manual_edit: number
+  not_reversible: number
+  skipped_changed: number
+}
+
+/** 409 detail of /inventory/apply when the inventory or the rules changed since the preview. */
+export interface PreviewStaleDetail {
+  code: 'preview_stale'
+  message: string
+  summary: InventorySummary
+  digest: string
+}
+
+export interface UndoResult {
+  engine_run_id: string
+  undo_of: string
+  status: string
+  reverted: number
+  skipped_changed: number
+  not_reversible: number
+  /** Devices a scan imported: listed for a deliberate delete, never deleted by undo. */
+  imported_devices: { device_id: string; ip_address: string | null; hostname: string | null }[]
+}
+
+export interface AssetRuleSetting {
+  action_key: string
+  item_key: string | null
+  /** what the rule set */
+  value: any
+  /** what the asset has now */
+  current: any
+  previous: any
+  /** rule: still the rule's value; manual_edit: changed by hand since */
+  state: 'rule' | 'manual_edit'
+  rule_id: string | null
+  rule_name: string | null
+  run_id: string | null
+  applied_at: string | null
+}
+
+export interface AssetAutomation {
+  asset_kind: AssetKind
+  asset_id: string
+  name: string | null
+  engine_enabled: boolean
+  settings: AssetRuleSetting[]
+  matching_rules: { rule_id: string; rule_name: string | null; priority: number }[]
+  pending: InventoryChange[]
+  history: {
+    run_id: string
+    rule_name: string | null
+    action_key: string | null
+    item_key: string | null
+    before: any
+    after: any
+    outcome: string
+    detail: string | null
+    created_at: string
+    trigger: EngineRunTrigger
+  }[]
+}
+
+export interface ConflictRuleStat {
+  rule_id: string
+  rule_name: string
+  priority: number
+  matches: number
+  wins: number
+  shadowed: number
+}
+
+export interface ConflictReport {
+  assets: number
+  truncated: boolean
+  rules: ConflictRuleStat[]
+  overridden: {
+    rule_id: string
+    rule_name: string | null
+    winner_rule_id: string
+    winner_rule_name: string | null
+    action_key: string
+    assets: number
+  }[]
+  never_match: ConflictRuleStat[]
+  never_win: ConflictRuleStat[]
 }

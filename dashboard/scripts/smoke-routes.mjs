@@ -90,6 +90,7 @@ const requiredRoutes = [
   '/discovery',
   '/discovery/rules',
   '/discovery/rules/new',
+  '/discovery/rules/run',
   '/discovery/rules/:id',
   '/mibs',
   '/alerts',

@@ -1,4 +1,4 @@
-// Discovery rules (phase 1, migrate-188): the pure model behind the rule builder, the rule list and the scan-result
+// Discovery rules (phase 1, migrate-188; phase 2 on inventory, migrate-191): the pure model behind the rule builder, the rule list and the scan-result
 // Rule / Decision columns (src/pages/discovery/ruleModel.ts). Pins the tree edits and their depth / leaf limits, the
 // one-sentence condition and action summaries, the disposition wording, the preview summary and the reorder helper,
 // and that the pages, routes, tab and sidebar entry are wired.
@@ -279,6 +279,168 @@ assert.match(rulesPage, /can\('discovery\.manage_rules'\)/, 'the rule list is re
 assert.match(read('src/pages/discovery/RuleEditorPage.tsx'), /expected_revision|update\(id!, draft, revision\)/, 'edits send the loaded revision')
 assert.match(read('src/pages/discovery/api.ts'), /expected_revision: expectedRevision/)
 for (const file of ['ruleModel.ts', 'ruleUi.tsx', 'RulesPage.tsx', 'RuleEditorPage.tsx']) {
+  assert(!/text-\[\d+px\]/.test(read(`src/pages/discovery/${file}`)), `${file} uses the rem type scale, never pixel font sizes`)
+}
+
+// ── phase 2: modes, triggers, enforcement, field sources, new actions ───────
+assert.deepEqual(d.triggers, ['discovery'], 'a new rule runs on scan results')
+assert.equal(d.enforcement, 'set_once', 'a new rule keeps later hand edits')
+assert.equal(M.MODE_LABEL.simulate, 'Simulating')
+assert.equal(M.MODE_TONE.simulate, 'info')
+assert.deepEqual(M.MODE_ORDER, ['draft', 'simulate', 'active', 'disabled'])
+for (const m of M.MODE_ORDER) assert(M.MODE_HELP[m], `mode ${m} has a one-line explanation`)
+assert.match(M.MODE_HELP.simulate, /changes nothing/)
+assert.deepEqual(M.ruleProblems({ ...M.defaultRule(), name: 'x', triggers: [] }, catalog),
+  ['Choose when the rule runs: on scan results, on new devices and servers, or both'])
+assert.equal(M.ruleRunsText({ triggers: ['discovery'], enforcement: 'set_once' }), 'runs on scans · set once')
+assert.equal(M.ruleRunsText({ triggers: ['discovery', 'created'], enforcement: 'enforce' }), 'runs on scans and new devices and servers · enforced')
+assert.equal(M.ruleRunsText({}), 'runs on scans · set once', 'a phase 1 rule runs on scans, set once')
+assert.equal(M.TRIGGER_LABEL.created, 'Devices and servers when they are added')
+assert(M.ENFORCEMENT_HELP.set_once && M.ENFORCEMENT_HELP.enforce)
+
+assert.equal(M.fieldSourceHint({ applies_to: ['scan'] }), 'scan only')
+assert.equal(M.fieldSourceHint({ applies_to: ['server'] }), 'servers only')
+assert.equal(M.fieldSourceHint({ applies_to: ['device', 'server'] }), 'devices and servers')
+assert.equal(M.fieldSourceHint({ applies_to: ['scan', 'device', 'server'] }), '', 'a field known everywhere needs no hint')
+assert.equal(M.fieldSourceHint({}), 'scan only', 'a phase 1 catalog (no applies_to) means scan results only')
+
+const catalog2 = {
+  ...catalog,
+  actions: [
+    ...catalog.actions,
+    { key: 'owner', label: 'Owner', kind: 'single', value: 'text', permission: ['devices.manage'], asset_kinds: ['device', 'server'], source: null, help: '', min: null, max: null },
+    { key: 'environment', label: 'Server environment', kind: 'single', value: 'text', permission: ['servers.manage'], asset_kinds: ['server'], source: null, help: '', min: null, max: null },
+    { key: 'ping_enabled', label: 'Turn ping monitoring on', kind: 'single', value: 'on', permission: ['devices.manage'], asset_kinds: ['device'], source: null, help: '', min: null, max: null },
+  ],
+}
+assert.deepEqual(M.defaultActionValue({ key: 'ping_enabled', value: 'on' }), { key: 'ping_enabled', value: true }, 'the only value of an "on" action is true')
+assert.deepEqual(M.actionProblems({ actions: [{ key: 'ping_enabled', value: false }], asset_kinds: ['device'] }, catalog2),
+  ['Turn ping monitoring on: a rule can only turn it on'])
+assert.deepEqual(M.actionProblems({ actions: [{ key: 'ping_enabled', value: true }], asset_kinds: ['device'] }, catalog2), [])
+assert.deepEqual(M.actionProblems({ actions: [{ key: 'environment', value: 'prod' }], asset_kinds: ['device'] }, catalog2),
+  ['Server environment applies to servers only'])
+assert.equal(M.summarizeAction({ key: 'ping_enabled', value: true }), 'Turn ping on')
+assert.equal(M.summarizeAction({ key: 'owner', value: 'NOC' }), 'Owner: NOC')
+assert.equal(M.summarizeAction({ key: 'environment', value: 'production' }), 'Environment: production')
+
+// Activation permissions mirror actions.permissions_needed on the server.
+assert.deepEqual(M.activationPermissions([{ key: 'tags', value: ['a'] }], ['device'], catalog2), ['devices.manage'])
+assert.deepEqual(M.activationPermissions([{ key: 'tags', value: ['a'] }], ['server'], catalog2), ['servers.manage'],
+  'tags on servers need servers.manage, not devices.manage')
+assert.deepEqual(M.activationPermissions([{ key: 'owner', value: 'x' }], ['device', 'server'], catalog2), ['devices.manage', 'servers.manage'])
+assert.deepEqual(M.activationPermissions([{ key: 'group', value: 'g' }], ['server'], catalog2), [], 'a device-only action on a server-only rule needs nothing')
+assert.deepEqual(M.activationPermissions([{ key: 'decision', value: 'auto_import', import_as: 'auto' }], ['device'], catalog2),
+  ['discovery.run', 'servers.manage'])
+assert.deepEqual(M.activationPermissions([{ key: 'decision', value: 'review' }], ['device'], catalog2), ['discovery.run'])
+
+// ── phase 2: run on inventory ────────────────────────────────────────────────
+for (const k of ['applied', 'kept_manual_edit', 'not_reversible', 'skipped_changed', 'reverted', 'unchanged', 'simulated']) {
+  assert(M.OUTCOME_LABEL[k] && M.OUTCOME_TONE[k], `history outcome ${k} has a label and a tone`)
+}
+for (const k of ['apply', 'kept_manual_edit', 'not_reversible']) {
+  assert(M.CHANGE_OUTCOME_LABEL[k] && M.CHANGE_OUTCOME_TONE[k], `change outcome ${k} has a label and a tone`)
+}
+assert.equal(
+  M.summarizeInventoryPreview({ assets: 120, matched: 42, changes: 17, assets_changed: 9, kept_manual_edit: 3, not_reversible: 0 }),
+  '42 devices and servers match; 17 values would change on 9 assets; 3 hand edits kept',
+)
+assert.equal(M.summarizeInventoryPreview({ matched: 1, changes: 1, assets_changed: 1 }, ['device']), '1 device matches; 1 value would change on 1 asset')
+assert.equal(M.summarizeInventoryPreview({ matched: 0, changes: 0 }, ['server']), '0 servers match; nothing would change')
+assert.equal(M.summarizeInventoryPreview({ matched: 5, changes: 0, kept_manual_edit: 1, not_reversible: 2 }, ['device', 'server']),
+  '5 devices and servers match; nothing would change; 1 hand edit kept; 2 left alone (not reversible)')
+assert.equal(M.summarizeApplyResult({ applied: 17, kept_manual_edit: 3, not_reversible: 0, skipped_changed: 1 }),
+  'Changed 17 values · 3 hand edits kept · 1 skipped (changed since the preview)')
+assert.equal(M.summarizeApplyResult({ applied: 1 }), 'Changed 1 value')
+assert.equal(M.summarizeUndoResult({ reverted: 4, skipped_changed: 1, not_reversible: 0, imported_devices: [] }),
+  'Reverted 4 values · 1 left as they are (changed since)')
+assert.equal(M.summarizeUndoResult({ reverted: 0, imported_devices: [{ device_id: 'x' }, { device_id: 'y' }] }),
+  'Reverted 0 values · 2 devices imported by the scan')
+
+assert(M.canUndoRun({ mode: 'apply', status: 'completed', trigger: 'manual' }))
+assert(M.canUndoRun({ mode: 'apply', status: 'partial', trigger: 'discovery' }))
+assert(M.canUndoRun({ mode: 'apply', status: 'completed', trigger: 'created' }))
+assert(!M.canUndoRun({ mode: 'apply', status: 'undone', trigger: 'manual' }), 'a run is undone once')
+assert(!M.canUndoRun({ mode: 'apply', status: 'completed', trigger: 'undo' }), 'an undo cannot be undone')
+assert(!M.canUndoRun({ mode: 'simulate', status: 'completed', trigger: 'created' }), 'a simulation changed nothing')
+assert(!M.canUndoRun({ mode: 'annotate', status: 'completed', trigger: 'discovery' }), 'an annotation changed nothing')
+assert(!M.canUndoRun({ mode: 'apply', status: 'failed', trigger: 'manual' }))
+
+assert.equal(M.runTriggerText({ trigger: 'discovery', mode: 'apply', discovery_run_id: 'r' }), 'Scan · apply')
+assert.equal(M.runTriggerText({ trigger: 'manual', mode: 'annotate', discovery_run_id: 'r' }), 'Re-evaluated · annotate only')
+assert.equal(M.runTriggerText({ trigger: 'manual', mode: 'apply', discovery_run_id: null }), 'Run on inventory · apply')
+assert.equal(M.runTriggerText({ trigger: 'created', mode: 'simulate', discovery_run_id: null }), 'New device / server · simulate')
+assert.equal(M.runTriggerText({ trigger: 'undo', mode: 'apply', discovery_run_id: null }), 'Undo')
+assert.equal(M.runStatusTone('undone'), 'outline')
+
+assert.equal(M.assetPath('device', 'abc'), '/devices/abc')
+assert.equal(M.assetPath('server', 'abc'), '/servers/abc')
+assert.equal(M.assetPath('discovery_result', 'abc'), null, 'scan results have no asset page')
+assert.equal(M.assetPath('device', null), null)
+
+const D1 = 'aaaaaaaa-0000-0000-0000-000000000001'
+const D2 = 'AAAAAAAA-0000-0000-0000-000000000002'
+const S1 = 'cccccccc-0000-0000-0000-000000000003'
+assert.deepEqual(M.parseRunTargets(`?device=${D1}`), { device_ids: [D1], server_ids: [], kinds: ['device'] })
+assert.deepEqual(M.parseRunTargets(`?devices=${D1},${D2}, ${D1},not-an-id`),
+  { device_ids: [D1, D2.toLowerCase()], server_ids: [], kinds: ['device'] }, 'ids are de-duplicated, lower-cased and checked')
+assert.deepEqual(M.parseRunTargets(`?server=${S1}`), { device_ids: [], server_ids: [S1], kinds: ['server'] })
+assert.deepEqual(M.parseRunTargets(`?device=${D1}&server=${S1}`), { device_ids: [D1], server_ids: [S1], kinds: ['device', 'server'] })
+assert.deepEqual(M.parseRunTargets(''), { device_ids: [], server_ids: [], kinds: ['device', 'server'] }, 'nothing pre-selected: both kinds')
+assert.deepEqual(M.parseRunTargets(new URLSearchParams({ devices: 'x,y' })), { device_ids: [], server_ids: [], kinds: ['device', 'server'] })
+
+assert(M.isSubnet('10.0.0.0/16'))
+assert(M.isSubnet(' 192.168.1.0/24 '))
+assert(M.isSubnet('fd00::/8'))
+assert(!M.isSubnet('10.0.0.0'), 'a bare address is not a subnet')
+assert(!M.isSubnet('10.0.0.0/33'))
+assert(!M.isSubnet('300.0.0.0/8'))
+assert(!M.isSubnet('fw-01/8'))
+
+assert.deepEqual(M.buildTargets({ kinds: ['device', 'server'], tags: [], subnet: ' ', query: '' }), { kinds: ['device', 'server'] },
+  'empty filters are left out')
+assert.deepEqual(M.buildTargets({ kinds: ['server'], device_ids: [D1], server_ids: [S1], group_ids: ['g'], tags: ['dc'], subnet: '10.0.0.0/8 ', query: ' fw ' }),
+  { kinds: ['server'], server_ids: [S1], group_ids: ['g'], tags: ['dc'], subnet: '10.0.0.0/8', query: 'fw' },
+  'pre-selected ids follow the kinds that are ticked')
+
+assert.equal(M.settingLabel('group', catalog), 'Device group')
+assert.equal(M.settingLabel('tags', catalog), 'Tag')
+assert.equal(M.settingLabel('ping_enabled', catalog2), 'Ping monitoring')
+assert.equal(M.settingLabel('template', null), 'Monitoring template', 'labels without the catalog (devices.view only)')
+assert.equal(M.settingLabel('something_new', null), 'Something new')
+assert.equal(M.formatSettingValue('group', 'aaaaaaaa-0000-0000-0000-000000000001', lookups), 'Datacenter firewalls')
+assert.equal(M.formatSettingValue('group', null, lookups), 'not set')
+assert.equal(M.formatSettingValue('ping_enabled', true), 'On')
+assert.equal(M.formatSettingValue('ping_enabled', false), 'Off')
+assert.equal(M.formatSettingValue('ping_interval', 30), '30 s')
+assert.equal(M.formatSettingValue('owner', 'NOC'), 'NOC')
+assert.equal(M.changeText('group', null, 'aaaaaaaa-0000-0000-0000-000000000001', lookups), 'not set → Datacenter firewalls')
+assert.equal(M.changeText('ping_enabled', false, true), 'Off → On')
+assert.equal(M.changeText('tags', null, 'datacenter'), '+ datacenter', 'tags are only added')
+assert.equal(M.changeText('tags', 'datacenter', null), '− datacenter', 'an undo removes the tag a rule added')
+assert.equal(M.overriddenText({ rule_name: 'Branch', winner_rule_name: 'DC firewalls', action_key: 'group', assets: 12 }, catalog),
+  'Branch: device group is overridden by DC firewalls on 12 assets')
+assert.equal(M.plural(1, 'asset'), '1 asset')
+assert.equal(M.plural(2, 'asset'), '2 assets')
+
+// ── phase 2 wiring ───────────────────────────────────────────────────────────
+const appSrc = read('src/App.tsx')
+assert(appSrc.indexOf('<Route path="rules/run"') > 0, 'App.tsx declares /discovery/rules/run')
+assert(appSrc.indexOf('<Route path="rules/run"') < appSrc.indexOf('<Route path="rules/:id"'), 'rules/run is declared before rules/:id')
+const runSrc = read('src/pages/discovery/RuleRunPage.tsx')
+assert.match(runSrc, /can\('discovery\.manage_rules'\)/, 'the run page explains that managing rules is needed')
+assert.match(runSrc, /preview_stale/, 'a stale preview is refreshed')
+assert.match(runSrc, /digest: preview!\.digest/, 'apply sends the digest of the preview the user saw')
+assert.match(runSrc, /parseRunTargets\(params\)/, 'the run page takes ?device= / ?devices= / ?server=')
+assert.match(rulesPage, /\/discovery\/rules\/run/, 'the rule list links to Run on inventory')
+assert.match(rulesPage, /canUndoRun\(r\)/, 'undo is offered only where the model allows it')
+assert.match(rulesPage, /rulesApi\.conflicts/, 'the rule list has a Conflicts panel')
+assert.match(read('src/pages/device/ConfigurationTab.tsx'), /useAssetAutomation\('device', device\.id\)/, 'the device Configuration tab has the Automation card')
+assert.match(read('src/pages/servers/detail/tabs/AgentTab.tsx'), /useAssetAutomation\('server', server\.id\)/, 'the server settings have the Automation panel')
+assert.match(read('src/pages/DevicesPage.tsx'), /\/discovery\/rules\/run\?devices=/, 'the device list bulk bar runs rules on the selection')
+assert.match(read('src/pages/discovery/RuleEditorPage.tsx'), /Runs automatically on/)
+assert.match(read('src/pages/discovery/RuleEditorPage.tsx'), /When a value was changed by hand/)
+assert.match(read('src/pages/discovery/api.ts'), /triggers: draft\.triggers/, 'create / update send the triggers')
+for (const file of ['RuleRunPage.tsx', 'AssetAutomation.tsx']) {
   assert(!/text-\[\d+px\]/.test(read(`src/pages/discovery/${file}`)), `${file} uses the rem type scale, never pixel font sizes`)
 }
 

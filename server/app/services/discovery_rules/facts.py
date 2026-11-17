@@ -36,6 +36,35 @@ FIELDS: dict[str, tuple[str, str, str]] = {
     "result_status": ("enum", "Result status", "new, existing, changed, unknown"),
     "profile_id": ("reference", "Discovery profile", "Profile that ran the scan"),
     "is_server": ("boolean", "Server-class host", "Windows / Linux / ESXi host rather than network gear"),
+    # Facts of devices and servers already in inventory (phase 2).
+    "tags": ("set", "Tags", "Tags on the device or server"),
+    "group_id": ("reference", "Device group", "The device's group"),
+    "template_id": ("reference", "Monitoring template", "The device's monitoring template"),
+    "location": ("text", "Location", "The device's location"),
+    "owner": ("text", "Owner", "Owner of the device or server"),
+    "status": ("text", "Status", "Current status (up, down, degraded, healthy, ...)"),
+    "ping_enabled": ("boolean", "Ping monitoring on", "Ping monitoring is enabled"),
+    "snmp_enabled": ("boolean", "SNMP polling on", "SNMP polling is enabled"),
+    "environment": ("text", "Environment", "Server environment (production, staging, ...)"),
+    "os_type": ("text", "OS type", "Server OS type: windows, linux, macos, bsd, other, unknown"),
+    "collection_mode": ("text", "Collection mode", "How a server is monitored: agent, agentless_winrm, ssh, snmp, none"),
+}
+
+# Which facts each source provides; a fact a source lacks is missing (see
+# conditions: missing facts fail positive tests). "scan" = a discovery scan
+# result, "device"/"server" = an asset already in inventory.
+_SCAN = {"ip_address", "hostname", "fqdn", "sys_name", "sys_descr", "sys_location", "sys_object_id", "vendor",
+         "model", "device_type", "os", "os_version", "serial_number", "mac_address", "open_ports",
+         "protocols_detected", "credential_status", "snmp_credential_id", "confidence_score", "result_status",
+         "profile_id", "is_server"}
+_DEVICE = {"ip_address", "hostname", "sys_descr", "sys_object_id", "vendor", "model", "device_type", "os_version",
+           "serial_number", "snmp_credential_id", "is_server", "tags", "group_id", "template_id", "location",
+           "owner", "status", "ping_enabled", "snmp_enabled"}
+_SERVER = {"ip_address", "hostname", "fqdn", "os", "os_version", "device_type", "is_server", "tags", "owner",
+           "status", "environment", "os_type", "collection_mode"}
+FIELD_SOURCES: dict[str, list[str]] = {
+    k: [src for src, keys in (("scan", _SCAN), ("device", _DEVICE), ("server", _SERVER)) if k in keys]
+    for k in FIELDS
 }
 
 ENUM_VALUES: dict[str, list[str]] = {
@@ -47,6 +76,8 @@ ENUM_VALUES: dict[str, list[str]] = {
 REFERENCE_SOURCES: dict[str, str] = {
     "snmp_credential_id": "snmp_credentials",
     "profile_id": "discovery_profiles",
+    "group_id": "device_groups",
+    "template_id": "device_profiles",
 }
 
 _SERVER_OS_HINTS = ("windows", "linux", "ubuntu", "debian", "centos", "rhel",
@@ -136,3 +167,64 @@ def sample_facts(raw: dict[str, Any]) -> dict[str, Any]:
     for k in FIELDS:
         clean.setdefault(k, None)
     return clean
+
+
+def _tags(raw) -> list[str]:
+    if isinstance(raw, str):
+        import json
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = [raw]
+    return [str(t) for t in (raw or []) if t is not None and str(t).strip()]
+
+
+def facts_from_device(row: Any) -> dict[str, Any]:
+    """Facts of a device in inventory (a mapping from ``DEVICE_FACTS_SQL``)."""
+    ip = _get(row, "ip_address")
+    cred = _get(row, "snmp_credential_id")
+    out = {k: None for k in FIELDS}
+    out.update({
+        "ip_address": str(ip).split("/")[0] if ip else None,
+        "hostname": _get(row, "hostname"),
+        "sys_descr": _get(row, "sys_descr"),
+        "sys_object_id": normalize_oid(_get(row, "sys_object_id")) or None,
+        "vendor": _get(row, "vendor"),
+        "model": _get(row, "model"),
+        "device_type": _get(row, "device_type"),
+        "os_version": _get(row, "os_version"),
+        "serial_number": _get(row, "serial_number"),
+        "snmp_credential_id": str(cred) if cred else None,
+        "is_server": False,
+        "tags": _tags(_get(row, "tags")),
+        "group_id": str(_get(row, "group_id")) if _get(row, "group_id") else None,
+        "template_id": str(_get(row, "profile_id")) if _get(row, "profile_id") else None,
+        "location": _get(row, "location"),
+        "owner": _get(row, "owner"),
+        "status": _get(row, "status"),
+        "ping_enabled": bool(_get(row, "ping_enabled")),
+        "snmp_enabled": bool(_get(row, "snmp_enabled")),
+    })
+    return out
+
+
+def facts_from_server(row: Any) -> dict[str, Any]:
+    """Facts of a server in inventory (a mapping from ``SERVER_FACTS_SQL``)."""
+    ip = _get(row, "primary_ip")
+    out = {k: None for k in FIELDS}
+    out.update({
+        "ip_address": str(ip).split("/")[0] if ip else None,
+        "hostname": _get(row, "hostname") or _get(row, "display_name"),
+        "fqdn": _get(row, "fqdn"),
+        "os": _get(row, "os_name"),
+        "os_version": _get(row, "os_version"),
+        "device_type": "server",
+        "is_server": True,
+        "tags": _tags(_get(row, "tags")),
+        "owner": _get(row, "owner"),
+        "status": _get(row, "status"),
+        "environment": _get(row, "environment"),
+        "os_type": _get(row, "os_type"),
+        "collection_mode": _get(row, "collection_mode"),
+    })
+    return out

@@ -8,7 +8,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-RuleMode = Literal["draft", "active", "disabled"]
+RuleMode = Literal["draft", "simulate", "active", "disabled"]
+Trigger = Literal["discovery", "created"]
+Enforcement = Literal["set_once", "enforce"]
 AssetKind = Literal["device", "server"]
 
 
@@ -21,6 +23,13 @@ class RuleIn(BaseModel):
     condition: dict[str, Any] = Field(default_factory=lambda: {"op": "all", "conditions": []})
     actions: list[dict[str, Any]] = Field(default_factory=list)
     stop_processing: bool = False
+    # When the rule runs by itself: on discovery scan results, and/or on
+    # devices and servers when they are added. Manual runs on inventory can
+    # use any active rule.
+    triggers: list[Trigger] = Field(default_factory=lambda: ["discovery"], min_length=1)
+    # set_once: a value edited by hand after the rule set it is left alone;
+    # enforce: the rule puts its value back.
+    enforcement: Enforcement = "set_once"
 
 
 class RuleCreate(RuleIn):
@@ -53,6 +62,7 @@ class RuleOut(BaseModel):
     condition: dict[str, Any]
     actions: list[dict[str, Any]]
     stop_processing: bool
+    enforcement: str = "set_once"
     revision: int
     created_by: Optional[UUID] = None
     updated_by: Optional[UUID] = None
@@ -103,3 +113,23 @@ class EvaluateScanRequest(BaseModel):
     # False: store the plans on the results (Rule and Decision columns) and
     # act on nothing. True: also auto-import / ignore as the profile allows.
     apply: bool = False
+
+
+class InventoryTargets(BaseModel):
+    kinds: list[AssetKind] = Field(default_factory=lambda: ["device", "server"], min_length=1)
+    device_ids: Optional[list[UUID]] = None
+    server_ids: Optional[list[UUID]] = None
+    group_ids: Optional[list[UUID]] = None
+    tags: Optional[list[str]] = None
+    subnet: Optional[str] = Field(default=None, max_length=64)
+    query: Optional[str] = Field(default=None, max_length=200)
+
+
+class InventoryRunRequest(BaseModel):
+    # None: every active rule, in order. Otherwise only these active rules.
+    rule_ids: Optional[list[UUID]] = None
+    targets: InventoryTargets = Field(default_factory=InventoryTargets)
+
+
+class InventoryApplyRequest(InventoryRunRequest):
+    digest: str = Field(..., min_length=8, max_length=64)

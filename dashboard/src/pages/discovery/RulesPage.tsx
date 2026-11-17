@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowDown,
@@ -7,13 +7,16 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  GitCompare,
   ListChecks,
   Loader2,
   Pencil,
   Plus,
+  Play,
   Power,
   Settings2,
   Trash2,
+  Undo2,
 } from 'lucide-react'
 import { regionalDate } from '@/lib/regionalTime'
 import { useCan } from '@/stores/auth'
@@ -29,11 +32,22 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from '@/components/ui/Toast'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import { rulesApi } from './api'
-import type { DiscoveryRule, EngineRun, RuleEngineSettings, RuleMode } from './types'
+import type { ConflictReport, DiscoveryRule, EngineRun, RuleCatalog, RuleEngineSettings, RuleMode, UndoResult } from './types'
 import {
+  Lookups,
   MODE_LABEL,
+  MODE_ORDER,
   OUTCOME_LABEL,
   OUTCOME_TONE,
+  assetPath,
+  canUndoRun,
+  changeText,
+  plural,
+  ruleRunsText,
+  runStatusTone,
+  runTriggerText,
+  settingLabel,
+  summarizeUndoResult,
   moveItem,
   summarizeActions,
   sentenceCase,
@@ -117,14 +131,20 @@ export function RulesPage() {
               Rules
             </CardTitle>
             <p className="mt-1 text-xs text-muted">
-              Evaluated top to bottom on every scan result. The first matching rule sets each setting; tags from every
-              matching rule are merged.
+              Evaluated top to bottom on scan results, on new devices and servers, and when you run them on inventory.
+              The first matching rule sets each setting; tags from every matching rule are merged. Rules never delete
+              anything or turn monitoring off.
             </p>
           </div>
           {canManage && (
-            <Button size="sm" onClick={() => navigate('/discovery/rules/new')}>
-              <Plus className="h-4 w-4" /> New rule
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={() => navigate('/discovery/rules/run')}>
+                <Play className="h-4 w-4" /> Run on inventory
+              </Button>
+              <Button size="sm" onClick={() => navigate('/discovery/rules/new')}>
+                <Plus className="h-4 w-4" /> New rule
+              </Button>
+            </div>
           )}
         </CardHeader>
         <CardContent className="p-0">
@@ -202,9 +222,11 @@ export function RulesPage() {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="draft">Draft</SelectItem>
-                            <SelectItem value="active">Active</SelectItem>
-                            <SelectItem value="disabled">Disabled</SelectItem>
+                            {MODE_ORDER.map((m) => (
+                              <SelectItem key={m} value={m}>
+                                {MODE_LABEL[m]}
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       ) : (
@@ -225,6 +247,7 @@ export function RulesPage() {
                           : ''}
                         {r.stop_processing ? ' · stops further rules' : ''}
                       </div>
+                      <div className="text-2xs text-muted">{sentenceCase(ruleRunsText(r))}</div>
                     </Td>
                     <Td>
                       <div className="flex flex-wrap gap-1">
@@ -285,7 +308,9 @@ export function RulesPage() {
         </CardContent>
       </Card>
 
-      <HistoryCard />
+      <ConflictsCard catalog={catalog} />
+
+      <HistoryCard canManage={canManage} catalog={catalog} lookups={lookups} />
 
       <ConfirmDialog
         open={!!deleting}
@@ -441,13 +466,129 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
 
 const OUTCOMES = Object.keys(OUTCOME_LABEL) as (keyof typeof OUTCOME_LABEL)[]
 
-function HistoryCard() {
+function ConflictsCard({ catalog }: { catalog: RuleCatalog | undefined }) {
+  const [open, setOpen] = useState(false)
+  const { data, isLoading, error } = useQuery<ConflictReport>({
+    queryKey: ['discovery', 'rules', 'conflicts'],
+    queryFn: rulesApi.conflicts,
+    enabled: open,
+    staleTime: 30_000,
+  })
+  const problems = data ? data.overridden.length + data.never_match.length + data.never_win.length : 0
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <button type="button" className="flex items-center gap-2 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
+          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <GitCompare className="h-4 w-4 text-primary" /> Conflicts
+          </CardTitle>
+          {data && <Badge variant={problems ? 'warning' : 'success'}>{problems ? plural(problems, 'finding') : 'none'}</Badge>}
+        </button>
+        {open && (
+          <p className="mt-1 text-xs text-muted">
+            The active rules evaluated against the devices and servers in inventory now: which rules override each
+            other, and which never match or never win.
+          </p>
+        )}
+      </CardHeader>
+      {open && (
+        <CardContent className="space-y-4 text-sm">
+          {isLoading ? (
+            <div className="py-4 text-center text-muted">Loading…</div>
+          ) : error ? (
+            <div className="py-4 text-center text-danger-fg">{apiErrorMessage(error)}</div>
+          ) : !data || data.rules.length === 0 ? (
+            <div className="py-4 text-center text-muted">No active rules.</div>
+          ) : (
+            <>
+              <div className="text-xs text-muted">
+                {plural(data.assets, 'device or server', 'devices and servers')} checked
+                {data.truncated ? ' (the first ones only: the inventory is larger than one check covers)' : ''}.
+              </div>
+              <ConflictList title="Overridden by an earlier rule" empty="No rule's value is overridden by another rule.">
+                {data.overridden.map((o, i) => (
+                  <li key={i}>
+                    <RuleLink id={o.rule_id} name={o.rule_name} />: {settingLabel(o.action_key, catalog).toLowerCase()} is
+                    overridden by <RuleLink id={o.winner_rule_id} name={o.winner_rule_name} /> on{' '}
+                    {plural(o.assets, 'asset')}
+                  </li>
+                ))}
+              </ConflictList>
+              <ConflictList title="Match nothing in inventory" empty="Every active rule matches something.">
+                {data.never_match.map((r) => (
+                  <li key={r.rule_id}>
+                    <RuleLink id={r.rule_id} name={r.rule_name} />
+                    <span className="text-muted"> — scan results may still match it</span>
+                  </li>
+                ))}
+              </ConflictList>
+              <ConflictList title="Match but never win" empty="Every matching rule sets at least one value somewhere.">
+                {data.never_win.map((r) => (
+                  <li key={r.rule_id}>
+                    <RuleLink id={r.rule_id} name={r.rule_name} />
+                    <span className="text-muted">
+                      {' '}— matches {plural(r.matches, 'asset')}, every value it sets comes from an earlier rule or is
+                      already set
+                    </span>
+                  </li>
+                ))}
+              </ConflictList>
+            </>
+          )}
+        </CardContent>
+      )}
+    </Card>
+  )
+}
+
+function ConflictList({ title, empty, children }: { title: string; empty: string; children: React.ReactNode[] }) {
+  return (
+    <div>
+      <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">{title}</div>
+      {children.length ? <ul className="list-disc space-y-0.5 pl-5 text-xs">{children}</ul> : <div className="text-xs text-muted">{empty}</div>}
+    </div>
+  )
+}
+
+function RuleLink({ id, name }: { id: string; name: string | null }) {
+  return (
+    <Link to={`/discovery/rules/${id}`} className="font-medium text-primary hover:underline">
+      {name || id.slice(0, 8)}
+    </Link>
+  )
+}
+
+function HistoryCard({ canManage, catalog, lookups }: { canManage: boolean; catalog: RuleCatalog | undefined; lookups: Lookups }) {
   const navigate = useNavigate()
-  const [expanded, setExpanded] = useState<string | null>(null)
+  const qc = useQueryClient()
+  const [params] = useSearchParams()
+  const linked = params.get('run')
+  const [expanded, setExpanded] = useState<string | null>(linked)
+  const [undoing, setUndoing] = useState<EngineRun | null>(null)
+  const [undone, setUndone] = useState<UndoResult | null>(null)
   const { data: runs = [], isLoading } = useQuery<EngineRun[]>({
     queryKey: ['discovery', 'rules', 'history'],
     queryFn: () => rulesApi.history({ limit: 25 }),
     refetchInterval: 30_000,
+  })
+  useEffect(() => {
+    if (linked) setExpanded(linked)
+  }, [linked])
+
+  const undo = useMutation({
+    mutationFn: (id: string) => rulesApi.undo(id),
+    onSuccess: (r) => {
+      setUndoing(null)
+      setUndone(r)
+      qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'history'] })
+      qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'conflicts'] })
+      toast.success('Run undone', summarizeUndoResult(r))
+    },
+    onError: (e: any) => {
+      setUndoing(null)
+      toast.error(e?.response?.status === 403 ? 'Not allowed' : 'Could not undo the run', apiErrorMessage(e))
+    },
   })
 
   return (
@@ -455,14 +596,16 @@ function HistoryCard() {
       <CardHeader className="pb-3">
         <CardTitle className="text-sm">Recent rule runs</CardTitle>
         <p className="mt-1 text-xs text-muted">
-          Each scan's evaluation, and each manual re-evaluation. Open a run to see what every rule did to each result.
+          Each scan's evaluation, re-evaluations, runs on inventory, new devices and servers, and undos. Open a run to
+          see what every rule did.
         </p>
       </CardHeader>
       <CardContent className="p-0">
+        {undone && <UndoResultPanel result={undone} onClose={() => setUndone(null)} />}
         {isLoading ? (
           <div className="py-8 text-center text-sm text-muted">Loading…</div>
         ) : runs.length === 0 ? (
-          <div className="py-8 text-center text-sm text-muted">Rules have not run on a scan yet.</div>
+          <div className="py-8 text-center text-sm text-muted">Rules have not run yet.</div>
         ) : (
           <Table>
             <THead className="bg-surface2/50">
@@ -473,6 +616,7 @@ function HistoryCard() {
                 <Th>Trigger</Th>
                 <Th>Status</Th>
                 <Th>Counts</Th>
+                {canManage && <Th className="w-24"></Th>}
               </Tr>
             </THead>
             <TBody>
@@ -480,7 +624,10 @@ function HistoryCard() {
                 const open = expanded === r.id
                 return (
                   <Fragment key={r.id}>
-                    <Tr className="cursor-pointer" onClick={() => setExpanded(open ? null : r.id)}>
+                    <Tr
+                      className={cn('cursor-pointer', linked === r.id && 'bg-primary/5')}
+                      onClick={() => setExpanded(open ? null : r.id)}
+                    >
                       <Td>
                         <button
                           type="button"
@@ -511,25 +658,34 @@ function HistoryCard() {
                           '—'
                         )}
                       </Td>
-                      <Td className="text-xs">
-                        {r.trigger === 'manual' ? 'Re-evaluated' : 'Scan'} ·{' '}
-                        {r.mode === 'apply' ? 'apply' : 'annotate only'}
-                      </Td>
+                      <Td className="text-xs">{runTriggerText(r)}</Td>
                       <Td>
-                        <Badge
-                          variant={
-                            r.status === 'completed' ? 'success' : r.status === 'partial' ? 'warning' : r.status === 'failed' ? 'danger' : 'outline'
-                          }
-                        >
-                          {r.status}
-                        </Badge>
+                        <Badge variant={runStatusTone(r.status) as any}>{r.status}</Badge>
                       </Td>
-                      <Td className="text-xs text-muted">{summarizeCounts(r.counts || {})}</Td>
+                      <Td className="text-xs text-muted">{runCountsText(r)}</Td>
+                      {canManage && (
+                        <Td className="text-right">
+                          {canUndoRun(r) && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7"
+                              title="Put back what this run changed"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setUndoing(r)
+                              }}
+                            >
+                              <Undo2 className="h-3.5 w-3.5" /> Undo
+                            </Button>
+                          )}
+                        </Td>
+                      )}
                     </Tr>
                     {open && (
                       <Tr>
-                        <Td colSpan={6} className="bg-surface2/30">
-                          <HistoryItems runId={r.id} />
+                        <Td colSpan={canManage ? 7 : 6} className="bg-surface2/30">
+                          <HistoryItems runId={r.id} catalog={catalog} lookups={lookups} />
                         </Td>
                       </Tr>
                     )}
@@ -540,11 +696,83 @@ function HistoryCard() {
           </Table>
         )}
       </CardContent>
+      <ConfirmDialog
+        open={!!undoing}
+        onOpenChange={(o) => !o && setUndoing(null)}
+        title="Undo this run?"
+        description={
+          undoing ? (
+            undoing.discovery_run_id ? (
+              <>
+                A scan's run is not reverted value by value: the settings came with the import. You get the list of
+                devices it imported, to delete from Devices if they should not be monitored. Undo never deletes devices.
+              </>
+            ) : (
+              <>
+                Every value this run set that is still as it left it is put back
+                {undoing.counts?.applied != null ? ` (${plural(Number(undoing.counts.applied), 'value')} applied)` : ''}.
+                Values changed since are listed and left alone. A run can be undone once.
+              </>
+            )
+          ) : undefined
+        }
+        confirmText="Undo run"
+        loading={undo.isPending}
+        onConfirm={() => {
+          if (undoing) undo.mutate(undoing.id)
+        }}
+      />
     </Card>
   )
 }
 
-function HistoryItems({ runId }: { runId: string }) {
+function runCountsText(r: EngineRun): string {
+  const c = r.counts || {}
+  if (r.trigger === 'undo') return summarizeUndoResult({ ...c, imported_devices: undefined })
+  if (r.trigger === 'manual' && !r.discovery_run_id) {
+    const parts = [`matched ${Number(c.matched ?? 0)} of ${Number(c.assets ?? 0)}`, `applied ${Number(c.applied ?? 0)}`]
+    if (c.kept_manual_edit) parts.push(`hand edits kept ${c.kept_manual_edit}`)
+    if (c.skipped_changed) parts.push(`skipped ${c.skipped_changed}`)
+    return sentenceCase(parts.join(' · '))
+  }
+  return summarizeCounts(c)
+}
+
+function UndoResultPanel({ result, onClose }: { result: UndoResult; onClose: () => void }) {
+  return (
+    <div className="m-3 space-y-2 rounded-md border border-border bg-surface2/40 p-3 text-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="font-medium">Undo finished: {result.status}</div>
+          <div className="text-xs text-muted">{summarizeUndoResult(result)}</div>
+        </div>
+        <Button variant="ghost" size="sm" className="h-7" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+      {result.imported_devices.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-xs">
+            The scan imported these devices. Delete them from Devices if they should not be monitored; undo never
+            deletes devices.
+          </div>
+          <ul className="max-h-48 space-y-0.5 overflow-y-auto text-xs">
+            {result.imported_devices.map((d) => (
+              <li key={d.device_id}>
+                <Link to={`/devices/${d.device_id}`} className="text-primary hover:underline">
+                  {d.hostname || d.ip_address || d.device_id.slice(0, 8)}
+                </Link>
+                {d.ip_address && d.hostname && <span className="ml-1 font-mono text-muted">{d.ip_address}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function HistoryItems({ runId, catalog, lookups }: { runId: string; catalog: RuleCatalog | undefined; lookups: Lookups }) {
   const [outcome, setOutcome] = useState<string>('all')
   const { data: items = [], isLoading, error } = useQuery({
     queryKey: ['discovery', 'rules', 'history', runId, 'items', outcome],
@@ -578,42 +806,49 @@ function HistoryItems({ runId }: { runId: string }) {
           <Table>
             <THead className="bg-surface2/50">
               <Tr>
-                <Th>IP</Th>
+                <Th>Asset</Th>
                 <Th>Rule</Th>
-                <Th>Action</Th>
+                <Th>Setting</Th>
+                <Th>Before → after</Th>
                 <Th>Outcome</Th>
                 <Th>Detail</Th>
               </Tr>
             </THead>
             <TBody>
-              {items.map((it) => (
-                <Tr key={it.id}>
-                  <Td className="font-mono text-xs">{it.ip_address || '—'}</Td>
-                  <Td className="text-xs">{it.rule_name || '—'}</Td>
-                  <Td className="text-xs">
-                    {it.action_key || '—'}
-                    {it.after != null && it.action_key && (
-                      <span className="text-muted"> → {formatAfter(it.after)}</span>
-                    )}
-                  </Td>
-                  <Td>
-                    <Badge variant={(OUTCOME_TONE as Record<string, string>)[it.outcome] as any ?? 'default'}>
-                      {(OUTCOME_LABEL as Record<string, string>)[it.outcome] ?? it.outcome}
-                    </Badge>
-                  </Td>
-                  <Td className="text-xs text-muted">
-                    {it.detail || '—'}
-                    {it.asset_id && (it.asset_kind === 'device' || it.asset_kind === 'server') && (
-                      <Link
-                        to={`/${it.asset_kind === 'server' ? 'servers' : 'devices'}/${it.asset_id}`}
-                        className="ml-1 text-primary hover:underline"
-                      >
-                        open
-                      </Link>
-                    )}
-                  </Td>
-                </Tr>
-              ))}
+              {items.map((it) => {
+                const href = assetPath(it.asset_kind, it.asset_id)
+                return (
+                  <Tr key={it.id}>
+                    <Td className="text-xs">
+                      {href ? (
+                        <Link to={href} className="font-mono text-primary hover:underline">
+                          {it.ip_address || it.asset_id?.slice(0, 8)}
+                        </Link>
+                      ) : (
+                        <span className="font-mono">{it.ip_address || '—'}</span>
+                      )}
+                      {it.asset_kind === 'server' && <div className="text-2xs text-muted">server</div>}
+                    </Td>
+                    <Td className="text-xs">
+                      {it.rule_id ? <RuleLink id={it.rule_id} name={it.rule_name} /> : it.rule_name || '—'}
+                    </Td>
+                    <Td className="text-xs">{it.action_key ? settingLabel(it.action_key, catalog) : '—'}</Td>
+                    <Td className="text-xs">
+                      {it.action_key && it.action_key !== 'decision' && (it.before !== undefined || it.after != null)
+                        ? changeText(it.action_key, it.before ?? null, it.after ?? null, lookups)
+                        : it.after != null
+                          ? formatAfter(it.after)
+                          : '—'}
+                    </Td>
+                    <Td>
+                      <Badge variant={(OUTCOME_TONE as Record<string, string>)[it.outcome] as any ?? 'default'}>
+                        {(OUTCOME_LABEL as Record<string, string>)[it.outcome] ?? it.outcome}
+                      </Badge>
+                    </Td>
+                    <Td className="text-xs text-muted">{it.detail || '—'}</Td>
+                  </Tr>
+                )
+              })}
             </TBody>
           </Table>
         </div>
