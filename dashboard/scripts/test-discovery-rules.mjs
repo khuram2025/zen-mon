@@ -1,4 +1,5 @@
-// Discovery rules (phase 1, migrate-188; phase 2 on inventory, migrate-191): the pure model behind the rule builder, the rule list and the scan-result
+// Discovery rules (phase 1, migrate-188; phase 2 on inventory, migrate-191; phase 3 re-checks, children, approval,
+// export / import and starter rules, migrate-193): the pure model behind the rule builder, the rule list and the scan-result
 // Rule / Decision columns (src/pages/discovery/ruleModel.ts). Pins the tree edits and their depth / leaf limits, the
 // one-sentence condition and action summaries, the disposition wording, the preview summary and the reorder helper,
 // and that the pages, routes, tab and sidebar entry are wired.
@@ -212,7 +213,8 @@ assert.deepEqual(M.actionProblems({ actions: [{ key: 'tags', value: [] }], asset
 assert.deepEqual(M.actionProblems({ actions: [{ key: 'decision', value: 'review' }, { key: 'decision', value: 'ignore' }], asset_kinds: ['device'] }, catalog),
   ['Import decision: only once per rule'])
 assert.deepEqual(M.ruleProblems({ ...M.defaultRule(), name: ' ' }, catalog), ['Give the rule a name'])
-assert.deepEqual(M.ruleProblems({ ...M.defaultRule(), name: 'x', asset_kinds: [] }, catalog)[0], 'Choose network devices, servers or both')
+assert.deepEqual(M.ruleProblems({ ...M.defaultRule(), name: 'x', asset_kinds: [] }, catalog)[0],
+  'Choose what the rule looks at: network devices, servers or controller-managed children')
 
 // ── dispositions, outcomes and the preview sentence ──────────────────────────
 assert.equal(M.dispositionText('review', 'license_capacity_reached'), 'Kept for review — license capacity reached')
@@ -291,7 +293,7 @@ assert.deepEqual(M.MODE_ORDER, ['draft', 'simulate', 'active', 'disabled'])
 for (const m of M.MODE_ORDER) assert(M.MODE_HELP[m], `mode ${m} has a one-line explanation`)
 assert.match(M.MODE_HELP.simulate, /changes nothing/)
 assert.deepEqual(M.ruleProblems({ ...M.defaultRule(), name: 'x', triggers: [] }, catalog),
-  ['Choose when the rule runs: on scan results, on new devices and servers, or both'])
+  ['Choose when the rule runs: on scan results, on new devices and servers, or whenever they change'])
 assert.equal(M.ruleRunsText({ triggers: ['discovery'], enforcement: 'set_once' }), 'runs on scans · set once')
 assert.equal(M.ruleRunsText({ triggers: ['discovery', 'created'], enforcement: 'enforce' }), 'runs on scans and new devices and servers · enforced')
 assert.equal(M.ruleRunsText({}), 'runs on scans · set once', 'a phase 1 rule runs on scans, set once')
@@ -380,13 +382,13 @@ assert.equal(M.assetPath('device', null), null)
 const D1 = 'aaaaaaaa-0000-0000-0000-000000000001'
 const D2 = 'AAAAAAAA-0000-0000-0000-000000000002'
 const S1 = 'cccccccc-0000-0000-0000-000000000003'
-assert.deepEqual(M.parseRunTargets(`?device=${D1}`), { device_ids: [D1], server_ids: [], kinds: ['device'] })
+assert.deepEqual(M.parseRunTargets(`?device=${D1}`), { device_ids: [D1], server_ids: [], child_ids: [], kinds: ['device'] })
 assert.deepEqual(M.parseRunTargets(`?devices=${D1},${D2}, ${D1},not-an-id`),
-  { device_ids: [D1, D2.toLowerCase()], server_ids: [], kinds: ['device'] }, 'ids are de-duplicated, lower-cased and checked')
-assert.deepEqual(M.parseRunTargets(`?server=${S1}`), { device_ids: [], server_ids: [S1], kinds: ['server'] })
-assert.deepEqual(M.parseRunTargets(`?device=${D1}&server=${S1}`), { device_ids: [D1], server_ids: [S1], kinds: ['device', 'server'] })
-assert.deepEqual(M.parseRunTargets(''), { device_ids: [], server_ids: [], kinds: ['device', 'server'] }, 'nothing pre-selected: both kinds')
-assert.deepEqual(M.parseRunTargets(new URLSearchParams({ devices: 'x,y' })), { device_ids: [], server_ids: [], kinds: ['device', 'server'] })
+  { device_ids: [D1, D2.toLowerCase()], server_ids: [], child_ids: [], kinds: ['device'] }, 'ids are de-duplicated, lower-cased and checked')
+assert.deepEqual(M.parseRunTargets(`?server=${S1}`), { device_ids: [], server_ids: [S1], child_ids: [], kinds: ['server'] })
+assert.deepEqual(M.parseRunTargets(`?device=${D1}&server=${S1}`), { device_ids: [D1], server_ids: [S1], child_ids: [], kinds: ['device', 'server'] })
+assert.deepEqual(M.parseRunTargets(''), { device_ids: [], server_ids: [], child_ids: [], kinds: ['device', 'server'] }, 'nothing pre-selected: both kinds')
+assert.deepEqual(M.parseRunTargets(new URLSearchParams({ devices: 'x,y' })), { device_ids: [], server_ids: [], child_ids: [], kinds: ['device', 'server'] })
 
 assert(M.isSubnet('10.0.0.0/16'))
 assert(M.isSubnet(' 192.168.1.0/24 '))
@@ -434,13 +436,180 @@ assert.match(runSrc, /parseRunTargets\(params\)/, 'the run page takes ?device= /
 assert.match(rulesPage, /\/discovery\/rules\/run/, 'the rule list links to Run on inventory')
 assert.match(rulesPage, /canUndoRun\(r\)/, 'undo is offered only where the model allows it')
 assert.match(rulesPage, /rulesApi\.conflicts/, 'the rule list has a Conflicts panel')
-assert.match(read('src/pages/device/ConfigurationTab.tsx'), /useAssetAutomation\('device', device\.id\)/, 'the device Configuration tab has the Automation card')
+assert.match(read('src/pages/device/ConfigurationTab.tsx'), /useAssetAutomation\(isManagedChild\(device\) \? 'child' : 'device', device\.id\)/,
+  'the device Configuration tab has the Automation card (a controller-managed child is explained as a child)')
 assert.match(read('src/pages/servers/detail/tabs/AgentTab.tsx'), /useAssetAutomation\('server', server\.id\)/, 'the server settings have the Automation panel')
 assert.match(read('src/pages/DevicesPage.tsx'), /\/discovery\/rules\/run\?devices=/, 'the device list bulk bar runs rules on the selection')
 assert.match(read('src/pages/discovery/RuleEditorPage.tsx'), /Runs automatically on/)
 assert.match(read('src/pages/discovery/RuleEditorPage.tsx'), /When a value was changed by hand/)
 assert.match(read('src/pages/discovery/api.ts'), /triggers: draft\.triggers/, 'create / update send the triggers')
 for (const file of ['RuleRunPage.tsx', 'AssetAutomation.tsx']) {
+  assert(!/text-\[\d+px\]/.test(read(`src/pages/discovery/${file}`)), `${file} uses the rem type scale, never pixel font sizes`)
+}
+
+// ── phase 3: the "changed" trigger, on_unmatch, controller-managed children ──
+assert.equal(d.on_unmatch, 'keep', 'a new rule keeps what it set when an asset stops matching')
+assert.equal(M.TRIGGER_LABEL.changed, 'Devices and servers whenever they change (and when the rule changes)')
+assert.equal(M.ruleRunsText({ triggers: ['created', 'changed'], enforcement: 'set_once' }), 'runs on new devices and servers and changes · set once')
+assert.equal(M.ruleRunsText({ triggers: ['changed'], enforcement: 'enforce', on_unmatch: 'revert' }),
+  'runs on changes · enforced · reverts when no longer matching')
+assert.equal(M.ruleRunsText({ triggers: ['changed'], on_unmatch: 'keep' }), 'runs on changes · set once', 'keep is the quiet default')
+assert.equal(M.ON_UNMATCH_LABEL.keep, 'Keep the values the rule set')
+assert.match(M.ON_UNMATCH_LABEL.revert, /^Revert them to what they were/)
+assert.match(M.ON_UNMATCH_HELP, /automatic re-checks.*manual runs/, 'the note says where on_unmatch applies')
+assert.deepEqual(M.ASSET_KIND_ORDER, ['device', 'server', 'child'])
+assert.equal(M.ASSET_KIND_LABEL.child, 'Controller-managed switches and access points')
+
+const catalog3 = {
+  ...catalog2,
+  actions: [
+    ...catalog2.actions.map((a) =>
+      ['group', 'owner', 'tags'].includes(a.key) ? { ...a, asset_kinds: [...a.asset_kinds, 'child'] } : a),
+    { key: 'location', label: 'Location', kind: 'single', value: 'text', permission: ['devices.manage'], asset_kinds: ['device', 'child'], source: null, help: '', min: null, max: null },
+    { key: 'map', label: 'Add to network map', kind: 'additive', value: 'ref', permission: ['maps.manage'], asset_kinds: ['device', 'server', 'child'], source: 'manual_maps', help: '', min: null, max: null },
+    { key: 'dependency_parent', label: 'Depends on (uplink parent)', kind: 'single', value: 'ref', permission: ['devices.manage'], asset_kinds: ['device'], source: 'devices', help: '', min: null, max: null },
+  ],
+}
+const keys = (list) => list.map((a) => a.key).sort()
+assert.deepEqual(keys(M.pickableActions(catalog3, ['child'])), ['group', 'location', 'map', 'owner', 'tags'],
+  'a rule on children is offered only group, location, owner, tags and map')
+assert.deepEqual(keys(M.pickableActions(catalog3, ['device', 'child'])), ['group', 'location', 'map', 'owner', 'tags'],
+  'a rule that includes children is offered only what applies to them')
+assert(keys(M.pickableActions(catalog3, ['device'])).includes('dependency_parent'), 'devices are offered the uplink parent')
+assert(!keys(M.pickableActions(catalog3, ['server'])).includes('dependency_parent'), 'servers are not offered the uplink parent')
+assert.deepEqual(keys(M.pickableActions(catalog3, ['child'], ['tags', 'map'])), ['group', 'location', 'owner'], 'actions already on the rule are left out')
+assert.deepEqual(M.actionProblems({ actions: [{ key: 'template', value: 'x' }], asset_kinds: ['child'] },
+  { ...catalog3, actions: [...catalog3.actions, { key: 'template', label: 'Monitoring template', kind: 'single', value: 'ref', permission: ['devices.manage'], asset_kinds: ['device'], source: 'device_profiles', help: '', min: null, max: null }] }),
+  ['Monitoring template applies to network devices only'])
+assert.deepEqual(M.actionProblems({ actions: [{ key: 'decision', value: 'review' }], asset_kinds: ['child'] }, catalog3),
+  ['Import decision applies to network devices and servers only'])
+assert.equal(M.kindsPhrase(['device', 'server', 'child']), 'network devices, servers and controller-managed children')
+
+// Field hints count children only for a rule that includes them.
+assert.equal(M.fieldSourceHint({ applies_to: ['scan', 'device', 'server', 'child'] }, ['child']), '')
+assert.equal(M.fieldSourceHint({ applies_to: ['scan', 'device', 'server'] }, ['device', 'child']), 'not children')
+assert.equal(M.fieldSourceHint({ applies_to: ['scan', 'device', 'server'] }, ['device']), '', 'children do not matter to a device rule')
+assert.equal(M.fieldSourceHint({ applies_to: ['child'] }, ['child']), 'children only')
+assert.equal(M.fieldSourceHint({ applies_to: ['child'] }), 'children only', 'a children-only field says so even without kinds')
+assert.equal(M.fieldSourceHint({ applies_to: ['device', 'child'] }, ['child']), 'devices and children')
+assert.equal(M.fieldSourceHint({ applies_to: ['scan', 'device', 'server', 'child'] }), '', 'known everywhere')
+
+// Activation permissions: a map placement is a map edit; children need devices.manage.
+assert.deepEqual(M.activationPermissions([{ key: 'map', value: 'm' }], ['server'], catalog3), ['maps.manage'])
+assert.deepEqual(M.activationPermissions([{ key: 'map', value: 'm' }], ['child'], catalog3), ['maps.manage'])
+assert.deepEqual(M.activationPermissions([{ key: 'tags', value: ['a'] }], ['child'], catalog3), ['devices.manage'])
+assert.deepEqual(M.activationPermissions([{ key: 'dependency_parent', value: 'd' }], ['device'], catalog3), ['devices.manage'])
+
+// Maps and uplink parents: names, links, added like tags.
+const MAP1 = 'dddddddd-0000-0000-0000-000000000001'
+const DEV1 = 'eeeeeeee-0000-0000-0000-000000000001'
+const lookups3 = { ...lookups, manual_maps: { [MAP1]: 'Core network' }, devices: { [DEV1]: 'core-sw-01' } }
+assert.equal(M.summarizeAction({ key: 'map', value: MAP1 }, lookups3), 'Map: Core network')
+assert.equal(M.summarizeAction({ key: 'dependency_parent', value: DEV1 }, lookups3), 'Depends on: core-sw-01')
+assert.equal(M.summarizeAction({ key: 'dependency_parent', value: DEV1 }), 'Depends on: eeeeeeee…', 'an unknown device keeps a short id')
+assert.equal(M.formatSettingValue('map', MAP1, lookups3), 'Core network')
+assert.equal(M.formatSettingValue('dependency_parent', DEV1, lookups3), 'core-sw-01')
+assert.equal(M.settingLabel('map', null), 'Network map')
+assert.equal(M.settingLabel('dependency_parent', null), 'Depends on (uplink parent)')
+assert.equal(M.settingValueLink('map', MAP1), `/maps/manual?map=${MAP1}`, 'a map opens in the maps editor')
+assert.equal(M.settingValueLink('dependency_parent', DEV1), `/devices/${DEV1}`)
+assert.equal(M.settingValueLink('group', 'x'), null)
+assert.equal(M.settingValueLink('map', null), null)
+assert.equal(M.changeText('map', null, MAP1, lookups3), '+ Core network', 'a map placement is only added')
+assert.equal(M.changeText('dependency_parent', DEV1, null, lookups3), '− core-sw-01')
+assert.deepEqual(M.dependencyIds([
+  { key: 'dependency_parent', value: DEV1.toUpperCase() }, { key: 'map', value: MAP1 },
+  { action_key: 'dependency_parent', item_key: DEV1, before: null, after: DEV1 },
+]), [DEV1], 'uplink parents to name, de-duplicated and lower-cased')
+assert.equal(M.assetPath('child', 'abc'), '/devices/abc', 'a controller-managed child has a device page')
+
+// Reverts: preview wording, the changes table text, outcome chip and counts.
+assert.equal(M.CHANGE_OUTCOME_LABEL.revert, 'Revert')
+assert.equal(M.CHANGE_OUTCOME_TONE.revert, 'warning')
+assert.deepEqual(M.CHANGE_OUTCOME_ORDER, ['apply', 'revert', 'kept_manual_edit', 'not_reversible'])
+const G1 = 'aaaaaaaa-0000-0000-0000-000000000001'
+assert.equal(M.proposedText({ action_key: 'group', item_key: '', before: null, after: G1, outcome: 'apply' }, lookups),
+  'not set → Datacenter firewalls')
+assert.equal(M.proposedText({ action_key: 'location', item_key: '', before: 'DC-2', after: 'DC-1', outcome: 'revert' }),
+  'Revert to DC-1 (now DC-2)')
+assert.equal(M.proposedText({ action_key: 'group', item_key: '', before: G1, after: null, outcome: 'revert' }, lookups),
+  'Revert to not set (now Datacenter firewalls)')
+assert.equal(M.proposedText({ action_key: 'tags', item_key: 'datacenter', before: 'datacenter', after: null, outcome: 'revert' }), 'Remove datacenter')
+assert.equal(M.proposedText({ action_key: 'map', item_key: MAP1, before: null, after: null, outcome: 'revert' }, lookups3),
+  'Remove Core network', 'a revert of a map placement names the map from the item key')
+assert.equal(M.proposedText({ action_key: 'tags', item_key: 'dc', before: null, after: 'dc', outcome: 'apply' }), '+ dc')
+
+assert.equal(M.summarizeInventoryPreview({ matched: 10, changes: 4, reverts: 2, assets_changed: 3 }, ['device']),
+  '10 devices match; 4 values would change and 2 would revert on 3 assets')
+assert.equal(M.summarizeInventoryPreview({ matched: 0, changes: 0, reverts: 1, assets_changed: 1 }, ['child']),
+  '0 devices match; 1 value would revert on 1 asset', 'children are devices; a revert alone is still a change')
+assert.equal(M.summarizeInventoryPreview({ matched: 3, changes: 0, reverts: 0 }, ['device', 'server', 'child']),
+  '3 devices and servers match; nothing would change')
+assert.equal(M.summarizeApplyResult({ applied: 5, reverted: 2 }), 'Changed 5 values · reverted 2')
+assert.equal(M.applyConfirmText({ changes: 17, reverts: 2, assets_changed: 9 }), '17 values will change and 2 will be reverted on 9 devices and servers.')
+assert.equal(M.applyConfirmText({ changes: 0, reverts: 1, assets_changed: 1 }), '1 value will be reverted on 1 device or server.')
+assert.equal(M.applyConfirmText({ changes: 3, assets_changed: 2 }), '3 values will change on 2 devices and servers.')
+assert.deepEqual(M.buildTargets({ kinds: ['child'], device_ids: [D1], child_ids: [D1] }), { kinds: ['child'], child_ids: [D1] })
+assert.deepEqual(M.parseRunTargets(`?child=${D1}`), { device_ids: [], server_ids: [], child_ids: [D1], kinds: ['child'] },
+  'the Automation card of a managed child pre-selects it')
+assert.deepEqual(M.parseRunTargets(`?children=${D1},${S1}&device=${D2}`).kinds, ['device', 'child'])
+
+// Approval of automatic re-checks.
+assert.equal(M.runTriggerText({ trigger: 'changed', mode: 'apply', discovery_run_id: null }), 'Rules re-checked · apply')
+assert.equal(M.TRIGGER_REASON.changed, 'Asset or rule changed')
+assert.equal(M.runStatusLabel('needs_approval'), 'Waiting for approval')
+assert.equal(M.runStatusLabel('rejected'), 'Rejected')
+assert.equal(M.runStatusLabel('something_else'), 'something else')
+assert.equal(M.runStatusTone('needs_approval'), 'warning')
+assert.equal(M.runStatusTone('rejected'), 'outline')
+assert.equal(M.pendingCount({ counts: { changes: 118, reverts: 2 } }), 120)
+assert.equal(M.waitingText([{ status: 'completed', counts: { changes: 5 } }]), null, 'no banner without a waiting run')
+assert.equal(M.waitingText([{ status: 'needs_approval', counts: { changes: 118, reverts: 2 } }, { status: 'completed', counts: {} }]),
+  '120 changes wait for approval')
+assert.equal(M.waitingText([{ status: 'needs_approval', counts: { changes: 1 } }]), '1 change waits for approval')
+assert.equal(M.waitingText([{ status: 'needs_approval', counts: { changes: 101 } }, { status: 'needs_approval', counts: { reverts: 150 } }]),
+  '251 changes wait for approval in 2 runs')
+assert.equal(M.summarizeApprovalResult({ status: 'partial', applied: 118, reverted: 2, skipped_changed: 3 }),
+  'Applied 118 values · reverted 2 · 3 skipped (changed since the plan)')
+assert.match(M.summarizeApprovalResult({ status: 'rejected' }), /^Rejected: not proposed again until an asset or a rule changes/)
+assert(!M.canUndoRun({ mode: 'apply', status: 'needs_approval', trigger: 'changed' }), 'nothing to undo before approval')
+assert(!M.canUndoRun({ mode: 'apply', status: 'rejected', trigger: 'changed' }), 'a rejected run changed nothing')
+assert(M.canUndoRun({ mode: 'apply', status: 'completed', trigger: 'changed' }), 'an approved or automatic re-check can be undone')
+
+// Export / import.
+assert.equal(M.exportFileName(new Date(2026, 10, 7, 23, 59)), 'discovery-rules-2026-11-07.json', 'local date, zero padded')
+assert.deepEqual(M.parseRulesFile('{"format":"zenplus-discovery-rules","version":1,"rules":[]}'),
+  { document: { format: 'zenplus-discovery-rules', version: 1, rules: [] } })
+assert.deepEqual(M.parseRulesFile('not json'), { error: 'The file is not valid JSON.' })
+assert.deepEqual(M.parseRulesFile('{"format":"other","rules":[]}'), { error: 'This is not a ZenPlus discovery rules export.' })
+assert.deepEqual(M.parseRulesFile('[1,2]'), { error: 'This is not a ZenPlus discovery rules export.' })
+
+// ── phase 3 wiring ───────────────────────────────────────────────────────────
+const api3 = read('src/pages/discovery/api.ts')
+assert.match(api3, /on_unmatch: draft\.on_unmatch/, 'create / update send on_unmatch')
+for (const [fn, route] of [['pending', '/pending'], ['approve', '/approve'], ['reject', '/reject'], ['exportRules', '/export'], ['importRules', '/import'], ['starter', '/starter'], ['addStarter', '/starter']]) {
+  assert(new RegExp(`async ${fn}\\(`).test(api3) && api3.includes(route), `rulesApi.${fn} calls ${route}`)
+}
+const rules3 = read('src/pages/discovery/RulesPage.tsx')
+assert.match(rules3, /waitingText\(runs\)/, 'the Rules page shows a banner while changes wait for approval')
+assert.match(rules3, /params\.get\('review'\)/, 'the review panel opens from ?review=<run id>')
+assert.match(rules3, /canManage && waiting &&/, 'Approve / Reject only for rule managers, only while the run waits')
+assert.match(rules3, /rulesApi\.approve\(runId\)/)
+assert.match(rules3, /rulesApi\.reject\(runId\)/)
+assert.match(rules3, /<ChangesTable /, 'the review panel uses the same changes table as Run on inventory')
+assert.match(rules3, /new Blob\(/, 'export downloads a file built in the browser')
+assert.match(rules3, /exportFileName\(/)
+assert.match(rules3, /new FileReader\(\)/, 'import reads a local file')
+assert.match(rules3, /rulesApi\.addStarter/, 'the Rules page offers starter rules')
+assert.match(rules3, /max_changes_per_run/, 'the settings panel edits the approval limit')
+assert.match(read('src/pages/discovery/RuleRunPage.tsx'), /<ChangesTable /)
+const editor3 = read('src/pages/discovery/RuleEditorPage.tsx')
+assert.match(editor3, /When an asset stops matching/)
+assert.match(editor3, /max_changes_per_run/, 'the editor warns with the approval limit when the changed trigger is active')
+assert.match(editor3, /pickableActions\(catalog, draft\.asset_kinds/, 'the action picker follows the asset kinds')
+assert.match(editor3, /<DevicePicker /, 'Depends on picks a device by search')
+assert.match(read('src/pages/discovery/ruleUi.tsx'), /api\.get\('\/maps'\)/, 'map choices come from the network maps list')
+for (const file of ['RulesPage.tsx', 'RuleEditorPage.tsx', 'RuleRunPage.tsx', 'AssetAutomation.tsx', 'ruleUi.tsx', 'ruleModel.ts']) {
   assert(!/text-\[\d+px\]/.test(read(`src/pages/discovery/${file}`)), `${file} uses the rem type scale, never pixel font sizes`)
 }
 

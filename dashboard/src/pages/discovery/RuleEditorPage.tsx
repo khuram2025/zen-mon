@@ -40,11 +40,13 @@ import type {
   DiscoveryRun,
   GroupOp,
   ImportMode,
+  OnUnmatch,
   PreviewResponse,
   RuleAction,
   RuleCatalog,
   RuleDraft,
   RuleMode,
+  RuleEngineSettings,
   RuleTrigger,
   RuleVersion,
 } from './types'
@@ -57,8 +59,15 @@ import {
   MODE_LABEL,
   MODE_ORDER,
   TRIGGER_LABEL,
+  ASSET_KIND_LABEL,
+  ASSET_KIND_ORDER,
+  ON_UNMATCH_HELP,
+  ON_UNMATCH_LABEL,
   activationPermissions,
+  dependencyIds,
   fieldSourceHint,
+  kindsPhrase,
+  pickableActions,
   IMPORT_AS_LABEL,
   IMPORT_MODE_TEXT,
   Lookups,
@@ -90,7 +99,24 @@ import {
   summarizePreview,
   updateNode,
 } from './ruleModel'
-import { DispositionBadge, ModeBadge, PlanDetails, PlanWhy, RefOption, useRuleCatalog, useRuleLookups } from './ruleUi'
+import {
+  DevicePicker,
+  DispositionBadge,
+  ModeBadge,
+  PlanDetails,
+  PlanWhy,
+  RefOption,
+  useRuleCatalog,
+  useRuleLookups,
+  useWithDeviceNames,
+} from './ruleUi'
+
+const TRIGGERS: RuleTrigger[] = ['discovery', 'created', 'changed']
+const KIND_EDITOR_LABEL: Record<AssetKind, string> = {
+  device: 'Network devices',
+  server: 'Servers (Windows / Linux / ESXi hosts)',
+  child: ASSET_KIND_LABEL.child,
+}
 
 
 function draftOf(rule: DiscoveryRule): RuleDraft {
@@ -103,8 +129,9 @@ function draftOf(rule: DiscoveryRule): RuleDraft {
     condition: isGroup(rule.condition) ? rule.condition : { op: 'all', conditions: [] },
     actions: rule.actions || [],
     stop_processing: !!rule.stop_processing,
-    triggers: rule.triggers?.length ? rule.triggers.filter((t): t is RuleTrigger => t === 'discovery' || t === 'created') : ['discovery'],
+    triggers: rule.triggers?.length ? rule.triggers.filter((t): t is RuleTrigger => TRIGGERS.includes(t)) : ['discovery'],
     enforcement: rule.enforcement === 'enforce' ? 'enforce' : 'set_once',
+    on_unmatch: rule.on_unmatch === 'revert' ? 'revert' : 'keep',
   }
 }
 
@@ -116,7 +143,9 @@ export function RuleEditorPage() {
   const can = useCan()
   const canManage = can('discovery.manage_rules')
   const { data: catalog, error: catalogError } = useRuleCatalog()
-  const { lookups, options } = useRuleLookups()
+  const { lookups: baseLookups, options } = useRuleLookups()
+  // Settings carry the approval limit the "whenever they change" trigger warns about.
+  const { data: settings } = useQuery<RuleEngineSettings>({ queryKey: ['discovery', 'rules', 'settings'], queryFn: rulesApi.getSettings })
 
   const [draft, setDraft] = useState<RuleDraft>(defaultRule)
   const [revision, setRevision] = useState<number | null>(null)
@@ -139,6 +168,8 @@ export function RuleEditorPage() {
       setLoadedId(rule.id)
     }
   }, [rule, loadedId])
+
+  const lookups = useWithDeviceNames(baseLookups, useMemo(() => dependencyIds(draft.actions), [draft.actions]))
 
   const update = (patch: Partial<RuleDraft>) => {
     setDraft((d) => ({ ...d, ...patch }))
@@ -271,7 +302,7 @@ export function RuleEditorPage() {
         <Section title="When" hint="Which scan results, devices and servers this rule looks at.">
           <div className="space-y-3">
             <div className="flex flex-wrap gap-4">
-              {(['device', 'server'] as AssetKind[]).map((k) => (
+              {((catalog?.asset_kinds?.map((k) => k.key) ?? ASSET_KIND_ORDER) as AssetKind[]).map((k) => (
                 <label key={k} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
@@ -284,10 +315,17 @@ export function RuleEditorPage() {
                       })
                     }
                   />
-                  {k === 'device' ? 'Network devices' : 'Servers (Windows / Linux / ESXi hosts)'}
+                  {KIND_EDITOR_LABEL[k] ?? catalog?.asset_kinds?.find((x) => x.key === k)?.label ?? k}
                 </label>
               ))}
             </div>
+            {draft.asset_kinds.includes('child') && (
+              <div className="text-xs text-muted">
+                FortiLink switches and FortiAPs are read through their FortiGate and never polled themselves. Only
+                group, location, owner, tags and network map apply to them; the rule matches them on the facts the
+                controller reports.
+              </div>
+            )}
             <ProfileLimit
               value={draft.profile_ids}
               options={options.discovery_profiles}
@@ -303,7 +341,7 @@ export function RuleEditorPage() {
         >
           <div className="space-y-2">
             <div className="flex flex-wrap gap-4">
-              {((catalog?.triggers?.map((t) => t.key) ?? ['discovery', 'created']) as RuleTrigger[]).map((t) => (
+              {((catalog?.triggers?.map((t) => t.key) ?? TRIGGERS) as RuleTrigger[]).map((t) => (
                 <label key={t} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
@@ -327,6 +365,22 @@ export function RuleEditorPage() {
                 enrolment); the rule sets values and adds tags, it never removes anything or turns monitoring off.
               </div>
             )}
+            {draft.triggers.includes('changed') && (
+              <div className="text-xs text-muted">
+                Re-checked once a minute on the devices and servers whose facts changed, and on every one of them after
+                this rule changes. What “When an asset stops matching” says below decides what happens to the values
+                on assets that no longer match.
+              </div>
+            )}
+            {draft.triggers.includes('changed') && draft.mode === 'active' && (
+              <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-fg">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  Active rules with this trigger apply on their own within a minute; more than{' '}
+                  {settings?.max_changes_per_run ?? 100} changes wait for approval.
+                </span>
+              </div>
+            )}
           </div>
         </Section>
 
@@ -346,6 +400,7 @@ export function RuleEditorPage() {
               path={[]}
               catalog={catalog}
               options={options}
+              kinds={draft.asset_kinds}
               onChange={(condition) => update({ condition })}
             />
           ) : (
@@ -356,7 +411,14 @@ export function RuleEditorPage() {
         {/* Then */}
         <Section title="Then" hint="The first matching rule sets each setting; tags from every matching rule are merged.">
           {catalog ? (
-            <ActionsEditor draft={draft} catalog={catalog} options={options} onChange={(actions) => update({ actions })} />
+            <ActionsEditor
+              draft={draft}
+              catalog={catalog}
+              options={options}
+              lookups={lookups}
+              can={can}
+              onChange={(actions) => update({ actions })}
+            />
           ) : (
             <div className="text-sm text-muted">Loading actions…</div>
           )}
@@ -421,6 +483,18 @@ export function RuleEditorPage() {
                 {ENFORCEMENT_HELP[draft.enforcement]} Tags are only ever added; a rule never deletes anything or turns
                 monitoring off.
               </div>
+            </div>
+            <div className="space-y-1.5 md:col-span-3">
+              <div className="text-sm font-medium">When an asset stops matching</div>
+              <div className="flex flex-wrap gap-4 text-sm">
+                {((catalog?.on_unmatch?.map((o) => o.key) ?? ['keep', 'revert']) as OnUnmatch[]).map((k) => (
+                  <label key={k} className="flex items-center gap-2">
+                    <input type="radio" name="on_unmatch" checked={draft.on_unmatch === k} onChange={() => update({ on_unmatch: k })} />
+                    {catalog?.on_unmatch?.find((o) => o.key === k)?.label ?? ON_UNMATCH_LABEL[k] ?? k}
+                  </label>
+                ))}
+              </div>
+              <div className="text-xs text-muted">{ON_UNMATCH_HELP}</div>
             </div>
           </div>
         </Section>
@@ -550,6 +624,7 @@ export function GroupEditor({
   onChange,
   onRemove,
   emptyAllText = 'No conditions: the rule matches every scan result it looks at.',
+  kinds,
 }: {
   root: ConditionGroup
   node: ConditionGroup
@@ -559,6 +634,8 @@ export function GroupEditor({
   onChange: (root: ConditionGroup) => void
   onRemove?: () => void
   emptyAllText?: string
+  /** The rule's asset kinds: the field hints then say which fields controller-managed children lack. */
+  kinds?: AssetKind[]
 }) {
   const limits = catalog.limits ?? DEFAULT_LIMITS
   const nested = path.length > 0
@@ -605,6 +682,7 @@ export function GroupEditor({
               onChange={onChange}
               onRemove={() => onChange(removeNode(root, childPath))}
               emptyAllText={emptyAllText}
+              kinds={kinds}
             />
           ) : (
             <LeafEditor
@@ -612,6 +690,7 @@ export function GroupEditor({
               leaf={child}
               catalog={catalog}
               options={options}
+              kinds={kinds}
               onChange={(leaf) => onChange(updateNode(root, childPath, () => leaf))}
               onRemove={() => onChange(removeNode(root, childPath))}
             />
@@ -645,12 +724,14 @@ function LeafEditor({
   leaf,
   catalog,
   options,
+  kinds,
   onChange,
   onRemove,
 }: {
   leaf: ConditionLeaf
   catalog: RuleCatalog
   options: Record<string, RefOption[]>
+  kinds?: AssetKind[]
   onChange: (leaf: ConditionLeaf) => void
   onRemove: () => void
 }) {
@@ -665,7 +746,7 @@ function LeafEditor({
           </SelectTrigger>
           <SelectContent>
             {catalog.fields.map((f) => {
-              const hint = fieldSourceHint(f)
+              const hint = fieldSourceHint(f, kinds)
               return (
                 <SelectItem key={f.key} value={f.key}>
                   {f.label}
@@ -874,15 +955,19 @@ function ActionsEditor({
   draft,
   catalog,
   options,
+  lookups,
+  can,
   onChange,
 }: {
   draft: RuleDraft
   catalog: RuleCatalog
   options: Record<string, RefOption[]>
+  lookups: Lookups
+  can: (p: string) => boolean
   onChange: (actions: RuleAction[]) => void
 }) {
-  const used = new Set(draft.actions.map((a) => a.key))
-  const available = catalog.actions.filter((a) => !used.has(a.key) && a.asset_kinds.some((k) => draft.asset_kinds.includes(k)))
+  const withChildren = draft.asset_kinds.includes('child')
+  const available = pickableActions(catalog, draft.asset_kinds, draft.actions.map((a) => a.key))
   const ordered = [...draft.actions].sort((a, b) => (a.key === 'decision' ? -1 : b.key === 'decision' ? 1 : 0))
   const set = (key: string, next: RuleAction) => onChange(draft.actions.map((a) => (a.key === key ? next : a)))
   const issues = actionProblems(draft, catalog)
@@ -894,6 +979,8 @@ function ActionsEditor({
         {ordered.map((a) => {
           const spec = catalog.actions.find((s) => s.key === a.key)
           const notApplicable = spec && !spec.asset_kinds.some((k) => draft.asset_kinds.includes(k))
+          const notForChildren = !!spec && !notApplicable && withChildren && !spec.asset_kinds.includes('child')
+          const missing = spec ? activationPermissions([a], draft.asset_kinds, catalog).filter((p) => !can(p)) : []
           return (
             <div key={a.key} className={cn('rounded-md border bg-surface p-3', a.key === 'decision' ? 'border-primary/40 lg:col-span-2' : 'border-border')}>
               <div className="mb-2 flex items-start justify-between gap-2">
@@ -901,8 +988,14 @@ function ActionsEditor({
                   <div className="text-sm font-medium">{spec?.label ?? a.key}</div>
                   {spec?.help && <div className="text-xs text-muted">{spec.help}</div>}
                   {notApplicable && (
+                    <div className="text-xs text-warning-fg">Applies to {kindsPhrase(spec!.asset_kinds)} only.</div>
+                  )}
+                  {notForChildren && (
+                    <div className="text-xs text-muted">Not applied to controller-managed switches and access points.</div>
+                  )}
+                  {missing.length > 0 && (
                     <div className="text-xs text-warning-fg">
-                      Applies to {spec!.asset_kinds.map((k) => (k === 'device' ? 'network devices' : 'servers')).join(' and ')} only.
+                      Activating needs {missing.join(', ')}, which your role lacks.
                     </div>
                   )}
                 </div>
@@ -917,7 +1010,7 @@ function ActionsEditor({
                 </Button>
               </div>
               {spec ? (
-                <ActionValue action={a} spec={spec} catalog={catalog} options={options} onChange={(next) => set(a.key, next)} />
+                <ActionValue action={a} spec={spec} catalog={catalog} options={options} lookups={lookups} onChange={(next) => set(a.key, next)} />
               ) : (
                 <div className="text-xs text-muted">{summarizeAction(a)}</div>
               )}
@@ -925,6 +1018,12 @@ function ActionsEditor({
           )
         })}
       </div>
+      {withChildren && (
+        <div className="text-xs text-muted">
+          This rule includes controller-managed switches and access points, so only the actions that apply to them are
+          offered.
+        </div>
+      )}
       {available.length > 0 && (
         <Select value="" onValueChange={(key) => {
           const spec = catalog.actions.find((s) => s.key === key)
@@ -958,14 +1057,19 @@ function ActionValue({
   spec,
   catalog,
   options,
+  lookups,
   onChange,
 }: {
   action: RuleAction
   spec: CatalogAction
   catalog: RuleCatalog
   options: Record<string, RefOption[]>
+  lookups: Lookups
   onChange: (a: RuleAction) => void
 }) {
+  if (spec.source === 'devices' || spec.key === 'dependency_parent') {
+    return <DevicePicker value={action.value || ''} lookups={lookups} label={spec.label} onChange={(v) => onChange({ ...action, value: v })} />
+  }
   switch (spec.value) {
     case 'decision':
       return (
@@ -1015,7 +1119,12 @@ function ActionValue({
           </SelectContent>
         </Select>
       ) : (
-        <Input aria-label={spec.label} value={action.value ?? ''} placeholder="Id (the list could not be loaded)" onChange={(e) => onChange({ ...action, value: e.target.value.trim() })} />
+        <div className="space-y-1">
+          <Input aria-label={spec.label} value={action.value ?? ''} placeholder="Id (the list could not be loaded)" onChange={(e) => onChange({ ...action, value: e.target.value.trim() })} />
+          {spec.source === 'manual_maps' && (
+            <div className="text-2xs text-muted">No network map could be listed: create one under Network Maps, or ask for map access.</div>
+          )}
+        </div>
       )
     }
     case 'int':

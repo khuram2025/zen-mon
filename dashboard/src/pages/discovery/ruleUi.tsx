@@ -1,14 +1,23 @@
-// Shared pieces of the Discovery rules UI: catalog and reference lookups, mode/decision chips and the "why" popover.
-import { useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { HelpCircle } from 'lucide-react'
+// Shared pieces of the Discovery rules UI: catalog and reference lookups, mode/decision chips, the "why" popover and
+// the table of planned changes (run preview and approval review).
+import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { useQueries, useQuery } from '@tanstack/react-query'
+import { HelpCircle, Search, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Badge } from '@/components/ui/Badge'
+import { Input } from '@/components/ui/Input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover'
+import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { cn } from '@/lib/utils'
 import { discoveryApi, rulesApi } from './api'
-import type { RuleCatalog, RuleMode, RulePlan } from './types'
+import type { InventoryChange, RuleCatalog, RuleMode, RulePlan } from './types'
 import {
+  CHANGE_OUTCOME_LABEL,
+  CHANGE_OUTCOME_TONE,
+  assetPath,
+  proposedText,
+  settingLabel,
   DECISION_LABEL,
   IMPORT_AS_LABEL,
   Lookups,
@@ -48,6 +57,8 @@ export function useRuleLookups(enabled = true): { lookups: Lookups; options: Rec
   const templates = useQuery<any>({ queryKey: ['snmp-profiles'], queryFn: async () => (await api.get('/snmp/profiles')).data, ...opts })
   const creds = useQuery<any>({ queryKey: ['snmp-credentials'], queryFn: async () => (await api.get('/snmp-credentials')).data, ...opts })
   const profiles = useQuery<any>({ queryKey: ['discovery', 'profiles'], queryFn: discoveryApi.listProfiles, ...opts })
+  // Network maps (the "Add to network map" action); GET /maps never returns background images.
+  const maps = useQuery<any>({ queryKey: ['manual-maps'], queryFn: async () => (await api.get('/maps')).data, ...opts })
   return useMemo(() => {
     const options: Record<string, RefOption[]> = {
       // A rule sets a device's own group: static groups only (migrate-192).
@@ -55,13 +66,41 @@ export function useRuleLookups(enabled = true): { lookups: Lookups; options: Rec
       device_profiles: asOptions(templates.data),
       snmp_credentials: asOptions(creds.data),
       discovery_profiles: asOptions(profiles.data),
+      manual_maps: asOptions(maps.data),
     }
     const lookups: Lookups = {}
     for (const [source, list] of Object.entries(options)) {
       lookups[source] = Object.fromEntries(list.map((o) => [o.id, o.name]))
     }
     return { lookups, options }
-  }, [groups.data, templates.data, creds.data, profiles.data])
+  }, [groups.data, templates.data, creds.data, profiles.data, maps.data])
+}
+
+/**
+ * `lookups` plus the names of the given devices (uplink parents of the "Depends on" action), each read with
+ * GET /devices/{id}; a device the viewer cannot see keeps its short id.
+ */
+export function useWithDeviceNames(lookups: Lookups, ids: string[]): Lookups {
+  const results = useQueries({
+    queries: ids.map((id) => ({
+      queryKey: ['device', id, 'name'],
+      queryFn: async () => (await api.get(`/devices/${id}`)).data as { id: string; hostname?: string; ip_address?: string },
+      retry: false,
+      staleTime: 5 * 60_000,
+    })),
+  })
+  const names = results.map((r) => (r.data ? r.data.hostname || r.data.ip_address || '' : '')).join('|')
+  return useMemo(() => {
+    if (!ids.length) return lookups
+    const devices: Record<string, string> = { ...(lookups.devices || {}) }
+    ids.forEach((id, i) => {
+      const d = results[i]?.data
+      const name = d?.hostname || d?.ip_address
+      if (name) devices[id] = name
+    })
+    return { ...lookups, devices }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookups, ids.join(','), names])
 }
 
 export function ModeBadge({ mode }: { mode: RuleMode }) {
@@ -177,5 +216,164 @@ export function PlanWhy({ plan, catalog, lookups, label = 'Why' }: { plan: RuleP
         <PlanDetails plan={plan} catalog={catalog} lookups={lookups} />
       </PopoverContent>
     </Popover>
+  )
+}
+
+/**
+ * Planned changes on devices, servers and controller-managed children: asset, setting, current → new (or the revert),
+ * rule and outcome. Used by Run on inventory's preview and by the review of a run waiting for approval.
+ */
+export function ChangesTable({
+  changes,
+  catalog,
+  lookups,
+}: {
+  changes: InventoryChange[]
+  catalog: RuleCatalog | null | undefined
+  lookups?: Lookups
+}) {
+  return (
+    <div className="rounded-md border border-border">
+      <Table>
+        <THead className="bg-surface2/50">
+          <Tr>
+            <Th>Asset</Th>
+            <Th>Setting</Th>
+            <Th>Current → new</Th>
+            <Th>Rule</Th>
+            <Th>Outcome</Th>
+          </Tr>
+        </THead>
+        <TBody>
+          {changes.map((c, i) => {
+            const href = assetPath(c.asset_kind, c.asset_id)
+            const kindWord = c.asset_kind === 'server' ? 'server' : c.asset_kind === 'child' ? 'managed switch / AP' : ''
+            return (
+              <Tr key={`${c.asset_kind}:${c.asset_id}:${c.action_key}:${c.item_key}:${i}`}>
+                <Td className="text-xs">
+                  {href ? (
+                    <Link to={href} className="font-medium text-primary hover:underline">
+                      {c.asset_name || c.ip_address || c.asset_id.slice(0, 8)}
+                    </Link>
+                  ) : (
+                    c.asset_name || '—'
+                  )}
+                  <div className="text-2xs text-muted">
+                    {c.ip_address && <span className="font-mono">{c.ip_address}</span>}
+                    {kindWord ? `${c.ip_address ? ' · ' : ''}${kindWord}` : ''}
+                  </div>
+                </Td>
+                <Td className="text-xs">{settingLabel(c.action_key, catalog)}</Td>
+                <Td className={cn('text-xs', c.outcome === 'revert' && 'text-warning-fg')}>{proposedText(c, lookups)}</Td>
+                <Td className="text-xs">
+                  {c.rule_id ? (
+                    <Link to={`/discovery/rules/${c.rule_id}`} className="hover:underline">
+                      {c.rule_name || c.rule_id.slice(0, 8)}
+                    </Link>
+                  ) : (
+                    c.rule_name || '—'
+                  )}
+                </Td>
+                <Td>
+                  <Badge variant={(CHANGE_OUTCOME_TONE as Record<string, string>)[c.outcome] as any ?? 'default'} className="whitespace-nowrap">
+                    {(CHANGE_OUTCOME_LABEL as Record<string, string>)[c.outcome] ?? c.outcome}
+                  </Badge>
+                  {c.detail && <div className="mt-0.5 max-w-xs text-2xs text-muted">{c.detail}</div>}
+                </Td>
+              </Tr>
+            )
+          })}
+        </TBody>
+      </Table>
+    </div>
+  )
+}
+
+/**
+ * Pick one device by searching the device list (GET /devices?search=), for the "Depends on (uplink parent)" action.
+ * Only ids are stored; the chosen device's name comes from `lookups.devices`.
+ */
+export function DevicePicker({
+  value,
+  lookups,
+  onChange,
+  label = 'Device',
+}: {
+  value: string
+  lookups: Lookups
+  onChange: (id: string) => void
+  label?: string
+}) {
+  const [q, setQ] = useState('')
+  const [open, setOpen] = useState(!value)
+  const search = q.trim()
+  const { data: found = [], isFetching, error } = useQuery<{ id: string; hostname?: string; ip_address?: string; device_type?: string }[]>({
+    queryKey: ['discovery', 'rules', 'device-search', search],
+    queryFn: async () => (await api.get('/devices', { params: { limit: 20, ...(search ? { search } : {}) } })).data?.data ?? [],
+    enabled: open,
+    retry: false,
+    staleTime: 30_000,
+  })
+  const name = value ? lookups.devices?.[value.toLowerCase()] || lookups.devices?.[value] : ''
+  return (
+    <div className="space-y-1.5">
+      {value && (
+        <div className="flex items-center gap-2 text-sm">
+          <Link to={`/devices/${value}`} className="font-medium text-primary hover:underline">
+            {name || `${value.slice(0, 8)}…`}
+          </Link>
+          <button type="button" className="text-xs text-muted hover:text-text" onClick={() => setOpen(!open)}>
+            {open ? 'Close search' : 'Change'}
+          </button>
+          <button type="button" className="text-muted hover:text-danger" title="Clear" aria-label="Clear the device" onClick={() => { onChange(''); setOpen(true) }}>
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+      {open && (
+        <>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+            <Input
+              aria-label={`Search ${label.toLowerCase()}`}
+              className="pl-8"
+              placeholder="Search by name or IP address"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+          <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-surface">
+            {error ? (
+              <div className="px-3 py-2 text-xs text-muted">The device list could not be loaded.</div>
+            ) : found.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted">{isFetching ? 'Searching…' : 'No device matches.'}</div>
+            ) : (
+              <ul className="divide-y divide-border/60">
+                {found.map((d) => (
+                  <li key={d.id}>
+                    <button
+                      type="button"
+                      className={cn(
+                        'flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-sm hover:bg-surface2',
+                        d.id === value && 'bg-primary/10',
+                      )}
+                      onClick={() => {
+                        onChange(d.id)
+                        setOpen(false)
+                        setQ('')
+                      }}
+                    >
+                      <span className="font-medium">{d.hostname || d.ip_address || d.id.slice(0, 8)}</span>
+                      {d.ip_address && <span className="font-mono text-2xs text-muted">{d.ip_address}</span>}
+                      {d.device_type && <span className="ml-auto text-2xs text-muted">{d.device_type.replace(/_/g, ' ')}</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </div>
   )
 }

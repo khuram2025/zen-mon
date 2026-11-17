@@ -39,14 +39,14 @@ ACTIONS: dict[str, ActionSpec] = {a.key: a for a in (
                help="Auto-import, keep for review, or ignore. Auto-import and ignore only happen on "
                     "profiles whose import mode allows them; otherwise the result shows what the rule "
                     "would do."),
-    ActionSpec("group", "Device group", "single", "ref", ("devices.manage",), ("device",),
+    ActionSpec("group", "Device group", "single", "ref", ("devices.manage",), ("device", "child"),
                source="device_groups"),
     ActionSpec("template", "Monitoring template", "single", "ref", ("devices.manage",), ("device",),
                source="device_profiles"),
     ActionSpec("device_type", "Device type", "single", "text", ("devices.manage",), ("device",),
                help="router, switch, firewall, access_point, load_balancer, wireless_controller, "
                     "printer, ups, storage, server or other"),
-    ActionSpec("location", "Location", "single", "text", ("devices.manage",), ("device",)),
+    ActionSpec("location", "Location", "single", "text", ("devices.manage",), ("device", "child")),
     ActionSpec("snmp_credential", "SNMP credential", "single", "ref", ("devices.manage",), ("device",),
                source="snmp_credentials",
                help="Stored credential, referenced by id; no secret is copied into the rule."),
@@ -54,13 +54,21 @@ ACTIONS: dict[str, ActionSpec] = {a.key: a for a in (
                min=10, max=3600),
     ActionSpec("snmp_interval", "SNMP poll interval (seconds)", "single", "int", ("devices.manage",),
                ("device",), min=30, max=3600),
-    ActionSpec("owner", "Owner", "single", "text", ("devices.manage",), ("device", "server"),
+    ActionSpec("owner", "Owner", "single", "text", ("devices.manage",), ("device", "server", "child"),
                help="Owner of the device or server (free text)."),
     ActionSpec("environment", "Server environment", "single", "text", ("servers.manage",), ("server",),
                help="production, staging, development, ..."),
     ActionSpec("ping_enabled", "Turn ping monitoring on", "single", "on", ("devices.manage",), ("device",),
                help="Only turns ping on; a rule never turns monitoring off."),
-    ActionSpec("tags", "Add tags", "additive", "tags", ("devices.manage",), ("device", "server"),
+    ActionSpec("map", "Add to network map", "additive", "ref", ("maps.manage",), ("device", "server", "child"),
+               source="manual_maps",
+               help="Places the device or server on the map (bottom row, to be arranged); never removes nodes "
+                    "an operator placed."),
+    ActionSpec("dependency_parent", "Depends on (uplink parent)", "single", "ref", ("devices.manage",),
+               ("device",), source="devices",
+               help="Adds an uplink dependency on this device, so alerts are suppressed while it is down. "
+                    "Existing dependencies are kept."),
+    ActionSpec("tags", "Add tags", "additive", "tags", ("devices.manage",), ("device", "server", "child"),
                help="Tags from every matching rule are merged. A tag is how a new device becomes "
                     "visible to a team whose view is limited by tags."),
 )}
@@ -177,8 +185,11 @@ def permissions_needed(actions: list[dict], asset_kinds: list[str] | None = None
                 # ("device") needs only the device permissions.
                 needed.add("servers.manage")
             continue
+        if spec.key == "map":
+            needed.update(spec.permission)
+            continue
         applies = kinds & set(spec.asset_kinds)
-        if "device" in applies:
+        if applies & {"device", "child"}:
             needed.update(p for p in spec.permission if p != "servers.manage")
         if "server" in applies:
             needed.add("servers.manage")

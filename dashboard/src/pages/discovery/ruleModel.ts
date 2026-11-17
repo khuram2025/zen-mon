@@ -12,8 +12,12 @@ import type {
   EngineRun,
   Enforcement,
   FieldSource,
+  ApprovalResult,
+  EngineRunStatus,
   InventoryApplyResult,
+  InventoryChange,
   InventorySummary,
+  OnUnmatch,
   InventoryTargets,
   RuleTrigger,
   UndoResult,
@@ -55,6 +59,7 @@ export function defaultRule(): RuleDraft {
     stop_processing: false,
     triggers: ['discovery'],
     enforcement: 'set_once',
+    on_unmatch: 'keep',
   }
 }
 
@@ -315,7 +320,12 @@ const ACTION_SOURCE: Record<string, string> = {
   group: 'device_groups',
   template: 'device_profiles',
   snmp_credential: 'snmp_credentials',
+  map: 'manual_maps',
+  dependency_parent: 'devices',
 }
+
+/** Actions whose value is one of a set (map placements, uplink parents): only ever added, like tags. */
+export const SET_ACTION_KEYS = new Set(['tags', 'map', 'dependency_parent'])
 
 export function summarizeAction(action: RuleAction, lookups?: Lookups, catalog?: RuleCatalog | null): string {
   const v = action.value
@@ -334,6 +344,8 @@ export function summarizeAction(action: RuleAction, lookups?: Lookups, catalog?:
     case 'snmp_interval': return `SNMP poll every ${v} s`
     case 'device_type': return `Type: ${v}`
     case 'location': return `Location: ${v}`
+    case 'map': return `Map: ${refName(lookups, ACTION_SOURCE.map, v)}`
+    case 'dependency_parent': return `Depends on: ${refName(lookups, ACTION_SOURCE.dependency_parent, v)}`
     default: {
       const spec = catalog?.actions.find((a) => a.key === action.key)
       const shown = Array.isArray(v) ? v.join(', ') : spec?.source ? refName(lookups, spec.source, v) : String(v ?? '')
@@ -374,7 +386,7 @@ export function actionProblems(draft: Pick<RuleDraft, 'actions' | 'asset_kinds'>
     seen.add(a.key)
     if (!spec) continue
     if (!spec.asset_kinds.some((k) => draft.asset_kinds.includes(k))) {
-      out.push(`${label} applies to ${spec.asset_kinds.map((k) => (k === 'device' ? 'network devices' : 'servers')).join(' and ')} only`)
+      out.push(`${label} applies to ${kindsPhrase(spec.asset_kinds)} only`)
     }
     if (spec.value === 'tags' && (!Array.isArray(a.value) || a.value.length === 0)) out.push(`${label}: give at least one tag`)
     if ((spec.value === 'ref' || spec.value === 'text') && String(a.value ?? '').trim() === '') out.push(`${label}: choose a value`)
@@ -392,8 +404,8 @@ export function actionProblems(draft: Pick<RuleDraft, 'actions' | 'asset_kinds'>
 export function ruleProblems(draft: RuleDraft, catalog: RuleCatalog | null | undefined): string[] {
   const out: string[] = []
   if (!draft.name.trim()) out.push('Give the rule a name')
-  if (!draft.asset_kinds.length) out.push('Choose network devices, servers or both')
-  if (draft.triggers && !draft.triggers.length) out.push('Choose when the rule runs: on scan results, on new devices and servers, or both')
+  if (!draft.asset_kinds.length) out.push('Choose what the rule looks at: network devices, servers or controller-managed children')
+  if (draft.triggers && !draft.triggers.length) out.push('Choose when the rule runs: on scan results, on new devices and servers, or whenever they change')
   return [...out, ...conditionProblems(draft.condition, catalog, catalog?.limits ?? DEFAULT_LIMITS), ...actionProblems(draft, catalog)]
 }
 
@@ -569,8 +581,50 @@ export const IMPORT_MODE_TEXT: Record<string, { label: string; desc: string }> =
 export const TRIGGER_LABEL: Record<RuleTrigger, string> = {
   discovery: 'Discovery scan results',
   created: 'Devices and servers when they are added',
+  changed: 'Devices and servers whenever they change (and when the rule changes)',
 }
-const TRIGGER_SHORT: Record<string, string> = { discovery: 'scans', created: 'new devices and servers' }
+const TRIGGER_SHORT: Record<string, string> = { discovery: 'scans', created: 'new devices and servers', changed: 'changes' }
+
+/** When an asset stops matching (phase 3). */
+export const ON_UNMATCH_LABEL: Record<OnUnmatch, string> = {
+  keep: 'Keep the values the rule set',
+  revert: 'Revert them to what they were (if unchanged since)',
+}
+export const ON_UNMATCH_HELP =
+  'Applies to automatic re-checks (the “whenever they change” trigger) and to manual runs on inventory.'
+
+/** Asset kinds (phase 3 adds controller-managed FortiSwitches and FortiAPs). */
+export const ASSET_KIND_ORDER: AssetKind[] = ['device', 'server', 'child']
+export const ASSET_KIND_LABEL: Record<AssetKind, string> = {
+  device: 'Network devices',
+  server: 'Servers',
+  child: 'Controller-managed switches and access points',
+}
+/** Short form for list lines ("Network devices + Managed switches / APs"). */
+export const ASSET_KIND_SHORT: Record<AssetKind, string> = {
+  device: 'Network devices',
+  server: 'Servers',
+  child: 'Managed switches / APs',
+}
+const KIND_PLURAL: Record<string, string> = { device: 'network devices', server: 'servers', child: 'controller-managed children' }
+
+/** "network devices and servers", "controller-managed children" (an action's reach, in a sentence). */
+export function kindsPhrase(kinds: string[]): string {
+  return joinWords(kinds.map((k) => KIND_PLURAL[k] ?? k), 'and')
+}
+
+/**
+ * Actions the editor offers for a rule on these kinds. A rule that includes controller-managed children is offered
+ * only the actions that apply to children (group, location, owner, tags, map); otherwise every action that applies
+ * to one of its kinds. Actions already on the rule are left out.
+ */
+export function pickableActions(catalog: RuleCatalog | null | undefined, kinds: AssetKind[], used: Iterable<string> = []): CatalogAction[] {
+  const taken = new Set(used)
+  const withChildren = kinds.includes('child')
+  return (catalog?.actions ?? []).filter(
+    (a) => !taken.has(a.key) && (withChildren ? a.asset_kinds.includes('child') : a.asset_kinds.some((k) => kinds.includes(k))),
+  )
+}
 
 export const ENFORCEMENT_LABEL: Record<Enforcement, string> = { set_once: 'Set once', enforce: 'Enforce' }
 export const ENFORCEMENT_HELP: Record<Enforcement, string> = {
@@ -579,22 +633,30 @@ export const ENFORCEMENT_HELP: Record<Enforcement, string> = {
 }
 
 /** "Runs on scans and new devices and servers · set once" (rule list line). */
-export function ruleRunsText(rule: { triggers?: string[] | null; enforcement?: string | null }): string {
+export function ruleRunsText(rule: { triggers?: string[] | null; enforcement?: string | null; on_unmatch?: string | null }): string {
   const t = (rule.triggers?.length ? rule.triggers : ['discovery']).map((k) => TRIGGER_SHORT[k] ?? k)
   const enf = rule.enforcement === 'enforce' ? 'enforced' : 'set once'
-  return `runs on ${joinWords(t, 'and')} · ${enf}`
+  const unmatch = rule.on_unmatch === 'revert' ? ' · reverts when no longer matching' : ''
+  return `runs on ${joinWords(t, 'and')} · ${enf}${unmatch}`
 }
 
-const SOURCE_WORD: Record<FieldSource, string> = { scan: 'scans', device: 'devices', server: 'servers' }
+const SOURCE_WORD: Record<FieldSource, string> = { scan: 'scans', device: 'devices', server: 'servers', child: 'children' }
 
 /**
  * Where a condition field has a value, as a short hint for the field picker: "" when it is known everywhere,
- * "scan only", "devices only", "devices and servers". A catalog without applies_to (phase 1 API) means scans only.
+ * "scan only", "devices only", "devices and servers", "children only". A catalog without applies_to (phase 1 API)
+ * means scans only. Controller-managed children count only for a rule that includes them (`kinds`): then a field
+ * known everywhere but on children says "not children".
  */
-export function fieldSourceHint(field: Pick<CatalogField, 'applies_to'> | undefined): string {
-  const src = field?.applies_to ?? ['scan']
-  if (src.length === 0) return ''
-  if (src.length >= 3) return ''
+export function fieldSourceHint(field: Pick<CatalogField, 'applies_to'> | undefined, kinds?: AssetKind[]): string {
+  const withChildren = !!kinds?.includes('child')
+  const universe: FieldSource[] = withChildren ? ['scan', 'device', 'server', 'child'] : ['scan', 'device', 'server']
+  const all = field?.applies_to ?? ['scan']
+  if (all.length === 0) return ''
+  const inUniverse = all.filter((k) => universe.includes(k))
+  const src = inUniverse.length ? inUniverse : all
+  if (universe.every((k) => src.includes(k))) return ''
+  if (withChildren && src.length === 3 && !src.includes('child')) return 'not children'
   if (src.length === 1) return src[0] === 'scan' ? 'scan only' : `${SOURCE_WORD[src[0]]} only`
   return joinWords(src.map((k) => SOURCE_WORD[k] ?? k), 'and')
 }
@@ -611,8 +673,13 @@ export function activationPermissions(actions: RuleAction[], assetKinds: AssetKi
       if (a.import_as === 'server' || a.import_as === 'both' || a.import_as === 'auto') needed.add('servers.manage')
       continue
     }
+    if (spec.key === 'map') {
+      // Placing an asset on a map is a map edit, whatever the asset.
+      spec.permission.forEach((p) => needed.add(p))
+      continue
+    }
     const applies = spec.asset_kinds.filter((k) => kinds.has(k))
-    if (applies.includes('device')) spec.permission.filter((p) => p !== 'servers.manage').forEach((p) => needed.add(p))
+    if (applies.includes('device') || applies.includes('child')) spec.permission.filter((p) => p !== 'servers.manage').forEach((p) => needed.add(p))
     if (applies.includes('server')) needed.add('servers.manage')
   }
   return Array.from(needed).sort()
@@ -622,43 +689,64 @@ export function activationPermissions(actions: RuleAction[], assetKinds: AssetKi
 
 export const CHANGE_OUTCOME_LABEL: Record<ChangeOutcome, string> = {
   apply: 'Will change',
+  revert: 'Revert',
   kept_manual_edit: 'Hand edit kept',
   not_reversible: 'Left alone',
 }
 export const CHANGE_OUTCOME_TONE: Record<ChangeOutcome, Tone> = {
   apply: 'success',
+  revert: 'warning',
   kept_manual_edit: 'info',
   not_reversible: 'warning',
 }
+export const CHANGE_OUTCOME_ORDER: ChangeOutcome[] = ['apply', 'revert', 'kept_manual_edit', 'not_reversible']
 
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`
 }
 
 function kindNoun(kinds: AssetKind[] | undefined, n: number): string {
-  const k = new Set(kinds?.length ? kinds : ['device', 'server'])
-  if (k.has('device') && !k.has('server')) return n === 1 ? 'device' : 'devices'
-  if (k.has('server') && !k.has('device')) return n === 1 ? 'server' : 'servers'
+  const k = new Set<AssetKind>(kinds?.length ? kinds : ['device', 'server'])
+  // Controller-managed children are devices too.
+  const dev = k.has('device') || k.has('child')
+  if (dev && !k.has('server')) return n === 1 ? 'device' : 'devices'
+  if (k.has('server') && !dev) return n === 1 ? 'server' : 'servers'
   return n === 1 ? 'device or server' : 'devices and servers'
 }
 
-/** "42 devices and servers match; 17 values would change on 9 assets; 3 hand edits kept" */
+/** "42 devices and servers match; 17 values would change and 2 would revert on 9 assets; 3 hand edits kept" */
 export function summarizeInventoryPreview(summary: Partial<InventorySummary>, kinds?: AssetKind[]): string {
   const matched = Number(summary.matched ?? 0)
   const changes = Number(summary.changes ?? 0)
+  const reverts = Number(summary.reverts ?? 0)
   const assets = Number(summary.assets_changed ?? 0)
   const kept = Number(summary.kept_manual_edit ?? 0)
   const notRev = Number(summary.not_reversible ?? 0)
   const parts = [`${matched} ${kindNoun(kinds, matched)} ${matched === 1 ? 'matches' : 'match'}`]
-  parts.push(changes ? `${plural(changes, 'value')} would change on ${plural(assets, 'asset')}` : 'nothing would change')
+  const on = `on ${plural(assets, 'asset')}`
+  if (changes && reverts) parts.push(`${plural(changes, 'value')} would change and ${reverts} would revert ${on}`)
+  else if (changes) parts.push(`${plural(changes, 'value')} would change ${on}`)
+  else if (reverts) parts.push(`${plural(reverts, 'value')} would revert ${on}`)
+  else parts.push('nothing would change')
   if (kept) parts.push(`${plural(kept, 'hand edit')} kept`)
   if (notRev) parts.push(`${notRev} left alone (not reversible)`)
   return parts.join('; ')
 }
 
-/** "Changed 17 values · 3 hand edits kept · 1 skipped (changed since the preview)" */
+/** The apply dialog's sentence: "17 values will change and 2 will be reverted on 9 devices and servers." */
+export function applyConfirmText(summary: Partial<InventorySummary>): string {
+  const changes = Number(summary.changes ?? 0)
+  const reverts = Number(summary.reverts ?? 0)
+  const on = `on ${plural(Number(summary.assets_changed ?? 0), 'device or server', 'devices and servers')}`
+  if (changes && reverts) return `${sentenceCase(plural(changes, 'value'))} will change and ${reverts} will be reverted ${on}.`
+  if (reverts) return `${sentenceCase(plural(reverts, 'value'))} will be reverted ${on}.`
+  return `${sentenceCase(plural(changes, 'value'))} will change ${on}.`
+}
+
+/** "Changed 17 values · reverted 2 · 3 hand edits kept · 1 skipped (changed since the preview)" */
 export function summarizeApplyResult(r: Partial<InventoryApplyResult>): string {
   const parts = [`Changed ${plural(Number(r.applied ?? 0), 'value')}`]
+  if (r.reverted) parts.push(`reverted ${r.reverted}`)
   if (r.kept_manual_edit) parts.push(`${plural(r.kept_manual_edit, 'hand edit')} kept`)
   if (r.not_reversible) parts.push(`${r.not_reversible} left alone (not reversible)`)
   if (r.skipped_changed) parts.push(`${r.skipped_changed} skipped (changed since the preview)`)
@@ -685,20 +773,93 @@ export function runTriggerText(run: Pick<EngineRun, 'trigger' | 'mode' | 'discov
   const what =
     run.trigger === 'discovery' ? 'Scan'
       : run.trigger === 'created' ? 'New device / server'
-        : run.trigger === 'undo' ? 'Undo'
-          : run.discovery_run_id ? 'Re-evaluated' : 'Run on inventory'
+        : run.trigger === 'changed' ? 'Rules re-checked'
+          : run.trigger === 'undo' ? 'Undo'
+            : run.discovery_run_id ? 'Re-evaluated' : 'Run on inventory'
   if (run.trigger === 'undo') return what
   const how = run.mode === 'apply' ? 'apply' : run.mode === 'simulate' ? 'simulate' : 'annotate only'
   return `${what} · ${how}`
 }
 
+/** Second line of the trigger column: why the run happened. */
+export const TRIGGER_REASON: Record<string, string> = {
+  discovery: 'Scan finished',
+  created: 'Asset added',
+  changed: 'Asset or rule changed',
+  manual: 'Started by hand',
+  undo: 'Undo of an earlier run',
+}
+
+export const RUN_STATUS_LABEL: Record<EngineRunStatus, string> = {
+  running: 'Running',
+  completed: 'Completed',
+  partial: 'Partial',
+  failed: 'Failed',
+  undone: 'Undone',
+  needs_approval: 'Waiting for approval',
+  rejected: 'Rejected',
+}
+
+export function runStatusLabel(status: string): string {
+  return (RUN_STATUS_LABEL as Record<string, string>)[status] ?? status.replace(/_/g, ' ')
+}
+
 export function runStatusTone(status: string): Tone {
-  return status === 'completed' ? 'success' : status === 'partial' ? 'warning' : status === 'failed' ? 'danger' : 'outline'
+  return status === 'completed' ? 'success'
+    : status === 'partial' || status === 'needs_approval' ? 'warning'
+      : status === 'failed' ? 'danger' : 'outline'
+}
+
+/** Values an automatic re-check holds for approval: changes plus reverts. */
+export function pendingCount(run: { counts?: Record<string, any> | null }): number {
+  const c = run.counts || {}
+  return Number(c.changes ?? 0) + Number(c.reverts ?? 0)
+}
+
+/** Banner text over the runs that wait: "120 changes wait for approval" (two runs: "… in 2 runs"). */
+export function waitingText(runs: { status: string; counts?: Record<string, any> | null }[]): string | null {
+  const waiting = runs.filter((r) => r.status === 'needs_approval')
+  if (!waiting.length) return null
+  const n = waiting.reduce((sum, r) => sum + pendingCount(r), 0)
+  const verb = n === 1 ? 'waits' : 'wait'
+  return `${plural(n, 'change')} ${verb} for approval${waiting.length > 1 ? ` in ${waiting.length} runs` : ''}`
+}
+
+/** "Applied 118 values · reverted 2 · 3 skipped (changed since the plan)" or "Rejected". */
+export function summarizeApprovalResult(r: Partial<ApprovalResult>): string {
+  if (r.status === 'rejected') return 'Rejected: not proposed again until an asset or a rule changes'
+  const parts = [`Applied ${plural(Number(r.applied ?? 0), 'value')}`]
+  if (r.reverted) parts.push(`reverted ${r.reverted}`)
+  if (r.kept_manual_edit) parts.push(`${plural(r.kept_manual_edit, 'hand edit')} kept`)
+  if (r.not_reversible) parts.push(`${r.not_reversible} left alone (not reversible)`)
+  if (r.skipped_changed) parts.push(`${r.skipped_changed} skipped (changed since the plan)`)
+  return parts.join(' · ')
+}
+
+/** The file name an export downloads as: discovery-rules-2026-11-17.json (local date). */
+export function exportFileName(date: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `discovery-rules-${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}.json`
+}
+
+/** A chosen file's text as an export document, or the reason it is not one (checked again by the API). */
+export function parseRulesFile(text: string): { document: Record<string, any> } | { error: string } {
+  let doc: any
+  try {
+    doc = JSON.parse(text)
+  } catch {
+    return { error: 'The file is not valid JSON.' }
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.format !== 'zenplus-discovery-rules' || !Array.isArray(doc.rules)) {
+    return { error: 'This is not a ZenPlus discovery rules export.' }
+  }
+  return { document: doc }
 }
 
 export function assetPath(kind: string | null | undefined, id: string | null | undefined): string | null {
   if (!id) return null
-  if (kind === 'device') return `/devices/${id}`
+  // A controller-managed child has its own device page.
+  if (kind === 'device' || kind === 'child') return `/devices/${id}`
   if (kind === 'server') return `/servers/${id}`
   return null
 }
@@ -717,17 +878,26 @@ function idList(...values: (string | null)[]): string[] {
 }
 
 /**
- * Pre-selected assets from the run page's address: ?device=<id>, ?devices=<id,id>, ?server=<id>, ?servers=<id,id>.
- * Anything that is not an id is dropped. `kinds` follows what was pre-selected.
+ * Pre-selected assets from the run page's address: ?device=<id>, ?devices=<id,id>, ?server=<id>, ?servers=<id,id>,
+ * ?child=<id>, ?children=<id,id> (controller-managed children). Anything that is not an id is dropped. `kinds`
+ * follows what was pre-selected; nothing pre-selected means devices and servers.
  */
-export function parseRunTargets(search: string | URLSearchParams): { device_ids: string[]; server_ids: string[]; kinds: AssetKind[] } {
+export function parseRunTargets(search: string | URLSearchParams): {
+  device_ids: string[]
+  server_ids: string[]
+  child_ids: string[]
+  kinds: AssetKind[]
+} {
   const p = typeof search === 'string' ? new URLSearchParams(search) : search
   const device_ids = idList(p.get('device'), p.get('devices'))
   const server_ids = idList(p.get('server'), p.get('servers'))
+  const child_ids = idList(p.get('child'), p.get('children'))
+  const any = device_ids.length + server_ids.length + child_ids.length > 0
   const kinds: AssetKind[] = []
-  if (device_ids.length || !server_ids.length) kinds.push('device')
-  if (server_ids.length || !device_ids.length) kinds.push('server')
-  return { device_ids, server_ids, kinds }
+  if (device_ids.length || !any) kinds.push('device')
+  if (server_ids.length || !any) kinds.push('server')
+  if (child_ids.length) kinds.push('child')
+  return { device_ids, server_ids, child_ids, kinds }
 }
 
 /** An IPv4 or IPv6 network in CIDR form ("10.0.0.0/16", "fd00::/8"); the server checks it again. */
@@ -747,6 +917,7 @@ export function buildTargets(f: {
   kinds: AssetKind[]
   device_ids?: string[]
   server_ids?: string[]
+  child_ids?: string[]
   group_ids?: string[]
   tags?: string[]
   subnet?: string
@@ -755,6 +926,7 @@ export function buildTargets(f: {
   const t: InventoryTargets = { kinds: f.kinds }
   if (f.device_ids?.length && f.kinds.includes('device')) t.device_ids = f.device_ids
   if (f.server_ids?.length && f.kinds.includes('server')) t.server_ids = f.server_ids
+  if (f.child_ids?.length && f.kinds.includes('child')) t.child_ids = f.child_ids
   if (f.group_ids?.length) t.group_ids = f.group_ids
   if (f.tags?.length) t.tags = f.tags
   if (f.subnet?.trim()) t.subnet = f.subnet.trim()
@@ -783,6 +955,8 @@ const SETTING_FALLBACK: Record<string, string> = {
   location: 'Location',
   owner: 'Owner',
   environment: 'Environment',
+  map: 'Network map',
+  dependency_parent: 'Depends on (uplink parent)',
 }
 
 /** A setting value for people: group / template / credential names, On / Off, "not set". */
@@ -800,13 +974,51 @@ export function formatSettingValue(actionKey: string | null | undefined, value: 
   return String(value)
 }
 
-/** "Before → after" for a change or a history item (tags show "+ tag"). */
+/** "Before → after" for a change or a history item (tags, maps and uplink parents show "+ added" / "− removed"). */
 export function changeText(actionKey: string | null | undefined, before: any, after: any, lookups?: Lookups): string {
-  if (actionKey === 'tags') {
-    if (before == null && after != null) return `+ ${formatSettingValue('tags', after, lookups)}`
-    if (after == null && before != null) return `− ${formatSettingValue('tags', before, lookups)}`
+  if (actionKey && SET_ACTION_KEYS.has(actionKey)) {
+    if (before == null && after != null) return `+ ${formatSettingValue(actionKey, after, lookups)}`
+    if (after == null && before != null) return `− ${formatSettingValue(actionKey, before, lookups)}`
   }
   return `${formatSettingValue(actionKey, before, lookups)} → ${formatSettingValue(actionKey, after, lookups)}`
+}
+
+/**
+ * What a planned change does, for the preview and approval tables: "not set → Datacenter firewalls", "+ datacenter",
+ * and for a revert (the asset no longer matches a rule set to revert) "Revert to Branch (now Datacenter)" or, for a
+ * tag, map or uplink parent the rule added, "Remove datacenter".
+ */
+export function proposedText(
+  c: Pick<InventoryChange, 'action_key' | 'item_key' | 'before' | 'after' | 'outcome'>,
+  lookups?: Lookups,
+): string {
+  if (c.outcome !== 'revert') return changeText(c.action_key, c.before, c.after, lookups)
+  if (SET_ACTION_KEYS.has(c.action_key) && c.after == null) {
+    return `Remove ${formatSettingValue(c.action_key, c.before ?? c.item_key, lookups)}`
+  }
+  const now = formatSettingValue(c.action_key, c.before, lookups)
+  return `Revert to ${formatSettingValue(c.action_key, c.after, lookups)} (now ${now})`
+}
+
+/** Where a setting's value opens: a network map, the uplink parent device. */
+export function settingValueLink(actionKey: string | null | undefined, value: unknown): string | null {
+  const id = typeof value === 'string' ? value : value == null ? '' : String(value)
+  if (!id) return null
+  if (actionKey === 'map') return `/maps/manual?map=${encodeURIComponent(id)}`
+  if (actionKey === 'dependency_parent') return `/devices/${encodeURIComponent(id)}`
+  return null
+}
+
+/** Ids of uplink parents named in these actions or changes, so the page can load their device names. */
+export function dependencyIds(items: { key?: string; action_key?: string | null; value?: any; before?: any; after?: any; item_key?: string | null }[]): string[] {
+  const out = new Set<string>()
+  for (const it of items) {
+    if ((it.key ?? it.action_key) !== 'dependency_parent') continue
+    for (const v of [it.value, it.before, it.after, it.item_key]) {
+      if (typeof v === 'string' && v) out.add(v.toLowerCase())
+    }
+  }
+  return Array.from(out).sort()
 }
 
 /** "Datacenter's Device group is overridden by Fortinet firewalls on 12 assets" */

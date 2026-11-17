@@ -392,7 +392,7 @@ def test_settings_round_trip_and_history(pg_db):
         s = c.put("/api/v1/discovery-v2/rules/settings", json={
             "enabled": True, "max_auto_import_per_run": 25, "license_reserve_nodes": 5, "history_days": 90}).json()
         assert s == {"enabled": True, "max_auto_import_per_run": 25, "license_reserve_nodes": 5,
-                     "history_days": 90}
+                     "history_days": 90, "max_changes_per_run": 100}     # phase 3 default
         profile = add_profile(pg_db, mode="review")
         run = add_run(pg_db, profile)
         add_result(pg_db, run, profile, "10.0.0.1")

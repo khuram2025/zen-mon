@@ -37,6 +37,8 @@ from app.models.user import User
 from app.schemas.discovery_rules import (
     EngineSettings,
     EvaluateScanRequest,
+    ImportRequest,
+    StarterRequest,
     InventoryApplyRequest,
     InventoryRunRequest,
     PreviewRequest,
@@ -50,7 +52,7 @@ from app.schemas.discovery_rules import (
 from app.services import tag_service
 from app.services.audit_service import write_audit_log
 from app.services.discovery_rules import actions as rule_actions
-from app.services.discovery_rules import conditions, inventory, runner
+from app.services.discovery_rules import conditions, inventory, portable, reconcile, runner
 from app.services.discovery_rules.facts import ENUM_VALUES, FIELD_SOURCES, FIELDS, REFERENCE_SOURCES
 
 router = APIRouter(prefix="/discovery-v2/rules", tags=["Discovery rules"])
@@ -63,6 +65,8 @@ _REF_TABLES = {
     "device_profiles": "device_profiles",
     "snmp_credentials": "snmp_credentials",
     "discovery_profiles": "discovery_profiles",
+    "devices": "devices",
+    "manual_maps": "manual_maps",
 }
 
 
@@ -80,7 +84,7 @@ def _snapshot(row: DiscoveryEngineRule) -> dict:
         "name": row.name, "description": row.description, "priority": row.priority, "mode": row.mode,
         "asset_kinds": list(row.asset_kinds or []), "profile_ids": [str(p) for p in row.profile_ids or []] or None,
         "condition": row.condition, "actions": row.actions, "stop_processing": row.stop_processing,
-        "triggers": list(row.triggers or []), "enforcement": row.enforcement,
+        "triggers": list(row.triggers or []), "enforcement": row.enforcement, "on_unmatch": row.on_unmatch,
     }
 
 
@@ -136,6 +140,12 @@ async def _normalise(db: AsyncSession, payload) -> tuple[dict, list[dict], list[
     for a in acts:
         if a["key"] == "tags":
             a["value"] = await tag_service.canonicalize_tags(db, a["value"])
+        if a["key"] == "device_type":
+            from app.schemas.snmp import BUILTIN_DEVICE_TYPES
+            known = a["value"] in BUILTIN_DEVICE_TYPES or (await db.execute(
+                text("SELECT 1 FROM device_types WHERE key = :k"), {"k": a["value"]})).first() is not None
+            if not known:
+                raise HTTPException(422, f"Unknown device type '{a['value']}'")
     return condition, acts, profile_ids
 
 
@@ -193,7 +203,12 @@ async def catalog(_user: User = Depends(require_permission("discovery.view"))):
         "modes": [{"key": "draft", "label": "Draft"}, {"key": "simulate", "label": "Simulating"},
                   {"key": "active", "label": "Active"}, {"key": "disabled", "label": "Disabled"}],
         "triggers": [{"key": "discovery", "label": "Discovery scan results"},
-                     {"key": "created", "label": "Devices and servers when they are added"}],
+                     {"key": "created", "label": "Devices and servers when they are added"},
+                     {"key": "changed", "label": "Devices and servers whenever they change (and when the rule changes)"}],
+        "on_unmatch": [{"key": "keep", "label": "Keep the values the rule set"},
+                       {"key": "revert", "label": "Revert them to what they were (if unchanged since)"}],
+        "asset_kinds": [{"key": "device", "label": "Network devices"}, {"key": "server", "label": "Servers"},
+                        {"key": "child", "label": "Controller-managed switches and access points"}],
         "enforcement": [{"key": "set_once", "label": "Set once (keep later hand edits)"},
                         {"key": "enforce", "label": "Enforce (put the rule's value back)"}],
         "limits": {"max_depth": conditions.MAX_DEPTH, "max_leaves": conditions.MAX_LEAVES,
@@ -228,12 +243,9 @@ async def list_rules(db: AsyncSession = Depends(get_db),
     return [_out(r) for r in rows]
 
 
-@router.post("", response_model=RuleOut, status_code=201)
-async def create_rule(payload: RuleCreate, db: AsyncSession = Depends(get_db),
-                      user: User = Depends(require_permission("discovery.manage_rules"))):
-    await _fleet_guard(db, user)
-    if await _name_taken(db, payload.name):
-        raise HTTPException(409, "A rule with this name already exists")
+async def _create(db: AsyncSession, payload: RuleCreate, user: User, *, reason: str = "created",
+                  builtin_key: str | None = None) -> DiscoveryEngineRule:
+    """Validate and insert one rule with its first version (no commit)."""
     condition, acts, profile_ids = await _normalise(db, payload)
     if payload.mode == "active":
         await _check_activation(db, user, acts, list(payload.asset_kinds))
@@ -245,14 +257,24 @@ async def create_rule(payload: RuleCreate, db: AsyncSession = Depends(get_db),
         name=payload.name.strip(), description=payload.description, priority=priority, mode=payload.mode,
         asset_kinds=list(payload.asset_kinds), triggers=list(payload.triggers), profile_ids=profile_ids,
         condition=condition, actions=acts, stop_processing=payload.stop_processing, revision=1,
-        enforcement=payload.enforcement,
+        enforcement=payload.enforcement, on_unmatch=payload.on_unmatch, builtin_key=builtin_key,
         created_by=user.id, updated_by=user.id, created_at=now, updated_at=now,
         activated_by=user.id if payload.mode == "active" else None,
         activated_at=now if payload.mode == "active" else None,
     )
     db.add(row)
     await db.flush()
-    await _record_version(db, row, user, "created")
+    await _record_version(db, row, user, reason)
+    return row
+
+
+@router.post("", response_model=RuleOut, status_code=201)
+async def create_rule(payload: RuleCreate, db: AsyncSession = Depends(get_db),
+                      user: User = Depends(require_permission("discovery.manage_rules"))):
+    await _fleet_guard(db, user)
+    if await _name_taken(db, payload.name):
+        raise HTTPException(409, "A rule with this name already exists")
+    row = await _create(db, payload, user)
     await write_audit_log(db, actor=user, action="discovery.rules.create", resource_type="discovery_rule",
                           resource_id=str(row.id), metadata={"name": row.name, "mode": row.mode,
                                                              "priority": row.priority})
@@ -369,6 +391,8 @@ async def history(limit: int = Query(default=50, ge=1, le=500), discovery_run_id
         "profile_name": names.get(r.discovery_run_id), "rules_revision": r.rules_revision,
         "started_by": str(r.started_by) if r.started_by else None,
         "started_at": r.started_at, "finished_at": r.finished_at, "counts": r.counts or {},
+        "detail": r.detail, "approved_by": str(r.approved_by) if r.approved_by else None,
+        "approved_at": r.approved_at,
     } for r in rows]
 
 
@@ -494,9 +518,9 @@ async def undo(engine_run_id: uuid.UUID, db: AsyncSession = Depends(get_db),
     await _fleet_guard(db, user)
     kinds = [k for (k,) in (await db.execute(text(
         "SELECT DISTINCT asset_kind FROM discovery_engine_run_items WHERE run_id = :r AND outcome = 'applied'"
-        " AND asset_kind IN ('device', 'server')"), {"r": engine_run_id})).all()]
+        " AND asset_kind IN ('device', 'server', 'child')"), {"r": engine_run_id})).all()]
     perms = set(await get_role_permissions(db, user.role))
-    need = {"device": "devices.manage", "server": "servers.manage"}
+    need = {"device": "devices.manage", "child": "devices.manage", "server": "servers.manage"}
     missing = sorted(need[k] for k in kinds if need[k] not in perms)
     if missing and SUPERUSER_PERMISSION not in perms:
         raise HTTPException(403, "Undoing this run needs: " + ", ".join(missing))
@@ -519,9 +543,9 @@ async def explain_asset(kind: str, asset_id: uuid.UUID, db: AsyncSession = Depen
                         user: User = Depends(require_permission("discovery.view", "devices.view", "servers.view"))):
     """Which rules set what on this device or server, hand edits the rules
     kept, rules that match it now and what they would still change."""
-    if kind not in ("device", "server"):
+    if kind not in ("device", "server", "child"):
         raise HTTPException(404, "Unknown asset kind")
-    table = "devices" if kind == "device" else "servers"
+    table = "servers" if kind == "server" else "devices"
     row = (await db.execute(text(f"SELECT tags FROM {table} WHERE id = :id"), {"id": asset_id})).first()
     if row is None or not scoping.entity_visible(row[0], await scoping.visible_tags(db, user)):
         raise HTTPException(404, "Not found")
@@ -541,6 +565,169 @@ async def rule_conflicts(db: AsyncSession = Depends(get_db),
     if not rules:
         return {"assets": 0, "truncated": False, "rules": [], "overridden": [], "never_match": [], "never_win": []}
     return await inventory.conflicts(db, rules)
+
+
+# ── phase 3: approval, export/import, starter rules ─────────────────────────
+
+async def _check_kinds(db: AsyncSession, user: User, kinds, verb: str) -> None:
+    perms = set(await get_role_permissions(db, user.role))
+    if SUPERUSER_PERMISSION in perms:
+        return
+    need = {"device": "devices.manage", "child": "devices.manage", "server": "servers.manage"}
+    missing = sorted({need[k] for k in kinds if k in need and need[k] not in perms})
+    if missing:
+        raise HTTPException(403, f"{verb} needs: " + ", ".join(missing))
+
+
+@router.get("/history/{engine_run_id}/pending")
+async def pending_changes(engine_run_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                          user: User = Depends(require_permission("discovery.view"))):
+    """The changes an automatic run is holding for approval."""
+    run = await db.get(DiscoveryEngineRun, engine_run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    plan = run.plan or {}
+    changes = list(plan.get("changes") or [])
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        ids = {(c["asset_kind"], c["asset_id"]) for c in changes}
+        visible = set()
+        for kind in ("device", "child", "server"):
+            want = [i for k, i in ids if k == kind]
+            if want:
+                table = "servers" if kind == "server" else "devices"
+                for aid, tags in (await db.execute(text(
+                        f"SELECT id::text, tags FROM {table} WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                        {"ids": want})).all():
+                    if scoping.entity_visible(tags, scope):
+                        visible.add((kind, aid))
+        changes = [c for c in changes if (c["asset_kind"], c["asset_id"]) in visible]
+    return {"engine_run_id": str(run.id), "status": run.status, "detail": run.detail, "counts": run.counts or {},
+            "assets": len(plan.get("assets") or []), "changes": changes}
+
+
+async def _decide(engine_run_id, approve: bool, db: AsyncSession, user: User) -> dict:
+    await _fleet_guard(db, user)
+    run = await db.get(DiscoveryEngineRun, engine_run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    kinds = {c.get("asset_kind") for c in (run.plan or {}).get("changes") or []}
+    await _check_kinds(db, user, kinds, "Approving these changes" if approve else "Rejecting these changes")
+    try:
+        out = await reconcile.decide(db, engine_run_id, approve=approve, actor_id=user.id)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from None
+    except reconcile.ApprovalRefused as e:
+        raise HTTPException(409, str(e)) from None
+    await write_audit_log(db, actor=user, action="discovery.rules.approve" if approve else "discovery.rules.reject",
+                          resource_type="discovery_engine_run", resource_id=str(engine_run_id), metadata=out)
+    await db.commit()
+    return out
+
+
+@router.post("/history/{engine_run_id}/approve")
+async def approve_run(engine_run_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                      user: User = Depends(require_permission("discovery.manage_rules"))):
+    """Apply the changes an automatic run held back (each value re-checked first)."""
+    return await _decide(engine_run_id, True, db, user)
+
+
+@router.post("/history/{engine_run_id}/reject")
+async def reject_run(engine_run_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                     user: User = Depends(require_permission("discovery.manage_rules"))):
+    """Discard the held changes; they are not proposed again until an asset or a rule changes."""
+    return await _decide(engine_run_id, False, db, user)
+
+
+@router.get("/export")
+async def export_rules(db: AsyncSession = Depends(get_db),
+                       user: User = Depends(require_permission("discovery.view"))):
+    """Every rule, in order, with references by name (no ids, no secrets)."""
+    rules = await runner.load_rules(db, modes=("draft", "simulate", "active", "disabled"))
+    doc = await portable.export_rules(db, rules)
+    await write_audit_log(db, actor=user, action="discovery.rules.export", resource_type="discovery_rules",
+                          resource_id=None, metadata={"rules": len(rules)})
+    await db.commit()
+    return doc
+
+
+@router.post("/import")
+async def import_rules(payload: ImportRequest, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(require_permission("discovery.manage_rules"))):
+    """Create the file's rules as Drafts, last in the order. A rule whose
+    references do not resolve here, or that is invalid, is skipped and
+    reported; nothing is guessed."""
+    await _fleet_guard(db, user)
+    doc = payload.document
+    if doc.get("format") != portable.FORMAT or not isinstance(doc.get("rules"), list):
+        raise HTTPException(422, "Not a ZenPlus discovery rules export")
+    created, skipped = [], []
+    for raw in doc["rules"][:500]:
+        name = str((raw or {}).get("name") or "")[:150]
+        try:
+            resolved, notes = await portable.resolve_rule(db, raw)
+            fields = {k: v for k, v in resolved.items() if k in RuleCreate.model_fields}
+            body = RuleCreate(**{**fields, "mode": "draft", "position": "last"})
+        except portable.Unresolved as e:
+            skipped.append({"name": name, "reason": str(e)})
+            continue
+        except Exception as e:  # noqa: BLE001 - invalid shape: report, keep going
+            skipped.append({"name": name, "reason": f"invalid rule: {str(e)[:200]}"})
+            continue
+        base, n = body.name.strip(), 1
+        while await _name_taken(db, body.name):
+            n += 1
+            body.name = f"{base} (imported{'' if n == 2 else f' {n - 1}'})"[:150]
+        try:
+            async with db.begin_nested():
+                out = await _create(db, body, user, reason="imported")
+        except HTTPException as e:
+            skipped.append({"name": name, "reason": str(e.detail)})
+            continue
+        created.append({"id": str(out.id), "name": out.name, "notes": notes})
+    await write_audit_log(db, actor=user, action="discovery.rules.import", resource_type="discovery_rules",
+                          resource_id=None, metadata={"created": [c["name"] for c in created], "skipped": skipped})
+    await db.commit()
+    return {"created": created, "skipped": skipped}
+
+
+@router.get("/starter")
+async def starter_rules(db: AsyncSession = Depends(get_db),
+                        _user: User = Depends(require_permission("discovery.view"))):
+    """Starter rules an administrator can add as Drafts."""
+    have = {k for (k,) in (await db.execute(text(
+        "SELECT builtin_key FROM discovery_engine_rules WHERE builtin_key IS NOT NULL"))).all()}
+    return [{"key": s["key"], "name": s["name"], "description": s["description"], "added": s["key"] in have}
+            for s in portable.STARTERS]
+
+
+@router.post("/starter")
+async def add_starter_rules(payload: StarterRequest, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(require_permission("discovery.manage_rules"))):
+    await _fleet_guard(db, user)
+    unknown = [k for k in payload.keys if k not in portable.STARTER_BY_KEY]
+    if unknown:
+        raise HTTPException(422, "Unknown starter rules: " + ", ".join(unknown))
+    have = {k for (k,) in (await db.execute(text(
+        "SELECT builtin_key FROM discovery_engine_rules WHERE builtin_key IS NOT NULL"))).all()}
+    created = []
+    for key in dict.fromkeys(payload.keys):
+        if key in have:
+            continue
+        st = portable.STARTER_BY_KEY[key]
+        body = RuleCreate(name=st["name"], description=st["description"], mode="draft",
+                          asset_kinds=st["asset_kinds"], triggers=st["triggers"], condition=st["condition"],
+                          actions=st["actions"], position="last")
+        base, n = body.name, 1
+        while await _name_taken(db, body.name):
+            n += 1
+            body.name = f"{base} ({n})"
+        out = await _create(db, body, user, reason=f"starter rule {key}", builtin_key=key)
+        created.append({"id": str(out.id), "name": out.name, "key": key})
+    await write_audit_log(db, actor=user, action="discovery.rules.starter", resource_type="discovery_rules",
+                          resource_id=None, metadata={"created": created})
+    await db.commit()
+    return {"created": created}
 
 
 # ── one rule ────────────────────────────────────────────────────────────────
@@ -578,6 +765,7 @@ async def update_rule(rule_id: uuid.UUID, payload: RuleUpdate, db: AsyncSession 
     row.stop_processing = payload.stop_processing
     row.triggers = list(payload.triggers)
     row.enforcement = payload.enforcement
+    row.on_unmatch = payload.on_unmatch
     row.revision = row.revision + 1
     row.updated_by = user.id
     row.updated_at = now
@@ -630,7 +818,8 @@ async def clone_rule(rule_id: uuid.UUID, db: AsyncSession = Depends(get_db),
         name=name[:150], description=src.description, priority=edge + 10, mode="draft",
         asset_kinds=list(src.asset_kinds or ["device"]), triggers=list(src.triggers or ["discovery"]),
         profile_ids=src.profile_ids, condition=src.condition, actions=src.actions,
-        stop_processing=src.stop_processing, enforcement=src.enforcement, revision=1, created_by=user.id,
+        stop_processing=src.stop_processing, enforcement=src.enforcement, on_unmatch=src.on_unmatch,
+        revision=1, created_by=user.id,
         updated_by=user.id,
         created_at=now, updated_at=now,
     )

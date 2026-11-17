@@ -19,6 +19,7 @@ import { inventoryApi } from '@/pages/inventory/api'
 import { Panel } from './charts'
 import { formatRelative, formatSpan } from './format'
 import { OwnerNotesCard } from './OwnerNotesCard'
+import { isManagedChild } from './ControllerChild'
 import { AssetAlertRules } from '@/components/alerts/RuleExclusions'
 import { AssetAutomationBody, useAssetAutomation } from '@/pages/discovery/AssetAutomation'
 import type { DeviceRecord, DeviceSummary, IdentityField } from './types'
@@ -41,7 +42,8 @@ export function ConfigurationTab({ device, summary, onOpenHardware }: { device: 
   })
   const snmp = !!device.snmp_enabled
   // Discovery rules: shown once the explain call answers; a 403 / 404 leaves the card out entirely.
-  const { data: automation } = useAssetAutomation('device', device.id)
+  // A controller-managed FortiSwitch / FortiAP is explained as a child (only the actions children take apply).
+  const { data: automation } = useAssetAutomation(isManagedChild(device) ? 'child' : 'device', device.id)
   const widgets = [
     { id: 'inventory', title: 'Identity and monitoring', width: 6, height: 10, minWidth: 3, minHeight: 4,
       content: <InventoryConfigCard device={device} entities={entities || []} snmpHasData={undefined} identity={summary?.identity} onDetails={onOpenHardware} /> },

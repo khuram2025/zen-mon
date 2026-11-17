@@ -49,6 +49,7 @@ def evaluate(facts: dict, rules: Iterable[dict], *, trigger: str = "discovery",
     kind = kind or asset_kind_of(facts)
     settings: dict[str, dict] = {}
     tags: list[dict] = []
+    additive: dict[str, list[dict]] = {}
     shadowed: list[dict] = []
     matched: list[dict] = []
     trace: list[dict] = []
@@ -75,12 +76,21 @@ def evaluate(facts: dict, rules: Iterable[dict], *, trigger: str = "discovery",
             spec = ACTIONS.get(key)
             if spec is None or kind not in spec.asset_kinds:
                 continue
-            if spec.kind == "additive":
+            if spec.kind == "additive" and key == "tags":
                 have = {t["value"].lower() for t in tags}
                 for value in action["value"]:
                     if value.lower() not in have:
                         tags.append({"value": value, **ref})
                         have.add(value.lower())
+                continue
+            if spec.kind == "additive":
+                # other additive actions (network maps): one entry per value,
+                # merged across matching rules
+                lst = additive.setdefault(key, [])
+                values = action["value"] if isinstance(action["value"], list) else [action["value"]]
+                for value in values:
+                    if str(value).lower() not in {str(e["value"]).lower() for e in lst}:
+                        lst.append({"value": value, **ref})
                 continue
             entry = {"value": action["value"], **ref}
             if "import_as" in action:
@@ -100,6 +110,7 @@ def evaluate(facts: dict, rules: Iterable[dict], *, trigger: str = "discovery",
         "matched": matched,
         "settings": settings,
         "tags": tags,
+        "additive": additive,
         "shadowed": shadowed,
         "stopped_by": stopped_by,
         "trace": trace,

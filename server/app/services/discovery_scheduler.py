@@ -151,16 +151,18 @@ async def discovery_scheduler_loop() -> None:
 
 
 async def discovery_rules_loop() -> None:
-    """Background task: discovery rules on devices and servers when they are
-    added (``discovery_rules.inventory.sweep_created``), once a minute, one
-    API worker at a time. Creating an asset never waits for or depends on it."""
+    """Background task, once a minute, one API worker at a time: discovery
+    rules on devices and servers when they are added
+    (``inventory.sweep_created``) and when they or the rules change
+    (``reconcile.reconcile_changed``). Creating or editing an asset never waits
+    for or depends on it."""
     from app.services import alert_worker_lock
-    from app.services.discovery_rules.inventory import sweep_created
+    from app.services.discovery_rules.reconcile import rules_pass
 
     await asyncio.sleep(30)
     while True:
         try:
-            await alert_worker_lock.run_pass("zenplus:discovery_rules_pass", sweep_created)
+            await alert_worker_lock.run_pass("zenplus:discovery_rules_pass", rules_pass)
         except asyncio.CancelledError:
             raise
         except Exception:

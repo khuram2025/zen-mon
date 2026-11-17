@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.discovery_rules import DiscoveryEngineRun, DiscoveryEngineRunItem
 
 from . import engine
-from .facts import facts_from_device, facts_from_server
+from .facts import facts_from_child, facts_from_device, facts_from_server
 
 logger = logging.getLogger("zenplus.discovery_rules")
 
@@ -54,8 +54,14 @@ WRITABLE: dict[str, dict[str, str]] = {
         "owner": "owner", "snmp_credential": "snmp_credential_id", "ping_interval": "ping_interval",
         "snmp_interval": "snmp_poll_interval", "ping_enabled": "ping_enabled", "tags": "tags",
     },
-    "server": {"owner": "owner", "environment": "environment", "tags": "tags"},
+    "server": {"owner": "owner", "environment": "environment", "tags": "tags", "map": "map"},
+    "child": {"group": "group_id", "location": "location", "owner": "owner", "tags": "tags", "map": "map"},
 }
+WRITABLE["device"].update({"map": "map", "dependency_parent": "dependency_parent"})
+# Set-membership values: the asset is on these maps / depends on these parents.
+# Like tags they are only added; item_key is the map or parent id.
+SET_KEYS = {"map", "dependency_parent"}
+KIND_TABLE = {"device": "devices", "child": "devices", "server": "servers"}
 _UUID_KEYS = {"group", "template", "snmp_credential"}
 _INT_KEYS = {"ping_interval", "snmp_interval"}
 
@@ -66,6 +72,13 @@ SELECT d.id, d.hostname, host(d.ip_address) AS ip_address, d.sys_object_id, d.sy
        d.created_at
 FROM devices d
 WHERE d.poll_mode IS DISTINCT FROM 'via_controller'
+"""
+CHILD_SQL = """
+SELECT d.id, d.hostname, host(d.ip_address) AS ip_address, d.vendor, d.model, d.device_type, d.os_version,
+       d.serial_number, d.tags, d.group_id, d.location, d.owner, d.status, d.created_at, d.managed_source,
+       c.hostname AS controller
+FROM devices d LEFT JOIN devices c ON c.id = d.managed_by_device_id
+WHERE d.poll_mode = 'via_controller'
 """
 SERVER_SQL = """
 SELECT s.id, s.display_name, s.hostname, s.fqdn, host(s.primary_ip) AS primary_ip, s.os_name, s.os_version,
@@ -108,9 +121,14 @@ def _tags(raw) -> list[str]:
 
 def current_values(kind: str, row: Any) -> dict[str, Any]:
     g = (lambda k: row.get(k)) if isinstance(row, dict) else (lambda k: getattr(row, k, None))
+    sets = {"map": [str(x).lower() for x in (g("_maps") or [])],
+            "dependency_parent": [str(x).lower() for x in (g("_parents") or [])]}
     if kind == "server":
-        return {"owner": g("owner"), "environment": g("environment"), "tags": _tags(g("tags"))}
-    return {
+        return {"owner": g("owner"), "environment": g("environment"), "tags": _tags(g("tags")), **sets}
+    if kind == "child":
+        return {"group": g("group_id"), "location": g("location"), "owner": g("owner"), "tags": _tags(g("tags")),
+                **sets}
+    return {**sets, 
         "group": g("group_id"), "template": g("profile_id"), "device_type": g("device_type"),
         "location": g("location"), "owner": g("owner"), "snmp_credential": g("snmp_credential_id"),
         "ping_interval": g("ping_interval"), "snmp_interval": g("snmp_poll_interval"),
@@ -120,13 +138,17 @@ def current_values(kind: str, row: Any) -> dict[str, Any]:
 
 
 def facts_for(kind: str, row: Any) -> dict:
-    return facts_from_server(row) if kind == "server" else facts_from_device(row)
+    if kind == "server":
+        return facts_from_server(row)
+    if kind == "child":
+        return facts_from_child(row)
+    return facts_from_device(row)
 
 
 # ── the pure planner ────────────────────────────────────────────────────────
 
 def plan_changes(kind: str, asset_id: str, current: dict, plan: dict, owned: dict,
-                 rules_by_id: dict[str, dict]) -> list[dict]:
+                 rules_by_id: dict[str, dict], *, revert_rules: Iterable[str] = ()) -> list[dict]:
     """Changes the rules' ``plan`` makes to one asset.
 
     ``owned`` maps (action_key, item_key) to the assignment row ({value, ...}).
@@ -141,8 +163,28 @@ def plan_changes(kind: str, asset_id: str, current: dict, plan: dict, owned: dic
         return {"rule_id": entry["rule_id"], "rule_name": entry.get("rule_name"),
                 "rule_revision": rule.get("revision"), "enforce": rule.get("enforcement") == "enforce"}
 
+    def set_entry(key, entry):
+        """Add the asset to a map / give it a parent: only ever added."""
+        k = str(entry["value"]).lower()
+        if k in {str(x).lower() for x in current.get(key) or []}:
+            return
+        if key == "dependency_parent" and k == str(asset_id).lower():
+            return   # a device never depends on itself
+        r = ref(entry)
+        base = {"asset_kind": kind, "asset_id": str(asset_id), "action_key": key, "item_key": k,
+                "before": None, "after": k, "rule_id": r["rule_id"], "rule_name": r["rule_name"],
+                "rule_revision": r["rule_revision"]}
+        if owned.get((key, k)) is not None and not r["enforce"]:
+            out.append({**base, "outcome": "kept_manual_edit",
+                        "detail": "Removed by hand after a rule added it; the rule adds it only once"})
+            return
+        out.append({**base, "outcome": "apply"})
+
     for key, entry in (plan.get("settings") or {}).items():
         if key == "decision" or key not in writable:
+            continue
+        if key in SET_KEYS:
+            set_entry(key, entry)
             continue
         r = ref(entry)
         desired, cur = norm(key, entry["value"]), norm(key, current.get(key))
@@ -181,6 +223,36 @@ def plan_changes(kind: str, asset_id: str, current: dict, plan: dict, owned: dic
                 continue
             out.append({**base, "outcome": "apply"})
             have.add(k)
+    for key, entries in (plan.get("additive") or {}).items():
+        if key in writable and key in SET_KEYS:
+            for entry in entries:
+                set_entry(key, entry)
+
+    # Un-match: values owned by a rule with on_unmatch = revert that no longer
+    # matches this asset go back to what they were, if still as the rule set them.
+    revert = set(revert_rules)
+    if revert:
+        touched = {(c["action_key"], c["item_key"]) for c in out}
+        for (key, item), a in owned.items():
+            if a.get("rule_id") not in revert or (key, item) in touched or key not in writable:
+                continue
+            base = {"asset_kind": kind, "asset_id": str(asset_id), "action_key": key, "item_key": item,
+                    "rule_id": a.get("rule_id"), "rule_name": a.get("rule_name"),
+                    "rule_revision": (rules_by_id.get(a.get("rule_id")) or {}).get("revision")}
+            if key == "tags" or key in SET_KEYS:
+                present = item in {str(x).lower() for x in current.get(key) or []}
+                if present:
+                    out.append({**base, "before": a.get("value"), "after": None, "outcome": "revert",
+                                "detail": "The asset no longer matches the rule (revert on un-match)"})
+                continue
+            cur = norm(key, current.get(key))
+            if cur != norm(key, a.get("value")):
+                continue   # changed by hand since: left alone, the assignment is dropped on apply
+            prev = norm(key, a.get("previous"))
+            if key == "snmp_credential" and prev is None:
+                continue   # never clears a credential
+            out.append({**base, "before": cur, "after": prev, "outcome": "revert",
+                        "detail": "The asset no longer matches the rule (revert on un-match)"})
     return out
 
 
@@ -192,10 +264,13 @@ def digest(changes: Iterable[dict]) -> str:
 
 def summarise(changes: list[dict], assets: int, matched: int) -> dict:
     out: dict[str, Any] = {"assets": assets, "matched": matched, "changes": 0, "kept_manual_edit": 0,
-                           "not_reversible": 0, "assets_changed": 0, "by_action": {}}
+                           "not_reversible": 0, "reverts": 0, "assets_changed": 0, "by_action": {}}
     changed = set()
     for c in changes:
-        if c["outcome"] == "apply":
+        if c["outcome"] == "revert":
+            out["reverts"] += 1
+            changed.add((c["asset_kind"], c["asset_id"]))
+        elif c["outcome"] == "apply":
             out["changes"] += 1
             changed.add((c["asset_kind"], c["asset_id"]))
             out["by_action"][c["action_key"]] = out["by_action"].get(c["action_key"], 0) + 1
@@ -208,15 +283,16 @@ def summarise(changes: list[dict], assets: int, matched: int) -> dict:
 # ── loading ─────────────────────────────────────────────────────────────────
 
 def _filters(kind: str, targets: dict, params: dict) -> str:
-    alias = "d" if kind == "device" else "s"
-    ip_col = "d.ip_address" if kind == "device" else "s.primary_ip"
-    name_cols = ("d.hostname",) if kind == "device" else ("s.display_name", "s.hostname")
+    dev = kind in ("device", "child")
+    alias = "d" if dev else "s"
+    ip_col = "d.ip_address" if dev else "s.primary_ip"
+    name_cols = ("d.hostname",) if dev else ("s.display_name", "s.hostname")
     sql = []
     ids = [str(i) for i in (targets.get(f"{kind}_ids") or targets.get("ids") or [])]
     if ids:
         sql.append(f"{alias}.id = ANY(CAST(:ids AS uuid[]))")
         params["ids"] = ids
-    if kind == "device" and targets.get("group_ids"):
+    if dev and targets.get("group_ids"):
         sql.append("d.group_id = ANY(CAST(:groups AS uuid[]))")
         params["groups"] = [str(g) for g in targets["group_ids"]]
     if targets.get("tags"):
@@ -240,27 +316,54 @@ def _filters(kind: str, targets: dict, params: dict) -> str:
 async def load_assets(db: AsyncSession, targets: dict, *, limit: int = MAX_ASSETS) -> list[tuple[str, dict]]:
     """[(kind, row)] for the manual-run target filter.
 
-    ``targets``: kinds (device, server), ids / device_ids / server_ids,
-    group_ids, tags, subnet, query, and ``scope`` (visible tags) when the
-    caller's view is limited. Controller-managed children are never loaded."""
+    ``targets``: kinds (device, server, child), ids / device_ids /
+    server_ids / child_ids, group_ids, tags, subnet, query, and ``scope``
+    (visible tags) when the caller's view is limited. Controller-managed
+    children load only as kind ``child``."""
     out: list[tuple[str, dict]] = []
     kinds = targets.get("kinds") or ["device", "server"]
-    for kind in ("device", "server"):
+    for kind in ("device", "child", "server"):
         if kind not in kinds or len(out) >= limit:
             continue
         params: dict = {"lim": limit - len(out)}
-        base = DEVICE_SQL if kind == "device" else SERVER_SQL
-        order = "d.hostname" if kind == "device" else "s.display_name"
+        base = {"device": DEVICE_SQL, "child": CHILD_SQL, "server": SERVER_SQL}[kind]
+        order = "s.display_name" if kind == "server" else "d.hostname"
         rows = (await db.execute(text(base + _filters(kind, targets, params) + f" ORDER BY {order} LIMIT :lim"),
                                  params)).mappings().all()
         out.extend((kind, dict(r)) for r in rows)
+    await attach_sets(db, out)
     return out
+
+
+async def attach_sets(db: AsyncSession, assets: list[tuple[str, dict]]) -> None:
+    """Current map placements (``_maps``) and dependency parents (``_parents``)."""
+    dev_ids = [str(r["id"]) for k, r in assets if k in ("device", "child")]
+    srv_ids = [str(r["id"]) for k, r in assets if k == "server"]
+    maps: dict = {}
+    parents: dict = {}
+    if dev_ids:
+        for aid, mid in (await db.execute(text(
+                "SELECT device_id::text, map_id::text FROM manual_map_nodes WHERE device_id = ANY(CAST(:ids AS uuid[]))"),
+                {"ids": dev_ids})).all():
+            maps.setdefault(aid, []).append(mid)
+        for aid, pid in (await db.execute(text(
+                "SELECT child_device_id::text, parent_device_id::text FROM topology_dependencies"
+                " WHERE child_device_id = ANY(CAST(:ids AS uuid[]))"), {"ids": dev_ids})).all():
+            parents.setdefault(aid, []).append(pid)
+    if srv_ids:
+        for aid, mid in (await db.execute(text(
+                "SELECT server_id::text, map_id::text FROM manual_map_nodes WHERE server_id = ANY(CAST(:ids AS uuid[]))"),
+                {"ids": srv_ids})).all():
+            maps.setdefault(aid, []).append(mid)
+    for _, r in assets:
+        r["_maps"] = maps.get(str(r["id"]), [])
+        r["_parents"] = parents.get(str(r["id"]), [])
 
 
 async def load_owned(db: AsyncSession, assets: list[tuple[str, dict]]) -> dict:
     """{(kind, id): {(action_key, item_key): row}}"""
     out: dict = {}
-    for kind in ("device", "server"):
+    for kind in ("device", "child", "server"):
         ids = [str(r["id"]) for k, r in assets if k == kind]
         if not ids:
             continue
@@ -276,8 +379,12 @@ async def load_owned(db: AsyncSession, assets: list[tuple[str, dict]]) -> dict:
 
 def evaluate_assets(assets: list[tuple[str, dict]], rules: list[dict], owned: dict, *,
                     trigger: str) -> tuple[list[dict], int, dict]:
-    """(changes, matched asset count, {(kind, id): plan}) - pure."""
+    """(changes, matched asset count, {(kind, id): plan}) - pure.
+
+    Values owned by an evaluated rule whose ``on_unmatch`` is ``revert`` and
+    that no longer matches the asset are reverted (see ``plan_changes``)."""
     rules_by_id = {r["id"]: r for r in rules}
+    reverting = {r["id"] for r in rules if r.get("on_unmatch") == "revert"}
     changes: list[dict] = []
     matched = 0
     plans: dict = {}
@@ -285,10 +392,14 @@ def evaluate_assets(assets: list[tuple[str, dict]], rules: list[dict], owned: di
         plan = engine.evaluate(facts_for(kind, row), rules, trigger=trigger, kind=kind)
         aid = str(row["id"])
         plans[(kind, aid)] = plan
+        own = owned.get((kind, aid), {})
+        revert = reverting - {m["rule_id"] for m in plan["matched"]}
+        revert = {r for r in revert if any(a.get("rule_id") == r for a in own.values())}
         if plan["matched"]:
             matched += 1
-            changes.extend(plan_changes(kind, aid, current_values(kind, row), plan,
-                                        owned.get((kind, aid), {}), rules_by_id))
+        if plan["matched"] or revert:
+            changes.extend(plan_changes(kind, aid, current_values(kind, row), plan, own, rules_by_id,
+                                        revert_rules=revert))
     return changes, matched, plans
 
 
@@ -311,12 +422,58 @@ async def preview_inventory(db: AsyncSession, rules: list[dict], targets: dict, 
 
 # ── writing ─────────────────────────────────────────────────────────────────
 
+async def _map_member(db: AsyncSession, kind: str, asset_id: str, map_id: str, add: bool) -> None:
+    """Place the asset on a network map (bottom row, to be arranged by hand) or
+    take the node off again, pruning annotation cables like the map editor."""
+    from app.api.v1 import manual_maps as mm
+    field = "server_id" if kind == "server" else "device_id"
+    try:
+        md = await mm._lock_map(db, map_id)
+    except Exception:
+        return   # the map was deleted
+    if add:
+        exists = (await db.execute(text(f"SELECT 1 FROM manual_map_nodes WHERE map_id = :m AND {field} = :a"),
+                                   {"m": map_id, "a": asset_id})).first()
+        if exists:
+            return
+        n = (await db.execute(text("SELECT count(*) FROM manual_map_nodes WHERE map_id = :m"), {"m": map_id})).scalar()
+        await mm._insert_node(db, map_id, field=field, entity_id=asset_id, x_pct=5 + (n * 6) % 90,
+                              y_pct=92 - 6 * ((n * 6) // 90 % 4), metadata={"placed_by": "discovery_rule"})
+        await mm._touch(db, map_id)
+        return
+    ids = [str(r[0]) for r in (await db.execute(text(
+        f"DELETE FROM manual_map_nodes WHERE map_id = :m AND {field} = :a RETURNING id"),
+        {"m": map_id, "a": asset_id})).all()]
+    md, dropped = mm._prune_ann(md, ids)
+    if dropped:
+        await mm._save_map_metadata(db, map_id, md)
+    else:
+        await mm._touch(db, map_id)
+
+
 async def _write(db: AsyncSession, change: dict, value: Any, *, apply_credential=None) -> None:
-    """Set one value on the asset (``value`` None clears a single value)."""
+    """Set one value on the asset (``value`` None clears a single value or
+    removes a tag / map placement / dependency)."""
     kind, key = change["asset_kind"], change["action_key"]
-    table = "devices" if kind == "device" else "servers"
+    table = KIND_TABLE[kind]
     col = WRITABLE[kind][key]
     params = {"id": change["asset_id"]}
+    if key == "map":
+        await _map_member(db, kind, change["asset_id"], change["item_key"], value is not None)
+        return
+    if key == "dependency_parent":
+        if value is None:
+            await db.execute(text(
+                "DELETE FROM topology_dependencies WHERE child_device_id = CAST(:id AS uuid)"
+                " AND parent_device_id = CAST(:p AS uuid) AND dependency_type = 'uplink'"),
+                {**params, "p": change["item_key"]})
+        else:
+            await db.execute(text(
+                "INSERT INTO topology_dependencies (parent_device_id, child_device_id, dependency_type,"
+                " suppress_alerts, notes) VALUES (CAST(:p AS uuid), CAST(:id AS uuid), 'uplink', true, :n)"
+                " ON CONFLICT DO NOTHING"),
+                {**params, "p": change["item_key"], "n": f"Discovery rule: {change.get('rule_name') or ''}"[:500]})
+        return
     if key == "tags":
         if value is None:   # remove the tag (undo)
             await db.execute(text(
@@ -372,10 +529,28 @@ async def _assign(db: AsyncSession, change: dict, run_id) -> None:
 
 
 async def _reload(db: AsyncSession, kind: str, asset_id: str) -> dict | None:
-    sql = (DEVICE_SQL if kind == "device" else SERVER_SQL) + \
-        (" AND d.id = CAST(:id AS uuid) FOR UPDATE OF d" if kind == "device" else " AND s.id = CAST(:id AS uuid) FOR UPDATE OF s")
+    if kind == "server":
+        sql = SERVER_SQL + " AND s.id = CAST(:id AS uuid) FOR UPDATE OF s"
+    else:
+        sql = (DEVICE_SQL if kind == "device" else CHILD_SQL) + " AND d.id = CAST(:id AS uuid) FOR UPDATE OF d"
     row = (await db.execute(text(sql), {"id": asset_id})).mappings().first()
-    return dict(row) if row else None
+    if not row:
+        return None
+    out = dict(row)
+    await attach_sets(db, [(kind, out)])
+    return out
+
+
+def _present(current: dict, key: str, item: str) -> bool:
+    return str(item).lower() in {str(x).lower() for x in current.get(key) or []}
+
+
+async def _drop_assignment(db: AsyncSession, change: dict) -> None:
+    await db.execute(text(
+        "DELETE FROM discovery_engine_assignments WHERE asset_kind = :k AND asset_id = CAST(:a AS uuid)"
+        " AND action_key = :key AND item_key = :item"),
+        {"k": change["asset_kind"], "a": change["asset_id"], "key": change["action_key"],
+         "item": change.get("item_key") or ""})
 
 
 def _item(run_id, change: dict, outcome: str, detail: str | None = None) -> DiscoveryEngineRunItem:
@@ -392,7 +567,7 @@ async def apply_changes(db: AsyncSession, changes: list[dict], run: DiscoveryEng
                         apply_credential=None) -> dict:
     """Write ``apply`` changes (re-checked against the locked current value),
     record every change as a run item. Caller holds APPLY_LOCK and commits."""
-    counts = {"applied": 0, "kept_manual_edit": 0, "not_reversible": 0, "skipped_changed": 0}
+    counts = {"applied": 0, "kept_manual_edit": 0, "not_reversible": 0, "skipped_changed": 0, "reverted": 0}
     by_asset: dict = {}
     for c in changes:
         by_asset.setdefault((c["asset_kind"], c["asset_id"]), []).append(c)
@@ -407,14 +582,28 @@ async def apply_changes(db: AsyncSession, changes: list[dict], run: DiscoveryEng
         current = current_values(kind, row)
         for c in group:
             c.setdefault("ip_address", row.get("ip_address") or row.get("primary_ip"))
+            key = c["action_key"]
+            setlike = key == "tags" or key in SET_KEYS
+            if c["outcome"] == "revert":
+                still = _present(current, key, c["item_key"]) if setlike else \
+                    norm(key, current.get(key)) == c["before"]
+                if not still:
+                    db.add(_item(run.id, c, "skipped_changed", "Changed since the plan was made"))
+                    counts["skipped_changed"] += 1
+                    continue
+                await _write(db, c, None if setlike else c["after"], apply_credential=apply_credential)
+                await _drop_assignment(db, c)
+                db.add(_item(run.id, c, "reverted"))
+                counts["reverted"] += 1
+                continue
             if c["outcome"] != "apply":
                 db.add(_item(run.id, c, c["outcome"]))
                 counts[c["outcome"]] = counts.get(c["outcome"], 0) + 1
                 continue
-            if c["action_key"] == "tags":
-                still = c["item_key"] not in {t.lower() for t in current["tags"]}
+            if setlike:
+                still = not _present(current, key, c["item_key"])
             else:
-                still = norm(c["action_key"], current.get(c["action_key"])) == c["before"]
+                still = norm(key, current.get(key)) == c["before"]
             if not still:
                 db.add(_item(run.id, c, "skipped_changed", "Changed since the plan was made"))
                 counts["skipped_changed"] += 1
@@ -480,7 +669,7 @@ async def undo_run(db: AsyncSession, run_id: uuid.UUID, *, actor_id, apply_crede
         " AND i.after->>'result' = 'imported'"), {"r": run_id})).mappings().all()]
     items = (await db.execute(text(
         "SELECT * FROM discovery_engine_run_items WHERE run_id = :r AND outcome = 'applied'"
-        " AND asset_id IS NOT NULL AND asset_kind IN ('device', 'server') AND action_key <> 'decision'"
+        " AND asset_id IS NOT NULL AND asset_kind IN ('device', 'server', 'child') AND action_key <> 'decision'"
         " ORDER BY id DESC"), {"r": run_id})).mappings().all()
     undo = DiscoveryEngineRun(trigger="undo", mode="apply", undo_of=run.id, started_by=actor_id, status="running",
                               discovery_run_id=run.discovery_run_id)
@@ -492,7 +681,7 @@ async def undo_run(db: AsyncSession, run_id: uuid.UUID, *, actor_id, apply_crede
     # listed for a deliberate delete. Inventory runs are reverted value by value.
     for it in ([] if run.discovery_run_id else items):
         c = {"asset_kind": it["asset_kind"], "asset_id": str(it["asset_id"]), "action_key": it["action_key"],
-             "item_key": it["item_key"] or ("" if it["action_key"] != "tags" else str(it["after"]).lower()),
+             "item_key": it["item_key"] or "",
              "before": it["after"], "after": it["before"], "rule_id": str(it["rule_id"]) if it["rule_id"] else None,
              "rule_name": it["rule_name"], "rule_revision": it["rule_revision"],
              "ip_address": str(it["ip_address"]) if it["ip_address"] else None}
@@ -503,8 +692,9 @@ async def undo_run(db: AsyncSession, run_id: uuid.UUID, *, actor_id, apply_crede
             continue
         current = current_values(c["asset_kind"], row)
         key = c["action_key"]
-        if key == "tags":
-            still = c["item_key"] in {t.lower() for t in current["tags"]}
+        setlike = key == "tags" or key in SET_KEYS
+        if setlike:
+            still = _present(current, key, c["item_key"])
         else:
             still = norm(key, current.get(key)) == norm(key, it["after"])
         if not still:
@@ -515,13 +705,13 @@ async def undo_run(db: AsyncSession, run_id: uuid.UUID, *, actor_id, apply_crede
             db.add(_item(undo.id, c, "not_reversible", "There was no credential before; left in place"))
             counts["not_reversible"] += 1
             continue
-        await _write(db, {**c, "action_key": key}, None if key == "tags" else it["before"],
+        await _write(db, {**c, "action_key": key}, None if setlike else it["before"],
                      apply_credential=apply_credential)
         a = (await db.execute(text(
             "SELECT previous FROM discovery_engine_assignments WHERE asset_kind = :k AND asset_id = CAST(:a AS uuid)"
             " AND action_key = :key AND item_key = :item"),
             {"k": c["asset_kind"], "a": c["asset_id"], "key": key, "item": c["item_key"]})).first()
-        if a is not None and (key == "tags" or norm(key, a[0]) == norm(key, it["before"])):
+        if a is not None and (setlike or norm(key, a[0]) == norm(key, it["before"])):
             await db.execute(text(
                 "DELETE FROM discovery_engine_assignments WHERE asset_kind = :k AND asset_id = CAST(:a AS uuid)"
                 " AND action_key = :key AND item_key = :item"),
@@ -548,20 +738,22 @@ async def undo_run(db: AsyncSession, run_id: uuid.UUID, *, actor_id, apply_crede
 
 async def explain(db: AsyncSession, kind: str, asset_id: uuid.UUID, rules: list[dict]) -> dict | None:
     params = {"id": str(asset_id)}
-    sql = (DEVICE_SQL + " AND d.id = CAST(:id AS uuid)") if kind == "device" else \
-        (SERVER_SQL + " AND s.id = CAST(:id AS uuid)")
+    sql = {"device": DEVICE_SQL + " AND d.id = CAST(:id AS uuid)",
+           "child": CHILD_SQL + " AND d.id = CAST(:id AS uuid)",
+           "server": SERVER_SQL + " AND s.id = CAST(:id AS uuid)"}[kind]
     row = (await db.execute(text(sql), params)).mappings().first()
     if row is None:
         return None
     row = dict(row)
+    await attach_sets(db, [(kind, row)])
     current = current_values(kind, row)
     owned = (await load_owned(db, [(kind, row)])).get((kind, str(asset_id)), {})
     plan = engine.evaluate(facts_for(kind, row), _manual(rules), trigger="manual", kind=kind)
     pending = plan_changes(kind, str(asset_id), current, plan, owned, {r["id"]: r for r in rules})
     settings = []
     for (key, item), a in sorted(owned.items()):
-        if key == "tags":
-            present = item in {t.lower() for t in current["tags"]}
+        if key == "tags" or key in SET_KEYS:
+            present = _present(current, key, item)
             state = "rule" if present else "manual_edit"
             cur = a.get("value") if present else None
         else:
@@ -660,7 +852,7 @@ async def sweep_created(db: AsyncSession, *, batch: int = 200, apply_credential=
 
     since = await _created_since(db)
     assets: list[tuple[str, dict]] = []
-    for kind, base, alias in (("device", DEVICE_SQL, "d"), ("server", SERVER_SQL, "s")):
+    for kind, base, alias in (("device", DEVICE_SQL, "d"), ("child", CHILD_SQL, "d"), ("server", SERVER_SQL, "s")):
         rows = (await db.execute(text(
             base + f" AND {alias}.created_at >= :since AND NOT EXISTS (SELECT 1 FROM discovery_engine_asset_state st"
             f" WHERE st.asset_kind = :k AND st.asset_id = {alias}.id) ORDER BY {alias}.created_at LIMIT :lim"),
@@ -668,6 +860,7 @@ async def sweep_created(db: AsyncSession, *, batch: int = 200, apply_credential=
         assets.extend((kind, dict(r)) for r in rows)
     if not assets:
         return {"assets": 0}
+    await attach_sets(db, assets)
     settings = await load_settings(db)
     out: dict[str, Any] = {"assets": len(assets), "enabled": bool(settings["enabled"])}
     matched_by: dict = {}
