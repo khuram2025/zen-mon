@@ -27,7 +27,11 @@ Device groups you can use everywhere, and custom fields.
   keys one template per name and leaves the other as it was; appliances that
   already ran it are reconciled without running it again. Appliances that
   failed this way can upgrade straight to 1.25.13.
+- Settings -> Updates explains the upgrade path: which required stops it
+  passes and why, how many installs and restarts it means, and, after a
+  failed install, which version failed and that the update server is
+  holding it (instead of "No eligible updates available").
 
-Migration 192. Includes 1.25.12. Appliance-only package; minimum upgrade
+Migrations 189 (revised) and 192. Includes 1.25.12. Appliance-only package; minimum upgrade
 base 1.24.36; signed Windows agent catalog preserved. Details:
 docs/device-groups.md.
