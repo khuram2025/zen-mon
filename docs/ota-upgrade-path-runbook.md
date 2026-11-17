@@ -38,6 +38,86 @@ cumulative entry for this chain; v1.23.8 and v1.23.9 keep their immutable signed
 minimums. Unknown or corrupt version markers require operator repair, not a
 guessed upgrade or downgrade.
 
+## Required checkpoints
+
+Releases stay cumulative. An appliance does **not** install every version in
+between: it installs the next *required checkpoint* above its installed
+version, then the next, then the newest eligible release. A checkpoint is a
+release that carries a one-time transition later packages do not repeat
+(installer catalog, updater or trust-key change, a data transform that needs
+the previous code). Installing every release in order would not have prevented
+a failure like 1.25.10's migration 189 (the same statement fails from 1.25.9),
+and it multiplies restarts and the number of bridges that must stay published
+and inside the 30-day manifest window.
+
+`scripts/release-policy.json` lists the checkpoints, oldest first, each with
+the reason it cannot be skipped:
+
+```json
+"minimum_supported_upgrade_base": "1.24.36",
+"required_checkpoints": [
+  {"version": "1.24.36", "reason": "Provisions the signed Windows agent 1.14.4 installer catalog ..."}
+]
+```
+
+- `minimum_supported_upgrade_base` is always the newest checkpoint;
+  `scripts/release_policy.py` refuses a list that is out of order, repeats a
+  version, lacks a reason or names a blocked prerequisite.
+- The builder signs each release with the newest checkpoint **below** it as its
+  minimum (`release_policy.default_minimum`), so the checkpoint release itself
+  is reached from the checkpoint before it and everything after must pass
+  through it. A higher `--min-version` is still allowed; a lower one is refused.
+- To make a release a checkpoint: add it to `required_checkpoints` and raise
+  `minimum_supported_upgrade_base` in the same commit that prepares that
+  version, with the reason and recovery plan in `docs/release-VERSION.md`. Keep
+  the package published at 100 % for as long as any supported appliance is
+  below it. Published packages are immutable: a release that is already out
+  cannot be turned into a checkpoint for releases that are already out.
+- Settings -> General -> Updates shows the whole path: every required stop, the
+  release that requires it, how many restarts the path means, and the newest
+  eligible version. Automatic installation follows the same path in order.
+
+## Automatic rollout stop
+
+A release that fails in the field stops for everyone, not only for the
+appliance that failed. Each time the portal selects an offer
+(`upgrade_path.get_zenplus_update`), `halt_failing_rollouts` counts, per
+release with an active rollout, the appliances whose install failed or rolled
+back and has not since succeeded. When that share of the appliances with a
+final result is above the rollout's `max_failure_pct` (default 5), the rollout
+policy is set to `paused` and the release is no longer offered. With the
+default, one unresolved failure pauses the rollout until at least nineteen
+other appliances have succeeded.
+
+- Only rollouts created on or after `AUTO_STOP_FROM` (17 November 2026) are
+  judged. Older rollouts, the 1.24.36 bridge among them, are never paused
+  retroactively: their old failures belong to appliances that have moved on,
+  and pausing a checkpoint blocks every appliance behind it. A release from
+  before that date is judged, with its whole failure history, once it gets a
+  new rollout.
+- Unfinished installs are not results. A retry that succeeds clears that
+  appliance. A paused rollout never resumes by itself.
+- Offering the release again takes a new rollout. If the failures are
+  understood and accepted (for example one appliance out of disk), create it
+  with a higher limit: `zentryc-release ... rollout --version V --stage full
+  --max-failure-pct 50`. `100` turns the stop off for that rollout. If the
+  release itself is wrong, publish a corrected version instead and leave the
+  failed one paused.
+- A paused rollout blocks every release that requires it, as before. A
+  failed checkpoint therefore holds the fleet at the versions it has; that is
+  intended.
+- The appliance explains the result: after failed installs the Updates tab
+  says which version failed, how many of the three attempts are used, and that
+  the update server is holding the release, instead of "No eligible updates".
+- The three-failures-per-appliance block is unchanged.
+
+Deploying: copy `integrations/zentryc_ota/upgrade_path.py` and
+`test_upgrade_path.py` over `ota/` on the site, run
+`manage.py test ota.test_upgrade_path` against a disposable database, then
+restart the Django workers. Until that is done the portal keeps offering a
+failing release and the rollout has to be paused by hand
+(`PATCH /api/v1/admin/rollouts/<id>` with `{"action": "pause"}`).
+
 ## Required safeguards
 
 - Server selects within the appliance's product and architecture. Every bridge must be published and eligible under its latest rollout. Paused, aborted, completed, wrong-group, zero-percent and missing prerequisites block the entire path. Three failed attempts block further automatic attempts; investigate instead of routing around the bridge.

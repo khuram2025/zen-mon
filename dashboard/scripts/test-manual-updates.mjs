@@ -53,6 +53,8 @@ try {
   await click('Check for Updates')
   assert.deepEqual(calls.map(c => c.url), ['/system/check-update'])
   assert(document.body.textContent.includes('Required intermediate version'))
+  assert(document.body.textContent.includes('v1.24.48 can only be installed from v1.24.46 or later'), 'a required stop says why')
+  assert(document.body.textContent.includes('2 installations in order'))
   assert(document.body.textContent.includes('Automatic installation is off'))
   assert.equal(document.getElementById('update-target').value, '1.24.48')
   await click('Review installation')

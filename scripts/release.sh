@@ -31,7 +31,8 @@ ROLLOUT="${4:-none}"
 MIN_VERSION="${5:-${ZENPLUS_MIN_VERSION:-}}"
 RELEASE_SCOPE="${6:-${ZENPLUS_RELEASE_SCOPE:-bundled}}"
 if [ -z "$MIN_VERSION" ]; then
-    MIN_VERSION="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["minimum_supported_upgrade_base"])' "$ZENPLUS_DIR/scripts/release-policy.json")"
+    # The newest required checkpoint below this version (scripts/release-policy.json).
+    MIN_VERSION="$(PYTHONPATH="$ZENPLUS_DIR" "$PYTHON" "$ZENPLUS_DIR/scripts/release_policy.py" default-minimum "$ZENPLUS_DIR" "$VERSION")"
 fi
 ZUP="${ZENPLUS_RELEASE_DIR:-/tmp/zenplus-releases}/update-${VERSION}.zup"
 
