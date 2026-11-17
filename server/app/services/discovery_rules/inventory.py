@@ -693,10 +693,16 @@ async def _write(db: AsyncSession, change: dict, value: Any, *, apply_credential
             return   # a created service check is never deleted by a rule
         from app.schemas.service_check import ServiceCheckTemplateApply
         from app.services import service_check_service
-        await service_check_service.apply_template(
-            db, uuid.UUID(change["item_key"]), ServiceCheckTemplateApply(device_ids=[uuid.UUID(change["asset_id"])],
-                                                                         enabled=True),
-            None, commit=False)
+        try:
+            res = await service_check_service.apply_template(
+                db, uuid.UUID(change["item_key"]),
+                ServiceCheckTemplateApply(device_ids=[uuid.UUID(change["asset_id"])], enabled=True),
+                None, commit=False)
+        except ValueError as e:   # the template was deleted
+            raise NotWritten(str(e)) from None
+        if not res.created_ids:
+            reason = (res.skipped[0].get("reason") if res.skipped else None) or "not created"
+            raise NotWritten(f"No service check created: {reason}")
         return
     if key == "agent_policy":
         await db.execute(text("UPDATE agents SET policy_id = CAST(:v AS uuid), updated_at = now()"
@@ -760,6 +766,10 @@ async def _write(db: AsyncSession, change: dict, value: Any, *, apply_credential
         value = "other"   # devices.device_type is not nullable
     await db.execute(text(f"UPDATE {table} SET {col} = {expr}{extra} WHERE id = CAST(:id AS uuid)"),
                      {**params, "v": value})
+
+
+class NotWritten(Exception):
+    """A value that could not be written; recorded as an ``error`` item."""
 
 
 async def _assign(db: AsyncSession, change: dict, run_id) -> None:
@@ -885,7 +895,16 @@ async def apply_changes(db: AsyncSession, changes: list[dict], run: DiscoveryEng
                              "The sensor is not online and authorised; it is added once it is"))
                 counts["not_ready"] += 1
                 continue
-            await _write(db, c, c["after"], apply_credential=apply_credential)
+            try:
+                if key == "service_template":   # creates rows: undo them alone if refused
+                    async with db.begin_nested():
+                        await _write(db, c, c["after"], apply_credential=apply_credential)
+                else:
+                    await _write(db, c, c["after"], apply_credential=apply_credential)
+            except NotWritten as e:
+                db.add(_item(run.id, c, "error", str(e)[:500]))
+                counts["error"] = counts.get("error", 0) + 1
+                continue
             await _assign(db, c, run.id)
             db.add(_item(run.id, c, "applied"))
             counts["applied"] += 1

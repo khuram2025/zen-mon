@@ -398,10 +398,15 @@ async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply
     settings = await load_settings(db)
     if not settings["enabled"]:
         return {"skipped": "engine_off"}
+    state = await _state(db)
     if not settings.get("schedule_enabled") and not force:
+        if state.get("last_scheduled_slot"):
+            # turned off: forget the last slot, so turning it on again starts
+            # at the next slot instead of catching up a missed one
+            await _save_state(db, last_scheduled_slot=None)
+            await db.commit()
         return {"skipped": "schedule_off"}
     slot = last_slot(now, settings)
-    state = await _state(db)
     done = state.get("last_scheduled_slot")
     if not force:
         if not done:

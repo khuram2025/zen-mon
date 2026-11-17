@@ -313,6 +313,14 @@ def test_service_check_from_template_created_once_and_kept_on_undo(pg_db):
         undo = c.post(f"{BASE}/history/{out['engine_run_id']}/undo").json()
         assert undo["not_reversible"] == 1
     assert pg_db.scalar("SELECT count(*) FROM service_checks") == 1
+    # a check of the generated name that is not this device's: reported, nothing recorded as applied
+    add_device(pg_db, "r2", "10.1.0.2")
+    pg_db.execute("INSERT INTO service_checks (name, check_type, target_host) VALUES ('SSH · r2', 'tcp', 'x')")
+    with manager(pg_db) as c:
+        _, out = run_manual(c)
+        assert out["applied"] == 0 and out["error"] == 1
+        assert "duplicate name" in pg_db.scalar(
+            "SELECT detail FROM discovery_engine_run_items WHERE outcome = 'error'")
     with manager(pg_db, role="no-checks", permissions=[p for p in MANAGER if p != "service_checks.manage"]) as c:
         r = c.post(BASE, json=rule("SSH 2", ANY_CISCO, [{"key": "service_template", "value": tpl}]))
         assert r.status_code == 403 and "service_checks.manage" in r.text
@@ -385,6 +393,13 @@ async def test_scheduled_runs_start_at_the_next_slot_and_run_once_per_slot(pg_db
     assert pg_db.query("SELECT trigger, status FROM discovery_engine_runs") == [("scheduled", "completed")]
     # the "changed" pass ignores scheduled-only rules
     assert (await rpass(pg_db))["skipped"] == "no_rules"
+    # turned off and on again: starts at the next slot, never catches up a missed one
+    enable_engine(pg_db, schedule_enabled=False)
+    async with session(pg_db) as s:
+        assert (await reconcile.scheduled_pass(s, now=t0 + timedelta(days=3)))["skipped"] == "schedule_off"
+    enable_engine(pg_db, schedule_enabled=True, schedule_timezone="Asia/Riyadh")
+    async with session(pg_db) as s:
+        assert (await reconcile.scheduled_pass(s, now=t0 + timedelta(days=3)))["skipped"] == "schedule_started"
 
 
 @pytest.mark.asyncio
