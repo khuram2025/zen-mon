@@ -5,6 +5,15 @@ import pytest
 from app.services import network_alert_service as worker
 from app.services import network_history
 from app.api.v1 import alert_engine
+from app.services import alert_funnel
+
+
+@pytest.fixture(autouse=True)
+def _migrated_priority_columns(monkeypatch):
+    # The fake sessions here answer only the worker's own queries. Declare the
+    # migrate-164 priority columns present instead of relying on an earlier
+    # test in the same process having cached that answer.
+    monkeypatch.setattr(alert_funnel, "_PRIORITY_SUPPORTED", True)
 
 
 def rule(metric='cpu', **overrides):
