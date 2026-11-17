@@ -134,6 +134,7 @@ async def test_scheduled_scan_on_auto_match_profile_imports_with_rule_settings(p
                       " FROM devices WHERE ip_address = '10.51.2.12'")
     assert dev == [(group, template, ["discovered", "firewall", "riyadh"], "firewall", "10.51.2.12")]
     assert pg_db.scalar("SELECT count(*) FROM devices") == 1
+    assert pg_db.scalar("SELECT profile_source FROM devices") == "rule"     # migrate-189
     rows = dict(pg_db.query("SELECT id, disposition FROM discovery_results_v2 WHERE run_id = $1", run))
     assert rows == {fw: "imported", elsewhere: "no_match", cisco: "no_match"}
     items = pg_db.query("SELECT action_key, outcome FROM discovery_engine_run_items ORDER BY id")
@@ -164,7 +165,8 @@ async def test_review_profile_imports_nothing_and_shows_the_decision(pg_db):
     with manager(pg_db) as c:
         out = c.post(f"/api/v1/discovery-v2/runs/{run}/import", json={"result_ids": [res[0]["id"]]}).json()
     assert out["devices_created"] == 1
-    assert pg_db.query("SELECT group_id::text, tags FROM devices") == [(group, ["firewall", "riyadh"])]
+    assert pg_db.query("SELECT group_id::text, tags, profile_source FROM devices") == [
+        (group, ["firewall", "riyadh"], "rule")]
 
 
 def test_preview_of_an_unsaved_rule_equals_what_the_saved_rule_applies(pg_db):
