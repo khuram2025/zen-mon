@@ -98,7 +98,10 @@ def _rule_scope_ok(rule, device: dict | None, excluded: rx.Exclusions = rx.EMPTY
     if rule["device_id"] is not None:
         return device is not None and str(device["id"]) == str(rule["device_id"])
     if rule["group_id"] is not None:
-        return device is not None and str(device.get("group_id")) == str(rule["group_id"])
+        # Group membership (primary, static, dynamic, with parent groups) when the
+        # caller loaded it ("groups"); the primary group otherwise (before migrate-192).
+        from app.services.device_groups.membership import in_group
+        return device is not None and in_group(rule["group_id"], device.get("groups"), device.get("group_id"))
     if rule["device_type"]:
         return device is not None and device.get("device_type") == rule["device_type"]
     if rule["location"]:
@@ -226,6 +229,9 @@ async def _process_events(db: AsyncSession, rules, outbox: list | None = None,
                 "FROM devices WHERE id = :id"
             ), {"id": k})).mappings().first()
             device_cache[k] = dict(row) if row else None
+            if device_cache[k] is not None:
+                from app.services.device_groups import membership
+                device_cache[k]["groups"] = await membership.groups_of(db, "device", k)
         return device_cache[k]
 
     raised = 0
@@ -282,10 +288,14 @@ async def _process_capacity(db: AsyncSession, rules, outbox: list | None = None,
            WHERE EXISTS (SELECT 1 FROM udt_port_state p WHERE p.device_id = d.id)
            GROUP BY d.id"""
     ))).mappings().all()
+    from app.services.device_groups import membership
+    groups = await membership.load(db, "device")
     for rule in cap_rules:
         thr = float(rule["threshold"] or 90)
         for dev in usage:
-            if not _rule_scope_ok(rule, dict(dev), excluded):
+            row = dict(dev)
+            row["groups"] = groups.get(str(row["id"]), set()) if groups is not None else None
+            if not _rule_scope_ok(rule, row, excluded):
                 continue
             total = dev["total"] or 0
             pct = (dev["used"] / total * 100.0) if total else 0.0

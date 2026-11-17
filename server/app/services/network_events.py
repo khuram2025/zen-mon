@@ -57,6 +57,8 @@ async def ingest_syslog(db, event, dispatch=None):
         await db.commit()
         return {'suppressed': True, 'alerts_created': 0}
     rules = (await db.execute(text("SELECT * FROM alert_rules WHERE enabled = true AND metric = 'syslog'"))).mappings().all()
+    from app.services.device_groups.membership import groups_of, in_group
+    syslog_groups = await groups_of(db, "device", did) if did and rules else None
     if did and rules:
         # Shared rules disabled for this device only (migrate-187).
         from app.services import alert_rule_exclusions as rx
@@ -68,7 +70,7 @@ async def ingest_syslog(db, event, dispatch=None):
     for r in rules:
         if r['device_id'] and str(r['device_id']) != did:
             continue
-        if r['group_id'] and (not device or r['group_id'] != device['group_id']):
+        if r['group_id'] and (not device or not in_group(r['group_id'], syslog_groups, device['group_id'])):
             continue
         if r['scope_tag'] and (not device or r['scope_tag'].lower() not in tag_set(device['tags'])):
             continue

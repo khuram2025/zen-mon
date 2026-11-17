@@ -50,7 +50,8 @@ export function useRuleLookups(enabled = true): { lookups: Lookups; options: Rec
   const profiles = useQuery<any>({ queryKey: ['discovery', 'profiles'], queryFn: discoveryApi.listProfiles, ...opts })
   return useMemo(() => {
     const options: Record<string, RefOption[]> = {
-      device_groups: asOptions(groups.data),
+      // A rule sets a device's own group: static groups only (migrate-192).
+      device_groups: asOptions((Array.isArray(groups.data) ? groups.data : []).filter((g: any) => (g.kind ?? 'static') === 'static')),
       device_profiles: asOptions(templates.data),
       snmp_credentials: asOptions(creds.data),
       discovery_profiles: asOptions(profiles.data),

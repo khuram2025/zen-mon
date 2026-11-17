@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { CustomFieldsCard } from '@/components/devices/CustomFieldsCard'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Box, Clock, GitBranch, HardDrive, Info, KeyRound, Layers, Save, Shield, Tag as TagIcon, Timer, Wifi } from 'lucide-react'
@@ -46,6 +47,9 @@ export function ConfigurationTab({ device, summary, onOpenHardware }: { device: 
       content: <InventoryConfigCard device={device} entities={entities || []} snmpHasData={undefined} identity={summary?.identity} onDetails={onOpenHardware} /> },
     { id: 'owner-notes', title: 'Owner and notes', width: 6, height: 7, minWidth: 3, minHeight: 4,
       content: <OwnerNotesCard device={device} /> },
+    // Custom fields (migrate-192): typed values of the fields defined under Groups & Fields.
+    { id: 'custom-fields', title: 'Custom fields', width: 6, height: 6, minWidth: 3, minHeight: 3,
+      content: <CustomFieldsCard kind="device" id={device.id} /> },
     { id: 'monitoring-sites', title: 'Monitoring sites', width: 6, height: 7, minWidth: 2, minHeight: 3,
       content: <Panel title="Monitoring sites" meta="Where reachability is measured from"><MonitoringSites targetType="device" targetId={device.id} compact /></Panel> },
     { id: 'reachability', title: 'How status is decided', width: 12, height: 9, minWidth: 3, minHeight: 3,

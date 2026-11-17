@@ -363,6 +363,19 @@
       ]
     },
     {
+      "key": "/device-groups",
+      "label": "Groups & Fields",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
       "key": "/discovery",
       "label": "Profiles",
       "group": "network",

@@ -655,6 +655,9 @@ async def create_device(
     user: User = Depends(require_permission("devices.manage")),
 ):
     await _check_device_type(db, data.device_type)
+    if data.group_id is not None:
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, data.group_id)
     # A scoped operator may only create devices inside its own scope, and not
     # with a management address that is another team's (or an unowned) flow
     # exporter: ownership follows the management IP (NF-04).
@@ -895,6 +898,9 @@ async def update_device(
     if data.tags is not None:
         await scoping.assert_tags_assignable(db, user, data.tags, previous=current.tags)
     await _check_device_type(db, data.device_type)
+    if "group_id" in data.model_fields_set and data.group_id is not None:
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, data.group_id)
     if "profile_id" in data.model_fields_set and data.profile_id is not None and (
             current.managed_by_device_id is not None or current.poll_mode == "via_controller"):
         raise HTTPException(status_code=422, detail="A controller-managed device is read through its controller's "

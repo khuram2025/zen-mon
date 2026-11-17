@@ -165,6 +165,9 @@ def create_app() -> FastAPI:
     from app.api.v1 import device_templates as device_templates_api, device_types as device_types_api
     app.include_router(device_templates_api.router, prefix="/api/v1", dependencies=[policy("snmp")])
     app.include_router(device_types_api.router, prefix="/api/v1", dependencies=[policy("devices")])
+    from app.api.v1 import custom_fields as custom_fields_api, device_groups as device_groups_api
+    app.include_router(device_groups_api.router, prefix="/api/v1", dependencies=[policy("devices")])
+    app.include_router(custom_fields_api.router, prefix="/api/v1", dependencies=[policy("devices")])
     app.include_router(snmp_credentials.router, prefix="/api/v1")
     app.include_router(windows_credentials.router, prefix="/api/v1", dependencies=[policy("windows_credentials")])
     app.include_router(audit_logs.router, prefix="/api/v1")
@@ -324,6 +327,9 @@ def create_app() -> FastAPI:
         # re-resolve customised templates whose parent changed (advisory-locked).
         from app.services.device_templates.service import resync_loop as device_template_resync_loop
         app.state.device_template_resync = asyncio.create_task(device_template_resync_loop())
+        # Device groups: keep dynamic group members current (advisory-locked, every minute).
+        from app.services.device_groups.membership import reconcile_loop as device_group_reconcile_loop
+        app.state.device_group_reconcile = asyncio.create_task(device_group_reconcile_loop())
         # Inventory & Compliance: normalise dirty/outdated identity and software rows
         # (every 2 min), and the daily snapshot + retention pass. Both take
         # transaction-scoped advisory locks, so every worker can run them.
@@ -352,7 +358,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync"):
+        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync", "device_group_reconcile"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

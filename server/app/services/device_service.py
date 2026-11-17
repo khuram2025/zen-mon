@@ -86,6 +86,7 @@ _SNMP_PLAIN_FIELDS = (
 # columns cannot give: the OS version of devices whose version only a monitoring template reports (PAN-OS, F5), and a
 # version without the vendor's decoration ("7.2.5", not "FortiOS v7.2.5,build1517").
 _IDENTITY = table("inventory_identity", column("asset_kind"), column("asset_id"), column("os_version"))
+_CLOSURE = table("device_group_member_closure", column("group_id"), column("asset_kind"), column("asset_id"))
 
 UNKNOWN = "unknown"
 FACET_LIMIT = 200
@@ -137,7 +138,9 @@ def _device_conditions(
     if managed_by:
         conds.append(Device.managed_by_device_id == managed_by)
     if group_id:
-        conds.append(Device.group_id == group_id)
+        # Members of the group and its subgroups, however they joined (migrate-192).
+        conds.append(or_(Device.group_id == group_id, Device.id.in_(
+            select(_CLOSURE.c.asset_id).where(_CLOSURE.c.group_id == group_id, _CLOSURE.c.asset_kind == "device"))))
     if device_type:
         conds.append(Device.device_type == device_type)
     if location:
@@ -505,7 +508,7 @@ async def bulk_import_devices(
     errors = []
 
     # Pre-fetch group name -> id mapping
-    group_result = await db.execute(select(DeviceGroup.id, DeviceGroup.name))
+    group_result = await db.execute(select(DeviceGroup.id, DeviceGroup.name).where(DeviceGroup.kind == "static"))
     group_map = {row[1].lower(): row[0] for row in group_result.all()}
     known_types = set((await db.execute(text("SELECT key FROM device_types"))).scalars().all())
 
@@ -608,5 +611,9 @@ async def get_device_groups(db: AsyncSession) -> list[dict]:
             "description": group.description,
             "color": group.color,
             "device_count": row[1],
+            # Device groups (migrate-192): only static groups can be a device's own group.
+            "kind": group.kind,
+            "parent_id": group.parent_id,
+            "member_count": group.member_count,
         })
     return groups

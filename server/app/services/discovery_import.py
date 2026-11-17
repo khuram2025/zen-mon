@@ -175,6 +175,9 @@ async def import_results(
     per result). ``apply_credential`` is injectable for tests."""
     profile = await db.get(DiscoveryProfile, run.profile_id) if run.profile_id else None
     explicit = payload.model_fields_set
+    if payload.group_id:
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, payload.group_id, what="The import group")
 
     batch = DiscoveryImportBatch(
         run_id=run.id,

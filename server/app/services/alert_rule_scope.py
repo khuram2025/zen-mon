@@ -219,8 +219,10 @@ async def affected(db: AsyncSession, rule) -> dict:
             return {"count": 1, "noun": "device", "shared": False}
         where, params = [], {}
         if _get(rule, "group_id"):
-            where.append("d.group_id = :g")
-            params["g"] = _get(rule, "group_id")
+            # Group membership with subgroups (migrate-192), the same set the evaluators use.
+            where.append("(d.group_id = CAST(:g AS uuid) OR EXISTS (SELECT 1 FROM device_group_member_closure c "
+                         "WHERE c.group_id = CAST(:g AS uuid) AND c.asset_kind = 'device' AND c.asset_id = d.id))")
+            params["g"] = str(_get(rule, "group_id"))
         if _get(rule, "device_type"):
             where.append("d.device_type = :dt")
             params["dt"] = _get(rule, "device_type")

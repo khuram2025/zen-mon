@@ -957,13 +957,24 @@ func (s *PostgresStore) LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[
 	return out, rows.Err()
 }
 
-// LoadActiveMaintenanceDeviceIDs returns the set of device IDs currently
-// inside an active device_maintenance window (scope: device, group, tag, or
-// all — devices.tags is a JSONB string array). Mirrors
-// LoadActiveMaintenanceCheckIDs: the poller keeps collecting metrics for
-// these devices but suppresses status transitions and alerting.
-func (s *PostgresStore) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
-	rows, err := s.pool.Query(ctx, `
+// maintenanceDeviceIDsSQL: a group window covers every member of the group
+// and of its subgroups (primary, static and dynamic membership, migration 192).
+const maintenanceDeviceIDsSQL = `
+		SELECT DISTINCT d.id
+		FROM devices d
+		JOIN device_maintenance m ON (
+		       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+		    OR (m.scope_type = 'group'  AND (m.scope_group_id = d.group_id OR EXISTS (
+		           SELECT 1 FROM device_group_member_closure c
+		            WHERE c.group_id = m.scope_group_id AND c.asset_kind = 'device' AND c.asset_id = d.id)))
+		    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+		    OR (m.scope_type = 'all')
+		)
+		WHERE m.starts_at <= now() AND m.ends_at >= now()
+	`
+
+// maintenanceDeviceIDsLegacySQL is the statement from before migration 192.
+const maintenanceDeviceIDsLegacySQL = `
 		SELECT DISTINCT d.id
 		FROM devices d
 		JOIN device_maintenance m ON (
@@ -973,7 +984,20 @@ func (s *PostgresStore) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map
 		    OR (m.scope_type = 'all')
 		)
 		WHERE m.starts_at <= now() AND m.ends_at >= now()
-	`)
+	`
+
+// LoadActiveMaintenanceDeviceIDs returns the set of device IDs currently
+// inside an active device_maintenance window (scope: device, group, tag, or
+// all — devices.tags is a JSONB string array). Mirrors
+// LoadActiveMaintenanceCheckIDs: the poller keeps collecting metrics for
+// these devices but suppresses status transitions and alerting.
+func (s *PostgresStore) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
+	rows, err := s.pool.Query(ctx, maintenanceDeviceIDsSQL)
+	if err != nil && isUndefinedTable(err) {
+		// The binary runs ahead of migration 192 (no group membership yet):
+		// a group window covers the devices whose own group it is, as before.
+		rows, err = s.pool.Query(ctx, maintenanceDeviceIDsLegacySQL)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("load device maintenance ids: %w", err)
 	}

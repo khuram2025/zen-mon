@@ -89,7 +89,9 @@ async def _exists(db: AsyncSession, source: str, ids: list[str]) -> list[str]:
     if not ids:
         return []
     table = _REF_TABLES[source]
-    found = (await db.execute(text(f"SELECT id::text FROM {table} WHERE id = ANY(CAST(:ids AS uuid[]))"),
+    # A rule sets a device's own group, which must be a static group (migrate-192).
+    extra = " AND kind = 'static'" if source == "device_groups" else ""
+    found = (await db.execute(text(f"SELECT id::text FROM {table} WHERE id = ANY(CAST(:ids AS uuid[])){extra}"),
                               {"ids": ids})).scalars().all()
     return [i for i in ids if i not in set(found)]
 
