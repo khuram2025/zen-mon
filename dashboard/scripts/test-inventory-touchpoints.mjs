@@ -558,7 +558,7 @@ const LINK = '/inventory/assets?kind=device&amp;os_family=fortios&amp;os_product
   for (const [label, value] of [['Serial number', 'FG100FTK2000'], ['SNMP', 'Disabled'], ['Ping', 'Disabled'], ['System OID', '1.3.6.1.4.1.12356'], ['Hardware', '—']]) {
     assert.equal(strip(cardRow(html, label)), value, label)
   }
-  assert(html.includes('href="/settings/general?tab=templates"'), 'the monitoring template link is kept')
+  assert(html.includes('href="/device-templates'), 'the monitoring template link is kept (now to Device Templates)')
 
   // The chassis firmware was the evidence: the Firmware row carries the link instead.
   const entity = card({ asset: ASSET({ os_source: 'entity' }) })
