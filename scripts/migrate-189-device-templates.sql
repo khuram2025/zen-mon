@@ -139,25 +139,52 @@ CREATE INDEX IF NOT EXISTS device_profiles_parent ON device_profiles (parent_id)
 -- templates unique by name (under the templates advisory lock).
 
 -- Built-in identity and default device types.
+--
+-- Several built-in rows can share a name (one per version): a seed migration
+-- re-applied after a later migration bumped that row's version (063 then 069
+-- for 'Aruba Wireless Controller', likewise the other seeds) inserts the old
+-- version again. Every such row gets the default device type, but only ONE row
+-- per name gets the canonical key: the one most devices use, then the highest
+-- version, then the most recently updated. The others get a derived key below
+-- and stay what they were (built-in templates, devices unchanged).
+--
+-- Revised 2026-11-17: the first cut keyed every row with the name and failed
+-- on the unique index (device_profiles_builtin_key) on such appliances, after
+-- everything above had run. Rerunning this file from that state converges.
+-- Where the first cut succeeded (one row per name) this revision leaves the
+-- same result, so run-migrations reconciles its checksum instead of re-running.
+CREATE TEMP TABLE zp189_builtin (n TEXT, k TEXT, t TEXT);
+INSERT INTO zp189_builtin (n, k, t) VALUES
+    ('Fortinet FortiGate',               'fortinet_fortigate',   'firewall'),
+    ('Cisco IOS/IOS-XE Switch & Router', 'cisco_ios',            NULL),
+    ('Cisco ASA Firewall',               'cisco_asa',            'firewall'),
+    ('Palo Alto PAN-OS Firewall',        'paloalto_panos',       'firewall'),
+    ('F5 BIG-IP',                        'f5_bigip',             'load_balancer'),
+    ('Juniper JunOS',                    'juniper_junos',        NULL),
+    ('Aruba Wireless Controller',        'aruba_wlc',            'wireless_controller'),
+    ('Aruba AOS-CX Switch',              'aruba_aoscx',          'switch'),
+    ('Dell SmartFabric OS10 Switch',     'dell_os10',            'switch'),
+    ('MikroTik RouterOS',                'mikrotik_routeros',    'router'),
+    ('Linux Server',                     'linux_server',         'server'),
+    ('Windows Server',                   'windows_server',       'server');
+
 UPDATE device_profiles p
-   SET builtin_key = v.k,
-       device_type = COALESCE(p.device_type, v.t)
-  FROM (VALUES
-        ('Fortinet FortiGate',               'fortinet_fortigate',   'firewall'),
-        ('Cisco IOS/IOS-XE Switch & Router', 'cisco_ios',            NULL),
-        ('Cisco ASA Firewall',               'cisco_asa',            'firewall'),
-        ('Palo Alto PAN-OS Firewall',        'paloalto_panos',       'firewall'),
-        ('F5 BIG-IP',                        'f5_bigip',             'load_balancer'),
-        ('Juniper JunOS',                    'juniper_junos',        NULL),
-        ('Aruba Wireless Controller',        'aruba_wlc',            'wireless_controller'),
-        ('Aruba AOS-CX Switch',              'aruba_aoscx',          'switch'),
-        ('Dell SmartFabric OS10 Switch',     'dell_os10',            'switch'),
-        ('MikroTik RouterOS',                'mikrotik_routeros',    'router'),
-        ('Linux Server',                     'linux_server',         'server'),
-        ('Windows Server',                   'windows_server',       'server')
-       ) AS v(n, k, t)
- WHERE p.name = v.n AND p.builtin AND p.builtin_key IS NULL
-   AND NOT EXISTS (SELECT 1 FROM device_profiles o WHERE o.builtin_key = v.k);
+   SET device_type = v.t
+  FROM zp189_builtin v
+ WHERE p.name = v.n AND p.builtin AND p.device_type IS NULL AND v.t IS NOT NULL;
+
+UPDATE device_profiles p
+   SET builtin_key = pick.k
+  FROM (SELECT DISTINCT ON (v.k) c.id, v.k
+          FROM zp189_builtin v
+          JOIN device_profiles c ON c.name = v.n AND c.builtin AND c.builtin_key IS NULL
+         WHERE NOT EXISTS (SELECT 1 FROM device_profiles o WHERE o.builtin_key = v.k)
+         ORDER BY v.k,
+                  (SELECT count(*) FROM devices d WHERE d.profile_id = c.id) DESC,
+                  c.version DESC, c.updated_at DESC, c.id) AS pick
+ WHERE p.id = pick.id;
+
+DROP TABLE zp189_builtin;
 
 UPDATE device_profiles
    SET builtin_key = left(regexp_replace(lower(name), '[^a-z0-9]+', '_', 'g'), 48) || '_' || left(md5(id::text), 8)
