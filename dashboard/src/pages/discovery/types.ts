@@ -237,9 +237,10 @@ export type RuleMode = 'draft' | 'simulate' | 'active' | 'disabled'
 export type AssetKind = 'device' | 'server' | 'child'
 /**
  * When a rule runs by itself: on discovery scan results, on devices and servers as they are added, and (phase 3)
- * whenever an asset's facts change or the rule changes (re-checked once a minute).
+ * whenever an asset's facts change or the rule changes (re-checked once a minute), and (phase 4) over the whole
+ * inventory at the scheduled times of the engine settings.
  */
-export type RuleTrigger = 'discovery' | 'created' | 'changed'
+export type RuleTrigger = 'discovery' | 'created' | 'changed' | 'scheduled'
 /** When an asset stops matching: keep what the rule set, or revert it if it is still as the rule set it. */
 export type OnUnmatch = 'keep' | 'revert'
 /** set_once: a value edited by hand after the rule set it is kept; enforce: the rule puts its value back. */
@@ -275,6 +276,9 @@ export type RefSource =
   | 'discovery_profiles'
   | 'manual_maps'
   | 'devices'
+  | 'sensors'
+  | 'agent_policies'
+  | 'service_check_templates'
 
 export interface CatalogOperator {
   key: string
@@ -299,7 +303,7 @@ export interface CatalogAction {
   label: string
   kind: 'single' | 'additive'
   /** `on`: the only value is true ("Turn ping monitoring on"); a rule never turns monitoring off. */
-  value: 'decision' | 'ref' | 'text' | 'int' | 'tags' | 'on'
+  value: 'decision' | 'ref' | 'text' | 'int' | 'tags' | 'on' | 'interfaces'
   permission: string[]
   asset_kinds: AssetKind[]
   source: string | null
@@ -315,12 +319,30 @@ export interface RuleCatalog {
   decisions: Decision[]
   import_as: ImportTarget[]
   device_types: string[]
-  limits: { max_depth: number; max_leaves: number; max_regex: number }
+  limits: { max_depth: number; max_leaves: number; max_regex: number; max_interface_patterns?: number }
   modes?: { key: RuleMode; label: string }[]
   triggers?: { key: RuleTrigger; label: string }[]
   enforcement?: { key: Enforcement; label: string }[]
   on_unmatch?: { key: OnUnmatch; label: string }[]
   asset_kinds?: { key: AssetKind; label: string }[]
+  /** Phase 4: what an interface pattern can test (text fields are case-insensitive regexes). */
+  interface_fields?: { key: InterfaceField; label: string; value: 'regex' | 'types' | 'range' }[]
+  interface_sets?: { key: InterfaceSet; label: string }[]
+  /** Phase 4: the intervals a schedule may use (hours). */
+  schedule_hours?: number[]
+}
+
+export type InterfaceField = 'if_name' | 'if_alias' | 'if_descr' | 'if_type' | 'speed'
+export type InterfaceSet = 'monitor' | 'ignore'
+/**
+ * One pattern of the "Monitor or ignore interfaces" action. For each interface the first matching pattern (rules in
+ * priority order, patterns in order) decides; interfaces nothing matches are left alone.
+ */
+export interface InterfacePattern {
+  set: InterfaceSet
+  field: InterfaceField
+  /** regex (if_name / if_alias / if_descr), "6, 24" (if_type), "1000", "100-1000", "10000-", "-100" (speed, Mbit/s) */
+  pattern: string
 }
 
 export interface ConditionLeaf {
@@ -349,6 +371,74 @@ export interface RuleEngineSettings {
   history_days: number
   /** An automatic re-check that would change more values than this waits for approval (phase 3). */
   max_changes_per_run: number
+  /** Phase 4 match-growth stop: a rule changing more assets than max(min, pct % of its last match count) waits. 0 = off. */
+  growth_breaker_pct?: number
+  growth_breaker_min?: number
+  /** Phase 4: rules with the "scheduled" trigger run over the inventory every N hours from HH:MM in this time zone. */
+  schedule_enabled?: boolean
+  schedule_every_hours?: number
+  /** "HH:MM" */
+  schedule_time?: string
+  /** IANA name */
+  schedule_timezone?: string
+}
+
+/** GET /schedule: when the scheduled rules run next and when they last ran. */
+export interface RuleScheduleStatus {
+  /** engine on and schedule on */
+  enabled: boolean
+  engine_enabled: boolean
+  schedule_enabled: boolean
+  /** ISO time of the next slot (computed even while the schedule is off) */
+  next: string
+  last_slot: string | null
+  last_run_at: string | null
+  /** active rules with the scheduled trigger */
+  rules: number
+  simulating: number
+  last_run: { id: string; status: string; started_at: string; counts: Record<string, any> | null } | null
+}
+
+/** POST /schedule/run-now: applied, held for approval, or skipped. */
+export interface ScheduleRunResult {
+  skipped?: string
+  engine_run_id?: string
+  needs_approval?: string
+  changes?: number
+  reasons?: string[]
+  assets?: number
+  matched?: number
+  applied?: number
+  reverted?: number
+  kept_manual_edit?: number
+  not_reversible?: number
+  skipped_changed?: number
+  not_ready?: number
+  next?: string
+}
+
+export interface UnmatchedRow {
+  asset_kind: AssetKind
+  asset_id: string
+  name: string | null
+  ip_address: string | null
+  vendor: string | null
+  model: string | null
+  device_type: string | null
+  os: string | null
+  tags: string[]
+}
+
+/** GET /unmatched: devices, servers and children no active (optionally: no simulating) rule matches. */
+export interface UnmatchedReport {
+  kinds: Partial<Record<AssetKind, { assets: number; unmatched: number }>>
+  assets: number
+  unmatched: number
+  rows: UnmatchedRow[]
+  truncated: boolean
+  rules: number
+  /** the rows are limited to the viewer's tag scope (the counts are not) */
+  scoped?: boolean
 }
 
 /** What the editor holds and sends (create / update / preview). */
@@ -364,6 +454,8 @@ export interface RuleDraft {
   triggers: RuleTrigger[]
   enforcement: Enforcement
   on_unmatch: OnUnmatch
+  /** Phase 4: automatic runs in which this rule would make more changes wait for approval; null = engine limit only. */
+  max_changes_per_run?: number | null
 }
 
 export interface DiscoveryRule extends RuleDraft {
@@ -517,7 +609,7 @@ export type EngineRunOutcome =
   | 'not_ready'
   | 'error'
 
-export type EngineRunTrigger = 'discovery' | 'manual' | 'created' | 'changed' | 'undo'
+export type EngineRunTrigger = 'discovery' | 'manual' | 'created' | 'changed' | 'scheduled' | 'undo'
 export type EngineRunMode = 'apply' | 'annotate' | 'simulate'
 
 export interface EngineRun {
@@ -626,6 +718,8 @@ export interface InventoryApplyResult extends Partial<InventorySummary> {
   not_reversible: number
   skipped_changed: number
   reverted?: number
+  /** Phase 4: sensor assignments waiting for the sensor to come online. */
+  not_ready?: number
 }
 
 /** 409 detail of /inventory/apply when the inventory or the rules changed since the preview. */
@@ -720,6 +814,10 @@ export interface PendingChanges {
   counts: Partial<InventorySummary> & Record<string, any>
   /** Assets the plan covers. */
   assets: number
+  /** Phase 4: why the run waits (engine cap, a rule's own cap, the match-growth stop). */
+  reasons?: string[]
+  /** Phase 4: "changed" (automatic re-check) or "scheduled". */
+  trigger?: EngineRunTrigger | string
   changes: InventoryChange[]
 }
 
@@ -732,6 +830,7 @@ export interface ApprovalResult {
   kept_manual_edit?: number
   not_reversible?: number
   skipped_changed?: number
+  not_ready?: number
 }
 
 /** GET /export: references by name ({"$ref": source, "name": ...}), never ids or secrets. */

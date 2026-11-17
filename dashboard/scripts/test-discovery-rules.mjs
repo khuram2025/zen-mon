@@ -1,5 +1,6 @@
 // Discovery rules (phase 1, migrate-188; phase 2 on inventory, migrate-191; phase 3 re-checks, children, approval,
-// export / import and starter rules, migrate-193): the pure model behind the rule builder, the rule list and the scan-result
+// export / import and starter rules, migrate-193; phase 4 interfaces, sensors, agent policies, service check templates,
+// schedules and the Unmatched report, no migration): the pure model behind the rule builder, the rule list and the scan-result
 // Rule / Decision columns (src/pages/discovery/ruleModel.ts). Pins the tree edits and their depth / leaf limits, the
 // one-sentence condition and action summaries, the disposition wording, the preview summary and the reorder helper,
 // and that the pages, routes, tab and sidebar entry are wired.
@@ -293,7 +294,7 @@ assert.deepEqual(M.MODE_ORDER, ['draft', 'simulate', 'active', 'disabled'])
 for (const m of M.MODE_ORDER) assert(M.MODE_HELP[m], `mode ${m} has a one-line explanation`)
 assert.match(M.MODE_HELP.simulate, /changes nothing/)
 assert.deepEqual(M.ruleProblems({ ...M.defaultRule(), name: 'x', triggers: [] }, catalog),
-  ['Choose when the rule runs: on scan results, on new devices and servers, or whenever they change'])
+  ['Choose when the rule runs: on scan results, on new devices and servers, whenever they change, or at the scheduled times'])
 assert.equal(M.ruleRunsText({ triggers: ['discovery'], enforcement: 'set_once' }), 'runs on scans · set once')
 assert.equal(M.ruleRunsText({ triggers: ['discovery', 'created'], enforcement: 'enforce' }), 'runs on scans and new devices and servers · enforced')
 assert.equal(M.ruleRunsText({}), 'runs on scans · set once', 'a phase 1 rule runs on scans, set once')
@@ -612,5 +613,169 @@ assert.match(read('src/pages/discovery/ruleUi.tsx'), /api\.get\('\/maps'\)/, 'ma
 for (const file of ['RulesPage.tsx', 'RuleEditorPage.tsx', 'RuleRunPage.tsx', 'AssetAutomation.tsx', 'ruleUi.tsx', 'ruleModel.ts']) {
   assert(!/text-\[\d+px\]/.test(read(`src/pages/discovery/${file}`)), `${file} uses the rem type scale, never pixel font sizes`)
 }
+
+// ── phase 4: interfaces, sensors, agent policies, service checks ─────────────
+assert.equal(d.max_changes_per_run, null, 'a new rule has no change limit of its own')
+assert.equal(M.TRIGGER_LABEL.scheduled, 'All devices and servers at the scheduled times')
+assert.equal(M.ruleRunsText({ triggers: ['changed', 'scheduled'] }), 'runs on changes and a schedule · set once')
+assert.equal(M.runTriggerText({ trigger: 'scheduled', mode: 'apply', discovery_run_id: null }), 'Scheduled run · apply')
+assert(M.TRIGGER_REASON.scheduled, 'a scheduled run says why it ran')
+assert.match(M.ON_UNMATCH_HELP, /scheduled runs/)
+assert.deepEqual(M.ruleProblems({ ...M.defaultRule(), name: 'x', max_changes_per_run: 0 }, catalog),
+  ['Changes per automatic run: a whole number from 1 to 100000, or empty'])
+assert.deepEqual(M.ruleProblems({ ...M.defaultRule(), name: 'x', max_changes_per_run: 250 }, catalog), [])
+
+// Speed ranges in Mbit/s, as actions._speed_range reads them.
+assert.deepEqual(M.parseSpeedRange('1000'), { min: 1000, max: 1000 })
+assert.deepEqual(M.parseSpeedRange('100-1000'), { min: 100, max: 1000 })
+assert.deepEqual(M.parseSpeedRange(' 10000- '), { min: 10000, max: null })
+assert.deepEqual(M.parseSpeedRange('-100'), { min: null, max: 100 })
+for (const bad of ['', '-', 'fast', '1000-100', '1g', '10-20-30']) assert.equal(M.parseSpeedRange(bad), null, `"${bad}" is not a speed range`)
+
+const P = (set, field, pattern) => ({ set, field, pattern })
+assert.deepEqual(M.defaultInterfacePattern(), P('monitor', 'if_name', ''))
+assert.deepEqual(M.interfacePatternProblems([P('monitor', 'if_name', '^gi'), P('ignore', 'if_type', '24, 131'), P('ignore', 'speed', '-100')]), [])
+assert.deepEqual(M.interfacePatternProblems([]), ['add at least one pattern'])
+assert.deepEqual(M.interfacePatternProblems([P('monitor', 'if_name', '  ')]), ['pattern 1: a pattern is required'])
+assert.deepEqual(M.interfacePatternProblems([P('watch', 'if_name', 'x')]), ['pattern 1: monitor or ignore'])
+assert.deepEqual(M.interfacePatternProblems([P('ignore', 'if_mtu', 'x')]), ['pattern 1: choose what it tests'])
+assert.deepEqual(M.interfacePatternProblems([P('ignore', 'if_type', 'ethernet')]), ['pattern 1: IF-MIB type numbers separated by commas (6, 24, 131)'])
+assert.deepEqual(M.interfacePatternProblems([P('ignore', 'speed', '1000-100')]), ['pattern 1: Mbit/s as 1000, 100-1000, 10000- or -100'])
+assert.deepEqual(M.interfacePatternProblems([P('ignore', 'if_alias', 'x'.repeat(201))]), ['pattern 1: at most 200 characters'])
+assert.deepEqual(M.interfacePatternProblems(Array.from({ length: 11 }, () => P('monitor', 'if_name', 'x'))), ['at most 10 patterns'])
+assert.deepEqual(M.interfacePatternProblems(Array.from({ length: 3 }, () => P('monitor', 'if_name', 'x')), 2), ['at most 2 patterns'],
+  'the catalog limit wins')
+
+assert.equal(M.interfacePatternText(P('monitor', 'if_name', '^gi')), 'monitor where name matches ^gi')
+assert.equal(M.interfacePatternText(P('ignore', 'if_type', '24,131')), 'ignore where type is 24 or 131')
+assert.equal(M.interfacePatternText(P('ignore', 'speed', '-100')), 'ignore where speed is at most 100 Mbit/s')
+assert.equal(M.interfacePatternText(P('monitor', 'speed', '10000-')), 'monitor where speed is at least 10000 Mbit/s')
+assert.equal(M.interfacePatternText(P('monitor', 'speed', '100-1000')), 'monitor where speed is 100–1000 Mbit/s')
+assert.equal(M.interfacePatternText(P('monitor', 'speed', '1000')), 'monitor where speed is 1000 Mbit/s')
+assert.equal(M.summarizeAction({ key: 'interfaces', value: [P('monitor', 'if_alias', 'uplink'), P('ignore', 'if_type', '24')] }),
+  'Interfaces: monitor where alias matches uplink; ignore where type is 24', 'patterns are summarised in test order')
+
+const catalog4 = {
+  ...catalog3,
+  limits: { ...catalog3.limits, max_interface_patterns: 10 },
+  actions: [
+    ...catalog3.actions,
+    { key: 'interfaces', label: 'Monitor or ignore interfaces', kind: 'additive', value: 'interfaces', permission: ['devices.manage'], asset_kinds: ['device'], source: null, help: '', min: null, max: null },
+    { key: 'sensor', label: 'Monitor from sensor', kind: 'additive', value: 'ref', permission: ['devices.manage'], asset_kinds: ['device'], source: 'sensors', help: '', min: null, max: null },
+    { key: 'agent_policy', label: 'Agent policy', kind: 'single', value: 'ref', permission: ['servers.manage'], asset_kinds: ['server'], source: 'agent_policies', help: '', min: null, max: null },
+    { key: 'service_template', label: 'Add service check from template', kind: 'additive', value: 'ref', permission: ['service_checks.manage'], asset_kinds: ['device'], source: 'service_check_templates', help: '', min: null, max: null },
+  ],
+}
+assert.deepEqual(M.defaultActionValue({ key: 'interfaces', value: 'interfaces' }), { key: 'interfaces', value: [P('monitor', 'if_name', '')] })
+assert.deepEqual(M.actionProblems({ actions: [{ key: 'interfaces', value: [P('monitor', 'if_name', '')] }], asset_kinds: ['device'] }, catalog4),
+  ['Monitor or ignore interfaces: pattern 1: a pattern is required'])
+assert.deepEqual(M.actionProblems({ actions: [{ key: 'interfaces', value: [P('ignore', 'if_type', '24')] }], asset_kinds: ['server'] }, catalog4),
+  ['Monitor or ignore interfaces applies to network devices only'])
+assert(!keys(M.pickableActions(catalog4, ['server'])).includes('interfaces'), 'servers are not offered interface patterns')
+assert(!keys(M.pickableActions(catalog4, ['server'])).includes('sensor'), 'servers are not offered a sensor')
+assert(keys(M.pickableActions(catalog4, ['server'])).includes('agent_policy'), 'servers are offered an agent policy')
+assert(!keys(M.pickableActions(catalog4, ['device'])).includes('agent_policy'), 'devices are not offered an agent policy')
+assert.deepEqual(keys(M.pickableActions(catalog4, ['child'])), ['group', 'location', 'map', 'owner', 'tags'], 'children get none of the phase 4 actions')
+assert.deepEqual(M.activationPermissions([{ key: 'service_template', value: 't' }], ['server'], catalog4), ['service_checks.manage'],
+  'a check from a template is a service check edit, whatever the asset')
+assert.deepEqual(M.activationPermissions([{ key: 'agent_policy', value: 'p' }], ['server'], catalog4), ['servers.manage'])
+assert.deepEqual(M.activationPermissions([{ key: 'sensor', value: 's' }], ['device'], catalog4), ['devices.manage'])
+
+const SEN1 = 'ffffffff-0000-0000-0000-000000000001'
+const POL1 = 'ffffffff-0000-0000-0000-000000000002'
+const TPL1 = 'ffffffff-0000-0000-0000-000000000003'
+const lookups4 = { ...lookups3, sensors: { [SEN1]: 'Branch sensor' }, agent_policies: { [POL1]: 'Linux default' }, service_check_templates: { [TPL1]: 'HTTPS' } }
+assert.equal(M.summarizeAction({ key: 'sensor', value: SEN1 }, lookups4), 'Monitor from sensor: Branch sensor')
+assert.equal(M.summarizeAction({ key: 'agent_policy', value: POL1 }, lookups4), 'Agent policy: Linux default')
+assert.equal(M.summarizeAction({ key: 'service_template', value: TPL1 }, lookups4), 'Service check: HTTPS')
+assert.equal(M.summarizeAction({ key: 'sensor', value: SEN1 }), 'Monitor from sensor: ffffffff…', 'an unknown sensor keeps a short id')
+assert.equal(M.formatSettingValue('agent_policy', POL1, lookups4), 'Linux default')
+assert.equal(M.changeText('agent_policy', null, POL1, lookups4), 'not set → Linux default')
+assert.equal(M.changeText('sensor', null, SEN1, lookups4), '+ Branch sensor', 'a sensor is only added, like a map')
+assert.equal(M.changeText('service_template', null, TPL1, lookups4), '+ HTTPS')
+for (const k of ['interfaces', 'sensor', 'agent_policy', 'service_template']) assert(M.settingLabel(k, null), `${k} has a label without the catalog`)
+
+// Interfaces: item_key is the lower-cased ifName or "#<ifIndex>"; before / after mean monitored.
+assert.equal(M.interfaceLabel('gi1/0/2'), 'Interface gi1/0/2')
+assert.equal(M.interfaceLabel('#12'), 'Interface ifIndex 12')
+assert.equal(M.changeText('interfaces', true, false, undefined, 'gi1/0/2'), 'Interface gi1/0/2: monitored → ignored')
+assert.equal(M.proposedText({ action_key: 'interfaces', item_key: '#7', before: false, after: true, outcome: 'apply' }), 'Interface ifIndex 7: ignored → monitored')
+assert.equal(M.proposedText({ action_key: 'interfaces', item_key: 'te1/1', before: false, after: true, outcome: 'revert' }),
+  'Interface te1/1: revert to monitored (now ignored)')
+assert.equal(M.formatSettingValue('interfaces', true), 'monitored')
+assert.equal(M.itemOutcomeLabel('not_ready', 'sensor'), 'Waiting: sensor not online')
+assert.equal(M.itemOutcomeLabel('not_ready', null), 'Not ready', 'a scan result that is not ready keeps its label')
+assert.equal(M.itemOutcomeLabel('applied', 'sensor'), 'Applied')
+assert.match(M.summarizeApplyResult({ applied: 3, not_ready: 2 }), /2 waiting for a sensor to come online/)
+
+// ── phase 4: schedules ───────────────────────────────────────────────────────
+assert.deepEqual(M.SCHEDULE_HOURS, [1, 2, 3, 4, 6, 8, 12, 24, 48, 72, 168], 'the same intervals as reconcile.SCHEDULE_HOURS')
+assert.equal(M.scheduleEveryText(1), 'Every hour')
+assert.equal(M.scheduleEveryText(6), 'Every 6 hours')
+assert.equal(M.scheduleEveryText(24), 'Daily')
+assert.equal(M.scheduleEveryText(72), 'Every 3 days')
+assert.equal(M.scheduleEveryText(168), 'Weekly (Mondays)')
+assert.equal(M.scheduleText({ schedule_every_hours: 6, schedule_time: '02:30', schedule_timezone: 'Asia/Riyadh' }), 'Every 6 hours from 02:30 (Asia/Riyadh)')
+assert.equal(M.scheduleText({ schedule_every_hours: 24, schedule_time: '02:00', schedule_timezone: 'UTC' }), 'Daily at 02:00 (UTC)')
+assert.equal(M.scheduleText({ schedule_every_hours: 48, schedule_time: '23:15', schedule_timezone: 'UTC' }), 'Every 2 days at 23:15 (UTC)')
+assert.equal(M.scheduleText({ schedule_every_hours: 168, schedule_time: '01:00', schedule_timezone: 'Europe/Berlin' }), 'Weekly on Mondays at 01:00 (Europe/Berlin)')
+assert.equal(M.scheduleText({}), 'Daily at 02:00 (UTC)', 'the API defaults')
+for (const ok of ['00:00', '09:05', '23:59']) assert(M.isScheduleTime(ok), ok)
+for (const bad of ['24:00', '9:05', '12:60', '', null]) assert(!M.isScheduleTime(bad), String(bad))
+assert(M.isTimeZone('UTC') && M.isTimeZone('Asia/Riyadh'))
+assert(!M.isTimeZone('Mars/Olympus') && !M.isTimeZone('') && !M.isTimeZone(null))
+assert(M.isTimeZone(M.browserTimeZone()), 'the browser time zone is a valid default')
+const sched = { growth_breaker_pct: 50, growth_breaker_min: 20, schedule_enabled: true, schedule_every_hours: 24, schedule_time: '02:00', schedule_timezone: 'UTC' }
+assert.deepEqual(M.engineSettingsProblems(sched), [])
+assert.deepEqual(M.engineSettingsProblems({ ...sched, schedule_every_hours: 5 }), ['Schedule: choose how often'])
+assert.deepEqual(M.engineSettingsProblems({ ...sched, schedule_time: '2am' }), ['Schedule: a time as HH:MM'])
+assert.deepEqual(M.engineSettingsProblems({ ...sched, schedule_timezone: 'Nowhere/City' }), ['Schedule: a known time zone, such as Asia/Riyadh or UTC'])
+assert.deepEqual(M.engineSettingsProblems({ ...sched, schedule_enabled: false, schedule_timezone: '' }), [], 'an unused schedule is not checked')
+assert.deepEqual(M.engineSettingsProblems({ ...sched, growth_breaker_pct: -1 }), ['Growth stop: a percentage from 0 (off) to 10000'])
+assert.deepEqual(M.engineSettingsProblems({ ...sched, growth_breaker_pct: 0 }), [], '0 turns the growth stop off')
+const now = Date.parse('2026-11-17T10:00:00Z')
+assert.equal(M.untilText('2026-11-17T10:25:00Z', now), 'in 25 min')
+assert.equal(M.untilText('2026-11-17T13:20:00Z', now), 'in 3 h 20 min')
+assert.equal(M.untilText('2026-11-18T10:00:00Z', now), 'in 24 h')
+assert.equal(M.untilText('2026-11-24T10:00:00Z', now), 'in 7 days')
+assert.equal(M.untilText('2026-11-17T09:00:00Z', now), 'now')
+assert.equal(M.untilText(null, now), '')
+assert.equal(M.scheduleRunText({ skipped: 'no_rules' }), 'No active or simulating rule has the scheduled trigger')
+assert.equal(M.scheduleRunText({ skipped: 'something_new' }), 'Something new')
+assert.equal(M.scheduleRunText({ needs_approval: 'r1', changes: 140, reasons: ['140 changes exceed the limit of 100 per automatic run'] }),
+  '140 changes wait for approval: 140 changes exceed the limit of 100 per automatic run')
+assert.equal(M.scheduleRunText({ assets: 300, matched: 40, applied: 12, not_ready: 1 }),
+  'Checked 300 assets · matched 40 · applied 12 values · 1 waiting for a sensor to come online')
+
+// ── phase 4: unmatched ───────────────────────────────────────────────────────
+assert.equal(M.unmatchedKindsText({ kinds: { server: { assets: 40, unmatched: 3 }, device: { assets: 300, unmatched: 12 } } }),
+  '12 of 300 network devices · 3 of 40 servers', 'kinds in the usual order')
+assert.equal(M.unmatchedKindsText({ kinds: {} }), '')
+
+// ── phase 4 wiring ───────────────────────────────────────────────────────────
+const api4 = read('src/pages/discovery/api.ts')
+assert.match(api4, /max_changes_per_run: draft\.max_changes_per_run/, 'create / update send the rule change limit')
+for (const [fn, route] of [['schedule', '/schedule'], ['runScheduleNow', '/schedule/run-now'], ['unmatched', '/unmatched']]) {
+  assert(new RegExp(`async ${fn}\\(`).test(api4) && api4.includes(route), `rulesApi.${fn} calls ${route}`)
+}
+const ui4 = read('src/pages/discovery/ruleUi.tsx')
+for (const [source, url] of [['sensors', '/sensors'], ['agent_policies', '/agent-policies'], ['service_check_templates', '/service-check-templates']]) {
+  assert(ui4.includes(`api.get('${url}')`) && ui4.includes(`${source}:`), `${source} choices come from ${url}`)
+}
+const rules4 = read('src/pages/discovery/RulesPage.tsx')
+assert.match(rules4, /<UnmatchedCard \/>/, 'the Rules page has the Unmatched report')
+assert.match(rules4, /Count simulating rules as matching/)
+assert.match(rules4, /rulesApi\.runScheduleNow/, 'rule managers can run the scheduled rules now')
+assert.match(rules4, /canManage && \(\s*<Button[\s\S]{0,900}Run scheduled rules now/, 'Run now only for rule managers')
+assert.match(rules4, /browserTimeZone\(\)/, 'a new schedule starts in the browser time zone')
+assert.match(rules4, /growth_breaker_pct/, 'the settings edit the growth stop')
+assert.match(rules4, /data\?\.reasons/, 'the approval view lists why a run waits')
+assert.match(rules4, /itemOutcomeLabel\(it\.outcome, it\.action_key\)/, 'run items label a waiting sensor')
+const editor4 = read('src/pages/discovery/RuleEditorPage.tsx')
+assert.match(editor4, /'scheduled'\]/, 'the editor keeps the scheduled trigger of a loaded rule')
+assert.match(editor4, /<InterfacePatternsEditor/)
+assert.match(editor4, /Changes per automatic run, at most/)
+assert.match(editor4, /first matching pattern decides/, 'the editor explains how interface patterns combine')
+assert.match(read('src/pages/discovery/AssetAutomation.tsx'), /interfaceLabel\(s\.item_key\)/, 'the Automation card names the interface')
 
 console.log('discovery rules model: ok')
