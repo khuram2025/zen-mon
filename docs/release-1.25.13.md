@@ -20,6 +20,13 @@ Device groups you can use everywhere, and custom fields.
   status and SNMP alert messages as {custom.<key>}. Import values from CSV
   with a dry run first.
 - New permission "Manage groups and policies" (admin, operator, network team).
+- Fixed: upgrades to 1.25.10, 1.25.11 and 1.25.12 stopped at migration 189
+  ("duplicate key value violates unique constraint device_profiles_builtin_key")
+  on appliances that hold two built-in templates of one name (an old and a
+  newer version, for example Aruba Wireless Controller). The migration now
+  keys one template per name and leaves the other as it was; appliances that
+  already ran it are reconciled without running it again. Appliances that
+  failed this way can upgrade straight to 1.25.13.
 
 Migration 192. Includes 1.25.12. Appliance-only package; minimum upgrade
 base 1.24.36; signed Windows agent catalog preserved. Details:
