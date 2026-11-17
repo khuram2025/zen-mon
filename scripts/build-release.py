@@ -1528,8 +1528,15 @@ def list_releases() -> None:
 
 
 def create_rollout(version: str, stage: str, target_group: str | None,
-                   target_pct: int, *, auto_promote: bool = True) -> None:
-    """Create a rollout policy for a release."""
+                   target_pct: int, *, auto_promote: bool = True, max_failure_pct: int = 5) -> None:
+    """Create a rollout policy for a release.
+
+    max_failure_pct is the share of appliances that may fail the release before
+    the portal pauses the rollout by itself (100 turns that stop off).
+    """
+    if not 0 <= max_failure_pct <= 100:
+        print("ERROR: --max-failure-pct must be between 0 and 100.")
+        sys.exit(1)
     import httpx
 
     token = get_admin_token()
@@ -1561,7 +1568,7 @@ def create_rollout(version: str, stage: str, target_group: str | None,
             "target_pct": target_pct,
             "auto_promote": auto_promote and stage != "full",
             "promote_after": "24:00:00",
-            "max_failure_pct": 5,
+            "max_failure_pct": max_failure_pct,
         },
         timeout=30,
     )
@@ -1574,6 +1581,7 @@ def create_rollout(version: str, stage: str, target_group: str | None,
     print(f"  Stage:    {stage}")
     print(f"  Group:    {target_group or 'all'}")
     print(f"  Percent:  {target_pct}%")
+    print(f"  Pauses itself when more than {max_failure_pct}% of appliances fail to install it.")
     print(f"  Appliances will start receiving this update on next check-in.\n")
 
 
@@ -1664,6 +1672,8 @@ Examples:
     pub_p.add_argument("--rollout-pct", type=int, default=100, help="Rollout percentage (default 100)")
     pub_p.add_argument("--rollout-group", default=None, help="Target rollout group")
     pub_p.add_argument("--no-auto-promote", action="store_true", help="Keep staged rollout pending explicit promotion")
+    pub_p.add_argument("--max-failure-pct", type=int, default=5,
+                       help="Share of appliances that may fail before the rollout pauses itself (default 5; 100 disables)")
 
     # Lint migrations
     lint_p = sub.add_parser("lint-migrations",
@@ -1681,6 +1691,8 @@ Examples:
     roll_p.add_argument("--group", default=None, help="Target group (default: all)")
     roll_p.add_argument("--pct", type=int, default=100, help="Target percentage")
     roll_p.add_argument("--no-auto-promote", action="store_true", help="Keep staged rollout pending explicit promotion")
+    roll_p.add_argument("--max-failure-pct", type=int, default=5,
+                       help="Share of appliances that may fail before the rollout pauses itself (default 5; 100 disables)")
 
     args = parser.parse_args()
 
@@ -1710,7 +1722,8 @@ Examples:
                         args.skip_agent_artifacts)
 
         if args.rollout:
-            create_rollout(args.version, args.rollout, args.rollout_group, args.rollout_pct, auto_promote=not args.no_auto_promote)
+            create_rollout(args.version, args.rollout, args.rollout_group, args.rollout_pct,
+                           auto_promote=not args.no_auto_promote, max_failure_pct=args.max_failure_pct)
 
     elif args.command == "lint-migrations":
         lint_migrations(update_lock=args.update_lock)
@@ -1720,7 +1733,8 @@ Examples:
         list_releases()
 
     elif args.command == "rollout":
-        create_rollout(args.version, args.stage, args.group, args.pct, auto_promote=not args.no_auto_promote)
+        create_rollout(args.version, args.stage, args.group, args.pct,
+                       auto_promote=not args.no_auto_promote, max_failure_pct=args.max_failure_pct)
 
 
 if __name__ == "__main__":

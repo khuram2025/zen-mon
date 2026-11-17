@@ -75,6 +75,7 @@ jobs:
       - run: node scripts/test-device-interfaces.mjs
       - run: node scripts/test-device-page-phase3.mjs
       - run: node scripts/test-controller-children.mjs
+      - run: node scripts/test-update-path.mjs
       - run: node scripts/test-nav-access.mjs
       - run: node scripts/test-page-access.mjs
       - run: node scripts/test-map-export.mjs
