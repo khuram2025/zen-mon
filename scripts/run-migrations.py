@@ -78,6 +78,15 @@ SUPERSEDED_CHECKSUMS: dict[str, set[str]] = {
     # 1.23.24 release: private/shared views use that release's is_shared column,
     # so this file no longer adds a "visibility" column. No appliance ever
     # applied the first cut, so nothing is left to reconcile.
+    # The first cut of 189 (1.25.10 - 1.25.12) gave every built-in template
+    # sharing a name the same builtin_key and aborted on the unique index on
+    # appliances with an old-version and a new-version row of one name. Where
+    # it succeeded there was one row per name, and the revision leaves exactly
+    # the same keys and types. Appliances where it failed have no ledger row
+    # and re-run the revised (idempotent) file.
+    "migrate-189-device-templates.sql": {
+        "dd05631ff051784b9b2d9ba12799003bbeec0fb958dc24d290a19fb86ce380d4",
+    },
     "migrate-138-netflow-governance.sql": {
         "18ff598ed2374b18a3d94f4e98e37cd17167f7454c4b50b16494762f51b14c75",
     },
