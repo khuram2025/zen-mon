@@ -364,12 +364,21 @@ async def test_growth_stop_after_a_rule_suddenly_matches_many_more(pg_db):
             {"field": "ip_address", "operator": "in_subnet", "value": "10.1.0.0/16"}]}
         c.put(f"{BASE}/{rid}", json=cur).raise_for_status()
     out = await rpass(pg_db)
-    assert "needs_approval" in out and "growth stop" in out["reasons"][0]
+    assert "needs_approval" in out and "newly matches and would change 20 assets" in out["reasons"][0]
     assert pg_db.scalar("SELECT count(*) FROM devices WHERE location = 'Lab'") == 10
     enable_engine(pg_db, growth_breaker_pct=0)  # off: the rule edit supersedes nothing, the run still waits
     with manager(pg_db) as c:
         c.post(f"{BASE}/history/{out['needs_approval']}/approve").raise_for_status()
     assert pg_db.scalar("SELECT count(*) FROM devices WHERE location = 'Lab'") == 30
+    assert pg_db.scalar("SELECT last_match_count FROM discovery_engine_rules") == 30
+    # a new action on the same 30 matches is not growth (found on .221)
+    enable_engine(pg_db, growth_breaker_pct=50, growth_breaker_min=5)
+    with manager(pg_db) as c:
+        cur = c.get(f"{BASE}/{rid}").json()
+        cur["actions"] = cur["actions"] + [{"key": "owner", "value": "Lab team"}]
+        c.put(f"{BASE}/{rid}", json=cur).raise_for_status()
+    out = await rpass(pg_db)
+    assert "needs_approval" not in out and out["applied"] == 30
 
 
 # ── scheduled runs ──────────────────────────────────────────────────────────

@@ -64,7 +64,7 @@ def evaluate(facts: dict, rules: Iterable[dict], *, trigger: str = "discovery",
                 trace.append({"rule_id": rid, "rule_name": rule.get("name"), "matched": False, "skipped": skip})
             continue
         leaves: list = []
-        ok = conditions.evaluate(rule["condition"], facts, leaves)
+        ok = conditions.evaluate(rule["condition"], facts, leaves, strict_booleans=True)
         if len(trace) < TRACE_RULE_LIMIT:
             trace.append({"rule_id": rid, "rule_name": rule.get("name"), "matched": ok, "leaves": leaves})
         if not ok:
