@@ -221,6 +221,7 @@ export const NAV_GROUPS: NavGroup[] = [
           { to: '/discovery/reports', label: 'Scan Results', icon: FileBarChart },
           { to: '/discovery/imports', label: 'Import Queue', icon: Inbox },
           { to: '/discovery/ignored', label: 'Ignored', icon: SlashSquare },
+          { to: '/discovery/rules', label: 'Rules', icon: ListChecks },
           { to: '/discovery/credentials', label: 'Credentials', icon: Key, permission: ['devices.manage', 'service_checks.manage'] },
         ],
       },

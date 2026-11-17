@@ -40,6 +40,8 @@ import { ReportsPage as DiscoveryReportsPage } from '@/pages/discovery/ReportsPa
 import { ImportsPage as DiscoveryImportsPage } from '@/pages/discovery/ImportsPage'
 import { IgnoredPage as DiscoveryIgnoredPage } from '@/pages/discovery/IgnoredPage'
 import { CredentialsPage as DiscoveryCredentialsPage } from '@/pages/discovery/CredentialsPage'
+import { RulesPage as DiscoveryRulesPage } from '@/pages/discovery/RulesPage'
+import { RuleEditorPage as DiscoveryRuleEditorPage } from '@/pages/discovery/RuleEditorPage'
 import { UdtLayout } from '@/pages/udt/UdtLayout'
 import { EndpointSearchPage } from '@/pages/udt/EndpointSearchPage'
 import { EndpointDetailPage } from '@/pages/udt/EndpointDetailPage'
@@ -206,6 +208,9 @@ export default function App() {
           <Route path="imports" element={<DiscoveryImportsPage />} />
           <Route path="ignored" element={<DiscoveryIgnoredPage />} />
           <Route path="credentials" element={<DiscoveryCredentialsPage />} />
+          <Route path="rules" element={<DiscoveryRulesPage />} />
+          <Route path="rules/new" element={<DiscoveryRuleEditorPage />} />
+          <Route path="rules/:id" element={<DiscoveryRuleEditorPage />} />
           <Route path="profiles/:id" element={<DiscoveryProfileDetailPage />} />
           <Route path="profiles/:id/edit" element={<DiscoveryWizardPage />} />
           <Route path="runs/:id" element={<DiscoveryRunPage />} />

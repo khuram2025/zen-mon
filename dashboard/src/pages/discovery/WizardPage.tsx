@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -21,7 +21,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { discoveryApi } from './api'
+import { discoveryApi, rulesApi } from './api'
+import { IMPORT_MODE_TEXT } from './ruleModel'
 import { api } from '@/lib/api'
 import { DiscoveryProtocol } from './types'
 import { Button } from '@/components/ui/Button'
@@ -1186,16 +1187,35 @@ function RulesStep({
   const removeRecipient = (r: string) =>
     update({ notify_recipients: state.notify_recipients.filter((x) => x !== r) })
 
+  // How many discovery rules would act on this profile's scans (Discovery → Rules).
+  const { data: rules } = useQuery({
+    queryKey: ['discovery', 'rules', 'list'],
+    queryFn: rulesApi.list,
+    retry: false,
+  })
+  const { data: ruleSettings } = useQuery({
+    queryKey: ['discovery', 'rules', 'settings'],
+    queryFn: rulesApi.getSettings,
+    retry: false,
+  })
+  const activeRules = (rules || []).filter((r) => r.mode === 'active').length
+
   return (
     <div className="space-y-5">
       <div>
-        <div className="mb-2 text-sm font-medium">When a device is discovered…</div>
+        <div className="mb-2 text-sm font-medium">What discovery rules may do with this profile's results</div>
+        <p className="mb-2 text-xs text-muted">
+          {rules
+            ? `${activeRules} active rule${activeRules === 1 ? '' : 's'}`
+            : 'Rules'}
+          {ruleSettings && !ruleSettings.enabled ? ' (rules are turned off: scans ignore them)' : ''}
+          {' · '}
+          <Link to="/discovery/rules" className="text-primary hover:underline">
+            Discovery → Rules
+          </Link>
+        </p>
         <div className="space-y-2">
-          {[
-            { v: 'review', label: 'Do not auto-import — review first (recommended)', desc: 'You manually approve each device' },
-            { v: 'auto_match', label: 'Auto-import devices matching classification rules', desc: 'Apply rules to import without confirmation' },
-            { v: 'ignore_match', label: 'Ignore devices matching ignore rules', desc: 'Used to filter known noise' },
-          ].map((c) => {
+          {(['review', 'auto_match', 'ignore_match'] as const).map((v) => ({ v, ...IMPORT_MODE_TEXT[v] })).map((c) => {
             const active = state.import_mode === (c.v as any)
             return (
               <button
@@ -1380,7 +1400,7 @@ function ReviewStep({ state, estimate }: { state: WizardState; estimate?: any })
             <Row label="Max duration" value={`${state.max_duration_sec} sec`} />
           </ReviewBlock>
           <ReviewBlock title="Import rules" className="md:col-span-2">
-            <Row label="On discovery" value={state.import_mode.replace('_', ' ')} />
+            <Row label="Discovery rules" value={IMPORT_MODE_TEXT[state.import_mode]?.label ?? state.import_mode} />
             <Row
               label="Default group"
               value={state.default_group_id ? '(selected)' : 'none'}

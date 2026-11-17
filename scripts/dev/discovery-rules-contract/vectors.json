@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "vectors": [
+    {
+      "name": "fortigate in subnet: auto-import with template, group and two tags",
+      "facts": {"ip_address": "10.51.2.12", "sys_object_id": ".1.3.6.1.4.1.12356.101.1.1000", "vendor": "Fortinet"},
+      "rules": [
+        {"id": "forti", "name": "FortiGate Riyadh", "priority": 10, "asset_kinds": ["device"],
+         "condition": {"op": "all", "conditions": [
+           {"field": "sys_object_id", "operator": "starts_with", "value": "1.3.6.1.4.1.12356"},
+           {"field": "ip_address", "operator": "in_subnet", "value": ["10.51.0.0/16"]}]},
+         "actions": [
+           {"key": "decision", "value": "auto_import"},
+           {"key": "template", "value": "00000000-0000-0000-0000-00000000f001"},
+           {"key": "group", "value": "00000000-0000-0000-0000-00000000a001"},
+           {"key": "tags", "value": ["firewall", "riyadh"]}]}
+      ],
+      "expect": {
+        "matched": ["forti"],
+        "settings": {"decision": "auto_import", "template": "00000000-0000-0000-0000-00000000f001",
+                     "group": "00000000-0000-0000-0000-00000000a001"},
+        "tags": ["firewall", "riyadh"],
+        "disposition": {"import_mode": "auto_match", "expect": ["auto_import", null]}
+      }
+    },
+    {
+      "name": "same rule on a review profile only annotates",
+      "facts": {"ip_address": "10.51.2.12", "sys_object_id": "1.3.6.1.4.1.12356.101.1.1000"},
+      "rules": [
+        {"id": "forti", "name": "FortiGate", "priority": 10,
+         "condition": {"op": "all", "conditions": [
+           {"field": "sys_object_id", "operator": "starts_with", "value": "1.3.6.1.4.1.12356"}]},
+         "actions": [{"key": "decision", "value": "auto_import"}]}
+      ],
+      "expect": {"matched": ["forti"], "settings": {"decision": "auto_import"},
+                 "disposition": {"import_mode": "review", "expect": ["would_import", "profile_review"]}}
+    },
+    {
+      "name": "two rules set different groups: the higher priority wins, the other is shadowed",
+      "facts": {"ip_address": "10.51.2.12", "vendor": "Fortinet"},
+      "rules": [
+        {"id": "low", "name": "Subnet group", "priority": 20,
+         "condition": {"op": "all", "conditions": [
+           {"field": "ip_address", "operator": "in_subnet", "value": ["10.51.0.0/16"]}]},
+         "actions": [{"key": "group", "value": "00000000-0000-0000-0000-00000000a002"},
+                     {"key": "tags", "value": ["Riyadh"]}]},
+        {"id": "high", "name": "Vendor group", "priority": 10,
+         "condition": {"op": "all", "conditions": [{"field": "vendor", "operator": "equals", "value": "fortinet"}]},
+         "actions": [{"key": "group", "value": "00000000-0000-0000-0000-00000000a001"},
+                     {"key": "tags", "value": ["firewall", "riyadh"]}]}
+      ],
+      "expect": {"matched": ["high", "low"], "settings": {"group": "00000000-0000-0000-0000-00000000a001"},
+                 "tags": ["firewall", "riyadh"], "shadowed": ["low"]}
+    },
+    {
+      "name": "catch-all ignore after a specific rule; unknown vendor is not Fortinet",
+      "facts": {"ip_address": "10.9.9.9"},
+      "rules": [
+        {"id": "forti", "name": "FortiGate", "priority": 10,
+         "condition": {"op": "all", "conditions": [{"field": "vendor", "operator": "equals", "value": "Fortinet"}]},
+         "actions": [{"key": "decision", "value": "auto_import"}]},
+        {"id": "not-forti", "name": "Tag the rest", "priority": 15,
+         "condition": {"op": "all", "conditions": [{"field": "vendor", "operator": "not_equals", "value": "Fortinet"}]},
+         "actions": [{"key": "tags", "value": ["unclassified"]}]},
+        {"id": "rest", "name": "Ignore the rest", "priority": 20,
+         "condition": {"op": "all", "conditions": []},
+         "actions": [{"key": "decision", "value": "ignore"}]}
+      ],
+      "expect": {"matched": ["not-forti", "rest"], "settings": {"decision": "ignore"}, "tags": ["unclassified"],
+                 "disposition": {"import_mode": "ignore_match", "expect": ["ignore", null]}}
+    },
+    {
+      "name": "stop processing keeps later rules from adding tags",
+      "facts": {"ip_address": "10.51.2.12", "open_ports": [22, 443]},
+      "rules": [
+        {"id": "a", "name": "HTTPS", "priority": 10, "stop_processing": true,
+         "condition": {"op": "all", "conditions": [{"field": "open_ports", "operator": "has_any", "value": ["443"]}]},
+         "actions": [{"key": "tags", "value": ["web"]}]},
+        {"id": "b", "name": "SSH", "priority": 20,
+         "condition": {"op": "all", "conditions": [{"field": "open_ports", "operator": "has_any", "value": ["22"]}]},
+         "actions": [{"key": "tags", "value": ["ssh"]}]}
+      ],
+      "expect": {"matched": ["a"], "settings": {}, "tags": ["web"]}
+    },
+    {
+      "name": "existing devices are never acted on in phase 1",
+      "facts": {"ip_address": "10.51.2.12", "vendor": "Fortinet", "result_status": "existing"},
+      "rules": [
+        {"id": "forti", "name": "FortiGate", "priority": 10,
+         "condition": {"op": "all", "conditions": [{"field": "vendor", "operator": "equals", "value": "Fortinet"}]},
+         "actions": [{"key": "decision", "value": "ignore"}]}
+      ],
+      "expect": {"matched": ["forti"], "settings": {"decision": "ignore"},
+                 "disposition": {"import_mode": "auto_match", "status": "existing", "expect": ["existing", null]}}
+    }
+  ]
+}

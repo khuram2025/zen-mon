@@ -433,6 +433,20 @@
       ]
     },
     {
+      "key": "/discovery/rules",
+      "label": "Rules",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "Discovery",
+      "gates": [
+        {
+          "any": [
+            "discovery.view"
+          ]
+        }
+      ]
+    },
+    {
       "key": "/discovery/credentials",
       "label": "Credentials",
       "group": "network",

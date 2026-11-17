@@ -51,6 +51,7 @@ Every path that creates a node takes the transaction-scoped advisory lock
 | `POST /devices/bulk-import` | creates up to the remaining nodes, reports the rest as skipped; 402 when none are left |
 | `POST /snmp/discover/{job}/import` | same as bulk import |
 | `POST /discovery-v2/runs/{id}/import` | each new device or unlinked server takes a node; items past the limit fail with the capacity message; updates of existing rows still work |
+| Discovery rules auto-import (end of a scan, `POST /discovery-v2/rules/evaluate-scan/{id}` with `apply`) | the same import path and lock; at most `max_auto_import_per_run` per scan and `license_reserve_nodes` always left free; results past the room stay in review with reason `license_capacity_reached` and the rules run is `partial` (see `docs/discovery-rule-engine.md`) |
 | `POST /servers` (Register / Add Server) | 402, unless linked to a device that already holds a node |
 | Agent enrollment creating a new server | 402; the agent retries on its normal schedule |
 | Approving pending agents (`POST /agent-fleet/{id}/authorize`, fleet bulk authorize) | 402 when the approval would create servers past the limit |

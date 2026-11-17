@@ -625,7 +625,9 @@ async def execute_run(run_id: uuid.UUID) -> None:
             db.add(row)
         await db.commit()
 
-    # Phase 6: applying rules (placeholder — rules are evaluated at import)
+    # Phase 6: applying discovery rules (app.services.discovery_rules). Off
+    # by default; while off the scan behaves exactly as before. A failure in
+    # the engine is logged on the run and never fails the scan.
     async with AsyncSessionLocal() as db:
         run = await db.get(DiscoveryRun, run_id)
         activity = list(run.activity_log or [])
@@ -638,6 +640,33 @@ async def execute_run(run_id: uuid.UUID) -> None:
         run.phase = "applying_rules"
         run.progress_pct = 95
         await db.commit()
+
+    rules_note: tuple[str, str] | None = None
+    try:
+        from app.services.discovery_rules import runner as rules_runner
+        async with AsyncSessionLocal() as db:
+            if (await rules_runner.load_settings(db)).get("enabled"):
+                summary = await rules_runner.evaluate_discovery_run(db, run_id, trigger="discovery")
+                level = "warning" if summary.get("status") == "partial" else "info"
+                parts = [f"{summary.get('matched', 0)} matched"]
+                for key, label in (("imported", "auto-imported"), ("ignored", "ignored"),
+                                   ("would_import", "would import (profile does not allow auto-import)"),
+                                   ("would_ignore", "would ignore (profile in review mode)"),
+                                   ("blocked_license", "kept for review: license capacity"),
+                                   ("blocked_cap", "kept for review: per-scan auto-import limit"),
+                                   ("errors", "import errors")):
+                    if summary.get(key):
+                        parts.append(f"{summary[key]} {label}")
+                rules_note = (f"Discovery rules: {', '.join(parts)}", level)
+    except Exception as e:  # noqa: BLE001 - the scan result stands without rules
+        rules_note = (f"Discovery rules failed: {e}"[:500], "warning")
+    if rules_note:
+        async with AsyncSessionLocal() as db:
+            run = await db.get(DiscoveryRun, run_id)
+            activity = list(run.activity_log or [])
+            _log_event(activity, rules_note[0], rules_note[1])
+            run.activity_log = activity
+            await db.commit()
     await asyncio.sleep(0.1)
 
     # Phase 7: reporting / done

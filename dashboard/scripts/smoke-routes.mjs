@@ -64,6 +64,14 @@ if (inventoryBlock) {
   }
 }
 
+// Same for /discovery: its children follow self-closing /services routes, so read its own block.
+const discoveryBlock = /<Route\s+path="discovery"[^>]*>([\s\S]*?)<\/Route>/.exec(app)
+if (discoveryBlock) {
+  for (const child of discoveryBlock[1].matchAll(/<Route\s+path="([^"]+)"/g)) {
+    routePaths.add(`/discovery/${child[1]}`)
+  }
+}
+
 const requiredRoutes = [
   '/',
   '/login',
@@ -80,6 +88,9 @@ const requiredRoutes = [
   '/maps',
   '/maps/manual',
   '/discovery',
+  '/discovery/rules',
+  '/discovery/rules/new',
+  '/discovery/rules/:id',
   '/mibs',
   '/alerts',
   '/alert-rules',
