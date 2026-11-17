@@ -49,6 +49,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Automatic re-evaluation ("changed" trigger): a pass that would change
     # more values than this waits for approval instead (phase 3).
     "max_changes_per_run": 100,
+    # Match-growth stop (phase 4): an automatic run in which one rule would
+    # change more assets than max(growth_breaker_min, growth_breaker_pct % of
+    # the assets it matched last time) waits for approval. 0 % turns it off.
+    "growth_breaker_pct": 50,
+    "growth_breaker_min": 20,
+    # Scheduled runs (rules with the "scheduled" trigger), local time.
+    "schedule_enabled": False,
+    "schedule_every_hours": 24,
+    "schedule_time": "02:00",
+    "schedule_timezone": "UTC",
 }
 # Result statuses the rules look at; failed (no answer) and already-ignored
 # addresses carry no facts worth classifying.
@@ -98,6 +108,8 @@ def rule_dict(row: DiscoveryEngineRule) -> dict:
         "stop_processing": bool(row.stop_processing),
         "enforcement": row.enforcement or "set_once",
         "on_unmatch": row.on_unmatch or "keep",
+        "max_changes_per_run": row.max_changes_per_run,
+        "last_match_count": row.last_match_count,
     }
 
 

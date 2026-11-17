@@ -67,6 +67,9 @@ _REF_TABLES = {
     "discovery_profiles": "discovery_profiles",
     "devices": "devices",
     "manual_maps": "manual_maps",
+    "sensors": "sensors",
+    "agent_policies": "agent_policies",
+    "service_check_templates": "service_check_templates",
 }
 
 
@@ -85,6 +88,7 @@ def _snapshot(row: DiscoveryEngineRule) -> dict:
         "asset_kinds": list(row.asset_kinds or []), "profile_ids": [str(p) for p in row.profile_ids or []] or None,
         "condition": row.condition, "actions": row.actions, "stop_processing": row.stop_processing,
         "triggers": list(row.triggers or []), "enforcement": row.enforcement, "on_unmatch": row.on_unmatch,
+        "max_changes_per_run": row.max_changes_per_run,
     }
 
 
@@ -204,7 +208,8 @@ async def catalog(_user: User = Depends(require_permission("discovery.view"))):
                   {"key": "active", "label": "Active"}, {"key": "disabled", "label": "Disabled"}],
         "triggers": [{"key": "discovery", "label": "Discovery scan results"},
                      {"key": "created", "label": "Devices and servers when they are added"},
-                     {"key": "changed", "label": "Devices and servers whenever they change (and when the rule changes)"}],
+                     {"key": "changed", "label": "Devices and servers whenever they change (and when the rule changes)"},
+                     {"key": "scheduled", "label": "All devices and servers at the scheduled times"}],
         "on_unmatch": [{"key": "keep", "label": "Keep the values the rule set"},
                        {"key": "revert", "label": "Revert them to what they were (if unchanged since)"}],
         "asset_kinds": [{"key": "device", "label": "Network devices"}, {"key": "server", "label": "Servers"},
@@ -212,7 +217,16 @@ async def catalog(_user: User = Depends(require_permission("discovery.view"))):
         "enforcement": [{"key": "set_once", "label": "Set once (keep later hand edits)"},
                         {"key": "enforce", "label": "Enforce (put the rule's value back)"}],
         "limits": {"max_depth": conditions.MAX_DEPTH, "max_leaves": conditions.MAX_LEAVES,
-                   "max_regex": conditions.MAX_REGEX},
+                   "max_regex": conditions.MAX_REGEX,
+                   "max_interface_patterns": rule_actions.MAX_INTERFACE_PATTERNS},
+        "interface_fields": [{"key": "if_name", "label": "Name (ifName)", "value": "regex"},
+                             {"key": "if_alias", "label": "Alias / description set on the port", "value": "regex"},
+                             {"key": "if_descr", "label": "ifDescr", "value": "regex"},
+                             {"key": "if_type", "label": "IF-MIB type numbers (6, 24, 131, ...)", "value": "types"},
+                             {"key": "speed", "label": "Speed in Mbit/s (1000, 100-1000, 10000-, -100)",
+                              "value": "range"}],
+        "interface_sets": [{"key": "monitor", "label": "Monitor"}, {"key": "ignore", "label": "Ignore"}],
+        "schedule_hours": list(reconcile.SCHEDULE_HOURS),
     }
 
 
@@ -258,6 +272,7 @@ async def _create(db: AsyncSession, payload: RuleCreate, user: User, *, reason: 
         asset_kinds=list(payload.asset_kinds), triggers=list(payload.triggers), profile_ids=profile_ids,
         condition=condition, actions=acts, stop_processing=payload.stop_processing, revision=1,
         enforcement=payload.enforcement, on_unmatch=payload.on_unmatch, builtin_key=builtin_key,
+        max_changes_per_run=payload.max_changes_per_run,
         created_by=user.id, updated_by=user.id, created_at=now, updated_at=now,
         activated_by=user.id if payload.mode == "active" else None,
         activated_at=now if payload.mode == "active" else None,
@@ -567,6 +582,59 @@ async def rule_conflicts(db: AsyncSession = Depends(get_db),
     return await inventory.conflicts(db, rules)
 
 
+@router.get("/unmatched")
+async def unmatched_assets(kinds: Optional[str] = Query(default="device,server,child"),
+                           include_simulating: bool = False, db: AsyncSession = Depends(get_db),
+                           user: User = Depends(require_permission("discovery.view"))):
+    """Devices, servers and controller-managed children that no active rule
+    (optionally: no simulating rule either) matches, whatever its triggers.
+    Users whose view is limited by tags see only their assets."""
+    want = [k for k in (kinds or "").split(",") if k in ("device", "server", "child")] or ["device", "server"]
+    rules = await runner.load_rules(db, modes=("active", "simulate") if include_simulating else ("active",))
+    out = await reconcile.unmatched(db, rules, kinds=want)
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        out["rows"] = [r for r in out["rows"] if scoping.entity_visible(r["tags"], scope)]
+        out["scoped"] = True
+    out["rules"] = len(rules)
+    return out
+
+
+@router.get("/schedule")
+async def schedule_status(db: AsyncSession = Depends(get_db),
+                          _user: User = Depends(require_permission("discovery.view"))):
+    """When scheduled rules run next and when they last ran."""
+    settings = await runner.load_settings(db)
+    state = await reconcile._state(db)
+    now = datetime.now(timezone.utc)
+    active, simulating, _ = await reconcile.rules_for(db, "scheduled")
+    last = (await db.execute(text(
+        "SELECT id::text, status, started_at, counts FROM discovery_engine_runs WHERE trigger = 'scheduled'"
+        " ORDER BY started_at DESC LIMIT 1"))).mappings().first()
+    return {"enabled": bool(settings["enabled"] and settings.get("schedule_enabled")),
+            "engine_enabled": bool(settings["enabled"]), "schedule_enabled": bool(settings.get("schedule_enabled")),
+            "next": reconcile.next_slot(now, settings).isoformat(),
+            "last_slot": state.get("last_scheduled_slot"), "last_run_at": state.get("last_scheduled_run_at"),
+            "rules": len(active), "simulating": len(simulating),
+            "last_run": dict(last) if last else None}
+
+
+@router.post("/schedule/run-now")
+async def run_schedule_now(db: AsyncSession = Depends(get_db),
+                           user: User = Depends(require_permission("discovery.manage_rules"))):
+    """Run the scheduled rules now (same limits and approval as a scheduled run)."""
+    await _fleet_guard(db, user)
+    active, _, _ = await reconcile.rules_for(db, "scheduled")
+    acts = [a for r in active for a in r["actions"]]
+    kinds = sorted({k for r in active for k in r["asset_kinds"]})
+    await _check_activation(db, user, acts, kinds, "Running the scheduled rules")
+    out = await reconcile.scheduled_pass(db, force=True)
+    await write_audit_log(db, actor=user, action="discovery.rules.schedule_run", resource_type="discovery_rules",
+                          resource_id=None, metadata={k: v for k, v in out.items() if k != "reasons"})
+    await db.commit()
+    return out
+
+
 # ── phase 3: approval, export/import, starter rules ─────────────────────────
 
 async def _check_kinds(db: AsyncSession, user: User, kinds, verb: str) -> None:
@@ -603,7 +671,8 @@ async def pending_changes(engine_run_id: uuid.UUID, db: AsyncSession = Depends(g
                         visible.add((kind, aid))
         changes = [c for c in changes if (c["asset_kind"], c["asset_id"]) in visible]
     return {"engine_run_id": str(run.id), "status": run.status, "detail": run.detail, "counts": run.counts or {},
-            "assets": len(plan.get("assets") or []), "changes": changes}
+            "assets": len(plan.get("assets") or []) or (run.counts or {}).get("assets", 0),
+            "reasons": plan.get("reasons") or [], "trigger": run.trigger, "changes": changes}
 
 
 async def _decide(engine_run_id, approve: bool, db: AsyncSession, user: User) -> dict:
@@ -611,8 +680,13 @@ async def _decide(engine_run_id, approve: bool, db: AsyncSession, user: User) ->
     run = await db.get(DiscoveryEngineRun, engine_run_id)
     if not run:
         raise HTTPException(404, "Run not found")
-    kinds = {c.get("asset_kind") for c in (run.plan or {}).get("changes") or []}
-    await _check_kinds(db, user, kinds, "Approving these changes" if approve else "Rejecting these changes")
+    changes = (run.plan or {}).get("changes") or []
+    kinds = {c.get("asset_kind") for c in changes}
+    verb = "Approving these changes" if approve else "Rejecting these changes"
+    await _check_kinds(db, user, kinds, verb)
+    if approve:
+        await _check_activation(db, user, [{"key": k} for k in {c.get("action_key") for c in changes}],
+                                sorted(k for k in kinds if k), verb)
     try:
         out = await reconcile.decide(db, engine_run_id, approve=approve, actor_id=user.id)
     except LookupError as e:
@@ -766,6 +840,7 @@ async def update_rule(rule_id: uuid.UUID, payload: RuleUpdate, db: AsyncSession 
     row.triggers = list(payload.triggers)
     row.enforcement = payload.enforcement
     row.on_unmatch = payload.on_unmatch
+    row.max_changes_per_run = payload.max_changes_per_run
     row.revision = row.revision + 1
     row.updated_by = user.id
     row.updated_at = now
