@@ -48,6 +48,9 @@ FIELDS: dict[str, tuple[str, str, str]] = {
     "environment": ("text", "Environment", "Server environment (production, staging, ...)"),
     "os_type": ("text", "OS type", "Server OS type: windows, linux, macos, bsd, other, unknown"),
     "collection_mode": ("text", "Collection mode", "How a server is monitored: agent, agentless_winrm, ssh, snmp, none"),
+    # Controller-managed children (FortiSwitch / FortiAP read through a FortiGate).
+    "controller": ("text", "Controller", "Hostname of the controller (FortiGate) that manages it"),
+    "managed_source": ("text", "Managed through", "How the controller reports it: fortilink switch, FortiAP, ..."),
 }
 
 # Which facts each source provides; a fact a source lacks is missing (see
@@ -62,8 +65,11 @@ _DEVICE = {"ip_address", "hostname", "sys_descr", "sys_object_id", "vendor", "mo
            "owner", "status", "ping_enabled", "snmp_enabled"}
 _SERVER = {"ip_address", "hostname", "fqdn", "os", "os_version", "device_type", "is_server", "tags", "owner",
            "status", "environment", "os_type", "collection_mode"}
+_CHILD = {"ip_address", "hostname", "vendor", "model", "device_type", "os_version", "serial_number", "is_server",
+          "tags", "group_id", "location", "owner", "status", "controller", "managed_source"}
 FIELD_SOURCES: dict[str, list[str]] = {
-    k: [src for src, keys in (("scan", _SCAN), ("device", _DEVICE), ("server", _SERVER)) if k in keys]
+    k: [src for src, keys in (("scan", _SCAN), ("device", _DEVICE), ("server", _SERVER), ("child", _CHILD))
+        if k in keys]
     for k in FIELDS
 }
 
@@ -227,4 +233,14 @@ def facts_from_server(row: Any) -> dict[str, Any]:
         "os_type": _get(row, "os_type"),
         "collection_mode": _get(row, "collection_mode"),
     })
+    return out
+
+
+def facts_from_child(row: Any) -> dict[str, Any]:
+    """Facts of a controller-managed child (a FortiSwitch or FortiAP device row
+    with ``poll_mode = 'via_controller'``, joined with its controller)."""
+    out = facts_from_device(row)
+    out.update({"controller": _get(row, "controller"), "managed_source": _get(row, "managed_source"),
+                "sys_object_id": None, "sys_descr": None, "template_id": None, "snmp_credential_id": None,
+                "ping_enabled": None, "snmp_enabled": None})
     return out

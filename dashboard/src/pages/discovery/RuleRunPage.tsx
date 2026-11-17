@@ -12,7 +12,6 @@ import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { Input } from '@/components/ui/Input'
 import { FormField } from '@/components/ui/FormField'
-import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { toast } from '@/components/ui/Toast'
 import { apiErrorMessage, cn } from '@/lib/utils'
@@ -27,11 +26,13 @@ import type {
   PreviewStaleDetail,
 } from './types'
 import {
+  applyConfirmText,
+  ASSET_KIND_ORDER,
+  ASSET_KIND_SHORT,
   CHANGE_OUTCOME_LABEL,
-  CHANGE_OUTCOME_TONE,
-  assetPath,
+  CHANGE_OUTCOME_ORDER,
   buildTargets,
-  changeText,
+  dependencyIds,
   isSubnet,
   parseList,
   parseRunTargets,
@@ -41,7 +42,7 @@ import {
   summarizeApplyResult,
   summarizeInventoryPreview,
 } from './ruleModel'
-import { useRuleCatalog, useRuleLookups } from './ruleUi'
+import { ChangesTable, useRuleCatalog, useRuleLookups, useWithDeviceNames } from './ruleUi'
 
 const MAX_ROWS = 500
 
@@ -65,8 +66,10 @@ export function RuleRunPage() {
           Run rules on inventory
         </h1>
         <p className="mt-1 text-xs text-muted">
-          Apply the active discovery rules to devices and servers that are already monitored. Preview first: nothing
-          changes until you apply. Rules set values and add tags; they never delete anything or turn monitoring off.
+          Apply the active discovery rules to devices, servers and controller-managed switches and access points that
+          are already monitored. Preview first: nothing changes until you apply. Rules set values and add tags; they
+          never delete anything or turn monitoring off. A rule set to revert puts back what it set on assets that no
+          longer match it.
         </p>
       </div>
       {canManage ? (
@@ -99,7 +102,7 @@ function RunForm() {
   const [params, setParams] = useSearchParams()
   const pre = useMemo(() => parseRunTargets(params), [params])
   const { data: catalog } = useRuleCatalog()
-  const { lookups, options } = useRuleLookups()
+  const { lookups: baseLookups, options } = useRuleLookups()
   const { data: rules = [], isLoading: rulesLoading } = useQuery<DiscoveryRule[]>({
     queryKey: ['discovery', 'rules', 'list'],
     queryFn: rulesApi.list,
@@ -122,13 +125,14 @@ function RunForm() {
   const [show, setShow] = useState<'all' | ChangeOutcome>('all')
 
   const subnetBad = subnet.trim() !== '' && !isSubnet(subnet)
-  const preselected = pre.device_ids.length + pre.server_ids.length > 0
+  const preselected = pre.device_ids.length + pre.server_ids.length + pre.child_ids.length > 0
   const body: InventoryRunRequest = useMemo(() => {
     const targets = buildTargets({
       kinds,
       device_ids: pre.device_ids,
       server_ids: pre.server_ids,
-      group_ids: kinds.includes('device') ? groupIds : [],
+      child_ids: pre.child_ids,
+      group_ids: kinds.includes('device') || kinds.includes('child') ? groupIds : [],
       tags: parseList(tagsText),
       subnet,
       query,
@@ -139,7 +143,7 @@ function RunForm() {
   const outdated = !!preview && previewBody !== bodyKey
 
   const blockers: string[] = []
-  if (!kinds.length) blockers.push('Choose devices, servers or both')
+  if (!kinds.length) blockers.push('Choose devices, servers or managed switches / APs')
   if (ruleChoice === 'pick' && !picked.length) blockers.push('Pick at least one rule')
   if (!rulesLoading && active.length === 0) blockers.push('There are no active rules')
   if (subnetBad) blockers.push('The subnet must look like 10.0.0.0/16')
@@ -182,10 +186,12 @@ function RunForm() {
   })
 
   const changes = preview?.changes ?? []
+  const lookups = useWithDeviceNames(baseLookups, useMemo(() => dependencyIds(changes), [changes]))
   const rows = changes.filter((c) => show === 'all' || c.outcome === show)
   const shown = rows.slice(0, MAX_ROWS)
   const summary = preview?.summary
-  const canApply = !!preview && !outdated && (summary?.changes ?? 0) > 0 && !apply.isPending
+  const writes = (summary?.changes ?? 0) + (summary?.reverts ?? 0)
+  const canApply = !!preview && !outdated && writes > 0 && !apply.isPending
 
   const toggleKind = (k: AssetKind, on: boolean) =>
     setKinds(on ? Array.from(new Set([...kinds, k])) : kinds.filter((x) => x !== k))
@@ -240,6 +246,7 @@ function RunForm() {
                 {[
                   pre.device_ids.length ? plural(pre.device_ids.length, 'selected device') : '',
                   pre.server_ids.length ? plural(pre.server_ids.length, 'selected server') : '',
+                  pre.child_ids.length ? plural(pre.child_ids.length, 'selected managed switch / AP', 'selected managed switches / APs') : '',
                 ]
                   .filter(Boolean)
                   .join(' and ')}
@@ -250,7 +257,7 @@ function RunForm() {
                 className="ml-auto inline-flex items-center gap-1 text-xs text-muted hover:text-text"
                 onClick={() => {
                   const next = new URLSearchParams(params)
-                  for (const k of ['device', 'devices', 'server', 'servers']) next.delete(k)
+                  for (const k of ['device', 'devices', 'server', 'servers', 'child', 'children']) next.delete(k)
                   setParams(next, { replace: true })
                   setKinds(['device', 'server'])
                 }}
@@ -260,10 +267,10 @@ function RunForm() {
             </div>
           )}
           <div className="flex flex-wrap gap-4 text-sm">
-            {(['device', 'server'] as AssetKind[]).map((k) => (
-              <label key={k} className="flex items-center gap-2">
+            {ASSET_KIND_ORDER.map((k) => (
+              <label key={k} className="flex items-center gap-2" title={k === 'child' ? 'FortiLink switches and FortiAPs read through their FortiGate' : undefined}>
                 <input type="checkbox" checked={kinds.includes(k)} onChange={(e) => toggleKind(k, e.target.checked)} />
-                {k === 'device' ? 'Network devices' : 'Servers'}
+                {ASSET_KIND_SHORT[k]}
               </label>
             ))}
           </div>
@@ -278,7 +285,7 @@ function RunForm() {
               <Input value={query} placeholder="fw-, 10.51." onChange={(e) => setQuery(e.target.value)} />
             </FormField>
           </div>
-          {kinds.includes('device') && options.device_groups.length > 0 && (
+          {(kinds.includes('device') || kinds.includes('child')) && options.device_groups.length > 0 && (
             <div className="space-y-1">
               <div className="text-xs font-medium">Device groups {groupIds.length ? `(${groupIds.length})` : ''}</div>
               <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto rounded-md border border-border bg-surface2/30 p-2">
@@ -293,7 +300,7 @@ function RunForm() {
                 ))}
               </div>
               {groupIds.length > 0 && kinds.includes('server') && (
-                <div className="text-2xs text-muted">Groups apply to network devices; servers are not in device groups.</div>
+                <div className="text-2xs text-muted">Groups apply to network devices and managed switches / APs; servers are not in device groups.</div>
               )}
             </div>
           )}
@@ -355,13 +362,13 @@ function RunForm() {
               )}
             </div>
             <Button onClick={() => setConfirming(true)} disabled={!canApply}>
-              <CheckCircle2 className="h-4 w-4" /> Apply {summary.changes ? plural(summary.changes, 'change') : ''}
+              <CheckCircle2 className="h-4 w-4" /> Apply {writes ? plural(writes, 'change') : ''}
             </Button>
           </CardHeader>
           <CardContent className="space-y-2">
             {changes.length > 0 && (
               <div className="flex flex-wrap items-center gap-1">
-                {(['all', 'apply', 'kept_manual_edit', 'not_reversible'] as const).map((k) => {
+                {(['all', ...CHANGE_OUTCOME_ORDER] as const).map((k) => {
                   const n = k === 'all' ? changes.length : changes.filter((c) => c.outcome === k).length
                   if (k !== 'all' && n === 0) return null
                   return (
@@ -386,54 +393,7 @@ function RunForm() {
                 {summary.matched ? 'Everything the rules set is already in place.' : 'No device or server matches these rules.'}
               </div>
             ) : (
-              <div className="rounded-md border border-border">
-                <Table>
-                  <THead className="bg-surface2/50">
-                    <Tr>
-                      <Th>Asset</Th>
-                      <Th>Setting</Th>
-                      <Th>Current → new</Th>
-                      <Th>Rule</Th>
-                      <Th>Outcome</Th>
-                    </Tr>
-                  </THead>
-                  <TBody>
-                    {shown.map((c, i) => {
-                      const href = assetPath(c.asset_kind, c.asset_id)
-                      return (
-                        <Tr key={`${c.asset_kind}:${c.asset_id}:${c.action_key}:${c.item_key}:${i}`}>
-                          <Td className="text-xs">
-                            {href ? (
-                              <Link to={href} className="font-medium text-primary hover:underline">
-                                {c.asset_name || c.ip_address || c.asset_id.slice(0, 8)}
-                              </Link>
-                            ) : (
-                              c.asset_name || '—'
-                            )}
-                            <div className="text-2xs text-muted">
-                              {c.ip_address && <span className="font-mono">{c.ip_address}</span>}
-                              {c.asset_kind === 'server' ? `${c.ip_address ? ' · ' : ''}server` : ''}
-                            </div>
-                          </Td>
-                          <Td className="text-xs">{settingLabel(c.action_key, catalog)}</Td>
-                          <Td className="text-xs">{changeText(c.action_key, c.before, c.after, lookups)}</Td>
-                          <Td className="text-xs">
-                            <Link to={`/discovery/rules/${c.rule_id}`} className="hover:underline">
-                              {c.rule_name || c.rule_id.slice(0, 8)}
-                            </Link>
-                          </Td>
-                          <Td>
-                            <Badge variant={CHANGE_OUTCOME_TONE[c.outcome] as any} className="whitespace-nowrap">
-                              {CHANGE_OUTCOME_LABEL[c.outcome] ?? c.outcome}
-                            </Badge>
-                            {c.detail && <div className="mt-0.5 max-w-xs text-2xs text-muted">{c.detail}</div>}
-                          </Td>
-                        </Tr>
-                      )
-                    })}
-                  </TBody>
-                </Table>
-              </div>
+              <ChangesTable changes={shown} catalog={catalog} lookups={lookups} />
             )}
           </CardContent>
         </Card>
@@ -446,9 +406,7 @@ function RunForm() {
           </DialogHeader>
           {summary && (
             <div className="space-y-2 text-sm">
-              <p>
-                {sentenceCase(plural(summary.changes, 'value'))} will change on {plural(summary.assets_changed, 'device or server', 'devices and servers')}.
-              </p>
+              <p>{applyConfirmText(summary)}</p>
               {summary.kept_manual_edit > 0 && (
                 <p className="text-muted">{sentenceCase(plural(summary.kept_manual_edit, 'hand edit'))} stay as they are (set-once rules).</p>
               )}
@@ -465,7 +423,7 @@ function RunForm() {
             </Button>
             <Button onClick={() => apply.mutate()} disabled={apply.isPending}>
               {apply.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-              Apply {summary ? plural(summary.changes, 'change') : ''}
+              Apply {summary ? plural(writes, 'change') : ''}
             </Button>
           </DialogFooter>
         </DialogContent>

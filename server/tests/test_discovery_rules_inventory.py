@@ -131,3 +131,79 @@ def test_server_permissions_follow_the_rule_kinds():
     assert actions.permissions_needed(acts, ["device"]) == {"devices.manage"}
     assert actions.permissions_needed(acts, ["server"]) == {"servers.manage"}
     assert actions.permissions_needed(acts, ["device", "server"]) == {"devices.manage", "servers.manage"}
+
+
+# ── phase 3: revert on un-match, maps, dependency parents, children ─────────
+
+MAP = "00000000-0000-0000-0000-0000000000b1"
+PARENT = "22222222-2222-2222-2222-222222222222"
+
+
+def test_a_reverting_rule_restores_what_it_set_when_the_asset_stops_matching():
+    owned = {("location", ""): {"value": "Riyadh DC", "previous": "Old site", "rule_id": "r"},
+             ("tags", "firewall"): {"value": "firewall", "previous": None, "rule_id": "r"}}
+    r = rule("r", 10, [{"key": "location", "value": "Riyadh DC"}, {"key": "tags", "value": ["firewall"]}],
+             {"op": "all", "conditions": [{"field": "vendor", "operator": "equals", "value": "Cisco"}]})
+    r["on_unmatch"] = "revert"
+    row = device(location="Riyadh DC", tags=["Mine", "firewall"])
+    facts = facts_from_device(row)
+    plan = engine.evaluate(facts, [r], trigger="manual", kind="device")
+    assert plan["matched"] == []
+    ch = plan_changes("device", DEV, current_values("device", row), plan, owned, {"r": r}, revert_rules={"r"})
+    assert sorted((c["action_key"], c["before"], c["after"], c["outcome"]) for c in ch) == [
+        ("location", "Riyadh DC", "Old site", "revert"), ("tags", "firewall", None, "revert")]
+    # changed by hand since: left alone
+    edited = device(location="Hand edit", tags=["Mine"])
+    assert plan_changes("device", DEV, current_values("device", edited), plan, owned, {"r": r},
+                        revert_rules={"r"}) == []
+
+
+def test_evaluate_assets_only_reverts_for_rules_that_own_values_and_no_longer_match():
+    from app.services.discovery_rules.inventory import evaluate_assets
+    r = rule("r", 10, [{"key": "owner", "value": "NOC"}],
+             {"op": "all", "conditions": [{"field": "vendor", "operator": "equals", "value": "Cisco"}]})
+    r["on_unmatch"] = "revert"
+    row = device(owner="NOC")
+    owned = {("device", DEV): {("owner", ""): {"value": "NOC", "previous": None, "rule_id": "r"}}}
+    changes, matched, _ = evaluate_assets([("device", row)], [r], owned, trigger="manual")
+    assert matched == 0 and [(c["outcome"], c["after"]) for c in changes] == [("revert", None)]
+    r["on_unmatch"] = "keep"
+    assert evaluate_assets([("device", row)], [r], owned, trigger="manual")[0] == []
+
+
+def test_maps_and_dependency_parents_are_only_added():
+    r = rule("r", 10, [{"key": "map", "value": MAP}, {"key": "dependency_parent", "value": PARENT}],
+             kinds=("device",))
+    ch = run(device(), [r])
+    assert sorted((c["action_key"], c["item_key"], c["outcome"]) for c in ch) == [
+        ("dependency_parent", PARENT, "apply"), ("map", MAP, "apply")]
+    placed = device(_maps=[MAP], _parents=[PARENT])
+    assert run(placed, [r]) == []
+    removed_by_hand = run(device(), [r], {("map", MAP): {"value": MAP}})
+    assert [(c["action_key"], c["outcome"]) for c in removed_by_hand if c["action_key"] == "map"] == [
+        ("map", "kept_manual_edit")]
+    itself = run(device(id=PARENT), [rule("r", 10, [{"key": "dependency_parent", "value": PARENT}],
+                                          kinds=("device",))])
+    assert itself == []                                            # never its own parent
+
+
+def test_children_take_only_organising_actions():
+    import pytest
+    with pytest.raises(actions.ActionError, match="does not apply to child"):
+        actions.validate_actions([{"key": "ping_interval", "value": 60}], ["child"])
+    with pytest.raises(actions.ActionError, match="does not apply to child"):
+        actions.validate_actions([{"key": "snmp_credential", "value": G1}], ["child"])
+    ok = actions.validate_actions([{"key": "group", "value": G1}, {"key": "tags", "value": ["fortiap"]},
+                                   {"key": "map", "value": MAP}], ["child"])
+    assert actions.permissions_needed(ok, ["child"]) == {"devices.manage", "maps.manage"}
+    from app.services.discovery_rules.facts import facts_from_child
+    f = facts_from_child({"id": DEV, "hostname": "FAP-1", "controller": "fgt-01", "managed_source": "fortiap",
+                          "tags": [], "ip_address": "10.0.0.9"})
+    r = rule("c", 10, [{"key": "tags", "value": ["fortiap"]}],
+             {"op": "all", "conditions": [{"field": "controller", "operator": "equals", "value": "FGT-01"}]},
+             kinds=("child",))
+    plan = engine.evaluate(f, [r], trigger="manual", kind="child")
+    assert plan["matched"] and plan["kind"] == "child"
+    child_row = {"id": DEV, "hostname": "FAP-1", "tags": [], "group_id": None, "location": None, "owner": None}
+    assert [c["action_key"] for c in plan_changes("child", DEV, current_values("child", child_row), plan, {},
+                                                  {"c": r})] == ["tags"]

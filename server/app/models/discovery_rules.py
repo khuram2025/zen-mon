@@ -89,6 +89,11 @@ class DiscoveryEngineRun(Base):
     preview_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
     undo_of: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("discovery_engine_runs.id", ondelete="SET NULL"), nullable=True)
+    # migrate-194
+    plan: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DiscoveryEngineRunItem(Base):

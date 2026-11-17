@@ -1,5 +1,11 @@
 import { api } from '@/lib/api'
 import {
+  ApprovalResult,
+  PendingChanges,
+  RulesExport,
+  RulesImportResult,
+  StarterResult,
+  StarterRule,
   AssetAutomation,
   AssetKind,
   ConflictReport,
@@ -141,6 +147,7 @@ export function ruleBody(draft: RuleDraft) {
     stop_processing: draft.stop_processing,
     triggers: draft.triggers?.length ? draft.triggers : (['discovery'] as RuleTrigger[]),
     enforcement: draft.enforcement || ('set_once' as const),
+    on_unmatch: draft.on_unmatch || ('keep' as const),
   }
 }
 
@@ -215,5 +222,32 @@ export const rulesApi = {
   },
   async conflicts(): Promise<ConflictReport> {
     return (await api.get(`${rulesBase}/conflicts`)).data
+  },
+
+  // Phase 3: automatic re-checks held for approval, export / import, starter rules.
+  /** The changes a `needs_approval` run holds (only assets the viewer may see). */
+  async pending(engineRunId: string): Promise<PendingChanges> {
+    return (await api.get(`${rulesBase}/history/${engineRunId}/pending`)).data
+  },
+  /** Apply the held changes, each re-checked; 409 when the rules changed since (the run becomes rejected) or it is not waiting. */
+  async approve(engineRunId: string): Promise<ApprovalResult> {
+    return (await api.post(`${rulesBase}/history/${engineRunId}/approve`)).data
+  },
+  /** Discard the held changes; not proposed again until an asset or a rule changes. */
+  async reject(engineRunId: string): Promise<ApprovalResult> {
+    return (await api.post(`${rulesBase}/history/${engineRunId}/reject`)).data
+  },
+  async exportRules(): Promise<RulesExport> {
+    return (await api.get(`${rulesBase}/export`)).data
+  },
+  /** Create the document's rules as Drafts, last in the order; unresolved or invalid ones are skipped with a reason. */
+  async importRules(document: unknown): Promise<RulesImportResult> {
+    return (await api.post(`${rulesBase}/import`, { document })).data
+  },
+  async starter(): Promise<StarterRule[]> {
+    return (await api.get(`${rulesBase}/starter`)).data
+  },
+  async addStarter(keys: string[]): Promise<StarterResult> {
+    return (await api.post(`${rulesBase}/starter`, { keys })).data
   },
 }

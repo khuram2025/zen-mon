@@ -32,8 +32,17 @@ from pg_fixture import (  # noqa: F401  (fixtures are used by name)
 )
 
 M189 = "migrate-189-device-templates.sql"
-LATER = ["migrate-190-discovery-rule-engine.sql", "migrate-191-discovery-rules-inventory.sql",
-         "migrate-192-device-groups.sql"]
+
+def _later_than_189() -> list[str]:
+    """Every migration released after 189 (lock order). A database "before 189"
+    must not hold them either: later migrations build on 189 and on each other
+    (a fixed list here broke as soon as 193/194 were added)."""
+    order = [line.split()[1] for line in (SCRIPTS_DIR / "migrations.lock").read_text().splitlines()
+             if line.strip() and not line.startswith("#") and len(line.split()) == 2]
+    return order[order.index(M189) + 1:] if M189 in order else []
+
+
+LATER = _later_than_189()
 SHIPPED_CHECKSUM = "dd05631ff051784b9b2d9ba12799003bbeec0fb958dc24d290a19fb86ce380d4"   # 1.25.10 - 1.25.12
 ARUBA, FORTI = "Aruba Wireless Controller", "Fortinet FortiGate"
 

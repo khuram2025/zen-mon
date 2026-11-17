@@ -9,9 +9,10 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 RuleMode = Literal["draft", "simulate", "active", "disabled"]
-Trigger = Literal["discovery", "created"]
+Trigger = Literal["discovery", "created", "changed"]
 Enforcement = Literal["set_once", "enforce"]
-AssetKind = Literal["device", "server"]
+AssetKind = Literal["device", "server", "child"]
+OnUnmatch = Literal["keep", "revert"]
 
 
 class RuleIn(BaseModel):
@@ -30,6 +31,10 @@ class RuleIn(BaseModel):
     # set_once: a value edited by hand after the rule set it is left alone;
     # enforce: the rule puts its value back.
     enforcement: Enforcement = "set_once"
+    # When an asset stops matching (rules with the "changed" trigger and
+    # manual runs): keep the values the rule set, or revert them to what they
+    # were if they are still as the rule set them.
+    on_unmatch: OnUnmatch = "keep"
 
 
 class RuleCreate(RuleIn):
@@ -63,6 +68,7 @@ class RuleOut(BaseModel):
     actions: list[dict[str, Any]]
     stop_processing: bool
     enforcement: str = "set_once"
+    on_unmatch: str = "keep"
     revision: int
     created_by: Optional[UUID] = None
     updated_by: Optional[UUID] = None
@@ -88,6 +94,7 @@ class EngineSettings(BaseModel):
     max_auto_import_per_run: int = Field(default=50, ge=1, le=1000)
     license_reserve_nodes: int = Field(default=0, ge=0, le=100000)
     history_days: int = Field(default=180, ge=7, le=3650)
+    max_changes_per_run: int = Field(default=100, ge=1, le=100000)
 
 
 class PreviewRule(RuleIn):
@@ -119,6 +126,7 @@ class InventoryTargets(BaseModel):
     kinds: list[AssetKind] = Field(default_factory=lambda: ["device", "server"], min_length=1)
     device_ids: Optional[list[UUID]] = None
     server_ids: Optional[list[UUID]] = None
+    child_ids: Optional[list[UUID]] = None
     group_ids: Optional[list[UUID]] = None
     tags: Optional[list[str]] = None
     subnet: Optional[str] = Field(default=None, max_length=64)
@@ -133,3 +141,11 @@ class InventoryRunRequest(BaseModel):
 
 class InventoryApplyRequest(InventoryRunRequest):
     digest: str = Field(..., min_length=8, max_length=64)
+
+
+class ImportRequest(BaseModel):
+    document: dict[str, Any]
+
+
+class StarterRequest(BaseModel):
+    keys: list[str] = Field(..., min_length=1, max_length=50)

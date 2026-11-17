@@ -233,13 +233,19 @@ export interface ImportResponse {
 // ── Discovery rules (/discovery-v2/rules) ─────────────────────────────────────
 
 export type RuleMode = 'draft' | 'simulate' | 'active' | 'disabled'
-export type AssetKind = 'device' | 'server'
-/** When a rule runs by itself: on discovery scan results and/or on devices and servers as they are added. */
-export type RuleTrigger = 'discovery' | 'created'
+/** child: a controller-managed FortiSwitch / FortiAP (phase 3), read through its FortiGate. */
+export type AssetKind = 'device' | 'server' | 'child'
+/**
+ * When a rule runs by itself: on discovery scan results, on devices and servers as they are added, and (phase 3)
+ * whenever an asset's facts change or the rule changes (re-checked once a minute).
+ */
+export type RuleTrigger = 'discovery' | 'created' | 'changed'
+/** When an asset stops matching: keep what the rule set, or revert it if it is still as the rule set it. */
+export type OnUnmatch = 'keep' | 'revert'
 /** set_once: a value edited by hand after the rule set it is kept; enforce: the rule puts its value back. */
 export type Enforcement = 'set_once' | 'enforce'
 /** Where a condition field is known: scan results, devices, servers. */
-export type FieldSource = 'scan' | 'device' | 'server'
+export type FieldSource = 'scan' | 'device' | 'server' | 'child'
 export type GroupOp = 'all' | 'any' | 'none'
 export type Decision = 'auto_import' | 'review' | 'ignore'
 export type OperatorValueKind =
@@ -262,7 +268,13 @@ export type FieldType =
   | 'enum'
   | 'reference'
   | 'boolean'
-export type RefSource = 'device_groups' | 'device_profiles' | 'snmp_credentials' | 'discovery_profiles'
+export type RefSource =
+  | 'device_groups'
+  | 'device_profiles'
+  | 'snmp_credentials'
+  | 'discovery_profiles'
+  | 'manual_maps'
+  | 'devices'
 
 export interface CatalogOperator {
   key: string
@@ -307,6 +319,8 @@ export interface RuleCatalog {
   modes?: { key: RuleMode; label: string }[]
   triggers?: { key: RuleTrigger; label: string }[]
   enforcement?: { key: Enforcement; label: string }[]
+  on_unmatch?: { key: OnUnmatch; label: string }[]
+  asset_kinds?: { key: AssetKind; label: string }[]
 }
 
 export interface ConditionLeaf {
@@ -333,6 +347,8 @@ export interface RuleEngineSettings {
   max_auto_import_per_run: number
   license_reserve_nodes: number
   history_days: number
+  /** An automatic re-check that would change more values than this waits for approval (phase 3). */
+  max_changes_per_run: number
 }
 
 /** What the editor holds and sends (create / update / preview). */
@@ -347,6 +363,7 @@ export interface RuleDraft {
   stop_processing: boolean
   triggers: RuleTrigger[]
   enforcement: Enforcement
+  on_unmatch: OnUnmatch
 }
 
 export interface DiscoveryRule extends RuleDraft {
@@ -500,28 +517,34 @@ export type EngineRunOutcome =
   | 'not_ready'
   | 'error'
 
-export type EngineRunTrigger = 'discovery' | 'manual' | 'created' | 'undo'
+export type EngineRunTrigger = 'discovery' | 'manual' | 'created' | 'changed' | 'undo'
 export type EngineRunMode = 'apply' | 'annotate' | 'simulate'
 
 export interface EngineRun {
   id: string
   trigger: EngineRunTrigger
   mode: EngineRunMode
-  /** completed | partial | failed | running | undone */
-  status: string
+  /** completed | partial | failed | running | undone | needs_approval | rejected */
+  status: EngineRunStatus | string
   discovery_run_id: string | null
   profile_name: string | null
   started_at: string
   finished_at: string | null
   counts: Partial<EvaluateScanCounts> & Record<string, any>
+  /** Why a run waits or was rejected ("120 changes exceed the limit of 100 …"). */
+  detail?: string | null
+  approved_by?: string | null
+  approved_at?: string | null
 }
+
+export type EngineRunStatus = 'running' | 'completed' | 'partial' | 'failed' | 'undone' | 'needs_approval' | 'rejected'
 
 export interface EngineRunItem {
   id: number
   ip_address: string | null
   discovery_result_id: number | null
   asset_id: string | null
-  /** device | server | discovery_result */
+  /** device | server | child | discovery_result */
   asset_kind?: string
   rule_id: string | null
   rule_name: string | null
@@ -541,6 +564,7 @@ export interface InventoryTargets {
   kinds: AssetKind[]
   device_ids?: string[]
   server_ids?: string[]
+  child_ids?: string[]
   group_ids?: string[]
   tags?: string[]
   /** "10.0.0.0/16" */
@@ -554,7 +578,8 @@ export interface InventoryRunRequest {
   targets: InventoryTargets
 }
 
-export type ChangeOutcome = 'apply' | 'kept_manual_edit' | 'not_reversible'
+/** revert: the asset no longer matches a rule set to revert; `after` is the value restored (null = removed). */
+export type ChangeOutcome = 'apply' | 'revert' | 'kept_manual_edit' | 'not_reversible'
 
 /** One value a rule would set on one device or server. */
 export interface InventoryChange {
@@ -580,6 +605,8 @@ export interface InventorySummary {
   changes: number
   kept_manual_edit: number
   not_reversible: number
+  /** Values put back because an asset no longer matches a rule set to revert (phase 3). */
+  reverts?: number
   assets_changed: number
   by_action: Record<string, number>
 }
@@ -598,6 +625,7 @@ export interface InventoryApplyResult extends Partial<InventorySummary> {
   kept_manual_edit: number
   not_reversible: number
   skipped_changed: number
+  reverted?: number
 }
 
 /** 409 detail of /inventory/apply when the inventory or the rules changed since the preview. */
@@ -680,4 +708,52 @@ export interface ConflictReport {
   }[]
   never_match: ConflictRuleStat[]
   never_win: ConflictRuleStat[]
+}
+
+// ── Phase 3: approval of automatic re-checks, export / import, starter rules ──
+
+/** GET /history/{id}/pending: the changes an automatic re-check holds until someone approves them. */
+export interface PendingChanges {
+  engine_run_id: string
+  status: EngineRunStatus | string
+  detail: string | null
+  counts: Partial<InventorySummary> & Record<string, any>
+  /** Assets the plan covers. */
+  assets: number
+  changes: InventoryChange[]
+}
+
+/** POST /history/{id}/approve or /reject. */
+export interface ApprovalResult {
+  engine_run_id: string
+  status: string
+  applied?: number
+  reverted?: number
+  kept_manual_edit?: number
+  not_reversible?: number
+  skipped_changed?: number
+}
+
+/** GET /export: references by name ({"$ref": source, "name": ...}), never ids or secrets. */
+export interface RulesExport {
+  format: 'zenplus-discovery-rules'
+  version: number
+  exported_at: string
+  rules: Record<string, any>[]
+}
+
+export interface RulesImportResult {
+  created: { id: string; name: string; notes: string[] }[]
+  skipped: { name: string; reason: string }[]
+}
+
+export interface StarterRule {
+  key: string
+  name: string
+  description: string
+  added: boolean
+}
+
+export interface StarterResult {
+  created: { id: string; name: string; key: string }[]
 }

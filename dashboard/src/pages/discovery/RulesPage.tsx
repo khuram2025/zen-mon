@@ -1,12 +1,16 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Check,
   ChevronDown,
   ChevronRight,
+  ClipboardCheck,
   Copy,
+  Download,
   GitCompare,
   ListChecks,
   Loader2,
@@ -15,8 +19,11 @@ import {
   Play,
   Power,
   Settings2,
+  Sparkles,
   Trash2,
   Undo2,
+  Upload,
+  X,
 } from 'lucide-react'
 import { regionalDate } from '@/lib/regionalTime'
 import { useCan } from '@/stores/auth'
@@ -28,12 +35,38 @@ import { Switch } from '@/components/ui/Switch'
 import { FormField } from '@/components/ui/FormField'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import { rulesApi } from './api'
-import type { ConflictReport, DiscoveryRule, EngineRun, RuleCatalog, RuleEngineSettings, RuleMode, UndoResult } from './types'
+import type {
+  ApprovalResult,
+  AssetKind,
+  ConflictReport,
+  DiscoveryRule,
+  EngineRun,
+  PendingChanges,
+  RuleCatalog,
+  RuleEngineSettings,
+  RuleMode,
+  RulesImportResult,
+  StarterRule,
+  UndoResult,
+} from './types'
 import {
+  ASSET_KIND_SHORT,
+  CHANGE_OUTCOME_LABEL,
+  CHANGE_OUTCOME_ORDER,
+  TRIGGER_REASON,
+  dependencyIds,
+  exportFileName,
+  parseRulesFile,
+  pendingCount,
+  runStatusLabel,
+  summarizeApprovalResult,
+  summarizeInventoryPreview,
+  waitingText,
   Lookups,
   MODE_LABEL,
   MODE_ORDER,
@@ -54,10 +87,20 @@ import {
   summarizeCondition,
   summarizeCounts,
 } from './ruleModel'
-import { ModeBadge, useRuleCatalog, useRuleLookups } from './ruleUi'
+import { ChangesTable, ModeBadge, useRuleCatalog, useRuleLookups, useWithDeviceNames } from './ruleUi'
 
 const RULES_KEY = ['discovery', 'rules', 'list'] as const
 const SETTINGS_KEY = ['discovery', 'rules', 'settings'] as const
+const HISTORY_KEY = ['discovery', 'rules', 'history'] as const
+
+/** The recent runs, shared by the waiting banner and the history card (one request). */
+function useRuleHistory() {
+  return useQuery<EngineRun[]>({
+    queryKey: HISTORY_KEY,
+    queryFn: () => rulesApi.history({ limit: 25 }),
+    refetchInterval: 30_000,
+  })
+}
 
 export function RulesPage() {
   const can = useCan()
@@ -65,13 +108,25 @@ export function RulesPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const { data: catalog } = useRuleCatalog()
-  const { lookups } = useRuleLookups()
+  const { lookups: baseLookups } = useRuleLookups()
   const [deleting, setDeleting] = useState<DiscoveryRule | null>(null)
+  const [params, setParams] = useSearchParams()
+  const reviewId = params.get('review')
+  const [starterOpen, setStarterOpen] = useState(false)
 
   const { data: rules = [], isLoading } = useQuery<DiscoveryRule[]>({
     queryKey: RULES_KEY,
     queryFn: rulesApi.list,
   })
+  const lookups = useWithDeviceNames(baseLookups, useMemo(() => dependencyIds(rules.flatMap((r) => r.actions || [])), [rules]))
+  const { data: runs = [] } = useRuleHistory()
+  const waiting = runs.filter((r) => r.status === 'needs_approval')
+  const openReview = (id: string | null) => {
+    const next = new URLSearchParams(params)
+    if (id) next.set('review', id)
+    else next.delete('review')
+    setParams(next, { replace: !id })
+  }
 
   const setRules = (rows: DiscoveryRule[]) => qc.setQueryData(RULES_KEY, rows)
   const refresh = () => qc.invalidateQueries({ queryKey: RULES_KEY })
@@ -121,6 +176,39 @@ export function RulesPage() {
 
   return (
     <div className="space-y-4">
+      {waiting.length > 0 && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-3 rounded-md border border-warning/50 bg-warning/10 px-4 py-3 text-sm text-warning-fg"
+        >
+          <ClipboardCheck className="h-5 w-5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold">{waitingText(runs)}</div>
+            <div className="text-xs">
+              An automatic re-check would change more values than the limit per run, so it waits for someone to review
+              it. Nothing has been changed yet.
+            </div>
+          </div>
+          {reviewId !== waiting[0].id && (
+            <Button size="sm" variant="outline" onClick={() => openReview(waiting[0].id)}>
+              {canManage ? 'Review' : 'View changes'}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {reviewId && (
+        <ReviewPanel
+          key={reviewId}
+          runId={reviewId}
+          run={runs.find((r) => r.id === reviewId)}
+          canManage={canManage}
+          catalog={catalog}
+          lookups={baseLookups}
+          onClose={() => openReview(null)}
+        />
+      )}
+
       <EngineCard canManage={canManage} activeCount={rules.filter((r) => r.mode === 'active').length} />
 
       <Card>
@@ -136,16 +224,23 @@ export function RulesPage() {
               anything or turn monitoring off.
             </p>
           </div>
-          {canManage && (
-            <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={() => navigate('/discovery/rules/run')}>
-                <Play className="h-4 w-4" /> Run on inventory
-              </Button>
-              <Button size="sm" onClick={() => navigate('/discovery/rules/new')}>
-                <Plus className="h-4 w-4" /> New rule
-              </Button>
-            </div>
-          )}
+          <div className="flex flex-wrap gap-2">
+            <ExportButton disabled={rules.length === 0} />
+            {canManage && (
+              <>
+                <ImportButton />
+                <Button size="sm" variant="outline" onClick={() => setStarterOpen(true)}>
+                  <Sparkles className="h-4 w-4" /> Add starter rules
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => navigate('/discovery/rules/run')}>
+                  <Play className="h-4 w-4" /> Run on inventory
+                </Button>
+                <Button size="sm" onClick={() => navigate('/discovery/rules/new')}>
+                  <Plus className="h-4 w-4" /> New rule
+                </Button>
+              </>
+            )}
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
@@ -161,9 +256,14 @@ export function RulesPage() {
                 group, template, credential and tags a new device gets.
               </p>
               {canManage && (
-                <Button onClick={() => navigate('/discovery/rules/new')}>
-                  <Plus className="h-4 w-4" /> New rule
-                </Button>
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button variant="outline" onClick={() => setStarterOpen(true)}>
+                    <Sparkles className="h-4 w-4" /> Add starter rules
+                  </Button>
+                  <Button onClick={() => navigate('/discovery/rules/new')}>
+                    <Plus className="h-4 w-4" /> New rule
+                  </Button>
+                </div>
               )}
             </div>
           ) : (
@@ -241,7 +341,7 @@ export function RulesPage() {
                         {catalog ? sentenceCase(summarizeCondition(r.condition, catalog, lookups)) : '…'}
                       </div>
                       <div className="mt-0.5 text-2xs text-muted">
-                        {r.asset_kinds.map((k) => (k === 'device' ? 'Network devices' : 'Servers')).join(' + ')}
+                        {r.asset_kinds.map((k) => ASSET_KIND_SHORT[k as AssetKind] ?? k).join(' + ')}
                         {r.profile_ids?.length
                           ? ` · ${r.profile_ids.map((p) => lookups.discovery_profiles?.[p] ?? 'profile').join(', ')} only`
                           : ''}
@@ -310,7 +410,9 @@ export function RulesPage() {
 
       <ConflictsCard catalog={catalog} />
 
-      <HistoryCard canManage={canManage} catalog={catalog} lookups={lookups} />
+      <HistoryCard canManage={canManage} catalog={catalog} lookups={baseLookups} onReview={openReview} />
+
+      {canManage && <StarterDialog open={starterOpen} onOpenChange={setStarterOpen} />}
 
       <ConfirmDialog
         open={!!deleting}
@@ -366,11 +468,13 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
   const dirty =
     form.max_auto_import_per_run !== settings.max_auto_import_per_run ||
     form.license_reserve_nodes !== settings.license_reserve_nodes ||
-    form.history_days !== settings.history_days
+    form.history_days !== settings.history_days ||
+    form.max_changes_per_run !== settings.max_changes_per_run
   const valid =
     Number.isInteger(form.max_auto_import_per_run) && form.max_auto_import_per_run >= 1 && form.max_auto_import_per_run <= 1000 &&
     Number.isInteger(form.license_reserve_nodes) && form.license_reserve_nodes >= 0 &&
-    Number.isInteger(form.history_days) && form.history_days >= 7 && form.history_days <= 3650
+    Number.isInteger(form.history_days) && form.history_days >= 7 && form.history_days <= 3650 &&
+    Number.isInteger(form.max_changes_per_run) && form.max_changes_per_run >= 1 && form.max_changes_per_run <= 100000
 
   return (
     <Card className={cn(on ? 'border-success/40' : 'border-warning/40')}>
@@ -395,6 +499,8 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
               <p className="mt-0.5 text-2xs text-muted">
                 Up to {settings.max_auto_import_per_run} auto-imports per scan · {settings.license_reserve_nodes} license
                 node{settings.license_reserve_nodes === 1 ? '' : 's'} kept free · history kept {settings.history_days} days
+                {settings.max_changes_per_run != null &&
+                  ` · an automatic re-check changing more than ${settings.max_changes_per_run} values waits for approval`}
               </p>
             </div>
           </div>
@@ -416,7 +522,7 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
           </div>
         </div>
         {canManage && open && (
-          <div className="grid gap-3 border-t border-border pt-3 md:grid-cols-4">
+          <div className="grid gap-3 border-t border-border pt-3 md:grid-cols-2 xl:grid-cols-5">
             <FormField label="Auto-imports per scan" hint="1 to 1000; the rest wait for review">
               <Input
                 type="number"
@@ -441,6 +547,18 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
                 max={3650}
                 value={form.history_days}
                 onChange={(e) => setForm({ ...form, history_days: Math.trunc(Number(e.target.value)) })}
+              />
+            </FormField>
+            <FormField
+              label="Changes allowed per automatic run before approval"
+              hint="A re-check (the “whenever they change” trigger) that would change more waits for review"
+            >
+              <Input
+                type="number"
+                min={1}
+                max={100000}
+                value={form.max_changes_per_run ?? 100}
+                onChange={(e) => setForm({ ...form, max_changes_per_run: Math.trunc(Number(e.target.value)) })}
               />
             </FormField>
             <div className="flex items-end gap-2">
@@ -559,7 +677,17 @@ function RuleLink({ id, name }: { id: string; name: string | null }) {
   )
 }
 
-function HistoryCard({ canManage, catalog, lookups }: { canManage: boolean; catalog: RuleCatalog | undefined; lookups: Lookups }) {
+function HistoryCard({
+  canManage,
+  catalog,
+  lookups,
+  onReview,
+}: {
+  canManage: boolean
+  catalog: RuleCatalog | undefined
+  lookups: Lookups
+  onReview: (runId: string) => void
+}) {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [params] = useSearchParams()
@@ -567,11 +695,7 @@ function HistoryCard({ canManage, catalog, lookups }: { canManage: boolean; cata
   const [expanded, setExpanded] = useState<string | null>(linked)
   const [undoing, setUndoing] = useState<EngineRun | null>(null)
   const [undone, setUndone] = useState<UndoResult | null>(null)
-  const { data: runs = [], isLoading } = useQuery<EngineRun[]>({
-    queryKey: ['discovery', 'rules', 'history'],
-    queryFn: () => rulesApi.history({ limit: 25 }),
-    refetchInterval: 30_000,
-  })
+  const { data: runs = [], isLoading } = useRuleHistory()
   useEffect(() => {
     if (linked) setExpanded(linked)
   }, [linked])
@@ -596,8 +720,8 @@ function HistoryCard({ canManage, catalog, lookups }: { canManage: boolean; cata
       <CardHeader className="pb-3">
         <CardTitle className="text-sm">Recent rule runs</CardTitle>
         <p className="mt-1 text-xs text-muted">
-          Each scan's evaluation, re-evaluations, runs on inventory, new devices and servers, and undos. Open a run to
-          see what every rule did.
+          Each scan's evaluation, re-evaluations, runs on inventory, new devices and servers, automatic re-checks after
+          changes, and undos. Open a run to see what every rule did.
         </p>
       </CardHeader>
       <CardContent className="p-0">
@@ -625,7 +749,11 @@ function HistoryCard({ canManage, catalog, lookups }: { canManage: boolean; cata
                 return (
                   <Fragment key={r.id}>
                     <Tr
-                      className={cn('cursor-pointer', linked === r.id && 'bg-primary/5')}
+                      className={cn(
+                        'cursor-pointer',
+                        linked === r.id && 'bg-primary/5',
+                        r.status === 'needs_approval' && 'bg-warning/10',
+                      )}
                       onClick={() => setExpanded(open ? null : r.id)}
                     >
                       <Td>
@@ -658,9 +786,34 @@ function HistoryCard({ canManage, catalog, lookups }: { canManage: boolean; cata
                           '—'
                         )}
                       </Td>
-                      <Td className="text-xs">{runTriggerText(r)}</Td>
+                      <Td className="text-xs">
+                        {runTriggerText(r)}
+                        {r.trigger === 'changed' && <div className="text-2xs text-muted">{TRIGGER_REASON.changed}</div>}
+                      </Td>
                       <Td>
-                        <Badge variant={runStatusTone(r.status) as any}>{r.status}</Badge>
+                        <Badge variant={runStatusTone(r.status) as any} className="whitespace-nowrap">
+                          {runStatusLabel(r.status)}
+                        </Badge>
+                        {r.status === 'needs_approval' && (
+                          <button
+                            type="button"
+                            className="ml-2 text-xs font-medium text-primary hover:underline"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onReview(r.id)
+                            }}
+                          >
+                            {canManage ? 'Review' : 'View changes'}
+                          </button>
+                        )}
+                        {r.detail && r.status !== 'needs_approval' && (r.status === 'rejected' || r.trigger === 'changed') && (
+                          <div className="mt-0.5 max-w-xs text-2xs text-muted">{r.detail}</div>
+                        )}
+                        {r.approved_at && (
+                          <div className="text-2xs text-muted">
+                            {r.status === 'rejected' ? 'Decided' : 'Approved'} {relativeTime(r.approved_at)}
+                          </div>
+                        )}
                       </Td>
                       <Td className="text-xs text-muted">{runCountsText(r)}</Td>
                       {canManage && (
@@ -729,8 +882,12 @@ function HistoryCard({ canManage, catalog, lookups }: { canManage: boolean; cata
 function runCountsText(r: EngineRun): string {
   const c = r.counts || {}
   if (r.trigger === 'undo') return summarizeUndoResult({ ...c, imported_devices: undefined })
-  if (r.trigger === 'manual' && !r.discovery_run_id) {
+  if (r.status === 'needs_approval' || (r.status === 'rejected' && c.applied == null)) {
+    return `${plural(pendingCount(r), 'change')} on ${plural(Number(c.assets_changed ?? 0), 'asset')} ${r.status === 'rejected' ? 'not applied' : 'held'}`
+  }
+  if ((r.trigger === 'manual' && !r.discovery_run_id) || r.trigger === 'changed') {
     const parts = [`matched ${Number(c.matched ?? 0)} of ${Number(c.assets ?? 0)}`, `applied ${Number(c.applied ?? 0)}`]
+    if (c.reverted) parts.push(`reverted ${c.reverted}`)
     if (c.kept_manual_edit) parts.push(`hand edits kept ${c.kept_manual_edit}`)
     if (c.skipped_changed) parts.push(`skipped ${c.skipped_changed}`)
     return sentenceCase(parts.join(' · '))
@@ -772,12 +929,13 @@ function UndoResultPanel({ result, onClose }: { result: UndoResult; onClose: () 
   )
 }
 
-function HistoryItems({ runId, catalog, lookups }: { runId: string; catalog: RuleCatalog | undefined; lookups: Lookups }) {
+function HistoryItems({ runId, catalog, lookups: baseLookups }: { runId: string; catalog: RuleCatalog | undefined; lookups: Lookups }) {
   const [outcome, setOutcome] = useState<string>('all')
   const { data: items = [], isLoading, error } = useQuery({
     queryKey: ['discovery', 'rules', 'history', runId, 'items', outcome],
     queryFn: () => rulesApi.historyItems(runId, { outcome: outcome === 'all' ? undefined : outcome, limit: 500 }),
   })
+  const lookups = useWithDeviceNames(baseLookups, useMemo(() => dependencyIds(items), [items]))
   return (
     <div className="space-y-2 py-1">
       <div className="flex flex-wrap items-center gap-1">
@@ -828,6 +986,7 @@ function HistoryItems({ runId, catalog, lookups }: { runId: string; catalog: Rul
                         <span className="font-mono">{it.ip_address || '—'}</span>
                       )}
                       {it.asset_kind === 'server' && <div className="text-2xs text-muted">server</div>}
+                      {it.asset_kind === 'child' && <div className="text-2xs text-muted">managed switch / AP</div>}
                     </Td>
                     <Td className="text-xs">
                       {it.rule_id ? <RuleLink id={it.rule_id} name={it.rule_name} /> : it.rule_name || '—'}
@@ -865,4 +1024,422 @@ function formatAfter(v: any): string {
     return Object.entries(v).map(([k, x]) => `${k}: ${Array.isArray(x) ? x.join(', ') : String(x)}`).join(', ')
   }
   return String(v)
+}
+
+// ── phase 3: approval, export / import, starter rules ───────────────────────
+
+const MAX_REVIEW_ROWS = 500
+
+/**
+ * The changes an automatic re-check holds for approval (?review=<run id>): what each would do, then Approve (each value
+ * is re-checked before it is written) or Reject (not proposed again until an asset or a rule changes). Read-only
+ * viewers see the list without the buttons.
+ */
+function ReviewPanel({
+  runId,
+  run,
+  canManage,
+  catalog,
+  lookups: baseLookups,
+  onClose,
+}: {
+  runId: string
+  run: EngineRun | undefined
+  canManage: boolean
+  catalog: RuleCatalog | undefined
+  lookups: Lookups
+  onClose: () => void
+}) {
+  const qc = useQueryClient()
+  const ref = useRef<HTMLDivElement>(null)
+  const [confirm, setConfirm] = useState<'approve' | 'reject' | null>(null)
+  const [result, setResult] = useState<ApprovalResult | null>(null)
+  const [refused, setRefused] = useState<string | null>(null)
+  const [show, setShow] = useState<'all' | (typeof CHANGE_OUTCOME_ORDER)[number]>('all')
+  const { data, isLoading, error } = useQuery<PendingChanges>({
+    queryKey: ['discovery', 'rules', 'pending', runId],
+    queryFn: () => rulesApi.pending(runId),
+    retry: false,
+  })
+  const changes = data?.changes ?? []
+  const lookups = useWithDeviceNames(baseLookups, useMemo(() => dependencyIds(changes), [changes]))
+  useEffect(() => {
+    ref.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }, [])
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: HISTORY_KEY })
+    qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'pending', runId] })
+    qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'conflicts'] })
+    qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'asset'] })
+  }
+  const decide = useMutation({
+    mutationFn: (what: 'approve' | 'reject') => (what === 'approve' ? rulesApi.approve(runId) : rulesApi.reject(runId)),
+    onSuccess: (r, what) => {
+      setConfirm(null)
+      setResult(r)
+      setRefused(null)
+      refresh()
+      if (what === 'approve') toast.success('Changes approved', summarizeApprovalResult(r))
+      else toast.success('Changes rejected', 'They are not proposed again until an asset or a rule changes.')
+    },
+    onError: (e: any) => {
+      setConfirm(null)
+      const status = e?.response?.status
+      if (status === 409) {
+        // The rules changed since the plan (the run is set aside and planned again) or it no longer waits.
+        setRefused(apiErrorMessage(e))
+        refresh()
+        return
+      }
+      toast.error(status === 403 ? 'Not allowed' : 'Could not record the decision', apiErrorMessage(e))
+    },
+  })
+
+  const waiting = data?.status === 'needs_approval' && !result
+  const total = pendingCount({ counts: data?.counts })
+  const rows = changes.filter((c) => show === 'all' || c.outcome === show)
+  const shown = rows.slice(0, MAX_REVIEW_ROWS)
+  const hidden = total > changes.length ? total - changes.filter((c) => c.outcome === 'apply' || c.outcome === 'revert').length : 0
+
+  return (
+    <Card ref={ref} className={cn('scroll-mt-20', waiting ? 'border-warning/50' : 'border-border')}>
+      <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 pb-3">
+        <div className="min-w-0">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ClipboardCheck className="h-4 w-4 text-primary" />
+            {waiting ? 'Changes waiting for approval' : 'Automatic re-check'}
+            {data && (
+              <Badge variant={runStatusTone(result?.status ?? data.status) as any}>{runStatusLabel(result?.status ?? data.status)}</Badge>
+            )}
+          </CardTitle>
+          <p className="mt-1 text-xs text-muted">
+            {run ? `Planned ${relativeTime(run.started_at)}` : 'Rule run'}
+            {data?.detail ? ` · ${data.detail}` : ''}
+          </p>
+          {data && (
+            <p className="mt-1 text-sm">{sentenceCase(summarizeInventoryPreview(data.counts || {}))}.</p>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {canManage && waiting && (
+            <>
+              <Button variant="outline" onClick={() => setConfirm('reject')} disabled={decide.isPending}>
+                <X className="h-4 w-4" /> Reject
+              </Button>
+              <Button onClick={() => setConfirm('approve')} disabled={decide.isPending || total === 0}>
+                <Check className="h-4 w-4" /> Approve {total ? plural(total, 'change') : ''}
+              </Button>
+            </>
+          )}
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {!canManage && waiting && (
+          <div className="text-xs text-muted">
+            Approving or rejecting needs the Discovery “Manage rules” permission (and device or server management for
+            the assets involved).
+          </div>
+        )}
+        {result && (
+          <div className="flex items-start gap-2 rounded-md border border-success/40 bg-success/10 px-3 py-2 text-sm text-success-fg">
+            <Check className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              {summarizeApprovalResult(result)}
+              {!!result.skipped_changed && (
+                <div className="text-xs">Values skipped had changed since the plan; they are left as they are.</div>
+              )}
+            </div>
+          </div>
+        )}
+        {refused && (
+          <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning-fg">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              {refused}
+              <div className="text-xs">Nothing was applied. The next automatic re-check plans the changes again.</div>
+            </div>
+          </div>
+        )}
+        {isLoading ? (
+          <div className="py-6 text-center text-sm text-muted">Loading…</div>
+        ) : error ? (
+          <div className="py-6 text-center text-sm text-danger-fg">{apiErrorMessage(error, 'Could not load the changes')}</div>
+        ) : changes.length === 0 ? (
+          <div className="py-6 text-center text-sm text-muted">No changes you can see in this run.</div>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-1">
+              {(['all', ...CHANGE_OUTCOME_ORDER] as const).map((k) => {
+                const n = k === 'all' ? changes.length : changes.filter((c) => c.outcome === k).length
+                if (k !== 'all' && n === 0) return null
+                return (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setShow(k)}
+                    className={cn(
+                      'whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium',
+                      show === k ? 'bg-primary/10 text-text' : 'text-muted hover:bg-surface2 hover:text-text',
+                    )}
+                  >
+                    {k === 'all' ? 'All' : CHANGE_OUTCOME_LABEL[k]} ({n})
+                  </button>
+                )
+              })}
+              {rows.length > shown.length && <span className="ml-auto text-xs text-muted">first {shown.length} shown</span>}
+            </div>
+            {hidden > 0 && waiting && (
+              <div className="text-xs text-muted">
+                {plural(hidden, 'change')} on assets outside your view are not listed; an approval applies them too.
+              </div>
+            )}
+            <ChangesTable changes={shown} catalog={catalog} lookups={lookups} />
+          </>
+        )}
+      </CardContent>
+      <ConfirmDialog
+        open={confirm === 'approve'}
+        onOpenChange={(o) => !o && setConfirm(null)}
+        title="Approve these changes?"
+        description={
+          <>
+            {plural(total, 'change')} {total === 1 ? 'is' : 'are'} applied now. Each value is checked again first: one
+            changed since the plan is skipped and listed. If the rules changed since, nothing is applied and the
+            changes are planned again. The run can be undone from the history.
+          </>
+        }
+        confirmText="Approve"
+        loading={decide.isPending}
+        onConfirm={() => decide.mutate('approve')}
+      />
+      <ConfirmDialog
+        open={confirm === 'reject'}
+        onOpenChange={(o) => !o && setConfirm(null)}
+        title="Reject these changes?"
+        description="Nothing is changed. They are not proposed again until an asset or a rule changes."
+        confirmText="Reject"
+        destructive
+        loading={decide.isPending}
+        onConfirm={() => decide.mutate('reject')}
+      />
+    </Card>
+  )
+}
+
+/** Download every rule as a JSON file (references by name; no ids, no secrets). */
+function ExportButton({ disabled }: { disabled?: boolean }) {
+  const exp = useMutation({
+    mutationFn: rulesApi.exportRules,
+    onSuccess: (doc) => {
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = exportFileName(new Date())
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      toast.success('Rules exported', plural(doc.rules?.length ?? 0, 'rule'))
+    },
+    onError: (e: any) => toast.error('Could not export the rules', apiErrorMessage(e)),
+  })
+  return (
+    <Button size="sm" variant="outline" onClick={() => exp.mutate()} disabled={disabled || exp.isPending} title="Download every rule as a JSON file">
+      {exp.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Export
+    </Button>
+  )
+}
+
+/** Read a local export file and create its rules as Drafts, last in the order; then list what was created or skipped. */
+function ImportButton() {
+  const qc = useQueryClient()
+  const input = useRef<HTMLInputElement>(null)
+  const [result, setResult] = useState<(RulesImportResult & { file: string }) | null>(null)
+  const imp = useMutation({
+    mutationFn: ({ document }: { document: Record<string, any>; file: string }) => rulesApi.importRules(document),
+    onSuccess: (r, v) => {
+      setResult({ ...r, file: v.file })
+      qc.invalidateQueries({ queryKey: RULES_KEY })
+    },
+    onError: (e: any) => toast.error(e?.response?.status === 403 ? 'Not allowed' : 'Could not import the rules', apiErrorMessage(e)),
+  })
+  const onFile = (file: File | undefined) => {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const parsed = parseRulesFile(String(reader.result ?? ''))
+      if ('error' in parsed) {
+        toast.error('Could not import the rules', parsed.error)
+        return
+      }
+      imp.mutate({ document: parsed.document, file: file.name })
+    }
+    reader.onerror = () => toast.error('Could not read the file', file.name)
+    reader.readAsText(file)
+  }
+  return (
+    <>
+      <input
+        ref={input}
+        type="file"
+        accept=".json,application/json"
+        className="hidden"
+        aria-label="Rules file to import"
+        onChange={(e) => {
+          onFile(e.target.files?.[0])
+          e.target.value = ''
+        }}
+      />
+      <Button size="sm" variant="outline" onClick={() => input.current?.click()} disabled={imp.isPending} title="Create rules from an exported file, as drafts">
+        {imp.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Import
+      </Button>
+      <Dialog open={!!result} onOpenChange={(o) => !o && setResult(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Import finished</DialogTitle>
+          </DialogHeader>
+          {result && (
+            <div className="space-y-3 text-sm">
+              <p className="text-xs text-muted">
+                {result.file}: {plural(result.created.length, 'rule')} created
+                {result.skipped.length ? `, ${result.skipped.length} skipped` : ''}. Imported rules are Drafts, placed
+                last: review and preview each one before you make it active.
+              </p>
+              {result.created.length > 0 && (
+                <div>
+                  <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Created as drafts</div>
+                  <ul className="max-h-56 space-y-1 overflow-y-auto">
+                    {result.created.map((c) => (
+                      <li key={c.id}>
+                        <Link to={`/discovery/rules/${c.id}`} className="font-medium text-primary hover:underline" onClick={() => setResult(null)}>
+                          {c.name}
+                        </Link>
+                        {c.notes?.length > 0 && (
+                          <ul className="ml-4 list-disc text-xs text-muted">
+                            {c.notes.map((n, i) => (
+                              <li key={i}>{n}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {result.skipped.length > 0 && (
+                <div>
+                  <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Skipped</div>
+                  <ul className="max-h-48 space-y-1 overflow-y-auto text-xs">
+                    {result.skipped.map((k, i) => (
+                      <li key={i}>
+                        <span className="font-medium">{k.name || 'Unnamed rule'}</span>
+                        <span className="text-warning-fg"> — {k.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button onClick={() => setResult(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+/** Starter rules (vendor tags by sysObjectID subtree, printer / IP phone ignore examples), added as Drafts. */
+function StarterDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+  const qc = useQueryClient()
+  const [picked, setPicked] = useState<string[]>([])
+  const { data: starters = [], isLoading, error } = useQuery<StarterRule[]>({
+    queryKey: ['discovery', 'rules', 'starter'],
+    queryFn: rulesApi.starter,
+    enabled: open,
+  })
+  useEffect(() => {
+    if (open) setPicked([])
+  }, [open])
+  const add = useMutation({
+    mutationFn: (keys: string[]) => rulesApi.addStarter(keys),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: RULES_KEY })
+      qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'starter'] })
+      onOpenChange(false)
+      toast.success(
+        r.created.length ? `${plural(r.created.length, 'starter rule')} added as drafts` : 'Nothing added',
+        r.created.length ? 'Review and preview them, then make them active.' : 'Those starter rules were already added.',
+      )
+    },
+    onError: (e: any) => toast.error(e?.response?.status === 403 ? 'Not allowed' : 'Could not add the starter rules', apiErrorMessage(e)),
+  })
+  const addable = starters.filter((s) => !s.added)
+  return (
+    <Dialog open={open} onOpenChange={(o) => !add.isPending && onOpenChange(o)}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add starter rules</DialogTitle>
+        </DialogHeader>
+        <p className="text-xs text-muted">
+          Ready-made rules to start from. They arrive as <span className="font-medium text-text">Drafts</span>, last in
+          the order: nothing runs until you review, preview and activate them.
+        </p>
+        {isLoading ? (
+          <div className="py-6 text-center text-sm text-muted">Loading…</div>
+        ) : error ? (
+          <div className="py-6 text-center text-sm text-danger-fg">{apiErrorMessage(error)}</div>
+        ) : (
+          <ul className="max-h-80 space-y-1 overflow-y-auto">
+            {starters.map((s) => (
+              <li key={s.key}>
+                <label className={cn('flex items-start gap-2 rounded-md px-2 py-1.5 text-sm', s.added ? 'opacity-70' : 'hover:bg-surface2')}>
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    disabled={s.added}
+                    checked={s.added || picked.includes(s.key)}
+                    onChange={(e) => setPicked(e.target.checked ? [...picked, s.key] : picked.filter((k) => k !== s.key))}
+                  />
+                  <span className="min-w-0">
+                    <span className="font-medium">{s.name}</span>
+                    {s.added && (
+                      <Badge variant="outline" className="ml-2">
+                        Added
+                      </Badge>
+                    )}
+                    <span className="block text-xs text-muted">{s.description}</span>
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+        <DialogFooter>
+          {addable.length > 0 && (
+            <Button
+              variant="ghost"
+              className="mr-auto"
+              onClick={() => setPicked(picked.length === addable.length ? [] : addable.map((s) => s.key))}
+            >
+              {picked.length === addable.length ? 'Clear' : 'Select all'}
+            </Button>
+          )}
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={add.isPending}>
+            Cancel
+          </Button>
+          <Button onClick={() => add.mutate(picked)} disabled={!picked.length || add.isPending}>
+            {add.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+            Add {picked.length ? plural(picked.length, 'rule') : ''} as drafts
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }

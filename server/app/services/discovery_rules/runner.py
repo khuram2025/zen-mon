@@ -46,6 +46,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "max_auto_import_per_run": 50,
     "license_reserve_nodes": 0,
     "history_days": 180,
+    # Automatic re-evaluation ("changed" trigger): a pass that would change
+    # more values than this waits for approval instead (phase 3).
+    "max_changes_per_run": 100,
 }
 # Result statuses the rules look at; failed (no answer) and already-ignored
 # addresses carry no facts worth classifying.
@@ -86,13 +89,15 @@ async def save_settings(db: AsyncSession, values: dict, user_id) -> dict:
 
 def rule_dict(row: DiscoveryEngineRule) -> dict:
     return {
-        "id": str(row.id), "name": row.name, "priority": row.priority, "revision": row.revision,
+        "id": str(row.id), "name": row.name, "description": row.description, "priority": row.priority,
+        "revision": row.revision,
         "mode": row.mode, "asset_kinds": list(row.asset_kinds or ["device"]),
         "triggers": list(row.triggers or ["discovery"]),
         "profile_ids": [str(p) for p in row.profile_ids] if row.profile_ids else None,
         "condition": row.condition, "actions": list(row.actions or []),
         "stop_processing": bool(row.stop_processing),
         "enforcement": row.enforcement or "set_once",
+        "on_unmatch": row.on_unmatch or "keep",
     }
 
 
