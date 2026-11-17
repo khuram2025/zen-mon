@@ -638,12 +638,23 @@ async def bulk_tag_devices(
     return {"updated": updated}
 
 
+async def _check_device_type(db: AsyncSession, key) -> None:
+    """422 for a device type the catalogue (device_types) does not know."""
+    from app.schemas.snmp import BUILTIN_DEVICE_TYPES
+    if key is None or key in BUILTIN_DEVICE_TYPES:
+        return
+    known = (await db.execute(text("SELECT 1 FROM device_types WHERE key = :k"), {"k": key})).first()
+    if not known:
+        raise HTTPException(status_code=422, detail=f"Unknown device type '{key}'")
+
+
 @router.post("", response_model=DeviceResponse, status_code=201)
 async def create_device(
     data: DeviceCreate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("devices.manage")),
 ):
+    await _check_device_type(db, data.device_type)
     # A scoped operator may only create devices inside its own scope, and not
     # with a management address that is another team's (or an unowned) flow
     # exporter: ownership follows the management IP (NF-04).
@@ -883,6 +894,11 @@ async def update_device(
         raise HTTPException(status_code=404, detail="Device not found")
     if data.tags is not None:
         await scoping.assert_tags_assignable(db, user, data.tags, previous=current.tags)
+    await _check_device_type(db, data.device_type)
+    if "profile_id" in data.model_fields_set and data.profile_id is not None and (
+            current.managed_by_device_id is not None or current.poll_mode == "via_controller"):
+        raise HTTPException(status_code=422, detail="A controller-managed device is read through its controller's "
+                                                    "template and cannot have a template of its own")
     if data.ip_address is not None and nf_access.canonical_ip(data.ip_address) != nf_access.canonical_ip(
             str(current.ip_address) if current.ip_address else None):
         await nf_access.authorize_device_address(db, user, data.ip_address)
@@ -2412,6 +2428,8 @@ def _device_to_response(
         model=device.model,
         os_version=device.os_version,
         profile_id=device.profile_id,
+        profile_source=getattr(device, "profile_source", None),
+        profile_suggested_id=getattr(device, "profile_suggested_id", None),
         profile_name=(profile_names or {}).get(device.profile_id),
         snmp_credential_id=device.snmp_credential_id,
         snmp_auth_configured=device.snmp_auth_passphrase is not None,

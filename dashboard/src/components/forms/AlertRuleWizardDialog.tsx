@@ -2,6 +2,7 @@
  * Alert rule wizard — properties, trigger, reset, scope, trigger actions,
  * escalation, reset actions, schedule, and review.
  */
+import { DeviceTypeItems } from '@/components/forms/DeviceTypeItems'
 import { FormEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { APM_EVENT_TRIGGERS, apmEventScope, apmScopeKind, isApmEvent } from './apmEventTriggers'
@@ -1542,9 +1543,7 @@ export function AlertRuleWizardDialog({
                         <Select value={s.device_type || '__pick__'} onValueChange={(v) => setS({ ...s, device_type: v === '__pick__' ? '' : v })}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
-                            {['router', 'switch', 'firewall', 'server', 'access_point', 'printer', 'other'].map((t) => (
-                              <SelectItem key={t} value={t}>{t.replace('_', ' ')}</SelectItem>
-                            ))}
+                            <DeviceTypeItems />
                           </SelectContent>
                         </Select>
                       </FormField>

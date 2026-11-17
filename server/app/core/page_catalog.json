@@ -350,6 +350,19 @@
       ]
     },
     {
+      "key": "/device-templates",
+      "label": "Device Templates",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
       "key": "/discovery",
       "label": "Profiles",
       "group": "network",
@@ -1145,20 +1158,6 @@
     {
       "key": "/settings/general?tab=sensors",
       "label": "Sensors",
-      "group": "administration",
-      "group_label": "Administration",
-      "parent": "Settings",
-      "gates": [
-        {
-          "any": [
-            "settings.manage"
-          ]
-        }
-      ]
-    },
-    {
-      "key": "/settings/general?tab=templates",
-      "label": "Monitoring Templates",
       "group": "administration",
       "group_label": "Administration",
       "parent": "Settings",

@@ -72,6 +72,14 @@ class Device(Base):
         ForeignKey("device_profiles.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Device Templates (migrate-189): who assigned the template, and a better
+    # match the classifier found (shown for review, never applied by itself).
+    profile_source: Mapped[str] = mapped_column(String(10), nullable=True)
+    profile_assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    profile_suggested_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("device_profiles.id", ondelete="SET NULL"), nullable=True)
+    profile_suggested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    device_type_source: Mapped[str] = mapped_column(String(10), nullable=True)
     snmp_credential_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         nullable=True,

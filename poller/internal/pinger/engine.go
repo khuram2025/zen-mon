@@ -85,7 +85,11 @@ type SNMPLoader interface {
 	UpsertSensors(ctx context.Context, deviceID uuid.UUID, sensors []snmp.Sensor) error
 	UpsertProfile(ctx context.Context, p *snmp.Profile) error
 	LoadProfiles(ctx context.Context) ([]*snmp.Profile, error)
-	AssignProfileIfUnset(ctx context.Context, deviceID, profileID uuid.UUID) error
+	// RecordProfileMatch assigns a matched template to a device without
+	// one, or records it as a suggestion when the device is on another.
+	RecordProfileMatch(ctx context.Context, deviceID, profileID uuid.UUID, deviceType string) error
+	// ClearProfileSuggestion drops a suggestion when nothing matches.
+	ClearProfileSuggestion(ctx context.Context, deviceID uuid.UUID) error
 	UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u *snmp.UdtData) error
 	LoadUdtGlobalInterval(ctx context.Context) (int, error)
 	UpsertTemplateValues(ctx context.Context, deviceID uuid.UUID, vals []snmp.TemplateValue, polledGroups []string) error
@@ -1242,14 +1246,20 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 	if rSystem != nil {
 		// Classify based on sysObjectID + sysDescr.
 		vendor, model, osVersion := "", "", ""
-		if prof := e.snmpClassifier.Match(rSystem.SysObjectID, rSystem.SysDescr); prof != nil {
+		// A match is assigned only to a device without a template; a device
+		// on another template gets it as a suggestion. With no match (or a
+		// bootstrap profile that has no DB row) a stale suggestion is cleared.
+		prof := e.snmpClassifier.Match(rSystem.SysObjectID, rSystem.SysDescr)
+		if prof != nil {
 			v, m, o := e.snmpClassifier.Extract(prof, rSystem.SysDescr)
 			vendor, model, osVersion = v, m, o
-			if prof.ID != uuid.Nil {
-				if err := e.snmpLoader.AssignProfileIfUnset(ctx, d.ID, prof.ID); err != nil {
-					e.logger.Warnf("AssignProfile %s → %s: %v", d.Hostname, prof.Name, err)
-				}
+		}
+		if prof != nil && prof.ID != uuid.Nil {
+			if err := e.snmpLoader.RecordProfileMatch(ctx, d.ID, prof.ID, prof.DeviceType); err != nil {
+				e.logger.Warnf("RecordProfileMatch %s → %s: %v", d.Hostname, prof.Name, err)
 			}
+		} else if err := e.snmpLoader.ClearProfileSuggestion(ctx, d.ID); err != nil {
+			e.logger.Warnf("ClearProfileSuggestion %s: %v", d.Hostname, err)
 		}
 		if err := e.snmpLoader.UpsertSystemInfo(ctx, d.ID, rSystem.SysObjectID, vendor, model, osVersion, rSystem.SysName, rSystem.SysDescr); err != nil {
 			e.logger.Warnf("UpsertSystemInfo %s: %v", d.Hostname, err)

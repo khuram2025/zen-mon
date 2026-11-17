@@ -915,6 +915,9 @@ async def import_results(
                         model=result.model,
                         os_version=result.os_version,
                         profile_id=payload.template_id or result.matched_template_id,
+                        profile_source=("import" if (payload.template_id or result.matched_template_id) else None),
+                        profile_assigned_at=(datetime.now(timezone.utc)
+                                             if (payload.template_id or result.matched_template_id) else None),
                         status="unknown",
                         created_by=user.id,
                     )

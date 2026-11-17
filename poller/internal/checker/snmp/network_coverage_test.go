@@ -29,12 +29,13 @@ func TestStandardNetworkGroupsAreBoundedAndValid(t *testing.T) {
 }
 
 func TestNetworkDeviceTypeFilter(t *testing.T) {
-	for _, kind := range []string{"router", "switch", "firewall", "access_point"} {
+	for _, kind := range []string{"router", "switch", "firewall", "access_point",
+		"load_balancer", "wireless_controller", "sdwan_edge"} {
 		if !IsNetworkDeviceType(kind) {
 			t.Errorf("%s should receive standard network groups", kind)
 		}
 	}
-	for _, kind := range []string{"server", "printer", "other", ""} {
+	for _, kind := range []string{"server", "printer", "other", "", "ups", "storage", "ip_camera"} {
 		if IsNetworkDeviceType(kind) {
 			t.Errorf("%s should not receive standard network groups", kind)
 		}

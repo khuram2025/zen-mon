@@ -49,9 +49,6 @@ from app.schemas.snmp import (
     DiscoveryJobResponse,
     DiscoveryResultResponse,
     MibUploadResponse,
-    ProfileCreate,
-    ProfileUpdate,
-    ProfileResponse,
 )
 
 router = APIRouter(prefix="/snmp", tags=["SNMP"])
@@ -140,6 +137,20 @@ async def _snmpget_detail(
         "-OU",    # no units suffix
         "-On",    # numeric OIDs (sysObjectID as .1.3.6…, never iso.3.6…)
     ]
+    args += snmp_auth_args(version, community, v3_username, v3_security_level, v3_auth_protocol,
+                           v3_auth_passphrase, v3_priv_protocol, v3_priv_passphrase, v3_context)
+    args += [f"{ip}:{port}", *oids]
+    return await _run_snmpget_values(args, oids, timeout_s)
+
+
+def snmp_auth_args(
+    version: str, community: str | None, v3_username: str | None = None, v3_security_level: str | None = None,
+    v3_auth_protocol: str | None = None, v3_auth_passphrase: str | None = None,
+    v3_priv_protocol: str | None = None, v3_priv_passphrase: str | None = None, v3_context: str | None = None,
+) -> list[str]:
+    """net-snmp credential arguments. Secrets are passed as ``-c``/``-A``/``-X``
+    pairs that ``_private_snmpget`` moves into a private config file."""
+    args: list[str] = []
     if version == "3":
         # SNMPv3 auth arguments
         _SEC_MAP = {"noAuthNoPriv": "noAuthNoPriv", "authNoPriv": "authNoPriv", "authPriv": "authPriv"}
@@ -171,8 +182,11 @@ async def _snmpget_detail(
             if v3_priv_passphrase:
                 args += ["-X", v3_priv_passphrase]
     else:
-        args += ["-c", community]
-    args += [f"{ip}:{port}", *oids]
+        args += ["-c", community or "public"]
+    return args
+
+
+async def _run_snmpget_values(args: list[str], oids: list[str], timeout_s: int):
     try:
         proc, out_b, err_b = await _private_snmpget(args, timeout_s)
         if proc.returncode != 0:
@@ -235,6 +249,74 @@ async def _snmpget(
     return result
 
 
+_NO_VALUE = ("No Such Object", "No Such Instance", "No more variables")
+
+
+def _parse_oid_lines(raw: str) -> list[tuple[str, str]]:
+    """``-On -Oq`` output (``.1.3.6… value``) as (oid, value) pairs; multi-line
+    quoted strings are joined."""
+    out: list[tuple[str, str]] = []
+    for line in raw.splitlines():
+        if line.startswith("."):
+            oid, _, value = line.partition(" ")
+            out.append((oid.lstrip("."), value.strip()))
+        elif out:
+            oid, value = out[-1]
+            out[-1] = (oid, value + "\n" + line)
+    cleaned = []
+    for oid, value in out:
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        cleaned.append((oid, value))
+    return cleaned
+
+
+async def snmp_get_map(ip: str, port: int, timeout_ms: int, oids: list[str],
+                       auth: list[str]) -> tuple[dict[str, Optional[str]], Optional[str]]:
+    """GET ``oids`` and return {oid: value or None when the agent lacks it}, or an error."""
+    binary = "snmpget"
+    if shutil.which(binary) is None:
+        return {}, "snmpget binary not installed in the API runtime"
+    timeout_s = max(1, timeout_ms // 1000)
+    args = [binary, *auth[:2], "-r", "1", "-t", str(timeout_s), "-On", "-Oq", "-OU", "-Oe", "-Ot",
+            *auth[2:], f"{ip}:{port}", *oids]
+    try:
+        proc, out_b, err_b = await _private_snmpget(args, timeout_s)
+    except Exception as exc:
+        return {}, f"snmpget invocation failed: {exc}"
+    raw = out_b.decode("utf-8", errors="replace")
+    pairs = _parse_oid_lines(raw)
+    if proc.returncode != 0 and not pairs:
+        return {}, (err_b.decode("utf-8", errors="replace").strip() or f"snmpget exited with code {proc.returncode}")
+    got = {oid: (None if any(v.startswith(n) for n in _NO_VALUE) else v) for oid, v in pairs}
+    return {o.lstrip("."): got.get(o.lstrip(".")) for o in oids}, None
+
+
+async def snmp_walk(ip: str, port: int, timeout_ms: int, oid: str, auth: list[str],
+                    max_rows: int) -> tuple[list[tuple[str, str]], Optional[str], bool]:
+    """Walk one column; returns (rows as (index, value), error, truncated)."""
+    version = auth[1] if len(auth) > 1 and auth[0] == "-v" else "2c"
+    binary = "snmpwalk" if version == "1" else "snmpbulkwalk"
+    if shutil.which(binary) is None:
+        return [], f"{binary} binary not installed in the API runtime", False
+    timeout_s = max(1, timeout_ms // 1000)
+    extra = [] if version == "1" else ["-Cr" + str(min(max(max_rows, 1), 50))]
+    args = [binary, *auth[:2], "-r", "1", "-t", str(timeout_s), "-On", "-Oq", "-OU", "-Oe", "-Ot", *extra,
+            *auth[2:], f"{ip}:{port}", oid]
+    try:
+        proc, out_b, err_b = await _private_snmpget(args, max(timeout_s, 5))
+    except Exception as exc:
+        return [], f"{binary} invocation failed: {exc}", False
+    base = oid.lstrip(".")
+    rows = []
+    for o, v in _parse_oid_lines(out_b.decode("utf-8", errors="replace")):
+        if o.startswith(base + ".") and not any(v.startswith(n) for n in _NO_VALUE):
+            rows.append((o[len(base) + 1:], v))
+    if proc.returncode != 0 and not rows:
+        return [], (err_b.decode("utf-8", errors="replace").strip() or f"{binary} exited with code {proc.returncode}"), False
+    return rows[:max_rows], None, len(rows) > max_rows
+
+
 SYS_OBJECT_OID = "1.3.6.1.2.1.1.2.0"
 SYS_DESCR_OID = "1.3.6.1.2.1.1.1.0"
 SYS_NAME_OID = "1.3.6.1.2.1.1.5.0"
@@ -243,92 +325,22 @@ SYS_NAME_OID = "1.3.6.1.2.1.1.5.0"
 async def _classify_from_db(
     db: AsyncSession, sys_object_id: str, sys_descr: str
 ) -> tuple[Optional[uuid.UUID], str, str, str]:
-    """Match a discovered device against seeded device_profiles.
+    """Match a discovered device against the templates (device_profiles).
 
-    Mirrors poller/internal/checker/snmp/profile.go Match() semantics:
-    longest sys_object_id_prefixes wins, sys_descr_regex is a fallback.
-    The match_rules extractors are applied in a best-effort way; if a
-    regex is missing or doesn't match, the field is left blank.
+    Uses the shared classification contract (services/device_templates/classify.py),
+    which the poller implements identically: match_priority, then sysObjectID
+    prefix over sysDescr, then the longest prefix, then name.
     """
-    rows = (await db.execute(
-        text(
-            "SELECT id, vendor, match_rules FROM device_profiles "
-            "ORDER BY length(name) DESC"
-        )
-    )).mappings().all()
-
-    clean_oid = normalize_oid(sys_object_id)
-
-    best_id: Optional[uuid.UUID] = None
-    best_len = -1
-    best_rules: dict = {}
-    best_vendor = ""
-
-    # 1. sysObjectID prefix — longest wins.
-    for row in rows:
-        rules = row["match_rules"] or {}
-        for pref in rules.get("sys_object_id_prefixes", []) or []:
-            pref = pref.lstrip(".")
-            if clean_oid and clean_oid.startswith(pref) and len(pref) > best_len:
-                best_id = row["id"]
-                best_len = len(pref)
-                best_rules = rules
-                best_vendor = row["vendor"] or rules.get("default_vendor", "")
-                break
-
-    # 2. sys_descr fallback.
-    if best_id is None:
-        for row in rows:
-            rules = row["match_rules"] or {}
-            pat = rules.get("sys_descr_regex")
-            if pat:
-                try:
-                    if re.search(pat, sys_descr or ""):
-                        best_id = row["id"]
-                        best_rules = rules
-                        best_vendor = row["vendor"] or rules.get("default_vendor", "")
-                        break
-                except re.error:
-                    continue
-
-    if best_id is None:
+    from app.services.device_templates import classify
+    rows = (await db.execute(text(
+        "SELECT id, name, vendor, match_rules, match_priority FROM device_profiles ORDER BY name"
+    ))).mappings().all()
+    templates = [dict(r) for r in rows]
+    best = classify.match(templates, sys_object_id or "", sys_descr or "")
+    if best is None:
         return None, "", "", ""
-
-    # Extract vendor/model/os_version
-    vendor = best_vendor or best_rules.get("default_vendor", "")
-    model = best_rules.get("default_model", "")
-    os_version = ""
-
-    def _extract(pattern: str) -> str:
-        if not pattern:
-            return ""
-        try:
-            m = re.search(pattern, sys_descr or "")
-            if not m:
-                return ""
-            if m.groupdict():
-                for v in m.groupdict().values():
-                    if v:
-                        return v.strip()
-            if m.groups():
-                for v in m.groups():
-                    if v:
-                        return v.strip()
-            return m.group(0).strip()
-        except re.error:
-            return ""
-
-    if best_rules.get("extract_vendor"):
-        v = _extract(best_rules["extract_vendor"])
-        if v:
-            vendor = v
-    if best_rules.get("extract_model"):
-        m = _extract(best_rules["extract_model"])
-        if m:
-            model = m
-    os_version = _extract(best_rules.get("extract_os_version", ""))
-
-    return best_id, vendor, model, os_version
+    vendor, model, os_version = classify.extract(best, sys_descr or "")
+    return best["id"], vendor, model, os_version
 
 
 async def _probe_host(
@@ -684,11 +696,14 @@ async def import_discovery_results(
                     INSERT INTO devices (
                         hostname, ip_address, device_type, group_id,
                         ping_enabled, snmp_enabled, snmp_version, snmp_community,
-                        profile_id, sys_object_id, vendor, model, os_version, created_by
+                        profile_id, profile_source, profile_assigned_at,
+                        sys_object_id, vendor, model, os_version, created_by
                     ) VALUES (
                         :hostname, CAST(:ip AS inet), 'other', :gid,
                         TRUE, TRUE, '2c', 'public',
-                        :pid, :oid, :vendor, :model, :os, :uid
+                        :pid, CASE WHEN CAST(:pid AS uuid) IS NULL THEN NULL ELSE 'import' END,
+                        CASE WHEN CAST(:pid AS uuid) IS NULL THEN NULL ELSE now() END,
+                        :oid, :vendor, :model, :os, :uid
                     )
                     RETURNING id
                 """),
@@ -868,285 +883,8 @@ async def mib_objects(search: str = '', symbol: Optional[str] = None,
 
 
 # --------------------------------------------------------------------
-# Read endpoints backing the dashboard
+# Device templates (/snmp/profiles…) live in app/api/v1/device_templates.py.
 # --------------------------------------------------------------------
-
-
-@router.get("/profiles", response_model=list[ProfileResponse])
-async def list_profiles(
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """List all SNMP device profiles with device count."""
-    rows = (await db.execute(
-        text("""
-            SELECT p.id, p.name, p.vendor, p.version, p.builtin, p.description,
-                   p.match_rules, p.oid_groups, p.created_at, p.updated_at,
-                   COALESCE(dc.cnt, 0) AS device_count
-            FROM device_profiles p
-            LEFT JOIN (
-                SELECT profile_id, COUNT(*) AS cnt FROM devices
-                WHERE profile_id IS NOT NULL GROUP BY profile_id
-            ) dc ON dc.profile_id = p.id
-            ORDER BY p.name
-        """)
-    )).mappings().all()
-    return [ProfileResponse(**dict(r)) for r in rows]
-
-
-@router.get("/profiles/{profile_id}", response_model=ProfileResponse)
-async def get_profile(
-    profile_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    row = (await db.execute(
-        text("""
-            SELECT p.id, p.name, p.vendor, p.version, p.builtin, p.description,
-                   p.match_rules, p.oid_groups, p.created_at, p.updated_at,
-                   COALESCE(dc.cnt, 0) AS device_count
-            FROM device_profiles p
-            LEFT JOIN (
-                SELECT profile_id, COUNT(*) AS cnt FROM devices
-                WHERE profile_id IS NOT NULL GROUP BY profile_id
-            ) dc ON dc.profile_id = p.id
-            WHERE p.id = :id
-        """),
-        {"id": profile_id},
-    )).mappings().first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    return ProfileResponse(**dict(row))
-
-
-@router.post("/profiles", response_model=ProfileResponse, status_code=201)
-async def create_profile(
-    data: ProfileCreate,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    import json
-    row = (await db.execute(
-        text("""
-            INSERT INTO device_profiles (name, vendor, description, match_rules, oid_groups, builtin)
-            VALUES (:name, :vendor, :desc, CAST(:match_rules AS jsonb), CAST(:oid_groups AS jsonb), FALSE)
-            RETURNING id, name, vendor, version, builtin, description,
-                      match_rules, oid_groups, created_at, updated_at
-        """),
-        {
-            "name": data.name,
-            "vendor": data.vendor,
-            "desc": data.description,
-            "match_rules": json.dumps(data.match_rules.model_dump(exclude_none=True)),
-            "oid_groups": json.dumps([g.model_dump(exclude_none=True) for g in data.oid_groups]),
-        },
-    )).mappings().first()
-    await db.commit()
-    return ProfileResponse(**dict(row), device_count=0)
-
-
-@router.put("/profiles/{profile_id}", response_model=ProfileResponse)
-async def update_profile(
-    profile_id: uuid.UUID,
-    data: ProfileUpdate,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    import json
-    existing = (await db.execute(
-        text("SELECT id, builtin FROM device_profiles WHERE id = :id"),
-        {"id": profile_id},
-    )).mappings().first()
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    if existing["builtin"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Built-in templates are read-only — clone it to customize",
-        )
-
-    sets = ["updated_at = NOW()"]
-    params: dict = {"id": profile_id}
-
-    if data.name is not None:
-        sets.append("name = :name")
-        params["name"] = data.name
-    if data.vendor is not None:
-        sets.append("vendor = :vendor")
-        params["vendor"] = data.vendor
-    if data.description is not None:
-        sets.append("description = :desc")
-        params["desc"] = data.description
-    if data.match_rules is not None:
-        sets.append("match_rules = CAST(:match_rules AS jsonb)")
-        params["match_rules"] = json.dumps(data.match_rules.model_dump(exclude_none=True))
-    if data.oid_groups is not None:
-        sets.append("oid_groups = CAST(:oid_groups AS jsonb)")
-        params["oid_groups"] = json.dumps([g.model_dump(exclude_none=True) for g in data.oid_groups])
-
-    await db.execute(
-        text(f"UPDATE device_profiles SET {', '.join(sets)} WHERE id = :id"),
-        params,
-    )
-    await db.commit()
-
-    return await get_profile(profile_id, db, user)
-
-
-@router.delete("/profiles/{profile_id}", status_code=204)
-async def delete_profile(
-    profile_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    existing = (await db.execute(
-        text("SELECT id, builtin FROM device_profiles WHERE id = :id"),
-        {"id": profile_id},
-    )).mappings().first()
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    if existing["builtin"]:
-        raise HTTPException(status_code=400, detail="Cannot delete built-in profiles")
-    # Unlink devices referencing this profile
-    await db.execute(
-        text("UPDATE devices SET profile_id = NULL WHERE profile_id = :id"),
-        {"id": profile_id},
-    )
-    await db.execute(
-        text("DELETE FROM device_profiles WHERE id = :id"),
-        {"id": profile_id},
-    )
-    await db.commit()
-
-
-@router.post("/profiles/{profile_id}/clone", response_model=ProfileResponse, status_code=201)
-async def clone_profile(
-    profile_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Copy a template (builtin or custom) into a new editable custom template."""
-    src = (await db.execute(
-        text("SELECT name, vendor, description, match_rules, oid_groups FROM device_profiles WHERE id = :id"),
-        {"id": profile_id},
-    )).mappings().first()
-    if src is None:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-    base = f"{src['name']} (copy)"
-    name = base
-    for n in range(2, 20):
-        taken = (await db.execute(
-            text("SELECT 1 FROM device_profiles WHERE name = :n AND version = 1"),
-            {"n": name},
-        )).first()
-        if not taken:
-            break
-        name = f"{base} {n}"
-
-    row = (await db.execute(
-        text("""
-            INSERT INTO device_profiles (name, vendor, description, match_rules, oid_groups, builtin)
-            SELECT :new_name, vendor, description, match_rules, oid_groups, FALSE
-            FROM device_profiles WHERE id = :id
-            RETURNING id, name, vendor, version, builtin, description,
-                      match_rules, oid_groups, created_at, updated_at
-        """),
-        {"new_name": name, "id": profile_id},
-    )).mappings().first()
-    await db.commit()
-    return ProfileResponse(**dict(row), device_count=0)
-
-
-class ProfileAssignRequest(BaseModel):
-    device_ids: list[uuid.UUID]
-
-
-class ProfileBundle(BaseModel):
-    format_version: int = 1
-    profile: ProfileCreate
-
-
-@router.get('/profiles/{profile_id}/export')
-async def export_profile(profile_id: uuid.UUID, db: AsyncSession = Depends(get_db),
-                         user: User = Depends(get_current_user)):
-    row = (await db.execute(text('SELECT name, vendor, description, match_rules, oid_groups '
-                                 'FROM device_profiles WHERE id = :id'), {'id': profile_id})).mappings().first()
-    if row is None:
-        raise HTTPException(404, 'Profile not found')
-    return {'format_version': 1, 'profile': ProfileCreate(**dict(row)).model_dump(mode='json')}
-
-
-@router.post('/profiles/import', response_model=ProfileResponse, status_code=201)
-async def import_profile(bundle: ProfileBundle, db: AsyncSession = Depends(get_db),
-                         user: User = Depends(require_permission("devices.manage"))):
-    if bundle.format_version != 1:
-        raise HTTPException(422, 'Unsupported template format version')
-    return await create_profile(bundle.profile, db, user)
-
-
-@router.post("/profiles/{profile_id}/assign")
-async def assign_profile(
-    profile_id: uuid.UUID,
-    data: ProfileAssignRequest,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("devices.manage")),
-):
-    """Attach a template to the given devices (operator override — sticks
-    even if auto-classification would pick something else)."""
-    existing = (await db.execute(
-        text("SELECT id FROM device_profiles WHERE id = :id"), {"id": profile_id}
-    )).first()
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    if not data.device_ids:
-        return {"assigned": 0}
-    res = await db.execute(
-        text("UPDATE devices SET profile_id = :pid WHERE id = ANY(:ids)"),
-        {"pid": profile_id, "ids": data.device_ids},
-    )
-    await db.commit()
-    return {"assigned": res.rowcount}
-
-
-@router.post("/profiles/unassign")
-async def unassign_profile(
-    data: ProfileAssignRequest,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("devices.manage")),
-):
-    """Detach any template from the given devices (back to Default monitoring).
-    Old template metric values are removed so stale vendor data doesn't linger."""
-    if not data.device_ids:
-        return {"unassigned": 0}
-    res = await db.execute(
-        text("UPDATE devices SET profile_id = NULL WHERE id = ANY(:ids)"),
-        {"ids": data.device_ids},
-    )
-    await db.execute(
-        text("DELETE FROM device_template_values WHERE device_id = ANY(:ids)"),
-        {"ids": data.device_ids},
-    )
-    await db.commit()
-    return {"unassigned": res.rowcount}
-
-
-@router.get("/profiles/{profile_id}/devices")
-async def list_profile_devices(
-    profile_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Devices currently attached to a template."""
-    rows = (await db.execute(
-        text("""
-            SELECT id, hostname, host(ip_address)::text AS ip_address,
-                   device_type, status, vendor, model
-            FROM devices WHERE profile_id = :id ORDER BY hostname
-        """),
-        {"id": profile_id},
-    )).mappings().all()
-    return {"data": [dict(r) for r in rows]}
 
 
 @router.get("/traps")

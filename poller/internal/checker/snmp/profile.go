@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 
@@ -18,13 +17,20 @@ import (
 // loaded at startup and upserted into the DB so operators can see
 // them in the UI (phase 4).
 type Profile struct {
-	ID          uuid.UUID    `json:"-"` // filled by the DB upsert
-	Name        string       `json:"name"`
-	Vendor      string       `json:"vendor,omitempty"`
-	Version     int          `json:"version"`
-	Builtin     bool         `json:"builtin"`
-	Description string       `json:"description,omitempty"`
-	Match       MatchRules   `json:"match_rules"`
+	ID          uuid.UUID  `json:"-"` // filled by the DB upsert
+	Name        string     `json:"name"`
+	Vendor      string     `json:"vendor,omitempty"`
+	Version     int        `json:"version"`
+	Builtin     bool       `json:"builtin"`
+	Description string     `json:"description,omitempty"`
+	Match       MatchRules `json:"match_rules"`
+	// MatchPriority ranks templates that match the same device (higher
+	// wins). The DB default is 100; 0 is a valid value and is kept as
+	// stored (a bootstrap JSON file without the field yields 0).
+	MatchPriority int `json:"match_priority"`
+	// DeviceType is the device_types key a device on this template is
+	// (devices.device_type is set from it only while the device is 'other').
+	DeviceType string `json:"device_type,omitempty"`
 	// OidGroups is reserved for Phase 3 (vendor-specific metric
 	// collection driven by the profile, not hard-coded Go collectors).
 	// Kept as raw JSON so profiles can evolve without schema churn.
@@ -36,13 +42,18 @@ type Profile struct {
 // nothing (except as an explicit operator override).
 type MatchRules struct {
 	// SysObjectIDPrefixes — if any prefix is a prefix of the device's
-	// sysObjectID, this profile matches. Longest prefix wins when
-	// multiple profiles match.
+	// sysObjectID on a dot boundary, this profile matches. Among equal
+	// match priorities the longest prefix wins.
 	SysObjectIDPrefixes []string `json:"sys_object_id_prefixes,omitempty"`
 
-	// SysDescrRegex — single regex (Go/RE2). If set, tried as a
-	// fallback when no sysObjectID prefix matched, OR as a tie-breaker.
+	// SysDescrRegex — single regex (Go/RE2). Tried as a fallback when
+	// no sysObjectID prefix matched (see Classifier.Match).
 	SysDescrRegex string `json:"sys_descr_regex,omitempty"`
+
+	// RequireSysDescr — a sysObjectID prefix hit counts only when
+	// SysDescrRegex also matches (a model-specific template under a
+	// vendor-wide prefix).
+	RequireSysDescr bool `json:"require_sys_descr,omitempty"`
 
 	// Vendor / Model / OSVersion extraction patterns — regexes with
 	// named groups (?P<vendor>…) or positional groups 1/2/3. Applied
@@ -59,11 +70,11 @@ type MatchRules struct {
 // compiledProfile caches regex compilations so we don't re-parse on
 // every classification call.
 type compiledProfile struct {
-	profile    *Profile
-	descrRE    *regexp.Regexp
-	vendorRE   *regexp.Regexp
-	modelRE    *regexp.Regexp
-	versionRE  *regexp.Regexp
+	profile   *Profile
+	descrRE   *regexp.Regexp
+	vendorRE  *regexp.Regexp
+	modelRE   *regexp.Regexp
+	versionRE *regexp.Regexp
 }
 
 // Classifier loads profile definitions from disk and assigns them
@@ -115,10 +126,9 @@ func (c *Classifier) LoadFromDir(dir string) ([]*Profile, []error) {
 	c.mu.Lock()
 	c.profiles = c.profiles[:0]
 	for _, p := range loaded {
-		cp, err := compile(p)
-		if err != nil {
+		cp, cerrs := compile(p)
+		for _, err := range cerrs {
 			errs = append(errs, fmt.Errorf("%s: %w", p.Name, err))
-			continue
 		}
 		c.profiles = append(c.profiles, cp)
 	}
@@ -130,15 +140,15 @@ func (c *Classifier) LoadFromDir(dir string) ([]*Profile, []error) {
 // SetProfiles replaces the classifier's profile set from an
 // already-loaded slice (the DB-driven path — device_profiles is the
 // source of truth; JSON files under data/profiles are only an optional
-// bootstrap). Profiles that fail to compile are skipped.
+// bootstrap). A regex that fails to compile is reported and disabled; the
+// profile itself is kept.
 func (c *Classifier) SetProfiles(profiles []*Profile) []error {
 	var errs []error
 	compiled := make([]compiledProfile, 0, len(profiles))
 	for _, p := range profiles {
-		cp, err := compile(p)
-		if err != nil {
+		cp, cerrs := compile(p)
+		for _, err := range cerrs {
 			errs = append(errs, fmt.Errorf("%s: %w", p.Name, err))
-			continue
 		}
 		compiled = append(compiled, cp)
 	}
@@ -159,45 +169,80 @@ func NormalizeOID(oid string) string {
 	return strings.TrimPrefix(oid, ".")
 }
 
-// Match returns the best profile for the given sysObjectID + sysDescr.
-// Returns nil if nothing matches. Priority:
+// Match returns the best profile for the given sysObjectID + sysDescr,
+// or nil if nothing matches. The rules are the shared classification
+// contract (scripts/dev/template-match-contract/vectors.json, also
+// implemented by the server's classify.py):
 //
-//  1. Longest sysObjectIDPrefix that is a prefix of the device's sysObjectID
-//  2. Fallback: first profile whose sysDescrRegex matches
+//   - OIDs are normalised (NormalizeOID) and a prefix matches only on a dot
+//     boundary: the sysObjectID equals the prefix or continues with ".".
+//   - A template matches by prefix (strength 2) or, when none of its
+//     prefixes matched, by sys_descr_regex (strength 1). With
+//     require_sys_descr a prefix hit counts only when the regex also
+//     matches; the descr fallback needs the regex anyway, so such a template
+//     does not match at all without it.
+//   - Candidates rank by match_priority (higher first), then strength, then
+//     the longest matching prefix, then name in byte order.
+//   - An invalid regex never matches (compile leaves it nil).
 func (c *Classifier) Match(sysObjectID, sysDescr string) *Profile {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	sysObjectID = NormalizeOID(sysObjectID)
 
-	type hit struct {
-		cp       compiledProfile
-		prefixLen int
+	var best *Profile
+	var bestStrength, bestPrefixLen int
+	for i := range c.profiles {
+		cp := &c.profiles[i]
+		strength, prefixLen := cp.matchStrength(sysObjectID, sysDescr)
+		if strength == 0 {
+			continue
+		}
+		if best == nil || outranks(cp.profile, strength, prefixLen, best, bestStrength, bestPrefixLen) {
+			best, bestStrength, bestPrefixLen = cp.profile, strength, prefixLen
+		}
 	}
-	var hits []hit
-	for _, cp := range c.profiles {
+	return best
+}
+
+// matchStrength reports how a template matches: 2 by sysObjectID prefix
+// (with the longest matching prefix length), 1 by sysDescr regex, 0 not at
+// all. sysObjectID must already be normalised.
+func (cp *compiledProfile) matchStrength(sysObjectID, sysDescr string) (strength, prefixLen int) {
+	descrOK := cp.descrRE != nil && cp.descrRE.MatchString(sysDescr)
+	longest := -1
+	if sysObjectID != "" {
 		for _, pref := range cp.profile.Match.SysObjectIDPrefixes {
 			pref = NormalizeOID(pref)
-			if sysObjectID != "" && pref != "" && strings.HasPrefix(sysObjectID, pref) {
-				hits = append(hits, hit{cp, len(pref)})
-				break
+			if pref == "" || len(pref) <= longest {
+				continue
+			}
+			if sysObjectID == pref || strings.HasPrefix(sysObjectID, pref+".") {
+				longest = len(pref)
 			}
 		}
 	}
-	if len(hits) > 0 {
-		sort.SliceStable(hits, func(i, j int) bool {
-			return hits[i].prefixLen > hits[j].prefixLen
-		})
-		return hits[0].cp.profile
+	if longest >= 0 && (!cp.profile.Match.RequireSysDescr || descrOK) {
+		return 2, longest
 	}
+	if descrOK {
+		return 1, 0
+	}
+	return 0, 0
+}
 
-	// sysDescr fallback.
-	for _, cp := range c.profiles {
-		if cp.descrRE != nil && cp.descrRE.MatchString(sysDescr) {
-			return cp.profile
-		}
+// outranks reports whether candidate a beats candidate b.
+func outranks(a *Profile, aStrength, aPrefixLen int, b *Profile, bStrength, bPrefixLen int) bool {
+	if a.MatchPriority != b.MatchPriority {
+		return a.MatchPriority > b.MatchPriority
 	}
-	return nil
+	if aStrength != bStrength {
+		return aStrength > bStrength
+	}
+	if aPrefixLen != bPrefixLen {
+		return aPrefixLen > bPrefixLen
+	}
+	return a.Name < b.Name
 }
 
 // Extract runs the profile's vendor/model/os_version regexes against
@@ -229,30 +274,29 @@ func (c *Classifier) Extract(p *Profile, sysDescr string) (vendor, model, osVers
 	return
 }
 
-func compile(p *Profile) (compiledProfile, error) {
+// compile caches a profile's regexes. A pattern that does not compile is
+// reported and left nil (it then never matches or extracts) instead of
+// dropping the whole profile: devices already on the template keep their
+// classification, and its other rules keep working.
+func compile(p *Profile) (compiledProfile, []error) {
 	cp := compiledProfile{profile: p}
-	var err error
-	if p.Match.SysDescrRegex != "" {
-		if cp.descrRE, err = regexp.Compile(p.Match.SysDescrRegex); err != nil {
-			return cp, fmt.Errorf("sys_descr_regex: %w", err)
+	var errs []error
+	re := func(field, pattern string) *regexp.Regexp {
+		if pattern == "" {
+			return nil
 		}
-	}
-	if p.Match.ExtractVendor != "" {
-		if cp.vendorRE, err = regexp.Compile(p.Match.ExtractVendor); err != nil {
-			return cp, fmt.Errorf("extract_vendor: %w", err)
+		r, err := regexp.Compile(pattern)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", field, err))
+			return nil
 		}
+		return r
 	}
-	if p.Match.ExtractModel != "" {
-		if cp.modelRE, err = regexp.Compile(p.Match.ExtractModel); err != nil {
-			return cp, fmt.Errorf("extract_model: %w", err)
-		}
-	}
-	if p.Match.ExtractOSVersion != "" {
-		if cp.versionRE, err = regexp.Compile(p.Match.ExtractOSVersion); err != nil {
-			return cp, fmt.Errorf("extract_os_version: %w", err)
-		}
-	}
-	return cp, nil
+	cp.descrRE = re("sys_descr_regex", p.Match.SysDescrRegex)
+	cp.vendorRE = re("extract_vendor", p.Match.ExtractVendor)
+	cp.modelRE = re("extract_model", p.Match.ExtractModel)
+	cp.versionRE = re("extract_os_version", p.Match.ExtractOSVersion)
+	return cp, errs
 }
 
 // firstGroup returns the first non-empty capture group from the
