@@ -26,6 +26,9 @@ import {
   RuleMode,
   RuleTrigger,
   RuleVersion,
+  RuleScheduleStatus,
+  ScheduleRunResult,
+  UnmatchedReport,
   DiscoveryResult,
   DiscoveryRun,
   DiscoverySchedule,
@@ -148,6 +151,7 @@ export function ruleBody(draft: RuleDraft) {
     triggers: draft.triggers?.length ? draft.triggers : (['discovery'] as RuleTrigger[]),
     enforcement: draft.enforcement || ('set_once' as const),
     on_unmatch: draft.on_unmatch || ('keep' as const),
+    max_changes_per_run: draft.max_changes_per_run ?? null,
   }
 }
 
@@ -249,5 +253,21 @@ export const rulesApi = {
   },
   async addStarter(keys: string[]): Promise<StarterResult> {
     return (await api.post(`${rulesBase}/starter`, { keys })).data
+  },
+
+  // Phase 4: scheduled runs and the Unmatched report.
+  /** When the scheduled rules run next and when they last ran. */
+  async schedule(): Promise<RuleScheduleStatus> {
+    return (await api.get(`${rulesBase}/schedule`)).data
+  },
+  /** Run the scheduled rules now: same limits and approval as a scheduled run. */
+  async runScheduleNow(): Promise<ScheduleRunResult> {
+    return (await api.post(`${rulesBase}/schedule/run-now`)).data
+  },
+  /** Devices, servers and children no active rule (optionally: no simulating rule either) matches. */
+  async unmatched(kinds: AssetKind[], includeSimulating: boolean): Promise<UnmatchedReport> {
+    return (await api.get(`${rulesBase}/unmatched`, {
+      params: { kinds: kinds.join(','), include_simulating: includeSimulating },
+    })).data
   },
 }

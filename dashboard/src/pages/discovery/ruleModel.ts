@@ -34,6 +34,10 @@ import type {
   RuleCatalog,
   RuleDraft,
   RuleMode,
+  InterfacePattern,
+  RuleEngineSettings,
+  ScheduleRunResult,
+  UnmatchedReport,
 } from './types'
 
 export type Path = number[]
@@ -60,6 +64,7 @@ export function defaultRule(): RuleDraft {
     triggers: ['discovery'],
     enforcement: 'set_once',
     on_unmatch: 'keep',
+    max_changes_per_run: null,
   }
 }
 
@@ -322,10 +327,16 @@ const ACTION_SOURCE: Record<string, string> = {
   snmp_credential: 'snmp_credentials',
   map: 'manual_maps',
   dependency_parent: 'devices',
+  sensor: 'sensors',
+  agent_policy: 'agent_policies',
+  service_template: 'service_check_templates',
 }
 
-/** Actions whose value is one of a set (map placements, uplink parents): only ever added, like tags. */
-export const SET_ACTION_KEYS = new Set(['tags', 'map', 'dependency_parent'])
+/**
+ * Actions whose value is one of a set (map placements, uplink parents, monitoring sensors, service checks made from
+ * templates): only ever added, like tags.
+ */
+export const SET_ACTION_KEYS = new Set(['tags', 'map', 'dependency_parent', 'sensor', 'service_template'])
 
 export function summarizeAction(action: RuleAction, lookups?: Lookups, catalog?: RuleCatalog | null): string {
   const v = action.value
@@ -346,6 +357,10 @@ export function summarizeAction(action: RuleAction, lookups?: Lookups, catalog?:
     case 'location': return `Location: ${v}`
     case 'map': return `Map: ${refName(lookups, ACTION_SOURCE.map, v)}`
     case 'dependency_parent': return `Depends on: ${refName(lookups, ACTION_SOURCE.dependency_parent, v)}`
+    case 'sensor': return `Monitor from sensor: ${refName(lookups, ACTION_SOURCE.sensor, v)}`
+    case 'agent_policy': return `Agent policy: ${refName(lookups, ACTION_SOURCE.agent_policy, v)}`
+    case 'service_template': return `Service check: ${refName(lookups, ACTION_SOURCE.service_template, v)}`
+    case 'interfaces': return `Interfaces: ${summarizeInterfacePatterns(Array.isArray(v) ? v : [])}`
     default: {
       const spec = catalog?.actions.find((a) => a.key === action.key)
       const shown = Array.isArray(v) ? v.join(', ') : spec?.source ? refName(lookups, spec.source, v) : String(v ?? '')
@@ -371,6 +386,7 @@ export function defaultActionValue(spec: { key: string; value: string; min?: num
     case 'tags': return { key: spec.key, value: [] }
     case 'on': return { key: spec.key, value: true }
     case 'int': return { key: spec.key, value: spec.key === 'snmp_interval' ? 300 : spec.min && spec.min > 60 ? spec.min : 60 }
+    case 'interfaces': return { key: spec.key, value: [defaultInterfacePattern()] }
     default: return { key: spec.key, value: '' }
   }
 }
@@ -397,6 +413,10 @@ export function actionProblems(draft: Pick<RuleDraft, 'actions' | 'asset_kinds'>
         out.push(`${label}: between ${spec.min} and ${spec.max}`)
       }
     }
+    if (spec.value === 'interfaces') {
+      const max = catalog?.limits?.max_interface_patterns ?? MAX_INTERFACE_PATTERNS
+      for (const p of interfacePatternProblems(Array.isArray(a.value) ? a.value : [], max)) out.push(`${label}: ${p}`)
+    }
   }
   return out
 }
@@ -405,7 +425,9 @@ export function ruleProblems(draft: RuleDraft, catalog: RuleCatalog | null | und
   const out: string[] = []
   if (!draft.name.trim()) out.push('Give the rule a name')
   if (!draft.asset_kinds.length) out.push('Choose what the rule looks at: network devices, servers or controller-managed children')
-  if (draft.triggers && !draft.triggers.length) out.push('Choose when the rule runs: on scan results, on new devices and servers, or whenever they change')
+  if (draft.triggers && !draft.triggers.length) out.push('Choose when the rule runs: on scan results, on new devices and servers, whenever they change, or at the scheduled times')
+  const cap = draft.max_changes_per_run
+  if (cap != null && (!Number.isInteger(cap) || cap < 1 || cap > 100000)) out.push('Changes per automatic run: a whole number from 1 to 100000, or empty')
   return [...out, ...conditionProblems(draft.condition, catalog, catalog?.limits ?? DEFAULT_LIMITS), ...actionProblems(draft, catalog)]
 }
 
@@ -582,8 +604,14 @@ export const TRIGGER_LABEL: Record<RuleTrigger, string> = {
   discovery: 'Discovery scan results',
   created: 'Devices and servers when they are added',
   changed: 'Devices and servers whenever they change (and when the rule changes)',
+  scheduled: 'All devices and servers at the scheduled times',
 }
-const TRIGGER_SHORT: Record<string, string> = { discovery: 'scans', created: 'new devices and servers', changed: 'changes' }
+const TRIGGER_SHORT: Record<string, string> = {
+  discovery: 'scans',
+  created: 'new devices and servers',
+  changed: 'changes',
+  scheduled: 'a schedule',
+}
 
 /** When an asset stops matching (phase 3). */
 export const ON_UNMATCH_LABEL: Record<OnUnmatch, string> = {
@@ -591,7 +619,7 @@ export const ON_UNMATCH_LABEL: Record<OnUnmatch, string> = {
   revert: 'Revert them to what they were (if unchanged since)',
 }
 export const ON_UNMATCH_HELP =
-  'Applies to automatic re-checks (the “whenever they change” trigger) and to manual runs on inventory.'
+  'Applies to automatic re-checks (the “whenever they change” trigger), scheduled runs and manual runs on inventory.'
 
 /** Asset kinds (phase 3 adds controller-managed FortiSwitches and FortiAPs). */
 export const ASSET_KIND_ORDER: AssetKind[] = ['device', 'server', 'child']
@@ -673,8 +701,8 @@ export function activationPermissions(actions: RuleAction[], assetKinds: AssetKi
       if (a.import_as === 'server' || a.import_as === 'both' || a.import_as === 'auto') needed.add('servers.manage')
       continue
     }
-    if (spec.key === 'map') {
-      // Placing an asset on a map is a map edit, whatever the asset.
+    if (spec.key === 'map' || spec.key === 'service_template') {
+      // Placing an asset on a map is a map edit, whatever the asset; a check from a template is a service check edit.
       spec.permission.forEach((p) => needed.add(p))
       continue
     }
@@ -750,6 +778,7 @@ export function summarizeApplyResult(r: Partial<InventoryApplyResult>): string {
   if (r.kept_manual_edit) parts.push(`${plural(r.kept_manual_edit, 'hand edit')} kept`)
   if (r.not_reversible) parts.push(`${r.not_reversible} left alone (not reversible)`)
   if (r.skipped_changed) parts.push(`${r.skipped_changed} skipped (changed since the preview)`)
+  if (r.not_ready) parts.push(`${r.not_ready} waiting for a sensor to come online`)
   return parts.join(' · ')
 }
 
@@ -774,7 +803,8 @@ export function runTriggerText(run: Pick<EngineRun, 'trigger' | 'mode' | 'discov
     run.trigger === 'discovery' ? 'Scan'
       : run.trigger === 'created' ? 'New device / server'
         : run.trigger === 'changed' ? 'Rules re-checked'
-          : run.trigger === 'undo' ? 'Undo'
+          : run.trigger === 'scheduled' ? 'Scheduled run'
+            : run.trigger === 'undo' ? 'Undo'
             : run.discovery_run_id ? 'Re-evaluated' : 'Run on inventory'
   if (run.trigger === 'undo') return what
   const how = run.mode === 'apply' ? 'apply' : run.mode === 'simulate' ? 'simulate' : 'annotate only'
@@ -786,6 +816,7 @@ export const TRIGGER_REASON: Record<string, string> = {
   discovery: 'Scan finished',
   created: 'Asset added',
   changed: 'Asset or rule changed',
+  scheduled: 'Scheduled time (or Run now)',
   manual: 'Started by hand',
   undo: 'Undo of an earlier run',
 }
@@ -833,6 +864,7 @@ export function summarizeApprovalResult(r: Partial<ApprovalResult>): string {
   if (r.kept_manual_edit) parts.push(`${plural(r.kept_manual_edit, 'hand edit')} kept`)
   if (r.not_reversible) parts.push(`${r.not_reversible} left alone (not reversible)`)
   if (r.skipped_changed) parts.push(`${r.skipped_changed} skipped (changed since the plan)`)
+  if (r.not_ready) parts.push(`${r.not_ready} waiting for a sensor to come online`)
   return parts.join(' · ')
 }
 
@@ -957,11 +989,16 @@ const SETTING_FALLBACK: Record<string, string> = {
   environment: 'Environment',
   map: 'Network map',
   dependency_parent: 'Depends on (uplink parent)',
+  interfaces: 'Interface monitoring',
+  sensor: 'Monitor from sensor',
+  agent_policy: 'Agent policy',
+  service_template: 'Service check from template',
 }
 
 /** A setting value for people: group / template / credential names, On / Off, "not set". */
 export function formatSettingValue(actionKey: string | null | undefined, value: any, lookups?: Lookups): string {
   if (value === null || value === undefined || value === '') return 'not set'
+  if (actionKey === 'interfaces' && typeof value === 'boolean') return value ? 'monitored' : 'ignored'
   if (typeof value === 'boolean') return value ? 'On' : 'Off'
   if (Array.isArray(value)) return value.length ? value.map(String).join(', ') : 'none'
   if (typeof value === 'object') {
@@ -974,8 +1011,14 @@ export function formatSettingValue(actionKey: string | null | undefined, value: 
   return String(value)
 }
 
-/** "Before → after" for a change or a history item (tags, maps and uplink parents show "+ added" / "− removed"). */
-export function changeText(actionKey: string | null | undefined, before: any, after: any, lookups?: Lookups): string {
+/**
+ * "Before → after" for a change or a history item (tags, maps and uplink parents show "+ added" / "− removed"; an
+ * interface shows its name: "Interface gi1/0/2: monitored → ignored").
+ */
+export function changeText(actionKey: string | null | undefined, before: any, after: any, lookups?: Lookups, itemKey?: string | null): string {
+  if (actionKey === 'interfaces') {
+    return `${interfaceLabel(itemKey)}: ${formatSettingValue(actionKey, before, lookups)} → ${formatSettingValue(actionKey, after, lookups)}`
+  }
   if (actionKey && SET_ACTION_KEYS.has(actionKey)) {
     if (before == null && after != null) return `+ ${formatSettingValue(actionKey, after, lookups)}`
     if (after == null && before != null) return `− ${formatSettingValue(actionKey, before, lookups)}`
@@ -992,7 +1035,10 @@ export function proposedText(
   c: Pick<InventoryChange, 'action_key' | 'item_key' | 'before' | 'after' | 'outcome'>,
   lookups?: Lookups,
 ): string {
-  if (c.outcome !== 'revert') return changeText(c.action_key, c.before, c.after, lookups)
+  if (c.outcome !== 'revert') return changeText(c.action_key, c.before, c.after, lookups, c.item_key)
+  if (c.action_key === 'interfaces') {
+    return `${interfaceLabel(c.item_key)}: revert to ${formatSettingValue(c.action_key, c.after, lookups)} (now ${formatSettingValue(c.action_key, c.before, lookups)})`
+  }
   if (SET_ACTION_KEYS.has(c.action_key) && c.after == null) {
     return `Remove ${formatSettingValue(c.action_key, c.before ?? c.item_key, lookups)}`
   }
@@ -1027,4 +1073,235 @@ export function overriddenText(
   catalog: RuleCatalog | null | undefined,
 ): string {
   return `${o.rule_name ?? 'A rule'}: ${settingLabel(o.action_key, catalog).toLowerCase()} is overridden by ${o.winner_rule_name ?? 'an earlier rule'} on ${plural(o.assets, 'asset')}`
+}
+
+// ── phase 4: interfaces, sensors, schedules, unmatched assets ───────────────
+
+export const MAX_INTERFACE_PATTERNS = 10
+export const MAX_INTERFACE_PATTERN = 200
+
+export const INTERFACE_FIELD_ORDER: InterfacePattern['field'][] = ['if_name', 'if_alias', 'if_descr', 'if_type', 'speed']
+/** Short field names for one-line summaries. */
+export const INTERFACE_FIELD_WORD: Record<InterfacePattern['field'], string> = {
+  if_name: 'name',
+  if_alias: 'alias',
+  if_descr: 'ifDescr',
+  if_type: 'type',
+  speed: 'speed',
+}
+/** Labels when the catalog does not give them (an older API). */
+export const INTERFACE_FIELD_LABEL: Record<InterfacePattern['field'], string> = {
+  if_name: 'Name (ifName)',
+  if_alias: 'Alias / description set on the port',
+  if_descr: 'ifDescr',
+  if_type: 'IF-MIB type numbers (6, 24, 131, ...)',
+  speed: 'Speed in Mbit/s (1000, 100-1000, 10000-, -100)',
+}
+export const INTERFACE_PLACEHOLDER: Record<InterfacePattern['field'], string> = {
+  if_name: '^(gi|te)\\d',
+  if_alias: 'uplink|wan',
+  if_descr: '^(Loopback|Null|Vlan)',
+  if_type: '6, 117',
+  speed: '1000-',
+}
+export const INTERFACE_SET_LABEL: Record<InterfacePattern['set'], string> = { monitor: 'Monitor', ignore: 'Ignore' }
+
+export function defaultInterfacePattern(): InterfacePattern {
+  return { set: 'monitor', field: 'if_name', pattern: '' }
+}
+
+/**
+ * A speed pattern in Mbit/s as the API reads it: "1000" (exactly), "100-1000", "10000-" (at least), "-100" (at most).
+ * null when it is not one of those.
+ */
+export function parseSpeedRange(pattern: string): { min: number | null; max: number | null } | null {
+  const p = String(pattern ?? '').replace(/\s+/g, '')
+  const at = p.indexOf('-')
+  const lo = at < 0 ? p : p.slice(0, at)
+  const hi = at < 0 ? p : p.slice(at + 1)
+  const num = (t: string) => (t === '' ? null : /^\d+(\.\d+)?$/.test(t) ? Number(t) : NaN)
+  const min = num(lo)
+  const max = num(hi)
+  if (Number.isNaN(min) || Number.isNaN(max)) return null
+  if (min === null && max === null) return null
+  if (min !== null && max !== null && min > max) return null
+  return { min, max }
+}
+
+/** Client-side checks of an interfaces action's patterns (the server checks again, regexes included). */
+export function interfacePatternProblems(patterns: InterfacePattern[], max = MAX_INTERFACE_PATTERNS): string[] {
+  const out: string[] = []
+  if (!patterns.length) out.push('add at least one pattern')
+  if (patterns.length > max) out.push(`at most ${max} patterns`)
+  patterns.forEach((p, i) => {
+    const n = `pattern ${i + 1}`
+    const text = String(p?.pattern ?? '').trim()
+    if (p?.set !== 'monitor' && p?.set !== 'ignore') out.push(`${n}: monitor or ignore`)
+    if (!INTERFACE_FIELD_ORDER.includes(p?.field)) out.push(`${n}: choose what it tests`)
+    if (!text) {
+      out.push(`${n}: a pattern is required`)
+      return
+    }
+    if (text.length > MAX_INTERFACE_PATTERN) out.push(`${n}: at most ${MAX_INTERFACE_PATTERN} characters`)
+    if (p.field === 'if_type') {
+      const parts = text.split(',').map((x) => x.trim()).filter(Boolean)
+      if (!parts.length || !parts.every((x) => /^\d+$/.test(x))) out.push(`${n}: IF-MIB type numbers separated by commas (6, 24, 131)`)
+    } else if (p.field === 'speed' && !parseSpeedRange(text)) {
+      out.push(`${n}: Mbit/s as 1000, 100-1000, 10000- or -100`)
+    }
+  })
+  return out
+}
+
+/** "monitor where name matches ^gi", "ignore where type is 24 or 131", "ignore where speed is at most 100 Mbit/s" */
+export function interfacePatternText(p: InterfacePattern): string {
+  const set = p.set === 'ignore' ? 'ignore' : 'monitor'
+  const word = INTERFACE_FIELD_WORD[p.field] ?? p.field
+  const text = String(p.pattern ?? '').trim()
+  if (p.field === 'if_type') {
+    return `${set} where type is ${joinWords(text.split(',').map((x) => x.trim()).filter(Boolean), 'or')}`
+  }
+  if (p.field === 'speed') {
+    const r = parseSpeedRange(text)
+    if (!r) return `${set} where speed is ${text}`
+    if (r.min !== null && r.max !== null) {
+      return r.min === r.max ? `${set} where speed is ${r.min} Mbit/s` : `${set} where speed is ${r.min}–${r.max} Mbit/s`
+    }
+    return r.min !== null ? `${set} where speed is at least ${r.min} Mbit/s` : `${set} where speed is at most ${r.max} Mbit/s`
+  }
+  return `${set} where ${word} matches ${text}`
+}
+
+/** One line for a rule's interface patterns, in test order. */
+export function summarizeInterfacePatterns(patterns: InterfacePattern[]): string {
+  if (!patterns.length) return 'no patterns'
+  return patterns.map(interfacePatternText).join('; ')
+}
+
+/** An interface's item key as people read it: "Interface gi1/0/2", "Interface ifIndex 12" for "#12". */
+export function interfaceLabel(itemKey: string | null | undefined): string {
+  const k = String(itemKey ?? '')
+  if (!k) return 'Interface'
+  return k.startsWith('#') ? `Interface ifIndex ${k.slice(1)}` : `Interface ${k}`
+}
+
+/** A run item's outcome label; a sensor that is not online yet waits instead of "Not ready". */
+export function itemOutcomeLabel(outcome: string, actionKey?: string | null): string {
+  if (outcome === 'not_ready' && actionKey === 'sensor') return 'Waiting: sensor not online'
+  return (OUTCOME_LABEL as Record<string, string>)[outcome] ?? outcome.replace(/_/g, ' ')
+}
+
+// Schedules
+
+export const SCHEDULE_HOURS = [1, 2, 3, 4, 6, 8, 12, 24, 48, 72, 168]
+
+/** "Every hour", "Every 6 hours", "Daily", "Every 2 days", "Weekly (Mondays)". */
+export function scheduleEveryText(hours: number): string {
+  if (hours === 1) return 'Every hour'
+  if (hours < 24) return `Every ${hours} hours`
+  if (hours === 24) return 'Daily'
+  if (hours === 168) return 'Weekly (Mondays)'
+  if (hours % 24 === 0) return `Every ${hours / 24} days`
+  return `Every ${hours} hours`
+}
+
+/**
+ * The schedule as a sentence: "Every 6 hours from 02:00 (Asia/Riyadh)", "Daily at 02:00 (UTC)", "Weekly on Mondays at
+ * 02:00 (UTC)". Intervals under a day repeat from the time each day; longer ones every N days at the time.
+ */
+export function scheduleText(s: Pick<RuleEngineSettings, 'schedule_every_hours' | 'schedule_time' | 'schedule_timezone'>): string {
+  const every = Number(s.schedule_every_hours ?? 24)
+  const at = s.schedule_time || '02:00'
+  const tz = s.schedule_timezone || 'UTC'
+  if (every < 24) return `${scheduleEveryText(every)} from ${at} (${tz})`
+  if (every === 24) return `Daily at ${at} (${tz})`
+  if (every === 168) return `Weekly on Mondays at ${at} (${tz})`
+  return `${scheduleEveryText(every)} at ${at} (${tz})`
+}
+
+export function isScheduleTime(text: string | null | undefined): boolean {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(text ?? ''))
+}
+
+/** A time zone name the browser knows (the server checks it against its own zone database). */
+export function isTimeZone(tz: string | null | undefined): boolean {
+  const z = String(tz ?? '').trim()
+  if (!z || z.length > 64) return false
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: z })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The browser's own IANA time zone, for a schedule being turned on; UTC when it cannot tell. */
+export function browserTimeZone(): string {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return tz && isTimeZone(tz) ? tz : 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
+/** Problems with the phase 4 settings (growth stop, schedule) before they are saved. */
+export function engineSettingsProblems(s: Partial<RuleEngineSettings>, hours: number[] = SCHEDULE_HOURS): string[] {
+  const out: string[] = []
+  const int = (v: unknown, lo: number, hi: number) => Number.isInteger(v) && (v as number) >= lo && (v as number) <= hi
+  if (s.growth_breaker_pct != null && !int(s.growth_breaker_pct, 0, 10000)) out.push('Growth stop: a percentage from 0 (off) to 10000')
+  if (s.growth_breaker_min != null && !int(s.growth_breaker_min, 0, 100000)) out.push('Growth stop: a minimum from 0 to 100000 assets')
+  if (s.schedule_enabled) {
+    if (!hours.includes(Number(s.schedule_every_hours))) out.push('Schedule: choose how often')
+    if (!isScheduleTime(s.schedule_time)) out.push('Schedule: a time as HH:MM')
+    if (!isTimeZone(s.schedule_timezone)) out.push('Schedule: a known time zone, such as Asia/Riyadh or UTC')
+  }
+  return out
+}
+
+/** "in 3 h 20 min", "in 2 days", "now" — how long until an ISO time. */
+export function untilText(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return ''
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return ''
+  const min = Math.round((t - now) / 60000)
+  if (min <= 0) return 'now'
+  if (min < 60) return `in ${min} min`
+  const h = Math.floor(min / 60)
+  if (h < 48) return min % 60 ? `in ${h} h ${min % 60} min` : `in ${h} h`
+  return `in ${Math.round(h / 24)} days`
+}
+
+export const SCHEDULE_SKIP_TEXT: Record<string, string> = {
+  engine_off: 'Discovery rules are off',
+  schedule_off: 'The schedule is off',
+  schedule_started: 'The schedule starts at the next scheduled time',
+  not_due: 'Not due yet',
+  no_rules: 'No active or simulating rule has the scheduled trigger',
+  waiting_for_approval: 'An earlier scheduled run still waits for approval',
+}
+
+/** A "Run scheduled rules now" answer for a toast: applied, held for approval, or skipped. */
+export function scheduleRunText(r: ScheduleRunResult): string {
+  if (r.skipped) return SCHEDULE_SKIP_TEXT[r.skipped] ?? sentenceCase(r.skipped.replace(/_/g, ' '))
+  if (r.needs_approval) {
+    const n = Number(r.changes ?? 0)
+    return `${sentenceCase(plural(n, 'change'))} ${n === 1 ? 'waits' : 'wait'} for approval${r.reasons?.length ? `: ${r.reasons.join('; ')}` : ''}`
+  }
+  const parts = [`Checked ${plural(Number(r.assets ?? 0), 'asset')}`, `matched ${Number(r.matched ?? 0)}`, `applied ${plural(Number(r.applied ?? 0), 'value')}`]
+  if (r.reverted) parts.push(`reverted ${r.reverted}`)
+  if (r.kept_manual_edit) parts.push(`${plural(r.kept_manual_edit, 'hand edit')} kept`)
+  if (r.skipped_changed) parts.push(`${r.skipped_changed} skipped (changed since)`)
+  if (r.not_ready) parts.push(`${r.not_ready} waiting for a sensor to come online`)
+  return parts.join(' · ')
+}
+
+/** "12 of 300 network devices · 3 of 40 servers" (kinds in the usual order). */
+export function unmatchedKindsText(report: Pick<UnmatchedReport, 'kinds'>): string {
+  return ASSET_KIND_ORDER.filter((k) => report.kinds?.[k])
+    .map((k) => {
+      const c = report.kinds[k]!
+      return `${c.unmatched} of ${c.assets} ${KIND_PLURAL[k]}`
+    })
+    .join(' · ')
 }

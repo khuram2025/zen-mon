@@ -3,7 +3,9 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   ChevronDown,
   ChevronRight,
   FlaskConical,
@@ -40,6 +42,7 @@ import type {
   DiscoveryRun,
   GroupOp,
   ImportMode,
+  InterfacePattern,
   OnUnmatch,
   PreviewResponse,
   RuleAction,
@@ -53,6 +56,14 @@ import type {
 import {
   DEFAULT_LIMITS,
   DECISION_LABEL,
+  INTERFACE_FIELD_LABEL,
+  INTERFACE_FIELD_ORDER,
+  INTERFACE_PLACEHOLDER,
+  INTERFACE_SET_LABEL,
+  MAX_INTERFACE_PATTERNS,
+  defaultInterfacePattern,
+  moveItem,
+  scheduleText,
   ENFORCEMENT_HELP,
   ENFORCEMENT_LABEL,
   MODE_HELP,
@@ -111,7 +122,7 @@ import {
   useWithDeviceNames,
 } from './ruleUi'
 
-const TRIGGERS: RuleTrigger[] = ['discovery', 'created', 'changed']
+const TRIGGERS: RuleTrigger[] = ['discovery', 'created', 'changed', 'scheduled']
 const KIND_EDITOR_LABEL: Record<AssetKind, string> = {
   device: 'Network devices',
   server: 'Servers (Windows / Linux / ESXi hosts)',
@@ -132,6 +143,7 @@ function draftOf(rule: DiscoveryRule): RuleDraft {
     triggers: rule.triggers?.length ? rule.triggers.filter((t): t is RuleTrigger => TRIGGERS.includes(t)) : ['discovery'],
     enforcement: rule.enforcement === 'enforce' ? 'enforce' : 'set_once',
     on_unmatch: rule.on_unmatch === 'revert' ? 'revert' : 'keep',
+    max_changes_per_run: rule.max_changes_per_run ?? null,
   }
 }
 
@@ -372,12 +384,24 @@ export function RuleEditorPage() {
                 on assets that no longer match.
               </div>
             )}
-            {draft.triggers.includes('changed') && draft.mode === 'active' && (
+            {draft.triggers.includes('scheduled') && (
+              <div className="text-xs text-muted">
+                Runs over every device and server the rule looks at, at the times set under Rules → Settings:{' '}
+                {settings?.schedule_enabled
+                  ? `${scheduleText(settings)}.`
+                  : 'the schedule is off, so the rule runs only with “Run scheduled rules now”.'}
+              </div>
+            )}
+            {(draft.triggers.includes('changed') || draft.triggers.includes('scheduled')) && draft.mode === 'active' && (
               <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-fg">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 <span>
-                  Active rules with this trigger apply on their own within a minute; more than{' '}
-                  {settings?.max_changes_per_run ?? 100} changes wait for approval.
+                  {draft.triggers.includes('changed')
+                    ? 'Active rules with these triggers apply on their own (re-checks within a minute); '
+                    : 'Active rules with this trigger apply on their own at the scheduled times; '}
+                  more than {settings?.max_changes_per_run ?? 100} changes per run
+                  {draft.max_changes_per_run ? `, or more than ${draft.max_changes_per_run} by this rule,` : ''} wait for
+                  approval.
                 </span>
               </div>
             )}
@@ -496,6 +520,19 @@ export function RuleEditorPage() {
               </div>
               <div className="text-xs text-muted">{ON_UNMATCH_HELP}</div>
             </div>
+            <FormField
+              label="Changes per automatic run, at most"
+              hint={`An automatic run (“whenever they change”, scheduled) in which this rule would change more values waits for approval. Empty: only the engine-wide limit (${settings?.max_changes_per_run ?? 100}).`}
+            >
+              <Input
+                type="number"
+                min={1}
+                max={100000}
+                placeholder="No limit of its own"
+                value={draft.max_changes_per_run ?? ''}
+                onChange={(e) => update({ max_changes_per_run: e.target.value === '' ? null : Math.trunc(Number(e.target.value)) })}
+              />
+            </FormField>
           </div>
         </Section>
       </fieldset>
@@ -982,7 +1019,14 @@ function ActionsEditor({
           const notForChildren = !!spec && !notApplicable && withChildren && !spec.asset_kinds.includes('child')
           const missing = spec ? activationPermissions([a], draft.asset_kinds, catalog).filter((p) => !can(p)) : []
           return (
-            <div key={a.key} className={cn('rounded-md border bg-surface p-3', a.key === 'decision' ? 'border-primary/40 lg:col-span-2' : 'border-border')}>
+            <div
+              key={a.key}
+              className={cn(
+                'rounded-md border bg-surface p-3',
+                a.key === 'decision' ? 'border-primary/40 lg:col-span-2' : 'border-border',
+                spec?.value === 'interfaces' && 'lg:col-span-2',
+              )}
+            >
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div>
                   <div className="text-sm font-medium">{spec?.label ?? a.key}</div>
@@ -1114,6 +1158,7 @@ function ActionValue({
             {list.map((o) => (
               <SelectItem key={o.id} value={o.id}>
                 {o.name}
+                {o.hint && <span className="ml-1.5 text-2xs text-muted">· {o.hint}</span>}
               </SelectItem>
             ))}
           </SelectContent>
@@ -1121,12 +1166,18 @@ function ActionValue({
       ) : (
         <div className="space-y-1">
           <Input aria-label={spec.label} value={action.value ?? ''} placeholder="Id (the list could not be loaded)" onChange={(e) => onChange({ ...action, value: e.target.value.trim() })} />
-          {spec.source === 'manual_maps' && (
-            <div className="text-2xs text-muted">No network map could be listed: create one under Network Maps, or ask for map access.</div>
-          )}
+          {spec.source && EMPTY_SOURCE_TEXT[spec.source] && <div className="text-2xs text-muted">{EMPTY_SOURCE_TEXT[spec.source]}</div>}
         </div>
       )
     }
+    case 'interfaces':
+      return (
+        <InterfacePatternsEditor
+          patterns={Array.isArray(action.value) ? action.value : []}
+          catalog={catalog}
+          onChange={(value) => onChange({ ...action, value })}
+        />
+      )
     case 'int':
       return (
         <Input
@@ -1173,6 +1224,125 @@ function ActionValue({
       }
       return <Input aria-label={spec.label} value={action.value ?? ''} maxLength={255} onChange={(e) => onChange({ ...action, value: e.target.value })} />
   }
+}
+
+/** Why a reference list is empty, for the actions whose list a role often cannot read or that start empty. */
+const EMPTY_SOURCE_TEXT: Record<string, string> = {
+  manual_maps: 'No network map could be listed: create one under Network Maps, or ask for map access.',
+  sensors: 'No sensor could be listed: add one under Sensors, or ask for sensor access.',
+  agent_policies: 'No agent policy could be listed: create one under Servers → Agent policies.',
+  service_check_templates: 'No service check template could be listed: create one under Service checks → Templates.',
+}
+
+/**
+ * The "Monitor or ignore interfaces" patterns: monitor / ignore, what the pattern tests, the pattern, in test order.
+ * For each interface the first matching pattern decides (rules in priority order, then patterns in this order).
+ */
+function InterfacePatternsEditor({
+  patterns,
+  catalog,
+  onChange,
+}: {
+  patterns: InterfacePattern[]
+  catalog: RuleCatalog
+  onChange: (patterns: InterfacePattern[]) => void
+}) {
+  const max = catalog.limits?.max_interface_patterns ?? MAX_INTERFACE_PATTERNS
+  const fields = catalog.interface_fields?.length
+    ? catalog.interface_fields
+    : INTERFACE_FIELD_ORDER.map((k) => ({ key: k, label: INTERFACE_FIELD_LABEL[k], value: 'regex' as const }))
+  const sets = catalog.interface_sets?.length
+    ? catalog.interface_sets
+    : (['monitor', 'ignore'] as const).map((k) => ({ key: k, label: INTERFACE_SET_LABEL[k] }))
+  const set = (i: number, patch: Partial<InterfacePattern>) => onChange(patterns.map((p, j) => (j === i ? { ...p, ...patch } : p)))
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted">
+        For each interface the first matching pattern decides: rules in priority order, then the patterns in this order.
+        Interfaces that nothing matches are left as they are. Name, alias and ifDescr patterns are regular expressions
+        (any case).
+      </p>
+      <ol className="space-y-2">
+        {patterns.map((p, i) => {
+          const kind = fields.find((f) => f.key === p.field)?.value ?? 'regex'
+          return (
+            <li key={i} className="flex flex-wrap items-start gap-2 rounded-md border border-border bg-surface2/30 p-2">
+              <span className="w-5 pt-2 text-xs tabular-nums text-muted">{i + 1}</span>
+              <div className="w-28">
+                <Select value={p.set} onValueChange={(v) => set(i, { set: v as InterfacePattern['set'] })}>
+                  <SelectTrigger className="h-9" aria-label={`Pattern ${i + 1}: monitor or ignore`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {sets.map((x) => (
+                      <SelectItem key={x.key} value={x.key}>
+                        {x.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="w-full sm:w-72">
+                <Select value={p.field} onValueChange={(v) => set(i, { field: v as InterfacePattern['field'] })}>
+                  <SelectTrigger
+                    className="h-9 gap-2 text-left [&>span]:min-w-0 [&>span]:truncate"
+                    aria-label={`Pattern ${i + 1}: what it tests`}
+                    title={fields.find((f) => f.key === p.field)?.label}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {fields.map((f) => (
+                      <SelectItem key={f.key} value={f.key}>
+                        {f.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="min-w-[10rem] flex-1">
+                <Input
+                  aria-label={`Pattern ${i + 1}`}
+                  value={p.pattern ?? ''}
+                  maxLength={200}
+                  className={kind === 'regex' ? 'font-mono text-xs' : undefined}
+                  placeholder={INTERFACE_PLACEHOLDER[p.field] ?? ''}
+                  onChange={(e) => set(i, { pattern: e.target.value })}
+                />
+              </div>
+              <div className="flex items-center">
+                <Button variant="ghost" size="icon" className="h-9 w-8" title="Test earlier" aria-label={`Move pattern ${i + 1} up`} disabled={i === 0} onClick={() => onChange(moveItem(patterns, i, -1))}>
+                  <ArrowUp className="h-3.5 w-3.5" />
+                </Button>
+                <Button variant="ghost" size="icon" className="h-9 w-8" title="Test later" aria-label={`Move pattern ${i + 1} down`} disabled={i === patterns.length - 1} onClick={() => onChange(moveItem(patterns, i, 1))}>
+                  <ArrowDown className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-8 text-muted hover:text-danger"
+                  title="Remove pattern"
+                  aria-label={`Remove pattern ${i + 1}`}
+                  onClick={() => onChange(patterns.filter((_, j) => j !== i))}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            </li>
+          )
+        })}
+      </ol>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" disabled={patterns.length >= max} onClick={() => onChange([...patterns, defaultInterfacePattern()])}>
+          <Plus className="h-3.5 w-3.5" /> Add pattern
+        </Button>
+        <span className="text-2xs text-muted">
+          {patterns.length} of {max}. Speed is in Mbit/s: 1000, 100-1000, 10000- (at least), -100 (at most); types are
+          IF-MIB numbers (6 Ethernet, 24 loopback, 131 tunnel, 53 virtual).
+        </span>
+      </div>
+    </div>
+  )
 }
 
 function ActivationNote({

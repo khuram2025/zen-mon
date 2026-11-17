@@ -154,8 +154,9 @@ async def discovery_rules_loop() -> None:
     """Background task, once a minute, one API worker at a time: discovery
     rules on devices and servers when they are added
     (``inventory.sweep_created``) and when they or the rules change
-    (``reconcile.reconcile_changed``). Creating or editing an asset never waits
-    for or depends on it."""
+    (``reconcile.reconcile_changed``), and scheduled rules when a scheduled
+    time has passed (``reconcile.scheduled_pass``). Creating or editing an
+    asset never waits for or depends on it."""
     from app.services import alert_worker_lock
     from app.services.discovery_rules.reconcile import rules_pass
 

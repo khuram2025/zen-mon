@@ -300,6 +300,8 @@ def test_contract_vectors(vector):
     assert {k: v["value"] for k, v in plan["settings"].items()} == exp["settings"]
     assert engine.tag_values(plan) == exp.get("tags", [])
     assert [s["rule_id"] for s in plan["shadowed"]] == exp.get("shadowed", [])
+    if "additive" in exp:
+        assert {k: [e["value"] for e in v] for k, v in plan["additive"].items()} == exp["additive"]
     if "disposition" in exp:
         d = exp["disposition"]
         assert list(engine.disposition(plan, import_mode=d["import_mode"], result_status=d.get("status", "new"),

@@ -11,10 +11,18 @@ import { Badge } from '@/components/ui/Badge'
 import { relativeTime } from '@/lib/utils'
 import { rulesApi } from './api'
 import type { AssetAutomation, AssetKind } from './types'
-import { dependencyIds, formatSettingValue, plural, settingLabel, settingValueLink } from './ruleModel'
+import {
+  SET_ACTION_KEYS,
+  dependencyIds,
+  formatSettingValue,
+  interfaceLabel,
+  plural,
+  settingLabel,
+  settingValueLink,
+} from './ruleModel'
 import { useRuleCatalog, useRuleLookups, useWithDeviceNames } from './ruleUi'
 
-const REF_KEYS = new Set(['group', 'template', 'snmp_credential', 'map'])
+const REF_KEYS = new Set(['group', 'template', 'snmp_credential', 'map', 'sensor', 'agent_policy', 'service_template'])
 
 export function useAssetAutomation(kind: AssetKind, assetId: string | undefined) {
   return useQuery<AssetAutomation>({
@@ -55,11 +63,13 @@ export function AssetAutomationBody({ data }: { data: AssetAutomation }) {
               <div className="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Set by rules</div>
               <ul className="divide-y divide-border/60">
                 {data.settings.map((s) => {
-                  const shown = s.action_key === 'tags' || s.action_key === 'map' || s.action_key === 'dependency_parent' ? s.value ?? s.item_key : s.value
+                  const shown = SET_ACTION_KEYS.has(s.action_key) ? s.value ?? s.item_key : s.value
                   const href = settingValueLink(s.action_key, shown)
                   return (
                   <li key={`${s.action_key}:${s.item_key ?? ''}`} className="flex flex-wrap items-baseline gap-x-2 py-1.5">
-                    <span className="text-xs text-muted">{settingLabel(s.action_key, catalog)}</span>
+                    <span className="text-xs text-muted">
+                      {s.action_key === 'interfaces' ? interfaceLabel(s.item_key) : settingLabel(s.action_key, catalog)}
+                    </span>
                     {href ? (
                       <Link to={href} className="font-medium text-primary hover:underline">
                         {formatSettingValue(s.action_key, shown, lookups)}

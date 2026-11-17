@@ -1069,12 +1069,15 @@ async def apply_template(
     data: ServiceCheckTemplateApply,
     user_id: UUID | None,
     visible_tags: list[str] | None = None,
+    *,
+    commit: bool = True,
 ) -> ServiceCheckTemplateApplyResult:
     """Create one service_check per target device from a template.
 
     Substitutes `{{hostname}}` and `{{ip}}` in target_url_template. Skips
     devices that already have a check with the generated name. Runs in a
-    single transaction so failures roll back.
+    single transaction so failures roll back; ``commit=False`` leaves the
+    commit to the caller (discovery rules apply it inside their own run).
     """
     from sqlalchemy import text
 
@@ -1175,7 +1178,8 @@ async def apply_template(
         await db.flush()
         created.append(sc.id)
 
-    await db.commit()
+    if commit:
+        await db.commit()
     return ServiceCheckTemplateApplyResult(created_ids=created, skipped=skipped)
 
 

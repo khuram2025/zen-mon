@@ -31,7 +31,8 @@ import {
   traceLeafText,
 } from './ruleModel'
 
-export type RefOption = { id: string; name: string }
+/** A choice for a reference: `hint` is a second, muted part of the label (a sensor's site and status, a policy's platform). */
+export type RefOption = { id: string; name: string; hint?: string }
 
 export function useRuleCatalog(enabled = true) {
   return useQuery<RuleCatalog>({
@@ -48,8 +49,9 @@ const asOptions = (rows: any): RefOption[] =>
     .map((r: any) => ({ id: String(r.id), name: String(r.name ?? r.label ?? r.id) }))
 
 /**
- * Names for the ids a rule refers to (groups, templates, SNMP credentials, discovery profiles). Each list comes from
- * the API the rest of the dashboard uses; a role that cannot read one of them sees the ids instead of names.
+ * Names for the ids a rule refers to (groups, templates, SNMP credentials, discovery profiles, maps, and since phase 4
+ * sensors, agent policies and service check templates). Each list comes from the API the rest of the dashboard uses; a
+ * role that cannot read one of them sees the ids instead of names.
  */
 export function useRuleLookups(enabled = true): { lookups: Lookups; options: Record<string, RefOption[]> } {
   const opts = { enabled, retry: false, staleTime: 60_000 } as const
@@ -59,6 +61,15 @@ export function useRuleLookups(enabled = true): { lookups: Lookups; options: Rec
   const profiles = useQuery<any>({ queryKey: ['discovery', 'profiles'], queryFn: discoveryApi.listProfiles, ...opts })
   // Network maps (the "Add to network map" action); GET /maps never returns background images.
   const maps = useQuery<any>({ queryKey: ['manual-maps'], queryFn: async () => (await api.get('/maps')).data, ...opts })
+  // Phase 4: "Monitor from sensor", "Agent policy" (action and fact), "Add service check from template". Own keys: other
+  // pages cache these lists in other shapes (GET /agent-policies answers {items}).
+  const sensors = useQuery<any>({ queryKey: ['discovery', 'rules', 'ref', 'sensors'], queryFn: async () => (await api.get('/sensors')).data, ...opts })
+  const policies = useQuery<any>({ queryKey: ['discovery', 'rules', 'ref', 'agent-policies'], queryFn: async () => (await api.get('/agent-policies')).data, ...opts })
+  const svcTemplates = useQuery<any>({
+    queryKey: ['discovery', 'rules', 'ref', 'service-check-templates'],
+    queryFn: async () => (await api.get('/service-check-templates')).data,
+    ...opts,
+  })
   return useMemo(() => {
     const options: Record<string, RefOption[]> = {
       // A rule sets a device's own group: static groups only (migrate-192).
@@ -67,13 +78,25 @@ export function useRuleLookups(enabled = true): { lookups: Lookups; options: Rec
       snmp_credentials: asOptions(creds.data),
       discovery_profiles: asOptions(profiles.data),
       manual_maps: asOptions(maps.data),
+      sensors: withHints(sensors.data, (r) => [r.site_name, r.status && r.status !== 'online' ? r.status : null]),
+      agent_policies: withHints(policies.data, (r) => [r.platform]),
+      service_check_templates: withHints(svcTemplates.data, (r) => [r.check_type ?? r.type]),
     }
     const lookups: Lookups = {}
     for (const [source, list] of Object.entries(options)) {
       lookups[source] = Object.fromEntries(list.map((o) => [o.id, o.name]))
     }
     return { lookups, options }
-  }, [groups.data, templates.data, creds.data, profiles.data, maps.data])
+  }, [groups.data, templates.data, creds.data, profiles.data, maps.data, sensors.data, policies.data, svcTemplates.data])
+}
+
+function withHints(rows: any, hint: (row: any) => (string | null | undefined)[]): RefOption[] {
+  const list: any[] = Array.isArray(rows) ? rows : Array.isArray(rows?.items) ? rows.items : Array.isArray(rows?.data) ? rows.data : []
+  const byId = new Map(list.filter((r) => r && r.id != null).map((r) => [String(r.id), r]))
+  return asOptions(list).map((o) => {
+    const h = hint(byId.get(o.id) || {}).filter(Boolean).join(' · ')
+    return h ? { ...o, hint: h } : o
+  })
 }
 
 /**

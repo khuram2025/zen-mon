@@ -68,10 +68,34 @@ ACTIONS: dict[str, ActionSpec] = {a.key: a for a in (
                ("device",), source="devices",
                help="Adds an uplink dependency on this device, so alerts are suppressed while it is down. "
                     "Existing dependencies are kept."),
+    # Phase 4
+    ActionSpec("interfaces", "Monitor or ignore interfaces", "additive", "interfaces", ("devices.manage",),
+               ("device",),
+               help="Sets which interfaces are monitored (interface alerts, utilisation, reports) by name, alias, "
+                    "description, IF-MIB type or speed. For each interface the first matching rule, in priority "
+                    "order, decides; interfaces no rule matches are left as they are."),
+    ActionSpec("sensor", "Monitor from sensor", "additive", "ref", ("devices.manage",), ("device",),
+               source="sensors",
+               help="Adds the sensor as a monitoring location, like the device's Monitoring locations card. "
+                    "Without an explicit choice there, the controller stops polling a device once a sensor "
+                    "does. Never removes a location an operator chose."),
+    ActionSpec("agent_policy", "Agent policy", "single", "ref", ("servers.manage",), ("server",),
+               source="agent_policies",
+               help="The policy the server's agent runs (collection intervals, watch lists, update ring). "
+                    "Servers without an agent are skipped."),
+    ActionSpec("service_template", "Add service check from template", "additive", "ref",
+               ("service_checks.manage",), ("device",), source="service_check_templates",
+               help="Creates the template's service check for the device (named \"<template> · <hostname>\") "
+                    "unless one exists. Undo and un-match leave created checks in place."),
     ActionSpec("tags", "Add tags", "additive", "tags", ("devices.manage",), ("device", "server", "child"),
                help="Tags from every matching rule are merged. A tag is how a new device becomes "
                     "visible to a team whose view is limited by tags."),
 )}
+
+INTERFACE_FIELDS = ("if_name", "if_alias", "if_descr", "if_type", "speed")
+INTERFACE_SETS = ("monitor", "ignore")
+MAX_INTERFACE_PATTERNS = 10
+MAX_INTERFACE_PATTERN = 200
 
 DEVICE_TYPES = ("router", "switch", "firewall", "access_point", "load_balancer", "wireless_controller",
                 "printer", "ups", "storage", "server", "other")
@@ -86,6 +110,84 @@ def _uuid(value: Any, label: str) -> str:
         return str(uuid.UUID(str(value)))
     except (TypeError, ValueError):
         raise ActionError(f"{label}: choose a value") from None
+
+
+def _speed_range(pattern: str) -> tuple[float | None, float | None]:
+    """"100-1000", "10000-", "-100" or "1000" (Mbit/s) -> (min, max)."""
+    p = pattern.replace(" ", "")
+    lo, sep, hi = p.partition("-")
+    try:
+        lo_v = float(lo) if lo else None
+        hi_v = float(hi) if hi else None
+    except ValueError:
+        raise ActionError("Interface speed: Mbit/s as 1000, 100-1000, 10000- or -100") from None
+    if not sep:
+        hi_v = lo_v
+    if lo_v is None and hi_v is None:
+        raise ActionError("Interface speed: give a minimum, a maximum or both")
+    if lo_v is not None and hi_v is not None and lo_v > hi_v:
+        raise ActionError("Interface speed: the minimum is above the maximum")
+    return lo_v, hi_v
+
+
+def _interface_patterns(value: Any) -> list[dict]:
+    """[{set: monitor|ignore, field, pattern}] in the order they are tested."""
+    items = value if isinstance(value, list) else [value]
+    out: list[dict] = []
+    for n, raw in enumerate(items, 1):
+        if not isinstance(raw, dict):
+            raise ActionError(f"Interface rule {n}: expected set, field and pattern")
+        setv, field, pattern = raw.get("set"), raw.get("field"), str(raw.get("pattern") or "").strip()
+        if setv not in INTERFACE_SETS:
+            raise ActionError(f"Interface rule {n}: monitor or ignore")
+        if field not in INTERFACE_FIELDS:
+            raise ActionError(f"Interface rule {n}: field is one of {', '.join(INTERFACE_FIELDS)}")
+        if not pattern or len(pattern) > MAX_INTERFACE_PATTERN:
+            raise ActionError(f"Interface rule {n}: a pattern is required (at most {MAX_INTERFACE_PATTERN} characters)")
+        if field == "if_type":
+            parts = [p.strip() for p in pattern.split(",") if p.strip()]
+            if not parts or not all(p.isdigit() for p in parts):
+                raise ActionError(f"Interface rule {n}: IF-MIB type numbers separated by commas (6, 24, 131)")
+            pattern = ",".join(parts)
+        elif field == "speed":
+            _speed_range(pattern)
+        else:
+            from .conditions import ConditionError, validate_regex
+            try:
+                validate_regex(pattern)
+            except ConditionError as e:
+                raise ActionError(f"Interface rule {n}: {e}") from None
+        out.append({"set": setv, "field": field, "pattern": pattern})
+    if not out:
+        raise ActionError("Monitor or ignore interfaces: add at least one pattern")
+    if len(out) > MAX_INTERFACE_PATTERNS:
+        raise ActionError(f"A rule has at most {MAX_INTERFACE_PATTERNS} interface patterns")
+    return out
+
+
+def interface_matches(item: dict, iface: dict) -> bool:
+    """One interface pattern against one interface row (pure). Text patterns
+    are case-insensitive regular expressions, like condition regexes."""
+    from .conditions import MAX_SUBJECT, _regex
+    field, pattern = item["field"], item["pattern"]
+    if field == "if_type":
+        t = iface.get("if_type")
+        try:
+            return t is not None and int(t) in {int(p) for p in pattern.split(",")}
+        except (TypeError, ValueError):
+            return False
+    if field == "speed":
+        bps = iface.get("configured_speed_bps") or iface.get("if_speed")
+        if not bps:
+            return False
+        mbps = float(bps) / 1_000_000
+        lo, hi = _speed_range(pattern)
+        return (lo is None or mbps >= lo) and (hi is None or mbps <= hi)
+    try:
+        rx = _regex(pattern)
+    except Exception:
+        return False
+    return bool(rx.search(str(iface.get(field) or "")[:MAX_SUBJECT]))
 
 
 def validate_action(raw: Any) -> dict:
@@ -121,6 +223,8 @@ def validate_action(raw: Any) -> dict:
         if (spec.min is not None and n < spec.min) or (spec.max is not None and n > spec.max):
             raise ActionError(f"{spec.label}: between {spec.min} and {spec.max}")
         out["value"] = n
+    elif spec.value == "interfaces":
+        out["value"] = _interface_patterns(value)
     elif spec.value == "tags":
         tags = value if isinstance(value, list) else str(value or "").split(",")
         clean: list[str] = []
@@ -185,7 +289,7 @@ def permissions_needed(actions: list[dict], asset_kinds: list[str] | None = None
                 # ("device") needs only the device permissions.
                 needed.add("servers.manage")
             continue
-        if spec.key == "map":
+        if spec.key in ("map", "service_template"):
             needed.update(spec.permission)
             continue
         applies = kinds & set(spec.asset_kinds)

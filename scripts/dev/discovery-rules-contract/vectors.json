@@ -92,6 +92,15 @@
       ],
       "expect": {"matched": ["forti"], "settings": {"decision": "ignore"},
                  "disposition": {"import_mode": "auto_match", "status": "existing", "expect": ["existing", null]}}
+    },
+    {
+      "name": "phase 4: interface patterns merge across rules in priority order; neighbour and site facts",
+      "facts": {"hostname": "acc-sw-07", "vendor": "Cisco", "neighbors": ["core-sw-01", "core-sw-02"], "sites": ["Jeddah"], "interface_count": 52},
+      "rules": [
+        {"id": "behind-core", "name": "Behind core", "priority": 10, "asset_kinds": ["device"], "condition": {"op": "all", "conditions": [{"field": "neighbors", "operator": "has_any", "value": ["core-sw-01"]}, {"field": "interface_count", "operator": "gt", "value": 48}]}, "actions": [{"key": "interfaces", "value": [{"set": "monitor", "field": "if_alias", "pattern": "uplink"}]}, {"key": "tags", "value": ["access"]}]},
+        {"id": "jeddah", "name": "Jeddah", "priority": 20, "asset_kinds": ["device"], "condition": {"op": "all", "conditions": [{"field": "sites", "operator": "has_any", "value": ["jeddah"]}]}, "actions": [{"key": "interfaces", "value": [{"set": "ignore", "field": "if_type", "pattern": "24,53"}, {"set": "monitor", "field": "if_alias", "pattern": "uplink"}]}]}
+      ],
+      "expect": {"matched": ["behind-core", "jeddah"], "settings": {}, "tags": ["access"], "additive": {"interfaces": [{"set": "monitor", "field": "if_alias", "pattern": "uplink"}, {"set": "ignore", "field": "if_type", "pattern": "24,53"}]}}
     }
   ]
 }

@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
+  Clock,
   Copy,
   Download,
   GitCompare,
@@ -18,6 +19,7 @@ import {
   Plus,
   Play,
   Power,
+  SearchX,
   Settings2,
   Sparkles,
   Trash2,
@@ -50,12 +52,25 @@ import type {
   RuleCatalog,
   RuleEngineSettings,
   RuleMode,
+  RuleScheduleStatus,
   RulesImportResult,
+  ScheduleRunResult,
   StarterRule,
   UndoResult,
+  UnmatchedReport,
 } from './types'
 import {
+  ASSET_KIND_ORDER,
   ASSET_KIND_SHORT,
+  SCHEDULE_HOURS,
+  browserTimeZone,
+  engineSettingsProblems,
+  itemOutcomeLabel,
+  scheduleEveryText,
+  scheduleRunText,
+  scheduleText,
+  untilText,
+  unmatchedKindsText,
   CHANGE_OUTCOME_LABEL,
   CHANGE_OUTCOME_ORDER,
   TRIGGER_REASON,
@@ -92,6 +107,7 @@ import { ChangesTable, ModeBadge, useRuleCatalog, useRuleLookups, useWithDeviceN
 const RULES_KEY = ['discovery', 'rules', 'list'] as const
 const SETTINGS_KEY = ['discovery', 'rules', 'settings'] as const
 const HISTORY_KEY = ['discovery', 'rules', 'history'] as const
+const SCHEDULE_KEY = ['discovery', 'rules', 'schedule'] as const
 
 /** The recent runs, shared by the waiting banner and the history card (one request). */
 function useRuleHistory() {
@@ -185,8 +201,8 @@ export function RulesPage() {
           <div className="min-w-0 flex-1">
             <div className="font-semibold">{waitingText(runs)}</div>
             <div className="text-xs">
-              An automatic re-check would change more values than the limit per run, so it waits for someone to review
-              it. Nothing has been changed yet.
+              An automatic run (a re-check after changes or a scheduled run) reached a limit, so it waits for someone to
+              review it. Nothing has been changed yet.
             </div>
           </div>
           {reviewId !== waiting[0].id && (
@@ -209,7 +225,12 @@ export function RulesPage() {
         />
       )}
 
-      <EngineCard canManage={canManage} activeCount={rules.filter((r) => r.mode === 'active').length} />
+      <EngineCard
+        canManage={canManage}
+        activeCount={rules.filter((r) => r.mode === 'active').length}
+        catalog={catalog}
+        onReview={openReview}
+      />
 
       <Card>
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-3">
@@ -221,7 +242,7 @@ export function RulesPage() {
             <p className="mt-1 text-xs text-muted">
               Evaluated top to bottom on scan results, on new devices and servers, and when you run them on inventory.
               The first matching rule sets each setting; tags from every matching rule are merged. Rules never delete
-              anything or turn monitoring off.
+              anything or turn monitoring off, except interfaces an ignore pattern names.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -410,6 +431,8 @@ export function RulesPage() {
 
       <ConflictsCard catalog={catalog} />
 
+      <UnmatchedCard />
+
       <HistoryCard canManage={canManage} catalog={catalog} lookups={baseLookups} onReview={openReview} />
 
       {canManage && <StarterDialog open={starterOpen} onOpenChange={setStarterOpen} />}
@@ -438,7 +461,17 @@ export function RulesPage() {
 }
 
 
-function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCount: number }) {
+function EngineCard({
+  canManage,
+  activeCount,
+  catalog,
+  onReview,
+}: {
+  canManage: boolean
+  activeCount: number
+  catalog: RuleCatalog | undefined
+  onReview: (runId: string) => void
+}) {
   const qc = useQueryClient()
   const { data: settings } = useQuery<RuleEngineSettings>({ queryKey: SETTINGS_KEY, queryFn: rulesApi.getSettings })
   const [form, setForm] = useState<RuleEngineSettings | null>(null)
@@ -451,6 +484,7 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
     mutationFn: (s: RuleEngineSettings) => rulesApi.putSettings(s),
     onSuccess: (s) => {
       qc.setQueryData(SETTINGS_KEY, s)
+      qc.invalidateQueries({ queryKey: SCHEDULE_KEY })
       toast.success(s.enabled ? 'Discovery rules are on' : 'Discovery rules are off')
     },
     onError: (e: any) => toast.error('Could not save the settings', apiErrorMessage(e)),
@@ -465,16 +499,29 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
   }
 
   const on = settings.enabled
+  const hours = catalog?.schedule_hours?.length ? catalog.schedule_hours : SCHEDULE_HOURS
+  const PHASE4_KEYS = [
+    'growth_breaker_pct',
+    'growth_breaker_min',
+    'schedule_enabled',
+    'schedule_every_hours',
+    'schedule_time',
+    'schedule_timezone',
+  ] as const
   const dirty =
     form.max_auto_import_per_run !== settings.max_auto_import_per_run ||
     form.license_reserve_nodes !== settings.license_reserve_nodes ||
     form.history_days !== settings.history_days ||
-    form.max_changes_per_run !== settings.max_changes_per_run
+    form.max_changes_per_run !== settings.max_changes_per_run ||
+    PHASE4_KEYS.some((k) => form[k] !== settings[k])
+  const phase4Problems = engineSettingsProblems(form, hours)
   const valid =
     Number.isInteger(form.max_auto_import_per_run) && form.max_auto_import_per_run >= 1 && form.max_auto_import_per_run <= 1000 &&
     Number.isInteger(form.license_reserve_nodes) && form.license_reserve_nodes >= 0 &&
     Number.isInteger(form.history_days) && form.history_days >= 7 && form.history_days <= 3650 &&
-    Number.isInteger(form.max_changes_per_run) && form.max_changes_per_run >= 1 && form.max_changes_per_run <= 100000
+    Number.isInteger(form.max_changes_per_run) && form.max_changes_per_run >= 1 && form.max_changes_per_run <= 100000 &&
+    phase4Problems.length === 0
+  const growthPct = settings.growth_breaker_pct ?? 50
 
   return (
     <Card className={cn(on ? 'border-success/40' : 'border-warning/40')}>
@@ -500,7 +547,10 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
                 Up to {settings.max_auto_import_per_run} auto-imports per scan · {settings.license_reserve_nodes} license
                 node{settings.license_reserve_nodes === 1 ? '' : 's'} kept free · history kept {settings.history_days} days
                 {settings.max_changes_per_run != null &&
-                  ` · an automatic re-check changing more than ${settings.max_changes_per_run} values waits for approval`}
+                  ` · an automatic run changing more than ${settings.max_changes_per_run} values waits for approval`}
+                {growthPct > 0
+                  ? ` · growth stop at ${growthPct} % (at least ${settings.growth_breaker_min ?? 20} assets)`
+                  : ' · growth stop off'}
               </p>
             </div>
           </div>
@@ -521,46 +571,141 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
             </label>
           </div>
         </div>
+        <ScheduleStatus canManage={canManage} settings={settings} onReview={onReview} />
         {canManage && open && (
-          <div className="grid gap-3 border-t border-border pt-3 md:grid-cols-2 xl:grid-cols-5">
-            <FormField label="Auto-imports per scan" hint="1 to 1000; the rest wait for review">
-              <Input
-                type="number"
-                min={1}
-                max={1000}
-                value={form.max_auto_import_per_run}
-                onChange={(e) => setForm({ ...form, max_auto_import_per_run: Math.trunc(Number(e.target.value)) })}
-              />
-            </FormField>
-            <FormField label="License nodes kept free" hint="Auto-import stops before this reserve">
-              <Input
-                type="number"
-                min={0}
-                value={form.license_reserve_nodes}
-                onChange={(e) => setForm({ ...form, license_reserve_nodes: Math.trunc(Number(e.target.value)) })}
-              />
-            </FormField>
-            <FormField label="Keep rule history (days)" hint="7 to 3650">
-              <Input
-                type="number"
-                min={7}
-                max={3650}
-                value={form.history_days}
-                onChange={(e) => setForm({ ...form, history_days: Math.trunc(Number(e.target.value)) })}
-              />
-            </FormField>
-            <FormField
-              label="Changes allowed per automatic run before approval"
-              hint="A re-check (the “whenever they change” trigger) that would change more waits for review"
-            >
-              <Input
-                type="number"
-                min={1}
-                max={100000}
-                value={form.max_changes_per_run ?? 100}
-                onChange={(e) => setForm({ ...form, max_changes_per_run: Math.trunc(Number(e.target.value)) })}
-              />
-            </FormField>
+          <div className="space-y-3 border-t border-border pt-3">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <FormField label="Auto-imports per scan" hint="1 to 1000; the rest wait for review">
+                <Input
+                  type="number"
+                  min={1}
+                  max={1000}
+                  value={form.max_auto_import_per_run}
+                  onChange={(e) => setForm({ ...form, max_auto_import_per_run: Math.trunc(Number(e.target.value)) })}
+                />
+              </FormField>
+              <FormField label="License nodes kept free" hint="Auto-import stops before this reserve">
+                <Input
+                  type="number"
+                  min={0}
+                  value={form.license_reserve_nodes}
+                  onChange={(e) => setForm({ ...form, license_reserve_nodes: Math.trunc(Number(e.target.value)) })}
+                />
+              </FormField>
+              <FormField label="Keep rule history (days)" hint="7 to 3650">
+                <Input
+                  type="number"
+                  min={7}
+                  max={3650}
+                  value={form.history_days}
+                  onChange={(e) => setForm({ ...form, history_days: Math.trunc(Number(e.target.value)) })}
+                />
+              </FormField>
+              <FormField
+                label="Changes allowed per automatic run before approval"
+                hint="A re-check (“whenever they change”) or scheduled run that would change more waits for review"
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  max={100000}
+                  value={form.max_changes_per_run ?? 100}
+                  onChange={(e) => setForm({ ...form, max_changes_per_run: Math.trunc(Number(e.target.value)) })}
+                />
+              </FormField>
+              <FormField
+                label="Growth stop (%)"
+                hint="A rule that would change more assets than this share of what it matched last time waits for review; 0 turns it off"
+              >
+                <Input
+                  type="number"
+                  min={0}
+                  max={10000}
+                  value={form.growth_breaker_pct ?? 50}
+                  onChange={(e) => setForm({ ...form, growth_breaker_pct: Math.trunc(Number(e.target.value)) })}
+                />
+              </FormField>
+              <FormField label="Growth stop: at least (assets)" hint="Changes on fewer assets than this never trip the growth stop">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100000}
+                  value={form.growth_breaker_min ?? 20}
+                  disabled={(form.growth_breaker_pct ?? 50) === 0}
+                  onChange={(e) => setForm({ ...form, growth_breaker_min: Math.trunc(Number(e.target.value)) })}
+                />
+              </FormField>
+            </div>
+            <div className="space-y-2 rounded-md border border-border bg-surface2/30 p-3">
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={!!form.schedule_enabled}
+                  onChange={(e) => {
+                    const enabled = e.target.checked
+                    // Turning the schedule on for the first time: start from the browser's own time zone.
+                    const fresh = enabled && !settings.schedule_enabled && (!form.schedule_timezone || form.schedule_timezone === 'UTC')
+                    setForm({ ...form, schedule_enabled: enabled, ...(fresh ? { schedule_timezone: browserTimeZone() } : {}) })
+                  }}
+                />
+                <span>
+                  Run rules with the scheduled trigger on a schedule
+                  <span className="block text-xs text-muted">
+                    They run over every device and server they look at, with the same limits and approval as a re-check.
+                    The first time after the schedule is turned on only marks the start.
+                  </span>
+                </span>
+              </label>
+              {form.schedule_enabled && (
+                <div className="grid gap-3 md:grid-cols-3">
+                  <FormField label="How often">
+                    <Select
+                      value={String(form.schedule_every_hours ?? 24)}
+                      onValueChange={(v) => setForm({ ...form, schedule_every_hours: Number(v) })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {hours.map((h) => (
+                          <SelectItem key={h} value={String(h)}>
+                            {scheduleEveryText(h)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </FormField>
+                  <FormField
+                    label={(form.schedule_every_hours ?? 24) < 24 ? 'Starting at' : 'At'}
+                    hint={(form.schedule_every_hours ?? 24) < 24 ? 'Repeats from this time every day' : undefined}
+                  >
+                    <Input
+                      type="time"
+                      value={form.schedule_time ?? '02:00'}
+                      onChange={(e) => setForm({ ...form, schedule_time: e.target.value })}
+                    />
+                  </FormField>
+                  <FormField label="Time zone" hint="An IANA name, such as Asia/Riyadh or UTC">
+                    <Input
+                      list="discovery-rules-time-zones"
+                      value={form.schedule_timezone ?? ''}
+                      maxLength={64}
+                      onChange={(e) => setForm({ ...form, schedule_timezone: e.target.value.trim() })}
+                    />
+                    <TimeZoneList id="discovery-rules-time-zones" />
+                  </FormField>
+                  <div className="text-xs text-muted md:col-span-3">{scheduleText(form)}</div>
+                </div>
+              )}
+            </div>
+            {phase4Problems.length > 0 && (
+              <ul className="list-disc pl-5 text-xs text-warning-fg">
+                {phase4Problems.map((p) => (
+                  <li key={p}>{p}</li>
+                ))}
+              </ul>
+            )}
             <div className="flex items-end gap-2">
               <Button
                 onClick={() => save.mutate({ ...form, enabled: settings.enabled })}
@@ -578,6 +723,264 @@ function EngineCard({ canManage, activeCount }: { canManage: boolean; activeCoun
           </div>
         )}
       </CardContent>
+    </Card>
+  )
+}
+
+/** The browser's time zone names for the schedule's time zone field (none on a browser that cannot list them). */
+function TimeZoneList({ id }: { id: string }) {
+  const zones = useMemo(() => {
+    try {
+      const list = (Intl as any).supportedValuesOf?.('timeZone') as string[] | undefined
+      return Array.isArray(list) ? Array.from(new Set(['UTC', ...list])) : ['UTC']
+    } catch {
+      return ['UTC']
+    }
+  }, [])
+  return (
+    <datalist id={id}>
+      {zones.map((z) => (
+        <option key={z} value={z} />
+      ))}
+    </datalist>
+  )
+}
+
+/**
+ * When the rules with the scheduled trigger run next (in the viewer's time), how many there are, the last scheduled run
+ * with a link to it, and "Run scheduled rules now" for rule managers.
+ */
+function ScheduleStatus({
+  canManage,
+  settings,
+  onReview,
+}: {
+  canManage: boolean
+  settings: RuleEngineSettings
+  onReview: (runId: string) => void
+}) {
+  const qc = useQueryClient()
+  const [confirm, setConfirm] = useState(false)
+  const { data: status } = useQuery<RuleScheduleStatus>({
+    queryKey: SCHEDULE_KEY,
+    queryFn: rulesApi.schedule,
+    refetchInterval: 60_000,
+    retry: false,
+  })
+  const runNow = useMutation({
+    mutationFn: rulesApi.runScheduleNow,
+    onSuccess: (r: ScheduleRunResult) => {
+      setConfirm(false)
+      qc.invalidateQueries({ queryKey: SCHEDULE_KEY })
+      qc.invalidateQueries({ queryKey: HISTORY_KEY })
+      qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'conflicts'] })
+      qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'unmatched'] })
+      qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'asset'] })
+      if (r.skipped) {
+        toast.info('Scheduled rules did not run', scheduleRunText(r))
+        if (r.skipped === 'waiting_for_approval' && r.engine_run_id) onReview(r.engine_run_id)
+      } else if (r.needs_approval) {
+        toast.warning('Scheduled run waits for approval', scheduleRunText(r))
+        onReview(r.needs_approval)
+      } else {
+        toast.success('Scheduled rules ran', scheduleRunText(r))
+      }
+    },
+    onError: (e: any) => {
+      setConfirm(false)
+      toast.error(e?.response?.status === 403 ? 'Not allowed' : 'Could not run the scheduled rules', apiErrorMessage(e))
+    },
+  })
+  if (!status) return null
+  const total = status.rules + status.simulating
+  if (!status.schedule_enabled && total === 0 && !status.last_run) return null
+  const last = status.last_run
+  const lastLink = last ? (last.status === 'needs_approval' ? `/discovery/rules?review=${last.id}` : `/discovery/rules?run=${last.id}`) : null
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-border bg-surface2/30 px-3 py-2 text-xs">
+      <Clock className="h-3.5 w-3.5 shrink-0 text-primary" />
+      <span className="font-medium">Scheduled rules</span>
+      {status.schedule_enabled ? (
+        <span className="text-muted">
+          {scheduleText(settings)}
+          {status.engine_enabled ? (
+            <>
+              {' '}· next{' '}
+              <span className="text-text">{regionalDate(new Date(status.next), 'datetime')}</span> ({untilText(status.next)})
+            </>
+          ) : (
+            ' · not running while discovery rules are off'
+          )}
+        </span>
+      ) : (
+        <span className="text-muted">The schedule is off (Settings)</span>
+      )}
+      <span className="text-muted">
+        · {plural(status.rules, 'active rule')}
+        {status.simulating ? `, ${status.simulating} simulating` : ''}
+      </span>
+      {last && lastLink && (
+        <span className="text-muted">
+          · last run{' '}
+          <Link to={lastLink} className="text-primary hover:underline">
+            {relativeTime(last.started_at)}
+          </Link>{' '}
+          <Badge variant={runStatusTone(last.status) as any} className="whitespace-nowrap">
+            {runStatusLabel(last.status)}
+          </Badge>
+        </span>
+      )}
+      {canManage && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="ml-auto h-7"
+          disabled={!status.engine_enabled || total === 0 || runNow.isPending}
+          title={!status.engine_enabled ? 'Discovery rules are off' : total === 0 ? 'No rule has the scheduled trigger' : undefined}
+          onClick={() => setConfirm(true)}
+        >
+          {runNow.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+          Run scheduled rules now
+        </Button>
+      )}
+      <ConfirmDialog
+        open={confirm}
+        onOpenChange={(o) => !o && setConfirm(false)}
+        title="Run the scheduled rules now?"
+        description={
+          <>
+            {plural(status.rules, 'active rule')} with the scheduled trigger run over every device and server they look
+            at{status.simulating ? `, and ${status.simulating} simulating rule${status.simulating === 1 ? '' : 's'} record what they would do` : ''}.
+            The same limits apply as on a scheduled run: more than {settings.max_changes_per_run ?? 100} changes, a
+            rule's own limit or the growth stop make the run wait for approval.
+          </>
+        }
+        confirmText="Run now"
+        loading={runNow.isPending}
+        onConfirm={() => runNow.mutate()}
+      />
+    </div>
+  )
+}
+
+/**
+ * Devices, servers and controller-managed children that no active rule matches (optionally: counting simulating rules
+ * as matching), whatever the rules' triggers: what the rules leave alone.
+ */
+function UnmatchedCard() {
+  const [open, setOpen] = useState(false)
+  const [kinds, setKinds] = useState<AssetKind[]>(['device', 'server', 'child'])
+  const [withSimulating, setWithSimulating] = useState(false)
+  const { data, isLoading, isFetching, error } = useQuery<UnmatchedReport>({
+    queryKey: ['discovery', 'rules', 'unmatched', kinds.join(','), withSimulating],
+    queryFn: () => rulesApi.unmatched(kinds, withSimulating),
+    enabled: open && kinds.length > 0,
+    staleTime: 30_000,
+    retry: false,
+  })
+  const rows = data?.rows ?? []
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <button type="button" className="flex items-center gap-2 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
+          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <SearchX className="h-4 w-4 text-primary" /> Unmatched
+          </CardTitle>
+          {data && <Badge variant={data.unmatched ? 'warning' : 'success'}>{data.unmatched ? plural(data.unmatched, 'asset') : 'none'}</Badge>}
+        </button>
+        {open && (
+          <p className="mt-1 text-xs text-muted">
+            Devices and servers in inventory that no active rule matches, whatever the rules' triggers: what your rules
+            leave alone.
+          </p>
+        )}
+      </CardHeader>
+      {open && (
+        <CardContent className="space-y-3 text-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            {ASSET_KIND_ORDER.map((k) => (
+              <label key={k} className="flex items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={kinds.includes(k)}
+                  onChange={(e) =>
+                    setKinds(e.target.checked ? ASSET_KIND_ORDER.filter((x) => x === k || kinds.includes(x)) : kinds.filter((x) => x !== k))
+                  }
+                />
+                {ASSET_KIND_SHORT[k]}
+              </label>
+            ))}
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={withSimulating} onChange={(e) => setWithSimulating(e.target.checked)} />
+              Count simulating rules as matching
+            </label>
+            {isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" />}
+          </div>
+          {kinds.length === 0 ? (
+            <div className="py-4 text-center text-xs text-muted">Choose at least one kind of asset.</div>
+          ) : isLoading ? (
+            <div className="py-4 text-center text-muted">Loading…</div>
+          ) : error ? (
+            <div className="py-4 text-center text-danger-fg">{apiErrorMessage(error)}</div>
+          ) : !data ? null : (
+            <>
+              <div className="text-xs text-muted">
+                {data.rules === 0
+                  ? `No ${withSimulating ? 'active or simulating' : 'active'} rule: nothing is matched. `
+                  : `${plural(data.rules, withSimulating ? 'active or simulating rule' : 'active rule')} checked. `}
+                Unmatched: {unmatchedKindsText(data) || 'none'}.
+                {data.scoped ? ' The list shows only the assets your view includes; the counts cover all of them.' : ''}
+                {data.truncated ? ` The first ${rows.length} are listed.` : ''}
+              </div>
+              {rows.length === 0 ? (
+                <div className="py-4 text-center text-xs text-muted">Every asset is matched by a rule.</div>
+              ) : (
+                <div className="max-h-96 overflow-y-auto rounded-md border border-border">
+                  <Table>
+                    <THead className="bg-surface2/50">
+                      <Tr>
+                        <Th>Asset</Th>
+                        <Th>Kind</Th>
+                        <Th>Vendor / model / OS</Th>
+                        <Th>Type</Th>
+                        <Th>Tags</Th>
+                      </Tr>
+                    </THead>
+                    <TBody>
+                      {rows.map((r) => {
+                        const href = assetPath(r.asset_kind, r.asset_id)
+                        const what = [r.vendor, r.model].filter(Boolean).join(' ') || r.os || ''
+                        return (
+                          <Tr key={`${r.asset_kind}:${r.asset_id}`}>
+                            <Td className="text-xs">
+                              {href ? (
+                                <Link to={href} className="font-medium text-primary hover:underline">
+                                  {r.name || r.ip_address || r.asset_id.slice(0, 8)}
+                                </Link>
+                              ) : (
+                                r.name || r.ip_address || '—'
+                              )}
+                              {r.ip_address && r.name && <div className="font-mono text-2xs text-muted">{r.ip_address}</div>}
+                            </Td>
+                            <Td className="whitespace-nowrap text-xs">{ASSET_KIND_SHORT[r.asset_kind] ?? r.asset_kind}</Td>
+                            <Td className="text-xs">
+                              {what || '—'}
+                              {r.os && what !== r.os && <div className="text-2xs text-muted">{r.os}</div>}
+                            </Td>
+                            <Td className="text-xs">{r.device_type ? r.device_type.replace(/_/g, ' ') : '—'}</Td>
+                            <Td className="text-xs">{r.tags?.length ? r.tags.join(', ') : '—'}</Td>
+                          </Tr>
+                        )
+                      })}
+                    </TBody>
+                  </Table>
+                </div>
+              )}
+            </>
+          )}
+        </CardContent>
+      )}
     </Card>
   )
 }
@@ -721,7 +1124,7 @@ function HistoryCard({
         <CardTitle className="text-sm">Recent rule runs</CardTitle>
         <p className="mt-1 text-xs text-muted">
           Each scan's evaluation, re-evaluations, runs on inventory, new devices and servers, automatic re-checks after
-          changes, and undos. Open a run to see what every rule did.
+          changes, scheduled runs and undos. Open a run to see what every rule did.
         </p>
       </CardHeader>
       <CardContent className="p-0">
@@ -788,7 +1191,9 @@ function HistoryCard({
                       </Td>
                       <Td className="text-xs">
                         {runTriggerText(r)}
-                        {r.trigger === 'changed' && <div className="text-2xs text-muted">{TRIGGER_REASON.changed}</div>}
+                        {(r.trigger === 'changed' || r.trigger === 'scheduled') && (
+                          <div className="text-2xs text-muted">{TRIGGER_REASON[r.trigger]}</div>
+                        )}
                       </Td>
                       <Td>
                         <Badge variant={runStatusTone(r.status) as any} className="whitespace-nowrap">
@@ -806,7 +1211,7 @@ function HistoryCard({
                             {canManage ? 'Review' : 'View changes'}
                           </button>
                         )}
-                        {r.detail && r.status !== 'needs_approval' && (r.status === 'rejected' || r.trigger === 'changed') && (
+                        {r.detail && r.status !== 'needs_approval' && (r.status === 'rejected' || r.trigger === 'changed' || r.trigger === 'scheduled') && (
                           <div className="mt-0.5 max-w-xs text-2xs text-muted">{r.detail}</div>
                         )}
                         {r.approved_at && (
@@ -885,11 +1290,12 @@ function runCountsText(r: EngineRun): string {
   if (r.status === 'needs_approval' || (r.status === 'rejected' && c.applied == null)) {
     return `${plural(pendingCount(r), 'change')} on ${plural(Number(c.assets_changed ?? 0), 'asset')} ${r.status === 'rejected' ? 'not applied' : 'held'}`
   }
-  if ((r.trigger === 'manual' && !r.discovery_run_id) || r.trigger === 'changed') {
+  if ((r.trigger === 'manual' && !r.discovery_run_id) || r.trigger === 'changed' || r.trigger === 'scheduled') {
     const parts = [`matched ${Number(c.matched ?? 0)} of ${Number(c.assets ?? 0)}`, `applied ${Number(c.applied ?? 0)}`]
     if (c.reverted) parts.push(`reverted ${c.reverted}`)
     if (c.kept_manual_edit) parts.push(`hand edits kept ${c.kept_manual_edit}`)
     if (c.skipped_changed) parts.push(`skipped ${c.skipped_changed}`)
+    if (c.not_ready) parts.push(`waiting for a sensor ${c.not_ready}`)
     return sentenceCase(parts.join(' · '))
   }
   return summarizeCounts(c)
@@ -994,14 +1400,14 @@ function HistoryItems({ runId, catalog, lookups: baseLookups }: { runId: string;
                     <Td className="text-xs">{it.action_key ? settingLabel(it.action_key, catalog) : '—'}</Td>
                     <Td className="text-xs">
                       {it.action_key && it.action_key !== 'decision' && (it.before !== undefined || it.after != null)
-                        ? changeText(it.action_key, it.before ?? null, it.after ?? null, lookups)
+                        ? changeText(it.action_key, it.before ?? null, it.after ?? null, lookups, it.item_key)
                         : it.after != null
                           ? formatAfter(it.after)
                           : '—'}
                     </Td>
                     <Td>
-                      <Badge variant={(OUTCOME_TONE as Record<string, string>)[it.outcome] as any ?? 'default'}>
-                        {(OUTCOME_LABEL as Record<string, string>)[it.outcome] ?? it.outcome}
+                      <Badge variant={(OUTCOME_TONE as Record<string, string>)[it.outcome] as any ?? 'default'} className="whitespace-nowrap">
+                        {itemOutcomeLabel(it.outcome, it.action_key)}
                       </Badge>
                     </Td>
                     <Td className="text-xs text-muted">{it.detail || '—'}</Td>
@@ -1108,14 +1514,15 @@ function ReviewPanel({
         <div className="min-w-0">
           <CardTitle className="flex items-center gap-2 text-base">
             <ClipboardCheck className="h-4 w-4 text-primary" />
-            {waiting ? 'Changes waiting for approval' : 'Automatic re-check'}
+            {waiting ? 'Changes waiting for approval' : (data?.trigger ?? run?.trigger) === 'scheduled' ? 'Scheduled run' : 'Automatic re-check'}
             {data && (
               <Badge variant={runStatusTone(result?.status ?? data.status) as any}>{runStatusLabel(result?.status ?? data.status)}</Badge>
             )}
           </CardTitle>
           <p className="mt-1 text-xs text-muted">
-            {run ? `Planned ${relativeTime(run.started_at)}` : 'Rule run'}
-            {data?.detail ? ` · ${data.detail}` : ''}
+            {(data?.trigger ?? run?.trigger) === 'scheduled' ? 'Scheduled run' : (data?.trigger ?? run?.trigger) === 'changed' ? 'Re-check after changes' : 'Rule run'}
+            {run ? ` · planned ${relativeTime(run.started_at)}` : ''}
+            {data?.detail && !data.reasons?.length ? ` · ${data.detail}` : ''}
           </p>
           {data && (
             <p className="mt-1 text-sm">{sentenceCase(summarizeInventoryPreview(data.counts || {}))}.</p>
@@ -1138,6 +1545,16 @@ function ReviewPanel({
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {(data?.reasons?.length ?? 0) > 0 && (
+          <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-fg">
+            <div className="mb-0.5 font-semibold">{waiting ? 'Why it waits' : 'Why it waited'}</div>
+            <ul className="list-disc space-y-0.5 pl-4">
+              {data!.reasons!.map((r) => (
+                <li key={r}>{r}</li>
+              ))}
+            </ul>
+          </div>
+        )}
         {!canManage && waiting && (
           <div className="text-xs text-muted">
             Approving or rejecting needs the Discovery “Manage rules” permission (and device or server management for
