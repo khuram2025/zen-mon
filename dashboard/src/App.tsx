@@ -30,6 +30,8 @@ import { ServiceMaintenancePage } from '@/pages/ServiceMaintenancePage'
 import { ServiceCheckTemplatesPage } from '@/pages/ServiceCheckTemplatesPage'
 import { DeviceTemplatesPage } from '@/pages/templates/DeviceTemplatesPage'
 import { TemplateDetailPage } from '@/pages/templates/TemplateDetailPage'
+import { DeviceGroupsPage } from '@/pages/groups/DeviceGroupsPage'
+import { GroupDetailPage } from '@/pages/groups/GroupDetailPage'
 import { DiscoveryLayout } from '@/pages/discovery/DiscoveryLayout'
 import { ProfilesPage as DiscoveryProfilesPage } from '@/pages/discovery/ProfilesPage'
 import { WizardPage as DiscoveryWizardPage } from '@/pages/discovery/WizardPage'
@@ -247,6 +249,8 @@ export default function App() {
         <Route path="templates" element={<Navigate to="/device-templates" replace />} />
         <Route path="device-templates" element={<DeviceTemplatesPage />} />
         <Route path="device-templates/:id" element={<TemplateDetailPage />} />
+        <Route path="device-groups" element={<DeviceGroupsPage />} />
+        <Route path="device-groups/:id" element={<GroupDetailPage />} />
         <Route path="sensors" element={<SensorsPage />} />
         <Route path="sensors/:id" element={<SensorDetailPage />} />
         <Route path="apm" element={<ApmLayout />}>

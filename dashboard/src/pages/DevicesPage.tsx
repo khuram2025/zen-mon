@@ -538,7 +538,22 @@ export function DevicesPage() {
   const pageStart = (currentPage - 1) * prefs.pageSize
   const pageRows = sorted.slice(pageStart, pageStart + prefs.pageSize)
   // Checkbox, name / IP, status and actions are pinned; the rest follow the Columns dialog.
-  const columnCount = 4 + HIDEABLE_COLUMNS.filter((c) => prefs.visible[c]).length
+  // Custom fields marked "show as a list column" (migrate-192).
+  const { data: cfColumns } = useQuery<{ fields: string[]; values: Record<string, Record<string, any>> }>({
+    queryKey: ['custom-field-list-values', 'device'],
+    queryFn: async () => (await api.get('/custom-fields/list-values', { params: { asset_kind: 'device' } })).data,
+    retry: false,
+    staleTime: 60_000,
+  })
+  const { data: cfDefs } = useQuery<Array<{ key: string; label: string; field_type: string }>>({
+    queryKey: ['custom-fields'],
+    queryFn: async () => (await api.get('/custom-fields')).data.data,
+    retry: false,
+    staleTime: 60_000,
+  })
+  const customColumns = (cfColumns?.fields || []).map((k) => ({ key: k, label: cfDefs?.find((f) => f.key === k)?.label || k,
+    boolean: cfDefs?.find((f) => f.key === k)?.field_type === 'boolean' }))
+  const columnCount = 4 + HIDEABLE_COLUMNS.filter((c) => prefs.visible[c]).length + customColumns.length
 
   useEffect(() => {
     // Reset to page 1 when filters/size cause overflow.
@@ -1134,6 +1149,7 @@ export function DevicesPage() {
                     {prefs.visible.last_seen && (
                       <SortableTh label="Last Seen" col="last_seen" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
+                    {customColumns.map((c) => <Th key={c.key} className="whitespace-nowrap">{c.label}</Th>)}
                     <Th className="w-12 text-right">Actions</Th>
                   </Tr>
                 </THead>
@@ -1357,6 +1373,10 @@ export function DevicesPage() {
                             </span>
                           </Td>
                         )}
+                        {customColumns.map((c) => {
+                          const v = cfColumns?.values?.[d.id]?.[c.key]
+                          return <Td key={c.key} className="text-sm">{v === undefined || v === null ? <span className="text-muted">—</span> : c.boolean ? (v ? 'Yes' : 'No') : String(v)}</Td>
+                        })}
                         <Td className="text-right">
                           <RowMenu
                             onEdit={() => { setEditing(d); setFormOpen(true) }}
@@ -2582,7 +2602,7 @@ function BulkEditDialog({
                   <SelectContent>
                     <SelectItem value="__keep__">Keep existing</SelectItem>
                     <SelectItem value="__clear__"><span className="text-muted">Remove from group</span></SelectItem>
-                    {(groups || []).map((g) => (
+                    {(groups || []).filter((g: any) => (g.kind ?? 'static') === 'static').map((g) => (
                       <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
                     ))}
                   </SelectContent>

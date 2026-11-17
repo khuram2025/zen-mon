@@ -304,3 +304,28 @@ def test_contract_vectors(vector):
         d = exp["disposition"]
         assert list(engine.disposition(plan, import_mode=d["import_mode"], result_status=d.get("status", "new"),
                                        import_ready=d.get("import_ready", True))) == d["expect"]
+
+
+def test_date_type_for_custom_fields():
+    """Device groups pass their own catalog; the date type compares ISO dates and treats a missing value as not matching."""
+    from app.services.device_groups import facts as gfacts
+    fields, enums = gfacts.catalog([{"key": "warranty_end", "label": "Warranty end", "field_type": "date",
+                                     "choices": None, "asset_kinds": ["device"]}])
+
+    def ev(op, value, have):
+        node = conditions.validate({"op": "all", "conditions": [leaf("custom.warranty_end", op, value)]},
+                                   fields=fields, enums=enums)
+        return conditions.evaluate(node, {} if have is None else {"custom.warranty_end": have}, fields=fields)
+
+    assert ev("before", "2027-01-01", "2026-12-31") is True
+    assert ev("before", "2027-01-01", "2027-01-01") is False
+    assert ev("on", "2027-01-01", "2027-01-01") is True
+    assert ev("after", "2027-01-01", "2027-03-01") is True
+    assert ev("before", "2027-01-01", None) is False
+    assert ev("is_empty", None, None) is True
+    assert ev("is_not_empty", None, "2027-01-01") is True
+    with pytest.raises(conditions.ConditionError):
+        conditions.validate({"op": "all", "conditions": [leaf("custom.warranty_end", "before", "01/02/2027")]},
+                            fields=fields, enums=enums)
+    with pytest.raises(conditions.ConditionError):   # the default discovery catalog has no custom fields
+        conditions.validate({"op": "all", "conditions": [leaf("custom.warranty_end", "before", "2027-01-01")]})

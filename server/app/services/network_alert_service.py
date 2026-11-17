@@ -295,8 +295,13 @@ async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
         "LEFT JOIN devices c ON c.id = d.managed_by_device_id AND d.poll_mode = 'via_controller' "
         "WHERE (d.snmp_enabled = true OR d.poll_mode = 'via_controller') AND d.status <> 'maintenance' ORDER BY d.id"
     ))).all()
+    # Group membership (primary, static, dynamic, with subgroups) for the group
+    # scope; None when unavailable, then the primary group decides (old behaviour).
+    from app.services.device_groups import membership
+    groups = await membership.load(db, "device")
     return {
         str(r[0]): {
+            "groups": (groups.get(str(r[0]), set()) if groups is not None else None),
             "hostname": r[1] or "device",
             "device_type": r[2],
             "location": r[3],
@@ -362,10 +367,15 @@ async def _interfaces(db: AsyncSession) -> dict[str, list[dict]]:
 
 # ─── Scope / target matching ────────────────────────────────────────────────
 
+def _in_group(rule_group_id, groups, primary) -> bool:
+    from app.services.device_groups.membership import in_group
+    return in_group(rule_group_id, groups, primary)
+
+
 def _device_in_scope(rule, dev_id: str, dev: dict) -> bool:
     if rule.device_id and str(rule.device_id) != dev_id:
         return False
-    if rule.group_id and (dev["group_id"] != str(rule.group_id)):
+    if rule.group_id and not _in_group(rule.group_id, dev.get("groups"), dev["group_id"]):
         return False
     if rule.device_type and rule.device_type != dev["device_type"]:
         return False
@@ -539,6 +549,9 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
               "status": "RESOLVED" if is_recovery else "ALERT",
               "timestamp": now.strftime("%H:%M UTC on %d %b %Y")})
     v.update(incident)
+    # Custom fields as {custom.<key>} placeholders (migrate-192); never blocks a send.
+    from app.services import custom_fields as _cf
+    v.update(await _cf.placeholders(db, "device", device_id))
     prefix = 'recovery_' if is_recovery else ''
     body = _render(getattr(rule, prefix + 'email_body', None) or (ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery else ap.DEFAULT_EMAIL_BODY), v)
     sms = _render(getattr(rule, 'recovery_sms_template' if is_recovery else 'sms_template', None) or (ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS), v)

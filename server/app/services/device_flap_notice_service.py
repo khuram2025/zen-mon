@@ -401,6 +401,8 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
         return _Plan("skipped", quiet)
 
     did = str(device.id)
+    from app.services.device_groups import membership
+    group_ids = await membership.groups_of(db, "device", did)
     candidates = [
         r for r in sweep.rules
         if rule_held(r, episode.kind)
@@ -408,7 +410,7 @@ async def _plan_start(db: AsyncSession, episode, sweep: _Sweep) -> _Plan:
         and engine._rule_in_device_scope(
             r, device_id=did, group_id=str(device.group_id) if device.group_id else None,
             device_type=device.device_type, location=device.location,
-            device_tags=tag_set(device.tags))
+            device_tags=tag_set(device.tags), group_ids=group_ids)
     ]
     if not candidates:
         return _Plan("skipped", "no_rules")

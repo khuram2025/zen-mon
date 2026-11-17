@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from datetime import date
 from functools import lru_cache
 from typing import Any
 
@@ -112,6 +113,14 @@ OPERATORS: dict[str, dict[str, tuple[str, str]]] = {
         "is_true": ("is true", "none"),
         "is_false": ("is false", "none"),
     },
+    # Dates (custom fields): ISO YYYY-MM-DD values.
+    "date": {
+        "on": ("is on", "text"),
+        "before": ("is before", "text"),
+        "after": ("is after", "text"),
+        "is_empty": ("is empty", "none"),
+        "is_not_empty": ("is not empty", "none"),
+    },
 }
 
 NEGATIVE = frozenset({"not_equals", "not_contains", "not_starts_with", "not_in_subnet",
@@ -150,7 +159,13 @@ def _as_list(value: Any) -> list:
     return [v.strip() for v in str(value).replace("\n", ",").split(",") if v.strip()]
 
 
-def _validate_leaf(node: dict) -> dict:
+def _validate_leaf(node: dict, fields: dict | None = None, enums: dict | None = None) -> dict:
+    FIELDS_ = fields if fields is not None else FIELDS
+    ENUMS_ = enums if enums is not None else ENUM_VALUES
+    return _validate_leaf_in(node, FIELDS_, ENUMS_)
+
+
+def _validate_leaf_in(node: dict, FIELDS: dict, ENUM_VALUES: dict) -> dict:  # noqa: N803 (shadows the defaults)
     field = node.get("field")
     if field not in FIELDS:
         raise ConditionError(f"Unknown field: {field!r}")
@@ -218,11 +233,19 @@ def _validate_leaf(node: dict) -> dict:
             raise ConditionError(f"Unknown {FIELDS[field][1]} value: {value!r}")
         if ftype == "oid" and op != "matches":
             value = normalize_oid(value)
+        if ftype == "date":
+            try:
+                value = date.fromisoformat(value).isoformat()
+            except ValueError:
+                raise ConditionError(f"{FIELDS[field][1]}: give a date as YYYY-MM-DD") from None
     return {"field": field, "operator": op, "value": value}
 
 
-def validate(node: Any, *, _depth: int = 1, _count: list | None = None) -> dict:
-    """Normalised copy of a condition tree, or ``ConditionError``."""
+def validate(node: Any, *, _depth: int = 1, _count: list | None = None,
+             fields: dict | None = None, enums: dict | None = None) -> dict:
+    """Normalised copy of a condition tree, or ``ConditionError``. ``fields`` /
+    ``enums`` replace the discovery-result catalog (device groups test the facts
+    of existing devices and servers)."""
     count = _count if _count is not None else [0]
     if not isinstance(node, dict):
         raise ConditionError("A condition must be an object")
@@ -235,11 +258,12 @@ def validate(node: Any, *, _depth: int = 1, _count: list | None = None) -> dict:
         children = node.get("conditions") or []
         if not isinstance(children, list):
             raise ConditionError("A group's conditions must be a list")
-        return {"op": op, "conditions": [validate(c, _depth=_depth + 1, _count=count) for c in children]}
+        return {"op": op, "conditions": [validate(c, _depth=_depth + 1, _count=count, fields=fields, enums=enums)
+                                         for c in children]}
     count[0] += 1
     if count[0] > MAX_LEAVES:
         raise ConditionError(f"A rule may test at most {MAX_LEAVES} conditions")
-    return _validate_leaf(node)
+    return _validate_leaf(node, fields, enums)
 
 
 def fields_used(node: dict) -> set[str]:
@@ -291,9 +315,12 @@ def _text(value: Any) -> str:
     return str(value)[:MAX_SUBJECT].lower()
 
 
-def eval_leaf(leaf: dict, facts: dict) -> bool:
+def eval_leaf(leaf: dict, facts: dict, fields: dict | None = None) -> bool:
     field, op, want = leaf["field"], leaf["operator"], leaf.get("value")
-    ftype = FIELDS[field][0]
+    catalog = fields if fields is not None else FIELDS
+    if field not in catalog:          # a field removed since the tree was saved (custom field deleted)
+        return op in NEGATIVE
+    ftype = catalog[field][0]
     have = facts.get(field)
 
     if op == "is_empty":
@@ -366,6 +393,13 @@ def eval_leaf(leaf: dict, facts: dict) -> bool:
             return bool(_regex(want).search(h[:MAX_SUBJECT]))
         return False
 
+    if ftype == "date":
+        try:
+            h, w = date.fromisoformat(str(have)[:10]), date.fromisoformat(str(want))
+        except ValueError:
+            return False
+        return {"on": h == w, "before": h < w, "after": h > w}.get(op, False)
+
     if ftype == "version" and op.startswith("version_"):
         hk, wk = _version_key(have), _version_key(want)
         if not hk or not wk:
@@ -387,7 +421,7 @@ def eval_leaf(leaf: dict, facts: dict) -> bool:
     }.get(op, False)
 
 
-def evaluate(node: dict, facts: dict, trace: list | None = None) -> bool:
+def evaluate(node: dict, facts: dict, trace: list | None = None, fields: dict | None = None) -> bool:
     """Whether ``facts`` satisfy the tree. With ``trace`` every evaluated leaf
     appends ``[field, operator, matched]``; groups short-circuit, so a leaf
     that was not needed is not listed."""
@@ -395,11 +429,11 @@ def evaluate(node: dict, facts: dict, trace: list | None = None) -> bool:
         children = node.get("conditions") or []
         op = node["op"]
         if op == "all":
-            return all(evaluate(c, facts, trace) for c in children)
+            return all(evaluate(c, facts, trace, fields) for c in children)
         if op == "any":
-            return any(evaluate(c, facts, trace) for c in children)
-        return not any(evaluate(c, facts, trace) for c in children)
-    ok = eval_leaf(node, facts)
+            return any(evaluate(c, facts, trace, fields) for c in children)
+        return not any(evaluate(c, facts, trace, fields) for c in children)
+    ok = eval_leaf(node, facts, fields)
     if trace is not None:
         trace.append([node["field"], node["operator"], ok])
     return ok

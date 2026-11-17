@@ -477,7 +477,8 @@ function ToggleChip({ active, onClick, children }: { active: boolean; onClick: (
 
 // ── condition builder ──────────────────────────────────────────────────────
 
-function GroupEditor({
+/** The condition builder, shared with device groups (pages/groups), which pass their own catalog. */
+export function GroupEditor({
   root,
   node,
   path,
@@ -485,6 +486,7 @@ function GroupEditor({
   options,
   onChange,
   onRemove,
+  emptyAllText = 'No conditions: the rule matches every scan result it looks at.',
 }: {
   root: ConditionGroup
   node: ConditionGroup
@@ -493,6 +495,7 @@ function GroupEditor({
   options: Record<string, RefOption[]>
   onChange: (root: ConditionGroup) => void
   onRemove?: () => void
+  emptyAllText?: string
 }) {
   const limits = catalog.limits ?? DEFAULT_LIMITS
   const nested = path.length > 0
@@ -522,7 +525,7 @@ function GroupEditor({
         <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted">
           {node.op === 'any'
             ? 'An empty “Any of” group matches nothing. Add a condition.'
-            : 'No conditions: the rule matches every scan result it looks at.'}
+            : emptyAllText}
         </div>
       )}
       <div className="space-y-2">
@@ -538,6 +541,7 @@ function GroupEditor({
               options={options}
               onChange={onChange}
               onRemove={() => onChange(removeNode(root, childPath))}
+              emptyAllText={emptyAllText}
             />
           ) : (
             <LeafEditor

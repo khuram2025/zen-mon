@@ -27,6 +27,9 @@ class DeviceGroup(Base):
     color: Mapped[str] = mapped_column(String(7), nullable=True)
     parent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("device_groups.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Device groups (migrate-192): static or dynamic, members counted with subgroups.
+    kind: Mapped[str] = mapped_column(String(10), default="static", nullable=False)
+    member_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class Device(Base):

@@ -786,15 +786,18 @@ def _status_path_rule(rule) -> bool:
 
 def _rule_in_device_scope(rule, *, device_id: str, group_id: str | None,
                           device_type: str | None, location: str | None,
-                          device_tags: set[str]) -> bool:
+                          device_tags: set[str], group_ids: set[str] | None = None) -> bool:
     """A device rule's device / group / type / location / tag scope.
 
     Shared by the status path and the flap notices so the two can never
-    disagree about which rules cover a device.
+    disagree about which rules cover a device. ``group_ids`` is the device's
+    group membership (primary, static, dynamic, with parent groups); without
+    it the primary ``group_id`` decides, as before migration 192.
     """
+    from app.services.device_groups.membership import in_group
     if rule.device_id and str(rule.device_id) != device_id:
         return False
-    if rule.group_id and str(rule.group_id) != group_id:
+    if rule.group_id and not in_group(rule.group_id, group_ids, group_id):
         return False
     if rule.device_type and rule.device_type != device_type:
         return False
@@ -805,6 +808,11 @@ def _rule_in_device_scope(rule, *, device_id: str, group_id: str | None,
     if rule.scope_tag and rule.scope_tag.strip().lower() not in device_tags:
         return False
     return True
+
+
+def _in_trap_group(rule_group_id, group_ids, primary) -> bool:
+    from app.services.device_groups.membership import in_group
+    return in_group(rule_group_id, group_ids, primary)
 
 
 def _transition_class(old_status: str, new_status: str) -> str:
@@ -861,7 +869,9 @@ async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
                 WHERE d.id = :did AND (d.status = 'maintenance' OR EXISTS (
                     SELECT 1 FROM device_maintenance m WHERE (
                        (m.scope_type = 'device' AND m.scope_device_id = d.id)
-                    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
+                    OR (m.scope_type = 'group'  AND (m.scope_group_id = d.group_id OR EXISTS (
+                           SELECT 1 FROM device_group_member_closure c
+                            WHERE c.group_id = m.scope_group_id AND c.asset_kind = 'device' AND c.asset_id = d.id)))
                     OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
                     OR (m.scope_type = 'all')
                 )
@@ -930,6 +940,8 @@ async def evaluate_status_change(
     group_id = str(dev_row.group_id) if dev_row and dev_row.group_id else event.group_id
     location = dev_row.location if dev_row else event.location
     device_tags = _tag_set(dev_row.tags if dev_row else None)
+    from app.services.device_groups import membership as _membership
+    group_ids = await _membership.groups_of(db, "device", event.device_id)
 
     # Planned downtime: never raise alerts for a device in an active
     # maintenance window. Recovery events still pass so open alerts resolve,
@@ -993,6 +1005,9 @@ async def evaluate_status_change(
         "reachability": _reachability_label(event.new_status, rtt_value),
         "status_intro": "The following alert has been resolved:" if is_recovery else "An alert has been triggered:",
     }
+    # Custom fields as {custom.<key>} placeholders (migrate-192); never blocks a send.
+    from app.services import custom_fields as _cf
+    variables.update(await _cf.placeholders(db, "device", event.device_id))
 
     notifications_sent = 0
     resolved_alerts = 0
@@ -1107,7 +1122,7 @@ async def evaluate_status_change(
 
         if not _rule_in_device_scope(rule, device_id=event.device_id, group_id=group_id,
                                      device_type=device_type, location=location,
-                                     device_tags=device_tags):
+                                     device_tags=device_tags, group_ids=group_ids):
             continue
 
         # E1: metric-threshold gating. Recovery events are never gated (so they
@@ -1840,6 +1855,7 @@ async def evaluate_trap(
         did = None
 
     group_id = None
+    trap_group_ids: set[str] | None = set()
     device_tags: set[str] = set()
     hostname = ""
     device_ip = ""
@@ -1850,6 +1866,8 @@ async def evaluate_trap(
                  "FROM devices WHERE id = :id"), {"id": did}
         )).first()
         group_id = str(dev.group_id) if dev and dev.group_id else None
+        from app.services.device_groups import membership as _membership
+        trap_group_ids = await _membership.groups_of(db, "device", did)
         device_tags = _tag_set(dev.tags if dev else None)
         hostname = (dev.hostname if dev else "") or ""
         device_ip = (dev.ip if dev else "") or ""
@@ -1894,7 +1912,7 @@ async def evaluate_trap(
     for rule in rules:
         if rule.device_id and (not did or str(rule.device_id) != did):
             continue
-        if rule.group_id and (not group_id or str(rule.group_id) != group_id):
+        if rule.group_id and (not did or not _in_trap_group(rule.group_id, trap_group_ids, group_id)):
             continue
         # A tag-scoped rule must not fall through to every device: a trap from
         # an unidentified source (no device_id) has no tags to match.

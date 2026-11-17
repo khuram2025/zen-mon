@@ -1,8 +1,9 @@
 # Device Templates, classification and grouping: research and phased plan
 
-Status: 2026-11-16. Phase 1 is built on branch `claude/device-templates-phase1` (migration 189, see
-`docs/device-templates.md` for what shipped and where it differs from this plan); phases 2 to 5 are
-not implemented. Based on main at `55492d8` (1.25.9)
+Status: 2026-11-17. Phase 1 shipped in 1.25.10 (migration 189, see `docs/device-templates.md` for
+what shipped and where it differs from this plan). Phase 2 (groups, dynamic membership, custom
+fields, one group scope) is built on branch `claude/device-groups-phase2` (migration 192, see
+`docs/device-groups.md`); phases 3 to 5 are not implemented. Based on main at `55492d8` (1.25.9)
 and on the unmerged Discovery Rule Engine branch `claude/discovery-rules-phase1` (PR #160).
 Shareable copy: https://claude.ai/artifact/Mjt1zjmhUt7ebzguwu72nE
 Companion plan: `docs/plans/discovery-rule-engine-plan.md` (on the PR #160 branch).

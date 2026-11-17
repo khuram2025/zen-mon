@@ -248,7 +248,7 @@ export function DeviceFormDialog({
                   <SelectTrigger><SelectValue placeholder="No group" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none__">No group</SelectItem>
-                    {(groups || []).map((g: any) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
+                    {(groups || []).filter((g: any) => (g.kind ?? 'static') === 'static').map((g: any) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </FormField>

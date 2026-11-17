@@ -161,6 +161,9 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("discovery.run")),
 ):
+    if payload.default_group_id:
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, payload.default_group_id, what="A discovery profile's group")
     existing = (
         await db.execute(select(DiscoveryProfile).where(DiscoveryProfile.name == payload.name))
     ).scalar_one_or_none()
@@ -258,6 +261,9 @@ async def update_profile(
     if not p:
         raise HTTPException(404, "Profile not found")
     fields = payload.model_dump(exclude_unset=True)
+    if fields.get("default_group_id"):
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, fields["default_group_id"], what="A discovery profile's group")
     for k, v in fields.items():
         if k in ("snmp_credential_ids", "windows_credential_ids", "ssh_credential_ids") and v is not None:
             v = [str(x) for x in v]
