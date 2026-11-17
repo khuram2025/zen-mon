@@ -179,14 +179,20 @@ async def changed_rules(db: AsyncSession) -> tuple[list[dict], list[dict], str]:
     return await rules_for(db, "changed")
 
 
-def limit_reasons(changes: list[dict], rules: list[dict], settings: dict) -> list[str]:
+def limit_reasons(changes: list[dict], rules: list[dict], settings: dict,
+                  new_matches: dict[str, set] | None = None, growth: dict[str, int] | None = None) -> list[str]:
     """Why an automatic run must wait for approval (empty: it may apply).
 
     * more value changes than ``max_changes_per_run`` (engine-wide);
     * more value changes by one rule than its own ``max_changes_per_run``;
-    * the match-growth stop: one rule would change more assets than
-      max(growth_breaker_min, growth_breaker_pct % of the assets it matched
-      last time). Rules never evaluated before are covered by the caps only."""
+    * the match-growth stop: one rule would change more assets *it did not
+      match before* than max(growth_breaker_min, growth_breaker_pct % of the
+      assets it matched last time). ``new_matches`` maps a rule id to the
+      (kind, id) of the assets it newly matches; a rule edit that only changes
+      what a rule sets on the assets it already matched is covered by the caps.
+      Rules never evaluated before are covered by the caps only. ``growth``
+      caps the count per rule where only the growth of the match count is
+      known (scheduled runs)."""
     writes = [c for c in changes if c["outcome"] in ("apply", "revert")]
     cap = int(settings.get("max_changes_per_run") or 100)
     out: list[str] = []
@@ -206,10 +212,35 @@ def limit_reasons(changes: list[dict], rules: list[dict], settings: dict) -> lis
         if own and n > own:
             out.append(f"Rule \"{r['name']}\" would make {n} changes; its own limit is {own}")
         last = r.get("last_match_count")
-        grown = len(assets_by_rule.get(r["id"], ()))
+        fresh = (new_matches or {}).get(r["id"], set())
+        grown = len(assets_by_rule.get(r["id"], set()) & set(fresh))
+        if growth and r["id"] in growth:
+            grown = min(grown, growth[r["id"]])
         if pct and last is not None and grown > max(floor, last * pct / 100):
-            out.append(f"Rule \"{r['name']}\" would change {grown} assets; it matched {last} last time "
-                       f"(growth stop at {pct} %)")
+            out.append(f"Rule \"{r['name']}\" newly matches and would change {grown} assets; it matched {last} "
+                       f"last time (growth stop at {pct} %)")
+    return out
+
+
+async def _new_matches(db: AsyncSession, plans: dict) -> dict[str, set]:
+    """{rule id: {(kind, id)}}: assets a rule matches now that its last
+    recorded evaluation (``discovery_engine_asset_state.matched_rule_ids``) did
+    not. An asset never evaluated before counts as a new match."""
+    before: dict = {}
+    for kind in ("device", "child", "server"):
+        ids = [a for (k, a) in plans if k == kind]
+        if not ids:
+            continue
+        for aid, m in (await db.execute(text(
+                "SELECT asset_id::text, matched_rule_ids FROM discovery_engine_asset_state"
+                " WHERE asset_kind = :k AND asset_id = ANY(CAST(:ids AS uuid[]))"), {"k": kind, "ids": ids})).all():
+            before[(kind, aid)] = {str(x) for x in (m or [])}
+    out: dict[str, set] = {}
+    for key, plan in plans.items():
+        had = before.get(key, set())
+        for m in plan.get("matched") or []:
+            if m["rule_id"] not in had:
+                out.setdefault(m["rule_id"], set()).add(key)
     return out
 
 
@@ -279,7 +310,7 @@ async def reconcile_changed(db: AsyncSession, *, batch: int = BATCH, apply_crede
     owned = await inventory.load_owned(db, assets)
     changes, matched, plans = inventory.evaluate_assets(assets, active, owned, trigger="changed")
     out: dict[str, Any] = {"assets": len(picked), "matched": matched}
-    reasons = limit_reasons(changes, active, settings)
+    reasons = limit_reasons(changes, active, settings, await _new_matches(db, plans))
 
     if reasons:
         # Plan everything that changed, so one approval covers it.
@@ -288,7 +319,7 @@ async def reconcile_changed(db: AsyncSession, *, batch: int = BATCH, apply_crede
             assets = await _load(db, picked, extras)
             owned = await inventory.load_owned(db, assets)
             changes, matched, plans = inventory.evaluate_assets(assets, active, owned, trigger="changed")
-            reasons = limit_reasons(changes, active, settings) or reasons
+            reasons = limit_reasons(changes, active, settings, await _new_matches(db, plans)) or reasons
         writes = [c for c in changes if c["outcome"] in ("apply", "revert")]
         _names(changes, assets)
         cap = int(settings.get("max_changes_per_run") or 100)
@@ -442,7 +473,15 @@ async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply
             if m["rule_id"] in rule_matches:
                 rule_matches[m["rule_id"]] += 1
     out: dict[str, Any] = {"assets": len(assets), "matched": matched, "slot": slot.isoformat()}
-    reasons = limit_reasons(changes, active, settings)
+    # A full run has no per-asset history of scheduled matches: a rule whose
+    # match count grew is treated as newly matching the assets it changes.
+    grew = {r["id"] for r in active
+            if r.get("last_match_count") is not None and rule_matches.get(r["id"], 0) > r["last_match_count"]}
+    fresh = {rid: {(k, a) for (k, a), p in plans.items() if any(m["rule_id"] == rid for m in p["matched"])}
+             for rid in grew}
+    reasons = limit_reasons(changes, active, settings, fresh,
+                            {rid: rule_matches[rid] - (next(r for r in active if r["id"] == rid)["last_match_count"])
+                             for rid in grew})
     if reasons:
         _names(changes, assets)
         writes = [c for c in changes if c["outcome"] in ("apply", "revert")]

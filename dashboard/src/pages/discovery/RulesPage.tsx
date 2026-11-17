@@ -295,7 +295,7 @@ export function RulesPage() {
                   <Th className="w-32">Mode</Th>
                   <Th>Rule</Th>
                   <Th>Actions</Th>
-                  <Th className="text-right">Matched last scan</Th>
+                  <Th className="text-right">Matched last run</Th>
                   <Th className="w-28"></Th>
                 </Tr>
               </THead>

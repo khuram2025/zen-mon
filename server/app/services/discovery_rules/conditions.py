@@ -315,7 +315,7 @@ def _text(value: Any) -> str:
     return str(value)[:MAX_SUBJECT].lower()
 
 
-def eval_leaf(leaf: dict, facts: dict, fields: dict | None = None) -> bool:
+def eval_leaf(leaf: dict, facts: dict, fields: dict | None = None, *, strict_booleans: bool = False) -> bool:
     field, op, want = leaf["field"], leaf["operator"], leaf.get("value")
     catalog = fields if fields is not None else FIELDS
     if field not in catalog:          # a field removed since the tree was saved (custom field deleted)
@@ -328,6 +328,8 @@ def eval_leaf(leaf: dict, facts: dict, fields: dict | None = None) -> bool:
     if op == "is_not_empty":
         return not _missing(have)
     if ftype == "boolean":
+        if strict_booleans and have is None:
+            return False   # a missing fact is neither true nor false
         return bool(have) if op == "is_true" else not bool(have)
     if _missing(have):
         return op in NEGATIVE
@@ -421,19 +423,26 @@ def eval_leaf(leaf: dict, facts: dict, fields: dict | None = None) -> bool:
     }.get(op, False)
 
 
-def evaluate(node: dict, facts: dict, trace: list | None = None, fields: dict | None = None) -> bool:
+def evaluate(node: dict, facts: dict, trace: list | None = None, fields: dict | None = None, *,
+             strict_booleans: bool = False) -> bool:
     """Whether ``facts`` satisfy the tree. With ``trace`` every evaluated leaf
     appends ``[field, operator, matched]``; groups short-circuit, so a leaf
-    that was not needed is not listed."""
+    that was not needed is not listed.
+
+    ``strict_booleans`` (discovery rules): a missing boolean fact satisfies
+    neither "is true" nor "is false", as for every other positive test (a scan
+    result has no "ping on" fact; it is not "ping off"). Other callers keep the
+    older reading, missing = false, so device group membership does not change."""
+    kw = {"strict_booleans": strict_booleans}
     if "op" in node:
         children = node.get("conditions") or []
         op = node["op"]
         if op == "all":
-            return all(evaluate(c, facts, trace, fields) for c in children)
+            return all(evaluate(c, facts, trace, fields, **kw) for c in children)
         if op == "any":
-            return any(evaluate(c, facts, trace, fields) for c in children)
-        return not any(evaluate(c, facts, trace, fields) for c in children)
-    ok = eval_leaf(node, facts, fields)
+            return any(evaluate(c, facts, trace, fields, **kw) for c in children)
+        return not any(evaluate(c, facts, trace, fields, **kw) for c in children)
+    ok = eval_leaf(node, facts, fields, **kw)
     if trace is not None:
         trace.append([node["field"], node["operator"], ok])
     return ok

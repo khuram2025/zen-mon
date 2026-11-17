@@ -374,7 +374,7 @@ export function RuleEditorPage() {
             {draft.triggers.includes('created') && (
               <div className="text-xs text-muted">
                 New devices and servers are checked shortly after they are added (Add Device, CSV import, agent
-                enrolment); the rule sets values and adds tags, it never removes anything or turns monitoring off.
+                enrolment); the rule sets values and adds tags, it never removes anything or turns monitoring off (except interfaces an ignore pattern names).
               </div>
             )}
             {draft.triggers.includes('changed') && (
@@ -505,7 +505,7 @@ export function RuleEditorPage() {
               </div>
               <div className="text-xs text-muted">
                 {ENFORCEMENT_HELP[draft.enforcement]} Tags are only ever added; a rule never deletes anything or turns
-                monitoring off.
+                monitoring off, except interfaces an ignore pattern names.
               </div>
             </div>
             <div className="space-y-1.5 md:col-span-3">

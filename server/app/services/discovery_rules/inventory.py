@@ -92,10 +92,11 @@ WHERE d.poll_mode = 'via_controller'
 SERVER_SQL = """
 SELECT s.id, s.display_name, s.hostname, s.fqdn, host(s.primary_ip) AS primary_ip, s.os_name, s.os_version,
        s.os_type, s.collection_mode, s.status, s.environment, s.owner, s.tags, s.created_at, s.site_id,
-       si.name AS site_name, ag.policy_id AS agent_policy_id, ag.agents AS agent_count
+       si.name AS site_name, ag.policy_id AS agent_policy_id, ag.agents AS agent_count, ag.platforms AS agent_platforms
 FROM servers s
 LEFT JOIN sites si ON si.id = s.site_id
-LEFT JOIN LATERAL (SELECT (array_agg(a.policy_id ORDER BY a.created_at, a.id))[1] AS policy_id, count(*) AS agents
+LEFT JOIN LATERAL (SELECT (array_agg(a.policy_id ORDER BY a.created_at, a.id))[1] AS policy_id, count(*) AS agents,
+                          array_agg(DISTINCT a.platform) AS platforms
                    FROM agents a WHERE a.server_id = s.id) ag ON true
 WHERE true
 """
@@ -138,7 +139,9 @@ def current_values(kind: str, row: Any) -> dict[str, Any]:
             "dependency_parent": [str(x).lower() for x in (g("_parents") or [])]}
     if kind == "server":
         return {"owner": g("owner"), "environment": g("environment"), "tags": _tags(g("tags")), **sets,
-                "agent_policy": g("agent_policy_id"), "_has_agent": bool(g("agent_count"))}
+                "agent_policy": g("agent_policy_id"), "_has_agent": bool(g("agent_count")),
+                "_agent_platforms": [p for p in (g("agent_platforms") or []) if p],
+                "_policy_platforms": g("_policy_platforms") or {}}
     if kind == "child":
         return {"group": g("group_id"), "location": g("location"), "owner": g("owner"), "tags": _tags(g("tags")),
                 **sets}
@@ -254,6 +257,16 @@ def plan_changes(kind: str, asset_id: str, current: dict, plan: dict, owned: dic
             continue   # no agent to run the policy
         r = ref(entry)
         desired, cur = norm(key, entry["value"]), norm(key, current.get(key))
+        if key == "agent_policy" and desired != cur:
+            want = (current.get("_policy_platforms") or {}).get(desired)
+            have = set(current.get("_agent_platforms") or [])
+            if want and want != "any" and have and have != {want}:
+                out.append({"asset_kind": kind, "asset_id": str(asset_id), "action_key": key, "item_key": "",
+                            "before": cur, "after": desired, "rule_id": r["rule_id"], "rule_name": r["rule_name"],
+                            "rule_revision": r["rule_revision"], "outcome": "not_ready",
+                            "detail": f"The policy is for {want} agents; this server's agent runs "
+                                      f"{', '.join(sorted(have))}"})
+                continue
         base = {"asset_kind": kind, "asset_id": str(asset_id), "action_key": key, "item_key": "",
                 "before": cur, "after": desired, "rule_id": r["rule_id"], "rule_name": r["rule_name"],
                 "rule_revision": r["rule_revision"]}
@@ -472,6 +485,11 @@ async def attach_sets(db: AsyncSession, assets: list[tuple[str, dict]], extras: 
     if devices:
         await _attach_device_extras(db, devices, extras)
     servers = [r for k, r in assets if k == "server"]
+    if servers:
+        platforms = {str(i).lower(): p for i, p in (await db.execute(text(
+            "SELECT id::text, platform FROM agent_policies"))).all()}
+        for r in servers:
+            r["_policy_platforms"] = platforms
     if servers and "baselines" in extras:
         await _attach_baselines(db, servers)
 

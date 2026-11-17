@@ -97,17 +97,61 @@ def _change(rule, asset, n=1):
 def test_limit_reasons_engine_cap_rule_cap_and_growth():
     settings = {"max_changes_per_run": 100, "growth_breaker_pct": 50, "growth_breaker_min": 20}
     r = {"id": "r", "name": "R", "max_changes_per_run": None, "last_match_count": None}
-    assert reconcile.limit_reasons(_change("r", "a", 50), [r], settings) == []      # never evaluated: caps only
+    new = lambda n: {"r": {("device", f"a-{i}") for i in range(n)}}   # noqa: E731
+    assert reconcile.limit_reasons(_change("r", "a", 50), [r], settings, new(50)) == []   # never evaluated: caps only
     assert "exceed the limit of 100" in reconcile.limit_reasons(_change("r", "a", 101), [r], settings)[0]
     r["max_changes_per_run"] = 10
     assert "its own limit is 10" in reconcile.limit_reasons(_change("r", "a", 11), [r], settings)[0]
     r.update(max_changes_per_run=None, last_match_count=100)
-    assert reconcile.limit_reasons(_change("r", "a", 50), [r], settings) == []      # 50 = 50 % of 100
-    assert "growth stop" in reconcile.limit_reasons(_change("r", "a", 51), [r], settings)[0]
+    assert reconcile.limit_reasons(_change("r", "a", 50), [r], settings, new(50)) == []   # 50 = 50 % of 100
+    assert "growth stop" in reconcile.limit_reasons(_change("r", "a", 51), [r], settings, new(51))[0]
     r["last_match_count"] = 0
-    assert reconcile.limit_reasons(_change("r", "a", 20), [r], settings) == []      # the floor
-    assert reconcile.limit_reasons(_change("r", "a", 21), [r], settings)
-    assert reconcile.limit_reasons(_change("r", "a", 21), [r], {**settings, "growth_breaker_pct": 0}) == []
+    assert reconcile.limit_reasons(_change("r", "a", 20), [r], settings, new(20)) == []   # the floor
+    assert reconcile.limit_reasons(_change("r", "a", 21), [r], settings, new(21))
+    assert reconcile.limit_reasons(_change("r", "a", 21), [r], {**settings, "growth_breaker_pct": 0}, new(21)) == []
+    # scheduled runs: only the growth of the match count is known
+    assert reconcile.limit_reasons(_change("r", "a", 40), [r], settings, new(40), {"r": 5}) == []
+
+
+def test_growth_stop_ignores_a_new_action_on_the_same_matches():
+    """Found on .221: a rule edit that adds a tag to the 8 assets the rule
+    already matched must not trip the growth stop (no match growth)."""
+    settings = {"max_changes_per_run": 100, "growth_breaker_pct": 50, "growth_breaker_min": 2}
+    r = {"id": "r", "name": "R", "max_changes_per_run": None, "last_match_count": 8}
+    assert reconcile.limit_reasons(_change("r", "a", 8), [r], settings, {}) == []
+    grown = {"r": {("device", f"a-{i}") for i in range(3, 8)}}            # 5 assets newly matched
+    assert "newly matches and would change 5 assets" in reconcile.limit_reasons(
+        _change("r", "a", 8), [r], settings, grown)[0]
+
+
+def test_missing_booleans_satisfy_neither_true_nor_false_in_discovery_rules():
+    """Found on .221: "controller polling is false" matched scan results,
+    which have no such fact."""
+    rule = {"id": "r", "name": "r", "priority": 1, "triggers": ["discovery"], "asset_kinds": ["device"],
+            "condition": {"op": "all", "conditions": [{"field": "ping_enabled", "operator": "is_false"}]},
+            "actions": [{"key": "tags", "value": ["x"]}]}
+    from app.services.discovery_rules.facts import facts_from_device, sample_facts
+    assert engine.evaluate(sample_facts({"vendor": "Cisco"}), [rule])["matched"] == []
+    off = facts_from_device({"hostname": "r1", "ping_enabled": False})
+    assert [m["rule_id"] for m in engine.evaluate(off, [{**rule, "triggers": ["manual"]}], trigger="manual",
+                                                   kind="device")["matched"]] == ["r"]
+    from app.services.discovery_rules import conditions
+    leaf = {"field": "ping_enabled", "operator": "is_false"}
+    assert conditions.evaluate(leaf, {}) is True                     # other callers (device groups) unchanged
+    assert conditions.evaluate(leaf, {}, strict_booleans=True) is False
+
+
+def test_agent_policy_for_another_platform_is_not_applied():
+    win, linux = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+    plan = {"settings": {"agent_policy": {"value": win, "rule_id": "r"}}, "tags": []}
+    row = {"agent_policy_id": linux, "agent_count": 1, "agent_platforms": ["linux"],
+           "_policy_platforms": {win: "windows", linux: "linux"}}
+    out = inventory.plan_changes("server", "s1", inventory.current_values("server", row), plan, {}, {"r": {}})
+    assert [(c["outcome"], c["detail"]) for c in out] == [
+        ("not_ready", "The policy is for windows agents; this server's agent runs linux")]
+    row["agent_platforms"] = ["windows"]
+    out = inventory.plan_changes("server", "s1", inventory.current_values("server", row), plan, {}, {"r": {}})
+    assert [c["outcome"] for c in out] == ["apply"]
 
 
 @pytest.mark.parametrize("now,every,at,expect", [

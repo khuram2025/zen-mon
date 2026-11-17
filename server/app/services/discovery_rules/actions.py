@@ -72,8 +72,7 @@ ACTIONS: dict[str, ActionSpec] = {a.key: a for a in (
     ActionSpec("interfaces", "Monitor or ignore interfaces", "additive", "interfaces", ("devices.manage",),
                ("device",),
                help="Sets which interfaces are monitored (interface alerts, utilisation, reports) by name, alias, "
-                    "description, IF-MIB type or speed. For each interface the first matching rule, in priority "
-                    "order, decides; interfaces no rule matches are left as they are."),
+                    "description, IF-MIB type or speed."),
     ActionSpec("sensor", "Monitor from sensor", "additive", "ref", ("devices.manage",), ("device",),
                source="sensors",
                help="Adds the sensor as a monitoring location, like the device's Monitoring locations card. "

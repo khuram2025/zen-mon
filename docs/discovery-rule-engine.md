@@ -64,8 +64,10 @@ A rule is global (not owned by a discovery profile) and has:
   is 7.2.10, newer than 7.2.9; 7.2 equals 7.2.0).
 * **Missing facts** never satisfy a positive test. Negative operators are true
   for a missing value: an unknown vendor "does not equal Fortinet". Use
-  *is empty* / *is not empty* to test for the missing value itself. Preview
-  shows the effect before a rule is active.
+  *is empty* / *is not empty* to test for the missing value itself. A missing
+  yes/no fact is neither *is true* nor *is false* (a scan result has no "ping
+  on" fact, so it is not "ping off"). Preview shows the effect before a rule is
+  active.
 * **Regular expressions** are validated when the rule is saved: at most 200
   characters, no nested quantifiers such as `(a+)+` and no back-references,
   because Python's `re` has no time limit. They run against at most 2,048
@@ -313,7 +315,8 @@ covers the server, `baseline_service.baseline_in_scope`) and
 `baseline_status` (`compliant`, `non_compliant`, `not_evaluated`). The action
 **Agent policy** sets `agents.policy_id` for the server's agents (as the
 fleet bulk action does; the agent picks it up on its next heartbeat); servers
-without an agent are skipped. Software baselines are assigned by tag: a
+without an agent are skipped, and a policy for another platform (a Windows
+policy for a Linux agent) is not applied (`not_ready`, with the reason). Software baselines are assigned by tag: a
 baseline applies to servers carrying all its tags, so a rule assigns one with
 **Add tags**; there is no separate baseline action.
 
@@ -327,9 +330,13 @@ if unwanted. Service checks never take a license node.
 (optional) and the match-growth stop join the engine-wide cap for automatic
 runs (`changed` and `scheduled`): a run waits for approval when it would
 change more values than the engine limit, more values from one rule than that
-rule's limit, or, for one rule, more assets than
+rule's limit, or, for one rule, more assets *that it newly matches* than
 max(`growth_breaker_min`, `growth_breaker_pct` % of the assets it matched last
-time). A rule never evaluated before is covered by the caps only. The pending
+time). "Newly matches" compares with the rule's matches recorded at each
+asset's last evaluation; a rule edit that only changes what the rule sets on
+the assets it already matched is covered by the caps, not the growth stop. For
+a scheduled run the count is limited to the growth of the rule's match count.
+A rule never evaluated before is covered by the caps only. The pending
 view lists the reasons. `last_match_count` is kept for `changed` rules from
 the asset state and for `scheduled` rules from each full run.
 
