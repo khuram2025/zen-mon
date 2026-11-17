@@ -24,6 +24,10 @@ export type InterfaceRecord = {
   last_seen: string | null
   last_up_at?: string | null
   ever_up?: boolean | null
+  /** Interface role (migrate-193): the operator's (role_source "manual") or the template's ("template"). */
+  role?: string | null
+  role_source?: 'manual' | 'template' | null
+  role_manual?: string | null
 }
 
 export type ErrorTotals = { in_errors: number; out_errors: number; in_discards: number; out_discards: number }

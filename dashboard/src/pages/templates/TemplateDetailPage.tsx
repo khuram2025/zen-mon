@@ -27,6 +27,8 @@ import {
   P, contentOf, type Impact, type TemplateContent, type TemplateDetail, type TestResult, templateError, templatesApi,
 } from './api'
 import { GroupEditor } from './GroupEditor'
+import { InterfaceRolesEditor } from './InterfaceRolesEditor'
+import { RecommendedAlertsTab } from './RecommendedAlerts'
 import { TemplateStateBadges, sourceLabel } from './DeviceTemplatesPage'
 
 const MANAGE = 'devices.manage_templates'
@@ -45,7 +47,7 @@ export function TemplateDetailPage() {
   const [work, setWork] = useState<TemplateContent | null>(null)
   const [dirty, setDirty] = useState(false)
   useEffect(() => {
-    if (t && !dirty) setWork(contentOf(t.draft || t))
+    if (t && !dirty) setWork(contentOf(t.draft || t, t))
   }, [t, dirty])
   const edit = (patch: Partial<TemplateContent>) => {
     setWork((w) => (w ? { ...w, ...patch } : w)); setDirty(true)
@@ -165,7 +167,7 @@ export function TemplateDetailPage() {
             {' '}Devices keep polling revision {t.revision} until you publish.
           </div>
           <div className="flex gap-2">
-            {dirty && <Button size="sm" variant="outline" onClick={() => { setDirty(false); setWork(contentOf(t.draft || t)) }}><Undo2 className="h-4 w-4" /> Undo changes</Button>}
+            {dirty && <Button size="sm" variant="outline" onClick={() => { setDirty(false); setWork(contentOf(t.draft || t, t)) }}><Undo2 className="h-4 w-4" /> Undo changes</Button>}
             {dirty && <Button size="sm" onClick={() => saveDraft.mutate()} disabled={saveDraft.isPending}><Save className="h-4 w-4" /> Save draft</Button>}
             {!dirty && t.has_draft && <Button size="sm" onClick={() => setPublishOpen(true)}><Rocket className="h-4 w-4" /> Review and publish</Button>}
             {!dirty && t.has_draft && !t.pilot_device_count && <Button size="sm" variant="outline" onClick={() => discard.mutate()}>Discard draft</Button>}
@@ -177,11 +179,19 @@ export function TemplateDetailPage() {
         <TabsList>
           <TabsTrigger value="overview">Identity &amp; matching</TabsTrigger>
           <TabsTrigger value="metrics">Metrics ({work.oid_groups.length})</TabsTrigger>
+          <TabsTrigger value="recommended">Recommended alerts</TabsTrigger>
           <TabsTrigger value="devices">Devices ({t.device_count})</TabsTrigger>
           <TabsTrigger value="test">Test on a device</TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
-        <TabsContent value="overview"><IdentityForm work={work} edit={edit} readOnly={!editable} /></TabsContent>
+        <TabsContent value="overview">
+          <div className="space-y-4">
+            <IdentityForm work={work} edit={edit} readOnly={!editable} />
+            <InterfaceRolesEditor roles={work.interface_roles} onChange={(roles) => edit({ interface_roles: roles })}
+                                  readOnly={!editable} parentId={t.parent_id} parentName={t.parent_name} />
+          </div>
+        </TabsContent>
+        <TabsContent value="recommended"><RecommendedAlertsTab t={t} /></TabsContent>
         <TabsContent value="metrics">
           <GroupEditor groups={work.oid_groups} onChange={(g) => edit({ oid_groups: g })} readOnly={!editable}
                        inherited={t.parent_id ? t.parent_groups : null} />

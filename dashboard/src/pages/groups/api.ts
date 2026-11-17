@@ -32,6 +32,8 @@ export type UsedBy = {
   discovery_profiles: { id: string; name: string }[]
   discovery_rules: { id: string; name: string }[]
   subgroups: { id: string; name: string }[]
+  /** Alert rule overrides with a row for this group (one per override; a rule may appear more than once). */
+  alert_overrides: { id: string; rule_id: string; name: string }[]
   primary_devices: number
 }
 

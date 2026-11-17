@@ -111,3 +111,6 @@ asset, reason and resolved alert count).
   *Disable for all*.
 * Alert Rules: a shared rule disabled for some assets shows *Off for N*, which
   opens the list (linked asset, who, when, reason) with *Re-enable*.
+
+To change a shared rule's threshold, holds or priority for one device, server or group
+(instead of turning it off), use an override: `docs/alert-rule-overrides.md`.

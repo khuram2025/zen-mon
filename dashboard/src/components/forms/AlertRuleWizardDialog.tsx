@@ -5,6 +5,7 @@
 import { DeviceTypeItems } from '@/components/forms/DeviceTypeItems'
 import { FormEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { INTERFACE_ROLES, ROLE_LABEL } from '@/components/alerts/thresholdModel'
 import { APM_EVENT_TRIGGERS, apmEventScope, apmScopeKind, isApmEvent } from './apmEventTriggers'
 import {
   Bell,
@@ -122,6 +123,10 @@ type WizardState = {
   service_check_group_id: string
   trap_oid: string
   target: string
+  /** SNMP device/interface/template metric rules: only devices on this template (or one customised from it). '' = any. */
+  profile_id: string
+  /** Interface metric rules: only interfaces with this role. '' = any. */
+  if_role: string
   notify_channels: string[]
   cooldown: number
   max_repeat: number
@@ -257,6 +262,8 @@ const DEFAULT_STATE: WizardState = {
   service_check_group_id: '',
   trap_oid: '',
   target: '',
+  profile_id: '',
+  if_role: '',
   notify_channels: [],
   cooldown: 300,
   max_repeat: 0,
@@ -336,6 +343,17 @@ function flapHoldApplies(s: WizardState): boolean {
   return trigger !== 'up'
 }
 
+// The rules a template scope applies to (alert_rules._validate_template_scope): SNMP interface and device metrics
+// and template metrics (tpl_<key>). An interface role applies when every condition is an interface metric.
+const TEMPLATE_SCOPE_SCALARS = new Set(['cpu', 'memory', 'temperature', 'session_count', 'uptime_reset'])
+function templateScopeApplies(conds: Cond[]): boolean {
+  return conds.length > 0 && conds.every((c) => INTERFACE_METRICS.has(c.metric) || TEMPLATE_SCOPE_SCALARS.has(c.metric)
+    || String(c.metric || '').startsWith('tpl_'))
+}
+function interfaceRoleApplies(conds: Cond[]): boolean {
+  return conds.length > 0 && conds.every((c) => INTERFACE_METRICS.has(c.metric))
+}
+
 function ruleToState(rule: any): WizardState {
   const source =
     isNetflowMetric(rule.metric) ? 'netflow' : rule.metric === 'syslog' ? 'syslog' : rule.metric === 'trap'
@@ -395,6 +413,8 @@ function ruleToState(rule: any): WizardState {
     service_check_group_id: rule.service_check_group_id || '',
     trap_oid: rule.trap_oid || '',
     target: rule.target || '',
+    profile_id: rule.profile_id || '',
+    if_role: rule.if_role || '',
     notify_channels: Array.isArray(rule.notify_channels) ? rule.notify_channels : [],
     cooldown: rule.cooldown ?? 300,
     max_repeat: rule.max_repeat ?? 0,
@@ -453,6 +473,9 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
       : isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric))
       ? s.target.trim() || null
       : null,
+    // Template scope and interface role (migrate-193); null clears them, and they are refused on other rules.
+    profile_id: isDevice && templateScopeApplies(s.conditions) ? s.profile_id || null : null,
+    if_role: isDevice && interfaceRoleApplies(s.conditions) ? s.if_role || null : null,
     min_duration: isSyslog || isTrap || (isApm && isApmEvent(first.metric)) || isRebootRule(s) ? 0 : s.min_duration,
     clear_duration: usesMetricLifecycle(s) || isRebootRule(s) ? s.clear_duration : null,
     notify_while_flapping: flapHoldApplies(s) ? s.notify_while_flapping : false,
@@ -594,6 +617,16 @@ export function AlertRuleWizardDialog({
     queryFn: async () => (await api.get('/devices/groups')).data,
     enabled: open,
   })
+
+  // Device templates: the template metric picker and the "only devices on template" scope.
+  const { data: templatesResp } = useQuery<any>({
+    queryKey: ['snmp-profiles'],
+    queryFn: async () => (await api.get('/snmp/profiles')).data,
+    enabled: open && s.source === 'device',
+    staleTime: 60_000,
+  })
+  const templates: WizardTemplate[] = Array.isArray(templatesResp) ? templatesResp : templatesResp?.data || []
+  const tplNames = useMemo(() => templateMetricNames(templates), [templates])
 
   const { data: locations = [] } = useQuery<string[]>({
     queryKey: ['devices', 'locations'],
@@ -803,6 +836,7 @@ export function AlertRuleWizardDialog({
     toast.success('Trigger templates copied to reset actions')
   }
 
+  const condMetricName = (m: string) => (m.startsWith('tpl_') ? `${tplNames[m.slice(4)] || m.slice(4)} (template)` : m)
   const summary = useMemo(() => {
     const first = s.conditions[0]
     const condText =
@@ -817,10 +851,11 @@ export function AlertRuleWizardDialog({
         : s.source === 'apm' && isApmEvent(first.metric)
         ? APM_EVENT_TRIGGERS.find(x => x.value === first.metric)!.label
         : s.conditions.length > 1
-        ? s.conditions.map((c) => `${c.metric} ${c.operator} ${c.threshold}`).join(` ${s.condition_logic} `)
-        : `${first.metric} ${first.operator} ${first.threshold}`
+        ? s.conditions.map((c) => `${condMetricName(c.metric)} ${c.operator} ${c.threshold}`).join(` ${s.condition_logic} `)
+        : `${condMetricName(first.metric)} ${first.operator} ${first.threshold}`
     return { condText }
-  }, [s])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s, tplNames])
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -850,6 +885,11 @@ export function AlertRuleWizardDialog({
         setStep(keys.some((k) => scopeKeys.has(k)) && keys.every((k) => scopeKeys.has(k)) ? 'scope' : 'trigger')
         return
       }
+    }
+    if (s.source === 'device' && s.conditions.some((c) => c.metric === 'tpl_')) {
+      toast.error('Choose a template metric', 'Pick the template and the metric to watch, or another field.')
+      setStep('trigger')
+      return
     }
     if (s.source === 'server') {
       const problem = serverDraftProblem(s)
@@ -1173,6 +1213,10 @@ export function AlertRuleWizardDialog({
                                 {NETWORK_METRICS.map((m) => (
                                   <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
                                 ))}
+                                {c.metric.startsWith('tpl_') && c.metric !== 'tpl_' && (
+                                  <SelectItem value={c.metric}>Template: {tplNames[c.metric.slice(4)] || c.metric.slice(4)}</SelectItem>
+                                )}
+                                <SelectItem value="tpl_">Template metric…</SelectItem>
                               </SelectContent>
                             </Select>
                           </FormField>
@@ -1195,7 +1239,7 @@ export function AlertRuleWizardDialog({
                             <Input type="number" step="any" value={c.threshold} onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })} />
                           </FormField>
                           </>)}
-                          {NETWORK_METRICS.some(m => m.value === c.metric) && c.metric !== REBOOT_METRIC && ['>', '>=', '<', '<='].includes(c.operator) && (() => {
+                          {(NETWORK_METRICS.some(m => m.value === c.metric) || (c.metric.startsWith('tpl_') && c.metric !== 'tpl_')) && c.metric !== REBOOT_METRIC && ['>', '>=', '<', '<='].includes(c.operator) && (() => {
                             const auto = autoResetThreshold(c)
                             return (
                               <FormField label="Reset value (optional)" hint={auto != null ? `Empty = auto: clears ${c.operator.startsWith('>') ? 'below' : 'above'} ${auto}%` : undefined}>
@@ -1203,6 +1247,21 @@ export function AlertRuleWizardDialog({
                               </FormField>
                             )
                           })()}
+                        {c.metric.startsWith('tpl_') && (
+                          <TemplateMetricPicker className="col-span-3" metric={c.metric} templates={templates} scopeTemplateId={s.profile_id}
+                            onPick={(m, templateId) => setS((st) => ({
+                              ...st,
+                              // A template metric defaults its scope to the chosen template.
+                              profile_id: st.profile_id || templateId,
+                              conditions: st.conditions.map((x, idx) => (idx !== i ? x : {
+                                ...x,
+                                metric: `tpl_${m.key}`,
+                                operator: m.thresholds?.op === '<=' ? '<=' : ['>', '>='].includes(x.operator) ? x.operator : '>=',
+                                threshold: m.thresholds?.crit ?? m.thresholds?.warn ?? x.threshold,
+                                reset_threshold: null,
+                              })),
+                            }))} />
+                        )}
                         </div>
                         <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-muted hover:text-danger" disabled={s.conditions.length === 1} onClick={() => removeCond(i)}>
                           <Trash2 className="h-4 w-4" />
@@ -1211,9 +1270,22 @@ export function AlertRuleWizardDialog({
                     ))}
                     <Button type="button" variant="outline" size="sm" onClick={addCond}><Plus className="h-3.5 w-3.5" />Add condition</Button>
                     {s.conditions.some((c) => INTERFACE_METRICS.has(c.metric)) && (
-                      <FormField label="Interface filter" hint="Name substring or if_index. Empty = all interfaces.">
-                        <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder="GigabitEthernet0/1" />
-                      </FormField>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <FormField label="Interface filter" hint="Name substring or if_index. Empty = all interfaces.">
+                          <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder="GigabitEthernet0/1" />
+                        </FormField>
+                        {interfaceRoleApplies(s.conditions) && (
+                          <FormField label="Interface role" hint="Roles come from the device's template, or an operator's choice on the interface.">
+                            <Select value={s.if_role || '__any__'} onValueChange={(v) => setS({ ...s, if_role: v === '__any__' ? '' : v })}>
+                              <SelectTrigger><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__any__">Any role</SelectItem>
+                                {INTERFACE_ROLES.map((r) => <SelectItem key={r} value={r}>{ROLE_LABEL[r]}</SelectItem>)}
+                              </SelectContent>
+                            </Select>
+                          </FormField>
+                        )}
+                      </div>
                     )}
                   </>
                 )}
@@ -1581,6 +1653,21 @@ export function AlertRuleWizardDialog({
                         </Select>
                       </FormField>
                     )}
+                    {s.source === 'device' && templateScopeApplies(s.conditions) && (
+                      <FormField label="Only devices on template"
+                        hint="Also covers templates customised from it. Combined with the scope above: a device must match both.">
+                        <Select value={s.profile_id || '__any__'} onValueChange={(v) => setS({ ...s, profile_id: v === '__any__' ? '' : v })}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__any__">Any template</SelectItem>
+                            {s.profile_id && !templates.some((t) => t.id === s.profile_id) && (
+                              <SelectItem value={s.profile_id}>Template {s.profile_id.slice(0, 8)}</SelectItem>
+                            )}
+                            {templates.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                    )}
                   </>
                 )}
               </div>
@@ -1859,6 +1946,12 @@ export function AlertRuleWizardDialog({
                 <ReviewRow label="Name" value={s.name || '—'} />
                 <ReviewRow label="Severity" value={<Badge variant={s.severity === 'critical' ? 'danger' : s.severity === 'warning' ? 'warning' : 'info'}>{s.severity}</Badge>} />
                 <ReviewRow label="Trigger" value={summary.condText} />
+                {s.source === 'device' && templateScopeApplies(s.conditions) && s.profile_id && (
+                  <ReviewRow label="Template" value={templates.find((t) => t.id === s.profile_id)?.name || 'One template'} />
+                )}
+                {s.source === 'device' && interfaceRoleApplies(s.conditions) && s.if_role && (
+                  <ReviewRow label="Interface role" value={ROLE_LABEL[s.if_role] || s.if_role} />
+                )}
                 {s.source === 'netflow' ? (
                   <>
                     <ReviewRow label="Scope" value={describeScopeDraft(s.nf)} />
@@ -2101,6 +2194,68 @@ function TemplateVars() {
             onClick={() => { void copyText(v) }} title="Click to copy">{v}</code>
         ))}
       </div>
+    </div>
+  )
+}
+
+type WizardTemplateMetric = { key: string; name: string; unit?: string | null; type?: string | null; thresholds?: { warn?: number | null; crit?: number | null; op?: string } | null }
+type WizardTemplate = { id: string; name: string; oid_groups?: { key: string; name: string; display?: string | null; metrics?: WizardTemplateMetric[] }[] }
+
+/** key -> metric name over every template, for template metric rules (tpl_<key>). */
+function templateMetricNames(templates: WizardTemplate[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const t of templates) for (const g of t.oid_groups || []) for (const m of g.metrics || []) if (!out[m.key]) out[m.key] = m.name
+  return out
+}
+
+/** A template's gauge metrics, which a rule can compare with a threshold. */
+function gaugeMetrics(t: WizardTemplate | undefined): { group: string; metric: WizardTemplateMetric }[] {
+  const seen = new Set<string>()
+  return (t?.oid_groups || []).filter((g) => g.display !== 'children').flatMap((g) => (g.metrics || [])
+    .filter((m) => (!m.type || m.type === 'gauge') && !seen.has(m.key) && !!seen.add(m.key))
+    .map((metric) => ({ group: g.name, metric })))
+}
+
+/** Template metric picker: a template, then one of its gauge metrics (the rule metric becomes tpl_<key>). */
+function TemplateMetricPicker({ metric, templates, scopeTemplateId, onPick, className }: {
+  metric: string
+  templates: WizardTemplate[]
+  scopeTemplateId: string
+  onPick: (m: WizardTemplateMetric, templateId: string) => void
+  className?: string
+}) {
+  const key = metric.startsWith('tpl_') ? metric.slice(4) : ''
+  const has = (t: WizardTemplate) => !!key && gaugeMetrics(t).some((x) => x.metric.key === key)
+  const initial = templates.find((t) => t.id === scopeTemplateId && (!key || has(t)))?.id
+    || templates.find(has)?.id || scopeTemplateId || ''
+  const [tplId, setTplId] = useState(initial)
+  // The template list may arrive after the picker opened (editing a saved rule).
+  useEffect(() => { if (!tplId && initial) setTplId(initial) }, [initial, tplId])
+  const chosen = templates.find((t) => t.id === tplId)
+  const options = gaugeMetrics(chosen)
+  return (
+    <div className={cn('grid gap-2 rounded-md border border-dashed border-border p-2 sm:grid-cols-2', className)}>
+      <FormField label="Template">
+        <Select value={tplId || '__none__'} onValueChange={(v) => setTplId(v === '__none__' ? '' : v)}>
+          <SelectTrigger><SelectValue placeholder="Choose a template" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__none__" disabled>Choose a template</SelectItem>
+            {templates.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </FormField>
+      <FormField label="Metric" hint={chosen && !options.length ? 'This template has no gauge metric.' : 'The threshold starts at the template’s critical level, when it has one.'}>
+        <Select value={key && options.some((x) => x.metric.key === key) ? key : '__none__'}
+          onValueChange={(v) => { const m = options.find((x) => x.metric.key === v)?.metric; if (m && chosen) onPick(m, chosen.id) }}>
+          <SelectTrigger><SelectValue placeholder="Choose a metric" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__none__" disabled>{key ? `${key} (not in this template)` : 'Choose a metric'}</SelectItem>
+            {options.map(({ group, metric: m }) => (
+              <SelectItem key={`${group}:${m.key}`} value={m.key}>{group}: {m.name}{m.unit ? ` (${m.unit})` : ''}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </FormField>
     </div>
   )
 }
