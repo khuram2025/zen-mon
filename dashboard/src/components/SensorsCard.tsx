@@ -200,6 +200,20 @@ function downloadText(filename: string, content: string) {
 }
 
 
+/** Every row of a paged list. Both lists cap a page at 200: asking for 500 was refused (422), which left the
+ *  service-check picker empty, and one page of devices hid the rest of a larger fleet from assignment. */
+const PICKER_PAGE = 200
+const PICKER_MAX = 10_000
+async function fetchAllPages(path: string, rows: (body: any) => any[]): Promise<any[]> {
+  const out: any[] = []
+  for (let skip = 0; skip < PICKER_MAX; skip += PICKER_PAGE) {
+    const page = rows((await api.get(path, { params: { limit: PICKER_PAGE, skip } })).data)
+    out.push(...page)
+    if (page.length < PICKER_PAGE) break
+  }
+  return out
+}
+
 export function SensorsCard() {
   const qc = useQueryClient()
   const [addOpen, setAddOpen] = useState(false)
@@ -947,8 +961,7 @@ export function SensorDetailDialog({
     queryKey: ['devices-light'],
     enabled: open,
     queryFn: async () => {
-      const r = (await api.get('/devices?limit=200')).data
-      const arr = r?.devices || r?.data || (Array.isArray(r) ? r : [])
+      const arr = await fetchAllPages('/devices', (r) => r?.devices || r?.data || (Array.isArray(r) ? r : []))
       return arr.map((d: any) => ({ id: d.id, hostname: d.hostname, ip_address: d.ip_address }))
     },
   })
@@ -957,8 +970,7 @@ export function SensorDetailDialog({
     queryKey: ['service-checks-light'],
     enabled: open,
     queryFn: async () => {
-      const r = (await api.get('/service-checks?limit=500')).data
-      const arr = r?.service_checks || r?.data || (Array.isArray(r) ? r : [])
+      const arr = await fetchAllPages('/service-checks', (r) => r?.service_checks || r?.data || (Array.isArray(r) ? r : []))
       return arr.map((s: any) => ({ id: s.id, name: s.name, check_type: s.check_type }))
     },
   })

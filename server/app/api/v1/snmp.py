@@ -758,7 +758,8 @@ async def upload_mib(
     name: Optional[str] = Form(default=None),
     description: Optional[str] = Form(default=None),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("devices.manage")),
+    # The MIB Library is a Settings tab (settings.manage); device managers keep access.
+    user: User = Depends(require_permission("devices.manage", "settings.manage")),
 ):
     # Filename must be safe — no path traversal.
     raw_name = file.filename or ""
@@ -804,7 +805,10 @@ async def upload_mib(
 @router.get("/mibs", response_model=list[MibUploadResponse])
 async def list_mibs(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    # Without its own guard the snmp module default applied (devices.view or
+    # discovery.view), so a role holding only settings.manage saw the Settings
+    # tab and got 403 from the list behind it.
+    user: User = Depends(require_permission("devices.view", "discovery.view", "devices.manage", "settings.manage")),
 ):
     rows = (await db.execute(
         text("SELECT id, name, filename, size_bytes, sha256, uploaded_at FROM snmp_mibs ORDER BY name")
@@ -816,7 +820,8 @@ async def list_mibs(
 async def delete_mib(
     mib_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("devices.manage")),
+    # The MIB Library is a Settings tab (settings.manage); device managers keep access.
+    user: User = Depends(require_permission("devices.manage", "settings.manage")),
 ):
     row = (await db.execute(
         text("SELECT filename FROM snmp_mibs WHERE id = :id"), {"id": mib_id}
@@ -834,7 +839,8 @@ async def delete_mib(
 
 
 @router.post('/mibs/compile')
-async def compile_mibs(db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("devices.manage"))):
+async def compile_mibs(db: AsyncSession = Depends(get_db),
+                       user: User = Depends(require_permission("devices.manage", "settings.manage"))):
     rows = (await db.execute(text('SELECT filename, sha256 FROM snmp_mibs ORDER BY filename'))).mappings().all()
     # Run the untrusted ASN.1 parser in a bounded child process. Generated
     # output is JSON, never executable Python; dependencies stay offline.

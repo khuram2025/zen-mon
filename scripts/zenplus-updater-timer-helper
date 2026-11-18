@@ -151,7 +151,9 @@ def main(argv: list[str], *, dropin_dir: Path = DROPIN_DIR, run=subprocess.run,
             hours = parse_hours(argv[1])
             write_dropin(dropin_dir, hours)
             _systemctl(run, "daemon-reload")
-            _systemctl(run, "restart", TIMER_UNIT)
+            # try-restart: a running timer picks the interval up now; a timer an
+            # operator stopped on purpose stays stopped and uses it when started.
+            _systemctl(run, "try-restart", TIMER_UNIT)
             print(f"updater check interval set to {hours}h")
             return 0
         if argv == ["reconcile"]:

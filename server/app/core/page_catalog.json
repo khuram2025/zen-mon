@@ -1086,6 +1086,20 @@
       ]
     },
     {
+      "key": "/settings/general?tab=monitoring",
+      "label": "Monitoring",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
       "key": "/settings/general?tab=smtp",
       "label": "SMTP / Email",
       "group": "administration",
@@ -1216,8 +1230,13 @@
       "group": "administration",
       "group_label": "Administration",
       "parent": "Settings",
-      "gates": [],
-      "personal": true
+      "gates": [
+        {
+          "any": [
+            "system.admin"
+          ]
+        }
+      ]
     },
     {
       "key": "/settings/general?tab=profile",

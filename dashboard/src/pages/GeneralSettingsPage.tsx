@@ -34,7 +34,7 @@ import { MibsTabContent } from '@/components/MibsTabContent'
 import { AccessTabContent, ACCESS_TAB_PERMISSIONS } from '@/components/access/AccessTabContent'
 import { MfaPanel } from '@/components/security/MfaPanel'
 import { NewPasswordFields, usePasswordCheck } from '@/components/security/PasswordFields'
-import { QueryBoundary } from '@/components/ui/QueryState'
+import { QueryBoundary, QueryFailure } from '@/components/ui/QueryState'
 import { ContactMethodsCard } from '@/components/settings/ContactMethodsCard'
 
 // `permission`: hidden unless the user's role grants it (system.admin
@@ -48,17 +48,18 @@ const TABS = [
   { value: 'licenses', label: 'Licenses', icon: KeyRound, permission: 'system.admin' },
   { value: 'updates', label: 'Updates', icon: Download, permission: 'system.admin' },
   { value: 'storage', label: 'Storage', icon: HardDrive, permission: 'system.admin' },
-  { value: 'security', label: 'Security', icon: ShieldCheck, permission: 'system.admin' },
+  { value: 'security', label: 'Security & TLS', icon: ShieldCheck, permission: 'system.admin' },
   { value: 'sensors', label: 'Sensors', icon: Plug, permission: 'settings.manage' },
   { value: 'mibs', label: 'MIB Library', icon: Upload, permission: 'settings.manage' },
-  { value: 'support', label: 'Support', icon: LifeBuoy },
-  { value: 'profile', label: 'Profile', icon: UserIcon },
+  // Every support-bundle route is administrator-only; shown to everyone, the tab was a form that could only fail.
+  { value: 'support', label: 'Support', icon: LifeBuoy, permission: 'system.admin' },
+  { value: 'profile', label: 'My Profile', icon: UserIcon },
 ] as const
 
 type TabValue = typeof TABS[number]['value']
 
 /** Open to every account, never limited by a role's page list (navigation.ts marks them `personal`). */
-const PERSONAL_TABS = new Set<string>(['appearance', 'support', 'profile'])
+const PERSONAL_TABS = new Set<string>(['appearance', 'profile'])
 
 export function GeneralSettingsPage() {
   const can = useCan()
@@ -166,6 +167,7 @@ export function MonitoringCard() {
   // after every save; the user's edits stay until then.
   const [form, setForm] = useState<MonitoringForm | null>(() => (data ? formFromSettings(data) : null))
   useEffect(() => { if (data) setForm(formFromSettings(data)) }, [data])
+  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   const save = useMutation({
     mutationFn: async (payload: MonitoringSettingsDoc) => (await api.put('/settings/monitoring', payload)).data,
@@ -193,6 +195,8 @@ export function MonitoringCard() {
   const set = (patch: Partial<MonitoringForm>) => setForm({ ...f, ...patch })
   const errors = validateMonitoringForm(f)
   const invalid = Object.keys(errors).length > 0
+  const ADVANCED_FIELDS: MonitoringFormField[] = ['degraded_rtt_clear_ms', 'degraded_loss_clear_pct', 'degraded_clear_checks', 'up_confirm_checks', 'sensor_down_confirm_checks', 'flap_stop_changes', 'flap_stable_minutes']
+  const advancedHasError = ADVANCED_FIELDS.some((k) => errors[k])
   const dirty = !!data && JSON.stringify(settingsPayload(f)) !== JSON.stringify(settingsPayload(formFromSettings(data)))
   const policy = policyFromForm(f)
   const auto = effectivePolicy({ degraded_rtt_ms: policy.degraded_rtt_ms, degraded_loss_pct: policy.degraded_loss_pct })
@@ -264,8 +268,10 @@ export function MonitoringCard() {
             </Sentence>
           </section>
 
-          <details className="group rounded-lg border border-border">
-            <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Advanced: recovery and flapping</summary>
+          {/* Collapsed by default, but its fields are validated: an error in here used to disable Save with
+              nothing highlighted on screen. Open it, and say so, whenever it holds one. */}
+          <details className="group rounded-lg border border-border" open={advancedOpen || advancedHasError} onToggle={(e) => setAdvancedOpen((e.currentTarget as HTMLDetailsElement).open)}>
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Advanced: recovery and flapping{advancedHasError && <span className="ml-2 text-xs font-normal text-danger">has a value to fix</span>}</summary>
             <div className="space-y-3 border-t border-border px-3 py-3">
               <ClearLimit
                 label="Recovery latency" unit="ms" autoValue={auto.degraded_rtt_clear_ms} override={f.rtt_clear_override}
@@ -615,21 +621,29 @@ const DEFAULT_SMTP: SmtpForm = {
 function SmtpCard() {
   const qc = useQueryClient()
   const { user } = useAuth()
-  const { data, isLoading } = useQuery<{ smtp?: Partial<SmtpForm> }>({
+  // The server returns the configuration senders use (the default SMTP gateway) and never the password:
+  // `password_set` says one is stored, and an empty password on save keeps it.
+  const smtpQuery = useQuery<{ smtp?: Partial<SmtpForm> & { password_set?: boolean; gateway_name?: string | null } }>({
     queryKey: ['settings', 'gateways'],
     queryFn: async () => (await api.get('/settings/gateways')).data,
   })
+  const { data, isLoading } = smtpQuery
   const [form, setForm] = useState<SmtpForm>(DEFAULT_SMTP)
+  const [clearPassword, setClearPassword] = useState(false)
   const [testRecipient, setTestRecipient] = useState('')
+  const passwordSet = !!data?.smtp?.password_set
 
   useEffect(() => {
     if (data?.smtp) {
+      const { password_set: _set, gateway_name: _name, ...stored } = data.smtp
       setForm({
         ...DEFAULT_SMTP,
-        ...data.smtp,
-        port: (data.smtp.port as number) ?? 587,
-        encryption: (data.smtp.encryption as 'tls' | 'ssl' | 'none') ?? 'tls',
+        ...stored,
+        password: '',
+        port: (stored.port as number) ?? 587,
+        encryption: (stored.encryption as 'tls' | 'ssl' | 'none') ?? 'tls',
       })
+      setClearPassword(false)
     }
   }, [data])
 
@@ -639,8 +653,7 @@ function SmtpCard() {
 
   const save = useMutation({
     mutationFn: async () => {
-      const payload = { ...form, port: Number(form.port) || 587 }
-      return (await api.put('/settings/gateways/smtp', payload)).data
+      return (await api.put('/settings/gateways/smtp', smtpPayload())).data
     },
     onSuccess: () => {
       toast.success('SMTP settings saved')
@@ -649,14 +662,27 @@ function SmtpCard() {
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
   })
 
+  // What is on screen, saved or not; an empty password means the stored one.
+  const smtpPayload = () => ({ ...form, port: Number(form.port) || 587, clear_password: clearPassword && !form.password })
+
   const test = useMutation({
     mutationFn: async () => {
       if (!testRecipient) throw new Error('Recipient required')
-      return (await api.post('/settings/gateways/smtp/test', { recipient: testRecipient })).data
+      return (await api.post('/settings/gateways/smtp/test', { recipient: testRecipient, config: smtpPayload() })).data
     },
     onSuccess: (d: any) => toast.success('Test email sent', d?.message ?? `Check inbox for ${testRecipient}`),
     onError: (e: any) => toast.error('Test failed', apiErrorMessage(e)),
   })
+
+  // Never show an empty form over settings that failed to load: saving it would replace the real ones.
+  if (smtpQuery.isError && !data) {
+    return (
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Mail className="h-4 w-4 text-primary" /> SMTP / Email</CardTitle></CardHeader>
+        <CardContent><QueryFailure error={smtpQuery.error} what="the email settings" onRetry={() => void smtpQuery.refetch()} retrying={smtpQuery.isFetching} /></CardContent>
+      </Card>
+    )
+  }
 
   return (
     <Card>
@@ -666,8 +692,10 @@ function SmtpCard() {
           SMTP / Email
         </CardTitle>
         <p className="text-xs text-muted">
-          Outbound email server used for alerts, scheduled reports, password resets, and other notifications.
-          Also configurable from the Gateways page.
+          Outbound email server used for alerts, scheduled reports, account notices, and other notifications.
+          {data?.smtp?.gateway_name
+            ? <> This is the default email gateway (“{data.smtp.gateway_name}”); channels bound to another gateway on the Gateways page keep their own server.</>
+            : <> Also configurable from the Gateways page.</>}
         </p>
       </CardHeader>
       <CardContent>
@@ -678,7 +706,7 @@ function SmtpCard() {
           <div className="md:col-span-2 flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
             <div>
               <p className="text-sm font-medium">Enabled</p>
-              <p className="text-xs text-muted">When off, the system won't attempt to send any email.</p>
+              <p className="text-xs text-muted">When off, nothing is sent through this gateway.</p>
             </div>
             <Switch
               checked={form.enabled}
@@ -726,14 +754,20 @@ function SmtpCard() {
             />
           </FormField>
 
-          <FormField label="Password / App password">
+          <FormField label="Password / App password" hint={passwordSet && !clearPassword ? 'A password is stored. Leave blank to keep it.' : undefined}>
             <Input
               type="password"
               value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-              placeholder={data?.smtp?.password ? '••••••••' : ''}
+              onChange={(e) => { setForm({ ...form, password: e.target.value }); if (e.target.value) setClearPassword(false) }}
+              placeholder={passwordSet && !clearPassword ? '•••••••• (unchanged)' : ''}
               autoComplete="new-password"
             />
+            {passwordSet && !form.password && (
+              <label className="mt-1.5 flex cursor-pointer items-center gap-2 text-xs text-muted">
+                <input type="checkbox" className="h-3.5 w-3.5 accent-primary" checked={clearPassword} onChange={(e) => setClearPassword(e.target.checked)} />
+                Remove the stored password (server without authentication)
+              </label>
+            )}
           </FormField>
 
           <FormField label="From address">
@@ -755,7 +789,7 @@ function SmtpCard() {
 
           <div className="md:col-span-2 mt-2 flex flex-col gap-2 border-t border-border pt-3 md:flex-row md:items-end md:justify-between">
             <div className="flex flex-1 items-end gap-2">
-              <FormField label="Send test email to" className="flex-1">
+              <FormField label="Send test email to" className="flex-1" hint="Tests the values shown above, saved or not.">
                 <Input
                   type="email"
                   value={testRecipient}

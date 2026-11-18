@@ -35,6 +35,12 @@ class User(Base):
     mfa_enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     mfa_last_counter: Mapped[int] = mapped_column(BigInteger, nullable=True)
     external_id: Mapped[str] = mapped_column(Text, nullable=True)
+    # Who decides a directory account's role (migrate-195). role_manual: an
+    # administrator set it by hand and sign-in keeps it; otherwise the provider's
+    # mapping is applied at every sign-in. directory_role: what the mapping gave
+    # at the last sign-in, applied or not. See app/services/role_source.py.
+    role_manual: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    directory_role: Mapped[str] = mapped_column(String(50), nullable=True)
     # Personal IANA time zone for on-call views and notices (migrate-164);
     # NULL = the appliance zone.
     timezone: Mapped[str] = mapped_column(String(64), nullable=True)

@@ -118,7 +118,8 @@ export function BackupsSection() {
   async function download(b: Backup) {
     try {
       toast.info('Preparing download…', b.kind === 'full' ? 'Full backups can be large' : undefined)
-      const res = await api.get(`/system/storage/backups/${b.id}/download`, { responseType: 'blob' })
+      // No timeout: a full backup takes longer than the 30 s default to arrive.
+      const res = await api.get(`/system/storage/backups/${b.id}/download`, { responseType: 'blob', timeout: 0 })
       const url = URL.createObjectURL(res.data)
       const a = document.createElement('a')
       a.href = url
@@ -136,6 +137,7 @@ export function BackupsSection() {
     try {
       await api.post('/system/storage/backups/upload', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 0,   // as large as the backup it restores
       })
       toast.success('Backup imported')
       invalidate()

@@ -39,7 +39,7 @@ from app.schemas.auth import (
     TokenResponse,
     UserResponse,
 )
-from app.services import auth_policy, oidc_service, session_service
+from app.services import auth_policy, oidc_service, role_source, session_service
 from app.services.audit_service import write_audit_log
 from app.services.external_auth import (
     EXTERNAL_PASSWORD_HASH,
@@ -153,8 +153,11 @@ async def _external_login(
                 detail=f"{source.upper()} sign-in succeeded, but no ZenPlus role is mapped for this account",
             )
         # A mapping can outlive its role (deleted, or a stale string). Never
-        # provision or refresh an account onto a role that does not exist.
-        if not await _role_exists(db, role):
+        # provision or refresh an account onto a role that does not exist. An
+        # account whose role an administrator set by hand does not take the
+        # mapped role, so a stale mapping does not lock it out.
+        keeps_own_role = existing is not None and bool(existing.role_manual)
+        if not keeps_own_role and not await _role_exists(db, role):
             logger.error("%s mapping for %r points at missing role %r", source, username, role)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -179,15 +182,18 @@ async def _external_login(
                 role=role,
                 is_active=True,
                 auth_source=source,
+                directory_role=role,
             )
             db.add(user)
             await db.flush()
             logger.info("provisioned %s user %r with role %r", source, username, role)
         else:
             user = existing
-            if user.role != role:
-                logger.info("%s user %r role refreshed %r -> %r", source, username, user.role, role)
-            user.role = role
+            # The mapping decides the role unless an administrator set one by
+            # hand (app.services.role_source); what it gives is recorded either way.
+            previous = role_source.apply_directory_role(user, role)
+            if previous is not None:
+                logger.info("%s user %r role refreshed %r -> %r", source, username, previous, role)
             if full_name:
                 user.full_name = full_name
             if email and email != user.email and await _email_available(db, email, own_id=user.id):
@@ -273,10 +279,28 @@ async def _complete_mfa(db: AsyncSession, user: User, code: str, policy: dict) -
                                     if h != totp.hash_recovery_code(code)]
 
 
+async def _find_user(db: AsyncSession, username: str) -> Optional[User]:
+    """The account a typed username means. Usernames are unique ignoring case
+    (users.py), and a directory matches them ignoring case too, so sign-in must:
+    an exact-case lookup let "JSmith" miss the disabled or scoped account
+    "jsmith" and be provisioned as a second, unrestricted one. Databases older
+    than the unique index (migrate-195) may still hold case variants: the exact
+    spelling wins, and an ambiguous one matches nobody."""
+    rows = (await db.execute(
+        select(User).where(func.lower(User.username) == username.lower()))).scalars().all()
+    exact = next((u for u in rows if u.username == username), None)
+    if exact is not None:
+        return exact
+    if len(rows) == 1:
+        return rows[0]
+    if rows:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    return None
+
+
 async def _login_impl(data: LoginRequest, db: AsyncSession, request: Optional[Request]):
     username = data.username.strip()
-    result = await db.execute(select(User).where(User.username == username))
-    user = result.scalar_one_or_none()
+    user = await _find_user(db, username)
     policy = await auth_policy.get_policy(db)
     now = datetime.now(timezone.utc)
 
@@ -530,7 +554,14 @@ async def _reauth(user: User, data: MfaReauthRequest, db: AsyncSession) -> None:
     if not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Password is incorrect")
     policy = await auth_policy.get_policy(db)
-    await _complete_mfa(db, user, data.code, policy)
+    try:
+        await _complete_mfa(db, user, data.code, policy)
+    except HTTPException as exc:
+        # A mistyped code here is a failed confirmation, not an expired session:
+        # 401 makes the browser sign the user out (dashboard/src/lib/api.ts).
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            raise HTTPException(status_code=400, detail=exc.detail)
+        raise
 
 
 @router.post("/mfa/disable")
@@ -670,7 +701,7 @@ async def _oidc_user(db: AsyncSession, cfg: dict, ident: dict, role: str) -> Use
     existing = (await db.execute(select(User).where(User.auth_source == "oidc", User.external_id == ident["sub"]))).scalar_one_or_none()
     if existing is not None:
         user = existing
-        user.role = role
+        role_source.apply_directory_role(user, role)
         if ident["full_name"]:
             user.full_name = str(ident["full_name"])[:255]
         email = (str(ident["email"]).strip().lower() if ident["email"] else None)
@@ -689,7 +720,7 @@ async def _oidc_user(db: AsyncSession, cfg: dict, ident: dict, role: str) -> Use
         email = f"{ident['username']}@oidc.external"
     user = User(username=ident["username"], email=email, password_hash=EXTERNAL_PASSWORD_HASH,
                 full_name=(str(ident["full_name"])[:255] if ident["full_name"] else None), role=role,
-                is_active=True, auth_source="oidc", external_id=ident["sub"])
+                is_active=True, auth_source="oidc", external_id=ident["sub"], directory_role=role)
     db.add(user)
     await db.flush()
     logger.info("provisioned oidc user %r with role %r", user.username, role)
@@ -720,7 +751,10 @@ async def oidc_callback(request: Request, db: AsyncSession = Depends(get_db),
         role, _rule = oidc_service.explain_group_role(cfg, ident["groups"])
         if role is None:
             raise oidc_service.OidcError("Sign-in succeeded, but no ZenPlus role is mapped for this account's groups")
-        if not await _role_exists(db, role):
+        linked = (await db.execute(select(User.role_manual).where(
+            User.auth_source == "oidc", User.external_id == ident["sub"]))).scalar_one_or_none()
+        # As for LDAP / RADIUS: a hand-set role does not depend on the mapped one.
+        if not linked and not await _role_exists(db, role):
             raise oidc_service.OidcError("The mapped ZenPlus role no longer exists; ask an administrator to fix the role mapping")
         user = await _oidc_user(db, cfg, ident, role)
         if not user.is_active:

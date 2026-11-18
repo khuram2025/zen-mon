@@ -511,6 +511,8 @@ async def update_role(
         # then carry directory mappings along in the same transaction.
         from sqlalchemy import update
         await db.execute(update(User).where(User.role == renamed_from).values(role=role.name))
+        # The role a directory last mapped an account to is a plain name (migrate-195).
+        await db.execute(update(User).where(User.directory_role == renamed_from).values(directory_role=role.name))
         migrated_refs = await role_references.rewrite_provider_role_references(db, renamed_from, role.name)
         changes["directory_references_migrated"] = migrated_refs
     await admin_guard.assert_admin_survives(db, admins_before)

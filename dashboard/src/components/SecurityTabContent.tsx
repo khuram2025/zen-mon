@@ -726,7 +726,7 @@ function HardeningCard({ status }: { status: TlsStatus }) {
       // If we just enabled HTTPS while browsing over HTTP, take the operator
       // to the secure origin (they may need to accept/trust the certificate).
       if (form.https_enabled && window.location.protocol === 'http:' && form.redirect_http) {
-        setTimeout(() => { window.location.href = `https://${window.location.host}${window.location.pathname}` }, 1500)
+        setTimeout(() => { window.location.href = `https://${window.location.host}${window.location.pathname}${window.location.search}` }, 1500)
       }
     },
     onError: (e: any) => toast.error('Apply failed', apiErrorMessage(e)),

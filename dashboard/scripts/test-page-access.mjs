@@ -64,8 +64,8 @@ for (const e of entries) {
   assert(e.personal || e.gates.length > 0, `${e.key} has no permission and is not personal`)
 }
 assert.deepEqual(entries.filter((e) => e.personal).map((e) => e.key).sort(), [
-  '/settings/general?tab=appearance', '/settings/general?tab=profile', '/settings/general?tab=support',
-], 'only the three personal Settings tabs are open to every account')
+  '/settings/general?tab=appearance', '/settings/general?tab=profile',
+], 'only the two personal Settings tabs are open to every account (Support needs system.admin, like its API)')
 // Parent gates travel with their children (NetFlow pages need netflow.view).
 assert.deepEqual(entries.find((e) => e.key === '/netflow/forensics').gates, [{ any: ['netflow.view'] }])
 assert.deepEqual(entries.find((e) => e.key === '/discovery/credentials').gates, [{ any: ['discovery.view'] }, { any: ['devices.manage', 'service_checks.manage'] }])
@@ -108,7 +108,7 @@ const menu = (perms, pages) => {
   }
   return out
 }
-const personal = ['/settings/general>/settings/general?tab=appearance', '/settings/general>/settings/general?tab=support', '/settings/general>/settings/general?tab=profile']
+const personal = ['/settings/general>/settings/general?tab=appearance', '/settings/general>/settings/general?tab=profile']
 assert.deepEqual(menu(viewer, ['/devices', '/maps/manual']), ['/devices', '/maps/manual', ...personal])
 assert.deepEqual(menu(viewer, ['/netflow/forensics']), ['/netflow>/netflow/forensics', ...personal], 'a section keeps only its listed pages')
 assert.deepEqual(menu(viewer, ['/apm']), personal, 'a listed page the permissions do not open stays hidden')

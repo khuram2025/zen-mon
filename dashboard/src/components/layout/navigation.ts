@@ -373,6 +373,7 @@ export const NAV_GROUPS: NavGroup[] = [
         selfGated: true,
         children: [
           settingsTab('company', 'Company', Building2, 'settings.manage'),
+          settingsTab('monitoring', 'Monitoring', Activity, 'settings.manage'),
           settingsTab('smtp', 'SMTP / Email', Mail, 'settings.manage'),
           { ...settingsTab('appearance', 'Appearance', Palette), personal: true },
           settingsTab('users', 'Users & Access', Users, ['users.view', 'users.manage', 'roles.view', 'roles.manage', 'system.admin']),
@@ -382,7 +383,7 @@ export const NAV_GROUPS: NavGroup[] = [
           settingsTab('storage', 'Storage', HardDrive, 'system.admin'),
           settingsTab('sensors', 'Sensors', Plug, 'settings.manage'),
           settingsTab('mibs', 'MIB Library', Upload, 'settings.manage'),
-          { ...settingsTab('support', 'Support', LifeBuoy), personal: true },
+          settingsTab('support', 'Support', LifeBuoy, 'system.admin'),
           { ...settingsTab('profile', 'My Profile', UserRound), personal: true },
         ],
       },

@@ -47,7 +47,8 @@ function pyList(name) {
 // ── every entry is gated by real permissions ───────────────────────────────
 const OPEN_TO_EVERY_ROLE = new Set([
   // Personal pages any signed-in account may use.
-  '/settings/general?tab=appearance', '/settings/general?tab=support', '/settings/general?tab=profile',
+  // Support is not one of them: every support-bundle route is administrator-only (system.admin).
+  '/settings/general?tab=appearance', '/settings/general?tab=profile',
 ])
 for (const group of NAV_GROUPS) {
   for (const item of group.items) {
@@ -106,7 +107,7 @@ const visible = (perms) => {
   const none = visible([])
   assert.deepEqual(none.groups, ['administration'])
   assert.deepEqual([...none.labels].sort(), [
-    'administration:Settings', 'administration:Settings:Appearance', 'administration:Settings:My Profile', 'administration:Settings:Support',
+    'administration:Settings', 'administration:Settings:Appearance', 'administration:Settings:My Profile',
   ])
   assert.equal(firstAllowedPath(NAV_GROUPS, canFromPermissions([])), '/settings/general?tab=appearance')
 }
