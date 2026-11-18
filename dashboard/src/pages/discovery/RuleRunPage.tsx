@@ -68,7 +68,7 @@ export function RuleRunPage() {
         <p className="mt-1 text-xs text-muted">
           Apply the active discovery rules to devices, servers and controller-managed switches and access points that
           are already monitored. Preview first: nothing changes until you apply. Rules set values and add tags; they
-          never delete anything or turn monitoring off. A rule set to revert puts back what it set on assets that no
+          never delete anything or turn monitoring off (except interfaces an ignore pattern names). A rule set to revert puts back what it set on assets that no
           longer match it.
         </p>
       </div>

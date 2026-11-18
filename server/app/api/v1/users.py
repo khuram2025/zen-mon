@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import admin_guard, delegation, password_policy
+from app.core import page_access as _page_access
 from app.core.database import get_db
 from app.core.permissions import (
     LEGACY_ROLE_PERMISSIONS,
@@ -25,7 +26,7 @@ from app.core.permissions import (
 from app.core.security import get_current_user, hash_password, require_permission
 from app.models.role import Role
 from app.models.user import User
-from app.services import session_service, tag_service
+from app.services import role_source, session_service, tag_service
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/users", tags=["User Management"])
@@ -176,6 +177,10 @@ class UserUpdate(BaseModel):
     email: Optional[str] = Field(None, max_length=255)
     full_name: Optional[str] = Field(None, max_length=255)
     role: Optional[str] = None
+    # Directory accounts only (app.services.role_source): "manual" keeps the
+    # role an administrator sets, "directory" hands it back to the provider's
+    # role mapping. Sending ``role`` for a directory account implies "manual".
+    role_source: Optional[str] = Field(None, pattern="^(manual|directory)$")
     is_active: Optional[bool] = None
     scope_tags: Optional[list[str]] = None
     must_change_password: Optional[bool] = None
@@ -212,6 +217,10 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     auth_source: str = "local"
+    # local | directory | manual (app.services.role_source), and for a
+    # directory account the role its provider's mapping gave at the last sign-in.
+    role_source: str = "local"
+    directory_role: Optional[str] = None
     scope_tags: list[str] = []
     # Scope inherited from the role (roles.scope_tags); filled by list/detail
     # endpoints. The effective scope is scope_tags plus these.
@@ -233,6 +242,8 @@ def _user_out(user: User, role_scopes: Optional[dict[str, list[str]]] = None) ->
     out = UserOut.model_validate(user)
     now = datetime.now(timezone.utc)
     out.locked = bool(user.locked_until and user.locked_until > now)
+    out.role_source = role_source.role_source(user)
+    out.directory_role = user.directory_role if role_source.is_external(user) else None
     if role_scopes is not None:
         out.role_scope_tags = list(role_scopes.get(user.role) or [])
     return out
@@ -406,11 +417,14 @@ async def access_review_export(
     w = csv.writer(buf)
     w.writerow(["username", "full_name", "email", "status", "locked", "auth_source", "role",
                 "permission_count", "privileged_permissions", "visibility_scope", "mfa_enabled",
-                "must_change_password", "last_sign_in_utc", "created_utc"])
+                "must_change_password", "last_sign_in_utc", "created_utc", "role_set_by", "directory_role"])
     now = datetime.now(timezone.utc)
     for u in users:
         role = roles.get(u.role)
-        perms = effective_permissions(role.permissions if role else LEGACY_ROLE_PERMISSIONS.get(u.role, []))
+        granted = list(role.permissions or []) if role else list(LEGACY_ROLE_PERMISSIONS.get(u.role, []))
+        if role is not None and SUPERUSER_PERMISSION not in granted:
+            granted = _page_access.restrict_permissions(granted, _page_access.normalize(role.page_access))
+        perms = effective_permissions(granted)
         risky = sorted(p for p in perms if risk_of(p) in ("privileged", "critical"))
         own_and_role = list(u.scope_tags or []) + [t for t in (role.scope_tags if role else None) or []
                                                     if t.lower() not in {x.lower() for x in (u.scope_tags or [])}]
@@ -424,7 +438,10 @@ async def access_review_export(
                     "yes" if (u.locked_until and u.locked_until > now) else "no", u.auth_source, u.role,
                     len(perms), " ".join(risky), cell(scope), "yes" if u.mfa_enabled else "no",
                     "yes" if u.must_change_password else "no",
-                    u.last_login.isoformat() if u.last_login else "", u.created_at.isoformat() if u.created_at else ""])
+                    u.last_login.isoformat() if u.last_login else "", u.created_at.isoformat() if u.created_at else "",
+                    {"local": "administrator", "manual": "administrator (directory account)",
+                     "directory": f"{u.auth_source} role mapping"}[role_source.role_source(u)],
+                    cell(u.directory_role or "") if role_source.is_external(u) else ""])
     await write_audit_log(db, actor=current_user, action="user.access_review_export", resource_type="user",
                           metadata={"accounts": len(users)})
     await db.commit()
@@ -703,24 +720,70 @@ async def update_user(
     changes: dict = {}
     access_changed = False
 
-    if "role" in fields and data.role is not None and data.role != user.role:
-        if user.auth_source != "local":
-            raise HTTPException(
-                status_code=409,
-                detail=f"This account's role is set by {user.auth_source.upper()} role mapping on every sign-in; "
-                       "change the mapping instead",
-            )
+    external = role_source.is_external(user)
+    source_before = role_source.role_source(user)
+    wants_role = data.role if ("role" in fields and data.role is not None) else None
+    wants_source = data.role_source if ("role_source" in fields and data.role_source is not None) else None
+    if wants_source is not None and not external:
+        if wants_source == role_source.DIRECTORY:
+            raise HTTPException(status_code=400, detail="A local account has no directory to take its role from")
+        wants_source = None  # a local account's role is always set by hand
+    if wants_source == role_source.DIRECTORY and wants_role is not None and wants_role != user.role:
+        raise HTTPException(
+            status_code=400,
+            detail="Either set a role by hand or let the directory decide it, not both in one change")
+    # A role set by hand on a directory account stays set by hand: without this
+    # the next sign-in would put the mapped role back and drop the change.
+    if external and wants_source is None and wants_role is not None and wants_role != user.role:
+        wants_source = role_source.MANUAL
+
+    if wants_role is not None and wants_role != user.role:
         if is_self:
             raise HTTPException(status_code=400, detail="You cannot change your own role")
         valid_roles = await _valid_role_names(db)
-        if data.role not in valid_roles:
+        if wants_role not in valid_roles:
             raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}")
-        new_role = await _role_by_name(db, data.role)
+        new_role = await _role_by_name(db, wants_role)
         if new_role is not None:
             await delegation.assert_can_assign_role(db, current_user, new_role)
-        changes["role"] = {"from": user.role, "to": data.role}
-        user.role = data.role
+        changes["role"] = {"from": user.role, "to": wants_role}
+        user.role = wants_role
         access_changed = True
+
+    if wants_source is not None and wants_source != source_before:
+        if is_self:
+            raise HTTPException(status_code=400, detail="You cannot change who decides your own role")
+        if wants_source == role_source.MANUAL:
+            # Keeping the current role by hand grants nothing new, but only
+            # someone who could assign that role may fix it in place.
+            kept = await _role_by_name(db, user.role)
+            if kept is not None and "role" not in changes:
+                await delegation.assert_can_assign_role(db, current_user, kept)
+            user.role_manual = True
+        else:
+            # Back to the directory. Its role is applied now when the last
+            # sign-in recorded one that still exists, otherwise at the next sign-in.
+            mapped = await _role_by_name(db, user.directory_role) if user.directory_role else None
+            if mapped is not None:
+                await delegation.assert_can_assign_role(db, current_user, mapped)
+                if mapped.name != user.role:
+                    changes["role"] = {"from": user.role, "to": mapped.name}
+                    user.role = mapped.name
+                    access_changed = True
+            else:
+                if not await delegation.is_full_admin(db, current_user):
+                    # What the directory will give is unknown, and only a full
+                    # administrator controls the mapping that decides it.
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Only a full administrator can hand this account's role back to the directory "
+                               "before the directory's role for it is known")
+                # The hand-set role must not outlive the decision: the account
+                # signs in again and takes whatever the mapping gives then.
+                access_changed = True
+            user.role_manual = False
+        changes["role_source"] = {"from": source_before, "to": wants_source,
+                                  "directory_role": user.directory_role}
 
     if "email" in fields and data.email is not None and data.email != user.email:
         await _assert_unique_identity(db, username=None, email=data.email, exclude_id=user.id)
@@ -948,6 +1011,10 @@ async def reset_user_mfa(
     """Remove a user's multi-factor enrolment (lost device). They re-enrol at
     next sign-in when policy requires it. Revokes all their sessions."""
     user = await _get_user_or_404(db, user_id)
+    if user.id == current_user.id:
+        # /auth/mfa/disable asks for the password and a code and honours the
+        # "MFA required" policy; this route would skip all three for yourself.
+        raise HTTPException(status_code=400, detail="Turn off your own two-step verification from your profile")
     await delegation.assert_can_manage_user(db, current_user, user, await _role_permissions(db, user.role))
     user.mfa_enabled = False
     user.mfa_secret_enc = None
@@ -974,7 +1041,12 @@ async def effective_access(
     role = await _role_by_name(db, user.role)
     granted = list(role.permissions or []) if role else list(LEGACY_ROLE_PERMISSIONS.get(user.role, []))
     full = SUPERUSER_PERMISSION in granted
+    if role is not None and not full:
+        # What the API enforces: a page list narrows the role's permissions.
+        granted = _page_access.restrict_permissions(granted, _page_access.normalize(role.page_access))
     eff = effective_permissions(granted)
+    directory_role = (await _role_by_name(db, user.directory_role)
+                      if role_source.is_external(user) and user.directory_role else None)
     modules = []
     for mid, label, perms in PERMISSION_MODULES:
         items = [{"id": pid, "label": pl, "granted": pid in eff, "explicit": pid in granted,
@@ -993,7 +1065,11 @@ async def effective_access(
     return {
         "user": _user_out(user, {user.role: role_scope}).model_dump(mode="json"),
         "role": {"name": user.role, "display_name": role.display_name if role else user.role,
-                 "exists": role is not None, "full_administration": full},
+                 "exists": role is not None, "full_administration": full,
+                 "source": role_source.role_source(user),
+                 "directory_role": directory_role.name if directory_role else None,
+                 "directory_role_display": (directory_role.display_name if directory_role
+                                            else user.directory_role if role_source.is_external(user) else None)},
         "permissions": modules,
         "permission_count": len(eff),
         "privileged_permissions": sorted(p for p in eff if risk_of(p) in ("privileged", "critical")),

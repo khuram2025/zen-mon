@@ -1,4 +1,4 @@
-# Discovery rules (phases 1 to 3)
+# Discovery rules (phases 1 to 4)
 
 Discovery rules classify what a discovery scan finds: auto-import it with the
 right group, template, tags and polling settings, keep it for review, or
@@ -12,7 +12,10 @@ inventory: through a previewed manual run, and to every device or server when
 it is added (see "Rules on inventory"). Phase 3 keeps assets in line when they
 or the rules change, reverts on un-match, holds large automatic changes for
 approval, covers controller-managed children, adds map and dependency
-actions, and exports/imports rules (see "Continuous rules").
+actions, and exports/imports rules (see "Continuous rules"). Phase 4 adds
+interface, topology, sensor/site and server-policy rules, service checks from
+templates, per-rule caps, the match-growth stop, scheduled runs and the
+Unmatched report (see "Phase 4").
 
 ## Rules
 
@@ -61,8 +64,10 @@ A rule is global (not owned by a discovery profile) and has:
   is 7.2.10, newer than 7.2.9; 7.2 equals 7.2.0).
 * **Missing facts** never satisfy a positive test. Negative operators are true
   for a missing value: an unknown vendor "does not equal Fortinet". Use
-  *is empty* / *is not empty* to test for the missing value itself. Preview
-  shows the effect before a rule is active.
+  *is empty* / *is not empty* to test for the missing value itself. A missing
+  yes/no fact is neither *is true* nor *is false* (a scan result has no "ping
+  on" fact, so it is not "ping off"). Preview shows the effect before a rule is
+  active.
 * **Regular expressions** are validated when the rule is saved: at most 200
   characters, no nested quantifiers such as `(a+)+` and no back-references,
   because Python's `re` has no time limit. They run against at most 2,048
@@ -80,6 +85,10 @@ A rule is global (not owned by a discovery profile) and has:
 | Add tags (devices, servers, children) | additive | `devices.manage` / `servers.manage` |
 | Add to network map (placed on the bottom row to be arranged; never removes an operator's node) | additive | `maps.manage` |
 | Depends on (uplink parent; adds a `topology_dependencies` row, alerts suppressed while the parent is down) | single, added only | `devices.manage` |
+| Monitor or ignore interfaces (devices; patterns on name, alias, ifDescr, IF-MIB type, speed) | additive, per interface | `devices.manage` |
+| Monitor from sensor (devices; adds a monitoring location) | additive | `devices.manage` |
+| Agent policy (servers with an agent) | single | `servers.manage` |
+| Add service check from template (devices) | additive | `service_checks.manage` |
 
 The permission follows the asset kinds the rule applies to: device settings
 need `devices.manage`, server settings `servers.manage`.
@@ -260,6 +269,98 @@ actions: they are sections of the monitoring policies planned in
 `docs/plans/device-templates-plan.md` (phase 4), reached from a rule through
 an "apply policy" action, so one thing never has two owners.
 
+## Phase 4
+
+**Interface rules.** The action "Monitor or ignore interfaces" takes up to 10
+patterns, each *monitor* or *ignore* plus one test: a case-insensitive regular
+expression on the name (ifName), alias or ifDescr, comma-separated IF-MIB type
+numbers (`24,53` = loopback, L3 VLAN), or a speed range in Mbit/s (`1000`,
+`100-1000`, `10000-`, `-100`; the configured speed wins over the reported
+one). For each interface the first matching pattern decides, rules in
+priority order and patterns in the rule's order; an interface nothing matches
+is left as it is. It writes `device_interfaces.monitored`, which interface
+alerts, link utilisation and reports honour (the poller keeps the flag across
+re-indexing, by name). Each interface is its own assignment (item key: the
+ifName in lower case, or `#<ifIndex>` when the name is empty or shared), so a
+hand edit is kept by a set-once rule, an enforce rule puts it back, undo and
+revert on un-match restore the previous value only if it is unchanged. This is
+the one action that can turn monitoring off, and only for interfaces, by an
+explicit *ignore*. New interfaces are picked up by the `changed` pass: while a
+rule uses interfaces, the device fingerprint includes its interface table.
+Writes take the poller's per-device interface lock first.
+
+**Topology facts** (devices): `neighbors` (hostnames of monitored LLDP/CDP
+neighbours), `neighbor_count` and `depends_on` (dependency parents). A
+neighbour counts only with *current evidence*, computed by the network maps'
+own code (`map_topology.build_adjacencies`): seen within 24 h and both ports
+present and up. Stale adjacencies are not neighbours. A controller-managed
+child's controller is the phase 3 fact `controller`.
+
+**Sensor and site facts** (devices): `sensors` (remote sensors monitoring the
+device, from `device_monitoring_vantages`), `sites` (their sites) and
+`controller_polling` (the controller itself polls it). Servers have `sites`
+(their own site). The action **Monitor from sensor** adds a
+`sensor_assignments` row like the device's Monitoring locations card. It is
+applied only for an enrolled, authorised sensor that is online or degraded;
+otherwise the item is `not_ready` and is planned again on the next manual,
+scheduled or changed run. As with the card, a device without an explicit
+monitoring choice is then polled by its sensors instead of the controller.
+The action never removes a location; undo and revert remove only the
+assignment the rule added. Built against main's sensor model; the HA and
+multi-site sensor work (not merged) may change how assignments are chosen.
+
+**Server rules.** Facts: `agent_policy` (the policy the server's agent runs),
+`baselines` (names of the enabled software baselines whose OS/site/tag scope
+covers the server, `baseline_service.baseline_in_scope`) and
+`baseline_status` (`compliant`, `non_compliant`, `not_evaluated`). The action
+**Agent policy** sets `agents.policy_id` for the server's agents (as the
+fleet bulk action does; the agent picks it up on its next heartbeat); servers
+without an agent are skipped, and a policy for another platform (a Windows
+policy for a Linux agent) is not applied (`not_ready`, with the reason). Software baselines are assigned by tag: a
+baseline applies to servers carrying all its tags, so a rule assigns one with
+**Add tags**; there is no separate baseline action.
+
+**Service check from template** (devices): creates the template's check
+(`service_check_service.apply_template`, named "<template> · <hostname>")
+unless a check of that name exists. Undo and revert on un-match never delete a
+created check (reported as `not_reversible`); delete it under Service Checks
+if unwanted. Service checks never take a license node.
+
+**Per-rule change cap and growth stop.** A rule's own `max_changes_per_run`
+(optional) and the match-growth stop join the engine-wide cap for automatic
+runs (`changed` and `scheduled`): a run waits for approval when it would
+change more values than the engine limit, more values from one rule than that
+rule's limit, or, for one rule, more assets *that it newly matches* than
+max(`growth_breaker_min`, `growth_breaker_pct` % of the assets it matched last
+time). "Newly matches" compares with the rule's matches recorded at each
+asset's last evaluation; a rule edit that only changes what the rule sets on
+the assets it already matched is covered by the caps, not the growth stop. For
+a scheduled run the count is limited to the growth of the rule's match count.
+A rule never evaluated before is covered by the caps only. The pending
+view lists the reasons. `last_match_count` is kept for `changed` rules from
+the asset state and for `scheduled` rules from each full run.
+
+**Scheduled runs.** Rules with the `scheduled` trigger evaluate the whole
+inventory at the times set in the engine settings: every 1, 2, 3, 4, 6, 8 or
+12 hours from `schedule_time`, or every 24, 48, 72 or 168 hours at
+`schedule_time` (168 h = Mondays), in `schedule_timezone`. The first slot
+after the schedule is turned on only marks the start; each later slot runs
+once (checked again under the apply lock, so two workers never both run it).
+The same caps and approval apply; while a scheduled run waits, later slots are
+skipped. `POST /schedule/run-now` runs them immediately. Scheduled runs do not
+change the `changed` pass's fingerprints.
+
+**Unmatched report.** `GET /unmatched` lists devices, servers and children no
+active rule matches (optionally counting Simulating rules), whatever the
+rules' triggers, with counts per kind; a tag-scoped viewer sees only their
+assets.
+
+**Facts that need extra queries** (interfaces, topology, sensors, baselines,
+service checks) are loaded only when a rule tests or writes them
+(`inventory.needs`); the fingerprint of the `changed` pass includes them
+under the same condition, so turning such a rule on re-evaluates the fleet
+once.
+
 ## Engine settings
 
 `system_settings['discovery_rules']`, edited on the Rules page:
@@ -270,7 +371,13 @@ an "apply policy" action, so one thing never has two owners.
 | `max_auto_import_per_run` | 50 | Auto-imports per scan or re-evaluation |
 | `license_reserve_nodes` | 0 | Nodes always left free for manual adds |
 | `history_days` | 180 | Rule-run history retention (minimum 7) |
-| `max_changes_per_run` | 100 | An automatic `changed` pass that would change more values waits for approval |
+| `max_changes_per_run` | 100 | An automatic run (`changed`, `scheduled`) that would change more values waits for approval |
+| `growth_breaker_pct` | 50 | Match-growth stop: one rule changing more assets than this % of its last match count waits for approval (0 = off) |
+| `growth_breaker_min` | 20 | ... but never below this many assets |
+| `schedule_enabled` | `false` | Run rules with the `scheduled` trigger |
+| `schedule_every_hours` | 24 | 1, 2, 3, 4, 6, 8, 12, 24, 48, 72 or 168 |
+| `schedule_time` | `02:00` | Local time of the first slot |
+| `schedule_timezone` | `UTC` | IANA time zone of `schedule_time` |
 
 ## Permissions and scope
 
@@ -285,9 +392,10 @@ an "apply policy" action, so one thing never has two owners.
   shown to a scoped viewer leaves out items about devices and servers outside
   the viewer's tags (scan results are not tag-scoped). The device/server
   explain view follows the asset's visibility.
-* Running rules on inventory, and undoing a run, need `discovery.manage_rules`
-  plus the permissions of the values written (`devices.manage`,
-  `servers.manage`).
+* Running rules on inventory, undoing a run, approving a held run and
+  "run scheduled rules now" need `discovery.manage_rules` plus the
+  permissions of the values written (`devices.manage`, `servers.manage`,
+  `maps.manage`, `service_checks.manage`).
 * A subnet-to-tag rule is how a newly imported device becomes visible to the
   right team: untagged devices stay hidden from scoped users.
 
@@ -315,6 +423,8 @@ Under `/api/v1/discovery-v2/rules`:
 | `GET /conflicts` | Overridden rules, rules that match nothing or never win |
 | `GET /history/{id}/pending`, `POST /history/{id}/approve`, `POST /history/{id}/reject` | Review a run held by the change cap |
 | `GET /export`, `POST /import` | Rules as JSON with references by name |
+| `GET /unmatched` | Assets no active rule matches |
+| `GET /schedule`, `POST /schedule/run-now` | Scheduled runs: next and last run; run now |
 | `GET /starter`, `POST /starter` | Starter rules, added as Drafts |
 
 ## Data
@@ -335,15 +445,37 @@ time). Imported and rule-set templates and device types are recorded in
 Migration 194: `facts_hash` on `discovery_engine_asset_state`, `plan` /
 `approved_by` / `approved_at` on runs, status `rejected`, asset kind `child`.
 
-## Not yet built
+Phase 4 needs no migration: it uses `discovery_engine_rules.max_changes_per_run`
+and `last_match_count` (migration 190), the existing run-item outcome
+`not_ready`, and `system_settings['discovery_rules_state']`
+(`last_scheduled_slot`, `last_scheduled_run_at`).
 
-A service check created from a template (deferred: creating monitored checks
-automatically needs its own review); a per-rule change cap and a match-growth
-breaker; the "apply policy" action (with the Device Templates plan's policy
-bundles); interface, topology, sensor/site and server-policy rules (phase 4).
+## Not built
+
+* The "apply policy" action: it comes with the Device Templates plan's
+  monitoring policies (NCCM, Device Tracker, maintenance, alert exclusions,
+  notification routing per class), so one thing never has two owners.
+* Interface *roles* as a fact or action: interface roles belong to Device
+  Templates phase 3 (not merged when phase 4 was built).
+* Sensor selection beyond adding an assignment (controller on/off, priority,
+  failover) waits for the HA and multi-site sensor work.
+* A separate software-baseline action: baselines are scoped by tags, which
+  rules already set.
 
 ## Tests
 
+* `server/tests/test_discovery_rules_phase4.py`: interface patterns and item
+  keys, the interface planner (first pattern wins, hand edits, revert), agent
+  policy without an agent, service checks never reverted, `needs`, the caps
+  and growth stop, schedule slots (also across a DST change).
+* `server/tests/test_discovery_rules_phase4_pg.py` (disposable PostgreSQL):
+  the phase 4 acceptance (interface rules with undo and hand edits, a new
+  interface picked up by the `changed` pass, neighbours with current evidence
+  only, monitor from sensor online/offline with site facts and undo, agent
+  policy and baseline facts with undo, service check from template kept on
+  undo, permissions, per-rule cap and growth stop with approval, scheduled
+  runs once per slot, over the cap and run now, settings validation,
+  Unmatched with tag scope, export/import by name).
 * `server/tests/test_discovery_rules_inventory.py`: the inventory change
   planner (new values, hand edits under set-once and enforce, tags, inline
   SNMP, servers, first match, digest) and inventory facts.

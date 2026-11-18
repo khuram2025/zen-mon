@@ -523,7 +523,7 @@ def test_password_policy_is_enforced_consistently(admin):
     assert admin.post(f"/users/{uid}/reset-password", json={"new_password": "password1234"}).status_code == 422
 
 
-def test_directory_owned_role_cannot_be_edited_via_the_user_api(admin):
+def test_directory_account_role_can_be_set_by_hand_but_its_password_cannot(admin):
     async def _insert():
         import asyncpg
         conn = await asyncpg.connect(os.environ.get("ZENPLUS_ACCESS_E2E_DSN",
@@ -535,8 +535,12 @@ def test_directory_owned_role_cannot_be_edited_via_the_user_api(admin):
         await conn.close()
         return str(row["id"])
     uid = asyncio.run(_insert())
+    # migrate-195: an administrator may set the role by hand; sign-in then keeps it
+    # (server/tests/test_directory_user_role.py covers the sign-in side).
     r = admin.put(f"/users/{uid}", json={"role": "operator"})
-    assert r.status_code == 409 and "LDAP" in r.text
+    assert r.status_code == 200 and r.json()["role"] == "operator" and r.json()["role_source"] == "manual", r.text
+    back = admin.put(f"/users/{uid}", json={"role_source": "directory"})
+    assert back.status_code == 200 and back.json()["role_source"] == "directory", back.text
     assert admin.post(f"/users/{uid}/reset-password", json={"new_password": STRONG}).status_code == 400
 
 

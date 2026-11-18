@@ -34,6 +34,9 @@ NAME_SOURCES: dict[str, tuple[str, str, str]] = {
     "discovery_profiles": ("discovery_profiles", "name", "name"),
     "manual_maps": ("manual_maps", "name", "updated_at DESC"),
     "devices": ("devices", "hostname", "hostname"),
+    "sensors": ("sensors", "name", "name"),
+    "agent_policies": ("agent_policies", "name", "name"),
+    "service_check_templates": ("service_check_templates", "name", "name"),
 }
 
 
@@ -91,6 +94,7 @@ async def export_rules(db: AsyncSession, rules: list[dict]) -> dict:
             "asset_kinds": r["asset_kinds"], "triggers": r["triggers"],
             "enforcement": r.get("enforcement", "set_once"), "on_unmatch": r.get("on_unmatch", "keep"),
             "stop_processing": r["stop_processing"],
+            "max_changes_per_run": r.get("max_changes_per_run"),
             "profiles": [ref("discovery_profiles", p) for p in r.get("profile_ids") or []] or None,
             "condition": cond, "actions": acts,
         })

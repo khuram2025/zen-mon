@@ -20,6 +20,7 @@ import { useAuth } from '@/stores/auth'
 import { useDirtyGuard } from '@/hooks/useDirtyGuard'
 
 const SOURCE_LABEL: Record<string, string> = { ldap: 'LDAP / Active Directory', radius: 'RADIUS', oidc: 'OpenID Connect single sign-on' }
+const SOURCE_SHORT: Record<string, string> = { ldap: 'LDAP', radius: 'RADIUS', oidc: 'SSO' }
 const EMAIL_RE = /^[^@\s<>()[\],;:\\"]+@[^@\s<>()[\],;:\\"]+\.[^@\s<>()[\],;:\\"]{2,}$/
 
 type Assignable = { name: string; display_name: string; description: string; permission_count: number; privileged: boolean; page_limited?: boolean }
@@ -29,6 +30,9 @@ type Assignable = { name: string; display_name: string; description: string; per
  *  - only roles the signed-in account may assign are offered (the server
  *    enforces the same ceiling);
  *  - edit sends only what changed, so a name edit never revokes sessions;
+ *  - a directory account (LDAP / RADIUS / OIDC) takes its role from the provider's
+ *    role mapping at every sign-in, or keeps a role set here by hand; the directory
+ *    always decides whether the account may sign in at all;
  *  - the visibility scope is an explicit choice (All resources / Selected tags)
  *    and is shown as locked for administrators, who bypass it;
  *  - password rules come from the API, so the form never promises less. */
@@ -62,6 +66,8 @@ export function UserFormDialog({ open, onOpenChange, user }: {
   const [password, setPassword] = useState('')
   const [password2, setPassword2] = useState('')
   const [role, setRole] = useState('viewer')
+  // Directory accounts: who decides the role (the provider's mapping, or this form).
+  const [roleSource, setRoleSource] = useState<'directory' | 'manual'>('directory')
   const [isActive, setIsActive] = useState(true)
   const [scopeMode, setScopeMode] = useState<'all' | 'tags'>('all')
   const [scopeTags, setScopeTags] = useState<string[]>([])
@@ -76,12 +82,20 @@ export function UserFormDialog({ open, onOpenChange, user }: {
     setFullName(user?.full_name || '')
     setPassword(''); setPassword2('')
     setRole(user?.role || 'viewer')
+    setRoleSource(user?.role_source === 'manual' ? 'manual' : 'directory')
     setIsActive(user?.is_active ?? true)
     setScopeTags(user?.scope_tags || [])
     setScopeMode((user?.scope_tags || []).length > 0 ? 'tags' : 'all')
     setMustChange(true)
     setErrors({}); setSubmitted(false)
   }, [open, user])
+
+  // A delegated manager may not be allowed to assign Viewer: start a new user on a role they can assign,
+  // instead of an empty select that fails with 403 on save.
+  useEffect(() => {
+    if (!open || isEdit || !assignable.data?.length) return
+    if (!assignable.data.some((r) => r.name === role)) setRole(assignable.data[0].name)
+  }, [open, isEdit, assignable.data]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const roleMeta = useMemo(() => {
     const m: Record<string, Role> = {}
@@ -96,6 +110,20 @@ export function UserFormDialog({ open, onOpenChange, user }: {
     ? [['all', 'Role scope only'], ['tags', 'Add tags for this user']]
     : [['all', 'All resources'], ['tags', 'Selected tags']]
   const roleAboveYou = isEdit && !!user && !roleOptions.some((r) => r.name === user.role) && assignable.isSuccess
+  const storedSource = user?.role_source === 'manual' ? 'manual' : 'directory'
+  const sourceChanged = isExternal && !isSelf && roleSource !== storedSource
+  // The role is editable for a local account, and for a directory account once it is set here.
+  const roleFromDirectory = isExternal && roleSource === 'directory'
+  const roleChanged = !isSelf && !roleFromDirectory && role !== user?.role
+  const directoryRole = user?.directory_role || null
+  const directoryRoleLabel = directoryRole ? roleMeta[directoryRole]?.display_name || directoryRole : null
+  const sourceShort = SOURCE_SHORT[source] || 'directory'
+
+  function chooseRoleSource(next: 'directory' | 'manual') {
+    setRoleSource(next)
+    // Following the directory shows what it gives (when known); setting by hand starts from the stored role.
+    setRole(next === 'directory' ? (storedSource === 'manual' && directoryRole ? directoryRole : user?.role || 'viewer') : (user?.role || 'viewer'))
+  }
 
   const pwCheck = usePasswordCheck(password, password2, { username: username.trim() || user?.username, email })
   const emailError = !email.trim() ? 'Email is required' : !EMAIL_RE.test(email.trim()) ? 'Enter a valid email address' : undefined
@@ -107,7 +135,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
   const dirty = isEdit
     ? email.trim().toLowerCase() !== (user?.email || '').toLowerCase()
       || (fullName.trim() || null) !== (user?.full_name || null)
-      || (!isExternal && !isSelf && role !== user?.role)
+      || roleChanged || sourceChanged
       || isActive !== (user?.is_active ?? true)
       || JSON.stringify([...effectiveScope].sort()) !== JSON.stringify([...(user?.scope_tags || [])].sort())
     : !!(username || email || fullName || password)
@@ -119,7 +147,8 @@ export function UserFormDialog({ open, onOpenChange, user }: {
         const payload: Record<string, unknown> = {}
         if (email.trim().toLowerCase() !== (user!.email || '').toLowerCase()) payload.email = email.trim()
         if ((fullName.trim() || null) !== (user!.full_name || null)) payload.full_name = fullName.trim() || null
-        if (!isExternal && !isSelf && role !== user!.role) payload.role = role
+        if (roleChanged) payload.role = role
+        if (sourceChanged) payload.role_source = roleSource
         if (isActive !== (user!.is_active ?? true)) payload.is_active = isActive
         if (JSON.stringify([...effectiveScope].sort()) !== JSON.stringify([...(user!.scope_tags || [])].sort())) payload.scope_tags = effectiveScope
         if (Object.keys(payload).length === 0) return { unchanged: true }
@@ -164,7 +193,7 @@ export function UserFormDialog({ open, onOpenChange, user }: {
             <DialogTitle>{isEdit ? `Edit user: ${user?.username}` : 'New local user'}</DialogTitle>
             <DialogDescription>
               {isExternal
-                ? `This account signs in through ${SOURCE_LABEL[source]}. Its password and role are managed by the directory and re-applied on every sign-in.`
+                ? `This account signs in through ${SOURCE_LABEL[source]}, which checks the password and decides whether the account may sign in. Its role follows the role mapping unless you set one here.`
                 : isEdit
                   ? 'Local account with a password stored on this appliance.'
                   : 'Creates a local account. Directory users are created automatically on their first sign-in.'}
@@ -177,11 +206,11 @@ export function UserFormDialog({ open, onOpenChange, user }: {
               <FormField label="Username" required hint={isEdit ? 'Usernames cannot be changed.' : '3–100 characters. Used to sign in; unique ignoring case.'} error={(submitted || username) ? (errors.username || usernameError) : errors.username}>
                 <Input value={username} onChange={(e) => { setUsername(e.target.value); setErrors({}) }} disabled={isEdit} placeholder="jsmith" autoComplete="off" autoFocus={!isEdit} aria-invalid={!!(errors.username || usernameError)} />
               </FormField>
-              <FormField label="Full name">
+              <FormField label="Full name" hint={isExternal && source !== 'radius' ? 'Updated from the directory at each sign-in when it supplies a name.' : undefined}>
                 <Input value={fullName} maxLength={255} onChange={(e) => setFullName(e.target.value)} placeholder="John Smith" />
               </FormField>
             </div>
-            <FormField label="Email" required error={(submitted || email) ? (errors.email || emailError) : errors.email}>
+            <FormField label="Email" required hint={isExternal && source !== 'radius' ? 'Updated from the directory at each sign-in when it supplies an address.' : undefined} error={(submitted || email) ? (errors.email || emailError) : errors.email}>
               <Input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setErrors({}) }} placeholder="user@example.com" autoComplete="off" aria-invalid={!!(errors.email || emailError)} />
             </FormField>
 
@@ -196,19 +225,42 @@ export function UserFormDialog({ open, onOpenChange, user }: {
               </>
             )}
 
+            {isExternal && (
+              <fieldset className="space-y-1.5">
+                <legend className="mb-1 text-sm font-medium">Role is decided by</legend>
+                <div role="radiogroup" aria-label="Role is decided by" className="inline-flex overflow-hidden rounded-md border border-border text-xs">
+                  {([['directory', `${sourceShort} role mapping`], ['manual', 'An administrator (set here)']] as const).map(([v, label]) => (
+                    <button key={v} type="button" role="radio" aria-checked={roleSource === v} disabled={isSelf || roleAboveYou}
+                      onClick={() => chooseRoleSource(v)}
+                      className={cn('px-3 py-1.5 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60', roleSource === v ? 'bg-primary text-white' : 'bg-surface text-muted hover:bg-surface2')}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted">
+                  {roleSource === 'directory'
+                    ? storedSource === 'manual'
+                      ? directoryRoleLabel
+                        ? `Saving applies the role the mapping gives this account (${directoryRoleLabel}) and signs it out. From then on the mapping is applied at every sign-in.`
+                        : 'The role the mapping gives this account is not known yet. Saving signs the account out; it takes the mapped role at its next sign-in.'
+                      : 'The role mapping in Authentication is applied at every sign-in. Choose “An administrator” to give this account a different role.'
+                    : `The role below is kept at every sign-in. The directory still decides whether this account may sign in${directoryRoleLabel ? `; its mapping gives ${directoryRoleLabel}` : ''}.`}
+                </p>
+              </fieldset>
+            )}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <FormField
                 label="Role"
                 hint={
-                  isExternal ? 'Set by the directory role mapping; change the mapping instead.'
-                  : isSelf ? 'You cannot change your own role.'
+                  isSelf ? 'You cannot change your own role.'
+                  : roleFromDirectory && !roleAboveYou ? `From the ${sourceShort} role mapping.`
                   : roleAboveYou ? 'This account has more access than you do, so only a higher administrator can change it.'
                   : roleIsAdmin ? 'Full administration: sees everything and bypasses visibility scope.'
                   : roleMeta[role]?.description || undefined
                 }
               >
                 {/* Radix reports '' while the options are still loading; never store it as the role. */}
-                <Select value={role} onValueChange={(v) => { if (v) setRole(v) }} disabled={isExternal || isSelf || roleAboveYou || assignable.isLoading}>
+                <Select value={role} onValueChange={(v) => { if (v) setRole(v) }} disabled={roleFromDirectory || isSelf || roleAboveYou || assignable.isLoading}>
                   <SelectTrigger aria-label="Role"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {(currentRoleInList || !isEdit || !role ? roleOptions : [{ name: role, display_name: roleMeta[role]?.display_name || role }, ...roleOptions]).map((r) => (

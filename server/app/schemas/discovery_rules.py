@@ -6,10 +6,10 @@ from datetime import datetime
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 RuleMode = Literal["draft", "simulate", "active", "disabled"]
-Trigger = Literal["discovery", "created", "changed"]
+Trigger = Literal["discovery", "created", "changed", "scheduled"]
 Enforcement = Literal["set_once", "enforce"]
 AssetKind = Literal["device", "server", "child"]
 OnUnmatch = Literal["keep", "revert"]
@@ -35,6 +35,9 @@ class RuleIn(BaseModel):
     # manual runs): keep the values the rule set, or revert them to what they
     # were if they are still as the rule set them.
     on_unmatch: OnUnmatch = "keep"
+    # Automatic runs ("changed", "scheduled") in which this rule would make
+    # more changes wait for approval. None: only the engine-wide limit.
+    max_changes_per_run: Optional[int] = Field(default=None, ge=1, le=100000)
 
 
 class RuleCreate(RuleIn):
@@ -69,6 +72,7 @@ class RuleOut(BaseModel):
     stop_processing: bool
     enforcement: str = "set_once"
     on_unmatch: str = "keep"
+    max_changes_per_run: Optional[int] = None
     revision: int
     created_by: Optional[UUID] = None
     updated_by: Optional[UUID] = None
@@ -95,6 +99,35 @@ class EngineSettings(BaseModel):
     license_reserve_nodes: int = Field(default=0, ge=0, le=100000)
     history_days: int = Field(default=180, ge=7, le=3650)
     max_changes_per_run: int = Field(default=100, ge=1, le=100000)
+    growth_breaker_pct: int = Field(default=50, ge=0, le=10000)
+    growth_breaker_min: int = Field(default=20, ge=0, le=100000)
+    schedule_enabled: bool = False
+    schedule_every_hours: int = 24
+    schedule_time: str = Field(default="02:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    schedule_timezone: str = Field(default="UTC", max_length=64)
+
+    @field_validator("schedule_every_hours")
+    @classmethod
+    def _every(cls, v: int) -> int:
+        from app.services.discovery_rules.reconcile import SCHEDULE_HOURS
+        if v not in SCHEDULE_HOURS:
+            raise ValueError("schedule_every_hours is one of " + ", ".join(map(str, SCHEDULE_HOURS)))
+        return v
+
+    @field_validator("schedule_timezone")
+    @classmethod
+    def _tz(cls, v: str) -> str:
+        from zoneinfo import ZoneInfo
+        try:
+            ZoneInfo(v)
+        except Exception:
+            raise ValueError("Unknown time zone") from None
+        return v
+
+
+class UnmatchedRequest(BaseModel):
+    kinds: list[AssetKind] = Field(default_factory=lambda: ["device", "server"], min_length=1)
+    include_simulating: bool = False
 
 
 class PreviewRule(RuleIn):

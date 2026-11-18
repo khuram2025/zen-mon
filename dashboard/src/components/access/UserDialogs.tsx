@@ -83,7 +83,11 @@ export function ResetPasswordDialog({ user, onClose }: { user: User | null; onCl
 
 type EffectiveAccess = {
   user: User
-  role: { name: string; display_name: string; exists: boolean; full_administration: boolean }
+  role: {
+    name: string; display_name: string; exists: boolean; full_administration: boolean
+    /** local | directory (the provider's mapping at every sign-in) | manual (set by hand on a directory account). */
+    source?: 'local' | 'directory' | 'manual'; directory_role?: string | null; directory_role_display?: string | null
+  }
   permissions: { module: string; label: string; granted_count: number; total: number; permissions: { id: string; label: string; granted: boolean; risk: string }[] }[]
   permission_count: number
   privileged_permissions: string[]
@@ -141,7 +145,16 @@ export function UserDetailDialog({ user, onClose, canManage }: { user: User | nu
                 <>
                   <dl className="grid grid-cols-[130px_1fr] gap-y-1.5 text-sm">
                     <dt className="text-xs text-muted">Role</dt>
-                    <dd>{a.role.display_name} {a.role.full_administration && <Badge variant="warning"><ShieldAlert className="h-3 w-3" /> Full administration</Badge>} {!a.role.exists && <Badge variant="danger">Role missing — no access</Badge>}</dd>
+                    <dd>
+                      {a.role.display_name} {a.role.full_administration && <Badge variant="warning"><ShieldAlert className="h-3 w-3" /> Full administration</Badge>} {!a.role.exists && <Badge variant="danger">Role missing — no access</Badge>}
+                      {a.role.source === 'directory' && <div className="text-xs text-muted">From the {(a.user.auth_source || '').toUpperCase()} role mapping, applied at every sign-in.</div>}
+                      {a.role.source === 'manual' && (
+                        <div className="text-xs text-muted">
+                          Set by an administrator and kept at every sign-in.
+                          {a.role.directory_role_display ? ` The ${(a.user.auth_source || '').toUpperCase()} role mapping gives ${a.role.directory_role_display}.` : ' The directory’s role for this account has not been recorded yet.'}
+                        </div>
+                      )}
+                    </dd>
                     <dt className="text-xs text-muted">Sign-in</dt>
                     <dd>{(a.user.auth_source || 'local').toUpperCase()} {a.user.mfa_enabled ? '· MFA on' : '· no MFA'} {a.user.locked && <Badge variant="danger">Locked</Badge>} {a.user.must_change_password && <Badge variant="outline">Password change pending</Badge>}</dd>
                     <dt className="text-xs text-muted">Visibility</dt>

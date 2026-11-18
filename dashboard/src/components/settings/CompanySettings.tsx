@@ -20,6 +20,7 @@ import { FormField } from '@/components/ui/FormField'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
+import { QueryFailure } from '@/components/ui/QueryState'
 
 type LogoVariant = 'light' | 'dark'
 type LogoMeta = { content_type: string; filename: string; size: number; updated_at: string } | null
@@ -71,10 +72,11 @@ function fmtBytes(n: number) {
 
 export function CompanySettings() {
   const qc = useQueryClient()
-  const { data, isLoading } = useQuery<CompanyResponse>({
+  const companyQuery = useQuery<CompanyResponse>({
     queryKey: ['settings', 'company'],
     queryFn: async () => (await api.get('/settings/company')).data,
   })
+  const { data, isLoading } = companyQuery
   const saved = useMemo(() => pick(data), [data])
   const [form, setForm] = useState<CompanyForm>(EMPTY)
   // Refetches after a logo upload or removal change only the logo metadata:
@@ -104,8 +106,11 @@ export function CompanySettings() {
   const invalid = Boolean(colorError || emailError || websiteError || baseUrlError)
 
   const save = useMutation({
-    mutationFn: async () => (await api.put('/settings/company', form)).data,
-    onSuccess: () => {
+    mutationFn: async (sent: CompanyForm) => (await api.put('/settings/company', sent)).data,
+    onSuccess: (_res, sent) => {
+      // The server trims text and drops a trailing "/" from the appliance URL. Treat what was sent as the
+      // baseline, so the reload below shows the stored values instead of leaving "Unsaved changes" forever.
+      lastSaved.current = sent
       toast.success('Company settings saved', 'New reports use the updated branding and formats.')
       qc.invalidateQueries({ queryKey: ['settings', 'company'] })
       qc.invalidateQueries({ queryKey: ['settings', 'timezone'] })
@@ -117,9 +122,14 @@ export function CompanySettings() {
 
   const logos = data?.logos ?? { light: null, dark: null }
 
+  // Never show an empty form over settings that failed to load: saving it would blank the real ones.
+  if (companyQuery.isError && !data) {
+    return <QueryFailure error={companyQuery.error} what="the company settings" onRetry={() => void companyQuery.refetch()} retrying={companyQuery.isFetching} />
+  }
+
   return (
     <form
-      onSubmit={(e: FormEvent) => { e.preventDefault(); if (!invalid) save.mutate() }}
+      onSubmit={(e: FormEvent) => { e.preventDefault(); if (!invalid) save.mutate(form) }}
       className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_380px]"
     >
       <div className="min-w-0 space-y-4">
@@ -428,7 +438,7 @@ function TimezonePicker({ value, onChange }: { value: string; onChange: (tz: str
           </div>
           <div role="listbox" className="max-h-72 overflow-y-auto py-1">
             {filtered.length === 0 && <div className="px-2 py-3 text-center text-xs text-muted">No matching timezone</div>}
-            {filtered.slice(0, 400).map((z) => (
+            {filtered.map((z) => (
               <button
                 key={z}
                 type="button"
