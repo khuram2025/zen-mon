@@ -82,7 +82,7 @@ def _content(data: TemplateContent) -> dict:
         d["match_rules"].pop("require_sys_descr", None)
     d["oid_groups"] = [g.model_dump(exclude_none=True) for g in data.oid_groups]
     d.setdefault("match_priority", 100)
-    for f in ("vendor", "description", "device_type", "icon"):
+    for f in ("vendor", "description", "device_type", "icon", "interface_roles", "rule_pack"):
         d.setdefault(f, None)
     return d
 
@@ -279,9 +279,11 @@ async def _create(db: AsyncSession, content: dict, user: User, *, action: str,
         await svc.check_device_type(db, content.get("device_type"))
     row = (await db.execute(text(f"""
         INSERT INTO device_profiles (name, vendor, description, match_rules, oid_groups, builtin, device_type, icon,
-                                     match_priority, parent_id, overlay, parent_hash, updated_by)
+                                     match_priority, parent_id, overlay, parent_hash, updated_by,
+                                     interface_roles, rule_pack)
         VALUES (:name, :vendor, :desc, CAST(:mr AS jsonb), CAST(:g AS jsonb), FALSE, :dt, :icon, :prio,
-                CAST(:parent AS uuid), CAST(:ov AS jsonb), :ph, (SELECT id FROM users WHERE id = :uid))
+                CAST(:parent AS uuid), CAST(:ov AS jsonb), :ph, (SELECT id FROM users WHERE id = :uid),
+                CAST(:roles AS jsonb), CAST(:pack AS jsonb))
         RETURNING id
     """), {"name": content["name"].strip(), "vendor": content.get("vendor"), "desc": content.get("description"),
            "mr": json.dumps(content.get("match_rules") or {}), "g": json.dumps(content.get("oid_groups") or []),
@@ -289,7 +291,9 @@ async def _create(db: AsyncSession, content: dict, user: User, *, action: str,
            "prio": int(content.get("match_priority") or 100),
            "parent": str(parent["id"]) if parent else None,
            "ov": json.dumps(overlay_doc) if parent else None,
-           "ph": parent.get("content_hash") if parent else None, "uid": getattr(user, "id", None)})).first()
+           "ph": parent.get("content_hash") if parent else None, "uid": getattr(user, "id", None),
+           "roles": json.dumps(content["interface_roles"]) if content.get("interface_roles") is not None else None,
+           "pack": json.dumps(content["rule_pack"]) if content.get("rule_pack") is not None else None})).first()
     pid = row[0]
     await db.execute(text(f"UPDATE device_profiles SET content_hash = {svc.HASH_SQL} WHERE id = :id"), {"id": pid})
     fresh = await svc.get(db, pid)
@@ -464,6 +468,11 @@ async def delete_profile(profile_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if children:
         raise HTTPException(status_code=409, detail=f"Templates customised from this one must be deleted first: "
                                                     f"{', '.join(children)}")
+    rules = (await db.execute(text("SELECT name FROM alert_rules WHERE profile_id = :id ORDER BY name"),
+                              {"id": profile_id})).scalars().all()
+    if rules:
+        raise HTTPException(status_code=409, detail="Alert rules are scoped to this template; delete them or change "
+                                                    f"their scope first: {', '.join(rules[:10])}")
     devices = await svc.device_ids_on(db, profile_id)
     if devices:
         await db.execute(text("DELETE FROM device_template_values WHERE device_id = ANY(CAST(:ids AS uuid[]))"),
@@ -485,6 +494,10 @@ async def clone_profile(profile_id: uuid.UUID, db: AsyncSession = Depends(get_db
     content = svc.content_of(src)
     content["name"] = await svc.unique_name(db, f"{src['name']} (copy)")
     content["match_priority"] = int(src.get("match_priority") or 100)
+    from app.services.device_templates import family as tfamily
+    fam = await tfamily.load(db)
+    content["interface_roles"] = fam.roles(src["id"])
+    content["rule_pack"] = fam.pack(src["id"])
     return await _create(db, content, user, action="cloned", reason=f"Copied from '{src['name']}' revision {src['revision']}")
 
 
@@ -503,6 +516,8 @@ async def customize_profile(profile_id: uuid.UUID, data: TemplateCustomizeReques
     content = svc.content_of(parent)
     content["name"] = (data.name or "").strip() or await svc.unique_name(db, f"{parent['name']} (customised)")
     content["match_priority"] = min(int(parent.get("match_priority") or 100) + 10, 1000)
+    # Interface roles and recommended rules stay the parent's (and follow its updates).
+    content["interface_roles"] = content["rule_pack"] = None
     resp = await _create(db, content, user, action="customized", parent=parent, overlay_doc={},
                          reason=f"Customised from '{parent['name']}' revision {parent['revision']}")
     if data.move_devices:
@@ -638,3 +653,120 @@ async def accept_suggestions(data: UnassignRequest, db: AsyncSession = Depends(g
 
 def _unused() -> tuple:  # keep imports used for type checkers of re-exported schemas
     return (MatchRules, OidGroup)
+
+
+# ── Recommended alert rules (migrate-193, app.services.rule_packs) ─────────
+
+class PackAcceptBody(BaseModel):
+    enabled: bool = True
+    notify_channels: list[str] = Field(default_factory=list, max_length=50)
+    # Narrow the accepted rule to one group (with the template scope).
+    group_id: Optional[uuid.UUID] = None
+
+
+async def _pack_item(db: AsyncSession, profile_id, key: str) -> tuple[dict, dict, list[dict]]:
+    from app.services import rule_packs
+    from app.services.device_templates import family as tfamily
+    row = await svc.get_or_404(db, profile_id)
+    items = await rule_packs.state(db, row, await tfamily.load(db))
+    item = rule_packs.find(items, key)
+    if item is None:
+        raise HTTPException(status_code=404, detail="This template has no such recommendation")
+    return row, item, items
+
+
+@router.get("/profiles/{profile_id}/recommended")
+async def recommended_rules(profile_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    """The template's recommended alert rules: available, accepted (with the rule) or
+    changed since accepted (Apply / Keep). Nothing is created until accepted."""
+    from app.services import rule_packs
+    from app.services.device_templates import family as tfamily
+    row = await svc.get_or_404(db, profile_id)
+    return {"items": await rule_packs.state(db, row, await tfamily.load(db))}
+
+
+@router.post("/profiles/{profile_id}/recommended/{key}/accept", status_code=201)
+async def accept_recommended_rule(profile_id: uuid.UUID, key: str, data: PackAcceptBody,
+                                  db: AsyncSession = Depends(get_db),
+                                  user: User = Depends(require_permission("alerts.manage"))):
+    """Create one ordinary alert rule from a recommendation, scoped to this template."""
+    from app.api.v1 import alert_rules as rules_api
+    from app.services import rule_packs
+    row, item, _ = await _pack_item(db, profile_id, key)
+    if item["accepted"]:
+        raise HTTPException(status_code=409, detail="This recommendation is already accepted"
+                            + ("" if item["accepted"]["on_this_template"]
+                               else f" on {item['accepted']['template_name']}, which covers this template"))
+    f = rule_packs.rule_fields(item)
+    body = rules_api.AlertRuleCreate(
+        name=f"{row['name']}: {item['name']}"[:255],
+        description=(item.get("description") or "") + " Accepted from the template's recommended rules.",
+        enabled=data.enabled, metric=f["metric"], operator=f["operator"], threshold=f["threshold"],
+        conditions=[rules_api.ConditionItem(**c) for c in f["conditions"]],
+        min_duration=f["min_duration"], clear_duration=f["clear_duration"], severity=f["severity"],
+        priority=f["priority"], if_role=f["if_role"], profile_id=profile_id, group_id=data.group_id,
+        notify_channels=data.notify_channels, recovery_alert=True,
+    )
+    created = await rules_api.create_alert_rule(body, db, user)
+    try:
+        await db.execute(text("UPDATE alert_rules SET pack_key = :k, pack_accepted = CAST(:acc AS jsonb) WHERE id = :id"),
+                         {"k": key, "acc": rule_packs.accepted_record(item), "id": created["id"]})
+        await db.commit()
+    except Exception:
+        # Accepted at the same moment by someone else: keep theirs.
+        await db.rollback()
+        await db.execute(text("DELETE FROM alert_rules WHERE id = :id"), {"id": created["id"]})
+        await db.commit()
+        raise HTTPException(status_code=409, detail="This recommendation was just accepted") from None
+    return {**created, "pack_key": key}
+
+
+async def _accepted_rule(item: dict) -> str:
+    acc = item.get("accepted")
+    if not acc:
+        raise HTTPException(status_code=409, detail="This recommendation is not accepted")
+    if not acc["on_this_template"]:
+        raise HTTPException(status_code=409, detail=f"The rule belongs to {acc['template_name']}; change it there")
+    return acc["rule_id"]
+
+
+@router.post("/profiles/{profile_id}/recommended/{key}/apply")
+async def apply_recommended_change(profile_id: uuid.UUID, key: str, db: AsyncSession = Depends(get_db),
+                                   user: User = Depends(require_permission("alerts.manage"))):
+    """Update the accepted rule to the current recommendation (threshold, holds, severity, priority)."""
+    from app.api.v1 import alert_rules as rules_api
+    from app.services import rule_packs
+    _, item, _ = await _pack_item(db, profile_id, key)
+    rule_id = await _accepted_rule(item)
+    f = rule_packs.rule_fields(item)
+    upd = rules_api.AlertRuleUpdate(
+        operator=f["operator"], threshold=f["threshold"],
+        conditions=[rules_api.ConditionItem(**c) for c in f["conditions"]],
+        min_duration=f["min_duration"], clear_duration=f["clear_duration"], severity=f["severity"],
+        priority=f["priority"], if_role=f["if_role"])
+    out = await rules_api.update_alert_rule(uuid.UUID(rule_id), upd, db, user)
+    await db.execute(text("UPDATE alert_rules SET pack_accepted = CAST(:acc AS jsonb) WHERE id = :id"),
+                     {"acc": rule_packs.accepted_record(item), "id": rule_id})
+    await db.commit()
+    return out
+
+
+@router.post("/profiles/{profile_id}/recommended/{key}/keep")
+async def keep_accepted_rule(profile_id: uuid.UUID, key: str, db: AsyncSession = Depends(get_db),
+                             user: User = Depends(require_permission("alerts.manage"))):
+    """Keep the accepted rule as it is and stop showing the changed recommendation."""
+    from app.services import alert_rule_scope as rs
+    from app.services import rule_packs
+    from app.services.audit_service import write_audit_log
+    _, item, _ = await _pack_item(db, profile_id, key)
+    rule_id = await _accepted_rule(item)
+    rule = await rs.rule_row(db, rule_id)
+    await rs.guard_rule_change(db, user, rule)
+    await db.execute(text("UPDATE alert_rules SET pack_accepted = CAST(:acc AS jsonb) WHERE id = :id"),
+                     {"acc": rule_packs.accepted_record(item), "id": rule_id})
+    await write_audit_log(db, actor=user, action="alert_rule.recommendation_kept", resource_type="alert_rule",
+                          resource_id=rule_id, metadata={"name": rule.get("name"), "pack_key": key,
+                                                         "changes": item.get("changes")})
+    await db.commit()
+    return {"rule_id": rule_id, "status": "accepted"}

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bell, BellOff, Copy, Eye, Pencil, Plus, Trash2, Zap } from 'lucide-react'
+import { Bell, BellOff, Copy, Eye, Pencil, Plus, SlidersHorizontal, Trash2, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -12,6 +12,8 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
 import { AlertMessagePreviewDialog } from '@/components/alerts/AlertMessagePreviewDialog'
 import { RuleExclusionsDialog } from '@/components/alerts/RuleExclusions'
+import { RuleOverridesDialog } from '@/components/alerts/RuleOverrides'
+import { roleLabel, ruleTakesOverrides } from '@/components/alerts/thresholdModel'
 import { exclusionBadge } from '@/components/alerts/exclusionModel'
 import { toast } from '@/components/ui/Toast'
 import { NETFLOW_METRIC_BY_KEY, formFromRule, isNetflowMetric, summarizeNetflowForm, type NetflowMetric } from '@/components/forms/netflowAlertRule'
@@ -91,6 +93,8 @@ export function AlertRulesPage() {
   const [previewing, setPreviewing] = useState<any>(null)
   // The assets a shared rule is turned off for (per-device/server exclusions).
   const [exclusionsOf, setExclusionsOf] = useState<any>(null)
+  // Per-device/server/group threshold, hold and priority changes (alert_rule_overrides).
+  const [overridesOf, setOverridesOf] = useState<any>(null)
 
   const policiesQ = usePolicies()
   const { data: rules, isError, error } = useQuery<any[]>({
@@ -200,7 +204,7 @@ export function AlertRulesPage() {
                   <Th>Severity</Th>
                   <Th>Reset</Th>
                   <Th>Created</Th>
-                  <Th className="w-36 text-right">Actions</Th>
+                  <Th className="w-40 text-right">Actions</Th>
                 </Tr>
               </THead>
               <TBody>
@@ -244,6 +248,11 @@ export function AlertRulesPage() {
                     </Td>
                     <Td>
                       <Badge variant="outline" className="text-2xs">{scopeLabel(r, serverNames)}</Badge>
+                      {(r.profile_id || r.if_role) && (
+                        <div className="mt-1 text-2xs text-muted" title={r.pack_key ? 'Accepted from a template’s recommended rules' : undefined}>
+                          {[r.profile_id ? 'Template devices' : null, r.if_role ? `${roleLabel(r.if_role)} interfaces` : null].filter(Boolean).join(' · ')}
+                        </div>
+                      )}
                       {exclusionBadge(r.exclusion_count) && (
                         <button type="button" onClick={() => setExclusionsOf(r)}
                           className="mt-1 flex items-center gap-1 text-2xs font-medium text-warning hover:underline"
@@ -283,6 +292,12 @@ export function AlertRulesPage() {
                           }}>
                           <Zap className="h-3.5 w-3.5 text-amber-500" />
                         </Button>
+                        {ruleTakesOverrides(r) && (
+                          <Button variant="ghost" size="icon" className="h-7 w-7" title="Overrides: other thresholds, holds or priority for some devices, servers or groups"
+                            aria-label={`Overrides of ${r.name}`} onClick={() => setOverridesOf(r)}>
+                            <SlidersHorizontal className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         <Button variant="ghost" size="icon" className="h-7 w-7" title="Duplicate"
                           onClick={() => duplicate.mutate(r)}>
                           <Copy className="h-3.5 w-3.5" />
@@ -317,6 +332,11 @@ export function AlertRulesPage() {
         open={!!exclusionsOf}
         onOpenChange={(o) => !o && setExclusionsOf(null)}
         rule={exclusionsOf}
+      />
+      <RuleOverridesDialog
+        open={!!overridesOf}
+        onOpenChange={(o) => !o && setOverridesOf(null)}
+        rule={overridesOf}
       />
       <AlertMessagePreviewDialog
         open={!!previewing}

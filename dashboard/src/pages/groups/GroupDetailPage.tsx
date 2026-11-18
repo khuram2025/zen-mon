@@ -82,6 +82,8 @@ function GroupView({ group: g, canManage, onEdit }: { group: DeviceGroup & { use
   const u = g.used_by
   const usedLists: [string, { id: string; name: string | null }[], (x: any) => string][] = [
     ['Alert rules', u.alert_rules, () => '/alert-rules'],
+    ['Alert rule overrides', (u.alert_overrides || []).map((x: { id: string; name: string }) => ({ id: x.id, name: `Override on ${x.name}` })),
+      () => '/alert-rules'],
     ['Discovery rules', u.discovery_rules, (x) => `/discovery/rules/${x.id}`],
     ['Discovery profiles', u.discovery_profiles, (x) => `/discovery/profiles/${x.id}`],
     ['Subgroups', u.subgroups, (x) => `/device-groups/${x.id}`],

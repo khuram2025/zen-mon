@@ -37,6 +37,8 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+import contextlib
+from types import SimpleNamespace
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,6 +77,12 @@ _OPS = {
 
 # oper_status code that means the interface is down (IF-MIB ifOperStatus).
 _OPER_DOWN = 2
+
+
+def _savepoint(db):
+    """A savepoint where the session offers one (test doubles may not)."""
+    begin = getattr(db, "begin_nested", None)
+    return begin() if begin else contextlib.nullcontext()
 
 
 def _cmp(value: float, operator: str, threshold: float) -> bool:
@@ -290,7 +298,7 @@ async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
     rows = (await db.execute(text(
         "SELECT d.id, d.hostname, d.device_type, d.location, d.group_id, d.tags, "
         "COALESCE(c.snmp_poll_interval, d.snmp_poll_interval), p.oid_groups, "
-        "COALESCE(host(d.ip_address), host(d.managed_ip)) "
+        "COALESCE(host(d.ip_address), host(d.managed_ip)), d.profile_id "
         "FROM devices d LEFT JOIN device_profiles p ON p.id = d.profile_id "
         "LEFT JOIN devices c ON c.id = d.managed_by_device_id AND d.poll_mode = 'via_controller' "
         "WHERE (d.snmp_enabled = true OR d.poll_mode = 'via_controller') AND d.status <> 'maintenance' ORDER BY d.id"
@@ -310,6 +318,7 @@ async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
             "poll_interval": int(r[6] or 60),
             "metric_intervals": template_intervals(r[7], int(r[6] or 60)),
             "ip": r[8] or "",
+            "profile_id": str(r[9]) if r[9] else None,
         }
         for r in rows
     }
@@ -339,9 +348,20 @@ async def _interfaces(db: AsyncSession) -> dict[str, list[dict]]:
     global _warned_missing_last_up
     sql = ("SELECT device_id, if_index, if_name, if_descr, if_alias, "
            "COALESCE(configured_speed_bps, if_speed) AS speed, admin_status, monitored, "
-           "{ever_up} FROM device_interfaces WHERE monitored = true")
+           "{ever_up}{extra} FROM device_interfaces WHERE monitored = true")
+
+    async def run(ever_up: str, extra: str):
+        return (await db.execute(text(sql.format(ever_up=ever_up, extra=extra)))).all()
+
     try:
-        rows = (await db.execute(text(sql.format(ever_up="last_up_at IS NOT NULL")))).all()
+        try:
+            # if_type and the operator's role select interfaces by role (migrate-193).
+            async with _savepoint(db):
+                rows = await run("last_up_at IS NOT NULL", ", if_type, role")
+        except Exception as exc:
+            if "role" not in str(exc) and "if_type" not in str(exc):
+                raise
+            rows = await run("last_up_at IS NOT NULL", "")
     except Exception as exc:
         # Rolling upgrade: code deployed before migrate-126 ran. Degrade to
         # the previous behaviour (every port eligible) with one warning.
@@ -352,7 +372,7 @@ async def _interfaces(db: AsyncSession) -> dict[str, list[dict]]:
             logger.warning("interface-down baseline disabled: device_interfaces.last_up_at "
                            "missing — run migrate-126-device-identity-and-interface-baseline.sql")
             _warned_missing_last_up = True
-        rows = (await db.execute(text(sql.format(ever_up="true")))).all()
+        rows = await run("true", "")
     out: dict[str, list[dict]] = {}
     for r in rows:
         out.setdefault(str(r[0]), []).append({
@@ -361,6 +381,8 @@ async def _interfaces(db: AsyncSession) -> dict[str, list[dict]]:
             "speed": int(r[5]) if r[5] else 0,
             "admin_up": (str(r[6] or "").lower() == "up"),
             "ever_up": bool(r[8]),
+            "if_type": r[9] if len(r) > 9 else None,
+            "role": r[10] if len(r) > 10 else None,
         })
     return out
 
@@ -372,9 +394,17 @@ def _in_group(rule_group_id, groups, primary) -> bool:
     return in_group(rule_group_id, groups, primary)
 
 
-def _device_in_scope(rule, dev_id: str, dev: dict) -> bool:
+def _device_in_scope(rule, dev_id: str, dev: dict, family=None) -> bool:
     if rule.device_id and str(rule.device_id) != dev_id:
         return False
+    profile = getattr(rule, "profile_id", None)
+    if profile:
+        # Template scope (migrate-193): the template or one customised from it.
+        if family is not None:
+            if not family.covers(profile, dev.get("profile_id")):
+                return False
+        elif str(profile) != str(dev.get("profile_id") or ""):
+            return False
     if rule.group_id and not _in_group(rule.group_id, dev.get("groups"), dev["group_id"]):
         return False
     if rule.device_type and rule.device_type != dev["device_type"]:
@@ -393,6 +423,15 @@ def _iface_matches_target(iface: dict, target: str | None) -> bool:
     if t.isdigit() and int(t) == iface["if_index"]:
         return True
     return any(t in (iface[k] or "").lower() for k in ("if_name", "if_descr", "if_alias"))
+
+
+def _iface_matches_role(iface: dict, role: str | None, role_rules) -> bool:
+    """An interface rule limited to a role (migrate-193) covers only interfaces with
+    that role: the operator's, else the one the device's template gives it."""
+    if not role:
+        return True
+    from app.services.interface_roles import effective
+    return effective(role_rules, iface)[0] == role
 
 
 def _iface_label(iface: dict) -> str:
@@ -605,13 +644,21 @@ async def _load_rules(db: AsyncSession) -> list:
         return text(
             f"SELECT id, name, metric, operator, threshold, severity, min_duration, {clear}, "
             f"notify_channels, cooldown, device_id, group_id, device_type, location, scope_tag, target, "
-            f"recovery_alert, conditions, condition_logic, "
+            f"recovery_alert, conditions, condition_logic, {{tpl}}, "
             f"email_subject, email_body, sms_template, recovery_email_subject, recovery_email_body, recovery_sms_template, "
             f"schedule_start, schedule_end, schedule_days, {prio} "
             f"FROM alert_rules WHERE enabled = true "
             f"AND (metric IN ({metric_list}) OR metric LIKE 'tpl\\_%')")
     try:
-        return (await db.execute(sql("clear_duration"))).all()
+        async with _savepoint(db):
+            return (await db.execute(text(sql("clear_duration").text.replace(
+                "{tpl}", "profile_id, if_role")))).all()
+    except Exception as exc:
+        if "profile_id" not in str(exc) and "if_role" not in str(exc) and "clear_duration" not in str(exc):
+            raise
+    try:
+        return (await db.execute(text(sql("clear_duration").text.replace(
+            "{tpl}", "NULL AS profile_id, NULL AS if_role")))).all()
     except Exception as exc:
         if "clear_duration" not in str(exc):
             raise
@@ -620,7 +667,8 @@ async def _load_rules(db: AsyncSession) -> list:
             logger.warning("alert_rules.clear_duration missing — run migrate-162; "
                            "using the default clear hold")
             _warned_missing_clear_duration = True
-        return (await db.execute(sql("NULL AS clear_duration"))).all()
+        return (await db.execute(text(sql("NULL AS clear_duration").text.replace(
+            "{tpl}", "NULL AS profile_id, NULL AS if_role")))).all()
 
 
 async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) -> dict[str, int]:
@@ -650,6 +698,11 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
     from app.services import alert_rule_exclusions
     # Shared rules disabled for single devices (migrate-187), once per pass.
     excluded = await alert_rule_exclusions.load(db)
+    # Per-asset overrides and template families (migrate-193), once per pass.
+    from app.services import alert_rule_overrides as ovr
+    from app.services.device_templates import family as tfamily
+    overrides = await ovr.load(db)
+    family = await tfamily.load(db)
     from app.services.regional_time import notification_branding
     branding = await notification_branding(db)
 
@@ -675,9 +728,10 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
         clear_hold = (event_hold_seconds(getattr(rule, 'clear_duration', None)) if reboot_rule
                       else clear_hold_seconds(getattr(rule, 'clear_duration', None)))
         # Include enough context for the first breach (or the whole clear
-        # hold) and freshness expiry.
+        # hold) and freshness expiry — for the longest hold an override sets too.
         max_gap = max(max(freshness_budgets(d, metrics).values()) for d in devices.values())
-        lookback = max(max(hold, clear_hold) + 2 * max_gap, 900)
+        o_hold, o_clear = overrides.longest_holds(rule.id) if not reboot_rule else (0, 0)
+        lookback = max(max(hold, clear_hold, o_hold, o_clear) + 2 * max_gap, 900)
         cache_key = (metrics, lookback)
         if cache_key not in history_cache:
             try:
@@ -688,7 +742,7 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 continue
         scalar, if_data = history_cache[cache_key]
         for did, dev in devices.items():
-            if not _device_in_scope(rule, did, dev):
+            if not _device_in_scope(rule, did, dev, family):
                 continue
             if excluded.device(rule.id, did):
                 continue
@@ -726,9 +780,12 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 await db.commit()
                 continue
             device_ifs = {idx: series for (device, idx), series in if_data.items() if device == did}
+            role = getattr(rule, 'if_role', None)
+            role_rules = family.roles(dev.get('profile_id')) if role else None
             bound_entities = list(entities(
                     conditions, scalar.get(did, {}), device_ifs, interfaces.get(did, []),
-                    lambda iface: _iface_matches_target(iface, rule.target)))
+                    lambda iface: _iface_matches_target(iface, rule.target)
+                    and _iface_matches_role(iface, role, role_rules)))
             # Keep pre-upgrade aggregate template incidents on their original
             # identity until observed recovery; new incidents are per component.
             if any(m.startswith('tpl_') for m in metrics):
@@ -751,9 +808,29 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                                  {'key': f'network:{rule.id}:{did}:{identity}'})
                 existing = await _active_alert(db, rule.id, did, identity)
-                result = evaluate(conditions, rule.condition_logic or 'AND', history,
-                                  now=now, hold=hold, max_gap=freshness_budgets(dev, metrics),
-                                  active=existing is not None, clear_hold=clear_hold)
+                # The first matching override (device rows before group rows) for
+                # this device and instance; nothing changes without one.
+                # Instance for an override's pattern: the interface name, or a template
+                # component's suffix ("root" of tpl_fgt_vd_cpu_root); none for a device value.
+                if 'series_suffix' in extra:
+                    instance = (extra['series_suffix'] or '').lstrip('_') or None
+                else:
+                    instance = label if identity is not None else None
+                override = overrides.find(rule.id, device_id=did, groups=dev.get('groups'),
+                                          primary_group=dev.get('group_id'),
+                                          instance=instance) if overrides else None
+                e_rule, e_conditions, e_hold, e_clear = rule, conditions, hold, clear_hold
+                if override is not None:
+                    e_rule = ovr.apply(rule, override)
+                    e_conditions = ovr.effective_conditions(SimpleNamespace(
+                        conditions=conditions, metric=rule.metric, operator=rule.operator,
+                        threshold=rule.threshold), override)
+                    e_hold = int(e_rule.min_duration or 0)
+                    e_clear = clear_hold_seconds(getattr(e_rule, 'clear_duration', None))
+                    extra['override'] = override.summary()
+                result = evaluate(e_conditions, rule.condition_logic or 'AND', history,
+                                  now=now, hold=e_hold, max_gap=freshness_budgets(dev, metrics),
+                                  active=existing is not None, clear_hold=e_clear)
                 if result.breach is None:
                     if existing:
                         await db.execute(text("UPDATE alerts SET metadata = COALESCE(metadata,'{}'::jsonb) "
@@ -768,13 +845,13 @@ async def evaluate_network_rules(db: AsyncSession, *, now: float | None = None) 
                 if value is None:
                     value = next((v for v in result.values.values() if v is not None), 0)
                 context = _counter_context(history, rule.metric, now)
-                detail = _detail_text(rule, conditions, result.values, context)
+                detail = _detail_text(e_rule, e_conditions, result.values, context)
                 extra.update({'held_seconds': result.held_seconds, 'values': result.values,
                               'data_state': 'current',
                               'suppressed_by_dependency': False})
                 # Serialize this rule/entity across API workers. _apply commits
                 # the inserted/resolved row before releasing the transaction lock.
-                raised, resolved = await _apply(db, rule, did, dev['hostname'], identity,
+                raised, resolved = await _apply(db, e_rule, did, dev['hostname'], identity,
                     label, result.breach, value, detail, extra, raised, resolved, silences,
                     ip_address=dev.get('ip', ''), value_context=context,
                     asset_type=ap.asset_type_label(dev.get('device_type')), branding=branding)

@@ -1056,7 +1056,28 @@ async def get_device_interfaces(
         rows = (await db.execute(
             text(sql.format(last_up="NULL::timestamptz AS last_up_at, TRUE AS ever_up")), {"id": device_id},
         )).mappings().all()
-    return [dict(r) for r in rows]
+    return await _with_roles(db, device_id, [dict(r) for r in rows])
+
+
+async def _with_roles(db, device_id, rows: list[dict]) -> list[dict]:
+    """Each interface's role (migrate-193): the operator's (role_source "manual"), else
+    the one the device's template gives it ("template"), else none."""
+    from sqlalchemy import text
+    from app.services import interface_roles as roles_svc
+    from app.services.device_templates import family as tfamily
+    try:
+        async with db.begin_nested():
+            manual = {r[0]: r[1] for r in (await db.execute(text(
+                "SELECT if_index, role FROM device_interfaces WHERE device_id = :id"), {"id": device_id})).all()}
+            profile = (await db.execute(text("SELECT profile_id FROM devices WHERE id = :id"),
+                                        {"id": device_id})).scalar()
+    except Exception:
+        return rows
+    rules = (await tfamily.load(db)).roles(profile)
+    for r in rows:
+        r["role_manual"] = manual.get(r.get("if_index"))
+        r["role"], r["role_source"] = roles_svc.effective(rules, {**r, "role": r["role_manual"]})
+    return rows
 
 
 # Declared before every /{device_id}/interfaces/{if_index}... route so the
@@ -1180,6 +1201,41 @@ async def update_device_interface_speed(
     )
     await db.commit()
     return out
+
+
+class InterfaceRoleUpdate(BaseModel):
+    # None = the template's role.
+    role: Optional[str] = Field(default=None, pattern="^(uplink|access|wan|server|tunnel|vlan|loopback|management)$")
+
+
+@router.put("/{device_id}/interfaces/{if_index}/role", dependencies=[Depends(_device_in_scope)])
+async def set_device_interface_role(
+    device_id: UUID,
+    if_index: int,
+    payload: InterfaceRoleUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("devices.manage")),
+):
+    """Set (or with null clear) an operator's role for one interface. Roles select
+    interfaces for alert rules; they never change whether the interface is monitored."""
+    from sqlalchemy import text
+    row = (await db.execute(text("""
+        WITH prev AS (SELECT role FROM device_interfaces WHERE device_id = :d AND if_index = :i)
+        UPDATE device_interfaces SET role = :role WHERE device_id = :d AND if_index = :i
+        RETURNING (SELECT role FROM prev) AS previous
+    """), {"d": device_id, "i": if_index, "role": payload.role})).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Interface not found")
+    await write_audit_log(
+        db, actor=user, action="device_interface.role.update",
+        resource_type="device_interface", resource_id=f"{device_id}:{if_index}",
+        metadata={"device_id": str(device_id), "if_index": if_index, "role": {"old": row[0], "new": payload.role}},
+    )
+    await db.commit()
+    rows = (await db.execute(text(
+        "SELECT id, if_index, if_name, if_descr, if_alias, if_type, monitored FROM device_interfaces "
+        "WHERE device_id = :d AND if_index = :i"), {"d": device_id, "i": if_index})).mappings().all()
+    return (await _with_roles(db, device_id, [dict(r) for r in rows]))[0]
 
 
 @router.post("/{device_id}/interfaces/bulk-speed", dependencies=[Depends(_device_in_scope)])
@@ -2099,6 +2155,9 @@ async def device_template_insights(
         """),
         {"id": device_id, "hidden": _children.hidden_group_keys(oid_groups)},
     )).mappings().all()
+    # Colours follow accepted alert rules on the same metrics (migrate-193).
+    from app.services import effective_thresholds as _eff
+    oid_groups = _eff.apply_display(oid_groups, await _eff.display_thresholds(db, device_id))
     groups_out, latest_ts = _insights.shape_template_groups(oid_groups, vals, child_ids)
 
     return {
@@ -2202,6 +2261,8 @@ async def get_device_page_summary(
                    value_num, value_text, updated_at
             FROM device_template_values WHERE device_id = :id AND NOT (group_key = ANY(:hidden))
         """), {"id": device_id, "hidden": _children.hidden_group_keys(oid_groups)})).mappings().all()
+        from app.services import effective_thresholds as _eff
+        oid_groups = _eff.apply_display(oid_groups, await _eff.display_thresholds(db, device_id))
         groups, template_updated = _insights.shape_template_groups(oid_groups, vals)
     shown_groups = [g for g in groups if (g.get("rows") if g.get("kind") == "table"
                                           else any(m.get("has_data") for m in g.get("metrics") or []))]

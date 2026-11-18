@@ -37,6 +37,9 @@ export type MatchRules = {
   extract_model?: string | null
   extract_os_version?: string | null
 }
+/** One ordered interface role rule (server/app/services/interface_roles.py): the first match gives the role. */
+export type InterfaceRoleRule = { role: string; field: string; pattern: string }
+
 export type TemplateContent = {
   name: string
   vendor: string | null
@@ -46,6 +49,10 @@ export type TemplateContent = {
   match_priority: number
   match_rules: MatchRules
   oid_groups: TemplateGroup[]
+  /** null = none (on a customised template: the parent's). */
+  interface_roles?: InterfaceRoleRule[] | null
+  /** Recommended alert rules; kept as received (no editor yet). null = none / the parent's. */
+  rule_pack?: Record<string, unknown>[] | null
 }
 export type Template = TemplateContent & {
   id: string
@@ -151,7 +158,10 @@ export type TestResult = {
 
 export const P = '/snmp/profiles'
 
-export function contentOf(t: TemplateContent): TemplateContent {
+/** The editable document. `fallback` supplies interface roles and rule pack for a draft saved before they existed. */
+export function contentOf(t: TemplateContent, fallback?: TemplateContent): TemplateContent {
+  const pick = <K extends 'interface_roles' | 'rule_pack'>(k: K): TemplateContent[K] =>
+    (k in t ? t[k] : fallback?.[k]) ?? null
   return {
     name: t.name,
     vendor: t.vendor ?? null,
@@ -161,6 +171,35 @@ export function contentOf(t: TemplateContent): TemplateContent {
     match_priority: t.match_priority ?? 100,
     match_rules: { ...(t.match_rules || {}) },
     oid_groups: JSON.parse(JSON.stringify(t.oid_groups || [])),
+    interface_roles: JSON.parse(JSON.stringify(pick('interface_roles'))),
+    rule_pack: JSON.parse(JSON.stringify(pick('rule_pack'))),
+  }
+}
+
+export type RecommendationChange = { field: string; from: unknown; to: unknown }
+export type Recommendation = {
+  key: string
+  name: string
+  description: string | null
+  metric: string
+  operator: string
+  threshold: number
+  reset_threshold: number | null
+  min_duration: number
+  clear_duration: number | null
+  severity: 'info' | 'warning' | 'critical'
+  priority: string | null
+  if_role: string | null
+  source: 'template' | 'threshold'
+  status: 'available' | 'accepted' | 'changed'
+  changes: RecommendationChange[]
+  accepted: null | {
+    rule_id: string
+    name: string
+    enabled: boolean
+    on_this_template: boolean
+    template_name: string | null
+    rule_values: Record<string, unknown>
   }
 }
 
@@ -185,4 +224,10 @@ export const templatesApi = {
   version: async (id: string, rev: number) => (await api.get(`${P}/${id}/versions/${rev}`)).data,
   unmatched: async () => (await api.get(`${P}/unmatched`)).data.data as any[],
   suggestions: async () => (await api.get(`${P}/suggestions`)).data.data as any[],
+  recommended: async (id: string): Promise<Recommendation[]> => (await api.get(`${P}/${id}/recommended`)).data.items,
+}
+
+/** Path of one recommendation action; keys may contain ':' ("fgt_cpu:crit"). */
+export function recommendationPath(id: string, key: string, action: 'accept' | 'apply' | 'keep'): string {
+  return `${P}/${id}/recommended/${encodeURIComponent(key)}/${action}`
 }

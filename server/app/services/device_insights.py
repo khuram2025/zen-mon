@@ -283,6 +283,8 @@ def shape_template_groups(oid_groups: list[dict], vals: Iterable, child_ids: dic
                     "key": m["key"], "name": m.get("name"),
                     "type": m.get("type", "gauge"), "unit": m.get("unit"),
                     "thresholds": m.get("thresholds"),
+                    # "alert_rule" when an accepted alert rule sets the levels (migrate-193).
+                    "thresholds_source": m.get("thresholds_source") or ("template" if m.get("thresholds") else None),
                     "value": value,
                     "text": text_out,
                     "status": status,

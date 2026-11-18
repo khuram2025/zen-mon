@@ -60,6 +60,24 @@ def _validate_network_contract(metric, conditions):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+async def _validate_template_scope(db, metric, conditions, profile_id, if_role):
+    """Template scope and interface roles (migrate-193) belong to SNMP and template
+    metric rules, the ones network_alert_service evaluates; roles to interface metrics."""
+    from app.services.network_alert_service import INTERFACE_METRICS, NETWORK_METRICS
+    metrics = [c.get("metric") for c in (conditions or [])] or [metric]
+    network = all(m in NETWORK_METRICS or str(m or "").startswith("tpl_") for m in metrics)
+    if profile_id:
+        if not network:
+            raise HTTPException(status_code=422,
+                                detail="A template scope applies to SNMP interface, device and template metric rules")
+        exists = (await db.execute(text("SELECT 1 FROM device_profiles WHERE id = CAST(:id AS uuid)"),
+                                   {"id": str(profile_id)})).first()
+        if not exists:
+            raise HTTPException(status_code=422, detail="The template does not exist")
+    if if_role and not all(m in INTERFACE_METRICS for m in metrics):
+        raise HTTPException(status_code=422, detail="An interface role applies to interface metrics only")
+
+
 def _merge_condition_update(current, fields):
     """A partial flat edit must not leave a different compound rule active."""
     merged = dict(fields)
@@ -247,6 +265,11 @@ class AlertRuleCreate(BaseModel):
     device_type: Optional[str] = None
     location: Optional[str] = None
     scope_tag: Optional[str] = Field(default=None, max_length=120)
+    # Device Templates phase 3 (migrate-193): devices on this template or one
+    # customised from it (SNMP/template metric rules), and for interface
+    # metrics only interfaces with this role.
+    profile_id: Optional[UUID] = None
+    if_role: Optional[str] = Field(default=None, pattern="^(uplink|access|wan|server|tunnel|vlan|loopback|management)$")
 
     severity: str = Field(default="warning", pattern="^(info|warning|critical)$")
     notify_channels: list[str] = Field(default_factory=list)
@@ -310,6 +333,8 @@ class AlertRuleUpdate(BaseModel):
     device_type: Optional[str] = None
     location: Optional[str] = None
     scope_tag: Optional[str] = Field(default=None, max_length=120)
+    profile_id: Optional[UUID] = None
+    if_role: Optional[str] = Field(default=None, pattern="^(uplink|access|wan|server|tunnel|vlan|loopback|management)$")
 
     severity: Optional[str] = Field(None, pattern="^(info|warning|critical)$")
     notify_channels: Optional[list[str]] = None
@@ -415,7 +440,8 @@ _RULE_COLUMNS = (
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
     "conditions, condition_logic, trap_oid, target, flow_scope, flow_params, "
-    "server_id, created_at, updated_at, created_by"
+    "server_id, created_at, updated_at, created_by, "
+    "profile_id, pack_key, pack_accepted, if_role"
 )
 
 
@@ -468,6 +494,10 @@ def _row_to_dict(row) -> dict:
         "recovery_sms_template": row.recovery_sms_template,
         "conditions": getattr(row, "conditions", None) or None,
         "condition_logic": getattr(row, "condition_logic", None) or "AND",
+        "profile_id": str(row.profile_id) if getattr(row, "profile_id", None) else None,
+        "pack_key": getattr(row, "pack_key", None),
+        "pack_accepted": getattr(row, "pack_accepted", None),
+        "if_role": getattr(row, "if_role", None),
         "trap_oid": getattr(row, "trap_oid", None),
         "target": getattr(row, "target", None),
         "flow_scope": getattr(row, "flow_scope", None),
@@ -570,6 +600,201 @@ async def rules_for_asset(
         raise HTTPException(status_code=404, detail=f"{asset_kind.capitalize()} not found")
     return {"asset": {"kind": asset_kind, "id": str(asset["id"]), "name": asset.get("name")},
             "items": await rx.rules_for_asset(db, asset_kind, asset)}
+
+
+# ── Overrides and effective thresholds (migrate-193) ───────────────────────
+
+@router.get("/effective")
+async def effective_thresholds_for_asset(
+    asset_kind: str = Query(..., pattern="^(device|server)$"),
+    asset_id: UUID = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Every rule covering one device or server with the values in force for it and
+    their source: the rule, an override (which row), an exclusion or the rule being off."""
+    from app.services import effective_thresholds as eff
+    asset = await rx.asset_row(db, asset_kind, asset_id)
+    if asset is None or not scoping.entity_visible(asset.get("tags"), await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail=f"{asset_kind.capitalize()} not found")
+    return {"asset": {"kind": asset_kind, "id": str(asset["id"]), "name": asset.get("name")},
+            "items": await eff.for_asset(db, asset_kind, asset)}
+
+
+class OverrideBody(BaseModel):
+    device_id: Optional[UUID] = None
+    server_id: Optional[UUID] = None
+    group_id: Optional[UUID] = None
+    instance_pattern: Optional[str] = Field(default=None, max_length=200)
+    metric: Optional[str] = Field(default=None, max_length=80)
+    threshold: Optional[float] = Field(default=None, allow_inf_nan=False)
+    reset_threshold: Optional[float] = Field(default=None, allow_inf_nan=False)
+    min_duration: Optional[int] = Field(default=None, ge=0, le=86400)
+    clear_duration: Optional[int] = Field(default=None, ge=0, le=86400)
+    priority: Optional[str] = Field(default=None, pattern="^P[1-4]$")
+    reason: str = Field(..., min_length=1, max_length=500)
+    expires_at: Optional[datetime] = None
+    position: Optional[int] = Field(default=None, ge=0, le=100000)
+
+
+class OverrideOrder(BaseModel):
+    ids: list[UUID] = Field(..., max_length=500)
+
+
+def _overridable(rule: dict) -> None:
+    from app.services.host_alert_service import THRESHOLD_METRICS
+    from app.services.network_alert_service import NETWORK_METRICS
+    conds = _json_value(rule.get("conditions")) or [{"metric": rule.get("metric")}]
+    metrics = {c.get("metric") for c in conds}
+    if metrics == {"uptime_reset"}:
+        raise HTTPException(status_code=422, detail="A restart rule has no threshold to override")
+    if all(m in NETWORK_METRICS or str(m or "").startswith("tpl_") for m in metrics):
+        return
+    if metrics <= set(THRESHOLD_METRICS):
+        return
+    raise HTTPException(status_code=422, detail="Overrides apply to SNMP, template and server metric rules")
+
+
+async def _override_rule(db: AsyncSession, user: User, rule_id: UUID) -> dict:
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    await rs.guard_rule_change(db, user, rule)
+    _overridable(rule)
+    return rule
+
+
+async def _check_override_target(db: AsyncSession, user: User, rule: dict, fields: dict) -> None:
+    """The target exists, fits the rule's kind and is visible; a group row needs an unscoped user."""
+    from app.services.host_alert_service import THRESHOLD_METRICS
+    server_rule = rule.get("metric") in THRESHOLD_METRICS
+    scope = await scoping.visible_tags(db, user)
+    if fields.get("group_id"):
+        if scope is not None:
+            raise HTTPException(status_code=403, detail="A group override needs a user without a tag scope")
+        if not (await db.execute(text("SELECT 1 FROM device_groups WHERE id = CAST(:id AS uuid)"),
+                                 {"id": fields["group_id"]})).first():
+            raise HTTPException(status_code=422, detail="The group does not exist")
+        return
+    kind = "device" if fields.get("device_id") else "server"
+    if (kind == "server") != server_rule:
+        raise HTTPException(status_code=422, detail=f"This rule evaluates {'servers' if server_rule else 'devices'}")
+    asset = await rx.asset_row(db, kind, fields[f"{kind}_id"])
+    if asset is None or not scoping.entity_visible(asset.get("tags"), scope):
+        raise HTTPException(status_code=404, detail=f"{kind.capitalize()} not found")
+
+
+@router.get("/{rule_id}/overrides")
+async def list_rule_overrides(rule_id: UUID, db: AsyncSession = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    from app.services import alert_rule_overrides as ovr
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    scope = await scoping.visible_tags(db, user)
+    items, hidden = [], 0
+    for it, tags in await ovr.list_for_rule(db, rule_id):
+        if it["group_id"] is None and not scoping.entity_visible(tags, scope):
+            hidden += 1
+            continue
+        items.append(it)
+    return {"items": items, "hidden": hidden}
+
+
+async def _save_override(db: AsyncSession, user: User, rule_id: UUID, data: OverrideBody,
+                         override_id: Optional[UUID] = None) -> dict:
+    from app.services import alert_rule_overrides as ovr
+    rule = await _override_rule(db, user, rule_id)
+    try:
+        fields = ovr.validate(data.model_dump(), rule)
+    except ovr.OverrideError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    await _check_override_target(db, user, rule, fields)
+    params = {**fields, "rule_id": str(rule_id), "uid": user.id, "uname": getattr(user, "username", None)}
+    if override_id is None:
+        row = (await db.execute(text("""
+            INSERT INTO alert_rule_overrides (rule_id, position, device_id, server_id, group_id, instance_pattern,
+                   metric, threshold, reset_threshold, min_duration, clear_duration, priority, reason, expires_at,
+                   created_by, created_by_name)
+            VALUES (CAST(:rule_id AS uuid), :position, CAST(:device_id AS uuid), CAST(:server_id AS uuid),
+                    CAST(:group_id AS uuid), :instance_pattern, :metric, :threshold, :reset_threshold,
+                    :min_duration, :clear_duration, :priority, :reason, :expires_at,
+                    (SELECT id FROM users WHERE id = :uid), :uname)
+            RETURNING id::text
+        """), params)).first()
+        oid, action = row[0], "alert_rule.override_create"
+    else:
+        before = (await db.execute(text("SELECT 1 FROM alert_rule_overrides WHERE id = :id AND rule_id = :rid"),
+                                   {"id": override_id, "rid": rule_id})).first()
+        if not before:
+            raise HTTPException(status_code=404, detail="Override not found")
+        await db.execute(text("""
+            UPDATE alert_rule_overrides SET position = :position, device_id = CAST(:device_id AS uuid),
+                   server_id = CAST(:server_id AS uuid), group_id = CAST(:group_id AS uuid),
+                   instance_pattern = :instance_pattern, metric = :metric, threshold = :threshold,
+                   reset_threshold = :reset_threshold, min_duration = :min_duration,
+                   clear_duration = :clear_duration, priority = :priority, reason = :reason,
+                   expires_at = :expires_at, updated_at = now()
+             WHERE id = :id
+        """), {**params, "id": override_id})
+        oid, action = str(override_id), "alert_rule.override_update"
+    await write_audit_log(db, actor=user, action=action, resource_type="alert_rule", resource_id=str(rule_id),
+                          metadata={"name": rule.get("name"), "override_id": oid,
+                                    **{k: (v.isoformat() if isinstance(v, datetime) else v)
+                                       for k, v in fields.items()}})
+    await db.commit()
+    rows = await ovr.list_for_rule(db, rule_id)
+    return next(it for it, _ in rows if it["id"] == oid)
+
+
+@router.post("/{rule_id}/overrides", status_code=201)
+async def create_rule_override(rule_id: UUID, data: OverrideBody, db: AsyncSession = Depends(get_db),
+                               user: User = Depends(require_rule_manager)):
+    return await _save_override(db, user, rule_id, data)
+
+
+@router.put("/{rule_id}/overrides/{override_id}")
+async def update_rule_override(rule_id: UUID, override_id: UUID, data: OverrideBody,
+                               db: AsyncSession = Depends(get_db), user: User = Depends(require_rule_manager)):
+    return await _save_override(db, user, rule_id, data, override_id)
+
+
+@router.delete("/{rule_id}/overrides/{override_id}", status_code=204)
+async def delete_rule_override(rule_id: UUID, override_id: UUID, db: AsyncSession = Depends(get_db),
+                               user: User = Depends(require_rule_manager)):
+    rule = await _override_rule(db, user, rule_id)
+    row = (await db.execute(text(
+        "SELECT device_id::text, server_id::text, group_id::text FROM alert_rule_overrides "
+        "WHERE id = :id AND rule_id = :rid"), {"id": override_id, "rid": rule_id})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Override not found")
+    await _check_override_target(db, user, rule, dict(row))
+    await db.execute(text("DELETE FROM alert_rule_overrides WHERE id = :id"), {"id": override_id})
+    await write_audit_log(db, actor=user, action="alert_rule.override_delete", resource_type="alert_rule",
+                          resource_id=str(rule_id), metadata={"name": rule.get("name"), "override_id": str(override_id)})
+    await db.commit()
+
+
+@router.post("/{rule_id}/overrides/reorder")
+async def reorder_rule_overrides(rule_id: UUID, data: OverrideOrder, db: AsyncSession = Depends(get_db),
+                                 user: User = Depends(require_rule_manager)):
+    """Positions follow the given order (device/server rows are still tried before group rows)."""
+    from app.services import alert_rule_overrides as ovr
+    rule = await _override_rule(db, user, rule_id)
+    if await scoping.visible_tags(db, user) is not None:
+        raise HTTPException(status_code=403, detail="Reordering overrides needs a user without a tag scope")
+    existing = {r[0] for r in (await db.execute(text(
+        "SELECT id::text FROM alert_rule_overrides WHERE rule_id = :rid FOR UPDATE"), {"rid": rule_id})).all()}
+    ids = [str(i) for i in data.ids]
+    if set(ids) != existing or len(ids) != len(existing):
+        raise HTTPException(status_code=409, detail="The overrides changed; reload and try again")
+    for n, oid in enumerate(ids):
+        await db.execute(text("UPDATE alert_rule_overrides SET position = :p, updated_at = now() WHERE id = :id"),
+                         {"p": (n + 1) * 10, "id": oid})
+    await write_audit_log(db, actor=user, action="alert_rule.override_reorder", resource_type="alert_rule",
+                          resource_id=str(rule_id), metadata={"name": rule.get("name"), "order": ids})
+    await db.commit()
+    return {"items": [it for it, _ in await ovr.list_for_rule(db, rule_id)]}
 
 
 @router.get("/{rule_id}/exclusions")
@@ -738,6 +963,7 @@ async def create_alert_rule(
         threshold = conditions[0]["threshold"]
 
     _validate_network_contract(metric, conditions)
+    await _validate_template_scope(db, metric, conditions, data.profile_id, data.if_role)
     if metric == 'syslog':
         _merge_condition_update({'metric': metric, 'threshold': threshold}, {})
     _validate_apm_event({**data.model_dump(), 'metric': metric, 'operator': operator,
@@ -780,6 +1006,8 @@ async def create_alert_rule(
         "device_type": data.device_type,
         "location": data.location,
         "scope_tag": (data.scope_tag or "").strip() or None,
+        "profile_id": data.profile_id,
+        "if_role": data.if_role,
         "trigger_on": data.trigger_on,
         "recovery_alert": False if metric == 'syslog' else data.recovery_alert,
         "min_duration": 0 if metric == 'syslog' else data.min_duration,
@@ -824,7 +1052,7 @@ async def create_alert_rule(
             "schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
             "recovery_email_subject, recovery_email_body, recovery_sms_template, "
-            "created_at, updated_at, created_by) "
+            "created_at, updated_at, created_by, profile_id, if_role) "
             "VALUES "
             "(:name, :description, :enabled, :metric, :operator, :threshold, :duration, "
             "CAST(:conditions AS jsonb), :condition_logic, :trap_oid, :target, "
@@ -838,7 +1066,7 @@ async def create_alert_rule(
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
             ":recovery_email_subject, :recovery_email_body, :recovery_sms_template, "
-            ":created_at, :updated_at, :created_by) "
+            ":created_at, :updated_at, :created_by, :profile_id, :if_role) "
             f"RETURNING {_RULE_COLUMNS}"
         ),
         params,
@@ -908,6 +1136,10 @@ async def update_alert_rule(
 
     _validate_apm_event({**before, **fields})
     await _validate_apm_event_target(db, {**before, **fields})
+    if any(k in fields for k in ("profile_id", "if_role", "metric", "conditions")):
+        merged = {**before, **fields}
+        await _validate_template_scope(db, merged.get("metric"), _json_value(merged.get("conditions")),
+                                       merged.get("profile_id"), merged.get("if_role"))
 
     # NetFlow rules: validate the merged definition; a changed definition
     # makes the old subjects meaningless, so their state and open alerts go.

@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 
 LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('device-templates'))"
 HASH_SQL = "md5(COALESCE(match_rules, '{}'::jsonb)::text || '|' || COALESCE(oid_groups, '[]'::jsonb)::text)"
-CONTENT_FIELDS = ("name", "vendor", "description", "device_type", "icon", "match_priority", "match_rules", "oid_groups")
+# interface_roles / rule_pack (migrate-193): NULL on a customised template = as the parent.
+CONTENT_FIELDS = ("name", "vendor", "description", "device_type", "icon", "match_priority", "match_rules", "oid_groups",
+                  "interface_roles", "rule_pack")
 _CHILD = "(d.managed_by_device_id IS NOT NULL OR d.poll_mode = 'via_controller')"
 
 ROW_SQL = f"""
@@ -37,6 +39,7 @@ ROW_SQL = f"""
            p.created_at, p.updated_at, p.builtin_key, p.parent_id, pp.name AS parent_name,
            p.overlay, p.parent_hash, p.device_type, p.icon, p.match_priority, p.revision, p.content_hash,
            p.draft, p.draft_updated_at, p.pilot_device_ids, p.pilot_oid_groups, p.pilot_started_at,
+           p.interface_roles, p.rule_pack,
            (p.draft IS NOT NULL) AS has_draft,
            COALESCE(cardinality(p.pilot_device_ids), 0) AS pilot_device_count,
            (SELECT count(*) FROM devices d WHERE d.profile_id = p.id) AS device_count,
@@ -59,7 +62,7 @@ def _json(v: Any) -> Any:
 
 def _row(r) -> dict:
     d = dict(r)
-    for k in ("match_rules", "oid_groups", "overlay", "draft", "pilot_oid_groups"):
+    for k in ("match_rules", "oid_groups", "overlay", "draft", "pilot_oid_groups", "interface_roles", "rule_pack"):
         if k in d:
             d[k] = _json(d[k])
     d["match_rules"] = d.get("match_rules") or {}
@@ -96,6 +99,7 @@ def snapshot(row: dict) -> dict:
         "device_type": row.get("device_type"), "icon": row.get("icon"),
         "match_priority": row.get("match_priority", 100), "match_rules": row.get("match_rules") or {},
         "oid_groups": row.get("oid_groups") or [], "overlay": row.get("overlay"),
+        "interface_roles": row.get("interface_roles"), "rule_pack": row.get("rule_pack"),
         "parent_id": str(row["parent_id"]) if row.get("parent_id") else None,
     }
 
@@ -174,6 +178,16 @@ async def validate_content(db: AsyncSession, content: dict, *, parent: Optional[
             metric_keys.setdefault(mk, gk)
     if parent is not None:
         errs += ov.problems_from_edit(canonical(parent.get("oid_groups") or []), groups)
+    # Interface roles and recommended rules (migrate-193).
+    from app.services import interface_roles as roles_svc, rule_packs
+    try:
+        content["interface_roles"] = roles_svc.validate(content.get("interface_roles"))
+    except roles_svc.RoleRuleError as exc:
+        errs.append(str(exc))
+    try:
+        content["rule_pack"] = rule_packs.validate_pack(content.get("rule_pack"))
+    except rule_packs.PackError as exc:
+        errs.append(str(exc))
     if errs:
         raise HTTPException(status_code=422, detail={"message": "Template cannot be saved", "errors": errs})
     name = (content.get("name") or "").strip()
@@ -242,6 +256,7 @@ async def write_published(db: AsyncSession, row: dict, content: dict, *, action:
             device_type = :device_type, icon = :icon, match_priority = :prio,
             match_rules = CAST(:mr AS jsonb), oid_groups = CAST(:groups AS jsonb),
             overlay = CAST(:overlay AS jsonb),
+            interface_roles = CAST(:roles AS jsonb), rule_pack = CAST(:pack AS jsonb),
             parent_hash = CASE WHEN parent_id IS NULL THEN NULL ELSE :phash END,
             revision = :rev, draft = NULL, draft_updated_at = NULL, draft_updated_by = NULL,
             pilot_device_ids = NULL, pilot_oid_groups = NULL, pilot_started_at = NULL,
@@ -252,6 +267,8 @@ async def write_published(db: AsyncSession, row: dict, content: dict, *, action:
            "icon": content.get("icon"), "prio": int(content.get("match_priority") or 100),
            "mr": json.dumps(content.get("match_rules") or {}), "groups": json.dumps(new_groups),
            "overlay": json.dumps(content["overlay"]) if content.get("overlay") is not None else None,
+           "roles": json.dumps(content["interface_roles"]) if content.get("interface_roles") is not None else None,
+           "pack": json.dumps(content["rule_pack"]) if content.get("rule_pack") is not None else None,
            "phash": (parent or {}).get("content_hash"), "rev": revision, "uid": getattr(user, "id", None)})
     await db.execute(text(f"UPDATE device_profiles SET content_hash = {HASH_SQL} WHERE id = :id"), {"id": row["id"]})
     removed = old_keys - group_keys(new_groups)

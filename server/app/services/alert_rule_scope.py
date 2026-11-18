@@ -95,9 +95,13 @@ def describe_scope(rule, names: dict | None = None) -> dict:
         return {"kind": "interface" if target else "device", "label": label, "target": target}
     parts = []
     kind = "global"
+    if _get(rule, "profile_id"):
+        # Template scope (migrate-193): the template and those customised from it.
+        parts.append(f"on template {n.get('template') or 'selected'}")
+        kind = "template"
     if _get(rule, "group_id"):
         parts.append(f"in group {n.get('group') or 'selected'}")
-        kind = "group"
+        kind = "group" if kind == "global" else kind
     if _get(rule, "device_type"):
         parts.append(f"of type {_get(rule, 'device_type')}")
         kind = "device_type" if kind == "global" else kind
@@ -112,6 +116,9 @@ def describe_scope(rule, names: dict | None = None) -> dict:
     from app.services.server_availability import is_down_rule
     noun = "All devices and servers" if is_down_rule(rule) else "All devices"
     label = noun + ((" " + ", ".join(parts)) if parts else "")
+    if _get(rule, "if_role"):
+        from app.services.interface_roles import ROLE_LABELS
+        label += f" — {ROLE_LABELS.get(_get(rule, 'if_role'), _get(rule, 'if_role')).lower()} interfaces"
     if target:
         label += f" — interface {target}"
     return {"kind": kind, "label": label, "target": target}
@@ -162,6 +169,7 @@ async def scope_names(db: AsyncSession, rule) -> dict:
     queries = [
         ("device", "device_id", "SELECT hostname FROM devices WHERE id = :id"),
         ("group", "group_id", "SELECT name FROM device_groups WHERE id = :id"),
+        ("template", "profile_id", "SELECT name FROM device_profiles WHERE id = :id"),
         ("server", "server_id", "SELECT COALESCE(display_name, hostname) FROM servers WHERE id = :id"),
         ("service_check", "service_check_id", "SELECT name FROM service_checks WHERE id = :id"),
         ("service_group", "service_check_group_id", "SELECT name FROM service_check_groups WHERE id = :id"),
@@ -218,6 +226,11 @@ async def affected(db: AsyncSession, rule) -> dict:
         if _get(rule, "device_id"):
             return {"count": 1, "noun": "device", "shared": False}
         where, params = [], {}
+        if _get(rule, "profile_id"):
+            # The template and every template customised from it (migrate-193).
+            from app.services.device_templates.family import descendants
+            where.append("d.profile_id = ANY(CAST(:tpls AS uuid[]))")
+            params["tpls"] = await descendants(db, _get(rule, "profile_id"))
         if _get(rule, "group_id"):
             # Group membership with subgroups (migrate-192), the same set the evaluators use.
             where.append("(d.group_id = CAST(:g AS uuid) OR EXISTS (SELECT 1 FROM device_group_member_closure c "
