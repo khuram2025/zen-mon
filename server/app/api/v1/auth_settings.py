@@ -190,7 +190,9 @@ def _with_override(stored: dict, override: Optional[BaseModel], secret_field: st
     incoming["group_mappings" if "group_mappings" in incoming else "class_mappings"] = [
         m for m in incoming.get("group_mappings", incoming.get("class_mappings", [])) if m.get("role")
     ]
-    if not incoming.get(secret_field):
+    # "Remove the stored secret" is ticked: test what saving would leave, not
+    # the secret that is about to be removed.
+    if not incoming.get(secret_field) and not getattr(override, "clear_secret", False):
         incoming[secret_field] = stored.get(secret_field, "")
     return merge_config(stored, incoming)
 
@@ -261,6 +263,21 @@ def _target_roles(cfg: dict, spec: dict) -> set[str]:
     out = {m.get("role") for m in cfg.get(spec["list"]) or [] if m.get("role")}
     if cfg.get("default_role"):
         out.add(cfg["default_role"])
+    return out
+
+
+def _grants(cfg: dict, spec: dict) -> set[tuple]:
+    """Every (who, role) pair the configuration grants: one per mapping row and
+    one for the default role. Comparing role names alone let "everyone without
+    a match becomes Administrator" through unconfirmed whenever some rule
+    already mapped a single group to Administrator."""
+    out: set[tuple] = set()
+    for m in cfg.get(spec["list"]) or []:
+        if m.get("role"):
+            who = tuple(sorted((k, str(v).strip().lower()) for k, v in m.items() if k != "role" and v))
+            out.add((who, m["role"]))
+    if cfg.get("default_role"):
+        out.add(("default", cfg["default_role"]))
     return out
 
 
@@ -345,6 +362,7 @@ async def get_providers(
         masked["last_test"] = await _last_test(db, name)
         masked.update(await _account_counts(db, name))
         out[name] = masked
+    out["local"] = await _account_counts(db, "local")
     return out
 
 
@@ -459,8 +477,8 @@ async def _save(db: AsyncSession, actor: User, provider: str, data: _ProviderIn)
         _enable_requirements(provider, {**incoming})
 
     # Confirm new grants of privileged roles.
-    new_targets = _target_roles(incoming, spec) - _target_roles(stored, spec)
-    privileged_new = sorted(r for r in new_targets if _privileged(roles.get(r, set())))
+    new_grants = _grants(incoming, spec) - _grants(stored, spec)
+    privileged_new = sorted({role for _who, role in new_grants if _privileged(roles.get(role, set()))})
     if privileged_new and not data.confirm_privileged:
         raise HTTPException(status_code=409, detail={
             "code": "privileged_mapping_confirmation_required",
@@ -554,6 +572,19 @@ async def set_provider_enabled(
             "message": "This provider was changed by another administrator. Reload and try again."})
     if data.enabled:
         _enable_requirements(provider, stored)
+    elif stored.get("enabled"):
+        # Every full administrator may sign in through this source (the
+        # last-administrator invariant counts them): turning it off would
+        # leave nobody able to turn it back on.
+        others = (await db.execute(text(
+            "SELECT count(*) FROM users u JOIN roles r ON r.name = u.role "
+            "WHERE u.is_active AND u.auth_source <> :s AND r.permissions::jsonb @> CAST(:perm AS jsonb)"),
+            {"s": provider, "perm": '["system.admin"]'})).scalar() or 0
+        if not others:
+            raise HTTPException(status_code=409, detail={
+                "code": "no_administrator_left",
+                "message": f"Every active administrator signs in through {spec['label']}. Create a local "
+                           "administrator account first, then disable this source."})
     revoked = 0
     if stored.get("enabled") != data.enabled:
         stored["enabled"] = data.enabled
@@ -585,8 +616,14 @@ async def _admission(db: AsyncSession, provider: str, cfg: dict, username: str, 
     if not cfg.get("enabled"):
         reasons.append({"code": "provider_disabled",
                         "message": f"{label} is not enabled, so its users cannot sign in yet"})
-    existing = (await db.execute(text("SELECT auth_source, is_active FROM users WHERE username = :u"),
-                                 {"u": username.strip()})).first()
+    existing = (await db.execute(text(
+        "SELECT auth_source, is_active, role_manual, role FROM users WHERE lower(username) = lower(:u) "
+        "ORDER BY (username = :u) DESC LIMIT 1"),   # as sign-in resolves it (auth._find_user)
+        {"u": username.strip()})).first()
+    # A role an administrator set by hand is kept at sign-in: the mapped role is
+    # recorded, not applied, so a mapping that points at a missing role does not
+    # block that account (app.services.role_source).
+    keeps_own_role = bool(existing is not None and existing[0] == provider and existing[2])
     if existing is not None:
         if existing[0] != provider:
             reasons.append({"code": "source_collision",
@@ -600,10 +637,12 @@ async def _admission(db: AsyncSession, provider: str, cfg: dict, username: str, 
     if role is None:
         reasons.append({"code": "no_role_mapped",
                         "message": "No role mapping matches this user and there is no default role"})
-    elif role not in roles:
+    elif role not in roles and not keeps_own_role:
         reasons.append({"code": "role_missing", "message": f"The mapped role '{role}' does not exist"})
     return {"would_sign_in": not reasons, "admission_reasons": reasons,
             "existing_account": existing is not None,
+            "account_role_manual": keeps_own_role,
+            "account_role": existing[3] if keeps_own_role else None,
             "mapped_role_privileged": bool(role and _privileged(roles.get(role, set())))}
 
 
@@ -613,6 +652,14 @@ async def _run_blocking(fn, *args, timeout: float):
     except asyncio.TimeoutError:
         raise ExternalAuthError(
             f"The directory did not answer within {int(timeout)} seconds (timeout, not a credentials problem)")
+
+
+def _failed_before_credentials(steps: list[dict]) -> list[dict]:
+    """The connection step is recorded before the directory is contacted. When
+    the call failed before any credential result, that step is what failed."""
+    if any(s["name"] == "credentials" for s in steps):
+        return steps
+    return [{"name": "connection", "ok": False}]
 
 
 @router.post("/ldap/test")
@@ -664,11 +711,11 @@ async def test_ldap(
         }
     except ExternalAuthError as exc:
         await _remember_test(db, "ldap", current_user, False, str(exc), cfg.get("server", ""))
-        return {"success": False, "message": str(exc), "steps": steps}
+        return {"success": False, "message": str(exc), "steps": _failed_before_credentials(steps)}
     except Exception as exc:  # ldap3 socket/TLS errors surface as a readable failure, not a 500
         msg = f"Cannot reach LDAP server {cfg.get('server')}:{cfg.get('port')}: {exc}"
         await _remember_test(db, "ldap", current_user, False, msg, cfg.get("server", ""))
-        return {"success": False, "message": msg, "steps": steps}
+        return {"success": False, "message": msg, "steps": _failed_before_credentials(steps)}
 
 
 @router.post("/radius/test")

@@ -43,6 +43,8 @@
 
 - SSH host keys (see `docs/ssh-host-key-trust.md`): the SSH terminal confirms unknown keys by fingerprint before sending a password and refuses changed keys; NCCM backups record the first key and only warn on change; UDT gateway collection enforces operator-registered keys only. Session tokens must carry a server-side session id (`jti`), never travel in a URL (streams use `?ticket=`), and the API refuses to start on placeholder secrets (`app.core.secret_policy`). Client addresses come from `app.core.client_ip`, never a client-supplied X-Forwarded-For hop.
 
+- Directory accounts (LDAP / RADIUS / OIDC; see `docs/directory-account-roles.md`, `app.services.role_source`): the directory decides whether the account may sign in (it must authenticate and match a role mapping or the default role); the mapping decides its role unless an administrator set one by hand (`users.role_manual`), which sign-in then keeps. What the mapping gives is always recorded (`users.directory_role`), never dropped, and handing the role back applies it. Sign-in resolves usernames ignoring case (`auth._find_user`); never look a user up by exact-case username. The Settings SMTP tab reads and writes the default `notification_gateways` row (what senders use) and never returns the password.
+
 ## Device Tracker
 
 - Sidebar groups and breadcrumb ownership are in `dashboard/src/components/layout/navigation.ts`. Device Tracker is separate from Monitoring.

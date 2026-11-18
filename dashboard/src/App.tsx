@@ -139,13 +139,15 @@ const tabRedirects: Record<string, string> = {
   sensors: '/sensors',
   snmp: '/credentials?tab=snmp',
   subscription: '/subscription',
-  appearance: '/settings/general',
-  profile: '/settings/general',
 }
+/** Old /settings/<tab> addresses of tabs that still exist under the same name on Settings → General.
+ *  They used to fall through to Company, so a bookmark for Security or a "profile" link opened the wrong tab. */
+const GENERAL_TABS = new Set(['monitoring', 'smtp', 'appearance', 'licenses', 'updates', 'storage', 'security', 'mibs', 'support', 'profile'])
 
 function SettingsRedirect() {
   const { tab } = useParams()
-  const target = tab ? tabRedirects[tab] || '/settings/general' : '/settings/general'
+  const target = !tab ? '/settings/general'
+    : tabRedirects[tab] || (GENERAL_TABS.has(tab) ? `/settings/general?tab=${tab}` : '/settings/general')
   return <Navigate to={target} replace />
 }
 

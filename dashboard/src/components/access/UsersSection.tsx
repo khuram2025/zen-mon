@@ -123,6 +123,11 @@ export function UsersSection() {
   const total = usersQ.data?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const colSpan = canManage ? 8 : 7
+  // Deleting the last row of the last page (or a filter change in another tab) leaves the address on a
+  // page that no longer exists: an empty table with no pager. Go back to the last page that has rows.
+  useEffect(() => {
+    if (usersQ.data && !usersQ.isPlaceholderData && filters.page > pages) set({ page: pages > 1 ? String(pages) : null }, false)
+  }, [usersQ.data, usersQ.isPlaceholderData, filters.page, pages]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['users'] }); qc.invalidateQueries({ queryKey: ['roles'] }) }
   const del = useMutation({
@@ -257,7 +262,14 @@ export function UsersSection() {
                           </div>
                         </div>
                       </Td>
-                      <Td><Badge variant={isAdmin ? 'success' : 'info'}>{roleLabel[u.role] || u.role}</Badge></Td>
+                      <Td>
+                        <Badge variant={isAdmin ? 'success' : 'info'}>{roleLabel[u.role] || u.role}</Badge>
+                        {u.role_source === 'manual' && (
+                          <div className="mt-0.5 text-2xs text-muted" title={`Set by an administrator and kept at every sign-in.${u.directory_role ? ` The ${SOURCE_LABEL[u.auth_source || 'local']} role mapping gives ${roleLabel[u.directory_role] || u.directory_role}.` : ''}`}>
+                            set by hand{u.directory_role && u.directory_role !== u.role ? ` · directory: ${roleLabel[u.directory_role] || u.directory_role}` : ''}
+                          </div>
+                        )}
+                      </Td>
                       <Td>
                         {(() => {
                           if (isAdmin) return <span className="text-xs text-muted" title="Full administration bypasses visibility scope">All resources</span>
@@ -302,7 +314,7 @@ export function UsersSection() {
                                 <DropdownMenuItem disabled={external || isMe} onSelect={() => setResetTarget(u)}><KeyRound /> Reset password…</DropdownMenuItem>
                                 {u.locked && <DropdownMenuItem onSelect={() => unlock.mutate(u.id)}><LockOpen /> Unlock account</DropdownMenuItem>}
                                 <DropdownMenuItem onSelect={() => setRevokeTarget(u)}><LogOut /> Sign out everywhere…</DropdownMenuItem>
-                                {u.mfa_enabled && <DropdownMenuItem onSelect={() => setMfaReset(u)}><ShieldOff /> Remove MFA…</DropdownMenuItem>}
+                                {u.mfa_enabled && !isMe && <DropdownMenuItem onSelect={() => setMfaReset(u)}><ShieldOff /> Remove MFA…</DropdownMenuItem>}
                                 <DropdownMenuSeparator />
                                 <DropdownMenuItem destructive disabled={isMe} onSelect={() => setDeleting(u)}><Trash2 /> Delete…</DropdownMenuItem>
                               </DropdownMenuContent>

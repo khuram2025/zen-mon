@@ -104,7 +104,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
         </CardTitle>
         <p className="text-xs text-muted">
           Choose how long to keep monitoring history. Expired records are removed in the background.
-          Blank fields use the built-in retention. Projections estimate capacity from stored history.
+          A blank field changes nothing: each table keeps the retention it has now. Projections estimate capacity from stored history.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -144,7 +144,7 @@ function RetentionCard({ overview }: { overview: Overview }) {
                         min={c.min_days}
                         max={3650}
                         placeholder={String(c.default_days)}
-                        title={`Blank keeps the built-in retention (${c.default_days} days by default)`}
+                        title={`Blank leaves the retention as it is now (${c.default_days} days on a new appliance); clearing a value you set does not shorten or restore it`}
                         value={raw}
                         onChange={(e) => setDays({ ...days, [c.id]: e.target.value })}
                         className={cn('ml-auto h-8 w-28 text-right tabular-nums', err && 'border-danger')}

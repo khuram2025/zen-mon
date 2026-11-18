@@ -2,6 +2,8 @@ from app.services.notification_transport import NotificationHTTPClient
 from app.services.sms_transport import send_sms_request, SMSBatchError
 from app.services.alert_delivery_log import DeliveryRejected
 from app.core.crypto import encrypt_config, decrypt_config
+import logging
+import re
 import ssl
 import base64
 from uuid import UUID
@@ -23,6 +25,7 @@ from app.services.alert_phrasing import sms_with_timestamp
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +41,44 @@ class SmtpConfig(BaseModel):
     from_name: str = ""
     encryption: str = "tls"  # none / tls / ssl
     enabled: bool = False
+
+
+class SmtpSettingsIn(BaseModel):
+    """What Settings -> SMTP / Email saves. The password never travels back to
+    the browser, so an empty ``password`` means "keep the stored one";
+    ``clear_password`` removes it on purpose."""
+    host: str = Field("", max_length=255)
+    port: int = Field(587, ge=1, le=65535)
+    username: str = Field("", max_length=255)
+    password: str = Field("", max_length=1024)
+    clear_password: bool = False
+    from_email: str = Field("", max_length=254)
+    from_name: str = Field("", max_length=120)
+    encryption: str = Field("tls", pattern="^(tls|ssl|none)$")
+    enabled: bool = False
+
+    @field_validator("host", "username", "from_email", "from_name")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return (v or "").strip()
+
+    @model_validator(mode="after")
+    def _usable_when_enabled(self):
+        if self.from_email and not re.match(r"^[^@\s]+@[^@\s]+$", self.from_email):
+            raise ValueError("Enter a valid From address")
+        if self.enabled and not self.host:
+            raise ValueError("An SMTP host is required to enable email")
+        if self.enabled and not self.from_email:
+            raise ValueError("A From address is required to enable email")
+        return self
+
+
+class SmtpSettingsOut(SmtpConfig):
+    # ``password`` is always empty in a response; this says whether one is stored.
+    password_set: bool = False
+    # Which stored configuration the form shows: the default SMTP gateway (what
+    # senders use), or the legacy settings key when no gateway exists yet.
+    gateway_name: Optional[str] = None
 
 
 class SmsConfig(BaseModel):
@@ -67,12 +108,15 @@ class SmsConfig(BaseModel):
 
 
 class GatewaysResponse(BaseModel):
-    smtp: Optional[SmtpConfig] = None
+    smtp: Optional[SmtpSettingsOut] = None
     sms: Optional[SmsConfig] = None
 
 
 class SmtpTestRequest(BaseModel):
     recipient: str
+    # The form's current values, saved or not (an empty password = the stored
+    # one). Absent = test the stored configuration.
+    config: Optional[SmtpSettingsIn] = None
 
 
 class SmsTestRequest(BaseModel):
@@ -144,6 +188,33 @@ def _json_dumps(obj) -> str:
     return json.dumps(obj)
 
 
+_SMTP_FIELDS = ("host", "port", "username", "password", "from_email", "from_name", "encryption", "enabled")
+
+
+async def _effective_smtp(db: AsyncSession) -> tuple[dict, Optional[str]]:
+    """(config, gateway name) of the SMTP configuration senders use: the default
+    ``notification_gateways`` row (``host_alert_service._gateway_config``), else
+    the legacy ``system_settings['smtp']`` key they fall back to. The Settings
+    tab must show and change this one: reading the legacy key showed a stale
+    copy whose Save then overwrote the live gateway."""
+    row = (await db.execute(text(
+        "SELECT name, config, enabled FROM notification_gateways "
+        "WHERE type = 'smtp' AND is_default = true LIMIT 1"))).first()
+    if row is not None:
+        cfg = _normalize_smtp_config(decrypt_config(row.config) or {})
+        cfg["enabled"] = bool(row.enabled)   # the column is what delivery honours
+        return cfg, row.name
+    legacy = await _get_system_setting(db, "smtp")
+    return _normalize_smtp_config(legacy if isinstance(legacy, dict) else {}), None
+
+
+def _smtp_with_stored_secret(data: "SmtpSettingsIn", stored: dict) -> dict:
+    cfg = data.model_dump(exclude={"clear_password"})
+    if not cfg["password"] and not data.clear_password:
+        cfg["password"] = str(stored.get("password") or "")
+    return cfg
+
+
 async def _sync_default_notification_gateway(
     db: AsyncSession,
     gateway_type: str,
@@ -155,7 +226,8 @@ async def _sync_default_notification_gateway(
             "INSERT INTO notification_gateways (name, type, config, is_default, enabled, created_at, updated_at) "
             "VALUES (:name, :type, CAST(:config AS jsonb), true, :enabled, NOW(), NOW()) "
             "ON CONFLICT (type) WHERE is_default "
-            "DO UPDATE SET name = EXCLUDED.name, config = EXCLUDED.config, "
+            # The name belongs to whoever named the gateway on the Gateways page.
+            "DO UPDATE SET config = EXCLUDED.config, "
             "enabled = EXCLUDED.enabled, updated_at = NOW()"
         ),
         {
@@ -512,7 +584,9 @@ async def update_grafana_settings(
 @router.get("/company")
 async def get_company_settings(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("settings.view")),
+    # The Company tab is shown to settings.manage, which does not include
+    # settings.view (no hidden grants): whoever may save must be able to load.
+    user: User = Depends(require_permission("settings.view", "settings.manage")),
 ):
     raw = await _get_system_setting(db, "company")
     out = _company_from_stored(raw)
@@ -815,29 +889,45 @@ async def get_gateways(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("settings.manage")),
 ):
-    smtp_raw = await _get_system_setting(db, "smtp")
+    smtp_raw, gateway_name = await _effective_smtp(db)
     sms_raw = await _get_system_setting(db, "sms")
-    return GatewaysResponse(
-        smtp=SmtpConfig(**smtp_raw) if smtp_raw else SmtpConfig(),
-        sms=SmsConfig(**sms_raw) if sms_raw else SmsConfig(),
-    )
+    smtp = {k: smtp_raw[k] for k in _SMTP_FIELDS if smtp_raw.get(k) is not None}
+    has_password = bool(smtp.pop("password", ""))
+    try:
+        sms = SmsConfig(**sms_raw) if sms_raw else SmsConfig()
+    except Exception:
+        # A stored SMS document this version cannot read must not take the
+        # email form down with it.
+        logger.warning("stored SMS settings are unreadable; returning defaults", exc_info=True)
+        sms = SmsConfig()
+    try:
+        smtp_out = SmtpSettingsOut(**smtp, password_set=has_password, gateway_name=gateway_name)
+    except Exception:
+        logger.warning("stored SMTP settings are unreadable", exc_info=True)
+        raise HTTPException(status_code=500, detail="The stored SMTP settings could not be read")
+    return GatewaysResponse(smtp=smtp_out, sms=sms)
 
 
 @router.put("/gateways/smtp")
 async def update_smtp_legacy(
-    data: SmtpConfig,
+    data: SmtpSettingsIn,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("settings.manage")),
 ):
-    await _upsert_system_setting(db, "smtp", data.model_dump())
-    await _sync_default_notification_gateway(db, "smtp", "Default SMTP", data.model_dump())
+    stored, _name = await _effective_smtp(db)
+    new = _smtp_with_stored_secret(data, stored)
+    # Keys this form does not know (written by the Gateways page) are kept.
+    merged = {**{k: v for k, v in stored.items() if k not in ("use_tls", "use_ssl")}, **new}
+    await _upsert_system_setting(db, "smtp", new)
+    await _sync_default_notification_gateway(db, "smtp", "Default SMTP", merged)
     await write_audit_log(
         db,
         actor=user,
         action="settings.gateway.smtp.update",
         resource_type="system_setting",
         resource_id="smtp",
-        metadata={"enabled": data.enabled, "host": data.host, "port": data.port},
+        metadata={"enabled": data.enabled, "host": data.host, "port": data.port,
+                  "password": "cleared" if data.clear_password else "changed" if data.password else "kept"},
     )
     await db.commit()
     return {"message": "SMTP settings updated"}
@@ -869,8 +959,12 @@ async def test_smtp_legacy(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("settings.manage")),
 ):
-    smtp_raw = await _get_system_setting(db, "smtp")
-    if not smtp_raw:
+    stored, _name = await _effective_smtp(db)
+    if data.config is not None:
+        smtp_raw = _smtp_with_stored_secret(data.config, stored)
+    else:
+        smtp_raw = {k: stored[k] for k in _SMTP_FIELDS if stored.get(k) is not None}
+    if not smtp_raw.get("host"):
         raise HTTPException(status_code=400, detail="SMTP not configured")
     return _do_smtp_test(smtp_raw, data.recipient, await notification_branding(db))
 
