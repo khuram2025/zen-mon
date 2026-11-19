@@ -778,4 +778,56 @@ assert.match(editor4, /Changes per automatic run, at most/)
 assert.match(editor4, /first matching pattern decides/, 'the editor explains how interface patterns combine')
 assert.match(read('src/pages/discovery/AssetAutomation.tsx'), /interfaceLabel\(s\.item_key\)/, 'the Automation card names the interface')
 
+// ── server inventory conditions (services, software, watched processes) ──────
+// Operators as conditions.OPERATORS["inventory"]; fields as server_inventory_facts.FIELDS.
+const invOps = [op('has', 'has any of', 'list'), op('has_containing', 'has one containing', 'text'), op('has_none', 'has none of', 'list'),
+  op('has_none_containing', 'has none containing', 'text'), op('reported', 'is reported', 'none'), op('not_reported', 'is not reported', 'none')]
+const invField = (key, label) => ({ key, type: 'inventory', label, help: '', values: null, source: null, applies_to: ['server'], operators: invOps })
+const invCatalog = {
+  ...catalog,
+  fields: [...catalog.fields, invField('services', 'Windows services'), invField('running_services', 'Running Windows services'),
+    invField('software', 'Installed software'), invField('software_publishers', 'Software publishers'),
+    invField('watched_processes', 'Watched processes running')],
+}
+assert.equal(M.summarizeLeaf(L('running_services', 'has', ['MSSQLSERVER']), invCatalog), 'Running Windows services has any of MSSQLSERVER')
+assert.equal(M.summarizeLeaf(L('services', 'has', ['MSSQLSERVER', 'W3SVC']), invCatalog), 'Windows services has any of MSSQLSERVER or W3SVC')
+assert.equal(M.summarizeLeaf(L('software', 'has_containing', 'SQL Server'), invCatalog), 'Installed software has one containing SQL Server')
+assert.equal(M.summarizeLeaf(L('software_publishers', 'has_none', ['Oracle Corporation']), invCatalog), 'Software publishers has none of Oracle Corporation')
+assert.equal(M.summarizeLeaf(L('watched_processes', 'has_none_containing', 'java'), invCatalog), 'Watched processes running has none containing java')
+assert.equal(M.summarizeLeaf(L('services', 'not_reported', null), invCatalog), 'Windows services is not reported')
+assert.equal(M.summarizeLeaf(L('software', 'reported', null), invCatalog), 'Installed software is reported')
+assert.equal(M.summarizeCondition({ op: 'all', conditions: [L('os', 'contains', 'Windows'), L('running_services', 'has', ['MSSQLSERVER'])] }, invCatalog),
+  'os contains Windows and Running Windows services has any of MSSQLSERVER', 'an unknown field keeps its key; inventory reads as a sentence')
+// value kinds: list operators start empty and need a value, text needs text, "reported" needs none
+assert.deepEqual(M.changeLeafOperator(L('services', 'has', ['A']), 'has_none', invCatalog), L('services', 'has_none', ['A']), 'list -> list keeps the names')
+assert.deepEqual(M.changeLeafOperator(L('services', 'has', ['A']), 'has_containing', invCatalog), L('services', 'has_containing', ''))
+assert.deepEqual(M.changeLeafOperator(L('services', 'has', ['A']), 'not_reported', invCatalog), L('services', 'not_reported', null))
+assert.deepEqual(M.changeLeafField(L('services', 'has', ['MSSQLSERVER']), 'running_services', invCatalog), L('running_services', 'has', ['MSSQLSERVER']),
+  'switching between inventory fields keeps the test and the names')
+assert.deepEqual(M.conditionProblems({ op: 'all', conditions: [L('services', 'has', [])] }, invCatalog), ['Windows services has any of: give at least one value'])
+assert.deepEqual(M.conditionProblems({ op: 'all', conditions: [L('software', 'has_containing', ' ')] }, invCatalog), ['Installed software has one containing: a value is required'])
+assert.deepEqual(M.conditionProblems({ op: 'all', conditions: [L('services', 'not_reported', null)] }, invCatalog), [])
+assert.equal(M.fieldSourceHint(invField('services', 'Windows services')), 'servers only')
+// the builder hint: case-insensitive, exact vs part of a name, and what "not reported" means
+assert.equal(M.isInventoryField(invField('software', 'Installed software')), true)
+assert.equal(M.isInventoryField(catalog.fields[0]), false)
+assert.equal(M.inventoryHint(catalog.fields[0], 'equals'), '', 'no hint for other fields')
+const hHas = M.inventoryHint(invField('running_services', 'Running Windows services'), 'has')
+assert.match(hHas, /exact service name or display name, ignoring case/)
+assert.match(hHas, /Linux servers report no services/)
+assert.match(hHas, /servers without an agent report nothing/)
+assert.match(hHas, /every other test, “has none” included, is then false/)
+assert.match(M.inventoryHint(invField('software', 'Installed software'), 'has_none'), /exact software name/)
+assert.match(M.inventoryHint(invField('software', 'Installed software'), 'has_containing'), /part of a software name, ignoring case/)
+assert.doesNotMatch(M.inventoryHint(invField('services', 'Windows services'), 'not_reported'), /Matches/, '"is reported" tests need no name')
+assert.equal(M.inventoryPlaceholder('services', 'list'), 'MSSQLSERVER, W3SVC')
+assert.equal(M.inventoryPlaceholder('software', 'text'), 'SQL Server')
+assert.equal(M.inventoryPlaceholder('unknown', 'list'), 'Comma separated')
+assert.equal(M.fieldSourceHint({ applies_to: ['scan', 'device', 'server'] }), '', 'device group fields carry no source hint')
+assert.match(read('src/pages/groups/api.ts'), /applies_to: f\.applies_to \?\? \['scan', 'device', 'server'\]/, 'the groups catalog never says "scan only"')
+const editorInv = read('src/pages/discovery/RuleEditorPage.tsx')
+assert.match(editorInv, /field\?\.type === 'inventory' && <div[^>]*>\{inventoryHint\(field, leaf\.operator\)\}/, 'the builder shows the inventory hint')
+assert.match(editorInv, /inventoryPlaceholder\(field\.key, 'list'\)/)
+assert.match(editorInv, /inventoryPlaceholder\(field\.key, 'text'\)/)
+
 console.log('discovery rules model: ok')

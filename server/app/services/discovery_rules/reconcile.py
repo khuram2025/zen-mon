@@ -105,9 +105,12 @@ SELECT 'child' AS kind, d.id::text AS id, md5(concat_ws('|', d.hostname, host(d.
 FROM devices d LEFT JOIN devices c ON c.id = d.managed_by_device_id {_MAPS.format(col='device_id', alias='d')}
 WHERE d.poll_mode = 'via_controller'"""
     base = ""
+    if "server_inventory" in extras:
+        from app.services.server_inventory_facts import HASH_PARTS
+        base += "".join(", " + HASH_PARTS[k] for k in ("services", "software", "processes"))
     if "baselines" in extras:
         # results of the server's evaluation, and every baseline's scope
-        base = (", (SELECT md5(string_agg(concat_ws(':', r.rule_id, r.status), ',' ORDER BY r.rule_id))"
+        base += (", (SELECT md5(string_agg(concat_ws(':', r.rule_id, r.status), ',' ORDER BY r.rule_id))"
                 " FROM server_baseline_results r WHERE r.server_id = s.id),"
                 " (SELECT md5(string_agg(concat_ws(':', b.id, b.name, b.enabled, b.os_type, b.site_id,"
                 " b.match_tags::text), ',' ORDER BY b.id)) FROM software_baselines b)")
@@ -138,11 +141,12 @@ async def candidates(db: AsyncSession, kinds: set[str], revision: str, *, limit:
 
 
 async def _load(db: AsyncSession, picked: list[tuple[str, str, str]],
-                extras: frozenset | set = frozenset()) -> list[tuple[str, dict]]:
+                extras: frozenset | set = frozenset(), needles: dict | None = None) -> list[tuple[str, dict]]:
     out: list[tuple[str, dict]] = []
     for k in sorted({k for k, _, _ in picked}):
         ids = [i for kk, i, _ in picked if kk == k]
-        out.extend(await inventory.load_assets(db, {"kinds": [k], f"{k}_ids": ids}, limit=len(ids), extras=extras))
+        out.extend(await inventory.load_assets(db, {"kinds": [k], f"{k}_ids": ids}, limit=len(ids), extras=extras,
+                                               needles=needles))
     return out
 
 
@@ -300,13 +304,14 @@ async def reconcile_changed(db: AsyncSession, *, batch: int = BATCH, apply_crede
         await db.rollback()
         return {"skipped": "waiting_for_approval", "engine_run_id": held}
     extras = frozenset(inventory.needs(active + simulating))
+    nd = inventory.needles(active + simulating)
     kinds = {k for r in active + simulating for k in (r.get("asset_kinds") or ["device"])}
     found = await candidates(db, kinds, revision, limit=inventory.MAX_ASSETS, extras=extras)
     if not found:
         await db.commit()
         return {"assets": 0}
     picked = found[:batch]
-    assets = await _load(db, picked, extras)
+    assets = await _load(db, picked, extras, nd)
     owned = await inventory.load_owned(db, assets)
     changes, matched, plans = inventory.evaluate_assets(assets, active, owned, trigger="changed")
     out: dict[str, Any] = {"assets": len(picked), "matched": matched}
@@ -316,7 +321,7 @@ async def reconcile_changed(db: AsyncSession, *, batch: int = BATCH, apply_crede
         # Plan everything that changed, so one approval covers it.
         if len(found) > len(picked):
             picked = found
-            assets = await _load(db, picked, extras)
+            assets = await _load(db, picked, extras, nd)
             owned = await inventory.load_owned(db, assets)
             changes, matched, plans = inventory.evaluate_assets(assets, active, owned, trigger="changed")
             reasons = limit_reasons(changes, active, settings, await _new_matches(db, plans)) or reasons
@@ -464,7 +469,8 @@ async def scheduled_pass(db: AsyncSession, *, now: datetime | None = None, apply
         return {"skipped": "waiting_for_approval", "engine_run_id": held}
     extras = frozenset(inventory.needs(active + simulating))
     kinds = sorted({k for r in active + simulating for k in (r.get("asset_kinds") or ["device"])})
-    assets = await inventory.load_assets(db, {"kinds": kinds}, extras=extras)
+    assets = await inventory.load_assets(db, {"kinds": kinds}, extras=extras,
+                                         needles=inventory.needles(active + simulating))
     owned = await inventory.load_owned(db, assets)
     changes, matched, plans = inventory.evaluate_assets(assets, active, owned, trigger="scheduled")
     rule_matches = {r["id"]: 0 for r in active}
@@ -574,7 +580,7 @@ async def unmatched(db: AsyncSession, rules: list[dict], *, kinds: list[str], li
     """Assets no given rule matches (whatever the rules' triggers), for the
     "Unmatched" report: which devices and servers the rules leave alone."""
     extras = frozenset(inventory.needs(rules))
-    assets = await inventory.load_assets(db, {"kinds": kinds}, extras=extras)
+    assets = await inventory.load_assets(db, {"kinds": kinds}, extras=extras, needles=inventory.needles(rules))
     manual = [{**r, "triggers": ["manual"]} for r in rules]
     rows: list[dict] = []
     per_kind: dict[str, dict] = {k: {"assets": 0, "unmatched": 0} for k in kinds}

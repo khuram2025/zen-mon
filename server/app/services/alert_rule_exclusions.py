@@ -179,7 +179,7 @@ def server_rule_covers(rule, server: dict) -> bool:
     if _get(rule, "server_id") and str(_get(rule, "server_id")) != str(server["id"]):
         return False
     if rs.family(rule) == "server":
-        return True
+        return server_scope_covers(rule, server)
     from app.services.server_availability import is_down_rule
     if not is_down_rule(rule):
         return False
@@ -188,6 +188,21 @@ def server_rule_covers(rule, server: dict) -> bool:
         return False
     tag = (_get(rule, "scope_tag") or "").strip().lower()
     return not tag or tag in tag_set(server.get("tags"))
+
+
+def server_scope_covers(rule, server: dict) -> bool:
+    """A server rule's tag and group scope (``scope_tag``, ``group_id``): the
+    server carries the tag, and is a member of the group (dynamic groups and
+    subgroups included, ``device_group_member_closure``; ``server["_groups"]``
+    when the caller loaded memberships). No scope: every server."""
+    tag = (_get(rule, "scope_tag") or "").strip().lower()
+    if tag and tag not in tag_set(server.get("tags")):
+        return False
+    if _get(rule, "group_id"):
+        from app.services.device_groups.membership import in_group
+        if not in_group(_get(rule, "group_id"), server.get("_groups") or set(), None):
+            return False
+    return True
 
 
 def covers(rule, kind: str, asset: dict) -> bool:
@@ -214,6 +229,11 @@ async def asset_row(db: AsyncSession, kind: str, asset_id) -> Optional[dict]:
         row = (await db.execute(text(
             "SELECT id, COALESCE(display_name, hostname) AS name, host(primary_ip) AS ip, tags,"
             " collection_mode, status FROM servers WHERE id = CAST(:id AS uuid)"), {"id": str(asset_id)})).mappings().first()
+        if row:
+            from app.services.device_groups import membership
+            out = dict(row)
+            out["_groups"] = await membership.groups_of(db, "server", out["id"]) or set()
+            return out
     else:
         return None
     return dict(row) if row else None

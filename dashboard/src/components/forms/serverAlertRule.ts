@@ -90,6 +90,57 @@ export function downRuleCoversServers(r: { metric?: string; trigger_on?: string 
   return firesOnDownOnly(r.operator, r.threshold)
 }
 
+/**
+ * Which servers a rule covers: every server, one server, the servers carrying a tag, or the members of a device group
+ * (static or dynamic, subgroups included). A tag and a group may both be set: a server must then match both.
+ */
+export type ServerScopeMode = 'all' | 'one' | 'tag' | 'group'
+
+export const SERVER_SCOPE_OPTIONS: ReadonlyArray<{ value: ServerScopeMode; label: string }> = [
+  { value: 'all', label: 'All servers' },
+  { value: 'one', label: 'One server' },
+  { value: 'tag', label: 'Servers with a tag' },
+  { value: 'group', label: 'Servers in a group' },
+]
+
+/** The longest tag a rule may be scoped to (host_alert_rules.HostRuleCreate.scope_tag). */
+export const MAX_SCOPE_TAG = 64
+
+type ScopeFields = { server_scope?: ServerScopeMode | null; server_id?: string | null; scope_tag?: string | null; group_id?: string | null }
+
+/**
+ * The scope a draft or saved rule uses. A server id (or the '__pick__' placeholder) always means one server; otherwise
+ * the wizard's choice, or without one the fields it implies.
+ */
+export function serverScopeOf(s: ScopeFields): ServerScopeMode {
+  if (s.server_id) return 'one'
+  if (s.server_scope && s.server_scope !== 'one') return s.server_scope
+  if (s.group_id) return 'group'
+  if (s.scope_tag) return 'tag'
+  return 'all'
+}
+
+/** The draft fields after choosing a scope. A tag and a group survive switching between the two; one server drops them. */
+export function serverScopeChange(mode: ServerScopeMode, s: ScopeFields): { server_scope: ServerScopeMode; server_id: string; scope_tag: string; group_id: string } {
+  if (mode === 'one') return { server_scope: mode, server_id: '__pick__', scope_tag: '', group_id: '' }
+  if (mode === 'all') return { server_scope: mode, server_id: '', scope_tag: '', group_id: '' }
+  return { server_scope: mode, server_id: '', scope_tag: s.scope_tag || '', group_id: s.group_id || '' }
+}
+
+/**
+ * The rule list's words for a server rule's scope: "All servers", the server's name, "Servers with tag prod",
+ * "Servers in SQL hosts", "Servers in SQL hosts with tag prod".
+ */
+export function serverScopeLabel(r: ScopeFields, names: { server?: string | null; group?: string | null } = {}): string {
+  if (r.server_id) return names.server || 'One server'
+  const tag = String(r.scope_tag || '').trim()
+  const group = r.group_id ? names.group || 'one device group' : ''
+  if (group && tag) return `Servers in ${group} with tag ${tag}`
+  if (group) return `Servers in ${group}`
+  if (tag) return `Servers with tag ${tag}`
+  return 'All servers'
+}
+
 /** The wizard fields a server rule is built from. */
 export type ServerDraft = {
   name: string
@@ -102,6 +153,12 @@ export type ServerDraft = {
   conditions: { metric: string; operator: string; threshold: number; reset_threshold?: number | null }[]
   target: string
   server_id: string
+  /** The scope chosen in the wizard; derived from the fields when absent (see serverScopeOf). */
+  server_scope?: ServerScopeMode
+  /** Without one server: only servers carrying this tag ('' = any). */
+  scope_tag?: string
+  /** Without one server: only members of this device group ('' = any). */
+  group_id?: string
   min_duration: number
   clear_duration: number | null
   reset_mode: 'auto' | 'none'
@@ -139,7 +196,11 @@ export function serverDraftProblem(s: ServerDraft): { step: 'trigger' | 'scope';
   if (kind === 'pct' && !(Number(c.threshold) >= 0 && Number(c.threshold) <= 100)) {
     return { step: 'trigger', message: 'The threshold is a percentage from 0 to 100.' }
   }
-  if (s.server_id === '__pick__') return { step: 'scope', message: 'Select a server, or choose "All servers".' }
+  const scope = serverScopeOf(s)
+  if (scope === 'one' && (!s.server_id || s.server_id === '__pick__')) return { step: 'scope', message: 'Select a server, or choose "All servers".' }
+  if (scope === 'tag' && !String(s.scope_tag || '').trim()) return { step: 'scope', message: 'Choose a tag, or choose "All servers".' }
+  if (scope === 'group' && !s.group_id) return { step: 'scope', message: 'Select a device group, or choose "All servers".' }
+  if (String(s.scope_tag || '').trim().length > MAX_SCOPE_TAG) return { step: 'scope', message: `A tag is at most ${MAX_SCOPE_TAG} characters.` }
   return null
 }
 
@@ -148,6 +209,8 @@ export function serverRulePayload(s: ServerDraft): Record<string, unknown> {
   const c = s.conditions[0]
   const kind = serverMetricKind(c.metric)
   const pct = kind === 'pct'
+  const scope = serverScopeOf(s)
+  const filtered = scope === 'tag' || scope === 'group'
   return {
     name: s.name,
     description: s.description || null,
@@ -165,7 +228,10 @@ export function serverRulePayload(s: ServerDraft): Record<string, unknown> {
     recovery_alert: s.reset_mode === 'auto',
     cooldown: s.cooldown,
     notify_channels: s.notify_channels,
-    server_id: s.server_id && s.server_id !== '__pick__' ? s.server_id : null,
+    server_id: scope === 'one' && s.server_id && s.server_id !== '__pick__' ? s.server_id : null,
+    // Sent on every save, so an edit that returns to all servers or one server clears them.
+    scope_tag: filtered ? String(s.scope_tag || '').trim() || null : null,
+    group_id: filtered ? s.group_id || null : null,
     target: kind === 'svc' || kind === 'proc' ? s.target.trim() : null,
     priority: s.priority || null,
     escalation_policy_id: s.escalation_mode === 'policy' ? s.escalation_policy_id || null : null,
@@ -191,6 +257,8 @@ export function serverRuleCopy(r: any): Record<string, unknown> {
     conditions: [{ metric: r.metric, operator: r.operator || 'gt', threshold: Number(r.threshold ?? 0), reset_threshold: reset }],
     target: r.target || '',
     server_id: r.server_id || '',
+    scope_tag: r.server_id ? '' : r.scope_tag || '',
+    group_id: r.server_id ? '' : r.group_id || '',
     min_duration: Number(r.min_duration ?? 0),
     clear_duration: typeof r.clear_duration === 'number' ? r.clear_duration : null,
     reset_mode: r.recovery_alert ? 'auto' : 'none',

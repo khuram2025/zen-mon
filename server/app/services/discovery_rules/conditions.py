@@ -109,6 +109,17 @@ OPERATORS: dict[str, dict[str, tuple[str, str]]] = {
         "is_any_of": ("is any of", "ref_list"),
         "is_empty": ("is empty", "none"),
     },
+    # Names a server's agent reports (services, software, watched processes;
+    # see app.services.server_inventory_facts). Not reported = unknown: only
+    # "is not reported" holds then, negative tests included.
+    "inventory": {
+        "has": ("has any of", "list"),
+        "has_containing": ("has one containing", "text"),
+        "has_none": ("has none of", "list"),
+        "has_none_containing": ("has none containing", "text"),
+        "reported": ("is reported", "none"),
+        "not_reported": ("is not reported", "none"),
+    },
     "boolean": {
         "is_true": ("is true", "none"),
         "is_false": ("is false", "none"),
@@ -124,7 +135,7 @@ OPERATORS: dict[str, dict[str, tuple[str, str]]] = {
 }
 
 NEGATIVE = frozenset({"not_equals", "not_contains", "not_starts_with", "not_in_subnet",
-                      "has_none", "is_not", "is_empty"})
+                      "has_none", "is_not", "is_empty", "has_none_containing", "not_reported"})
 
 
 class ConditionError(ValueError):
@@ -323,6 +334,9 @@ def eval_leaf(leaf: dict, facts: dict, fields: dict | None = None, *, strict_boo
     ftype = catalog[field][0]
     have = facts.get(field)
 
+    if ftype == "inventory":
+        from app.services.server_inventory_facts import evaluate as _inventory
+        return _inventory(op, have, want)
     if op == "is_empty":
         return _missing(have)
     if op == "is_not_empty":

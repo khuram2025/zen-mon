@@ -58,10 +58,12 @@ per custom field:
 | status | enum |
 | managed child, SNMP enabled, ping enabled, NCM enrolled | boolean |
 | custom fields | their own type (text, number, date, choice, boolean) |
+| servers: Windows services, running Windows services, installed software, software publishers, watched processes running | inventory (has any of, has one containing, has none of, has none containing, is reported, is not reported); see `docs/discovery-rule-engine.md`, "Server inventory conditions" |
 
 A fact an asset does not have (a server's sysObjectID, an unset custom field)
 makes a positive test false and a negative test (`does not equal`, `is empty`)
-true. The `date` type (on / before / after / is empty) was added to the shared
+true. Inventory facts are stricter: a server that reports nothing for one is
+unknown and fails every test except *is not reported*. The `date` type (on / before / after / is empty) was added to the shared
 condition engine for custom date fields.
 
 The editor shows a live **preview** (`POST /device-groups/preview`): how many
@@ -108,8 +110,16 @@ never stops because the membership tables are unavailable.
 
 Not changed in phase 2: traps still ignore device type and location scope;
 Device Tracker still matches location exactly; sensor group assignments and
-the vantage view still use the primary group; host (server) alert rules have
-no group scope yet.
+the vantage view still use the primary group.
+
+**Server alert rules** (`host_*`) that are not for one server can be scoped by
+a tag (`scope_tag`) and/or a device group (`group_id`, static or dynamic,
+subgroups included): `alert_rule_exclusions.server_scope_covers`, used by the
+host evaluator, the per-server rule list and the scope count. When a server
+leaves the scope (tag removed, no longer a group member) the rule's open
+incident on it is resolved without a recovery notice (`resolved_by:
+out_of_scope`), as an exclusion resolves it. A tag-scoped user may manage a
+server rule scoped to one of their tags.
 
 ## Custom fields
 

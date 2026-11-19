@@ -77,6 +77,8 @@ import {
   activationPermissions,
   dependencyIds,
   fieldSourceHint,
+  inventoryHint,
+  inventoryPlaceholder,
   kindsPhrase,
   pickableActions,
   IMPORT_AS_LABEL,
@@ -821,6 +823,7 @@ function LeafEditor({
             onChange={(value) => onChange({ ...leaf, value })}
           />
         )}
+        {field?.type === 'inventory' && <div className="mt-0.5 px-1 text-2xs text-muted">{inventoryHint(field, leaf.operator)}</div>}
       </div>
       <Button variant="ghost" size="icon" className="h-9 w-9 text-muted hover:text-danger" title="Remove condition" onClick={onRemove}>
         <X className="h-4 w-4" />
@@ -935,7 +938,13 @@ function ValueInput({
           value={Array.isArray(value) ? value : []}
           onChange={onChange}
           ariaLabel="Values"
-          placeholder={field.type === 'set' && field.key === 'open_ports' ? '22, 443, 8443' : 'Comma separated'}
+          placeholder={
+            field.type === 'inventory'
+              ? inventoryPlaceholder(field.key, 'list')
+              : field.type === 'set' && field.key === 'open_ports'
+                ? '22, 443, 8443'
+                : 'Comma separated'
+          }
         />
       )
     default:
@@ -962,7 +971,15 @@ function ValueInput({
           maxLength={operator === 'matches' ? maxRegex : undefined}
           className={field.type === 'oid' || operator === 'matches' ? 'font-mono text-xs' : undefined}
           placeholder={
-            operator === 'matches' ? 'Regular expression' : field.type === 'oid' ? '1.3.6.1.4.1.12356' : field.type === 'version' ? '7.2.5' : ''
+            operator === 'matches'
+              ? 'Regular expression'
+              : field.type === 'oid'
+                ? '1.3.6.1.4.1.12356'
+                : field.type === 'version'
+                  ? '7.2.5'
+                  : field.type === 'inventory'
+                    ? inventoryPlaceholder(field.key, 'text')
+                    : ''
           }
           onChange={(e) => onChange(e.target.value)}
         />
