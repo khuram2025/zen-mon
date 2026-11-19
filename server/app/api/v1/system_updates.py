@@ -47,7 +47,9 @@ TYPED_PRIVILEGE_BROKER = "/usr/local/libexec/zentryc-privileged"
 
 class UpdateConfig(BaseModel):
     auto_update: bool = True
-    check_interval_hours: int = 4
+    # The timer helper accepts 1 through 168; anything else was written to
+    # agent.conf and then failed (or was clamped) only at the timer.
+    check_interval_hours: int = Field(4, ge=1, le=168)
     maintenance_window_start: str = ""
     maintenance_window_end: str = ""
 
@@ -183,7 +185,10 @@ def _load_subscription() -> Optional[RemoteSubscription]:
         if not data:
             return None
         return RemoteSubscription(**data)
-    except (json.JSONDecodeError, OSError, TypeError):
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        # ValueError covers a cached document this version cannot validate (a
+        # null count, for one): no subscription shown beats a 500 on the
+        # Licenses tab, the Updates tab and the header bell at once.
         return None
 
 
@@ -424,6 +429,29 @@ async def get_update_status(user: User = Depends(require_admin_user)):
     )
 
 
+def _applied_timer_hours() -> Optional[int]:
+    """The check interval the timer runs on now: the managed drop-in, else the
+    shipped unit's 4 hours. None when it cannot be told (unreadable or not ours)."""
+    try:
+        with open(TIMER_DROPIN_FILE, encoding="utf-8") as f:
+            text_ = f.read()
+    except FileNotFoundError:
+        return 4
+    except OSError:
+        return None
+    import re
+    found = re.findall(r"^OnUnitActiveSec=([0-9]{1,3})h$", text_, re.MULTILINE)
+    return int(found[-1]) if found else None
+
+
+def _relay_status(upstream: int) -> int:
+    """Status for a failure the licensing portal reported. Its 401 / 403 are
+    about the appliance's key, not this browser session: relayed as they are,
+    the dashboard treats 401 as an expired session and signs the administrator
+    out instead of showing the reason."""
+    return 502 if upstream in (401, 403) or upstream >= 500 else upstream
+
+
 def _write_timer_override(check_interval_hours: int) -> tuple[bool, str]:
     """Set the updater timer interval without touching the shipped unit file.
 
@@ -508,7 +536,13 @@ async def update_config(
 
     _write_config(config)
 
-    ok, err = _write_timer_override(body.check_interval_hours)
+    # Touch the systemd timer only when the interval really changes. The helper
+    # restarts it, which also STARTS a timer that was stopped on purpose (a
+    # frozen appliance), so saving the maintenance window must not go near it.
+    if _applied_timer_hours() == body.check_interval_hours:
+        ok, err = True, ""
+    else:
+        ok, err = _write_timer_override(body.check_interval_hours)
     if not ok:
         await write_audit_log(
             db,
@@ -682,7 +716,7 @@ async def register_appliance(
             )
 
         if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail=_extract_remote_error(resp))
+            raise HTTPException(status_code=_relay_status(resp.status_code), detail=_extract_remote_error(resp))
 
         data = resp.json()
         appliance_id = data.get("appliance_id", "")
@@ -897,7 +931,7 @@ async def refresh_subscription(
             return {"subscription": None, "message": "Appliance is not linked to any subscription"}
 
         if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail=_extract_remote_error(resp))
+            raise HTTPException(status_code=_relay_status(resp.status_code), detail=_extract_remote_error(resp))
 
         data = resp.json()
         subscription = data.get("subscription")

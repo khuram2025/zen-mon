@@ -221,9 +221,54 @@ async def _store_state(db: AsyncSession, alert_id, state: dict, expected=None) -
     return row is not None
 
 
+def _incident_text(row) -> str:
+    """The incident in one finished sentence, for escalations and reminders.
+
+    The stored message without the rule name the subject and SMS already
+    lead with ("High CPU: High CPU: ..."), ending in a full stop so the next
+    sentence does not run on. A metric incident that recorded its opening
+    reading (``trigger_value``) says so — "Host CPU on srv-a (10.0.0.5)
+    opened at 93.8% (limit 90%)." — rather than quoting a value from the
+    moment it opened as if it were current.
+    """
+    msg = " ".join(str(getattr(row, "message", None) or "").split())
+    name = " ".join(str(getattr(row, "rule_name", None) or "").split())
+    if name and msg.lower().startswith(name.lower() + ":"):
+        msg = msg[len(name) + 1:].strip()
+    meta = getattr(row, "metadata", None) or {}
+    metric = getattr(row, "metric", None) or ""
+    opened = meta.get("trigger_value") if isinstance(meta, dict) else None
+    info = ap.METRICS.get(metric, {})
+    if (opened is not None and metric and "state" not in info
+            and metric not in ap.EVENT_SENTENCE_METRICS and not meta.get("if_index")):
+        try:
+            value = float(opened)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None:
+            hostname, ip = _subject_noun(row)
+            threshold = meta.get("threshold", getattr(row, "threshold", None))
+            mount = meta.get("mount")
+            noun = (f"Filesystem {mount}" if mount and metric == "host_filesystem_pct"
+                    else ap.metric_noun(metric))
+            reading = ap.format_reading(metric, value, getattr(row, "operator", None), threshold)
+            limit = ap.format_threshold(metric, threshold) if threshold is not None else ""
+            return (f"{noun} on {ap.host_label(hostname, ip)} opened at {reading}"
+                    + (f" (limit {limit})" if limit else "") + ".")
+    msg = msg.rstrip(" .")
+    return f"{msg}." if msg else ""
+
+
 def _incident(row, now, lifecycle: str, **extra) -> dict:
     return ap.incident_context(alert_id=row.id, first_seen=row.triggered_at, now=now,
                                lifecycle=lifecycle, **extra)
+
+
+async def _at_site(db: AsyncSession, row) -> str:
+    """" at Site Riyadh-HQ" for the SMS of this incident ("" when unknown)."""
+    from app.services import notification_context
+
+    return (await notification_context.asset_place(db, {"alert_id": row.id}))["site_suffix"]
 
 
 async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
@@ -236,6 +281,7 @@ async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
     """
     from app.services.host_alert_service import dispatch_to_channels
 
+    at_site = await _at_site(db, row)
     now = datetime.now(timezone.utc)
     hostname, ip = _subject_noun(row)
     sev = (row.rule_severity or row.alert_severity or "warning")
@@ -246,25 +292,29 @@ async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
         metric=row.metric, operator=row.operator, threshold=row.threshold,
     )
     total = int(row.max_repeat or 0) or None
+    summary = _incident_text(row)
     if is_repeat:
         incident = _incident(row, now, "reminder", reminder_index=repeats or None,
                              reminder_total=total)
         reminder = incident.get("lifecycle_label") or "Reminder"
-        body = (f"{row.message} This alert has been active for {duration} without "
+        body = (f"{summary} This alert has been active for {duration} without "
                 f"being acknowledged. {reminder} at escalation level {level_no}.")
     else:
         incident = _incident(row, now, "escalated", escalation_level=level_no)
         # "Escalation L2:" already leads the subject; the tag would repeat it.
         incident["lifecycle_tag"] = ""
-        body = (f"{row.message} This alert has been active for {duration} without "
+        body = (f"{summary} This alert has been active for {duration} without "
                 f"being acknowledged and has been escalated to escalation level {level_no}.")
-    sms = (f"ZenPlus ESCALATION L{level_no} {sev.upper()} — "
-           f"{row.rule_name}: {row.message} Active {duration}, unacknowledged."
+    # " at Site Riyadh-HQ" when the site is known (notification_context).
+    sms = (f"ZenPlus ESCALATION L{level_no} {sev.upper()} - "
+           f"{row.rule_name}{at_site}: {summary} Active {duration}, unacknowledged."
            + (f" {incident.get('lifecycle_label')}." if is_repeat else ""))
     sent = await dispatch_to_channels(db, level.get("notify_channels") or [], {
         "subject": f"[{sev.upper()}] Escalation L{level_no}: {row.rule_name} — {hostname}",
         "body": body,
         "message": sms,
+        "event_sentence": (f"{incident.get('lifecycle_label') or 'Reminder'}: {summary}" if is_repeat
+                           else f"Escalated to level {level_no}: {summary}"),
         "hostname": hostname, "ip_address": ip,
         "status": f"ESCALATION L{level_no}",
         "severity": sev, "resolved": False,
@@ -304,6 +354,7 @@ async def _dispatch_all_clear(db: AsyncSession, row, channels: list[str],
     from app.services.host_alert_service import dispatch_to_channels
 
     hostname, ip = _subject_noun(row)
+    at_site = await _at_site(db, row)
     sev = (row.rule_severity or row.alert_severity or "warning")
     duration = ap.duration_between(row.triggered_at, row.resolved_at)
     meta = dict(row.metadata or {})
@@ -319,19 +370,22 @@ async def _dispatch_all_clear(db: AsyncSession, row, channels: list[str],
         body = (f"The escalated alert was closed by {who}. This is a manual closure, "
                 f"not a confirmed recovery; the monitored condition may still be present."
                 + (f" Note: {note}" if note else ""))
-        sms = (f"ZenPlus closed — {row.rule_name}: {hostname} closed by {who} "
+        sms = (f"ZenPlus closed - {row.rule_name}{at_site}: {hostname} closed by {who} "
                f"(manual, not a confirmed recovery).")
         subject = f"[{sev.upper()}] Closed by operator: {row.rule_name} — {hostname}"
+        sentence = f"{hostname}: the escalated alert was closed by {who} (not a confirmed recovery)."
     else:
         body = (f"The escalated alert has been resolved."
                 + (f" It was active for {duration}." if duration else ""))
-        sms = (f"ZenPlus resolved — {row.rule_name}: {hostname} all clear."
+        sms = (f"ZenPlus resolved - {row.rule_name}{at_site}: {hostname} all clear."
                + (f" Active for {duration}." if duration else ""))
         subject = f"[{sev.upper()}] Resolved: {row.rule_name} — {hostname}"
+        sentence = f"{hostname}: the escalated alert has been resolved."
     return await dispatch_to_channels(db, channels, {
         "subject": subject,
         "body": body,
         "message": sms,
+        "event_sentence": sentence,
         "hostname": hostname, "ip_address": ip,
         "status": "CLOSED" if manual else "RESOLVED",
         "severity": sev, "resolved": True,
@@ -595,19 +649,24 @@ async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Po
 
     now = datetime.now(timezone.utc)
     hostname, ip = _subject_noun(row)
+    at_site = await _at_site(db, row)
     sev = (row.rule_severity or row.alert_severity or "warning")
     priority = _priority_of(row)
     duration = ap.duration_between(row.triggered_at, now)
     condition = ap.conditions_label(row.conditions, row.condition_logic or "AND",
                                     metric=row.metric, operator=row.operator, threshold=row.threshold)
     step_txt = _step_label(policy, plan.step) if plan.step >= 0 else ""
+    # Steps are numbered from 1 everywhere a person reads them ("Escalation
+    # step 2", "Step 2 of 3"); plan.step is the zero-based index.
+    step_no = plan.step + 1
     acked = row.status == "acknowledged" and plan.kind != "ack_expired"
+    summary = _incident_text(row)
     if plan.kind == "review":
         incident = _incident(row, now, "reminder", reminder_index=plan.review)
         incident.update(lifecycle_label=f"Unresolved update {plan.review}",
                         lifecycle_tag=f"Update {plan.review}")
         head = f"Unresolved update {plan.review}"
-        body = (f"{row.message} This incident is still open after {duration}"
+        body = (f"{summary} This incident is still open after {duration}"
                 + (f" and is owned by {owner_name}." if owner_name else
                    (" and has been acknowledged." if acked else " and has not been acknowledged."))
                 + " Please review its impact and progress.")
@@ -617,35 +676,36 @@ async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Po
         incident = _incident(row, now, "reminder")
         incident.update(lifecycle_label="Acknowledgement expired", lifecycle_tag="Ack expired")
         head = "Acknowledgement expired"
-        body = (f"{row.message} The acknowledgement is older than {policy.ack_expiry_minutes} "
+        body = (f"{summary} The acknowledgement is older than {policy.ack_expiry_minutes} "
                 f"minutes and the incident is still open (active for {duration}), so escalation "
                 f"has re-opened at {step_txt.lower() or 'the first step'}.")
         notice = f"Escalation policy {policy.name}: acknowledgements expire after {policy.ack_expiry_minutes} minutes."
     elif plan.kind == "repeat":
         total = int(policy.max_repeats or 0) or None
         incident = _incident(row, now, "reminder", reminder_index=plan.repeat, reminder_total=total)
-        head = f"Escalation S{plan.step}"
-        body = (f"{row.message} This alert has been active for {duration} without being "
+        head = f"Escalation step {step_no}"
+        body = (f"{summary} This alert has been active for {duration} without being "
                 f"acknowledged. {incident.get('lifecycle_label') or 'Reminder'} at {step_txt.lower()}.")
         notice = (f"Escalation policy {policy.name}: the current step is re-notified every "
                   f"{policy.repeat_minutes} minutes until someone acknowledges.")
     elif plan.step <= 0:
         incident = _incident(row, now, "new")
         head = "ALERT"
-        body = f"{row.message} You are notified by escalation policy {policy.name}."
+        body = f"{summary} You are notified by escalation policy {policy.name}."
         notice = f"Escalation policy {policy.name}: initial notification ({step_txt.lower()})."
     else:
-        incident = _incident(row, now, "escalated", escalation_level=plan.step)
+        incident = _incident(row, now, "escalated", escalation_level=step_no)
         incident["lifecycle_tag"] = ""
+        incident["lifecycle_label"] = f"Escalated to step {step_no}"
         delay = policy.steps[plan.step].delay_minutes
-        head = f"Escalation S{plan.step}"
-        body = (f"{row.message} This alert has been active for {duration} without being "
+        head = f"Escalation step {step_no}"
+        body = (f"{summary} This alert has been active for {duration} without being "
                 f"acknowledged and has been escalated to {step_txt.lower()}.")
         notice = (f"Escalation policy {policy.name}: this alert was not acknowledged within "
                   f"{delay} minutes, so it has been escalated.")
     if fallback:
         notice += " The step's own route reached nobody, so the policy's fallback route is notified."
-    sms = (f"ZenPlus {priority} {head.upper()} {sev.upper()} — {row.rule_name}: {row.message} "
+    sms = (f"ZenPlus {priority} {head.upper()} {sev.upper()} - {row.rule_name}{at_site}: {summary} "
            f"Active {duration}" + (", acknowledged." if acked else ", unacknowledged.")
            + (f" {incident.get('incident_ref')}" if incident.get("incident_ref") else ""))
     details = [("Alert rule", row.rule_name), ("Condition", condition),
@@ -659,6 +719,7 @@ async def _dispatch_policy(db: AsyncSession, row, plan: eps.Plan, policy: eps.Po
     return await dispatch_to_channels(db, channels, {
         "subject": f"[{sev.upper()}] {head}: {row.rule_name} — {hostname}",
         "body": body, "message": sms,
+        "event_sentence": summary if head == "ALERT" else f"{head}: {summary}",
         "hostname": hostname, "ip_address": ip,
         "status": head.upper() if plan.kind != "escalate" or plan.step > 0 else "ALERT",
         "severity": sev, "priority": priority, "resolved": False,
@@ -1114,5 +1175,16 @@ async def escalation_sweeper_loop() -> None:
             raise
         except Exception:
             logger.exception("suppression expiry sweep failed")
+        # Event alerts (trap, syslog, Device Tracker, config change) with no
+        # new event within the window close silently (at most once a minute).
+        try:
+            from app.services.alert_expiry import run_pass as expire_event_alerts
+            await expire_event_alerts()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("event alert expiry sweep failed")
         await __import__("app.services.notification_grouping", fromlist=["release_tick"]).release_tick()
+        # Hourly: clear the stored text of old deliveries (never raises).
+        await __import__("app.services.alert_delivery_log", fromlist=["content_retention_tick"]).content_retention_tick()
         await asyncio.sleep(EVAL_INTERVAL_S)

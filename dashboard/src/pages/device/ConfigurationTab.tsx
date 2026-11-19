@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { CustomFieldsCard } from '@/components/devices/CustomFieldsCard'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Box, Clock, GitBranch, HardDrive, Info, KeyRound, Layers, Save, Shield, Tag as TagIcon, Timer, Wifi } from 'lucide-react'
@@ -18,12 +19,16 @@ import { inventoryApi } from '@/pages/inventory/api'
 import { Panel } from './charts'
 import { formatRelative, formatSpan } from './format'
 import { OwnerNotesCard } from './OwnerNotesCard'
+import { isManagedChild } from './ControllerChild'
+import { AssetAlertRules } from '@/components/alerts/RuleExclusions'
+import { EffectiveThresholdsCard } from '@/components/alerts/EffectiveThresholdsCard'
+import { AssetAutomationBody, useAssetAutomation } from '@/pages/discovery/AssetAutomation'
 import type { DeviceRecord, DeviceSummary, IdentityField } from './types'
 
 /* How the device is monitored and what it is: identity (one resolved answer
  * per field, with its source), polling and credentials status (never the
  * values), owner and notes, monitoring sites, the status policy explained, tags, configuration
- * backups and connected endpoints. */
+ * backups, alert rules and the thresholds in force, discovery-rule automation and connected endpoints. */
 
 const SOURCE: Record<string, string> = {
   inventory: 'from Inventory', device: 'reported by the device', template: 'from the template reading', entity: 'from ENTITY-MIB',
@@ -37,11 +42,17 @@ export function ConfigurationTab({ device, summary, onOpenHardware }: { device: 
     enabled: !!device.snmp_enabled,
   })
   const snmp = !!device.snmp_enabled
+  // Discovery rules: shown once the explain call answers; a 403 / 404 leaves the card out entirely.
+  // A controller-managed FortiSwitch / FortiAP is explained as a child (only the actions children take apply).
+  const { data: automation } = useAssetAutomation(isManagedChild(device) ? 'child' : 'device', device.id)
   const widgets = [
     { id: 'inventory', title: 'Identity and monitoring', width: 6, height: 10, minWidth: 3, minHeight: 4,
       content: <InventoryConfigCard device={device} entities={entities || []} snmpHasData={undefined} identity={summary?.identity} onDetails={onOpenHardware} /> },
     { id: 'owner-notes', title: 'Owner and notes', width: 6, height: 7, minWidth: 3, minHeight: 4,
       content: <OwnerNotesCard device={device} /> },
+    // Custom fields (migrate-192): typed values of the fields defined under Groups & Fields.
+    { id: 'custom-fields', title: 'Custom fields', width: 6, height: 6, minWidth: 3, minHeight: 3,
+      content: <CustomFieldsCard kind="device" id={device.id} /> },
     { id: 'monitoring-sites', title: 'Monitoring sites', width: 6, height: 7, minWidth: 2, minHeight: 3,
       content: <Panel title="Monitoring sites" meta="Where reachability is measured from"><MonitoringSites targetType="device" targetId={device.id} compact /></Panel> },
     { id: 'reachability', title: 'How status is decided', width: 12, height: 9, minWidth: 3, minHeight: 3,
@@ -51,6 +62,18 @@ export function ConfigurationTab({ device, summary, onOpenHardware }: { device: 
         <p className="text-sm text-muted">Backups, differences between versions and compliance for this device are kept in NCM.</p>
         <Link to={`/ncm/${device.id}`} className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"><Save className="h-3.5 w-3.5" />Open configuration history</Link>
       </Panel> }] : []),
+    // Shared rules can be turned off for this device alone (never for every device).
+    ...(can('alerts.view') ? [{ id: 'alert-rules', title: 'Alert rules', width: 6, height: 9, minWidth: 3, minHeight: 4,
+      content: <Panel title="Alert rules" meta="Rules that apply to this device">
+        <AssetAlertRules kind="device" assetId={device.id} assetName={device.hostname} />
+      </Panel> }] : []),
+    // The values in force for this device per rule: the rule's, an override row's, excluded or off (migrate-193).
+    ...(can('alerts.view') ? [{ id: 'alert-thresholds', title: 'Alert thresholds', width: 6, height: 9, minWidth: 3, minHeight: 4,
+      content: <Panel title="Alert thresholds" meta="What each rule checks on this device">
+        <EffectiveThresholdsCard kind="device" id={device.id} />
+      </Panel> }] : []),
+    ...(automation ? [{ id: 'automation', title: 'Automation', width: 6, height: 7, minWidth: 3, minHeight: 4,
+      content: <Panel title="Automation" meta="What discovery rules set on this device"><AssetAutomationBody data={automation} /></Panel> }] : []),
     ...(snmp && ['switch', 'router', 'firewall'].includes(device.device_type) ? [{ id: 'connected-endpoints', title: 'Connected endpoints', width: 6, height: 9, minWidth: 3, minHeight: 4,
       content: <ConnectedEndpointsCard deviceId={device.id} /> }] : []),
   ]
@@ -129,7 +152,13 @@ export function InventoryConfigCard({
     {
       icon: Layers, label: 'Monitoring Template',
       value: device.profile_name
-        ? <Link to="/settings/general?tab=templates" className="text-primary hover:underline">{device.profile_name}</Link>
+        ? <span>
+            <Link to={device.profile_id ? `/device-templates/${device.profile_id}` : '/device-templates'} className="text-primary hover:underline">{device.profile_name}</Link>
+            {device.profile_source && <span className="block text-xs font-normal text-muted">
+              Assigned by {({ auto: 'the classifier', manual: 'an operator', rule: 'a discovery rule', import: 'import' } as Record<string, string>)[device.profile_source] || device.profile_source}
+            </span>}
+            {device.profile_suggested_id && <Link to="/device-templates?tab=suggestions" className="block text-xs font-normal text-warning-fg hover:underline">A better-matching template is suggested</Link>}
+          </span>
         : snmp
           ? <span>{auto.label}{auto.reason && <span className="block text-xs font-normal text-muted">{auto.reason}</span>}</span>
           : '—',

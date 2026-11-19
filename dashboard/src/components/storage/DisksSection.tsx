@@ -7,11 +7,16 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
-import { GIB, allocationBytes, bytes, usageTextTone, diskName, diskStatus } from './storageMath'
+import { toast } from '@/components/ui/Toast'
+import {
+  GIB, addDiskAllocation, allocationBytes, bytes, claimedAllocation, diskName, diskStatus, rescanSummary,
+  usageBarTone, usageTextTone,
+} from './storageMath'
 import type { Disk, DiskStatus, Layout, PhysicalVolume, Volume } from './types'
 import { useStorageAction, useStorageStatus } from './useStorage'
 
@@ -32,7 +37,7 @@ export function DisksSection() {
   const [claimTarget, setClaimTarget] = useState<{ pv: string; bytes: number } | null>(null)
   const [removeTarget, setRemoveTarget] = useState<PhysicalVolume | null>(null)
 
-  const rescan = useStorageAction('/system/storage/rescan', { title: 'Disk rescan' })
+  const rescan = useStorageAction('/system/storage/rescan', { title: 'Disk rescan', describe: rescanSummary })
 
   if (isError) return <Card><CardContent className="py-5 text-sm">Disk information is unavailable. <Button variant="ghost" onClick={() => refetch()}>Retry</Button></CardContent></Card>
   if (isLoading || !status) {
@@ -97,8 +102,10 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
   onClaim: (pv: string, bytes: number) => void
 }) {
   const vg = layout.volume_groups.find((v) => v.is_data)
-  const abort = useStorageAction('/system/storage/evacuate/abort', { title: 'Abort data move' })
-  const forget = useStorageAction('/system/storage/remove-missing', { title: 'Forget missing disk' })
+  const [confirm, setConfirm] = useState<'abort' | 'forget' | null>(null)
+  const closeConfirm = { onDone: () => setConfirm(null), onFail: () => { setConfirm(null); return false } }
+  const abort = useStorageAction('/system/storage/evacuate/abort', { title: 'Abort data move', ...closeConfirm })
+  const forget = useStorageAction('/system/storage/remove-missing', { title: 'Forget missing disk', ...closeConfirm })
   const allocated = vg ? vg.size_bytes - vg.free_bytes : 0
   const canAllocate = !layout.pvmove && layout.unallocated_bytes >= Math.max(layout.extent_bytes, 1)
 
@@ -141,7 +148,7 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
               </div>
             </div>
             {m.used_bytes === 0 && (
-              <Button size="sm" variant="outline" onClick={() => forget.mutate()} disabled={forget.isPending}>
+              <Button size="sm" variant="outline" onClick={() => setConfirm('forget')} disabled={forget.isPending}>
                 {forget.isPending && <Loader2 className="animate-spin" />} Forget disk
               </Button>
             )}
@@ -156,7 +163,7 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
               </span>
               <span className="flex items-center gap-3">
                 <span className="tabular-nums text-text2">{layout.pvmove.percent.toFixed(1)}%</span>
-                <Button size="sm" variant="ghost" onClick={() => abort.mutate()} disabled={abort.isPending}>
+                <Button size="sm" variant="ghost" onClick={() => setConfirm('abort')} disabled={abort.isPending}>
                   <X /> Abort
                 </Button>
               </span>
@@ -184,13 +191,16 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
           </div>
         ))}
 
+        {!vg && (
+          <p role="status" className="text-xs text-warning">The storage pool could not be read. Rescan or refresh to retry.</p>
+        )}
         <div className="grid gap-3 sm:grid-cols-4">
-          <Stat label="Pool capacity" value={bytes(vg?.size_bytes || 0)}
-            sub={`${vg?.pv_count || 0} disk${vg?.pv_count === 1 ? '' : 's'}`} />
-          <Stat label="Allocated" value={bytes(allocated)} sub="Assigned to volumes" />
-          <Stat label="Unallocated" value={bytes(layout.unallocated_bytes)}
-            sub={layout.unallocated_bytes > 0 ? 'Reserve, ready to allocate' : 'Fully allocated'}
-            tone={layout.unallocated_bytes >= GIB ? 'info' : undefined} />
+          <Stat label="Pool capacity" value={bytes(vg?.size_bytes)}
+            sub={vg ? `${vg.pv_count} disk${vg.pv_count === 1 ? '' : 's'}` : 'Unavailable'} />
+          <Stat label="Allocated" value={bytes(vg ? allocated : null)} sub={vg ? 'Assigned to volumes' : 'Unavailable'} />
+          <Stat label="Unallocated" value={bytes(vg ? layout.unallocated_bytes : null)}
+            sub={!vg ? 'Unavailable' : layout.unallocated_bytes > 0 ? 'Reserve, ready to allocate' : 'Fully allocated'}
+            tone={vg && layout.unallocated_bytes >= GIB ? 'info' : undefined} />
           <Stat label="Claimable" value={bytes(layout.claimable.reduce((a, c) => a + c.bytes, 0))}
             sub="From enlarged disks" tone={layout.claimable.length ? 'info' : undefined} />
         </div>
@@ -211,6 +221,28 @@ function PoolCard({ layout, onRescan, rescanning, onExtend, onClaim }: {
         <div className="space-y-2">
           {layout.volumes.map((v) => <VolumeRow key={v.path} volume={v} />)}
         </div>
+
+        <ConfirmDialog
+          open={confirm === 'forget'}
+          onOpenChange={(o) => !o && setConfirm(null)}
+          title="Forget the missing disk?"
+          description="The empty missing disk is removed from the storage pool. If it is reattached later it must be added again as a new disk."
+          confirmText="Forget disk"
+          destructive
+          loading={forget.isPending}
+          onConfirm={() => forget.mutate()}
+        />
+        <ConfirmDialog
+          open={confirm === 'abort'}
+          onOpenChange={(o) => !o && setConfirm(null)}
+          title="Abort the data move?"
+          description="The move stops and the disk stays in the storage pool. Removing the disk later starts the move again."
+          confirmText="Abort move"
+          cancelText="Keep moving"
+          destructive
+          loading={abort.isPending}
+          onConfirm={() => abort.mutate()}
+        />
       </CardContent>
     </Card>
   )
@@ -227,25 +259,25 @@ function Stat({ label, value, sub, tone }: { label: string; value: string; sub: 
 }
 
 function VolumeRow({ volume }: { volume: Volume }) {
-  const pct = volume.usage?.usage_percent ?? 0
+  const pct = volume.usage?.usage_percent ?? null
   const roles = volume.roles.includes('data') && volume.roles.includes('system')
     ? 'System & data' : volume.roles.includes('data') ? 'Data' : 'System'
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/50 px-3 py-2 text-sm">
       <div className="min-w-[12rem] flex-1">
         <div className="font-medium">{roles} volume</div>
-        <div className="text-xs text-muted">{bytes(volume.usage?.free_bytes || 0)} available
+        <div className="text-xs text-muted">{volume.usage ? `${bytes(volume.usage.free_bytes)} available` : 'Usage could not be read'}
         </div>
       </div>
       <div className="w-40">
         <div className="h-1.5 overflow-hidden rounded-full bg-surface2">
-          <div className={cn('h-full', pct >= 95 ? 'bg-danger' : pct >= 85 ? 'bg-warning' : 'bg-primary')}
-            style={{ width: `${Math.min(100, pct)}%` }} />
+          <div className={cn('h-full', usageBarTone(pct ?? 0))}
+            style={{ width: `${Math.min(100, pct ?? 0)}%` }} />
         </div>
       </div>
       <div className="text-right text-xs tabular-nums text-text2">
-        <span className={cn('font-semibold', usageTextTone(pct))}>{pct.toFixed(1)}%</span>{' '}
-        of {bytes(volume.size_bytes || volume.usage?.total_bytes || 0)}
+        <span className={cn('font-semibold', usageTextTone(pct ?? 0))}>{pct == null ? '—' : `${pct.toFixed(1)}%`}</span>{' '}
+        of {bytes(volume.size_bytes || volume.usage?.total_bytes || null)}
       </div>
     </div>
   )
@@ -426,7 +458,7 @@ function AllocationPicker({ mode, setMode, gib, setGib, maxBytes, dataSharesOs }
       {options.map((o) => (
         <label key={o.id} className={cn('flex cursor-pointer gap-3 rounded-lg border px-3 py-2',
           mode === o.id ? 'border-primary/60 bg-primary/5' : 'border-border/60 hover:bg-surface2/40')}>
-          <input type="radio" name="allocation" className="mt-1 accent-[var(--primary,#3b82f6)]"
+          <input type="radio" name="allocation" className="mt-1 accent-primary"
             checked={mode === o.id} onChange={() => setMode(o.id)} />
           <span className="text-sm">
             <span className="font-medium">{o.title}</span>
@@ -437,7 +469,7 @@ function AllocationPicker({ mode, setMode, gib, setGib, maxBytes, dataSharesOs }
       {mode === 'custom' && (
         <div className="flex items-center gap-3 pl-8">
           <input type="range" min={1} max={Math.max(1, maxGib)} value={Math.min(Number(gib) || 1, Math.max(1, maxGib))}
-            onChange={(e) => setGib(e.target.value)} className="flex-1 accent-[var(--primary,#3b82f6)]"
+            onChange={(e) => setGib(e.target.value)} className="flex-1 accent-primary"
             aria-label="Amount to allocate in GiB" />
           <Input type="number" min={1} max={maxGib} value={gib} onChange={(e) => setGib(e.target.value)}
             className="h-8 w-24 text-right tabular-nums" aria-label="GiB to allocate" />
@@ -453,7 +485,17 @@ function AddDiskDialog({ disk, layout, onClose }: { disk: Disk; layout: Layout; 
   const [gib, setGib] = useState(String(Math.max(1, Math.floor(disk.size_bytes / GIB / 2))))
   const [confirm, setConfirm] = useState('')
   const add = useStorageAction<{ disk: string; allocate: string; wipe: boolean; confirm?: string }>(
-    '/system/storage/add-disk', { title: 'Add disk', onDone: onClose },
+    '/system/storage/add-disk', {
+      title: 'Add disk',
+      onDone: onClose,
+      // The disk joins the pool before its space is allocated; the server reports a failed second step as an error.
+      onFail: (e) => {
+        if (e?.response?.status !== 500 || !/joined the storage pool but/.test(String(e?.response?.data?.detail || ''))) return false
+        toast.warning('Disk added, not yet allocated', 'The disk joined the storage pool but its space was not allocated. Use Allocate space to retry.')
+        onClose()
+        return true
+      },
+    },
   )
   // Free space after the disk joins: what is unallocated now plus the disk.
   const poolFreeAfter = layout.unallocated_bytes + disk.size_bytes
@@ -462,7 +504,7 @@ function AddDiskDialog({ disk, layout, onClose }: { disk: Disk; layout: Layout; 
   const valid = (mode !== 'custom' || custom != null) && (!disk.needs_wipe || confirm === name)
 
   function submit() {
-    const allocate = mode === 'all' ? 'all' : mode === 'none' ? 'none' : String(custom)
+    const allocate = addDiskAllocation(mode, custom, layout.extent_bytes, poolFreeAfter)
     add.mutate({ disk: disk.path, allocate, wipe: disk.needs_wipe, confirm: disk.needs_wipe ? disk.path : undefined })
   }
 
@@ -532,7 +574,7 @@ function ExtendDialog({ layout, onClose }: { layout: Layout; onClose: () => void
             {targets.map((v) => (
               <label key={v.path} className="flex items-center gap-2 text-sm">
                 <input type="radio" name="target" checked={mount === v.mount_point}
-                  onChange={() => setMount(v.mount_point)} className="accent-[var(--primary,#3b82f6)]" />
+                  onChange={() => setMount(v.mount_point)} className="accent-primary" />
                 {v.roles.includes('data') ? 'Data volume' : 'System volume'}
                 <span className="text-xs text-muted">{bytes(v.size_bytes)} currently</span>
               </label>
@@ -541,18 +583,18 @@ function ExtendDialog({ layout, onClose }: { layout: Layout; onClose: () => void
         )}
         <div className="space-y-2" role="radiogroup" aria-label="Amount">
           <label className="flex items-center gap-2 text-sm">
-            <input type="radio" checked={mode === 'all'} onChange={() => setMode('all')} className="accent-[var(--primary,#3b82f6)]" />
+            <input type="radio" name="amount" checked={mode === 'all'} onChange={() => setMode('all')} className="accent-primary" />
             All unallocated space ({bytes(layout.unallocated_bytes)})
           </label>
           <label className="flex items-center gap-2 text-sm">
-            <input type="radio" checked={mode === 'custom'} onChange={() => setMode('custom')} className="accent-[var(--primary,#3b82f6)]" />
+            <input type="radio" name="amount" checked={mode === 'custom'} onChange={() => setMode('custom')} className="accent-primary" />
             A specific amount
           </label>
           {mode === 'custom' && (
             <div className="flex items-center gap-3 pl-6">
               <input type="range" min={1} max={Math.max(1, Math.floor(layout.unallocated_bytes / GIB))}
                 value={Number(gib) || 1} onChange={(e) => setGib(e.target.value)}
-                className="flex-1 accent-[var(--primary,#3b82f6)]" aria-label="GiB to allocate" />
+                className="flex-1 accent-primary" aria-label="GiB to allocate" />
               <Input type="number" min={1} value={gib} onChange={(e) => setGib(e.target.value)}
                 className="h-8 w-24 text-right tabular-nums" aria-label="GiB" />
               <span className="text-xs text-muted">GiB</span>
@@ -580,16 +622,24 @@ function ClaimDialog({ target, layout, onClose }: {
   const [allocate, setAllocate] = useState(true)
   const [pending, setPending] = useState(false)
   const claim = useStorageAction<{ pv: string }>('/system/storage/claim', { title: 'Claim space' })
-  const extend = useStorageAction<{ mount: string; size_bytes: null }>('/system/storage/extend', { title: 'Allocate space' })
+  const extend = useStorageAction<{ mount: string; size_bytes: number }>('/system/storage/extend', { title: 'Allocate space' })
 
   async function submit() {
     setPending(true)
+    let claimed = false
     try {
-      await claim.mutateAsync({ pv: target.pv })
-      if (allocate) await extend.mutateAsync({ mount: '/data', size_bytes: null })
+      const result: any = await claim.mutateAsync({ pv: target.pv })
+      claimed = true
+      if (allocate) {
+        // Only what was just claimed: "all" would also take the existing unallocated reserve.
+        const size = claimedAllocation(result?.added_bytes, layout.extent_bytes)
+        if (size != null) await extend.mutateAsync({ mount: '/data', size_bytes: size })
+        else toast.info('Nothing to allocate', 'The claim added no new space to the pool.')
+      }
       onClose()
     } catch {
-      // Errors are toasted by the mutation hooks.
+      // Errors are toasted by the mutation hooks. After a successful claim this dialog's offer is spent.
+      if (claimed) onClose()
     } finally {
       setPending(false)
     }
@@ -606,7 +656,7 @@ function ClaimDialog({ target, layout, onClose }: {
         </DialogDescription>
         <label className="flex items-start gap-2 text-sm">
           <input type="checkbox" checked={allocate} onChange={(e) => setAllocate(e.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-[var(--primary,#3b82f6)]" />
+            className="mt-0.5 h-4 w-4 accent-primary" />
           <span>
             Allocate it to the {layout.data_shares_os ? 'system & data' : 'data'} volume right away
             <span className="block text-xs text-muted">Leave unchecked to keep it as unallocated reserve.</span>

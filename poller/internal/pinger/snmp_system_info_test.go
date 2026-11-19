@@ -29,11 +29,32 @@ type systemInfoCall struct {
 type fakeSNMPLoader struct {
 	SNMPLoader
 
-	mu     sync.Mutex
-	calls  []systemInfoCall
-	order  []string
-	err    error
-	entErr error
+	mu      sync.Mutex
+	calls   []systemInfoCall
+	order   []string
+	err     error
+	entErr  error
+	matches []profileMatchCall
+	clears  []uuid.UUID
+}
+
+type profileMatchCall struct {
+	deviceID, profileID uuid.UUID
+	deviceType          string
+}
+
+func (f *fakeSNMPLoader) RecordProfileMatch(ctx context.Context, deviceID, profileID uuid.UUID, deviceType string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.matches = append(f.matches, profileMatchCall{deviceID, profileID, deviceType})
+	return nil
+}
+
+func (f *fakeSNMPLoader) ClearProfileSuggestion(ctx context.Context, deviceID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clears = append(f.clears, deviceID)
+	return nil
 }
 
 func (f *fakeSNMPLoader) UpsertEntities(ctx context.Context, deviceID uuid.UUID, ents []snmp.Entity) error {
@@ -221,4 +242,49 @@ func TestHandleSNMPResultWritesSystemInfoWhenEntitiesFail(t *testing.T) {
 	if len(loader.calls) != 1 || loader.calls[0].sysDescr != "Cisco IOS XE Software" {
 		t.Fatalf("system info not written after an entity failure: %+v", loader.calls)
 	}
+}
+
+// A matched template is recorded with its device type (the store decides
+// whether that assigns it or only suggests it); no match clears a stale
+// suggestion instead.
+func TestHandleSNMPResultRecordsTemplateMatch(t *testing.T) {
+	branch := &snmp.Profile{
+		ID: uuid.New(), Name: "FortiGate branch", MatchPriority: 110, DeviceType: "sdwan_edge",
+		Match: snmp.MatchRules{SysObjectIDPrefixes: []string{"1.3.6.1.4.1.12356.101.1"}},
+	}
+	generic := &snmp.Profile{
+		ID: uuid.New(), Name: "Fortinet FortiGate", MatchPriority: 100, DeviceType: "firewall",
+		Match: snmp.MatchRules{SysObjectIDPrefixes: []string{"1.3.6.1.4.1.12356.101.1.3004"}},
+	}
+
+	t.Run("match", func(t *testing.T) {
+		loader := &fakeSNMPLoader{}
+		e := snmpTestEngine(loader, generic, branch)
+		dev := &snmp.Device{ID: uuid.New(), Hostname: "fw01"}
+		e.handleSNMPResult(context.Background(), dev, &snmp.Result{System: &snmp.SystemInfo{
+			SysObjectID: ".1.3.6.1.4.1.12356.101.1.3004", SysDescr: "FortiGate-60F v7.2.5",
+		}})
+		want := []profileMatchCall{{dev.ID, branch.ID, "sdwan_edge"}}
+		if len(loader.matches) != 1 || loader.matches[0] != want[0] {
+			t.Fatalf("RecordProfileMatch calls = %+v, want %+v", loader.matches, want)
+		}
+		if len(loader.clears) != 0 {
+			t.Fatalf("ClearProfileSuggestion called on a match: %v", loader.clears)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		loader := &fakeSNMPLoader{}
+		e := snmpTestEngine(loader, generic, branch)
+		dev := &snmp.Device{ID: uuid.New(), Hostname: "srv01"}
+		e.handleSNMPResult(context.Background(), dev, &snmp.Result{System: &snmp.SystemInfo{
+			SysObjectID: "1.3.6.1.4.1.8072.3.2.10", SysDescr: "Linux srv01",
+		}})
+		if len(loader.matches) != 0 {
+			t.Fatalf("RecordProfileMatch called without a match: %+v", loader.matches)
+		}
+		if len(loader.clears) != 1 || loader.clears[0] != dev.ID {
+			t.Fatalf("ClearProfileSuggestion calls = %v, want [%s]", loader.clears, dev.ID)
+		}
+	})
 }

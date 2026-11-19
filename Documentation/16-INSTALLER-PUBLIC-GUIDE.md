@@ -630,7 +630,7 @@ docker exec zenplus-clickhouse clickhouse-client --password "$CLICKHOUSE_PASSWOR
   --query "SELECT table, formatReadableSize(sum(bytes)) FROM system.parts WHERE database='zenplus' GROUP BY table"
 ```
 
-The customer can grow `/data` online via Settings → Storage → Add Disk,
+The customer can grow `/data` online via Settings → System status → Disks & capacity → Add disk,
 or by increasing the VM disk in the hypervisor and clicking Grow Volume.
 
 ---

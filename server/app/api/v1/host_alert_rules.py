@@ -13,6 +13,13 @@ metrics: 2 points on the healthy side, returned as ``auto_reset_threshold``);
 ``recovery_alert`` whether a recovery notice is sent. The reset level is
 stored as the rule's single condition, like network rules.
 
+Depth metrics (``host_depth_metrics``): ``host_swap_pct``,
+``host_disk_latency_ms`` (per disk), ``host_nic_errors`` (per NIC),
+``host_clock_skew_s``, ``host_fs_days_left`` (per mount; ``<``/``<=`` only)
+and ``host_auto_service_stopped`` (per service; stored as ``> 0``, ``target``
+= service name patterns to leave out). ``cooldown`` delays a re-opened
+incident's trigger until that long after the last notified one.
+
 The schedule (``schedule_start``/``schedule_end`` as HH:MM, ``schedule_days``
 1-7 for Mon-Sun) limits when notifications go out, as on every other rule;
 an update may move a rule between one server and all servers (``server_id``
@@ -34,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_permission
 from app.services import alert_rule_scope as rs
+from app.services import alert_rule_exclusions as rx
 from app.services.alert_priority import priority_for
 from app.services.audit_service import write_audit_log
 
@@ -42,7 +50,11 @@ from app.models.user import User
 
 router = APIRouter(prefix="/host-alert-rules", tags=["Host Alert Rules"])
 
-_METRIC = "^(host_cpu_pct|host_memory_pct|host_filesystem_pct|host_disk_util_pct|host_service_down|host_process_down|host_agent_offline|host_restart|host_shutdown)$"
+_METRIC = ("^(host_cpu_pct|host_memory_pct|host_filesystem_pct|host_disk_util_pct|host_service_down"
+           "|host_process_down|host_agent_offline|host_restart|host_shutdown"
+           # Server depth metrics (alerting plan G-9/G-10, migrate-208; host_depth_metrics).
+           "|host_swap_pct|host_disk_latency_ms|host_nic_errors|host_clock_skew_s|host_fs_days_left"
+           "|host_auto_service_stopped)$")
 _OPERATOR = "^(gt|gte|lt|lte|eq|neq|>|<|>=|<=|==|!=)$"
 _HHMM = "^([01][0-9]|2[0-3]):[0-5][0-9]$"
 
@@ -50,10 +62,32 @@ _COLUMNS = (
     "id, name, description, enabled, metric, operator, threshold, "
     "severity, min_duration, clear_duration, cooldown, notify_channels, server_id, target, "
     "recovery_alert, conditions, priority, escalation_policy_id, "
-    "schedule_start, schedule_end, schedule_days, created_at, updated_at"
+    "schedule_start, schedule_end, schedule_days, scope_tag, group_id, created_at, updated_at"
 )
 # Threshold metrics: the ones a reset threshold and clear hold apply to.
-_PCT_METRICS = ("host_cpu_pct", "host_memory_pct", "host_filesystem_pct", "host_disk_util_pct")
+_PCT_METRICS = ("host_cpu_pct", "host_memory_pct", "host_filesystem_pct", "host_disk_util_pct",
+                "host_swap_pct", "host_disk_latency_ms", "host_nic_errors", "host_clock_skew_s",
+                "host_fs_days_left")
+_LOW_OPS = ("lt", "lte", "<", "<=")
+
+
+def _metric_rule(metric, operator, threshold, target):
+    """(operator, threshold) as stored for a metric with its own shape, 422
+    when they cannot work:
+
+    * host_auto_service_stopped fires per stopped automatic service: the
+      stored condition is always "> 0" (a stopped service reads 1); ``target``
+      is optional and lists service name patterns to leave out.
+    * host_fs_days_left is "fewer than N days until full": < or <=, N > 0.
+    """
+    if metric == "host_auto_service_stopped":
+        return "gt", 0.0
+    if metric == "host_fs_days_left":
+        if operator not in _LOW_OPS:
+            raise HTTPException(422, "A days-until-full rule fires below a number of days: use < or <=")
+        if threshold is None or float(threshold) <= 0:
+            raise HTTPException(422, "Days until full must be more than 0")
+    return operator, threshold
 
 
 class HostRuleCreate(BaseModel):
@@ -73,6 +107,10 @@ class HostRuleCreate(BaseModel):
     cooldown: int = Field(300, ge=0, le=86400)
     notify_channels: list[str] = Field(default_factory=list)
     server_id: Optional[UUID] = None
+    # Without server_id: only servers with this tag and/or in this device group
+    # (static or dynamic, subgroups included). None = every server.
+    scope_tag: Optional[str] = Field(None, max_length=64)
+    group_id: Optional[UUID] = None
     target: Optional[str] = None
     # None = derived from severity (critical -> P2, warning -> P3, info -> P4).
     priority: Optional[str] = Field(None, pattern="^P[1-4]$")
@@ -103,6 +141,8 @@ class HostRuleUpdate(BaseModel):
     escalation_policy_id: Optional[UUID] = None
     # An explicit null moves the rule to all servers.
     server_id: Optional[UUID] = None
+    scope_tag: Optional[str] = Field(None, max_length=64)
+    group_id: Optional[UUID] = None
     schedule_start: Optional[str] = Field(None, pattern=_HHMM)
     schedule_end: Optional[str] = Field(None, pattern=_HHMM)
     schedule_days: Optional[list[Annotated[int, Field(ge=1, le=7)]]] = None
@@ -117,6 +157,18 @@ def _days(value) -> Optional[str]:
     """schedule_days as stored: the distinct days in order, or NULL for every day."""
     days = sorted(set(value or []))
     return json.dumps(days) if days else None
+
+
+async def _scope_or_422(db: AsyncSession, server_id, scope_tag, group_id) -> tuple[Optional[str], Optional[UUID]]:
+    """(scope_tag, group_id) as stored: a rule for one server has neither; a
+    group must exist (static or dynamic, any member kind)."""
+    tag = (scope_tag or "").strip() or None
+    if server_id and (tag or group_id):
+        raise HTTPException(422, "A rule for one server has no tag or group scope")
+    if group_id and not (await db.execute(text("SELECT 1 FROM device_groups WHERE id = :id"),
+                                          {"id": group_id})).first():
+        raise HTTPException(422, "Device group not found")
+    return tag, group_id
 
 
 async def _policy_or_422(db: AsyncSession, policy_id) -> Optional[UUID]:
@@ -156,7 +208,8 @@ def _condition_json(metric, operator, threshold, reset) -> Optional[str]:
     if reset is None:
         return None
     if metric not in _PCT_METRICS:
-        raise HTTPException(422, "A reset threshold applies to CPU, memory, filesystem and disk utilisation rules")
+        raise HTTPException(422, "A reset threshold applies to threshold rules (CPU, memory, swap, filesystem, "
+                                 "disk, network errors, clock offset, days until full)")
     from app.services.network_conditions import validate_conditions
     cond = {"metric": metric, "operator": operator, "threshold": float(threshold or 0),
             "reset_threshold": float(reset)}
@@ -168,6 +221,8 @@ def _condition_json(metric, operator, threshold, reset) -> Optional[str]:
 
 
 def _auto_reset(metric, operator, threshold) -> Optional[float]:
+    if metric == "host_fs_days_left" and operator in _LOW_OPS and threshold is not None:
+        return float(threshold) + 1.0   # one day on the healthy side (host_alert_service)
     from app.services.network_conditions import auto_reset_threshold
     return auto_reset_threshold({"metric": metric, "operator": operator, "threshold": threshold})
 
@@ -198,6 +253,8 @@ def _row(r) -> dict:
         "schedule_start": r.schedule_start.strftime("%H:%M") if r.schedule_start else None,
         "schedule_end": r.schedule_end.strftime("%H:%M") if r.schedule_end else None,
         "schedule_days": r.schedule_days or [],
+        "scope_tag": r.scope_tag,
+        "group_id": str(r.group_id) if r.group_id else None,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
     }
@@ -209,13 +266,33 @@ async def list_host_rules(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List host rules. With server_id: rules that apply to it (its own + global)."""
+    """List host rules. With server_id: rules that apply to it (its own + global),
+    each global one with ``excluded`` (who disabled it for this server and
+    when, or null) and ``active`` (its effect on this server)."""
     if server_id:
         rows = (await db.execute(text(
             f"SELECT {_COLUMNS} FROM alert_rules "
             "WHERE metric LIKE 'host\\_%' AND (server_id = :sid OR server_id IS NULL) "
             "ORDER BY server_id NULLS FIRST, metric, threshold"
         ), {"sid": server_id})).all()
+        try:
+            async with db.begin_nested():
+                excluded = await rx.for_asset(db, "server", server_id)
+        except Exception:
+            excluded = {}      # before migrate-187
+        server = {"id": str(server_id), "tags": (await db.execute(text(
+            "SELECT tags FROM servers WHERE id = :id"), {"id": server_id})).scalar()}
+        if any(r.group_id for r in rows):
+            from app.services.device_groups import membership
+            server["_groups"] = await membership.groups_of(db, "server", str(server_id)) or set()
+        items = []
+        for r in rows:
+            if not r.server_id and not rx.server_scope_covers(r._mapping, server):
+                continue   # a tag / group scope that leaves this server out
+            row = _row(r)
+            ex = None if r.server_id else excluded.get(str(r.id))
+            items.append({**row, "excluded": ex, "active": bool(r.enabled) and ex is None})
+        return {"items": items}
     else:
         rows = (await db.execute(text(
             f"SELECT {_COLUMNS} FROM alert_rules WHERE metric LIKE 'host\\_%' "
@@ -232,18 +309,20 @@ async def create_host_rule(
 ):
     if data.metric in ("host_process_down", "host_service_down") and not data.target:
         raise HTTPException(400, f"target is required for {data.metric}")
-    await rs.guard_rule_change(db, user, data.model_dump())
+    data.operator, data.threshold = _metric_rule(data.metric, data.operator, data.threshold, data.target)
+    scope_tag, group_id = await _scope_or_422(db, data.server_id, data.scope_tag, data.group_id)
+    await rs.guard_rule_change(db, user, {**data.model_dump(), "scope_tag": scope_tag, "group_id": group_id})
     conditions = _condition_json(data.metric, data.operator, data.threshold, data.reset_threshold)
     row = (await db.execute(text(
         "INSERT INTO alert_rules "
         "(name, description, enabled, metric, operator, threshold, severity, "
         " min_duration, clear_duration, cooldown, notify_channels, server_id, target, "
         " recovery_alert, conditions, priority, escalation_policy_id, "
-        " schedule_start, schedule_end, schedule_days, created_by) "
+        " schedule_start, schedule_end, schedule_days, scope_tag, group_id, created_by) "
         "VALUES (:name, :description, :enabled, :metric, :operator, :threshold, :severity, "
         " :min_duration, :clear_duration, :cooldown, CAST(:notify_channels AS jsonb), :server_id, :target, "
         " :recovery_alert, CAST(:conditions AS jsonb), :priority, :escalation_policy_id, "
-        " :schedule_start, :schedule_end, CAST(:schedule_days AS jsonb), :created_by) "
+        " :schedule_start, :schedule_end, CAST(:schedule_days AS jsonb), :scope_tag, :group_id, :created_by) "
         f"RETURNING {_COLUMNS}"
     ), {
         "name": data.name, "description": data.description, "enabled": data.enabled,
@@ -257,6 +336,7 @@ async def create_host_rule(
         "escalation_policy_id": await _policy_or_422(db, data.escalation_policy_id),
         "schedule_start": _clock(data.schedule_start), "schedule_end": _clock(data.schedule_end),
         "schedule_days": _days(data.schedule_days),
+        "scope_tag": scope_tag, "group_id": group_id,
         "created_by": user.id,
     })).first()
     await write_audit_log(db, actor=user, action="alert_rule.create", resource_type="alert_rule",
@@ -280,12 +360,29 @@ async def update_host_rule(
     before = await rs.rule_row(db, rule_id)
     if not before or not str(before.get("metric") or "").startswith("host_"):
         raise HTTPException(404, "host alert rule not found")
+    if any(k in fields for k in ("server_id", "scope_tag", "group_id")):
+        merged = {**before, **fields}
+        if fields.get("server_id"):
+            # moving to one server drops a tag / group scope
+            merged["scope_tag"], merged["group_id"] = None, None
+            fields["scope_tag"], fields["group_id"] = None, None
+        tag, grp = await _scope_or_422(db, merged.get("server_id"), merged.get("scope_tag"), merged.get("group_id"))
+        if "scope_tag" in fields:
+            fields["scope_tag"] = tag
+        if "group_id" in fields:
+            fields["group_id"] = grp
     await rs.guard_rule_change(db, user, before, {**before, **fields})
     # NOT NULL columns: an explicit null means "leave it as it is".
     for key in ("recovery_alert", "enabled", "metric", "operator", "threshold",
                 "min_duration", "cooldown", "name", "severity"):
         if key in fields and fields[key] is None:
             del fields[key]
+    if any(k in fields for k in ("metric", "operator", "threshold")):
+        merged = {**before, **fields}
+        op, thr = _metric_rule(merged.get("metric"), merged.get("operator"), merged.get("threshold"),
+                               merged.get("target"))
+        if (op, thr) != (merged.get("operator"), merged.get("threshold")):
+            fields["operator"], fields["threshold"] = op, thr
     # The reset level lives in the rule's condition; rebuild it whenever the
     # trigger or the reset changes (a reset left on the wrong side is a 422).
     if any(k in fields for k in ("metric", "operator", "threshold", "reset_threshold")):

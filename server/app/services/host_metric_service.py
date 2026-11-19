@@ -1161,8 +1161,10 @@ async def _upsert_inventory(
                                               {"sid": server_id})).scalar()
             if previous_boot and (server_event_service.utc(boot_dt)-server_event_service.utc(previous_boot)).total_seconds() > 120:
                 uid = hashlib.sha256(f"boot:{server_id}:{server_event_service.utc(boot_dt).isoformat()}".encode()).hexdigest()
-                await server_event_service.record_lifecycle(db, server_id, uid, "restart", server_event_service.utc(boot_dt),
-                                                            {"source": "OS boot time changed", "previous_boot": str(previous_boot)})
+                # Skipped when the agent already reported this boot (Linux
+                # boot report, Windows Kernel-General 12): one restart, not two.
+                await server_event_service.record_boot(db, server_id, uid, boot_dt,
+                                                       {"source": "OS boot time changed", "previous_boot": str(previous_boot)})
             await db.execute(text(
                 """UPDATE servers SET boot_time = :bt, updated_at = NOW()
                    WHERE id = :sid

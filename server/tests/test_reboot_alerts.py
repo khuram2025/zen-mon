@@ -112,12 +112,12 @@ async def test_a_reboot_pages_once_with_when_and_uptime_then_clears_after_the_ho
     [(alert_id, status, message, meta)] = alerts(n)
     assert status == "active" and meta["reboot_count"] == 1
     assert message.startswith("Switch New_ACC_AdminB_SW09 (192.168.24.34) rebooted at ")
-    assert "uptime is now 2 min (was 41 days)" in message
+    assert "Uptime is now 2 min (was 41 days)" in message
     assert len(n.sent) == 1
     sms = n.sent[0]["message"]
     for raw in ("currently 1", "(now 0)", "uptime reset", "possible reboot"):
         assert raw not in sms
-    assert sms.startswith("ZenPlus WARNING — Device reboot detected: Switch New_ACC_AdminB_SW09"
+    assert sms.startswith("ZenPlus WARNING - Device reboot detected: Switch New_ACC_AdminB_SW09"
                           " (192.168.24.34) rebooted at ")
     assert n.sent[0]["headline_metric"] is None          # no "1" as a big number
     # Still open just inside the 15-minute hold from the reboot's detection.

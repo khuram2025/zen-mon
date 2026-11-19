@@ -1,6 +1,34 @@
 import { api } from '@/lib/api'
 import {
+  ApprovalResult,
+  PendingChanges,
+  RulesExport,
+  RulesImportResult,
+  StarterResult,
+  StarterRule,
+  AssetAutomation,
+  AssetKind,
+  ConflictReport,
+  InventoryApplyResult,
+  InventoryPreview,
+  InventoryRunRequest,
+  UndoResult,
   DiscoveryProfile,
+  DiscoveryRule,
+  EngineRun,
+  EngineRunItem,
+  EvaluateScanCounts,
+  PreviewRequest,
+  PreviewResponse,
+  RuleCatalog,
+  RuleDraft,
+  RuleEngineSettings,
+  RuleMode,
+  RuleTrigger,
+  RuleVersion,
+  RuleScheduleStatus,
+  ScheduleRunResult,
+  UnmatchedReport,
   DiscoveryResult,
   DiscoveryRun,
   DiscoverySchedule,
@@ -104,5 +132,142 @@ export const discoveryApi = {
   // Import batches
   async listImports(opts: { run_id?: string; profile_id?: string } = {}): Promise<ImportBatch[]> {
     return (await api.get(`${base}/imports`, { params: opts })).data
+  },
+}
+
+const rulesBase = `${base}/rules`
+
+/** The rule body the API takes for create / update (position or expected_revision added by the caller). */
+export function ruleBody(draft: RuleDraft) {
+  return {
+    name: draft.name.trim(),
+    description: draft.description?.trim() || null,
+    mode: draft.mode,
+    asset_kinds: draft.asset_kinds,
+    profile_ids: draft.profile_ids && draft.profile_ids.length ? draft.profile_ids : null,
+    condition: draft.condition,
+    actions: draft.actions,
+    stop_processing: draft.stop_processing,
+    triggers: draft.triggers?.length ? draft.triggers : (['discovery'] as RuleTrigger[]),
+    enforcement: draft.enforcement || ('set_once' as const),
+    on_unmatch: draft.on_unmatch || ('keep' as const),
+    max_changes_per_run: draft.max_changes_per_run ?? null,
+  }
+}
+
+export const rulesApi = {
+  async catalog(): Promise<RuleCatalog> {
+    return (await api.get(`${rulesBase}/catalog`)).data
+  },
+  async getSettings(): Promise<RuleEngineSettings> {
+    return (await api.get(`${rulesBase}/settings`)).data
+  },
+  async putSettings(payload: RuleEngineSettings): Promise<RuleEngineSettings> {
+    return (await api.put(`${rulesBase}/settings`, payload)).data
+  },
+  async list(): Promise<DiscoveryRule[]> {
+    return (await api.get(rulesBase)).data
+  },
+  async get(id: string): Promise<DiscoveryRule> {
+    return (await api.get(`${rulesBase}/${id}`)).data
+  },
+  async create(draft: RuleDraft, position: 'first' | 'last' = 'last'): Promise<DiscoveryRule> {
+    return (await api.post(rulesBase, { ...ruleBody(draft), position })).data
+  },
+  async update(id: string, draft: RuleDraft, expectedRevision: number | null): Promise<DiscoveryRule> {
+    return (await api.put(`${rulesBase}/${id}`, { ...ruleBody(draft), expected_revision: expectedRevision })).data
+  },
+  async remove(id: string): Promise<void> {
+    await api.delete(`${rulesBase}/${id}`)
+  },
+  async clone(id: string): Promise<DiscoveryRule> {
+    return (await api.post(`${rulesBase}/${id}/clone`)).data
+  },
+  async setMode(id: string, mode: RuleMode): Promise<DiscoveryRule> {
+    return (await api.post(`${rulesBase}/${id}/mode`, { mode })).data
+  },
+  async versions(id: string): Promise<RuleVersion[]> {
+    return (await api.get(`${rulesBase}/${id}/versions`)).data
+  },
+  async reorder(ids: string[]): Promise<DiscoveryRule[]> {
+    return (await api.post(`${rulesBase}/reorder`, { ids })).data
+  },
+  async preview(payload: PreviewRequest): Promise<PreviewResponse> {
+    return (await api.post(`${rulesBase}/preview`, payload)).data
+  },
+  async evaluateScan(runId: string, apply: boolean): Promise<EvaluateScanCounts> {
+    return (await api.post(`${rulesBase}/evaluate-scan/${runId}`, { apply })).data
+  },
+  async history(opts: { limit?: number; discovery_run_id?: string } = {}): Promise<EngineRun[]> {
+    return (await api.get(`${rulesBase}/history`, { params: opts })).data
+  },
+  async historyItems(
+    engineRunId: string,
+    opts: { outcome?: string; rule_id?: string; limit?: number; offset?: number } = {},
+  ): Promise<EngineRunItem[]> {
+    return (await api.get(`${rulesBase}/history/${engineRunId}/items`, { params: opts })).data
+  },
+
+  // Phase 2: rules on devices and servers already in inventory.
+  /** What the active (or chosen active) rules would change; writes nothing. */
+  async inventoryPreview(payload: InventoryRunRequest): Promise<InventoryPreview> {
+    return (await api.post(`${rulesBase}/inventory/preview`, payload)).data
+  },
+  /** Apply exactly the previewed changes; 409 `preview_stale` when anything changed since. */
+  async inventoryApply(payload: InventoryRunRequest & { digest: string }): Promise<InventoryApplyResult> {
+    return (await api.post(`${rulesBase}/inventory/apply`, payload)).data
+  },
+  async undo(engineRunId: string): Promise<UndoResult> {
+    return (await api.post(`${rulesBase}/history/${engineRunId}/undo`)).data
+  },
+  /** Which rules set what on a device or server, hand edits kept, rules that match now. */
+  async asset(kind: AssetKind, assetId: string): Promise<AssetAutomation> {
+    return (await api.get(`${rulesBase}/assets/${kind}/${assetId}`)).data
+  },
+  async conflicts(): Promise<ConflictReport> {
+    return (await api.get(`${rulesBase}/conflicts`)).data
+  },
+
+  // Phase 3: automatic re-checks held for approval, export / import, starter rules.
+  /** The changes a `needs_approval` run holds (only assets the viewer may see). */
+  async pending(engineRunId: string): Promise<PendingChanges> {
+    return (await api.get(`${rulesBase}/history/${engineRunId}/pending`)).data
+  },
+  /** Apply the held changes, each re-checked; 409 when the rules changed since (the run becomes rejected) or it is not waiting. */
+  async approve(engineRunId: string): Promise<ApprovalResult> {
+    return (await api.post(`${rulesBase}/history/${engineRunId}/approve`)).data
+  },
+  /** Discard the held changes; not proposed again until an asset or a rule changes. */
+  async reject(engineRunId: string): Promise<ApprovalResult> {
+    return (await api.post(`${rulesBase}/history/${engineRunId}/reject`)).data
+  },
+  async exportRules(): Promise<RulesExport> {
+    return (await api.get(`${rulesBase}/export`)).data
+  },
+  /** Create the document's rules as Drafts, last in the order; unresolved or invalid ones are skipped with a reason. */
+  async importRules(document: unknown): Promise<RulesImportResult> {
+    return (await api.post(`${rulesBase}/import`, { document })).data
+  },
+  async starter(): Promise<StarterRule[]> {
+    return (await api.get(`${rulesBase}/starter`)).data
+  },
+  async addStarter(keys: string[]): Promise<StarterResult> {
+    return (await api.post(`${rulesBase}/starter`, { keys })).data
+  },
+
+  // Phase 4: scheduled runs and the Unmatched report.
+  /** When the scheduled rules run next and when they last ran. */
+  async schedule(): Promise<RuleScheduleStatus> {
+    return (await api.get(`${rulesBase}/schedule`)).data
+  },
+  /** Run the scheduled rules now: same limits and approval as a scheduled run. */
+  async runScheduleNow(): Promise<ScheduleRunResult> {
+    return (await api.post(`${rulesBase}/schedule/run-now`)).data
+  },
+  /** Devices, servers and children no active rule (optionally: no simulating rule either) matches. */
+  async unmatched(kinds: AssetKind[], includeSimulating: boolean): Promise<UnmatchedReport> {
+    return (await api.get(`${rulesBase}/unmatched`, {
+      params: { kinds: kinds.join(','), include_simulating: includeSimulating },
+    })).data
   },
 }

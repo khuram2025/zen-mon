@@ -3,7 +3,7 @@ import { cn, relativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import { bytes, forecastSummary, issueText, logGroups, spaceSegments, usageTextTone } from './storageMath'
+import { bytes, forecastSummary, growthNote, issueText, logGroups, spaceSegments, usageTextTone } from './storageMath'
 import type { Overview, StorageSection } from './types'
 import { useOverview, useStorageStatus } from './useStorage'
 
@@ -83,12 +83,12 @@ function Protection({ overview }: { overview: Overview }) {
       <Stat label="Start cleanup" value={enabled ? `${overview.auto_purge.threshold_pct}% used` : 'Disabled'} />
       <Stat label="Cleanup target" value={`${overview.auto_purge.target_pct}% used`} />
       <Stat label="Minimum history" value={`${overview.auto_purge.min_keep_days} days`} />
-      <Stat label="Pending reclaim" value={bytes(wd.pending_bytes || 0)} />
+      <Stat label="Pending reclaim" value={bytes(wd.installed ? wd.pending_bytes : null)} />
     </div>
     {(wd.filesystems || []).map((fs, i) => <div key={fs.mount} className="rounded-lg border border-border/50 p-3 text-xs text-text2">
       <div className="flex flex-wrap justify-between gap-2"><span className="font-medium">{overview.data_shares_os ? 'Appliance capacity' : `Storage area ${i + 1}`}</span><span>{fs.usage_pct.toFixed(1)}% used</span></div>
       <p className="mt-1">Free-space reserve: {bytes(fs.minimum_free_bytes ?? Math.min(overview.auto_purge.min_free_gib * 1024 ** 3, (fs.used_bytes + fs.avail_bytes) * 0.1))} · adapts to available disk capacity.</p>
-      <p className="mt-1">{fs.growth_bytes_per_hour == null ? 'Collecting a growth sample.' : fs.growth_bytes_per_hour <= 0 ? 'No net growth in the recent sample.' : `Recent growth: ${bytes(fs.growth_bytes_per_hour)}/hour.`}{fs.runway_hours != null ? ` Estimated remaining capacity: ${fs.runway_hours.toFixed(1)} hours at this rate.` : ''}</p>
+      <p className="mt-1">{growthNote(fs.growth_bytes_per_hour, fs.runway_hours)}</p>
       {(fs.exhausted || fs.insufficient) && <p className="mt-1 text-warning">Cleanup cannot recover enough space. Expand capacity or review retention.</p>}
     </div>)}
     <p className="text-xs text-muted">Last check: {wd.heartbeat ? relativeTime(new Date(wd.heartbeat * 1000).toISOString()) : 'Awaiting first report'}. Capacity may take several minutes to return after cleanup.</p>

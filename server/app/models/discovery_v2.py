@@ -21,7 +21,7 @@ from sqlalchemy import (
     Text,
     Time,
 )
-from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -223,8 +223,18 @@ class DiscoveryResultV2(Base):
     raw_data: Mapped[dict] = mapped_column(JSONB, default=dict)
     scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    # Discovery rules (migrate-190): the plan the rules computed for this
+    # result, what happened to it, and which rules matched. NULL while the
+    # engine is off.
+    rule_plan: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    disposition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    matched_rule_ids: Mapped[list | None] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=True)
+
 
 class DiscoveryRule(Base):
+    """Legacy per-profile rule table (migrate-017). Nothing reads or writes it;
+    superseded by ``discovery_engine_rules`` (app.models.discovery_rules)."""
+
     __tablename__ = "discovery_rules"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -75,18 +75,30 @@ jobs:
       - run: node scripts/test-device-interfaces.mjs
       - run: node scripts/test-device-page-phase3.mjs
       - run: node scripts/test-controller-children.mjs
+      - run: node scripts/test-update-path.mjs
       - run: node scripts/test-nav-access.mjs
       - run: node scripts/test-page-access.mjs
       - run: node scripts/test-map-export.mjs
+      - run: npm run test:site-tile
       - run: node scripts/test-escalation-ui.mjs
       - run: node scripts/test-alert-storm-ui.mjs
+      - run: node scripts/test-delivery-message.mjs
+      - run: node scripts/test-event-expiry-ui.mjs
+      - run: node scripts/test-dependencies-ui.mjs
+      - run: node scripts/test-maintenance-windows.mjs
       - run: node scripts/test-custom-time-range.mjs
       - run: node scripts/test-server-alert-rules.mjs
+      - run: node scripts/test-alert-rule-catalog.mjs
+      - run: node scripts/test-alert-rules-ui.mjs
+      - run: node scripts/test-rule-exclusions.mjs
+      - run: node scripts/test-rule-overrides-ui.mjs
+      - run: node scripts/test-discovery-rules.mjs
       - run: npm run test:alert-wizard
       - run: npm run test:list-ordering
       - run: npm run test:baseline-details
       - run: npm run test:manual-updates
       - run: npm run test:apm-event-rules
+      - run: node scripts/test-synthetics-ui.mjs
       - run: node scripts/test-event-log-policy.mjs
       - run: node scripts/test-role-model.mjs
       - run: node scripts/test-inventory-ui.mjs
@@ -101,6 +113,7 @@ jobs:
       - run: node scripts/test-report-schedules.mjs
       - run: node scripts/test-report-designer.mjs
       - run: node scripts/test-storage-ui.mjs
+      - run: node scripts/test-system-status.mjs
       - run: node scripts/test-offline-assets.mjs
 
   poller:
@@ -136,5 +149,9 @@ jobs:
       - run: go test ./internal/...
       - if: runner.os == 'Windows'
         run: go build ./...
+      # The Linux agent binary (systemd services, load average, restart and
+      # shutdown evidence); the tray app and installer are Windows-only.
+      - if: runner.os == 'Linux'
+        run: go vet ./cmd/zenplus-agent ./internal/... && go build ./cmd/zenplus-agent
       # Installer creation/publication remains exclusively in the signing-gated
       # Windows agent release workflow. This job publishes no agent artifacts.

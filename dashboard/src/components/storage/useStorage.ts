@@ -35,21 +35,34 @@ export function useStorageEvents(limit = 50) {
   })
 }
 
-/** POST a storage action, toast the outcome and refresh every storage query. */
+const STORAGE_ACTION_TIMEOUT_MS = 35 * 60_000
+
+/**
+ * POST a storage action, toast the outcome and refresh every storage query.
+ * `describe` words the success toast from the response; `onFail` returns true
+ * when it has reported the error itself.
+ */
 export function useStorageAction<TBody = void>(
   path: string,
-  { title, onDone }: { title: string; onDone?: (data: any) => void },
+  { title, onDone, describe, onFail }: {
+    title: string
+    onDone?: (data: any) => void
+    describe?: (data: any) => string | null | undefined
+    onFail?: (e: any) => boolean
+  },
 ) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: async (body: TBody) => (await api.post(path, body ?? undefined)).data,
+    // Disk work outlasts the 30 s default: the server waits up to 5 minutes for adding or claiming a disk and
+    // 30 for growing a volume. A browser timeout showed "failed" while the resize was still running.
+    mutationFn: async (body: TBody) => (await api.post(path, body ?? undefined, { timeout: STORAGE_ACTION_TIMEOUT_MS })).data,
     onSuccess: (data: any) => {
-      toast.success(title, 'Storage information refreshed.')
+      toast.success(title, describe?.(data) || 'Storage information refreshed.')
       qc.invalidateQueries({ queryKey: STORAGE_KEY })
       onDone?.(data)
     },
     onError: (e: any) => {
-      toast.error(`${title} failed`, storageError(e))
+      if (!onFail?.(e)) toast.error(`${title} failed`, storageError(e))
       qc.invalidateQueries({ queryKey: STORAGE_KEY })
     },
   })

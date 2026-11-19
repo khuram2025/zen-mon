@@ -1,4 +1,4 @@
-import { Calendar, Clock, FileBarChart, Inbox, Key, Layers, Radar, SlashSquare } from 'lucide-react'
+import { Calendar, FileBarChart, Inbox, Key, Layers, ListChecks, Radar, SlashSquare } from 'lucide-react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 
@@ -15,6 +15,7 @@ const tabs: TabDef[] = [
   { to: '/discovery/reports', label: 'Reports', icon: FileBarChart },
   { to: '/discovery/imports', label: 'Import Queue', icon: Inbox },
   { to: '/discovery/ignored', label: 'Ignored', icon: SlashSquare },
+  { to: '/discovery/rules', label: 'Rules', icon: ListChecks },
   { to: '/discovery/credentials', label: 'Credentials', icon: Key },
 ]
 
@@ -23,7 +24,7 @@ export function DiscoveryLayout() {
   // Hide the tab strip on run-detail / wizard sub-pages so they own
   // the full canvas.
   const hideStrip =
-    /\/discovery\/(new|profiles\/[^/]+\/edit|runs\/[^/]+)/.test(location.pathname)
+    /\/discovery\/(new|profiles\/[^/]+\/edit|runs\/[^/]+|rules\/[^/]+)/.test(location.pathname)
 
   return (
     <div className="space-y-4">

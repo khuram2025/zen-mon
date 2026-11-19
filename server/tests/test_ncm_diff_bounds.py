@@ -248,3 +248,28 @@ def test_cross_device_compare_does_not_block_concurrent_requests(slow_routes):
                                    _FakeDb([a, b]), NS(id=uuid.uuid4()))
     result, health = asyncio.run(_health_while(request))
     assert result['added'] == 1 and result['warnings'] == [] and health < 0.5
+
+
+def _difflib_count(a, b):
+    return sum(1 for line in difflib.unified_diff(a, b, lineterm="")
+               if line[:1] in "+-" and not line.startswith(("+++", "---")))
+
+
+def test_changed_line_count_matches_difflib_and_is_bounded():
+    small_a = fortigate(60).splitlines()
+    small_b = fortigate(60, changed=frozenset({1, 30})).splitlines()[:-40] + ["    set extra 1"]
+    assert ncm_content.changed_line_count(small_a, small_b) == _difflib_count(small_a, small_b)
+    a, b = fortigate().splitlines(), fortigate(renumber=True).splitlines()
+    started = time.monotonic()
+    assert ncm_content.changed_line_count(a, b) == 16000
+    assert time.monotonic() - started < 5
+    # Over budget: the lines the two sides do not share.
+    assert ncm_content.changed_line_count(a, b, budget=0) == 16000
+
+
+def test_unsaved_configuration_check_is_fast_on_large_configurations():
+    from app.services import ncm_alerts
+    running, startup = fortigate(renumber=True), fortigate()
+    started = time.monotonic()
+    assert ncm_alerts.unsaved_diff(running, startup) == 16000
+    assert time.monotonic() - started < 8

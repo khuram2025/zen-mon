@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react'
+import { DeviceTypeItems } from '@/components/forms/DeviceTypeItems'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Key, Layers, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -235,9 +236,7 @@ export function DeviceFormDialog({
                 <Select value={state.device_type} onValueChange={(v) => setState({ ...state, device_type: v })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {['router', 'switch', 'firewall', 'server', 'access_point', 'printer', 'other'].map((t) => (
-                      <SelectItem key={t} value={t}>{t.replace('_', ' ')}</SelectItem>
-                    ))}
+                    <DeviceTypeItems />
                   </SelectContent>
                 </Select>
               </FormField>
@@ -249,7 +248,7 @@ export function DeviceFormDialog({
                   <SelectTrigger><SelectValue placeholder="No group" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none__">No group</SelectItem>
-                    {(groups || []).map((g: any) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
+                    {(groups || []).filter((g: any) => (g.kind ?? 'static') === 'static').map((g: any) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </FormField>

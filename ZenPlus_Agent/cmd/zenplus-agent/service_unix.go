@@ -94,7 +94,9 @@ func ensureInstallConfig(path string) error {
 	cfg := config.Default()
 	if runtime.GOOS == "linux" {
 		cfg.DataDir = "/var/lib/zenplus-agent"
-		cfg.Collectors.Services.Enabled = false
+		// systemd services are collected; the default watchlist names
+		// Windows services, which would only report as not found here.
+		cfg.Collectors.Services.Watchlist = nil
 		cfg.Collectors.EventLog.Enabled = false
 	}
 	return config.Save(path, cfg)

@@ -45,6 +45,34 @@ class RequiredUpgradePathTests(TestCase):
             UpdateHistory.objects.create(appliance=self.appliance, release=self.releases[0], status="failed", attempt=attempt)
         self.assertIsNone(get_available_update(self.appliance))
 
+    def other_appliance(self, name, version="1.23.3"):
+        return Appliance.objects.create(subscription=self.appliance.subscription, api_key_hash=name, hostname=name,
+            arch="amd64", current_version=version, rollout_group="stable", is_active=True)
+
+    def test_one_failed_appliance_pauses_the_rollout_for_everyone(self):
+        failed = self.other_appliance("failed-one")
+        UpdateHistory.objects.create(appliance=failed, release=self.releases[0], status="failed", attempt=1)
+        self.assertIsNone(get_available_update(self.appliance))
+        self.assertEqual(self.releases[0].rollout_policies.order_by("-created_at").first().stage, "paused")
+        # A later success does not resume it: offering again takes a new, reviewed rollout.
+        UpdateHistory.objects.create(appliance=failed, release=self.releases[0], status="success", attempt=2)
+        self.assertIsNone(get_available_update(self.appliance))
+        RolloutPolicy.objects.create(release=self.releases[0], stage="full", target_pct=100)
+        self.assertEqual(get_available_update(self.appliance), self.releases[0])
+
+    def test_unresolved_failure_pauses_a_new_rollout_unless_the_limit_is_raised(self):
+        failed = self.other_appliance("failed-two")
+        UpdateHistory.objects.create(appliance=failed, release=self.releases[0], status="rolled_back", attempt=1)
+        self.assertIsNone(get_available_update(self.appliance))
+        RolloutPolicy.objects.create(release=self.releases[0], stage="full", target_pct=100)
+        self.assertIsNone(get_available_update(self.appliance))
+        RolloutPolicy.objects.create(release=self.releases[0], stage="full", target_pct=100, max_failure_pct=100)
+        self.assertEqual(get_available_update(self.appliance), self.releases[0])
+
+    def test_unfinished_installs_do_not_pause_a_rollout(self):
+        UpdateHistory.objects.create(appliance=self.other_appliance("busy"), release=self.releases[0], status="downloading", attempt=1)
+        self.assertEqual(get_available_update(self.appliance), self.releases[0])
+
     def test_other_product_cannot_supply_missing_bridge(self):
         r = self.releases[1]
         r.product = "zenai"

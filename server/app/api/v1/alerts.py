@@ -585,6 +585,32 @@ async def put_response_targets(body: ResponseTargets, db: AsyncSession = Depends
     return wf.legacy_target_view(after)
 
 
+class DeliveryContentSettings(BaseModel):
+    days: int = Field(..., ge=1, le=365)
+
+
+@router.get("/delivery-content")
+async def get_delivery_content_settings(db: AsyncSession = Depends(get_db),
+                                        user: User = Depends(can_view)):
+    """How many days the text of sent notifications is kept (default 30)."""
+    from app.services import alert_delivery_log as dl
+    return await dl.content_settings(db)
+
+
+@router.put("/delivery-content")
+async def put_delivery_content_settings(body: DeliveryContentSettings,
+                                        db: AsyncSession = Depends(get_db),
+                                        user: User = Depends(can_manage)):
+    from app.services import alert_delivery_log as dl
+    before = await dl.content_settings(db)
+    after = await dl.save_content_settings(db, body.days)
+    await write_audit_log(db, actor=user, action="alert.delivery_content.update",
+                          resource_type="settings", resource_id=dl.CONTENT_SETTINGS_KEY,
+                          metadata={"before": before, "after": after})
+    await db.commit()
+    return after
+
+
 # ── Silences (suppression workspace) ─────────────────────────────────────────
 
 @router.get("/silences")
@@ -697,6 +723,7 @@ _EVENT_LABELS = {
     "coverage_gap": "Coverage gap — fallback route used", "route_failed": "Delivery failed on this route",
     "recovered": "Recovered automatically", "superseded": "Superseded by a newer status",
     "hold_cancelled": "Hold cancelled", "dependency": "Suppressed by upstream dependency",
+    "expired": "Expired — no new event within the window",
     "closed": "Closed",
 }
 
@@ -753,10 +780,13 @@ async def _events(db: AsyncSession, alert: dict, row) -> list[dict]:
             actor={"id": sup.get("by"), "name": sup.get("by_name") or "Operator"} if sup.get("by") else None,
             detail={"until": sup.get("until")})
     closure = alert.get("closure")
-    if row.status == "resolved" and closure and "resolved" not in kinds and not alert["is_notice"]:
-        kind = {"recovered": "recovered", "superseded": "superseded",
-                "hold_cancelled": "hold_cancelled", "dependency": "dependency",
-                "manual": "resolved"}.get(closure["reason"], "closed")
+    closure_kind = {"recovered": "recovered", "superseded": "superseded",
+                    "hold_cancelled": "hold_cancelled", "dependency": "dependency",
+                    "expired": "expired", "manual": "resolved"}.get(
+        (closure or {}).get("reason"), "closed")
+    if (row.status == "resolved" and closure and "resolved" not in kinds
+            and closure_kind not in kinds and not alert["is_notice"]):
+        kind = closure_kind
         add(row.resolved_at, kind, actor=closure.get("by"),
             source="user" if closure["reason"] in ("manual", "suppressed") else "evaluator",
             reason=closure.get("note"), new="resolved",
@@ -782,6 +812,11 @@ _EVIDENCE_KEYS = [
     ("flap_kind", "Held while flapping"),
 ]
 
+# An event alert that stood for repeated events (app.services.event_alerts).
+_OCCURRENCE_EVIDENCE_KEYS = [
+    ("occurrences", "Occurrences"), ("last_seen", "Last occurrence"), ("last_message", "Last message"),
+]
+
 # A device flapping notice (device_flap_notice_service) describes its episode;
 # these keys are generic enough to mean something else on other rows.
 _FLAP_NOTICE_EVIDENCE_KEYS = [
@@ -796,8 +831,10 @@ def _evidence(meta: dict) -> list[dict]:
     if meta.get("old_status") or meta.get("new_status"):
         out.append({"label": "Status change",
                     "value": f"{meta.get('old_status') or '?'} → {meta.get('new_status') or '?'}"})
+    from app.services.event_alerts import occurrences
     keys = _EVIDENCE_KEYS + (_FLAP_NOTICE_EVIDENCE_KEYS
-                             if wf.notice_kind(meta) == "flapping" else [])
+                             if wf.notice_kind(meta) == "flapping" else []) + (
+        _OCCURRENCE_EVIDENCE_KEYS if occurrences(meta) > 1 else [])
     for key, label in keys:
         v = meta.get(key)
         if v in (None, "", [], {}):
@@ -1015,13 +1052,20 @@ async def get_alert_detail(
     payload["events"] = await _events(db, payload, row)
     payload["deliveries"] = []
     if await wf.supported(db):
+        # What was sent (migrate-197): the subject with alerts.view; the text
+        # itself may name people and addresses, so only with alerts.manage.
+        show_content = has_permission(perms, "alerts.manage")
         payload["deliveries"] = [
             {"at": d.attempted_at, "channel_id": str(d.channel_id) if d.channel_id else None,
              "channel_name": d.channel_name, "channel_type": d.channel_type, "kind": d.kind,
-             "outcome": d.outcome, "error": d.error, "latency_ms": d.latency_ms}
+             "outcome": d.outcome, "error": d.error, "latency_ms": d.latency_ms,
+             "subject": d.subject, "recipients_count": d.recipients_count,
+             "content": d.content if show_content else None,
+             "content_withheld": bool(d.content) and not show_content}
             for d in (await db.execute(text(
                 "SELECT attempted_at, channel_id, channel_name, channel_type, kind, outcome,"
-                " error, latency_ms FROM alert_deliveries WHERE alert_id = :id"
+                " error, latency_ms, subject, content, recipients_count"
+                " FROM alert_deliveries WHERE alert_id = :id"
                 " ORDER BY attempted_at DESC LIMIT 100"
             ), {"id": row.id})).fetchall()
         ]

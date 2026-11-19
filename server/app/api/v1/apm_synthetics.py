@@ -2,7 +2,11 @@
 
 Definitions live in ``apm_synthetic_monitors`` (Postgres); run history in
 ``zenplus.apm_synthetic_results`` (ClickHouse). Execution is in
-services/apm_synthetic_service.py.
+services/apm_synthetic_service.py, read models in apm_synthetic_stats.py.
+
+Every read takes a time range: ``from``/``to`` (ISO with offset) or ``hours``
+(default 24). Scenario variables, request bodies and credential headers are
+shown only to users who may manage scenarios (``apm.manage``).
 """
 
 from __future__ import annotations
@@ -19,8 +23,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, get_ch_client
-from app.core.security import get_current_user, require_permission
+from app.core.security import get_current_user, get_role_permissions, require_permission
 from app.models.user import User
+from app.services import apm_synthetic_stats as stats
 from app.services.apm_synthetic_service import execute_and_record, MAX_STEPS
 
 router = APIRouter(prefix="/apm/synthetics", tags=["APM synthetics"])
@@ -90,6 +95,22 @@ class MonitorUpdate(MonitorCreate):
     pass
 
 
+def _keep_masked_secrets(body: MonitorCreate, stored: dict) -> MonitorCreate:
+    """A masked placeholder sent back (a screen loaded without secrets) keeps
+    the stored value instead of overwriting the secret with the mask."""
+    old_vars = stored.get("variables") or {}
+    variables = {k: (old_vars.get(k, "") if v == stats.MASK else v) for k, v in body.variables.items()}
+    old_steps = {s.get("name"): s for s in stored.get("steps") or []}
+    steps = []
+    for step in body.steps:
+        prev = old_steps.get(step.name) or {}
+        headers = {k: ((prev.get("headers") or {}).get(k, "") if v == stats.MASK else v)
+                   for k, v in step.headers.items()}
+        body_text = prev.get("body") if step.body == stats.MASK else step.body
+        steps.append(step.model_copy(update={"headers": headers, "body": body_text}))
+    return body.model_copy(update={"variables": variables, "steps": steps})
+
+
 def _config_json(body: MonitorCreate) -> str:
     return json.dumps({
         "steps": [s.model_dump(exclude_none=True) for s in body.steps],
@@ -126,53 +147,55 @@ def _row_to_dict(r) -> dict:
     }
 
 
-def _uptime_stats_sync(monitor_ids: list[str], hours: int) -> dict[str, dict]:
-    if not monitor_ids:
-        return {}
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(tzinfo=None)
-    rows = get_ch_client().query(
-        """
-        SELECT monitor_id, count(), countIf(success = 1),
-               avg(total_ms), max(timestamp)
-        FROM zenplus.apm_synthetic_results
-        WHERE monitor_id IN %(ids)s AND timestamp >= %(since)s
-        GROUP BY monitor_id
-        """,
-        parameters={"ids": [uuid.UUID(m) for m in monitor_ids], "since": since},
-    ).result_rows
-    return {
-        str(r[0]): {
-            "runs": int(r[1]),
-            "uptime_pct": round(int(r[2]) / int(r[1]) * 100, 2) if r[1] else None,
-            "avg_ms": round(float(r[3] or 0), 1),
-            "last_run_at": r[4].isoformat() if isinstance(r[4], datetime) else None,
-        }
-        for r in rows
-    }
+async def _can_manage(db: AsyncSession, user: User) -> bool:
+    perms = await get_role_permissions(db, user.role)
+    return "apm.manage" in perms or "system.admin" in perms
+
+
+def _range(hours: Optional[int], from_time: Optional[datetime], to_time: Optional[datetime]):
+    for name, ts in (("from", from_time), ("to", to_time)):
+        if ts is not None and ts.tzinfo is None:
+            raise HTTPException(422, f"'{name}' must include a timezone offset")
+    try:
+        return stats.resolve_range(hours, from_time, to_time)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+_EMPTY_STATS = {"runs": 0, "failures": 0, "uptime_pct": None, "avg_ms": None, "p95_ms": None,
+                "last_run_at": None, "last_failure_at": None, "last_error": None,
+                "last_failed_step": None, "spark": [None] * stats.SPARK_BUCKETS}
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
 
 @router.get("")
 async def list_monitors(
-    hours: int = Query(24, ge=1, le=168),
+    hours: Optional[int] = Query(None, ge=1, le=2160),
+    from_time: Optional[datetime] = Query(None, alias="from"),
+    to_time: Optional[datetime] = Query(None, alias="to"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    since, until = _range(hours, from_time, to_time)
     rows = (await db.execute(text(_MONITOR_SELECT + " ORDER BY name"))).mappings().all()
     monitors = [_row_to_dict(r) for r in rows]
-    stats = await asyncio.to_thread(
-        _uptime_stats_sync, [m["id"] for m in monitors], hours)
+    if not await _can_manage(db, user):
+        monitors = [stats.mask_scenario(m) for m in monitors]
+    data = await asyncio.to_thread(
+        stats.scenario_stats, get_ch_client(), [m["id"] for m in monitors], since, until)
     for m in monitors:
-        m.update(stats.get(m["id"]) or {"runs": 0, "uptime_pct": None,
-                                        "avg_ms": None, "last_run_at": None})
+        m.update(data.get(m["id"]) or _EMPTY_STATS)
     return {
         "monitors": monitors,
+        "range": {"from": stats.iso(since), "to": stats.iso(until)},
         "summary": {
             "total": len(monitors),
-            "up": sum(1 for m in monitors if m["status"] == "up"),
-            "down": sum(1 for m in monitors if m["status"] == "down"),
+            "up": sum(1 for m in monitors if m["enabled"] and m["status"] == "up"),
+            "down": sum(1 for m in monitors if m["enabled"] and m["status"] == "down"),
             "disabled": sum(1 for m in monitors if not m["enabled"]),
+            "runs": sum(m["runs"] for m in monitors),
+            "failures": sum(m["failures"] for m in monitors),
         },
     }
 
@@ -204,6 +227,9 @@ async def create_monitor(
 @router.get("/{monitor_id}")
 async def get_monitor(
     monitor_id: uuid.UUID,
+    hours: Optional[int] = Query(None, ge=1, le=2160),
+    from_time: Optional[datetime] = Query(None, alias="from"),
+    to_time: Optional[datetime] = Query(None, alias="to"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -213,8 +239,11 @@ async def get_monitor(
     if not row:
         raise HTTPException(404, "Monitor not found")
     out = _row_to_dict(row)
+    if not await _can_manage(db, user):
+        out = stats.mask_scenario(out)
+    since, until = _range(hours, from_time, to_time)
     out.update((await asyncio.to_thread(
-        _uptime_stats_sync, [out["id"]], 24)).get(out["id"]) or {})
+        stats.scenario_stats, get_ch_client(), [out["id"]], since, until)).get(out["id"]) or _EMPTY_STATS)
     return out
 
 
@@ -225,6 +254,10 @@ async def update_monitor(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("apm.manage")),
 ):
+    current = (await db.execute(text("SELECT config FROM apm_synthetic_monitors WHERE id = :id"),
+                                {"id": str(monitor_id)})).scalar()
+    if current is not None:
+        body = _keep_masked_secrets(body, current or {})
     res = await db.execute(text("""
         UPDATE apm_synthetic_monitors
         SET name = :name, target_url = :url, config = CAST(:cfg AS jsonb),
@@ -308,7 +341,7 @@ async def monitor_results(
         out = []
         for i, r in enumerate(rows):
             item = {
-                "timestamp": r[0].isoformat(),
+                "timestamp": stats.iso(r[0]),
                 "status": r[1], "success": bool(r[2]),
                 "total_ms": int(r[3]), "steps_total": int(r[4]),
                 "steps_passed": int(r[5]), "failed_step": r[6], "error": r[7],
@@ -323,3 +356,64 @@ async def monitor_results(
         return out
 
     return {"results": await asyncio.to_thread(_fetch)}
+
+
+async def _require_monitor(db: AsyncSession, monitor_id) -> dict:
+    row = (await db.execute(text("SELECT id, check_interval FROM apm_synthetic_monitors WHERE id = :id"),
+                            {"id": str(monitor_id)})).mappings().first()
+    if not row:
+        raise HTTPException(404, "Monitor not found")
+    return dict(row)
+
+
+@router.get("/{monitor_id}/summary")
+async def monitor_summary(
+    monitor_id: uuid.UUID,
+    hours: Optional[int] = Query(None, ge=1, le=2160),
+    from_time: Optional[datetime] = Query(None, alias="from"),
+    to_time: Optional[datetime] = Query(None, alias="to"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Totals, trend, per-step statistics, grouped errors and outages for a range."""
+    mon = await _require_monitor(db, monitor_id)
+    since, until = _range(hours, from_time, to_time)
+    return await asyncio.to_thread(stats.summary, get_ch_client(), str(monitor_id), since, until,
+                                   interval=int(mon["check_interval"] or 60))
+
+
+@router.get("/{monitor_id}/runs")
+async def monitor_runs(
+    monitor_id: uuid.UUID,
+    hours: Optional[int] = Query(None, ge=1, le=2160),
+    from_time: Optional[datetime] = Query(None, alias="from"),
+    to_time: Optional[datetime] = Query(None, alias="to"),
+    status: str = Query("all", pattern="^(all|failed|passed)$"),
+    step: Optional[str] = Query(None, max_length=120),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=100000),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Runs in a range, newest first; ``status`` and ``step`` (the failed step) filter."""
+    await _require_monitor(db, monitor_id)
+    since, until = _range(hours, from_time, to_time)
+    return await asyncio.to_thread(stats.runs, get_ch_client(), str(monitor_id), since, until,
+                                   status=status, step=step, limit=limit, offset=offset)
+
+
+@router.get("/{monitor_id}/run-detail")
+async def monitor_run_detail(
+    monitor_id: uuid.UUID,
+    at: datetime = Query(..., description="The run's timestamp, as returned by /runs"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """One run with every step: status, timings, assertions and failure detail."""
+    await _require_monitor(db, monitor_id)
+    if at.tzinfo is None:
+        raise HTTPException(422, "'at' must include a timezone offset")
+    run = await asyncio.to_thread(stats.run_detail, get_ch_client(), str(monitor_id), at)
+    if run is None:
+        raise HTTPException(404, "Run not found")
+    return run

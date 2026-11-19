@@ -9,6 +9,12 @@ Without this policy every channel receives one message per asset.
 
 ## Behaviour
 
+* **Defaults (1.25.18)** — the suggested event types are devices down, reboots, latency and
+  packet loss, and service checks (the policy itself stays off until turned on). When a
+  devices-down storm counted across all assets covers at least half of the monitored devices
+  (10 or more), the first summary says so and points at the appliance's own network path
+  (uplink, gateway, firewall in between) before the devices.
+
 * **Event types** — choose which kinds of event are combined: devices down
   (device down/unreachable, server agent offline), reboots and restarts (device
   uptime reset, server restart/shutdown), service checks, interface, latency and

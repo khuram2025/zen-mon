@@ -25,6 +25,8 @@ import { UsageBar } from '@/pages/device/KpiTile'
 type InsightMetric = {
   key: string; name: string; type: string; unit?: string | null
   thresholds?: { warn?: number; crit?: number; op?: string } | null
+  /** Where the colour levels come from: an accepted alert rule on this metric (overrides applied) or the template. */
+  thresholds_source?: 'alert_rule' | 'template' | null
   value: number | null; text: string; status: string
   series_key: string; has_data: boolean
 }
@@ -369,6 +371,17 @@ function MetricTile({ label, value, status, onChart, footer }: {
   )
 }
 
+/* The tile's colours follow the alert rule on this metric, so the colour and the alarm agree. */
+function RuleLevelsHint({ m }: { m: InsightMetric }) {
+  const th = m.thresholds || {}
+  const levels = [th.warn != null ? `warning ${th.warn}` : null, th.crit != null ? `critical ${th.crit}` : null].filter(Boolean).join(', ')
+  return (
+    <div className="mt-0.5 text-2xs text-muted" title={`Colours use the alert rule's levels for this device${levels ? `: ${levels}` : ''}`}>
+      levels from alert rule
+    </div>
+  )
+}
+
 /* Tiles wrap into as many columns as fit. auto-fill keeps the tracks, so a tile
  * is the same size whether its group has two metrics or eight. */
 function TileGrid({ children }: { children: ReactNode }) {
@@ -436,7 +449,8 @@ function ScalarGroupCard({ group: g, onChart }: {
             {numeric.map((m) => (
               <MetricTile key={m.key} label={m.name} status={m.status}
                 value={m.type === 'enum' && m.text ? m.text : formatValue(m.value, m.unit, m.name)}
-                onChart={m.type === 'enum' || !m.series_key ? undefined : () => onChart(m)} />
+                onChart={m.type === 'enum' || !m.series_key ? undefined : () => onChart(m)}
+                footer={m.thresholds_source === 'alert_rule' ? <RuleLevelsHint m={m} /> : undefined} />
             ))}
             {pairs.map(({ used, cap, base }) => {
               const pct = (used.value! / cap.value!) * 100

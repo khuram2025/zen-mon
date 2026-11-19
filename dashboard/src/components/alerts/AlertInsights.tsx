@@ -78,7 +78,7 @@ export function AlertInsights({
           <h3 id="trend-h" className="text-base font-semibold">Opened vs closed</h3>
           <p className="text-sm text-muted">
             Last {rangeLabel}{trend.data ? `, ${trend.data.bucket === 'hour' ? 'hourly' : 'daily'} buckets` : ''}.
-            Closed is split into genuine recoveries and other closures (manual, suppressed, superseded).
+            Closed is split into genuine recoveries and other closures (manual, suppressed, superseded, expired).
           </p>
           {trend.isLoading ? (
             <div className="flex h-60 items-center justify-center text-muted"><Loader2 className="h-5 w-5 animate-spin" /></div>

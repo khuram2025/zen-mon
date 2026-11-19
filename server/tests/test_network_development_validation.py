@@ -39,13 +39,21 @@ async def test_mib_api_compiles_in_child_and_resolves_then_detects_stale_index(t
 
 @pytest.mark.asyncio
 async def test_template_export_import_preserves_profile_and_omits_device_identity(monkeypatch):
-    profile = dict(name='Fixture', vendor='Test', description='Offline fixture', match_rules={}, oid_groups=[])
-    db = NS(execute=AsyncMock(return_value=NS(mappings=lambda: NS(first=lambda: profile))))
-    bundle = await snmp.export_profile(uuid4(), db, None)
-    expected = snmp.ProfileCreate(**profile).model_dump(mode='json')
-    assert bundle['profile'] == expected
-    assert 'device_id' not in bundle and 'credentials' not in bundle
+    # Templates moved to app/api/v1/device_templates.py (Device Templates, migrate-189): export is
+    # format 2 (content plus source identity) and import still accepts format 1 bundles.
+    from app.api.v1 import device_templates as dt
+    profile = dict(id=uuid4(), name='Fixture', vendor='Test', description='Offline fixture', match_rules={},
+                   oid_groups=[], device_type=None, icon=None, match_priority=100, builtin_key=None,
+                   revision=1, parent_id=None)
+    monkeypatch.setattr(dt.svc, 'get', AsyncMock(return_value=profile))
+    bundle = await dt.export_profile(uuid4(), None, None)
+    assert bundle['format_version'] == 2
+    assert {k: bundle['profile'][k] for k in ('name', 'vendor', 'description', 'match_rules', 'oid_groups')} == \
+        {k: profile[k] for k in ('name', 'vendor', 'description', 'match_rules', 'oid_groups')}
+    assert 'device_id' not in bundle['profile'] and 'credentials' not in bundle['profile']
     create = AsyncMock(return_value=profile)
-    monkeypatch.setattr(snmp, 'create_profile', create)
-    assert await snmp.import_profile(snmp.ProfileBundle(**bundle), db, None) == profile
-    assert create.call_args.args[0].model_dump(mode='json') == expected
+    monkeypatch.setattr(dt, '_create', create)
+    monkeypatch.setattr(dt.svc, 'name_taken', AsyncMock(return_value=False))
+    v1 = {'format_version': 1, 'profile': {k: profile[k] for k in ('name', 'vendor', 'description', 'match_rules', 'oid_groups')}}
+    assert await dt.import_profile(dt.ProfileBundle(**v1), None, None) == profile
+    assert create.call_args.args[1]['name'] == 'Fixture'

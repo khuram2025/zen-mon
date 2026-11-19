@@ -23,6 +23,7 @@ import hashlib
 import re
 import time
 import weakref
+from collections import Counter
 from app.core import crypto
 
 MAX_CONFIG_BYTES = 16 * 1024 * 1024
@@ -285,18 +286,36 @@ def config_diff(before: str, after: str, *, raw: bool = False, normalized: bool 
     return result
 
 
+def changed_line_count(a: list[str], b: list[str], *, budget: float = DIFF_TIME_BUDGET_SECONDS) -> int:
+    """Lines removed plus added between two line lists, as a unified diff of
+    them counts. Past the time budget, the lines the two sides do not share
+    (as a multiset), which differs only where lines moved."""
+    try:
+        matched = sum(n for _, _, n in _matching_blocks(a, b, _Deadline(budget)))
+    except DiffTooLarge:
+        ca, cb = Counter(a), Counter(b)
+        return sum(((ca - cb) + (cb - ca)).values())
+    return len(a) + len(b) - 2 * matched
+
+
 _diff_slots: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
-async def config_diff_async(before: str, after: str, **options) -> dict:
-    """``config_diff`` in a worker thread so the API event loop keeps serving
-    other requests; at most ``_DIFF_CONCURRENCY`` run at once per process."""
+async def off_loop(function, *args, **kwargs):
+    """Run a CPU-bound comparison in a worker thread so the event loop keeps
+    serving other requests; at most ``_DIFF_CONCURRENCY`` run at once per
+    process."""
     loop = asyncio.get_running_loop()
     slots = _diff_slots.get(loop)
     if slots is None:
         slots = _diff_slots[loop] = asyncio.Semaphore(_DIFF_CONCURRENCY)
     async with slots:
-        return await asyncio.to_thread(config_diff, before, after, **options)
+        return await asyncio.to_thread(function, *args, **kwargs)
+
+
+async def config_diff_async(before: str, after: str, **options) -> dict:
+    """``config_diff`` off the event loop (see ``off_loop``)."""
+    return await off_loop(config_diff, before, after, **options)
 
 
 _NESTED_QUANTIFIER = re.compile(r'\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d*,)')

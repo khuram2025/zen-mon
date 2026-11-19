@@ -21,7 +21,7 @@ import {
   type NodeChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { useIsMutating } from '@tanstack/react-query'
+import { useIsMutating, useQueryClient } from '@tanstack/react-query'
 import {
   AlignEndHorizontal,
   AlignEndVertical,
@@ -31,6 +31,7 @@ import {
   AlignStartVertical,
   AlignVerticalDistributeCenter,
   AlignVerticalJustifyCenter,
+  Building2,
   Cable,
   Check,
   ChevronDown,
@@ -102,10 +103,16 @@ import {
   type ManualMapLink,
   type ManualMapNode,
   type MapShape,
+  type ManualMapListItem,
   type NodeLiveData,
+  type SiteLive,
+  type SiteMember,
+  type SiteSpec,
+  backgroundImageOf,
+  isSiteShape,
 } from '../core'
 import { useMapMutations, type BulkPayload } from '../useMapData'
-import { DeviceHoverCard, DeviceNode } from './DeviceNode'
+import { DeviceNode } from './DeviceNode'
 import { ShapeNode, isBackgroundZone } from './ShapeNode'
 import { COMPACT_PILL_ZOOM, NetworkEdge } from './NetworkEdge'
 import { ContextMenu, type ContextMenuState, type MenuItem } from './ContextMenu'
@@ -122,6 +129,8 @@ import { LinkDrillPanel } from './LinkDrillPanel'
 import { VerifyPanel } from './VerifyPanel'
 import { AutoLegend } from './AutoLegend'
 import { NO_SNAP, computeSmartSnap, nodeToGuideBox, tidyLayout, type SmartSnapResult } from './smartGuides'
+import { SiteDialog, type SiteDialogResult } from './SiteDialog'
+import { NodeInspector, type InspectorLink } from './NodeInspector'
 
 const nodeTypes = { device: DeviceNode, shape: ShapeNode }
 const edgeTypes = { network: NetworkEdge }
@@ -229,9 +238,21 @@ export type MapCanvasProps = {
   /** ?focus=<device id> (the device page's Related panel): centre on that device's node and select it. */
   focusDeviceId?: string | null
   actionsRef?: React.MutableRefObject<MapCanvasActions | null>
+  /** Aggregate status of the map's site nodes. */
+  sitesLive?: Record<string, SiteLive>
+  /** Open another map (site drill-down) — the shell keeps the mode and trail. */
+  onOpenMap?: (mapId: string) => void
+  /** Every map (site dialog's drill-down choice). */
+  maps?: ManualMapListItem[]
+  /** NOC wall: read-only, no editor chrome; the shell draws its own header. */
+  wall?: boolean
+  /** On-canvas text multiplier (wall displays). */
+  textBoost?: number
 }
 
-export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, liveMode, showThroughput, showIfaceLabels = true, animate = true, showProblems = true, insertRef, focusDeviceId, actionsRef }: MapCanvasProps) {
+const EMPTY_SITES: Record<string, SiteLive> = {}
+
+export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, liveMode, showThroughput, showIfaceLabels = true, animate = true, showProblems = true, insertRef, focusDeviceId, actionsRef, sitesLive = EMPTY_SITES, onOpenMap, maps = [], wall = false, textBoost = 1 }: MapCanvasProps) {
   const navigate = useNavigate()
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
@@ -271,9 +292,14 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   const [liveLinkId, setLiveLinkId] = useState<string | null>(null)
   // Design mode: the topology verification panel.
   const [verifyOpen, setVerifyOpen] = useState(false)
+  // Site create/edit dialog. `picked` carries a canvas selection being grouped.
+  const [siteDialog, setSiteDialog] = useState<{ mode: 'create' | 'edit'; shapeId?: string; at?: { x: number; y: number }; picked?: { nodeIds: string[]; deviceIds: string[]; shapeIds: string[] } } | null>(null)
+  const [siteBusy, setSiteBusy] = useState(false)
 
   const connectMode = tool === 'connect' && !liveMode
-  const theme = useTheme((s) => s.theme)
+  const qc = useQueryClient()
+  const themeSetting = useTheme((s) => s.theme)
+  const theme = wall ? 'dark' : themeSetting
   const {
     bulkMove, updateLink, updateNode, addLink, addNode, addShape, updateShape, autoConnect, invalidate,
     addAnnLink, updateAnnLink, deleteAnnLink, bulkCreate, bulkDelete, expandNode,
@@ -281,6 +307,8 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   const { screenToFlowPosition, fitView, setCenter, getViewport, setViewport, getNodes } = useReactFlow()
   const rfTransform = useStore((s) => s.transform)
   const nodeById = useMemo(() => new Map(detail.nodes.map((n) => [n.id, n])), [detail.nodes])
+  const nodeByIdRef = useRef(nodeById)
+  nodeByIdRef.current = nodeById
   const selectedShape = useMemo<MapShape | null>(
     () => (selectedShapeId ? ((nodes.find((n) => n.id === selectedShapeId)?.data as any)?.shape ?? null) : null),
     [selectedShapeId, nodes],
@@ -359,10 +387,20 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
           if (v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.zoom)) { setViewport(v, { duration: 0 }); return }
         } catch { /* fall back to fit */ }
       }
-      fitView({ padding: liveMode ? 0.12 : 0.2, duration: 350 })
+      fitView({ padding: wall ? 0.05 : liveMode ? 0.12 : 0.2, duration: 350 })
     }, 60)
     return () => clearTimeout(t)
-  }, [mapId, liveMode, fitView, setViewport, viewportKey, focusDeviceId])
+  }, [mapId, liveMode, fitView, setViewport, viewportKey, focusDeviceId, wall])
+  // The wall re-fits when the screen changes size or the map gains/loses items.
+  const itemCount = detail.nodes.length + (detail.shapes?.length || 0)
+  useEffect(() => {
+    if (!wall) return
+    let t: number | undefined
+    const refit = () => { window.clearTimeout(t); t = window.setTimeout(() => fitView({ padding: 0.05, duration: 300 }), 200) }
+    refit()
+    window.addEventListener('resize', refit)
+    return () => { window.removeEventListener('resize', refit); window.clearTimeout(t) }
+  }, [wall, itemCount, fitView])
   const saveViewport = useCallback((_e: unknown, v: { x: number; y: number; zoom: number }) => {
     if (liveMode) return
     try { localStorage.setItem(viewportKey, JSON.stringify({ x: Math.round(v.x), y: Math.round(v.y), zoom: +v.zoom.toFixed(3) })) } catch { /* best effort */ }
@@ -543,6 +581,12 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     setNodes((nds) => nds.map((n) => (n.id === shapeId ? { ...n, zIndex: z } : n)))
   }, [setNodes])
 
+  /** A site member opens its own page in a new tab (the wall keeps running). */
+  const openSiteMember = useCallback((m: SiteMember) => {
+    const href = m.kind === 'server' ? `/servers/${m.id}` : m.kind === 'service_check' ? `/services/${m.id}` : `/devices/${m.id}`
+    window.open(href, '_blank')
+  }, [])
+
   // Preserve selection across server-driven rebuilds.
   const selectedIds = useRef<Set<string>>(new Set())
 
@@ -576,6 +620,9 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
         data: {
           shape: s,
           live: liveMode,
+          siteLive: isSiteShape(s) ? sitesLive[s.id] : undefined,
+          onOpenMap,
+          onOpenMember: openSiteMember,
           onEditText: (text: string) => setShape(s.id, { text }, true),
           onResizeEnd: (rect: { x: number; y: number; width: number; height: number }) =>
             setShape(s.id, pxToShape(rect.x, rect.y, rect.width, rect.height), true),
@@ -583,13 +630,14 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
         draggable: !liveMode && !s.metadata?.locked,
         selected: selectedIds.current.has(s.id),
         zIndex: s.z_index || 0,
+        className: isSiteShape(s) ? 'nm-site-node' : undefined,
         // Locked zones are background: clicks and box-select go through to
         // the canvas; ShapeNode keeps the caption and lock badge grabbable.
         ...(isBackgroundZone(s, liveMode) ? { style: { width: Math.round(r.w), height: Math.round(r.h), pointerEvents: 'none' as const } } : {}),
       }
     })
     setNodes([...shapeNodes, ...deviceNodes])
-  }, [detail.nodes, detail.shapes, liveMode, nodesLive, setNodes, setNodeLabelOffset, setShape])
+  }, [detail.nodes, detail.shapes, liveMode, nodesLive, sitesLive, onOpenMap, setNodes, setNodeLabelOffset, setShape])
 
   /* Live throughput pills: slide each pill along its cable until it clears
    * the pills already placed and the device tiles (labels counter-scale when
@@ -1468,6 +1516,76 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     return () => { insertRef.current = null }
   }, [insertRef, addShapeAt])
 
+  /* ── Sites (grouped nodes) ─────────────────────────────────────────── */
+  const viewportCentre = useCallback(() => {
+    const rect = wrapperRef.current?.getBoundingClientRect()
+    return screenToFlowPosition({ x: rect ? rect.left + rect.width / 2 : 400, y: rect ? rect.top + rect.height / 2 : 300 })
+  }, [screenToFlowPosition])
+
+  /** "Group into a site": the current selection becomes one site tile. */
+  const openGroupIntoSite = useCallback(() => {
+    const sel = nodesRef.current.filter((n) => n.selected)
+    const devs = sel.filter((n) => n.type === 'device')
+    const shapes = sel.filter((n) => n.type === 'shape' && !isBackgroundZone((n.data as any).shape, false))
+    if (!devs.length) { toast.info('Select the devices to group first'); return }
+    const pts = devs.map((n) => nodeXYToDiscCenter(n.position.x, n.position.y))
+    const at = { x: pts.reduce((a, p) => a + p.x, 0) / pts.length, y: pts.reduce((a, p) => a + p.y, 0) / pts.length }
+    const deviceIds = devs.map((n) => ((n.data as any).node as ManualMapNode).device_id).filter((x): x is string => !!x)
+    setSiteDialog({ mode: 'create', at, picked: { nodeIds: devs.map((n) => n.id), deviceIds, shapeIds: shapes.map((n) => n.id) } })
+  }, [])
+
+  const SITE_W_PCT = 7.2
+  const SITE_H_PCT = 7.6
+  const saveSite = useCallback(async (r: SiteDialogResult) => {
+    const dlg = siteDialog
+    if (!dlg) return
+    setSiteBusy(true)
+    try {
+      let childId: string | null = r.spec.map_id || null
+      if (r.createMap) {
+        const { data } = await api.post('/maps', { name: r.name, description: `Site map${r.spec.location ? ` · ${r.spec.location}` : ''}` })
+        childId = data.id as string
+        if (r.buildFromLocation && r.spec.location) {
+          try { await api.post(`/maps/${childId}/populate`, { location: r.spec.location, include_links: true }) } catch { toast.error('The site map was created but could not be built from the location') }
+        }
+        if (r.moveSelection && dlg.picked) {
+          // Copy the selection (and the cables between its members) into the
+          // site map, then remove it here with undo.
+          const snap = snapshotFor({ nodeIds: dlg.picked.nodeIds, shapeIds: dlg.picked.shapeIds })
+          const inSet = new Set([...snap.nodes.map((n) => n.id), ...snap.shapes.map((sh) => sh.id)])
+          await api.post(`/maps/${childId}/bulk`, {
+            nodes: snap.nodes.map((n) => ({ client_id: n.id, device_id: n.device_id, server_id: n.server_id, service_check_id: n.service_check_id, label: n.label, icon: n.icon, x_pct: n.x_pct, y_pct: n.y_pct, metadata: n.metadata })),
+            shapes: snap.shapes.map((sh) => ({ client_id: sh.id, kind: sh.kind, x_pct: sh.x_pct, y_pct: sh.y_pct, w_pct: sh.w_pct, h_pct: sh.h_pct, text: sh.text ?? null, fill: sh.fill ?? null, stroke: sh.stroke ?? null, z_index: sh.z_index || 0, metadata: sh.metadata || {} })),
+            links: snap.links.filter((l) => inSet.has(l.source_node_id) && inSet.has(l.target_node_id)).map((l) => ({ source: l.source_node_id, target: l.target_node_id, label: l.label, link_type: l.link_type, metadata: l.metadata })),
+            annotation_links: snap.ann.filter((a) => inSet.has(a.source) && inSet.has(a.target)).map((a) => ({ ...a, id: undefined })),
+          })
+          deleteWithUndo({ nodeIds: dlg.picked.nodeIds, shapeIds: dlg.picked.shapeIds })
+        }
+      }
+      const spec: SiteSpec = {
+        location: r.spec.location || null,
+        map_id: childId,
+        device_ids: dlg.picked && !r.moveSelection ? dlg.picked.deviceIds : (r.spec.device_ids || null),
+        expanded: !!r.spec.expanded,
+      }
+      if (dlg.mode === 'edit' && dlg.shapeId) {
+        const cur = ((nodesRef.current.find((n) => n.id === dlg.shapeId)?.data as any)?.shape as MapShape | undefined)
+        setShape(dlg.shapeId, { text: r.name, metadata: { ...(cur?.metadata || {}), widget: 'site', site: spec } }, true)
+        toast.success('Site updated')
+      } else {
+        const at = dlg.at || viewportCentre()
+        addShapeAtFlow({ kind: 'rectangle', w_pct: SITE_W_PCT, h_pct: SITE_H_PCT, text: r.name, fill: null, stroke: null, metadata: { widget: 'site', site: spec } }, at)
+      }
+      void qc.invalidateQueries({ queryKey: ['manual-maps'] })
+      void qc.invalidateQueries({ queryKey: ['manual-map-sites-live', mapId] })
+      setSiteDialog(null)
+    } catch (e: any) {
+      toast.error('Could not save the site', e?.response?.data?.detail || e?.message)
+    } finally {
+      setSiteBusy(false)
+    }
+  }, [siteDialog, snapshotFor, deleteWithUndo, setShape, addShapeAtFlow, viewportCentre, qc, mapId])
+
   /* ── Alignment / auto-align (shapes included, locked items skipped) ───── */
   const applyAlign = useCallback((op: AlignOp) => {
     const sel = nodes.filter((n) => n.selected && !lockedOf(n))
@@ -1541,11 +1659,11 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   }, [setCenter, setEdges])
 
   const focusProblem = useCallback((p: Problem) => {
-    if (p.kind === 'device') { focusNode(p.targetId, false); setLiveFocusId(p.targetId) }
+    if (p.kind === 'device') { focusNode(p.targetId, false); if (nodeByIdRef.current.has(p.targetId)) setLiveFocusId(p.targetId) }
     else focusEdge(p.targetId)
   }, [focusNode, focusEdge])
 
-  const problems = useMemo(() => (liveMode ? computeProblems(detail, nodesLive, liveData) : []), [liveMode, detail, nodesLive, liveData])
+  const problems = useMemo(() => (liveMode ? computeProblems(detail, nodesLive, liveData, sitesLive) : []), [liveMode, detail, nodesLive, liveData, sitesLive])
 
   /* ── Selection tracking + keyboard ───────────────────────────── */
   const onSelectionChange = useCallback(({ nodes: sel }: { nodes: Node[] }) => {
@@ -1668,9 +1786,12 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     const dev = (node.data as any)?.node as ManualMapNode | undefined
     if (liveMode) {
       const items: MenuItem[] = [{ type: 'header', label: dev?.hostname || ((node.data as any)?.shape?.text) || 'Item' }]
+      const liveShape = (node.data as any)?.shape as MapShape | undefined
+      const drill = liveShape && isSiteShape(liveShape) ? sitesLive[liveShape.id]?.map_id : null
+      if (drill && onOpenMap) items.push({ type: 'item', label: 'Open site map', icon: <Building2 className="h-4 w-4" />, onClick: () => onOpenMap(drill) })
       if (dev) {
         const isDevice = nodeKindOf(dev) === 'device'
-        items.push({ type: 'item', label: 'Pin details', icon: <LocateFixed className="h-4 w-4" />, onClick: () => setLiveFocusId(node.id) })
+        items.push({ type: 'item', label: 'Show details', icon: <LocateFixed className="h-4 w-4" />, onClick: () => setLiveFocusId(node.id) })
         items.push({ type: 'item', label: isDevice ? 'Open device page' : nodeKindOf(dev) === 'server' ? 'Open server page' : 'Open service check', icon: <ExternalLink className="h-4 w-4" />, onClick: () => openEntity(dev) })
         if (isDevice) {
           items.push({ type: 'item', label: 'Open interfaces', icon: <Cable className="h-4 w-4" />, onClick: () => window.open(`/devices/${dev.device_id}?tab=interfaces`, '_blank') })
@@ -1693,6 +1814,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       items.push({ type: 'item', label: 'Copy (Ctrl+C)', icon: <Copy className="h-4 w-4" />, onClick: () => copySelected() })
       items.push({ type: 'item', label: 'Duplicate selection (Ctrl+D)', icon: <CopyPlus className="h-4 w-4" />, onClick: () => { void duplicateSelectedRef.current() } })
       items.push({ type: 'item', label: 'Group (Ctrl+G)', icon: <Group className="h-4 w-4" />, onClick: () => groupSelected() })
+      items.push({ type: 'item', label: 'Group into a site…', icon: <Building2 className="h-4 w-4" />, onClick: () => openGroupIntoSite() })
       if (anyGrouped) items.push({ type: 'item', label: 'Ungroup (Ctrl+Shift+G)', icon: <Ungroup className="h-4 w-4" />, onClick: () => ungroupSelected() })
       items.push({ type: 'item', label: allLocked ? 'Unlock (L)' : 'Lock (L)', icon: allLocked ? <LockOpen className="h-4 w-4" /> : <Lock className="h-4 w-4" />, onClick: () => toggleLockSelected() })
       items.push({ type: 'divider' })
@@ -1716,7 +1838,13 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       items.push({ type: 'item', label: 'Delete selected', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => deleteSelected() })
     } else if (node.type === 'shape') {
       const sh = (node.data as any).shape as MapShape
-      items.push({ type: 'header', label: sh.text ? sh.text.slice(0, 24) : 'Annotation' })
+      items.push({ type: 'header', label: sh.text ? sh.text.slice(0, 24) : isSiteShape(sh) ? 'Site' : 'Annotation' })
+      if (isSiteShape(sh)) {
+        items.push({ type: 'item', label: 'Edit site…', icon: <Building2 className="h-4 w-4" />, onClick: () => setSiteDialog({ mode: 'edit', shapeId: sh.id }) })
+        const drillId = sitesLive[sh.id]?.map_id
+        if (drillId && onOpenMap) items.push({ type: 'item', label: 'Open site map', icon: <ExternalLink className="h-4 w-4" />, onClick: () => onOpenMap(drillId) })
+        items.push({ type: 'divider' })
+      }
       items.push({ type: 'item', label: 'Copy (Ctrl+C)', icon: <Copy className="h-4 w-4" />, onClick: () => copySelected() })
       items.push({ type: 'item', label: 'Duplicate (Ctrl+D)', icon: <CopyPlus className="h-4 w-4" />, onClick: () => duplicateShape(node.id) })
       items.push({ type: 'item', label: locked ? 'Unlock (L)' : 'Lock (L)', icon: locked ? <LockOpen className="h-4 w-4" /> : <Lock className="h-4 w-4" />, onClick: () => setLockedFor([node.id], !locked) })
@@ -1755,7 +1883,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       }) })
     }
     setMenu({ x: e.clientX, y: e.clientY, items })
-  }, [liveMode, setNodes, applyAlign, deleteWithUndo, bumpShapeZ, matchSizes, resetLabels, duplicateShape, duplicateDevice, groupSelected, ungroupSelected, resizeSelected, resizeIconFill, copySelected, setLockedFor, toggleLockSelected, focusNode, openEntity, expandNeighbours])
+  }, [liveMode, setNodes, applyAlign, deleteWithUndo, bumpShapeZ, matchSizes, resetLabels, duplicateShape, duplicateDevice, groupSelected, ungroupSelected, resizeSelected, resizeIconFill, copySelected, setLockedFor, toggleLockSelected, focusNode, openEntity, expandNeighbours, sitesLive, onOpenMap, openGroupIntoSite])
 
   const onEdgeContextMenu = useCallback((e: React.MouseEvent, edge: Edge) => {
     e.preventDefault()
@@ -1800,11 +1928,18 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   }, [liveMode, setEdgeShape, setEdgeWaypoints, resetIfaceLabels, deleteWithUndo, duplicateEdge, nodeById, resizeLink, openEditLink, openEntity, focusEdge])
 
   const onNodeDoubleClick = useCallback((_e: React.MouseEvent, node: Node) => {
+    const sh = node.type === 'shape' ? ((node.data as any).shape as MapShape) : null
+    if (sh && isSiteShape(sh)) {
+      const drillId = sitesLive[sh.id]?.map_id
+      if (liveMode) { if (drillId && onOpenMap) onOpenMap(drillId) }
+      else setSiteDialog({ mode: 'edit', shapeId: sh.id })
+      return
+    }
     if (node.type !== 'device') return
     const dev = (node.data as any).node as ManualMapNode
     if (liveMode) openEntity(dev)
     else setEditNode(dev)
-  }, [liveMode, openEntity])
+  }, [liveMode, openEntity, sitesLive, onOpenMap])
 
   const onNodeClick = useCallback((_e: React.MouseEvent, node: Node) => {
     if (liveMode && node.type === 'device') { setLiveFocusId(node.id); setLiveLinkId(null) }
@@ -1960,9 +2095,36 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   ], [smartOn, snapOn, gridOn, fitView, getViewport, setViewport])
 
   const liveFocusNode = liveFocusId ? nodeById.get(liveFocusId) : undefined
+  // Every cable the inspected node terminates, with the far end's name.
+  const inspectorLinks = useMemo<InspectorLink[]>(() => {
+    if (!liveFocusId) return []
+    const out: InspectorLink[] = []
+    for (const l of detail.links) {
+      if (l.source_node_id !== liveFocusId && l.target_node_id !== liveFocusId) continue
+      const fromHere = l.source_node_id === liveFocusId
+      out.push({ id: l.id, peer: nodeLabel(fromHere ? l.target_node_id : l.source_node_id), srcIf: fromHere ? l.metadata?.src_interface : l.metadata?.dst_interface, dstIf: fromHere ? l.metadata?.dst_interface : l.metadata?.src_interface, speed: l.metadata?.speed || null })
+    }
+    for (const a of annLinks) {
+      if (a.source !== liveFocusId && a.target !== liveFocusId) continue
+      const fromHere = a.source === liveFocusId
+      out.push({ id: a.id, peer: nodeLabel(fromHere ? a.target : a.source), srcIf: fromHere ? a.metadata?.src_interface : a.metadata?.dst_interface, dstIf: fromHere ? a.metadata?.dst_interface : a.metadata?.src_interface, speed: a.metadata?.speed || null })
+    }
+    return out
+  }, [liveFocusId, detail.links, annLinks, nodeLabel])
+  const bgImage = backgroundImageOf(detail.metadata)
+  const modeCtx = useMemo(() => ({ connectMode, textBoost, pinnedId: liveFocusId, wall }), [connectMode, textBoost, liveFocusId, wall])
+
+  // Esc closes the live inspector / link panel (the editor's own handler
+  // ignores live mode).
+  useEffect(() => {
+    if (!liveMode) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setLiveFocusId(null); setLiveLinkId(null) } }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [liveMode])
 
   return (
-    <MapModeContext.Provider value={{ connectMode }}>
+    <MapModeContext.Provider value={modeCtx}>
     <div
       ref={wrapperRef}
       tabIndex={0}
@@ -2021,7 +2183,24 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
         disableKeyboardA11y
         proOptions={{ hideAttribution: true }}
       >
-        {gridOn && <Background variant={BackgroundVariant.Dots} gap={26} size={1} color={theme === 'dark' ? 'rgba(148,163,184,0.18)' : 'rgba(71,85,105,0.22)'} />}
+        {gridOn && !wall && <Background variant={BackgroundVariant.Dots} gap={26} size={1} color={theme === 'dark' ? 'rgba(148,163,184,0.18)' : 'rgba(71,85,105,0.22)'} />}
+        {bgImage && (
+          <ViewportPortal>
+            <img
+              src={bgImage.src}
+              alt=""
+              draggable={false}
+              className="pointer-events-none absolute select-none"
+              style={{
+                left: ((bgImage.x_pct ?? 0) / 100) * LOGICAL_W,
+                top: ((bgImage.y_pct ?? 0) / 100) * LOGICAL_H,
+                width: ((bgImage.w_pct ?? 100) / 100) * LOGICAL_W,
+                opacity: Math.max(0.05, Math.min(1, bgImage.opacity ?? 0.5)),
+                zIndex: -1,
+              }}
+            />
+          </ViewportPortal>
+        )}
 
         {(guides.v.length > 0 || guides.h.length > 0 || guides.gaps.length > 0) && (
           <ViewportPortal>
@@ -2055,29 +2234,31 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
             </svg>
           </ViewportPortal>
         )}
-        <Controls showInteractive={false} />
-        <MiniMap
+        {!wall && <Controls showInteractive={false} />}
+        {!wall && <MiniMap
           pannable
           zoomable
           nodeColor={(n) => (n.type === 'shape' ? (theme === 'dark' ? 'rgba(148,163,184,0.18)' : 'rgba(71,85,105,0.18)') : (STATUS_HEX[statusKey((n.data as any)?.node?.status)] || STATUS_HEX.unknown))}
           nodeStrokeWidth={2}
           maskColor={theme === 'dark' ? 'rgba(2,6,23,0.6)' : 'rgba(226,232,240,0.6)'}
           className="!bg-surface"
-        />
+        />}
 
         {/* NOC overlays (live mode) */}
-        {liveMode && (
-          <Panel position="top-center">
-            <NocStatusBar detail={detail} nodesLive={nodesLive} liveData={liveData} updatedAt={liveUpdatedAt || Date.now()} onOpenAlerts={() => navigate('/alerts')} />
+        {liveMode && !wall && (
+          <Panel position="top-left" className="max-w-[calc(100%-22rem)]">
+            <NocStatusBar detail={detail} nodesLive={nodesLive} liveData={liveData} sitesLive={sitesLive} updatedAt={liveUpdatedAt || Date.now()} onOpenAlerts={() => navigate('/alerts')} />
           </Panel>
         )}
-        <Panel position="bottom-center">
-          <AutoLegend key={liveMode ? 'live' : 'design'} detail={detail} live={liveMode} collapsedKey={`zp-map-legend-collapsed:${liveMode ? 'live' : 'design'}`} defaultCollapsed={!liveMode} />
-        </Panel>
+        {!wall && (
+          <Panel position="bottom-left" className="!ml-14">
+            <AutoLegend key={liveMode ? 'live' : 'design'} detail={detail} live={liveMode} collapsedKey={`zp-map-legend-collapsed:${liveMode ? 'live' : 'design'}`} defaultCollapsed />
+          </Panel>
+        )}
         {liveMode && (
-          <Panel position="top-right" className="flex flex-col items-end gap-2">
-            <FindBox nodes={detail.nodes} shapes={detail.shapes || []} onPick={(id) => focusNode(id, false)} />
-            {showProblems && <ProblemsPanel problems={problems} onFocus={focusProblem} />}
+          <Panel position="top-right" className="flex max-h-[calc(100%-1.5rem)] flex-col items-end gap-2 overflow-y-auto">
+            {!wall && <FindBox nodes={detail.nodes} shapes={detail.shapes || []} onPick={(id) => focusNode(id, false)} />}
+            {showProblems && !liveFocusNode && !drillLink && <ProblemsPanel problems={problems} onFocus={focusProblem} />}
             {drillLink && (
               <LinkDrillPanel
                 link={drillLink.link}
@@ -2090,16 +2271,14 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
               />
             )}
             {liveFocusNode && (
-              <div className="relative">
-                <button type="button" onClick={() => setLiveFocusId(null)} className="absolute -right-1.5 -top-1.5 z-10 flex h-5 w-5 items-center justify-center rounded-full border border-border bg-surface text-muted shadow hover:text-text" title="Close">
-                  <X className="h-3 w-3" />
-                </button>
-                <DeviceHoverCard node={liveFocusNode} nodeLive={nodesLive[liveFocusNode.id]} sk={statusKey(nodesLive[liveFocusNode.id]?.status ?? liveFocusNode.status)} />
-                <div className="mt-1 flex gap-1">
-                  <button type="button" onClick={() => openEntity(liveFocusNode)} className="flex-1 rounded-md border border-border bg-surface/95 px-2 py-1 text-2xs font-semibold text-text2 shadow hover:border-primary/50 hover:text-text">{nodeKindOf(liveFocusNode) === 'device' ? 'Device page' : nodeKindOf(liveFocusNode) === 'server' ? 'Server page' : 'Check page'}</button>
-                  {nodeKindOf(liveFocusNode) === 'device' && <button type="button" onClick={() => window.open(`/alerts?device=${liveFocusNode.device_id}`, '_blank')} className="flex-1 rounded-md border border-border bg-surface/95 px-2 py-1 text-2xs font-semibold text-text2 shadow hover:border-primary/50 hover:text-text">Alerts</button>}
-                </div>
-              </div>
+              <NodeInspector
+                node={liveFocusNode}
+                nodeLive={nodesLive[liveFocusNode.id]}
+                links={inspectorLinks}
+                liveData={liveData}
+                onClose={() => setLiveFocusId(null)}
+                onFocusLink={(id) => { focusEdge(id); setLiveLinkId(id); setLiveFocusId(null) }}
+              />
             )}
           </Panel>
         )}
@@ -2116,7 +2295,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
               <ToolBtn onClick={undo} title="Undo (Ctrl+Z)"><Undo2 className="h-4 w-4" /></ToolBtn>
               <ToolBtn onClick={redo} title="Redo (Ctrl+Shift+Z)"><Redo2 className="h-4 w-4" /></ToolBtn>
               <div className="mx-0.5 h-5 w-px bg-border" />
-              <InsertMenu onAdd={addShapeAt} />
+              <InsertMenu onAdd={addShapeAt} onSite={() => setSiteDialog({ mode: 'create' })} />
               <MenuBtn label="Arrange" onOpen={(el) => openMenuUnder(el, arrangeItems())} />
               <MenuBtn label="View" onOpen={(el) => openMenuUnder(el, viewItems())} />
               <div className="mx-0.5 h-5 w-px bg-border" />
@@ -2196,6 +2375,23 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       {iconPickAt && (
         <IconPickerDialog onCancel={() => setIconPickAt(null)} onPick={(icon) => { const at = iconPickAt; setIconPickAt(null); addShapeAtFlow(iconSpec(icon), at) }} />
       )}
+
+      {siteDialog && (() => {
+        const editShape = siteDialog.shapeId ? ((nodes.find((n) => n.id === siteDialog.shapeId)?.data as any)?.shape as MapShape | undefined) : undefined
+        return (
+          <SiteDialog
+            mode={siteDialog.mode}
+            mapId={mapId}
+            maps={maps}
+            initialName={editShape?.text || ''}
+            initialSpec={editShape?.metadata?.site || null}
+            pickedCount={siteDialog.picked ? siteDialog.picked.nodeIds.length + siteDialog.picked.shapeIds.length : 0}
+            saving={siteBusy}
+            onCancel={() => setSiteDialog(null)}
+            onSave={(r) => void saveSite(r)}
+          />
+        )
+      })()}
 
       {quickOpen && (
         <QuickConnectDialog

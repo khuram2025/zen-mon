@@ -8,9 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.gzip_request import GzipRequestMiddleware
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_runs, report_schedules, discovery, discovery_v2, users, roles, auth_settings, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, ncm_compliance, host_alert_rules, link_utilization, udt, netpath, tags
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_runs, report_schedules, discovery, discovery_v2, discovery_rules, users, roles, auth_settings, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, ncm_compliance, host_alert_rules, link_utilization, udt, netpath, tags
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
+from app.api.v1 import system_status as system_status_api
 from app.api.v1 import security_settings as security_api
 from app.api.v1.probe_trust import router as probe_trust_router
 from app.api.v1.ssh_terminal import router as ssh_terminal_router
@@ -19,6 +20,8 @@ from app.api.v1 import network_events
 from app.api.v1 import virtualization
 from app.api.v1 import notification_grouping as notification_grouping_api
 from app.api.v1 import alert_storm as alert_storm_api
+from app.api.v1 import alert_rule_recommendations as alert_rule_recommendations_api
+from app.api.v1 import alert_event_expiry as alert_event_expiry_api
 from app.api.v1 import escalation_policies as escalation_policies_api
 from app.api.v1 import oncall as oncall_api
 from app.api.v1 import sensors as sensors_admin_api
@@ -121,10 +124,13 @@ def create_app() -> FastAPI:
     app.include_router(tags.router, prefix="/api/v1", dependencies=[policy("tags")])
     app.include_router(notification_grouping_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_storm_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
+    app.include_router(alert_event_expiry_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(escalation_policies_api.router, prefix="/api/v1", dependencies=[policy("escalation")])
     app.include_router(oncall_api.router, prefix="/api/v1", dependencies=[policy("oncall")])
     app.include_router(alerts.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(settings_api.router, prefix="/api/v1", dependencies=[policy("settings", allow_public=True)])
+    # Before alert_rules: "/alert-rules/recommended" must not reach "/alert-rules/{rule_id}".
+    app.include_router(alert_rule_recommendations_api.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(host_alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_engine.router, prefix="/api/v1")
@@ -149,18 +155,28 @@ def create_app() -> FastAPI:
     app.include_router(realtime.router, prefix="/api/v1")
     app.include_router(discovery.router, prefix="/api/v1", dependencies=[policy("discovery")])
     app.include_router(discovery_v2.router, prefix="/api/v1", dependencies=[policy("discovery")])
+    app.include_router(discovery_rules.router, prefix="/api/v1", dependencies=[policy("discovery")])
     app.include_router(users.router, prefix="/api/v1", dependencies=[policy("access")])
     app.include_router(roles.router, prefix="/api/v1", dependencies=[policy("access")])
     app.include_router(auth_settings.router, prefix="/api/v1")
     app.include_router(subscription.router, prefix="/api/v1")
     app.include_router(system_updates.router, prefix="/api/v1")
     app.include_router(storage_api.router, prefix="/api/v1")
+    app.include_router(system_status_api.router, prefix="/api/v1")
     app.include_router(security_api.router, prefix="/api/v1")
     app.include_router(probe_trust_router, prefix="/api/v1")
     app.include_router(ssh_terminal_router, prefix="/api/v1")
     app.include_router(management_access.router, prefix="/api/v1")
     app.include_router(support.router, prefix="/api/v1")
     app.include_router(snmp.router, prefix="/api/v1", dependencies=[policy("snmp")])
+    from app.api.v1 import device_templates as device_templates_api, device_types as device_types_api
+    app.include_router(device_templates_api.router, prefix="/api/v1", dependencies=[policy("snmp")])
+    app.include_router(device_types_api.router, prefix="/api/v1", dependencies=[policy("devices")])
+    from app.api.v1 import custom_fields as custom_fields_api, device_groups as device_groups_api
+    app.include_router(device_groups_api.router, prefix="/api/v1", dependencies=[policy("devices")])
+    app.include_router(custom_fields_api.router, prefix="/api/v1", dependencies=[policy("devices")])
+    from app.api.v1 import topology_dependencies as topology_dependencies_api
+    app.include_router(topology_dependencies_api.router, prefix="/api/v1", dependencies=[policy("devices")])
     app.include_router(snmp_credentials.router, prefix="/api/v1")
     app.include_router(windows_credentials.router, prefix="/api/v1", dependencies=[policy("windows_credentials")])
     app.include_router(audit_logs.router, prefix="/api/v1")
@@ -248,6 +264,8 @@ def create_app() -> FastAPI:
         # Discovery: recover restart-stranded runs, then fire due schedules.
         from app.services.discovery_scheduler import discovery_scheduler_loop
         app.state.discovery_scheduler = asyncio.create_task(discovery_scheduler_loop())
+        from app.services.discovery_scheduler import discovery_rules_loop
+        app.state.discovery_rules = asyncio.create_task(discovery_rules_loop())
         # Software baselines: hourly full re-evaluation clears stale results.
         from app.services.baseline_service import baseline_repair_loop
         app.state.baseline_repair = asyncio.create_task(baseline_repair_loop())
@@ -257,6 +275,15 @@ def create_app() -> FastAPI:
         # Network-device (SNMP) alert rules: periodic threshold evaluation against ClickHouse.
         from app.services.network_alert_service import network_alert_evaluator_loop
         app.state.network_alert_evaluator = asyncio.create_task(network_alert_evaluator_loop())
+        # Certificate-expiry and response-time rules (service checks, F5 inventory).
+        from app.services.service_metric_alert_service import service_metric_alert_evaluator_loop
+        app.state.service_metric_alert_evaluator = asyncio.create_task(service_metric_alert_evaluator_loop())
+        # Virtualisation rules: host disconnected, datastore usage, platform alarms.
+        from app.services.virtualization_alert_service import virtualization_alert_evaluator_loop
+        app.state.virtualization_alert_evaluator = asyncio.create_task(virtualization_alert_evaluator_loop())
+        # Monitoring gaps: SNMP unanswered while ping answers, agent heartbeats without metrics.
+        from app.services.monitoring_gap_alert_service import monitoring_gap_alert_evaluator_loop
+        app.state.monitoring_gap_alert_evaluator = asyncio.create_task(monitoring_gap_alert_evaluator_loop())
         # SLA escalation tiers: page the next on-call level for alerts that stay
         # active and unacknowledged past each level's deadline.
         from app.services.alert_escalation_service import escalation_sweeper_loop
@@ -275,6 +302,10 @@ def create_app() -> FastAPI:
         # APM alert rules (apm_* metric keys): periodic RED-rollup evaluation.
         from app.services.apm_alert_service import apm_alert_evaluator_loop
         app.state.apm_alert_evaluator = asyncio.create_task(apm_alert_evaluator_loop())
+        # ZenPlus appliance health (appliance_* rules): disk, ClickHouse,
+        # backups, updates, licence, clock, failing channels, remote sensors.
+        from app.services.appliance_alert_service import appliance_alert_evaluator_loop
+        app.state.appliance_alert_evaluator = asyncio.create_task(appliance_alert_evaluator_loop())
         # SLO error-budget burn: multi-window multi-burn-rate evaluation.
         from app.services.apm_slo_service import apm_slo_burn_loop
         app.state.apm_slo_burn = asyncio.create_task(apm_slo_burn_loop())
@@ -286,6 +317,10 @@ def create_app() -> FastAPI:
         # Advisory-locked, so safe with multiple Uvicorn workers.
         from app.services.storage_service import storage_sweeper_loop
         app.state.storage_sweeper = asyncio.create_task(storage_sweeper_loop())
+        # System status: one CPU / memory / load sample a minute, kept 24 h in
+        # Redis. Every worker measures; the one that claims the minute writes.
+        from app.services.appliance_health import sampler_loop as appliance_health_sampler_loop
+        app.state.appliance_health_sampler = asyncio.create_task(appliance_health_sampler_loop())
         # Agent packages: reconcile the DB against the on-disk artifact store so
         # a release that shipped a new MSI is downloadable without a manual
         # publish step.
@@ -314,6 +349,13 @@ def create_app() -> FastAPI:
         # switches as child devices (advisory-locked).
         from app.services.managed_device_service import managed_sync_loop
         app.state.managed_device_sync = asyncio.create_task(managed_sync_loop())
+        # Device Templates: record built-in updates shipped by a release and
+        # re-resolve customised templates whose parent changed (advisory-locked).
+        from app.services.device_templates.service import resync_loop as device_template_resync_loop
+        app.state.device_template_resync = asyncio.create_task(device_template_resync_loop())
+        # Device groups: keep dynamic group members current (advisory-locked, every minute).
+        from app.services.device_groups.membership import reconcile_loop as device_group_reconcile_loop
+        app.state.device_group_reconcile = asyncio.create_task(device_group_reconcile_loop())
         # Inventory & Compliance: normalise dirty/outdated identity and software rows
         # (every 2 min), and the daily snapshot + retention pass. Both take
         # transaction-scoped advisory locks, so every worker can run them.
@@ -342,7 +384,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer"):
+        for attr in ("virtualization_poller", "controller_recovery", "health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "discovery_rules", "host_alert_evaluator", "network_alert_evaluator", "service_metric_alert_evaluator", "monitoring_gap_alert_evaluator", "virtualization_alert_evaluator", "appliance_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "appliance_health_sampler", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "udt_gateway_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator", "baseline_repair", "inventory_normalize", "inventory_snapshot", "inventory_catalog_warmer", "device_template_resync", "device_group_reconcile"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

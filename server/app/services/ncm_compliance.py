@@ -298,6 +298,13 @@ async def evaluate_device(db, device_id, *, version_id=None, content=None, platf
     # Rules that no longer apply (policy disabled, platform changed) drop out.
     await db.execute(text('DELETE FROM ncm_compliance_results WHERE device_id=:d AND NOT (rule_id = ANY(:ids))'),
                      {'d': device_id, 'ids': evaluated})
+    # One alert per device + failing policy (ncm_alerts); alerting never fails an evaluation.
+    from app.services import ncm_alerts
+    try:
+        async with db.begin_nested():
+            await ncm_alerts.sync_compliance(db, device_id)
+    except Exception:
+        ncm_alerts.logger.exception('Compliance alerts for device %s could not be updated', device_id)
     return counts
 
 

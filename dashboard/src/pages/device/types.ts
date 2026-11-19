@@ -133,6 +133,9 @@ export type DeviceRecord = {
   snmp_version: string
   snmp_port: number
   profile_name: string | null
+  profile_id?: string | null
+  profile_source?: string | null
+  profile_suggested_id?: string | null
   sys_object_id: string | null
   os_version: string | null
   serial_number: string | null

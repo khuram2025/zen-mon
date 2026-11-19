@@ -15,8 +15,8 @@ from app.services import storage_service as svc
 @pytest.mark.parametrize('fail_after_postgres', [False, True])
 async def test_restore_recovers_its_backup_row(tmp_path, monkeypatch, fail_after_postgres):
     conn = sqlite3.connect(tmp_path / 'state.db', check_same_thread=False)
-    conn.execute('CREATE TABLE storage_backups(id TEXT PRIMARY KEY, status TEXT, last_restore_status TEXT, last_restore_error TEXT)')
-    conn.execute("INSERT INTO storage_backups VALUES ('backup', 'completed', 'running', NULL)")
+    conn.execute('CREATE TABLE storage_backups(id TEXT PRIMARY KEY, status TEXT, last_restore_status TEXT, last_restore_error TEXT, last_restore_at TEXT)')
+    conn.execute("INSERT INTO storage_backups VALUES ('backup', 'completed', 'running', NULL, NULL)")
     conn.commit()
 
     class Session:

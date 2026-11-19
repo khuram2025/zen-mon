@@ -258,3 +258,15 @@ def _builtin_roles_for_minimal_fake_dbs(monkeypatch):
         return await real(db, role_name)
 
     monkeypatch.setattr(security, "get_role_permissions", shim)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_template_metric_names():
+    """alert_phrasing remembers template metric names process-wide (filled by
+    the network evaluator); a test must not see names another test loaded."""
+    from app.services import alert_phrasing as _ap
+    saved = dict(_ap._TEMPLATE_METRICS)
+    _ap._TEMPLATE_METRICS.clear()
+    yield
+    _ap._TEMPLATE_METRICS.clear()
+    _ap._TEMPLATE_METRICS.update(saved)

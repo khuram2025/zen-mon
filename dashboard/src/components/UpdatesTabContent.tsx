@@ -1,6 +1,7 @@
 import { regionalDate } from '@/lib/regionalTime'
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { pathHold, pathSummary, stepRole } from './updatePath'
 import {
   AlertTriangle,
   Check,
@@ -253,6 +254,8 @@ export function UpdatesTabContent() {
   }
 
   const isRegistered = !!status?.appliance_id
+  // Failed installs since the last success: explains an empty or changed path.
+  const hold = status ? pathHold(status.history || [], status.current_version) : null
 
   return (
     <div className="space-y-5">
@@ -467,8 +470,23 @@ export function UpdatesTabContent() {
 
       {plan && (
         <section aria-label="Available upgrade path" className="rounded-xl border border-border bg-surface p-6">
-          <h3 className="text-sm font-semibold">{plan.steps.length ? 'Available upgrade path' : 'No eligible updates available'}</h3>
+          <h3 className="text-sm font-semibold">{plan.steps.length ? 'Available upgrade path' : hold ? 'Updates are on hold for this appliance' : 'No eligible updates available'}</h3>
           <p className="mt-1 text-xs text-muted">Checked {fmtDate(plan.checked_at)}. Checking does not download or install updates.</p>
+          {hold && plan.from_version === status.current_version && (
+            <div role="status" className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+              <p className="text-sm font-medium">
+                v{hold.version} failed to install {hold.attempts === 1 ? 'once' : `${hold.attempts} times`} on this appliance
+                {hold.lastAt ? ` (last attempt ${fmtDate(hold.lastAt)})` : ''}.
+              </p>
+              <p className="mt-1 text-xs text-muted">
+                {plan.steps.length === 0
+                  ? 'The update server is not offering it again. A release that fails in the field is paused for every appliance, and a version is no longer offered to an appliance after three failed installs. This appliance stays on its installed version and keeps monitoring; a corrected release appears here when it is published.'
+                  : hold.exhausted
+                    ? 'This was the third failed install. The path below is what the update server offers now.'
+                    : `The update server stops offering a version after three failed installs (${hold.attempts} of 3 used). Review the error under Update history before trying again.`}
+              </p>
+            </div>
+          )}
           {plan.from_version !== status.current_version ? (
             <p className="mt-3 text-sm text-amber-500">The installed version changed. Check again to refresh the upgrade path.</p>
           ) : plan.steps.length > 0 && (
@@ -477,12 +495,13 @@ export function UpdatesTabContent() {
                 <li className="text-sm text-muted">Installed: v{plan.from_version}</li>
                 {plan.steps.map((step, index) => (
                   <li key={step.id} className="rounded-lg bg-surface2 p-3">
-                    <p className="text-sm font-medium">{index + 1}. v{step.version} <span className="ml-2 text-xs text-muted">{index < plan.steps.length - 1 ? 'Required intermediate version' : 'Latest eligible version'}</span></p>
+                    <p className="text-sm font-medium">{index + 1}. v{step.version} <span className={`ml-2 text-xs ${stepRole(plan.steps, index).required ? 'text-amber-500' : 'text-muted'}`}>{stepRole(plan.steps, index).label}</span></p>
+                    {stepRole(plan.steps, index).reason && <p className="mt-1 text-xs">{stepRole(plan.steps, index).reason}</p>}
                     <p className="mt-1 whitespace-pre-wrap text-xs text-muted">{step.changelog}</p>
                   </li>
                 ))}
               </ol>
-              <p className="mb-3 text-xs text-muted">Required intermediate versions are installed in order. Each step must pass verification and health checks before the next starts.</p>
+              <p className="mb-3 text-xs text-muted">{pathSummary(plan.steps)} Each step must pass verification and health checks before the next starts; a failed step stops the path and the appliance is rolled back to the version it had.</p>
               <label htmlFor="update-target" className="block text-xs font-medium">Install through version</label>
               <select id="update-target" value={targetVersion} onChange={e => setTargetVersion(e.target.value)}
                 disabled={installNow.isPending}
@@ -492,7 +511,7 @@ export function UpdatesTabContent() {
                 </option>)}
               </select>
               <p className="mt-3 text-xs text-muted">{status.auto_update
-                ? `Automatic installation is enabled. Scheduled runs may install eligible updates within the configured maintenance window (${status.maintenance_timezone || 'appliance local time'}).`
+                ? `Automatic installation is enabled. Scheduled runs follow this same path in order, one version at a time, within the configured maintenance window (${status.maintenance_timezone || 'appliance local time'}).`
                 : 'Automatic installation is off. Scheduled checks leave installation to you.'}</p>
               <button className="mt-4 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
                 disabled={installNow.isPending || status.updater_running || !!status.active_update || !targetVersion}

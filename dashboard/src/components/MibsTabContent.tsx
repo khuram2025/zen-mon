@@ -5,7 +5,8 @@ import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
-import { formatBytes, relativeTime } from '@/lib/utils'
+import { apiErrorMessage, formatBytes, relativeTime } from '@/lib/utils'
+import { toast } from '@/components/ui/Toast'
 
 export function MibsTabContent() {
   const qc = useQueryClient()
@@ -46,13 +47,16 @@ export function MibsTabContent() {
       qc.invalidateQueries({ queryKey: ['mibs'] })
     },
     onError: (e: any) => {
-      setUploadError(e?.response?.data?.detail || 'Upload failed')
+      setUploadError(apiErrorMessage(e) || 'Upload failed')
+      // Otherwise choosing the same file again does nothing: the input's value has not changed.
+      if (fileInput.current) fileInput.current.value = ''
     },
   })
 
   const deleteMib = useMutation({
     mutationFn: async (id: string) => api.delete(`/snmp/mibs/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mibs'] }),
+    onError: (e: any) => toast.error('Could not delete the MIB', apiErrorMessage(e)),
   })
 
   function onPick(e: ChangeEvent<HTMLInputElement>) {

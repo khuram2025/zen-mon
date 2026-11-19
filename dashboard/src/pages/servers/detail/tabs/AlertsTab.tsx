@@ -29,7 +29,12 @@ import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import { QueryError, TableStateRow } from '@/components/servers/tables'
+import { ExcludeRuleDialog, useRuleExclusion } from '@/components/alerts/RuleExclusions'
+import { ruleSwitch, type RuleExclusion } from '@/components/alerts/exclusionModel'
+import { useCan } from '@/stores/auth'
 import type { ServerItem } from '@/types/servers'
+import { serverMetricLabel, serverRuleCondition, serverScopeLabel } from '@/components/forms/serverAlertRule'
+import { groupsApi } from '@/pages/groups/api'
 import { EmptyState, Panel, Pill, Segmented, StatTile, type Tone } from '../ui'
 
 /* ── Types and labels ────────────────────────────────────────────── */
@@ -62,7 +67,15 @@ export interface HostRule {
   auto_reset_threshold?: number | null
   recovery_alert?: boolean
   server_id: string | null
+  /** Shared rules: only servers carrying this tag (null = any). */
+  scope_tag?: string | null
+  /** Shared rules: only members of this device group, subgroups and dynamic membership included (null = any). */
+  group_id?: string | null
   target: string | null
+  /** Global rules only: who disabled it for this server and when (null = runs here). */
+  excluded?: RuleExclusion | null
+  /** The rule's effect on this server: enabled and not excluded here. */
+  active?: boolean
 }
 
 /** Default clear hold the evaluator applies when a rule leaves clear_duration empty. */
@@ -99,7 +112,7 @@ const OP_SYMBOL: Record<string, string> = {
 }
 
 export function metricLabel(metric: string): string {
-  return HOST_METRICS.find((m) => m.value === metric)?.label || metric
+  return HOST_METRICS.find((m) => m.value === metric)?.label || serverMetricLabel(metric)
 }
 
 export function ruleCondition(r: HostRule): string {
@@ -108,6 +121,11 @@ export function ruleCondition(r: HostRule): string {
   if (m?.kind === 'proc') return `Process ${r.target || '?'} not running`
   if (m?.kind === 'event') return metricLabel(r.metric)
   if (m?.kind === 'flag') return 'Agent silent, server still answers ping'
+  // Depth metrics (swap, disk latency, NIC errors, clock offset, days until full, automatic services) and any
+  // metric this editor does not list: the shared words, with the metric's own unit (never a stray "%").
+  if (!m || r.metric !== 'host_cpu_pct' && r.metric !== 'host_memory_pct' && r.metric !== 'host_filesystem_pct' && r.metric !== 'host_disk_util_pct') {
+    return serverRuleCondition(r as any)
+  }
   return `${metricLabel(r.metric)} ${OP_SYMBOL[r.operator] || r.operator} ${r.threshold}%`
 }
 
@@ -172,6 +190,10 @@ export function AlertsTab({ server }: { server: ServerItem }) {
   const [search, setSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [deleting, setDeleting] = useState<HostRule | null>(null)
+  // A global rule being turned off for this server only (never for every server).
+  const [excluding, setExcluding] = useState<HostRule | null>(null)
+  const can = useCan()
+  const canManage = can('alerts.manage')
 
   const alertsQ = useQuery<{ data: ServerAlert[]; meta: { total: number } }>({
     queryKey: ['servers', serverId, 'alerts', status],
@@ -203,6 +225,11 @@ export function AlertsTab({ server }: { server: ServerItem }) {
     queryFn: async () => (await api.get('/host-alert-rules', { params: { server_id: serverId } })).data,
   })
   const rules = rulesQ.data?.items || []
+  // Names for shared rules scoped to a device group (the API lists only the ones that cover this server).
+  const hasGroupScoped = rules.some((r) => !r.server_id && r.group_id)
+  const { data: groupList } = useQuery({ queryKey: ['groups-tree'], queryFn: groupsApi.list, enabled: hasGroupScoped, retry: false, staleTime: 60_000 })
+  const sharedScope = (r: HostRule) =>
+    serverScopeLabel({ scope_tag: r.scope_tag, group_id: r.group_id }, { group: (groupList || []).find((g) => g.id === r.group_id)?.name })
 
   const { data: silencesResp } = useQuery<{ items: Silence[] }>({
     queryKey: ['servers', serverId, 'silences'],
@@ -227,6 +254,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
     onSuccess: () => { invalidate(); toast.success('Alert resolved') },
     onError: (e) => toast.error(apiErrorMessage(e)),
   })
+  const { exclude, include } = useRuleExclusion('server', serverId, invalidate)
   const toggleRule = useMutation({
     mutationFn: async (id: string) => (await api.post(`/host-alert-rules/${id}/toggle`)).data,
     onSuccess: () => { invalidate(); toast.success('Rule updated') },
@@ -256,7 +284,9 @@ export function AlertsTab({ server }: { server: ServerItem }) {
     critical: openAlerts.filter((a) => a.severity === 'critical').length,
     warning: openAlerts.filter((a) => a.severity === 'warning').length,
   }
-  const rulesEnabled = rules.filter((r) => r.enabled).length
+  // Active here: enabled, and (for a global rule) not disabled for this server.
+  const isActive = (r: HostRule) => r.active ?? (r.enabled && !r.excluded)
+  const rulesEnabled = rules.filter(isActive).length
   const serverRules = rules.filter((r) => r.server_id).length
 
   const unhealthy = serverStatus === 'warning' || serverStatus === 'critical'
@@ -502,7 +532,7 @@ export function AlertsTab({ server }: { server: ServerItem }) {
         id="alert-rules"
         icon={Settings2}
         title="Alert rules"
-        subtitle={`Global and server-specific · ${rulesEnabled} of ${rules.length} enabled`}
+        subtitle={`Global and server-specific · ${rulesEnabled} of ${rules.length} active on this server`}
         flush
         actions={(
           <Button size="sm" onClick={() => setCreateOpen(true)}>
@@ -540,14 +570,26 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                   )}
                 />
               </TableStateRow>
-            ) : rules.map((r) => (
-              <Tr key={r.id} className={cn('border-border/60 hover:bg-surface2/40', !r.enabled && 'opacity-60')}>
+            ) : rules.map((r) => {
+              // A global rule switches on/off for this server only; a server-specific rule toggles itself.
+              const sw = ruleSwitch({ name: r.name, enabled: r.enabled, shared: !r.server_id, excluded: r.excluded ?? null },
+                'server', canManage)
+              const busy = (toggleRule.isPending && toggleRule.variables === r.id)
+                || (exclude.isPending && exclude.variables?.ruleId === r.id)
+                || (include.isPending && include.variables === r.id)
+              return (
+              <Tr key={r.id} className={cn('border-border/60 hover:bg-surface2/40', !isActive(r) && 'opacity-60')}>
                 <Td className="py-2 pl-4">
                   <Switch
-                    checked={r.enabled}
-                    disabled={toggleRule.isPending && toggleRule.variables === r.id}
-                    onCheckedChange={() => toggleRule.mutate(r.id)}
-                    aria-label={`${r.enabled ? 'Disable' : 'Enable'} ${r.name}`}
+                    checked={sw.checked}
+                    disabled={sw.disabled || busy}
+                    onCheckedChange={() => {
+                      if (sw.action === 'exclude') setExcluding(r)
+                      else if (sw.action === 'include') include.mutate(r.id)
+                      else if (sw.action === 'toggle') toggleRule.mutate(r.id)
+                    }}
+                    aria-label={sw.label}
+                    title={sw.label}
                   />
                 </Td>
                 <Td className="max-w-[240px] truncate py-2 font-medium" title={r.name}>{r.name}</Td>
@@ -560,7 +602,10 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                   )}
                 </Td>
                 <Td className="py-2"><SevPill sev={r.severity} /></Td>
-                <Td className="py-2 text-xs text-muted">{r.server_id ? 'This server' : 'All servers'}</Td>
+                <Td className="py-2 text-xs text-muted">
+                  {r.server_id ? 'This server' : sharedScope(r)}
+                  {sw.note && <div className={cn('mt-0.5 max-w-[16rem] text-2xs', r.excluded ? 'text-warning' : 'text-muted')}>{sw.note}</div>}
+                </Td>
                 <Td className="py-2 pr-4 text-right">
                   {r.server_id ? (
                     <Button
@@ -571,11 +616,12 @@ export function AlertsTab({ server }: { server: ServerItem }) {
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
                   ) : (
-                    <span className="text-xs text-muted" title="Global rules are managed on the Alerts page">global</span>
+                    <span className="text-xs text-muted" title="Global rules are edited in Alert Rules; the switch turns one off for this server only">global</span>
                   )}
                 </Td>
               </Tr>
-            ))}
+              )
+            })}
           </TBody>
         </Table>
       </Panel>
@@ -585,6 +631,18 @@ export function AlertsTab({ server }: { server: ServerItem }) {
         open={createOpen}
         onOpenChange={setCreateOpen}
         onCreated={invalidate}
+      />
+
+      <ExcludeRuleDialog
+        open={!!excluding}
+        onOpenChange={(o) => { if (!o) setExcluding(null) }}
+        rule={excluding ? { name: excluding.name, scope: { label: sharedScope(excluding) } } : null}
+        kind="server"
+        assetName={server.display_name || server.hostname}
+        loading={exclude.isPending}
+        onConfirm={(reason) => {
+          if (excluding) exclude.mutate({ ruleId: excluding.id, reason }, { onSuccess: () => setExcluding(null) })
+        }}
       />
 
       <ConfirmDialog

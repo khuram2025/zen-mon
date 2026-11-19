@@ -107,6 +107,11 @@ export interface User {
   role: string
   is_active?: boolean
   auth_source?: 'local' | 'ldap' | 'radius' | 'oidc'
+  /** Who decides the role: a local account ('local'), the provider's role mapping at every sign-in
+   *  ('directory'), or an administrator who set it by hand on a directory account ('manual'). */
+  role_source?: 'local' | 'directory' | 'manual'
+  /** Directory accounts: the role the provider's mapping gave at the last sign-in (null = not seen yet). */
+  directory_role?: string | null
   /** Visibility scope: the user's own tag names. Their role's tags add to these. */
   scope_tags?: string[]
   /** Scope inherited from the role (roles.scope_tags). */

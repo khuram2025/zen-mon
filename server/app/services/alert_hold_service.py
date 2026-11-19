@@ -68,12 +68,14 @@ _DUE_SQL = """
            r.email_subject, r.email_body, r.sms_template,
            r.schedule_start, r.schedule_end, r.schedule_days, {rule_priority} AS rule_priority,
            d.status AS device_status, d.hostname AS device_hostname,
-           host(d.ip_address) AS device_ip,
+           host(d.ip_address) AS device_ip, d.device_type AS device_type,
+           d.location AS device_location, dg.name AS device_group,
            sc.status AS check_status, sc.name AS check_name,
            sc.check_type AS check_type, sc.target_host AS check_target
     FROM alerts a
     JOIN alert_rules r ON r.id = a.rule_id
     LEFT JOIN devices d ON d.id = a.device_id
+    LEFT JOIN device_groups dg ON dg.id = d.group_id
     LEFT JOIN service_checks sc ON sc.id = a.service_check_id
     WHERE a.status = 'pending'
       AND (a.metadata->>'hold_until') IS NOT NULL
@@ -128,10 +130,65 @@ async def _supersede_on_confirm(db: AsyncSession, row, now: datetime, new_status
     return res.rowcount or 0
 
 
+def _meta_number(meta: dict, key: str):
+    value = meta.get(key)
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _held_readings(meta: dict) -> tuple:
+    """(rtt ms, loss %) the transition measured. Rows from before 1.25.18
+    stored only the status condition's own reading (condition_value)."""
+    rtt = _meta_number(meta, "rtt_ms")
+    loss = _meta_number(meta, "loss_pct")
+    metric = meta.get("condition_metric")
+    if rtt is None and "rtt_ms" not in meta and metric == "rtt":
+        rtt = _meta_number(meta, "condition_value")
+    if loss is None and "loss_pct" not in meta and metric == "packet_loss":
+        loss = _meta_number(meta, "condition_value")
+    return rtt, loss
+
+
+def _device_phrasing(row, meta: dict, status: str, branding, now: datetime) -> dict:
+    """The device variables the immediate path (alert_engine) builds: the
+    reading, the status cause, the asset type and the transition's time."""
+    from app.api.v1.alert_engine import RTT_UNAVAILABLE
+    from app.services import alert_condition
+
+    rtt, loss = _held_readings(meta)
+    metric = row.metric or "ping_status"
+    value = None
+    if metric in alert_condition.RULE_READING_METRICS:
+        value = _meta_number(meta, "rule_value")
+        if value is None:
+            value = rtt if metric == "rtt" else loss
+    cause = alert_condition.status_cause(metric, status, meta.get("condition"))
+    return {
+        "rtt": (ap.format_reading("rtt", rtt, None, None) if rtt is not None
+                else RTT_UNAVAILABLE if "rtt_ms" in meta or status == "down" else ""),
+        "packet_loss": ap.format_reading("packet_loss", loss, None, None) if loss is not None else "",
+        "group": getattr(row, "device_group", None) or "",
+        "location": getattr(row, "device_location", None) or "",
+        "device_type": getattr(row, "device_type", None) or "",
+        **ap.rule_phrasing(
+            row, hostname=ap.host_label(row.device_hostname or "monitored object", row.device_ip),
+            reading=RTT_UNAVAILABLE if metric == "rtt" and value is None else None,
+            value=value, device_status=status,
+            asset_type=ap.asset_type_label(getattr(row, "device_type", None)),
+            # When it changed, not when the hold confirmed it.
+            event_time=row.triggered_at, branding=branding, now=now,
+            status_detail=meta.get("condition") if status == "degraded" else None,
+            status_cause=cause or None),
+    }
+
+
 async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
     """Render the rule's trigger templates and send them to its channels."""
     from app.api.v1.alert_engine import _dashboard_url, _render
     from app.services.host_alert_service import dispatch_to_channels
+    from app.services.regional_time import notification_branding
 
     meta = dict(row.metadata or {})
     status_txt = (meta.get("new_status") or "alert").upper()
@@ -140,6 +197,7 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
     ip = (row.check_target if is_service else row.device_ip) or ""
     sev = row.rule_severity or row.alert_severity or "warning"
     held_for = ap.duration_between(row.triggered_at, now)
+    branding = await notification_branding(db)
 
     variables = {
         "hostname": hostname,
@@ -150,16 +208,25 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         "duration": held_for,
         "rtt": "", "packet_loss": "",
-        "group": "", "location": "", "device_type": "",
+        # {group} and {site} not known here are filled by the dispatcher
+        # (notification_context) from the asset.
+        "location": "", "device_type": "",
         "check_name": row.check_name or "",
         "check_type": row.check_type or "",
         "target": row.check_target or hostname,
         "error": (meta.get("error") or ""),
         **ap.service_check_variables(status_txt, meta.get("error")),
         "status_intro": "An alert has been triggered:",
-        **ap.rule_phrasing(row, hostname=ap.host_label(hostname, ip),
-                           device_status=status_txt.lower() if not is_service else None),
+        **(ap.rule_phrasing(row, hostname=ap.host_label(hostname, ip))
+           if is_service else _device_phrasing(row, meta, status_txt.lower(), branding, now)),
     }
+    incident = ap.incident_context(alert_id=row.id, first_seen=row.triggered_at, now=now,
+                                   lifecycle="new")
+    variables.update(incident)
+    from app.services import notification_context
+    for key, value in (await notification_context.asset_place(db, {"alert_id": row.id})).items():
+        if not variables.get(key):
+            variables[key] = value
     templates = ap.effective_templates(row, "service" if is_service else "device")
     subject = _render(templates["email_subject"], variables)
     body = _render(templates["email_body"], variables)
@@ -182,6 +249,9 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         "subject": subject,
         "body": body,
         "message": sms,
+        # The chat/incident title: the default mail sentence.
+        "event_sentence": _render(ap.default_templates("service" if is_service else "device")["email_body"],
+                                  variables),
         "hostname": hostname,
         "ip_address": ip,
         "status": status_txt,
@@ -194,6 +264,11 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
             ("Condition", variables.get("condition_label")),
             ("Condition held for", held_for),
             ("Target", row.check_target if is_service else None),
+            ("Round-trip time", None if is_service else variables.get("rtt")),
+            ("Packet loss", None if is_service else variables.get("packet_loss")),
+            ("Group", variables.get("group")),
+            ("Location", variables.get("location")),
+            ("Device type", variables.get("device_type")),
         ],
         "triggered_at": now.isoformat(),
         "action_url": await _dashboard_url(db, "/services" if is_service else "/alerts"),
@@ -206,8 +281,7 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         # Priority routes and may group a confirmed warning like any other
         # first page (alert_funnel: P3/P4 warning/info triggers only).
         **alert_funnel.notification_fields(sev, getattr(row, "rule_priority", None), trigger=True),
-        **ap.incident_context(alert_id=row.id, first_seen=row.triggered_at, now=now,
-                              lifecycle="new"),
+        **incident,
     })
 
 

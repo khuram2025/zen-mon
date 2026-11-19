@@ -1,10 +1,10 @@
 import { memo } from 'react'
 import { Handle, Position, useStore, type NodeProps } from '@xyflow/react'
-import { Lock } from 'lucide-react'
+import { Bell, Lock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { NetworkIcon } from '@/components/network-icons'
 import {
-  DISC, DISC_CX, DISC_CY, NODE_W, STATUS_COLOR,
+  DISC, DISC_CX, DISC_CY, NODE_W, STATUS_COLOR, STATUS_LABEL,
   iconFillFor,
   formatAgo, formatUptime, iconForNode, nodeKindOf, statusKey, textScaleFor, utilHex,
   type ManualMapNode, type NodeLiveData,
@@ -24,11 +24,11 @@ export type DeviceNodeData = {
 const LABEL_X = DISC_CX
 
 const STATUS_GLOW: Record<string, string> = {
-  up: '0 0 14px rgb(34 197 94 / 0.35)',
-  down: '0 0 18px rgb(239 68 68 / 0.55)',
-  degraded: '0 0 16px rgb(245 158 11 / 0.45)',
-  maintenance: '0 0 14px rgb(59 130 246 / 0.4)',
-  unknown: 'none',
+  up: '0 0 0 3px rgb(34 197 94 / 0.10), 0 4px 14px rgb(34 197 94 / 0.22)',
+  down: '0 0 0 4px rgb(239 68 68 / 0.22), 0 0 22px rgb(239 68 68 / 0.6)',
+  degraded: '0 0 0 3px rgb(245 158 11 / 0.18), 0 0 18px rgb(245 158 11 / 0.45)',
+  maintenance: '0 0 0 3px rgb(59 130 246 / 0.14), 0 0 14px rgb(59 130 246 / 0.35)',
+  unknown: '0 2px 8px rgb(0 0 0 / 0.25)',
 }
 
 /* React Flow custom node: status-ringed icon disc + a separately MOVABLE label.
@@ -42,9 +42,9 @@ const STATUS_GLOW: Record<string, string> = {
  * topology geometry never lies. */
 function DeviceNodeImpl({ data, selected }: NodeProps) {
   const { node, live, nodeLive, onLabelMove } = data as DeviceNodeData
-  const { connectMode } = useMapMode()
+  const { connectMode, textBoost = 1, pinnedId } = useMapMode()
   const zoom = useStore((s) => s.transform[2])
-  const ts = textScaleFor(zoom)
+  const ts = textScaleFor(zoom) * textBoost
   const iconKey = iconForNode(node)
   const kind = nodeKindOf(node)
   // Live status feed (15s poll) wins over the map snapshot when present.
@@ -53,21 +53,24 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
   const pulsing = live && (sk === 'down' || sk === 'degraded')
   const alerts = live ? nodeLive?.alerts : undefined
   const alertCount = alerts?.active || 0
+  const critical = (alerts?.critical || 0) > 0
 
   const off = node.metadata?.label_offset || { dx: 0, dy: 0 }
   const scale = node.metadata?.size_scale || 1
   const ls = node.metadata?.label_style || {}
   const locked = !!node.metadata?.locked
+  const imageSrc = typeof node.metadata?.image_src === 'string' && node.metadata.image_src ? node.metadata.image_src : null
   const discSize = DISC * scale
   const iconFill = iconFillFor(node.metadata)
-  // Outer frame: a full circle (default) or a rounded-corner square.
-  const frameRadius = node.metadata?.frame === 'rounded' ? Math.round(discSize * 0.22) : discSize / 2
+  // Outer frame: a rounded square (default for new maps) or a full circle.
+  const frameRadius = node.metadata?.frame === 'rounded' ? Math.round(discSize * 0.24) : discSize / 2
   const lx = LABEL_X + off.dx
-  const ly = (DISC_CY + discSize / 2 + 8) + off.dy
+  const ly = (DISC_CY + discSize / 2 + 7) + off.dy
   const moved = Math.hypot(off.dx, off.dy) > 6
   const editable = !live && !!onLabelMove && !locked
-  const hasGauges = live && (nodeLive?.cpu_pct != null || nodeLive?.mem_pct != null)
-  const gaugeW = Math.max(52, discSize * 0.85)
+  const hasStats = live && (nodeLive?.cpu_pct != null || nodeLive?.mem_pct != null)
+  const name = node.label || node.hostname
+  const badgeScale = Math.min(2.4, ts)
 
   const startLabelDrag = (e: React.PointerEvent) => {
     if (!editable || e.button !== 0) return
@@ -114,7 +117,7 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
   } as const
 
   return (
-    <div className="group relative" style={{ width: NODE_W, height: DISC }}>
+    <div className="group relative" style={{ width: NODE_W, height: DISC }} data-status={sk}>
       <Handle type="target" position={Position.Top} id="c" style={handleStyle} isConnectable={!live} />
       <Handle type="source" position={Position.Top} id="c" style={handleStyle} isConnectable={!live} />
       {quickHandleVisible && (
@@ -145,25 +148,49 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
         </svg>
       )}
 
-      {/* Icon disc (this is the draggable node body) */}
+      {/* Icon tile (this is the draggable node body) */}
       <div className="absolute" style={{ left: DISC_CX, top: DISC_CY, transform: 'translate(-50%, -50%)' }}>
-        {pulsing && <span aria-hidden className={cn('absolute inset-0', sk === 'down' ? 'bg-danger/40' : 'bg-warning/40', 'nm-ping')} style={{ borderRadius: frameRadius }} />}
+        {pulsing && <span aria-hidden className={cn('absolute inset-0', sk === 'down' ? 'bg-danger/45' : 'bg-warning/40', 'nm-ping')} style={{ borderRadius: frameRadius }} />}
         <div
-          className={cn('relative flex items-center justify-center border-2 bg-surface shadow-md transition', color.ring, selected && 'ring-2 ring-primary ring-offset-2 ring-offset-surface')}
+          className={cn(
+            'nm-tile relative flex items-center justify-center border-2 transition',
+            color.ring,
+            sk === 'down' && live && 'nm-tile-down',
+            selected && 'ring-2 ring-primary ring-offset-2 ring-offset-surface',
+          )}
           style={{ width: discSize, height: discSize, borderRadius: frameRadius, boxShadow: live ? STATUS_GLOW[sk] : undefined }}
         >
-          <span aria-hidden className={cn('absolute -right-0.5 -top-0.5 h-3.5 w-3.5 rounded-full border-2 border-surface', color.dot, live && 'animate-pulse-soft')} />
-          <NetworkIcon name={iconKey} style={{ width: discSize * iconFill, height: discSize * iconFill }} />
+          {imageSrc ? (
+            <img
+              src={imageSrc}
+              alt=""
+              draggable={false}
+              className="pointer-events-none select-none object-contain"
+              style={{ width: discSize * iconFill, height: discSize * iconFill }}
+            />
+          ) : (
+            <NetworkIcon name={iconKey} style={{ width: discSize * iconFill, height: discSize * iconFill }} />
+          )}
 
-          {/* Active-alert badge */}
+          {/* Status pip (bottom-right) — the colour reads even when the ring is subtle */}
+          <span
+            aria-hidden
+            className={cn('absolute rounded-full border-2 border-surface', color.dot, live && sk !== 'up' && 'animate-pulse-soft')}
+            style={{ right: -3, bottom: -3, width: 14, height: 14, transform: `scale(${Math.min(1.8, badgeScale)})`, transformOrigin: 'bottom right' }}
+            title={STATUS_LABEL[sk] || sk}
+          />
+
+          {/* Active-alert badge (top-right) */}
           {alertCount > 0 && (
             <span
               className={cn(
-                'absolute -left-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-surface px-0.5 font-mono text-2xs font-bold leading-none text-white shadow',
-                (alerts?.critical || 0) > 0 ? 'bg-danger' : 'bg-warning',
+                'absolute flex h-[18px] min-w-[18px] items-center justify-center gap-0.5 rounded-full border-2 border-surface px-1 font-mono text-2xs font-bold leading-none text-white shadow-md',
+                critical ? 'bg-danger' : 'bg-warning',
               )}
-              style={{ transform: `scale(${ts})`, transformOrigin: 'top left' }}
+              style={{ right: -8, top: -8, transform: `scale(${badgeScale})`, transformOrigin: 'bottom left' }}
+              title={`${alertCount} active alert${alertCount > 1 ? 's' : ''}${critical ? ` · ${alerts!.critical} critical` : ''}`}
             >
+              <Bell className="h-2.5 w-2.5" strokeWidth={3} />
               {alertCount > 99 ? '99+' : alertCount}
             </span>
           )}
@@ -171,8 +198,8 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
           {/* Kind badge: server / service-check nodes are not network devices */}
           {kind !== 'device' && (
             <span
-              className="absolute -bottom-1.5 left-1/2 rounded-full border border-surface bg-surface2 px-1 font-mono text-[7.5px] font-bold uppercase leading-[12px] text-muted shadow"
-              style={{ transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'top center' }}
+              className="absolute -bottom-2 left-1/2 rounded-full border border-surface bg-surface2 px-1.5 font-mono text-2xs font-bold uppercase leading-4 text-muted shadow"
+              style={{ transform: `translateX(-50%) scale(${Math.min(1.6, ts) * 0.85})`, transformOrigin: 'top center' }}
               title={kind === 'server' ? 'Server (Servers module)' : 'Service check'}
             >
               {kind === 'server' ? 'SRV' : 'CHK'}
@@ -181,66 +208,67 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
 
           {/* Lock badge (design mode) */}
           {locked && !live && (
-            <span className="absolute -bottom-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full border border-surface bg-surface2 text-muted shadow" title="Locked — unlock from the right-click menu">
+            <span className="absolute -bottom-1 -left-1 flex h-4 w-4 items-center justify-center rounded-full border border-surface bg-surface2 text-muted shadow" title="Locked — unlock from the right-click menu">
               <Lock className="h-2.5 w-2.5" />
             </span>
           )}
         </div>
       </div>
 
-      {/* Live CPU / MEM micro-gauges under the disc */}
-      {hasGauges && (
-        <div
-          className="pointer-events-none absolute flex flex-col gap-[3px]"
-          style={{ left: DISC_CX, top: DISC_CY + discSize / 2 + 3, width: gaugeW, transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'top center' }}
-        >
-          {nodeLive?.cpu_pct != null && <MicroGauge label="C" pct={nodeLive.cpu_pct} />}
-          {nodeLive?.mem_pct != null && <MicroGauge label="M" pct={nodeLive.mem_pct} />}
-        </div>
-      )}
-
-      {/* Movable, styleable label (counter-scaled when zoomed out) */}
+      {/* Movable, styleable label card (counter-scaled when zoomed out). Live
+       * CPU / memory sit inside the card so they never collide with cables. */}
       <div
         onPointerDown={startLabelDrag}
         className={cn(
-          'nodrag absolute max-w-[11rem] rounded-md border border-border bg-surface/90 px-2 py-0.5 text-center leading-tight shadow-sm backdrop-blur',
+          'nodrag absolute w-max max-w-[15rem] rounded-md border bg-surface/95 px-2 py-[3px] text-center leading-tight shadow-sm backdrop-blur',
+          live && sk === 'down' ? 'border-danger/60' : live && sk === 'degraded' ? 'border-warning/50' : 'border-border',
           editable && 'cursor-move hover:border-primary/60',
         )}
         style={{
-          left: lx, top: hasGauges ? ly + 16 * ts : ly, transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'top center',
+          left: lx, top: ly, transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'top center',
           fontFamily: ls.fontFamily || undefined,
-          fontSize: ls.fontSize ? `${ls.fontSize}px` : '11px',
+          fontSize: ls.fontSize ? `${ls.fontSize}px` : '0.75rem',
           fontWeight: ls.bold === false ? 400 : 600,
           fontStyle: ls.italic ? 'italic' : 'normal',
         }}
+        title={`${name}${node.ip_address ? ` · ${node.ip_address}` : ''}`}
       >
-        <div className="truncate" style={{ color: ls.color || 'rgb(var(--text))' }}>{node.label || node.hostname}</div>
-        {!node.metadata?.hide_ip && (
-          <div className="truncate font-normal text-muted" style={{ fontSize: ls.fontSize ? `${Math.max(9, ls.fontSize - 1)}px` : '10px' }}>{node.ip_address}</div>
+        <div className="truncate" style={{ color: ls.color || 'rgb(var(--text))' }}>{name}</div>
+        {!node.metadata?.hide_ip && node.ip_address && (
+          <div className="truncate font-mono font-normal text-muted" style={{ fontSize: ls.fontSize ? `${Math.max(9, ls.fontSize - 1)}px` : '0.6875rem' }}>{node.ip_address}</div>
+        )}
+        {hasStats && (
+          <div className="mt-[3px] flex items-center justify-center gap-2 border-t border-border/60 pt-[3px] font-mono font-semibold" style={{ fontSize: '0.625rem' }}>
+            {nodeLive?.cpu_pct != null && <StatBar label="CPU" pct={nodeLive.cpu_pct} />}
+            {nodeLive?.mem_pct != null && <StatBar label="MEM" pct={nodeLive.mem_pct} />}
+          </div>
         )}
       </div>
 
-      {/* Hover health card (counter-scaled so it stays readable at any zoom) */}
-      <div
-        className="pointer-events-none absolute z-50 hidden group-hover:block"
-        style={{ left: DISC_CX + discSize / 2 + 10, top: DISC_CY, transform: `translateY(-50%) scale(${1 / Math.max(0.5, Math.min(1.6, zoom))})`, transformOrigin: 'left center' }}
-      >
-        <DeviceHoverCard node={node} nodeLive={live ? nodeLive : undefined} sk={sk} />
-      </div>
+      {/* Hover health card (counter-scaled so it stays readable at any zoom);
+       * hidden while this node's inspector is pinned open. */}
+      {pinnedId !== node.id && (
+        <div
+          className="pointer-events-none absolute z-50 hidden group-hover:block"
+          style={{ left: DISC_CX + discSize / 2 + 12, top: DISC_CY, transform: `translateY(-50%) scale(${textBoost / Math.max(0.5, Math.min(1.6, zoom))})`, transformOrigin: 'left center' }}
+        >
+          <DeviceHoverCard node={node} nodeLive={live ? nodeLive : undefined} sk={sk} />
+        </div>
+      )}
     </div>
   )
 }
 
-function MicroGauge({ label, pct }: { label: string; pct: number }) {
+function StatBar({ label, pct }: { label: string; pct: number }) {
   const v = Math.max(0, Math.min(100, pct))
   return (
-    <div className="flex items-center gap-1">
-      <span className="w-2 font-mono text-[7px] font-bold leading-none text-muted">{label}</span>
-      <div className="h-[4px] flex-1 overflow-hidden rounded-full bg-surface2/90 shadow-inner">
-        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${Math.max(3, v)}%`, background: utilHex(v) }} />
-      </div>
-      <span className="w-6 text-right font-mono text-[7.5px] font-semibold leading-none text-text2">{Math.round(v)}%</span>
-    </div>
+    <span className="flex items-center gap-1" title={`${label} ${v.toFixed(1)}%`}>
+      <span className="text-muted">{label}</span>
+      <span className="relative h-[5px] w-6 overflow-hidden rounded-full bg-surface2">
+        <span className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${Math.max(4, v)}%`, background: utilHex(v) }} />
+      </span>
+      <span style={{ color: v >= 60 ? utilHex(v) : 'rgb(var(--text2))' }}>{Math.round(v)}%</span>
+    </span>
   )
 }
 

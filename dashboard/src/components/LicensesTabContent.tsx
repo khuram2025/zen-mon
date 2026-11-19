@@ -123,7 +123,7 @@ export function LicensesTabContent() {
               placeholder="Enter license key"
               value={licenseKey}
               onChange={(e) => setLicenseKey(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && register.mutate()}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !register.isPending && licenseKey.trim()) register.mutate() }}
             />
             <button
               onClick={() => register.mutate()}

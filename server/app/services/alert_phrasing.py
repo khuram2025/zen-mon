@@ -12,6 +12,7 @@ and on the way back down, how long it stayed that way.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
@@ -28,7 +29,8 @@ _PERCENT = {"unit": "%", "decimals": 0}
 METRICS: dict[str, dict] = {
     # Reachability / ICMP
     "ping_status": {"noun": "ICMP reachability", "healthy": 1.0, "subject": "the device",
-                    "lasted": "Down for",
+                    # A recovery from degraded says "Degraded for" (phrasing_variables).
+                    "lasted": "Down for", "lasted_degraded": "Degraded for",
                     "narrative": {"down": "is down: it does not answer ping",
                                   "up": "is reachable again: it answers ping"},
                     "state": {"down": "stops responding to ping",
@@ -70,6 +72,17 @@ METRICS: dict[str, dict] = {
     "if_out_bps": {"noun": "Outbound traffic", "unit": " Mbps", "scale": 1e6, "decimals": 1},
     "if_errors": {"noun": "Interface errors", "unit": " errors", "decimals": 0},
     "if_discards": {"noun": "Interface discards", "unit": " discards", "decimals": 0},
+    # Interface quality (alerting plan G-12; network_alert_service writes the
+    # flapping and speed-change sentences itself).
+    "if_error_rate_pct": {"noun": "Interface error rate", "unit": "% of packets", "decimals": 1},
+    "if_discard_rate_pct": {"noun": "Interface discard rate", "unit": "% of packets", "decimals": 1},
+    "if_flaps": {"noun": "Interface state changes", "unit": " changes", "decimals": 0},
+    "if_speed_changed": {"noun": "Interface speed change", "subject": "the interface", "event": True,
+                         "narrative": {"down": "changed its link speed",
+                                       "up": "has kept its link speed"},
+                         "state": {"down": "changes its link speed", "up": "keeps its link speed"},
+                         "state_label": {"down": "Interface speed changed",
+                                         "up": "No interface speed change"}},
     "if_oper_status": {"noun": "Interface state", "healthy": 1.0, "subject": "the interface",
                        "lasted": "Down for",
                        "narrative": {"down": "is down (link not operational)", "up": "is up again"},
@@ -122,6 +135,19 @@ METRICS: dict[str, dict] = {
     "host_memory_pct": {"noun": "Host memory", **_PERCENT},
     "host_filesystem_pct": {"noun": "Filesystem usage", **_PERCENT},
     "host_disk_util_pct": {"noun": "Disk utilisation", **_PERCENT},
+    # Server depth metrics (alerting plan G-9; host_depth_metrics.py).
+    "host_swap_pct": {"noun": "Swap usage", **_PERCENT},
+    "host_disk_latency_ms": {"noun": "Disk latency", "unit": " ms", "decimals": 1},
+    "host_nic_errors": {"noun": "Network interface errors", "unit": " errors/s", "decimals": 1},
+    "host_clock_skew_s": {"noun": "Clock offset", "unit": " s", "decimals": 0},
+    "host_fs_days_left": {"noun": "Time until the filesystem is full", "unit": " days", "decimals": 1},
+    "host_auto_service_stopped": {"noun": "Automatic service", "subject": "the host",
+                                  "narrative": {"down": "reported that an automatic service has stopped unexpectedly",
+                                                "up": "reported that the automatic service is running again"},
+                                  "state": {"down": "stops an automatic service unexpectedly",
+                                            "up": "runs the automatic service again"},
+                                  "state_label": {"down": "Automatic service stopped",
+                                                  "up": "Automatic service running"}},
     "host_service_down": {"noun": "Monitored service", "subject": "the host",
                           "narrative": {"down": "reported that a monitored service is stopped",
                                         "up": "reported that the monitored service is running again"},
@@ -235,6 +261,53 @@ METRICS: dict[str, dict] = {
                             "state": {"down": "cannot reach the target",
                                       "up": "can reach the target again"},
                             "state_label": {"down": "Target unreachable", "up": "Target reachable"}},
+
+    # ZenPlus appliance health (appliance_alert_service, migrate-198)
+    "appliance_disk_pct": {"noun": "Appliance data disk", **_PERCENT, "subject": "the appliance"},
+    "appliance_db_down": {"noun": "Appliance database", "subject": "the appliance",
+                          "narrative": {"down": "has a database that is not answering",
+                                        "up": "has its databases answering again"},
+                          "state": {"down": "has a database that stops answering",
+                                    "up": "has its databases answering again"},
+                          "state_label": {"down": "Database not answering", "up": "Databases answering"}},
+    "appliance_backup_failed": {"noun": "Appliance backup", "subject": "the appliance",
+                                "narrative": {"down": "has a failed or overdue scheduled backup",
+                                              "up": "is completing its scheduled backups again"},
+                                "state": {"down": "misses or fails a scheduled backup",
+                                          "up": "completes its scheduled backups again"},
+                                "state_label": {"down": "Scheduled backup failed or overdue",
+                                                "up": "Scheduled backups completing"}},
+    "appliance_update_failed": {"noun": "Appliance update", "subject": "the appliance",
+                                "narrative": {"down": "failed its last update attempt",
+                                              "up": "completed an update"},
+                                "state": {"down": "fails an update attempt", "up": "completes an update"},
+                                "state_label": {"down": "Last update failed", "up": "Last update succeeded"}},
+    "appliance_license_days": {"noun": "Licence validity", "unit": " days", "decimals": 0,
+                               "subject": "the appliance"},
+    "appliance_time_unsynced": {"noun": "Appliance clock", "subject": "the appliance",
+                                "narrative": {"down": "has a clock that is not synchronised",
+                                              "up": "has its clock synchronised again"},
+                                "state": {"down": "loses clock synchronisation",
+                                          "up": "has its clock synchronised again"},
+                                "state_label": {"down": "Clock not synchronised", "up": "Clock synchronised"}},
+    "appliance_delivery_failures": {"noun": "Failed deliveries in the last hour", "unit": "",
+                                    "decimals": 0, "subject": "the channel"},
+    "appliance_sensor_offline": {"noun": "Remote sensor", "subject": "the sensor",
+                                 "narrative": {"down": "is offline", "up": "is online again"},
+                                 "state": {"down": "goes offline", "up": "comes back online"},
+                                 "state_label": {"down": "Remote sensor offline", "up": "Remote sensor online"}},
+    # Security and operations events (appliance_alert_service, migrate-206)
+    "appliance_login_failures": {"noun": "Failed sign-ins in the last 15 minutes", "unit": "",
+                                 "decimals": 0, "subject": "the account"},
+    "appliance_admin_changes": {"noun": "Administrative changes in the last 15 minutes", "unit": "",
+                                "decimals": 0, "subject": "the appliance"},
+    "appliance_report_failed": {"noun": "Scheduled report", "subject": "the report schedule",
+                                "narrative": {"down": "has a run that failed or was only partly delivered",
+                                              "up": "was delivered again"},
+                                "state": {"down": "fails or is only partly delivered",
+                                          "up": "is delivered again"},
+                                "state_label": {"down": "Report run failed or partial",
+                                                "up": "Report delivered"}},
 }
 
 # Rules are stored with either spelling depending on which screen created them
@@ -264,14 +337,77 @@ _OPERATORS: dict[str, dict[str, str]] = {
 }
 
 
+# ── Monitoring-template metrics ──────────────────────────────────────────────
+#
+# A template rule's metric is `tpl_<key>`; its name and unit live in the
+# template (device_profiles.oid_groups: groups[].metrics[] {key, name, unit}).
+# The evaluators register the templates they load each pass, so a message
+# reads "UPS load on UPS ups-01 rose to 88.5% (limit 80%)", never "Ups load
+# pct ... rose to 88.5 (limit 80)".
+
+_TEMPLATE_METRICS: dict[str, dict] = {}
+
+
+def register_template_metrics(oid_groups) -> None:
+    """Remember display name and unit of every metric in a template's groups."""
+    groups = oid_groups
+    if isinstance(groups, str):
+        try:
+            import json as _json
+            groups = _json.loads(groups)
+        except ValueError:
+            return
+    for g in groups or []:
+        if not isinstance(g, dict):
+            continue
+        for m in g.get("metrics") or []:
+            if not isinstance(m, dict) or not m.get("key"):
+                continue
+            name = str(m.get("name") or "").strip()
+            unit = str(m.get("unit") or "").strip()
+            entry = {}
+            if name:
+                entry["noun"] = name[:1].upper() + name[1:]
+            if unit:
+                entry["unit"] = unit
+            if entry:
+                _TEMPLATE_METRICS[f"tpl_{m['key']}"] = entry
+
+
+def _template_info(key: str) -> dict:
+    meta = _TEMPLATE_METRICS.get(key)
+    if not meta:
+        return {}
+    unit = meta.get("unit", "")
+    info: dict = {}
+    if meta.get("noun"):
+        info["noun"] = meta["noun"]
+    if unit == "%":
+        info.update(_PERCENT)
+    elif unit:
+        info.update({"unit": unit if unit.startswith("°") else f" {unit}", "decimals": 1})
+    return info
+
+
+def _info(metric: Optional[str]) -> dict:
+    """The catalogue entry for a metric (template metrics from their template)."""
+    key = (metric or "").strip()
+    info = METRICS.get(key)
+    if info is not None:
+        return info
+    if key.startswith("tpl_"):
+        return _template_info(key)
+    return {}
+
+
 def metric_noun(metric: Optional[str]) -> str:
     """Sentence-cased subject for a metric key, or the key itself if unknown."""
-    info = METRICS.get((metric or "").strip())
-    if info:
+    info = _info(metric)
+    if info.get("noun"):
         return info["noun"]
     key = (metric or "").strip()
     if key.startswith("tpl_"):
-        # Monitoring-template series: `tpl_ups_load_pct` -> "Ups load pct".
+        # A template metric no evaluator registered: `tpl_ups_load_pct` -> "Ups load pct".
         return key[4:].replace("_", " ").strip().capitalize() or "Template metric"
     return key.replace("_", " ").strip().capitalize() or "Metric"
 
@@ -283,7 +419,7 @@ def _display(metric: Optional[str], num: float, *, extra: int = 0,
     ``extra`` adds decimals to the catalogue precision; ``strip`` drops
     trailing zeros ("80%" rather than "80.0%").
     """
-    info = METRICS.get((metric or "").strip(), {})
+    info = _info(metric)
     unit = info.get("unit", "")
     num /= float(info.get("scale") or 1.0)
     decimals = int(info.get("decimals", 1))
@@ -312,14 +448,16 @@ def format_value(metric: Optional[str], value) -> str:
 
 # ── Readings next to their threshold ─────────────────────────────────────────
 #
-# The catalogue rounds percentages to whole numbers, which is right for a rule
-# description ("above 90%") and wrong for a reading that sits just over it: a
-# 90.3% reading printed as "currently 90%" next to "rose above 90%" reads like
-# a false alarm. A reading therefore gets as many extra decimals (up to
-# READING_MAX_EXTRA_DECIMALS) as it needs to differ visibly from the threshold,
-# and the threshold is shown with the same precision.
+# One rule for every message (audit T-11): a whole-percent reading shows no
+# decimals when it is at least one point from its limit ("95%") and one
+# decimal within a point of it ("90.4%", never "90%" next to "limit 90%"). A
+# threshold prints exactly, without a trailing ".0" ("limit 90%", "limit
+# 90.5%"). Nothing ever shows more than one extra decimal ("95.001%" read like
+# a measuring error, not a reading).
 
-READING_MAX_EXTRA_DECIMALS = 3
+READING_MAX_EXTRA_DECIMALS = 1
+THRESHOLD_MAX_EXTRA_DECIMALS = 2
+NEAR_THRESHOLD_POINTS = 1.0
 UNAVAILABLE = "unavailable"
 
 
@@ -333,38 +471,31 @@ def _finite(value) -> Optional[float]:
     return num if num == num and num not in (float("inf"), float("-inf")) else None
 
 
+def _whole_percent(metric: Optional[str]) -> bool:
+    info = _info(metric)
+    return info.get("unit") == "%" and int(info.get("decimals", 1)) == 0
+
+
+def _exact_extra(metric: Optional[str], num: float, cap: int) -> int:
+    """Fewest extra decimals (up to ``cap``) that print ``num`` exactly."""
+    exact = float(_display(metric, num, extra=cap + 6, strip=False)[0])
+    for extra in range(cap + 1):
+        shown = float(_display(metric, num, extra=extra, strip=False)[0])
+        if abs(shown - exact) <= 1e-9 * max(1.0, abs(exact)):
+            return extra
+    return cap
+
+
 def reading_precision(metric: Optional[str], value, operator: Optional[str] = None,
                       threshold=None) -> int:
-    """Extra decimals a reading and its threshold are both shown with.
+    """Extra decimals (0 or 1) a reading is shown with.
 
-    Near its threshold (within ``NEAR_THRESHOLD_POINTS``) a whole-percent
-    reading keeps one decimal: 91.5% against 90% is "91.5%", never "92%"
-    (field report: readings of 90.1-91.5% read as "90%"/"91%"). Readings far
-    from the threshold keep the catalogue format ("100%", "95%").
-    """
-    extra = _reading_precision(metric, value, operator, threshold)
-    info = METRICS.get((metric or "").strip(), {})
-    num, thr = _finite(value), _finite(threshold)
-    if (num is not None and thr is not None and num != thr and abs(num - thr) < NEAR_THRESHOLD_POINTS
-            and info.get("unit") == "%" and int(info.get("decimals", 1)) == 0):
-        extra = max(extra, 1)
-    return extra
-
-
-NEAR_THRESHOLD_POINTS = 5.0
-
-
-def _reading_precision(metric: Optional[str], value, operator: Optional[str] = None,
-                       threshold=None) -> int:
-    """Extra decimals (0..3) a reading and its threshold are both shown with.
-
-    The threshold first gets enough decimals to print exactly (a 90.5% rule is
-    never shown as "90%"); the reading then gets more only while it would
-    still print identical to a threshold it differs from. A non-zero reading
-    with no threshold is never shown as zero ("0.4%", not "0%").
-    ``operator`` is accepted for symmetry with the rule columns: rounding is
-    monotonic, so a reading on the breaching side of an exactly printed
-    threshold can only collide with it, never print on the wrong side.
+    Whole-percent metrics: 1 within ``NEAR_THRESHOLD_POINTS`` of a threshold
+    it differs from, else 0 (91.5% against 90% is "91.5%", 95.4% is "95%").
+    Other metrics get one extra decimal only while the reading would print
+    identical to a threshold it differs from. A non-zero reading with no
+    threshold is never shown as zero ("0.4%", not "0%"). ``operator`` is
+    accepted for symmetry with the rule columns.
     """
     num = _finite(value)
     thr = _finite(threshold)
@@ -376,31 +507,23 @@ def _reading_precision(metric: Optional[str], value, operator: Optional[str] = N
             if num == 0 or float(_display(metric, num, extra=extra, strip=False)[0]) != 0:
                 return extra
         return cap
-    base = 0
-    for extra in range(cap + 1):
-        base = extra
-        shown = float(_display(metric, thr, extra=extra, strip=False)[0])
-        exact = float(_display(metric, thr, extra=cap + 6, strip=False)[0])
-        if abs(shown - exact) <= 1e-9 * max(1.0, abs(exact)):
-            break
     if num == thr:
-        return base
-    for extra in range(base, cap + 1):
-        if (_display(metric, num, extra=extra, strip=False)
-                != _display(metric, thr, extra=extra, strip=False)):
+        return 0
+    if _whole_percent(metric):
+        return 1 if abs(num - thr) < NEAR_THRESHOLD_POINTS else 0
+    shown_thr = float(_display(metric, thr, extra=_exact_extra(metric, thr, THRESHOLD_MAX_EXTRA_DECIMALS),
+                               strip=False)[0])
+    for extra in range(cap + 1):
+        if float(_display(metric, num, extra=extra, strip=False)[0]) != shown_thr:
             return extra
     return cap
 
 
 def format_reading(metric: Optional[str], value: float | None, operator: Optional[str],
                    threshold: float | None) -> str:
-    """A reading formatted against its rule's threshold.
-
-    The catalogue format, with as many extra decimals (max 3) as needed so the
-    reading never prints equal to a threshold it is on the other side of:
-    90.3 against 90 -> "90.3%", 90.04 -> "90.04%", None -> "unavailable".
-    Use :func:`format_threshold` for the threshold next to it.
-    """
+    """A reading formatted against its rule's threshold (see
+    :func:`reading_precision`): 90.3 against 90 -> "90.3%", 97.2 -> "97%",
+    None -> "unavailable". Use :func:`format_threshold` for the threshold."""
     num = _finite(value)
     if num is None:
         return UNAVAILABLE
@@ -411,16 +534,14 @@ def format_reading(metric: Optional[str], value: float | None, operator: Optiona
 
 def format_threshold(metric: Optional[str], threshold, operator: Optional[str] = None,
                      value=None) -> str:
-    """The threshold with the same decimals :func:`format_reading` gave ``value``.
-
-    "" for a missing threshold, as format_value does.
-    """
+    """The threshold as every message shows it: exact, no trailing ".0"
+    ("90%", "90.5%", "100 ms"). "" for a missing threshold, as format_value
+    does. ``operator`` and ``value`` are accepted for older callers."""
     thr = _finite(threshold)
     if thr is None:
         return format_value(metric, threshold)
-    num = _finite(value)
-    extra = reading_precision(metric, thr if num is None else num, operator, thr)
-    text_, unit = _display(metric, thr, extra=extra, strip=extra == 0)
+    extra = _exact_extra(metric, thr, THRESHOLD_MAX_EXTRA_DECIMALS)
+    text_, unit = _display(metric, thr, extra=extra, strip=True)
     return f"{text_}{unit}"
 
 
@@ -750,8 +871,9 @@ def short_duration(seconds) -> str:
 
 
 def clock(ts, branding=None, now=None) -> str:
-    """Appliance-local time of an event: "14:44", or "Nov 07 14:44" when it
-    was not today. Uses the organisation's time zone and 12/24 h format
+    """Appliance-local time of an event: "14:44", or the organisation's date
+    and time ("2026-11-07 14:44", "07/11/2026 2:44 PM") when it was not
+    today. Uses the organisation's time zone, date format and 12/24 h format
     (``branding``, as notification_branding loads it); "" for no time."""
     at = _as_utc(ts) if not isinstance(ts, (int, float)) else datetime.fromtimestamp(float(ts), timezone.utc)
     if at is None:
@@ -763,7 +885,7 @@ def clock(ts, branding=None, now=None) -> str:
     ref = ref or datetime.now(timezone.utc)
     if branding.localize(at).date() == branding.localize(ref).date():
         return branding.fmt_time(at)
-    return branding.fmt_short(at)
+    return branding.fmt_datetime(at)
 
 
 def _epoch(ts) -> Optional[float]:
@@ -805,7 +927,7 @@ def reboot_sentence(who: str, ctx: Optional[dict], *, recovery: bool = False,
             text_ = f"{who} rebooted" + (f" at {at}" if at else "")
         if uptime:
             prev = short_duration(c.get("previous_uptime_s"))
-            text_ += f" — uptime is now {uptime}" + (f" (was {prev})" if prev and count == 1 else "")
+            text_ += f". Uptime is now {uptime}" + (f" (was {prev})" if prev and count == 1 else "")
         return text_ + "."
     since = f" since its {at} reboot" if at else " since its reboot"
     if c.get("uptime_s") is not None:
@@ -848,7 +970,7 @@ def restart_sentence(who: str, ctx: Optional[dict], *, recovery: bool = False,
             else:
                 text_ = f"{who} restarted at {boot_at}" + (f" {how}" if how else "")
             uptime = short_duration(c.get("uptime_s"))
-            return text_ + (f" — up for {uptime}." if uptime else ".")
+            return text_ + (f". Up for {uptime}." if uptime else ".")
         requested = clock(c.get("requested_at"), branding, now)
         if requested:
             return f"{who} is restarting: a restart was requested at {requested}."
@@ -862,7 +984,7 @@ def restart_sentence(who: str, ctx: Optional[dict], *, recovery: bool = False,
         return f"{who} is reporting normally; no further restarts since{since}."
     seen = clock(c.get("heartbeat_at"), branding, now)
     return (f"Restart alert for {who} closed with no further restarts, but its agent has not "
-            f"reported since {seen or 'the restart'} — its current state is unknown.")
+            f"reported since {seen or 'the restart'}, so its current state is unknown.")
 
 
 def shutdown_sentence(who: str, ctx: Optional[dict], *, recovery: bool = False,
@@ -915,7 +1037,9 @@ def sample_event_context(metric: Optional[str], *, recovered: bool = False, now=
 # `{host_suffix}` names the object as " — core-sw-01 (10.0.0.1)": two switches
 # sharing a sysName are otherwise indistinguishable in an inbox.
 DEFAULT_EMAIL_SUBJECT = "[{severity}] {status}: {rule_name}{host_suffix}"
-DEFAULT_RECOVERY_EMAIL_SUBJECT = "[{severity}] Resolved: {rule_name}{host_suffix}"
+# A recovery leads with [RESOLVED], not the severity of the fault that ended
+# (email_render.alert_subject does the same for subjects a rule's author wrote).
+DEFAULT_RECOVERY_EMAIL_SUBJECT = "[RESOLVED] {rule_name}{host_suffix}"
 
 # The email body is the highlighted callout above a table that already lists
 # the rule, the condition, the host and the time. So it says the one thing the
@@ -923,9 +1047,43 @@ DEFAULT_RECOVERY_EMAIL_SUBJECT = "[{severity}] Resolved: {rule_name}{host_suffix
 DEFAULT_EMAIL_BODY = "{event_sentence}"
 DEFAULT_RECOVERY_EMAIL_BODY = "{event_sentence}{duration_sentence}"
 
-# SMS has no table to lean on, so it names the rule as well.
-DEFAULT_SMS = "ZenPlus {severity} — {rule_name}: {event_sentence}"
-DEFAULT_RECOVERY_SMS = "ZenPlus resolved — {rule_name}: {event_sentence}{duration_suffix}"
+# SMS has no table to lean on, so it names the rule and, when known, the site
+# ("ZenPlus CRITICAL - Device Down at Site Riyadh-HQ: ..."). Plain GSM-7
+# characters only (a hyphen, not a dash): one non-GSM character sends the whole
+# message as UCS-2, 70 characters per part (sms_text).
+DEFAULT_SMS = "ZenPlus {severity} - {rule_name}{site_suffix}: {event_sentence}"
+DEFAULT_RECOVERY_SMS = "ZenPlus resolved - {rule_name}{site_suffix}: {event_sentence}{duration_suffix}"
+
+
+# ── Where the asset is: site and group ───────────────────────────────────────
+#
+# {site} is the site the alert storm and warning grouping use
+# (notification_grouping.group_for "site"): the site of the asset's server
+# record or of the sensor that polls it, else the device's location text.
+# {group} is the device's primary group (a server's linked device's). Both are
+# filled for every family by notification_context.prepare just before a send,
+# so a sender that does not know them never ships "{site}" verbatim; NetPath,
+# APM and appliance alerts have no asset with a site and get "".
+
+PLACE_KEYS = ("site", "group", "site_suffix")
+# A site name in an SMS is capped so the message stays near one segment.
+SMS_SITE_CHARS = 24
+
+
+def site_suffix(site: Optional[str]) -> str:
+    """" at Site Riyadh-HQ" for an SMS; "" when the site is not known. A site
+    already named "Site ..." is not prefixed twice."""
+    name = brief(site, SMS_SITE_CHARS)
+    if not name:
+        return ""
+    return f" at {name}" if name.lower().startswith("site ") else f" at Site {name}"
+
+
+def place_variables(site: Optional[str] = None, group: Optional[str] = None) -> dict:
+    """{site}, {group} and {site_suffix} for a template."""
+    s = " ".join(str(site or "").split())
+    g = " ".join(str(group or "").split())
+    return {"site": s, "group": g, "site_suffix": site_suffix(s)}
 
 
 # Templates the alert-rule wizard used to seed into every new rule. Nobody
@@ -936,6 +1094,8 @@ LEGACY_DEFAULT_TEMPLATES = frozenset({
     "[{severity}] {status}: {rule_name}",
     "[{severity}] RESOLVED: {rule_name}",
     "[{severity}] Resolved: {rule_name}",
+    "[{severity}] Resolved: {rule_name}{host_suffix}",
+    "[{severity}] Resolved: {check_name}",
     "{status_intro}\n\nRule: {rule_name}\nSeverity: {severity}\nDevice: {hostname} "
     "({ip_address})\nStatus: {status}\nMetric: {metric} {operator} {threshold}\n"
     "Time: {timestamp}\n\n--\nZenPlus Network Monitoring",
@@ -946,6 +1106,19 @@ LEGACY_DEFAULT_TEMPLATES = frozenset({
     'The {check_type} check “{check_name}” on {target} is {status}.{error_sentence}',
     "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target}).",
     "ZenPlus resolved — {rule_name}: {check_name} is passing again.{duration_suffix}",
+    # Built-in defaults before the SMS text became GSM-7 (1.25.18).
+    "ZenPlus {severity} — {rule_name}: {event_sentence}",
+    "ZenPlus resolved — {rule_name}: {event_sentence}{duration_suffix}",
+    "ZenPlus {severity} — {rule_name}: {check_name} ({target}) {check_result}.",
+    "ZenPlus resolved — {rule_name}: {check_name} ({target}) is passing again.{duration_suffix}",
+    # GSM-7 defaults before the site suffix ({site_suffix}).
+    "ZenPlus {severity} - {rule_name}: {event_sentence}",
+    "ZenPlus resolved - {rule_name}: {event_sentence}{duration_suffix}",
+    "ZenPlus {severity} - {rule_name}: {check_name} ({target}) {check_result}{error_brief}",
+    "ZenPlus resolved - {rule_name}: {check_name} ({target}) is passing again.{duration_suffix}",
+    "ZenPlus {severity} - {rule_name}: {hostname} sent trap {trap_label}.{trap_brief}",
+    "ZenPlus {severity} - {rule_name}: {hostname} syslog {syslog_severity_label}: {event_brief}",
+    "{rule_name}: {hostname}: {event_message}",
     "An alert has been triggered:",
     "The following alert has been resolved:",
 })
@@ -970,32 +1143,88 @@ def effective_template(stored: Optional[str], default: str) -> str:
 # sent.
 
 _SERVICE_TEMPLATES = {
+    # Trigger and all-clear name the same thing, the check; the rule name is
+    # in the mail's title and details. The SMS carries a short failure reason.
     "email_subject": "[{severity}] {status}: {check_name}",
     "email_body": "The {check_type} check “{check_name}” on {target} {check_result}.{error_sentence}",
-    "sms_template": "ZenPlus {severity} — {rule_name}: {check_name} ({target}) {check_result}.",
+    "sms_template": "ZenPlus {severity} - {rule_name}{site_suffix}: {check_name} ({target}) "
+                    "{check_result}{error_brief}",
     # The service path has no {host_suffix}; its subject stays name-only.
-    "recovery_email_subject": "[{severity}] Resolved: {rule_name}",
+    "recovery_email_subject": "[RESOLVED] {check_name}",
     "recovery_email_body": "The {check_type} check “{check_name}” on {target} is "
                            "passing again.{duration_sentence}",
-    "recovery_sms_template": "ZenPlus resolved — {rule_name}: {check_name} ({target}) "
+    "recovery_sms_template": "ZenPlus resolved - {rule_name}{site_suffix}: {check_name} ({target}) "
                              "is passing again.{duration_suffix}",
 }
 
+SMS_REASON_CHARS = 60
+SMS_DETAIL_CHARS = 100
+
+
+def brief(text_: Optional[str], limit: int = SMS_DETAIL_CHARS) -> str:
+    """Free text for an SMS: whitespace collapsed, at most ``limit`` characters,
+    cut at a word with "..." when it is longer."""
+    flat = " ".join(str(text_ or "").split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[:max(1, limit - 3)]
+    if " " in cut[limit // 2:]:
+        cut = cut[:cut.rindex(" ")]
+    return cut.rstrip(" ,;:.-") + "..."
+
+
 def service_check_variables(status: str, error: str = "") -> dict:
     detail = (error or "").strip().rstrip(".").strip()
+    short = brief(detail, SMS_REASON_CHARS)
     return {
         "check_result": {
             "down": "failed", "up": "passed", "degraded": "reported degraded performance",
             "warning": "reported a warning",
         }.get((status or "").lower(), "changed state"),
         "error_sentence": f" Failure detail: {detail}." if detail else "",
+        # ": connection timed out after 5s." — the reason in an SMS, with the
+        # sentence's full stop ("." alone without a reason; a cut reason
+        # ends in "..." and gets no extra stop).
+        "error_brief": (f": {short}" + ("" if short.endswith("...") else ".")) if short else ".",
     }
+
+
+# Syslog severities (RFC 5424) as words.
+SYSLOG_SEVERITIES = ("emergency", "alert", "critical", "error", "warning", "notice", "info", "debug")
+
+
+def syslog_severity_label(severity) -> str:
+    """"error" for 3; a word that is already a severity stays itself."""
+    try:
+        n = int(severity)
+    except (TypeError, ValueError):
+        word = str(severity or "").strip().lower()
+        return word or "unknown"
+    return SYSLOG_SEVERITIES[n] if 0 <= n < len(SYSLOG_SEVERITIES) else str(n)
+
+
+def syslog_variables(severity, message: Optional[str]) -> dict:
+    """{syslog_severity_label}, {event_brief} for the syslog templates."""
+    return {"syslog_severity_label": syslog_severity_label(severity),
+            "event_brief": brief(message, SMS_DETAIL_CHARS)}
+
+
+def trap_variables(trap_name: Optional[str], trap_oid: Optional[str],
+                   message: Optional[str]) -> dict:
+    """{trap_label} (name, else OID) and {trap_brief} (" " + the trap's own
+    text, capped for SMS; "" when the trap carried none)."""
+    text_ = brief(message, SMS_DETAIL_CHARS)
+    return {"trap_label": (trap_name or trap_oid or "unknown").strip(),
+            "trap_brief": f" {text_}" if text_ else ""}
 
 
 _TRAP_TEMPLATES = {
     "email_subject": DEFAULT_EMAIL_SUBJECT,
     "email_body": "{event_sentence} {trap_message}",
-    "sms_template": DEFAULT_SMS,
+    # Which trap, and what it said (capped): "... sent trap linkDown. Interface
+    # port3 is down".
+    "sms_template": "ZenPlus {severity} - {rule_name}{site_suffix}: {hostname} sent trap "
+                    "{trap_label}.{trap_brief}",
     # A trap is an event, not a state: nothing ever "clears" it, so the trap
     # path has no recovery notification to describe.
     "recovery_email_subject": None,
@@ -1007,7 +1236,10 @@ _SYSLOG_TEMPLATES = {
     **_TRAP_TEMPLATES,
     'email_subject': '{rule_name}: syslog from {hostname}',
     'email_body': '{hostname} sent a matching syslog event (severity {syslog_severity}). {event_message}',
-    'sms_template': '{rule_name}: {hostname}: {event_message}',
+    # Product, severity word and a capped message: a raw syslog line has no
+    # length limit and says nothing about where it came from.
+    'sms_template': 'ZenPlus {severity} - {rule_name}{site_suffix}: {hostname} syslog '
+                    '{syslog_severity_label}: {event_brief}',
 }
 
 _DEVICE_TEMPLATES = {
@@ -1105,6 +1337,72 @@ def normalize_stored_template(value: Optional[str], default: Optional[str]) -> O
     return value
 
 
+# ── Which {placeholders} a rule's templates may use ──────────────────────────
+#
+# A placeholder no sender fills is sent verbatim ("{hostnmae}" in a page), so
+# the rule API refuses one on save (alert_rules._validate_template_placeholders).
+# These are the names the senders of each template kind fill: identity, the
+# phrasing variables (phrasing_variables), incident lifecycle (incident_context),
+# site and group (place_variables) and each family's own. Device rules also
+# take {custom.<key>} for a defined custom field.
+
+PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}")
+CUSTOM_PLACEHOLDER_PREFIX = "custom."
+
+_IDENTITY_VARS = ("rule_name", "hostname", "ip_address", "severity", "status", "timestamp")
+# The device wording serves status, SNMP, server, NetFlow, appliance, APM,
+# NetPath, Device Tracker, monitoring-gap, certificate and virtualisation rules:
+# each sender's extras are listed so a working template is never refused.
+_DEVICE_VARS = ("group", "location", "device_type", "status_intro", "rtt", "packet_loss",
+                "reachability", "certificate", "expires_on", "check_name", "check_type",
+                "target", "source", "resource", "alarm")
+_SERVICE_VARS = ("check_name", "check_type", "target", "error", "check_result", "error_sentence",
+                 "error_brief", "group", "location", "device_type", "rtt", "packet_loss",
+                 "status_intro", "certificate", "expires_on")
+_TRAP_VARS = ("trap_oid", "trap_name", "source_ip", "trap_message", "trap_label", "trap_brief")
+_SYSLOG_VARS = ("event_message", "trap_message", "syslog_severity", "syslog_severity_label",
+                "event_brief", "event_sentence")
+
+
+def template_variables(kind: str = "device") -> frozenset:
+    """Every placeholder a rule of this template kind may use."""
+    base = set(_IDENTITY_VARS) | set(PLACE_KEYS)
+    if kind == "syslog":
+        return frozenset(base | set(_SYSLOG_VARS))
+    phrased = set(phrasing_variables())
+    if kind == "trap":
+        return frozenset(base | phrased | set(_TRAP_VARS))
+    if kind == "service":
+        return frozenset(base | phrased | set(INCIDENT_KEYS) | set(_SERVICE_VARS))
+    return frozenset(base | phrased | set(INCIDENT_KEYS) | set(_DEVICE_VARS))
+
+
+def template_placeholders(template: Optional[str]) -> list[str]:
+    """The {names} a template uses, in order, each once."""
+    seen: list[str] = []
+    for name in PLACEHOLDER_RE.findall(template or ""):
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def unknown_placeholders(template: Optional[str], kind: str = "device", *,
+                         extra: Iterable[str] = (), custom_keys: Optional[Iterable[str]] = None) -> list[str]:
+    """Placeholders in ``template`` that no sender of ``kind`` fills.
+    ``custom_keys``: defined custom field keys ({custom.<key>}, device kind)."""
+    valid = template_variables(kind) | set(extra)
+    custom = None if custom_keys is None else set(custom_keys)
+    out = []
+    for name in template_placeholders(template):
+        if name in valid:
+            continue
+        if (kind == "device" and name.startswith(CUSTOM_PLACEHOLDER_PREFIX)
+                and (custom is None or name[len(CUSTOM_PLACEHOLDER_PREFIX):] in custom)):
+            continue
+        out.append(name)
+    return out
+
+
 # ── Device flapping notices ──────────────────────────────────────────────────
 #
 # One notice when a device starts flapping and one when it stops
@@ -1122,7 +1420,7 @@ FLAP_START_EMAIL_BODY = (
     "lasts {stable} minutes still notifies. Flapping ends after {stable} minutes "
     "without a change. {unaffected_label} are not affected."
 )
-FLAP_START_SMS = ("ZenPlus — {hostname} ({ip}) is flapping: {changes} status changes in "
+FLAP_START_SMS = ("ZenPlus - {hostname} ({ip}) is flapping: {changes} status changes in "
                   "{window} min. {held_sms_label} held until a status lasts {stable} min.")
 
 FLAP_STOP_EMAIL_SUBJECT = "[ZenPlus] {hostname} stopped flapping — {STATUS}"
@@ -1130,7 +1428,7 @@ FLAP_STOP_EMAIL_BODY = (
     "{hostname} ({ip}) has stopped flapping ({end_reason_label}). Current status: "
     "{STATUS} since {since}. Status notifications have resumed."
 )
-FLAP_STOP_SMS = "ZenPlus — {hostname} ({ip}) stopped flapping: {STATUS} since {since}."
+FLAP_STOP_SMS = "ZenPlus - {hostname} ({ip}) stopped flapping: {STATUS} since {since}."
 
 # Episode kind (the union of the classes that flapped) -> what changed.
 FLAP_KIND_LABELS = {
@@ -1206,37 +1504,12 @@ def flap_end_reason_label(reason: Optional[str]) -> str:
     return FLAP_END_REASON_LABELS.get(reason or "", "ended")
 
 
-def _reading_extra(metric: Optional[str], reading: Optional[str]) -> int:
-    """Extra decimals a pre-formatted reading ("90.3%") carries over the
-    catalogue precision, so the threshold beside it can match. 0 when the
-    reading is not in the metric's plain unit (a "1.25 Gbps" reading against
-    a Mbps catalogue entry, "unavailable", a counter sentence's tail)."""
-    import re as _re
-    if not reading:
-        return 0
-    m = _re.match(r"-?\d+(?:\.(\d+))?", str(reading).strip())
-    if not m:
-        return 0
-    info = METRICS.get((metric or "").strip(), {})
-    unit = info.get("unit", "")
-    rest = str(reading).strip()[m.end():]
-    if unit and not rest.startswith(unit):
-        return 0
-    shown = len(m.group(1) or "")
-    return max(0, min(READING_MAX_EXTRA_DECIMALS, shown - int(info.get("decimals", 1))))
-
-
 def _threshold_text(metric: Optional[str], operator: Optional[str], threshold,
                     value, reading: Optional[str]) -> str:
     """The threshold as every part of one message shows it."""
-    thr = _finite(threshold)
-    if thr is None:
+    if _finite(threshold) is None:
         return format_value(metric, threshold) if threshold is not None else ""
-    if _finite(value) is not None:
-        return format_threshold(metric, thr, operator, value)
-    extra = max(_reading_extra(metric, reading), reading_precision(metric, thr, operator, thr))
-    text_, unit = _display(metric, thr, extra=extra, strip=extra == 0)
-    return f"{text_}{unit}"
+    return format_threshold(metric, threshold, operator)
 
 
 # Numeric sentences: "<Noun> on <asset> rose to 97% (limit 90%)." The verb
@@ -1257,7 +1530,9 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
                        device_status: Optional[str] = None,
                        asset_type: Optional[str] = None, event_time=None,
                        branding=None, status_detail: Optional[str] = None,
-                       now=None) -> dict:
+                       now=None, recovered_from: Optional[str] = None,
+                       noun: Optional[str] = None,
+                       status_cause: Optional[str] = None) -> dict:
     """The condition/duration half of the template variables.
 
     Kept separate from the identity half (host, severity, timestamps) because
@@ -1278,9 +1553,15 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
     a state change happened in appliance-local time. On/off states never show
     their raw flag value, and reboot/restart/shutdown events are phrased from
     ``value_context`` (see :func:`event_sentence`).
+
+    ``recovered_from`` ("down"/"degraded") is the status a device recovery
+    closed: it says "Degraded for", not "Down for". ``noun`` replaces the
+    metric's noun in the event sentence ("Filesystem D:"). ``status_cause`` is
+    appended to a numeric event sentence ("; status degraded: packet loss 33%
+    (limit 10%)") when the device status had a different cause than the rule.
     """
     key = (metric or "").strip()
-    info = METRICS.get(key, {})
+    info = _info(key)
     is_state = "state" in info
     if is_state:
         # A state's stored value (1/0/2) is an internal flag, never a reading.
@@ -1297,7 +1578,8 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
                              operator=operator, threshold=threshold,
                              threshold_text=thr_text)
 
-    noun_ = metric_noun(key)
+    base_noun = metric_noun(key)
+    noun_ = (noun or "").strip() or base_noun
     who_plain = subject_noun or None
     who = (f"{asset_type} {subject_noun}".strip() if asset_type and subject_noun
            else (subject_noun or None))
@@ -1323,7 +1605,7 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
         """"Memory on Server srv-a (10.0.0.5) rose to 97% (limit 90%)"."""
         lead = f"{noun_} on {target}" if target else noun_
         if not reading or reading == UNAVAILABLE:
-            rest = phrase[len(noun_):].lstrip() if phrase.startswith(noun_) else phrase
+            rest = phrase[len(base_noun):].lstrip() if phrase.startswith(base_noun) else phrase
             text_ = f"{lead} {rest}".strip()
             if reading == UNAVAILABLE and not is_recovery:
                 text_ += " (no current reading)"
@@ -1370,12 +1652,17 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
             event += f" (since {at})"
     else:
         event = _numeric(who)
+        if status_cause:
+            event = f"{event.rstrip('.')}; {status_cause.strip().rstrip('.')}"
 
     sentence = _finish(phrase)
     reading_value = (format_reading(key, value, operator, threshold)
                      if value is not None and not is_state else (reading or ""))
     # Events carry their own "when" and "now"; a duration would be the hold.
-    lasted = "" if info.get("event") else f" {info.get('lasted', 'Lasted')} {duration}." if duration else ""
+    lasted_word = info.get("lasted", "Lasted")
+    if (recovered_from or "").lower() == "degraded" and info.get("lasted_degraded"):
+        lasted_word = info["lasted_degraded"]
+    lasted = "" if info.get("event") else f" {lasted_word} {duration}." if duration else ""
 
     return {
         "event_sentence": _finish(event, with_reading=False),
@@ -1434,7 +1721,7 @@ def sample_reading(metric: Optional[str], operator: Optional[str], threshold,
     else:
         factor = 0.61 if not recovered else 1.24
     value = thr * factor
-    if METRICS.get(key, {}).get("unit") == "%" and not key.startswith("apm_"):
+    if _info(key).get("unit") == "%" and not key.startswith("apm_"):
         value = max(0.0, min(100.0, value))
         # A 95% threshold overshoots the ceiling, and "currently 100%" next to
         # "above 95%" reads like a rounding bug. Sit it between the two instead.
@@ -1553,7 +1840,18 @@ def _as_utc(ts) -> Optional[datetime]:
 
 
 def sms_with_timestamp(message: str, timestamp, branding=None) -> str:
-    """Stamp the original event in the configured zone, including queued delivery."""
+    """The SMS as it is sent: the original event stamped in the configured
+    zone (including queued delivery), in the GSM-7 alphabet (sms_text).
+
+    No stamp is added when the sentence already states the event's local time
+    ("went down at 14:44"): a second date line only costs a segment.
+    """
+    from app.services.sms_text import to_gsm7
+
+    return to_gsm7(_stamped(message, timestamp, branding))
+
+
+def _stamped(message: str, timestamp, branding=None) -> str:
     event_time = _as_utc(timestamp) or datetime.now(timezone.utc)
     if branding is not None:
         from app.services.regional_time import localize_text, timestamp_label
@@ -1561,7 +1859,8 @@ def sms_with_timestamp(message: str, timestamp, branding=None) -> str:
         stamp = timestamp_label(event_time, branding)
         if '{timestamp}' in message:
             return message.replace('{timestamp}', stamp)
-        if stamp in message or timestamp_label(event_time, branding, seconds=True) in message:
+        if (stamp in message or timestamp_label(event_time, branding, seconds=True) in message
+                or branding.fmt_time(event_time) in message):
             return message
         return f'{message.rstrip()}\n{stamp}'
     stamp = event_time.strftime("%d %b %Y %H:%M UTC")

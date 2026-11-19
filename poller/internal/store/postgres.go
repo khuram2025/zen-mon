@@ -33,6 +33,12 @@ type PostgresStore struct {
 	// until the next LoadDevices succeeds with the current one.
 	statusLegacy   atomic.Bool
 	statusWarnedAt atomic.Int64 // last loud warning (unix nanoseconds)
+
+	// Device Templates schema lag (migration 189), see
+	// postgres_templates.go: the pre-189 statements are used until then
+	// (unix nanoseconds; zero = columns assumed present).
+	templatesLegacyUntil atomic.Int64
+	templatesWarnedAt    atomic.Int64 // last loud warning; 0 when not degraded
 }
 
 // NewPostgresStore connects to PostgreSQL.
@@ -189,14 +195,10 @@ func (s *PostgresStore) IsServiceCheckCentrallyOwned(ctx context.Context, id uui
 
 // --- SNMP ---
 
-// LoadSNMPDevices returns all SNMP-enabled devices with credentials
-// already decrypted in memory, limited to targets selecting the controller.
-// The SNMP_ENC_KEY env var must be set;
-// devices with credentials that fail to decrypt are skipped and logged
-// by the caller (we still return a nil error so one bad row does not
-// stall the whole sync).
-func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, error) {
-	rows, err := s.pool.Query(ctx, `
+// snmpDevicesSelectHead, the template groups column and snmpDevicesSelectTail
+// make up the LoadSNMPDevices statement. The current and the pre-189
+// statements differ only in the groups column, so they cannot drift.
+const snmpDevicesSelectHead = `
 		SELECT d.id, d.hostname, COALESCE(d.device_type, 'other'), host(d.ip_address)::text,
 		       d.snmp_version, d.snmp_port, COALESCE(d.snmp_community, ''),
 		       COALESCE(d.snmp_v3_username, ''), COALESCE(d.snmp_v3_context, ''),
@@ -211,8 +213,9 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		       COALESCE(d.vendor, ''),
 		       COALESCE(d.model, ''),
 		       COALESCE(d.os_version, ''),
-		       COALESCE(p.oid_groups::text, ''),
-		       COALESCE(us.enabled, TRUE),
+`
+
+const snmpDevicesSelectTail = `		       COALESCE(us.enabled, TRUE),
 		       COALESCE(us.poll_interval_s, 0),
 		       sc.id IS NOT NULL,
 		       COALESCE(sc.snmp_version, ''), COALESCE(sc.port, 0),
@@ -237,7 +240,46 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		  AND EXISTS (SELECT 1 FROM device_monitoring_vantages v WHERE v.device_id=d.id AND v.poller_id='central')
 		  AND d.ip_address IS NOT NULL
 		ORDER BY d.hostname
-	`)
+	`
+
+// snmpDevicesGroupsSQL: a device in a running pilot publish of its
+// template polls the pilot groups; every other device polls the published
+// oid_groups (migration 189).
+const snmpDevicesGroupsSQL = `		       COALESCE((CASE WHEN p.pilot_device_ids IS NOT NULL AND d.id = ANY(p.pilot_device_ids)
+		                      THEN p.pilot_oid_groups ELSE p.oid_groups END)::text, ''),
+`
+
+// snmpDevicesGroupsLegacySQL is the groups column before migration 189.
+const snmpDevicesGroupsLegacySQL = `		       COALESCE(p.oid_groups::text, ''),
+`
+
+const loadSNMPDevicesSQL = snmpDevicesSelectHead + snmpDevicesGroupsSQL + snmpDevicesSelectTail
+
+// loadSNMPDevicesLegacySQL is used only while migration 189 is missing, so
+// SNMP polling never stops because the binary runs ahead of the schema.
+const loadSNMPDevicesLegacySQL = snmpDevicesSelectHead + snmpDevicesGroupsLegacySQL + snmpDevicesSelectTail
+
+// LoadSNMPDevices returns all SNMP-enabled devices with credentials
+// already decrypted in memory, limited to targets selecting the controller.
+// The SNMP_ENC_KEY env var must be set;
+// devices with credentials that fail to decrypt are skipped and logged
+// by the caller (we still return a nil error so one bad row does not
+// stall the whole sync). A device in a template's pilot publish gets the
+// pilot groups; before migration 189 the legacy statement is used.
+func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, error) {
+	if !s.templatesLegacy(time.Now()) {
+		devices, err := s.loadSNMPDevices(ctx, loadSNMPDevicesSQL)
+		if err == nil || !isUndefinedColumn(err) {
+			s.noteTemplatesColumnsPresent(err)
+			return devices, err
+		}
+		s.noteTemplatesColumnsMissing(time.Now(), err)
+	}
+	return s.loadSNMPDevices(ctx, loadSNMPDevicesLegacySQL)
+}
+
+func (s *PostgresStore) loadSNMPDevices(ctx context.Context, query string) ([]*snmp.Device, error) {
+	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query snmp devices: %w", err)
 	}
@@ -524,7 +566,7 @@ func (s *PostgresStore) LookupDeviceByIP(ctx context.Context, ip net.IP) (uuid.U
 // AssignProfileIfUnset sets devices.profile_id for a device, but only
 // if it is currently NULL. This honors explicit operator overrides —
 // once an admin picks a profile in the UI, auto-classification will
-// not overwrite it.
+// not overwrite it. It is RecordProfileMatch's pre-189 fallback.
 func (s *PostgresStore) AssignProfileIfUnset(ctx context.Context, deviceID, profileID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE devices SET profile_id = $1
@@ -568,14 +610,42 @@ func (s *PostgresStore) UpsertProfile(ctx context.Context, p *snmp.Profile) erro
 // LoadProfiles returns every row of device_profiles. The DB is the
 // source of truth for monitoring templates (builtins are seeded by SQL
 // migration; operators create custom ones through the API), so the
-// classifier is refreshed from here on the periodic sync tick.
+// classifier is refreshed from here on the periodic sync tick. Before
+// migration 189 every template gets the default match priority and no
+// device type.
 func (s *PostgresStore) LoadProfiles(ctx context.Context) ([]*snmp.Profile, error) {
-	rows, err := s.pool.Query(ctx, `
+	if !s.templatesLegacy(time.Now()) {
+		profiles, err := s.loadProfiles(ctx, loadProfilesSQL, true)
+		if err == nil || !isUndefinedColumn(err) {
+			s.noteTemplatesColumnsPresent(err)
+			return profiles, err
+		}
+		s.noteTemplatesColumnsMissing(time.Now(), err)
+	}
+	return s.loadProfiles(ctx, loadProfilesLegacySQL, false)
+}
+
+const loadProfilesSQL = `
+		SELECT id, name, COALESCE(vendor, ''), match_rules, oid_groups,
+		       version, builtin, COALESCE(description, ''),
+		       match_priority, COALESCE(device_type, '')
+		FROM device_profiles
+		ORDER BY name`
+
+// loadProfilesLegacySQL is the statement from before migration 189 (no
+// match_priority / device_type); every template then ranks at the DB
+// default priority, defaultMatchPriority.
+const loadProfilesLegacySQL = `
 		SELECT id, name, COALESCE(vendor, ''), match_rules, oid_groups,
 		       version, builtin, COALESCE(description, '')
 		FROM device_profiles
-		ORDER BY name
-	`)
+		ORDER BY name`
+
+// defaultMatchPriority is device_profiles.match_priority's DB default.
+const defaultMatchPriority = 100
+
+func (s *PostgresStore) loadProfiles(ctx context.Context, query string, withTemplateColumns bool) ([]*snmp.Profile, error) {
+	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query device_profiles: %w", err)
 	}
@@ -585,8 +655,14 @@ func (s *PostgresStore) LoadProfiles(ctx context.Context) ([]*snmp.Profile, erro
 	for rows.Next() {
 		var p snmp.Profile
 		var matchJSON, groupsJSON []byte
-		if err := rows.Scan(&p.ID, &p.Name, &p.Vendor, &matchJSON, &groupsJSON,
-			&p.Version, &p.Builtin, &p.Description); err != nil {
+		dest := []any{&p.ID, &p.Name, &p.Vendor, &matchJSON, &groupsJSON,
+			&p.Version, &p.Builtin, &p.Description}
+		if withTemplateColumns {
+			dest = append(dest, &p.MatchPriority, &p.DeviceType)
+		} else {
+			p.MatchPriority = defaultMatchPriority
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("scan device_profile: %w", err)
 		}
 		if len(matchJSON) > 0 {
@@ -597,7 +673,10 @@ func (s *PostgresStore) LoadProfiles(ctx context.Context) ([]*snmp.Profile, erro
 		p.OidGroups = json.RawMessage(groupsJSON)
 		profiles = append(profiles, &p)
 	}
-	return profiles, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read device_profiles: %w", err)
+	}
+	return profiles, nil
 }
 
 // UpsertTemplateValues replaces a device's latest template-metric
@@ -878,13 +957,42 @@ func (s *PostgresStore) LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[
 	return out, rows.Err()
 }
 
-// LoadActiveMaintenanceDeviceIDs returns the set of device IDs currently
-// inside an active device_maintenance window (scope: device, group, tag, or
-// all — devices.tags is a JSONB string array). Mirrors
-// LoadActiveMaintenanceCheckIDs: the poller keeps collecting metrics for
-// these devices but suppresses status transitions and alerting.
-func (s *PostgresStore) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
-	rows, err := s.pool.Query(ctx, `
+// maintenanceDeviceIDsSQL: a group window covers every member of the group
+// and of its subgroups (primary, static and dynamic membership, migration 192).
+// device_maintenance_active (migration 207) decides whether a one-off or
+// recurring window is in force now: the same SQL function the API's
+// evaluators use (app.services.maintenance_windows), so they agree.
+const maintenanceDeviceIDsSQL = `
+		SELECT DISTINCT d.id
+		FROM (SELECT * FROM device_maintenance m WHERE device_maintenance_active(m, now())) m
+		JOIN devices d ON (
+		       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+		    OR (m.scope_type = 'group'  AND (m.scope_group_id = d.group_id OR EXISTS (
+		           SELECT 1 FROM device_group_member_closure c
+		            WHERE c.group_id = m.scope_group_id AND c.asset_kind = 'device' AND c.asset_id = d.id)))
+		    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+		    OR (m.scope_type = 'all')
+		)
+	`
+
+// maintenanceDeviceIDs192SQL is the statement from before migration 207:
+// one-off windows only (there were no recurring ones).
+const maintenanceDeviceIDs192SQL = `
+		SELECT DISTINCT d.id
+		FROM devices d
+		JOIN device_maintenance m ON (
+		       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+		    OR (m.scope_type = 'group'  AND (m.scope_group_id = d.group_id OR EXISTS (
+		           SELECT 1 FROM device_group_member_closure c
+		            WHERE c.group_id = m.scope_group_id AND c.asset_kind = 'device' AND c.asset_id = d.id)))
+		    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+		    OR (m.scope_type = 'all')
+		)
+		WHERE m.starts_at <= now() AND m.ends_at >= now()
+	`
+
+// maintenanceDeviceIDsLegacySQL is the statement from before migration 192.
+const maintenanceDeviceIDsLegacySQL = `
 		SELECT DISTINCT d.id
 		FROM devices d
 		JOIN device_maintenance m ON (
@@ -894,7 +1002,38 @@ func (s *PostgresStore) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map
 		    OR (m.scope_type = 'all')
 		)
 		WHERE m.starts_at <= now() AND m.ends_at >= now()
-	`)
+	`
+
+// maintenanceDeviceIDQueries lists the statements newest first. The binary
+// may run ahead of the migrations: a missing function (207) falls back to
+// the 192 statement, a missing closure view (192) to the legacy one, where a
+// group window covers the devices whose own group it is, as before.
+var maintenanceDeviceIDQueries = []string{
+	maintenanceDeviceIDsSQL, maintenanceDeviceIDs192SQL, maintenanceDeviceIDsLegacySQL,
+}
+
+// maintenanceFallback reports whether err means "this statement needs a
+// newer schema": an undefined function (42883) or table/view (42P01).
+func maintenanceFallback(err error) bool {
+	return isUndefinedFunction(err) || isUndefinedTable(err)
+}
+
+// LoadActiveMaintenanceDeviceIDs returns the set of device IDs currently
+// inside an active device_maintenance window, one-off or recurring (scope:
+// device, group, tag, or all — devices.tags is a JSONB string array).
+// Mirrors LoadActiveMaintenanceCheckIDs: the poller keeps collecting metrics
+// for these devices but suppresses status transitions and alerting. When a
+// window, or one occurrence of a recurring window, ends the device leaves
+// the set and its confirmed status is applied with alerts, whatever the kind.
+func (s *PostgresStore) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
+	var rows pgx.Rows
+	var err error
+	for i, q := range maintenanceDeviceIDQueries {
+		rows, err = s.pool.Query(ctx, q)
+		if err == nil || i == len(maintenanceDeviceIDQueries)-1 || !maintenanceFallback(err) {
+			break
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("load device maintenance ids: %w", err)
 	}

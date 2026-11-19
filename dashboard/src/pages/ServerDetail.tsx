@@ -33,6 +33,7 @@ import {
   Slash,
   TerminalSquare,
   Trash2,
+  Wrench,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
@@ -43,6 +44,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Skeleton, SkeletonTable } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { MaintenanceDialog } from '@/components/maintenance/MaintenanceDialog'
+import type { MaintenanceWindow } from '@/components/maintenance/model'
 import { toast } from '@/components/ui/Toast'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import type {
@@ -187,6 +190,13 @@ export default function ServerDetail() {
   const [tab, setTab] = useState('overview')
   const [range, setRange] = useState('6h')
   const [decommissionOpen, setDecommissionOpen] = useState(false)
+  const [maintOpen, setMaintOpen] = useState(false)
+  const maintQ = useQuery<{ active: MaintenanceWindow[]; upcoming: MaintenanceWindow[] }>({
+    queryKey: ['server-maintenance', id],
+    queryFn: async () => (await api.get(`/device-maintenance/servers/${id}`)).data,
+    enabled: !!id,
+  })
+  const inMaintenance = (maintQ.data?.active.length ?? 0) > 0
 
   const serverQ = useQuery<Server>({
     queryKey: ['server', id],
@@ -300,6 +310,7 @@ export default function ServerDetail() {
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-semibold">{s.display_name}</h1>
               <StatusBadge status={s.status} />
+              {inMaintenance && <Badge variant="info">Maintenance</Badge>}
             </div>
             <div className="mt-0.5 text-xs text-muted">
               {s.hostname || '—'} · {s.primary_ip || '—'} · {s.os_name || s.os_type}
@@ -319,6 +330,10 @@ export default function ServerDetail() {
           >
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setMaintOpen(true)}>
+            <Wrench className="h-3.5 w-3.5" />
+            Maintenance
           </Button>
           <Button
             variant="destructive"
@@ -682,6 +697,13 @@ export default function ServerDetail() {
         </TabsContent>
       </Tabs>
 
+      <MaintenanceDialog
+        open={maintOpen}
+        onOpenChange={setMaintOpen}
+        asset={{ kind: 'server', id: s.id, name: s.display_name }}
+        windows={maintQ.data}
+        queryKeys={[['server-maintenance', id]]}
+      />
       <ConfirmDialog
         open={decommissionOpen}
         onOpenChange={setDecommissionOpen}

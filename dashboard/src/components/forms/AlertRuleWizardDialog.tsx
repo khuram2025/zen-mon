@@ -2,8 +2,18 @@
  * Alert rule wizard — properties, trigger, reset, scope, trigger actions,
  * escalation, reset actions, schedule, and review.
  */
+import { DeviceTypeItems } from '@/components/forms/DeviceTypeItems'
 import { FormEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { INTERFACE_METRIC_KEYS, INTERFACE_ROLES, ROLE_LABEL } from '@/components/alerts/thresholdModel'
+import {
+  APM_MIN_WINDOW_S, DEFAULT_FLAP_WINDOW_S, NEW_PERCENT_CLEAR_S, RULE_SOURCES, conditionProblem,
+  familyPayload, isRetired, metricSpec, metricsFor, newCondition, newPercentClearLevel, operatorsFor, ruleTimers,
+  stateRuleInfo, templateIndex, timersText, triggerSummary, withNewPercentDefaults, badCodes, conditionsForStates,
+  type RuleSource,
+} from './alertRuleCatalog'
+import { FamilyConditionFields, FamilyScopeFields, StatePicker, familyScopeProblem } from './AlertRuleFamilyFields'
+import { eventExpiryFromApi, expiryWindowLabel } from '@/features/escalation/eventExpiry'
 import { APM_EVENT_TRIGGERS, apmEventScope, apmScopeKind, isApmEvent } from './apmEventTriggers'
 import {
   Bell,
@@ -58,12 +68,21 @@ import {
   SERVER_METRICS,
   downRuleCoversServers,
   serverAutoReset,
+  serverMetric,
+  serverOperators,
   serverDraftProblem,
   serverMetricKind,
   serverRuleCondition,
   serverRulePayload,
+  serverScopeChange,
+  serverScopeOf,
+  serverScopeLabel,
   serverWatchChange,
+  SERVER_SCOPE_OPTIONS,
+  type ServerScopeMode,
 } from './serverAlertRule'
+import { TagPicker } from '@/components/tags/TagPicker'
+import { groupsApi, treeOrder, type DeviceGroup } from '@/pages/groups/api'
 import { usePolicies } from '@/features/escalation/api'
 import {
   PRIORITIES, PRIORITY_META, autoPriorityText, derivePriority, disabledPolicyText, effectivePriority, fmtMinutes, legacyTiersText,
@@ -78,6 +97,8 @@ type Cond = { metric: string; operator: string; threshold: number; reset_thresho
 // after_minutes after triggering, page notify_channels. repeat_every_minutes
 // re-pages the tier on that cadence until ack/resolve (null = no repeat).
 type EscLevel = { after_minutes: number; notify_channels: string[]; repeat_every_minutes: number | null }
+
+const ALL_OPS = ['>', '>=', '<', '<=', '==', '!='] as const
 
 /** The server accepts at most this many legacy tiers (alert_rules.py). */
 const MAX_ESC_LEVELS = 5
@@ -99,7 +120,7 @@ type WizardState = {
   priority: '' | Priority
   escalation_mode: EscalationMode
   escalation_policy_id: string
-  source: 'device' | 'server' | 'service' | 'trap' | 'syslog' | 'apm' | 'netflow'
+  source: RuleSource
   conditions: Cond[]
   condition_logic: 'AND' | 'OR'
   trigger_on: 'any' | 'down' | 'up' | 'degraded'
@@ -117,10 +138,16 @@ type WizardState = {
   scope_tag: string
   /** Server rules: one server, '' = all servers, '__pick__' = "one server" chosen but none picked yet. */
   server_id: string
+  /** Server rules: all servers, one server, or the servers with a tag (scope_tag) and/or in a device group (group_id). */
+  server_scope: 'all' | 'one' | 'tag' | 'group'
   service_check_id: string
   service_check_group_id: string
   trap_oid: string
   target: string
+  /** SNMP device/interface/template metric rules: only devices on this template (or one customised from it). '' = any. */
+  profile_id: string
+  /** Interface metric rules: only interfaces with this role. '' = any. */
+  if_role: string
   notify_channels: string[]
   cooldown: number
   max_repeat: number
@@ -162,21 +189,9 @@ const CHANNEL_TYPE_LABEL: Record<string, string> = {
   telegram: 'Telegram', teams: 'Teams', discord: 'Discord', pagerduty: 'PagerDuty',
 }
 
-const NETWORK_METRICS = [
-  { value: 'if_util_pct', label: 'Interface utilization (%)', iface: true },
-  { value: 'if_in_bps', label: 'Interface inbound (bps)', iface: true },
-  { value: 'if_out_bps', label: 'Interface outbound (bps)', iface: true },
-  { value: 'if_errors', label: 'Interface errors', iface: true },
-  { value: 'if_discards', label: 'Interface discards', iface: true },
-  { value: 'if_oper_status', label: 'Interface down (oper=2)', iface: true },
-  { value: 'cpu', label: 'Device CPU (%)', iface: false },
-  { value: 'memory', label: 'Device memory (%)', iface: false },
-  { value: 'temperature', label: 'Device temperature', iface: false },
-  { value: 'session_count', label: 'Session count', iface: false },
-  { value: 'uptime_reset', label: 'Reboot detected', iface: false },
-] as const
-
-const INTERFACE_METRICS = new Set<string>(NETWORK_METRICS.filter((m) => m.iface).map((m) => m.value))
+// Interface metrics take the interface filter and role (network_conditions.INTERFACE_METRICS). The device
+// field list itself comes from the rule catalogue (alertRuleCatalog.METRICS), which also knows the retired keys.
+const INTERFACE_METRICS = new Set<string>(INTERFACE_METRIC_KEYS)
 
 // Server APM metrics are evaluated per service; browser RUM metrics are
 // evaluated per application ID. Rates are fractions in 0–1.
@@ -199,15 +214,29 @@ const APM_METRICS = [
 // Ordered by how often a template needs them. The phrasing variables at the
 // top render finished English ("Interface utilisation on core-router-01 rose
 // above 80%"); the raw ones below are the rule's stored values.
+//
+// Only the placeholders a save accepts for the rule's template kind are offered (GET
+// /alert-rules/template-defaults `variables`, plus the family's own `extras`): a placeholder nothing fills
+// is refused with 422 unknown_template_placeholder. This list only orders them.
 const TEMPLATE_VARS = [
   '{event_sentence}', '{condition}', '{condition_sentence}', '{reading}',
   '{duration}', '{duration_sentence}', '{duration_suffix}',
-  '{hostname}', '{ip_address}', '{host_suffix}', '{status}', '{severity}', '{rule_name}',
+  '{hostname}', '{ip_address}', '{host_suffix}', '{site}', '{site_suffix}', '{status}', '{severity}', '{rule_name}',
   '{group}', '{location}', '{device_type}', '{timestamp}',
   '{metric_label}', '{threshold_value}', '{metric}', '{operator}', '{threshold}',
   '{rtt}', '{packet_loss}',
   '{scenario_name}', '{failed_step}', '{error}', '{slo_name}',
 ]
+/** Offline fallback when the server's list is not loaded: what every kind fills. */
+const COMMON_VARS = ['rule_name', 'hostname', 'ip_address', 'severity', 'status', 'timestamp', 'site', 'group', 'site_suffix', 'event_sentence']
+
+/** The placeholders to offer, in TEMPLATE_VARS order first, then the rest alphabetically. */
+function orderedVars(valid: Iterable<string>): string[] {
+  const set = new Set(valid)
+  const head = TEMPLATE_VARS.filter((v) => set.has(v.slice(1, -1)))
+  const rest = [...set].filter((v) => !TEMPLATE_VARS.includes(`{${v}}`)).sort().map((v) => `{${v}}`)
+  return [...head, ...rest]
+}
 
 // The six template fields, in the order the editor shows them.
 const TEMPLATE_FIELDS = [
@@ -252,10 +281,13 @@ const DEFAULT_STATE: WizardState = {
   location: '',
   scope_tag: '',
   server_id: '',
+  server_scope: 'all',
   service_check_id: '',
   service_check_group_id: '',
   trap_oid: '',
   target: '',
+  profile_id: '',
+  if_role: '',
   notify_channels: [],
   cooldown: 300,
   max_repeat: 0,
@@ -335,6 +367,17 @@ function flapHoldApplies(s: WizardState): boolean {
   return trigger !== 'up'
 }
 
+// The rules a template scope applies to (alert_rules._validate_template_scope): SNMP interface and device metrics
+// and template metrics (tpl_<key>). An interface role applies when every condition is an interface metric.
+const TEMPLATE_SCOPE_SCALARS = new Set(['cpu', 'memory', 'temperature', 'session_count', 'uptime_reset'])
+function templateScopeApplies(conds: Cond[]): boolean {
+  return conds.length > 0 && conds.every((c) => INTERFACE_METRICS.has(c.metric) || TEMPLATE_SCOPE_SCALARS.has(c.metric)
+    || String(c.metric || '').startsWith('tpl_'))
+}
+function interfaceRoleApplies(conds: Cond[]): boolean {
+  return conds.length > 0 && conds.every((c) => INTERFACE_METRICS.has(c.metric))
+}
+
 function ruleToState(rule: any): WizardState {
   const source =
     isNetflowMetric(rule.metric) ? 'netflow' : rule.metric === 'syslog' ? 'syslog' : rule.metric === 'trap'
@@ -343,20 +386,32 @@ function ruleToState(rule: any): WizardState {
       ? 'apm'
       : String(rule.metric || '').startsWith('host_')
       ? 'server'
-      : rule.service_check_id || rule.service_check_group_id || rule.metric === 'service_status'
+      // Self-contained like the rest (alertRuleCatalog.ruleSource is the same mapping).
+      : String(rule.metric || '').startsWith('appliance_')
+      ? 'appliance'
+      : ['vm_host_disconnected', 'vm_datastore_pct', 'vm_alarm'].includes(rule.metric)
+      ? 'virtualization'
+      : ['snmp_unreachable', 'agent_no_metrics'].includes(rule.metric)
+      ? 'gap'
+      : String(rule.metric || '').startsWith('udt_')
+      ? 'udt'
+      : String(rule.metric || '').startsWith('netpath_')
+      ? 'netpath'
+      : rule.service_check_id || rule.service_check_group_id || ['service_status', 'service_tls_days', 'service_response_ms'].includes(rule.metric)
       ? 'service'
       : 'device'
-  // Server rules store word operators (gt); the editor's operator list uses symbols.
-  const symbol = (op: any) => ({ gt: '>', gte: '>=', lt: '<', lte: '<=', eq: '==', neq: '!=' } as Record<string, string>)[op] || op
+  // Rules may store word operators (gt: server rules, and shipped device rules such as Packet Loss); the
+  // editor's operator lists use symbols, so a stored "gt" no longer opens as an empty Operator field.
+  const symbol = (op: any) => ({ gt: '>', gte: '>=', lt: '<', lte: '<=', eq: '==', neq: '!=' } as Record<string, string>)[String(op ?? '').trim().toLowerCase()] || op
   const loaded: Cond[] =
     Array.isArray(rule.conditions) && rule.conditions.length
       ? rule.conditions.map((c: any) => ({
           metric: c.metric,
-          operator: c.operator,
+          operator: symbol(c.operator),
           threshold: c.threshold ?? 0,
           reset_threshold: c.reset_threshold ?? null,
         }))
-      : [{ metric: rule.metric || 'ping_status', operator: rule.operator || '==', threshold: rule.threshold ?? 0 }]
+      : [{ metric: rule.metric || 'ping_status', operator: symbol(rule.operator || '=='), threshold: rule.threshold ?? 0 }]
   return {
     ...DEFAULT_STATE,
     name: rule.name || '',
@@ -390,10 +445,14 @@ function ruleToState(rule: any): WizardState {
     location: rule.location || '',
     scope_tag: rule.scope_tag || '',
     server_id: rule.server_id || '',
+    // Self-contained like the rest (see priority above): one server wins, then a group, then a tag.
+    server_scope: rule.server_id ? 'one' : source === 'server' && rule.group_id ? 'group' : source === 'server' && rule.scope_tag ? 'tag' : 'all',
     service_check_id: rule.service_check_id || '',
     service_check_group_id: rule.service_check_group_id || '',
     trap_oid: rule.trap_oid || '',
     target: rule.target || '',
+    profile_id: rule.profile_id || '',
+    if_role: rule.if_role || '',
     notify_channels: Array.isArray(rule.notify_channels) ? rule.notify_channels : [],
     cooldown: rule.cooldown ?? 300,
     max_repeat: rule.max_repeat ?? 0,
@@ -452,6 +511,9 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
       : isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric))
       ? s.target.trim() || null
       : null,
+    // Template scope and interface role (migrate-193); null clears them, and they are refused on other rules.
+    profile_id: isDevice && templateScopeApplies(s.conditions) ? s.profile_id || null : null,
+    if_role: isDevice && interfaceRoleApplies(s.conditions) ? s.if_role || null : null,
     min_duration: isSyslog || isTrap || (isApm && isApmEvent(first.metric)) || isRebootRule(s) ? 0 : s.min_duration,
     clear_duration: usesMetricLifecycle(s) || isRebootRule(s) ? s.clear_duration : null,
     notify_while_flapping: flapHoldApplies(s) ? s.notify_while_flapping : false,
@@ -542,18 +604,42 @@ export function AlertRuleWizardDialog({
   const serverKind = isServer ? serverMetricKind(s.conditions[0]?.metric) : null
   const isLifecycle = isServer && serverKind === 'event'
   const rebootRule = isRebootRule(s)
+  const first0 = s.conditions[0]
+  // Interface speed change: an event like a reboot (no breach hold, auto-clear). Flapping: the hold is the window.
+  const speedRule = s.source === 'device' && s.conditions.length === 1 && first0?.metric === 'if_speed_changed'
+  const flapRule = s.source === 'device' && s.conditions.some((c) => c.metric === 'if_flaps')
+  const eventAutoClear = rebootRule || speedRule
+  // Families with one condition and their own inputs (alertRuleCatalog / AlertRuleFamilyFields).
+  const familySource = ['gap', 'appliance', 'virtualization', 'udt', 'netpath'].includes(s.source)
+    || (s.source === 'service' && !!first0 && first0.metric !== 'service_status')
+  // Which timer fields this rule's evaluator honours; the others are hidden or explained.
+  const timers = ruleTimers({ metric: first0?.metric, conditions: s.source === 'device' ? s.conditions : null })
+  // Events that never recover on their own: traps, syslog, Device Tracker events (they expire) and route changes.
+  const eventOnly = s.source === 'trap' || s.source === 'syslog' || (familySource && (timers.closes === 'expires' || timers.closes === 'none'))
   const nfErrors = useMemo(() => (s.source === 'netflow' ? validateNetflowForm(s.nf) : {}), [s.source, s.nf])
 
   // Which default wording this rule's notifications are built from. Service
   // checks and traps lead with different sentences than a device does, so the
   // editor has to show the set that will actually be sent.
-  const templateKind = s.source === 'service' ? 'service' : s.source === 'syslog' ? 'syslog' : s.source === 'trap' ? 'trap' : 'device'
+  // Mirrors alert_phrasing.template_kind: a service-check metric rule not bound to a check uses the device set.
+  const templateKind = s.source === 'syslog' ? 'syslog' : s.source === 'trap' ? 'trap'
+    : s.source === 'service' && (first0?.metric === 'service_status' || !!s.service_check_id || !!s.service_check_group_id) ? 'service'
+    : 'device'
   const { data: templateDefaultsMap } = useQuery<any>({
     queryKey: ['alert-rules', 'template-defaults'],
     queryFn: async () => (await api.get('/alert-rules/template-defaults')).data,
     staleTime: Infinity,
   })
   const tplDefaults: TemplateSet = templateDefaultsMap?.[templateKind] || DEFAULTS
+  // The placeholders a save accepts for this kind, plus the ones this family's sender adds (APM events,
+  // appliance, NetFlow). Offline: the saved rule's own list, else what every kind fills.
+  const templateVars = useMemo(() => {
+    const kindVars: string[] | undefined = templateDefaultsMap?.variables?.[templateKind]
+    const extras: string[] = templateDefaultsMap?.extras?.[first0?.metric || ''] || []
+    if (kindVars) return orderedVars([...kindVars, ...extras])
+    if (Array.isArray(rule?.template_variables) && rule?.template_kind === templateKind) return orderedVars(rule.template_variables)
+    return orderedVars(COMMON_VARS)
+  }, [templateDefaultsMap, templateKind, first0?.metric, rule])
   const hasResetTemplates = tplDefaults.recovery_email_subject != null
 
   // Re-seed the message fields when the rule kind changes — but only the ones
@@ -594,6 +680,31 @@ export function AlertRuleWizardDialog({
     enabled: open,
   })
 
+  // Device templates: the template metric picker and the "only devices on template" scope.
+  const { data: templatesResp } = useQuery<any>({
+    queryKey: ['snmp-profiles'],
+    queryFn: async () => (await api.get('/snmp/profiles')).data,
+    enabled: open && s.source === 'device',
+    staleTime: 60_000,
+  })
+  const templates: WizardTemplate[] = Array.isArray(templatesResp) ? templatesResp : templatesResp?.data || []
+  const tplNames = useMemo(() => templateMetricNames(templates), [templates])
+  // Template names, units and state (enum) value maps: the state picker and the summaries.
+  const tplIndex = useMemo(() => templateIndex(templates), [templates])
+  const stateInfo = s.source === 'device' ? stateRuleInfo(s.conditions, tplIndex) : null
+  // Event alerts (trap, syslog, Device Tracker events) close by themselves after this window.
+  const { data: expiryRaw } = useQuery<any>({
+    queryKey: ['alerts', 'event-expiry'],
+    queryFn: async () => (await api.get('/alerts/event-expiry')).data,
+    enabled: open && (s.source === 'trap' || s.source === 'syslog' || s.source === 'udt'),
+    staleTime: 60_000,
+    retry: false,
+  })
+  const expiry = eventExpiryFromApi(expiryRaw)
+  const expiryText = expiry.enabled
+    ? `Event alerts close by themselves once ${expiryWindowLabel(expiry.hours)} pass without a new event (Escalation & On-call → Alert storms → Event alert expiry); closing sends no notification. A repeat while one is open updates it instead of adding another.`
+    : 'Event alert expiry is off (Escalation & On-call → Alert storms), so these alerts stay open until someone resolves them. A repeat while one is open updates it instead of adding another.'
+
   const { data: locations = [] } = useQuery<string[]>({
     queryKey: ['devices', 'locations'],
     queryFn: async () => (await api.get('/devices/locations')).data,
@@ -616,6 +727,17 @@ export function AlertRuleWizardDialog({
     enabled: open && isServer,
   })
   const servers: any[] = serversResp?.items || []
+  const serverScope = isServer ? serverScopeOf(s) : 'all'
+
+  // Server rules scoped to a device group: every group (static and dynamic), in tree order.
+  const { data: deviceGroupList } = useQuery<DeviceGroup[]>({
+    queryKey: ['groups-tree'],
+    queryFn: groupsApi.list,
+    enabled: open && (isServer || s.source === 'gap'),
+    retry: false,
+    staleTime: 60_000,
+  })
+  const deviceGroups = useMemo(() => treeOrder(deviceGroupList || []), [deviceGroupList])
 
   const { data: serviceGroups = [] } = useQuery<any[]>({
     queryKey: ['service-check-groups'],
@@ -679,6 +801,15 @@ export function AlertRuleWizardDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rule])
 
+  /**
+   * The /alert-rules body: the generic builder, then the family's own fields (alertRuleCatalog.familyPayload),
+   * and for a new rule the percent defaults (clear 5 points below the limit after 900 s, plan step 2.2).
+   */
+  const buildPayload = (st: WizardState) => {
+    const draft = !isEdit && st.source === 'device' ? { ...st, ...withNewPercentDefaults(st.conditions, st.clear_duration) } : st
+    return familyPayload(draft, stateToPayload(draft, tplDefaults))
+  }
+
   const save = useMutation({
     mutationFn: async ({ payload, server }: { payload: any; server: boolean }) => {
       const base = server ? '/host-alert-rules' : '/alert-rules'
@@ -698,7 +829,7 @@ export function AlertRuleWizardDialog({
     // used to create a disabled throwaway rule and delete it again for every
     // preview, which leaked a rule into the list whenever the delete failed.
     mutationFn: async () =>
-      (await api.post('/alert-rules/preview', stateToPayload(s, tplDefaults))).data,
+      (await api.post('/alert-rules/preview', buildPayload(s))).data,
     onSuccess: (data) => setPreview(data),
     onError: (e: any) => toast.error('Preview failed', apiErrorMessage(e)),
   })
@@ -721,6 +852,38 @@ export function AlertRuleWizardDialog({
       ...st,
       conditions: st.conditions.length > 1 ? st.conditions.filter((_, idx) => idx !== i) : st.conditions,
     }))
+  /**
+   * A template metric picked for condition i. A state (enum) metric becomes the whole rule: its bad states
+   * (template_states.bad_codes, else the first non-healthy one) as AND-combined conditions, a 2-minute hold on
+   * a new rule. A gauge starts at the template's critical level.
+   */
+  const pickTemplateMetric = (i: number, m: WizardTemplateMetric, templateId: string) => {
+    const info = m.type === 'enum' ? tplIndex.states[m.key] : undefined
+    if (info) {
+      const metric = `tpl_${m.key}`
+      const bad = badCodes(info)
+      const codes = Object.keys(info.labels).map(Number).sort((a, b) => a - b)
+      const start = bad.length ? bad : codes.filter((c) => info.labels[c][1] !== 'ok').slice(0, 1)
+      const conds = conditionsForStates(metric, info, start.length ? start : codes.slice(0, 1))
+      if (!conds) return
+      setS((st) => ({ ...st, profile_id: st.profile_id || templateId, condition_logic: 'AND', target: '', if_role: '',
+        min_duration: isEdit || st.min_duration ? st.min_duration : 120,
+        conditions: conds.map((c) => ({ ...c, reset_threshold: null })) }))
+      return
+    }
+    setS((st) => ({
+      ...st,
+      // A template metric defaults its scope to the chosen template.
+      profile_id: st.profile_id || templateId,
+      conditions: (stateRuleInfo(st.conditions, tplIndex) ? [st.conditions[0]] : st.conditions).map((x, idx) => (idx !== i ? x : {
+        ...x,
+        metric: `tpl_${m.key}`,
+        operator: m.thresholds?.op === '<=' ? '<=' : ['>', '>='].includes(x.operator) ? x.operator : '>=',
+        threshold: m.thresholds?.crit ?? m.thresholds?.warn ?? x.threshold,
+        reset_threshold: null,
+      })),
+    }))
+  }
   const toggleChannel = (id: string) =>
     setS((st) => ({
       ...st,
@@ -777,7 +940,7 @@ export function AlertRuleWizardDialog({
   // about the mail that lands in their inbox.
   const onMessageStep = step === 'actions' || step === 'reset_actions'
   const draftPayload = useMemo(
-    () => JSON.stringify(stateToPayload(s, tplDefaults)),
+    () => JSON.stringify(buildPayload(s)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [s, tplDefaultsKey],
   )
@@ -802,6 +965,7 @@ export function AlertRuleWizardDialog({
     toast.success('Trigger templates copied to reset actions')
   }
 
+  const condMetricName = (m: string) => (m.startsWith('tpl_') ? `${tplNames[m.slice(4)] || m.slice(4)} (template)` : m)
   const summary = useMemo(() => {
     const first = s.conditions[0]
     const condText =
@@ -815,11 +979,15 @@ export function AlertRuleWizardDialog({
         ? `Service status → ${s.trigger_on}`
         : s.source === 'apm' && isApmEvent(first.metric)
         ? APM_EVENT_TRIGGERS.find(x => x.value === first.metric)!.label
-        : s.conditions.length > 1
-        ? s.conditions.map((c) => `${c.metric} ${c.operator} ${c.threshold}`).join(` ${s.condition_logic} `)
-        : `${first.metric} ${first.operator} ${first.threshold}`
+        : s.source === 'apm'
+        ? s.conditions.length > 1
+          ? s.conditions.map((c) => `${condMetricName(c.metric)} ${c.operator} ${c.threshold}`).join(` ${s.condition_logic} `)
+          : `${condMetricName(first.metric)} ${first.operator} ${first.threshold}`
+        // Every other family in words, with its unit ("Data disk used > 85%", "IPsec Tunnels: Status is Down").
+        : triggerSummary({ ...buildPayload(s), conditions: s.conditions }, tplIndex).detail
     return { condText }
-  }, [s])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s, tplNames, tplIndex])
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -850,6 +1018,29 @@ export function AlertRuleWizardDialog({
         return
       }
     }
+    if (s.source === 'device' && s.conditions.some((c) => c.metric === 'tpl_')) {
+      toast.error('Choose a template metric', 'Pick the template and the metric to watch, or another field.')
+      setStep('trigger')
+      return
+    }
+    // The server's validators for the condition (single-condition metrics, operators, limits, clear levels,
+    // retired keys) and for the family scopes, so a refusal is caught on the step that can fix it.
+    if (s.source !== 'server' && s.source !== 'netflow' && s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'apm'
+      && !(s.source === 'service' && first0?.metric === 'service_status')) {
+      const kept = isEdit ? [rule?.metric, ...(Array.isArray(rule?.conditions) ? rule.conditions.map((c: any) => c?.metric) : [])] : []
+      const problem = conditionProblem(s.conditions, kept.filter(Boolean))
+      if (problem) {
+        toast.error('Trigger incomplete', problem)
+        setStep('trigger')
+        return
+      }
+      const scopeProblem = familyScopeProblem(s)
+      if (scopeProblem) {
+        toast.error('Scope incomplete', scopeProblem)
+        setStep('scope')
+        return
+      }
+    }
     if (s.source === 'server') {
       const problem = serverDraftProblem(s)
       if (problem) {
@@ -858,7 +1049,7 @@ export function AlertRuleWizardDialog({
         return
       }
     }
-    if (!isService && s.source !== 'apm' && s.source !== 'netflow' && s.source !== 'server' && scopeEmpty) {
+    if ((['device', 'trap', 'syslog', 'udt'].includes(s.source) || (s.source === 'gap' && first0?.metric === 'snmp_unreachable')) && scopeEmpty) {
       toast.error('Scope incomplete', `Select a ${scopeMode === 'type' ? 'device type' : scopeMode}, or choose "All devices".`)
       setStep('scope')
       return
@@ -893,8 +1084,8 @@ export function AlertRuleWizardDialog({
       }
     }
     save.mutate(isServer
-      ? { payload: serverRulePayload(s), server: true }
-      : { payload: stateToPayload(s, tplDefaults), server: false })
+      ? { payload: serverRulePayload(isEdit ? s : { ...s, ...withNewPercentDefaults(s.conditions, s.clear_duration) }), server: true }
+      : { payload: buildPayload(s), server: false })
   }
   const isService = s.source === 'service'
 
@@ -1057,21 +1248,23 @@ export function AlertRuleWizardDialog({
             {step === 'trigger' && (
               <div className="space-y-4">
                 <SectionTitle title="Trigger Conditions" hint="Define when this alert fires. Add multiple child conditions with AND/OR logic." />
-                <div className="grid grid-cols-4 gap-1 rounded-lg border border-border bg-surface2 p-1 text-xs sm:flex">
-                  {(['device', 'server', 'service', 'trap', 'syslog', 'apm', 'netflow'] as const).map((src) => (
+                <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-surface2 p-1 text-xs sm:grid-cols-4 lg:grid-cols-6">
+                  {RULE_SOURCES.map(({ value: src, label: srcLabel, hint: srcHint }) => (
                     <button
                       key={src}
                       type="button"
                       disabled={isEdit && (src === 'server') !== editingServerRule}
                       title={isEdit && (src === 'server') !== editingServerRule
                         ? (editingServerRule ? 'A server rule stays a server rule. Create a new rule to watch something else.' : 'Create a new rule to watch servers.')
-                        : undefined}
+                        : srcHint}
                       onClick={() => {
                         if (src === s.source) return
                         // Entering/leaving APM swaps the condition metric domain,
                         // and `target` changes meaning (service name vs interface).
                         if (src === 'server') {
-                          setS({ ...s, source: src, target: '', server_id: '', min_duration: 300, clear_duration: null, reset_mode: 'auto', recovery_alert: true,
+                          // A device scope (group, tag) does not carry over: a new server rule covers all servers.
+                          setS({ ...s, source: src, target: '', server_id: '', server_scope: 'all', group_id: '', scope_tag: '', device_id: '', device_type: '', location: '',
+                            min_duration: 300, clear_duration: null, reset_mode: 'auto', recovery_alert: true,
                             escalation_mode: s.escalation_mode === 'legacy' ? 'default' : s.escalation_mode,
                             conditions: [{ metric: 'host_cpu_pct', operator: '>', threshold: 90, reset_threshold: null }] })
                         } else if (src === 'syslog') {
@@ -1080,7 +1273,22 @@ export function AlertRuleWizardDialog({
                           setS({ ...s, source: src, target: '', conditions: [{ metric: 'apm_latency_p95', operator: '>', threshold: 800 }] })
                         } else if (src === 'netflow') {
                           setS({ ...s, source: src, target: '', reset_mode: 'auto', recovery_alert: true })
-                        } else if (s.source === 'apm' || s.source === 'syslog' || s.source === 'netflow' || s.source === 'server') {
+                        } else if (['service', 'gap', 'appliance', 'virtualization', 'udt', 'netpath'].includes(src)) {
+                          // One condition on the family's first metric; no device scope carries over.
+                          const metric = src === 'service' ? 'service_status' : metricsFor(src)[0].key
+                          const event = ruleTimers({ metric }).closes === 'expires'
+                          setScopeMode('all')
+                          setS({ ...s, source: src, target: '', server_id: '', server_scope: 'all', device_id: '', group_id: '', device_type: '',
+                            location: '', scope_tag: '', service_check_id: '', service_check_group_id: '', profile_id: '', if_role: '',
+                            trigger_on: src === 'service' ? (s.source === 'service' ? s.trigger_on : 'down') : 'any',
+                            min_duration: 0, clear_duration: null, reset_mode: event ? 'none' : 'auto', recovery_alert: !event,
+                            conditions: [src === 'service' ? { metric, operator: '==', threshold: 0, reset_threshold: null } : newCondition(metric)] })
+                        } else if (s.source === 'server') {
+                          // Nor does a server tag / group scope carry over to a device rule.
+                          setScopeMode('all')
+                          setS({ ...s, source: src, target: '', server_id: '', server_scope: 'all', group_id: '', scope_tag: '',
+                            conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
+                        } else if (['apm', 'syslog', 'netflow', 'service', 'gap', 'appliance', 'virtualization', 'udt', 'netpath'].includes(s.source)) {
                           setS({ ...s, source: src, target: '', server_id: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
                         } else {
                           setS({ ...s, source: src })
@@ -1089,12 +1297,28 @@ export function AlertRuleWizardDialog({
                       aria-pressed={s.source === src}
                       className={cn('flex-1 rounded-md px-1 py-2 font-medium disabled:cursor-not-allowed disabled:opacity-40', s.source === src ? 'bg-primary text-white' : 'text-muted')}
                     >
-                      {src === 'device' ? 'Device / SNMP' : src === 'server' ? 'Server' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : src === 'syslog' ? 'Syslog' : src === 'apm' ? 'APM & RUM' : 'NetFlow'}
+                      {srcLabel}
                     </button>
                   ))}
                 </div>
 
                 {s.source === 'service' && (
+                  <FormField label="Watch" hint="A status change pages on the check's confirmed state; certificate and response-time rules compare a reading with a limit.">
+                    <Select value={first0?.metric === 'service_status' ? 'service_status' : first0?.metric}
+                      onValueChange={(v) => setS({ ...s, trigger_on: v === 'service_status' ? 'down' : 'any', device_id: '', scope_tag: '',
+                        min_duration: 0, clear_duration: null,
+                        conditions: [v === 'service_status' ? { metric: v, operator: '==', threshold: 0, reset_threshold: null } : newCondition(v)] })}>
+                      <SelectTrigger aria-label="What the service check rule watches"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {metricsFor('service').map((m) => <SelectItem key={m.key} value={m.key}>{m.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </FormField>
+                )}
+                {familySource && (
+                  <FamilyConditionFields s={s} newRule={!isEdit} hideWatch={s.source === 'service'} onChange={(patch) => setS((st) => ({ ...st, ...patch }))} />
+                )}
+                {s.source === 'service' && first0?.metric === 'service_status' && (
                   <FormField label="Trigger on status" hint="Fires when a service check transitions to this state">
                     <Select value={s.trigger_on} onValueChange={(v: any) => setS({ ...s, trigger_on: v })}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1116,7 +1340,7 @@ export function AlertRuleWizardDialog({
 
                 {s.source === 'syslog' && <div className="space-y-3">
                   <FormField label="Message contains (optional)"><Input value={s.target} onChange={e => setS({ ...s, target: e.target.value })} /></FormField>
-                  <FormField label="Severity condition" hint="0 is emergency; 7 is debug. Events require manual resolution.">
+                  <FormField label="Severity condition" hint="0 is emergency; 7 is debug. One open alert per device and rule; it closes by itself after the event alert expiry window.">
                     <div className="flex gap-2"><select aria-label="Syslog severity operator" value={s.conditions[0].operator} onChange={e => setS({ ...s, conditions: [{ ...s.conditions[0], operator: e.target.value }] })} className="rounded border border-border bg-surface p-2">
                       {['<=', '<', '==', '!=', '>=', '>'].map(op => <option key={op}>{op}</option>)}
                     </select><Input aria-label="Syslog severity threshold" type="number" min={0} max={7} value={s.conditions[0].threshold} onChange={e => setS({ ...s, conditions: [{ ...s.conditions[0], threshold: Number(e.target.value) }] })} /></div>
@@ -1150,76 +1374,133 @@ export function AlertRuleWizardDialog({
                         </div>
                       )}
                     </div>
-                    {s.conditions.map((c, i) => (
+                    {stateInfo ? (
+                      // A template state (enum) metric: the states that alert, stored as AND-combined conditions.
+                      <div className="space-y-3 rounded-lg border border-border/60 bg-surface2/30 p-3">
+                        <TemplateMetricPicker metric={first0.metric} templates={templates} scopeTemplateId={s.profile_id}
+                          onPick={(m, templateId) => pickTemplateMetric(0, m, templateId)} />
+                        <StatePicker info={stateInfo} conditions={s.conditions}
+                          onChange={(conds) => setS((st) => ({ ...st, conditions: conds, condition_logic: 'AND' }))} />
+                      </div>
+                    ) : s.conditions.map((c, i) => {
+                      const spec = metricSpec(c.metric)
+                      const isTpl = c.metric.startsWith('tpl_') && c.metric !== 'tpl_'
+                      const event = spec?.kind === 'event' && !!spec.fixed
+                      const auto = autoResetThreshold(c)
+                      // A new percent rule starts with a clear level 5 points below the limit (plan step 2.2).
+                      const fresh = isEdit ? null : newPercentClearLevel(c)
+                      const resettable = (isTpl || (spec?.source === 'device' && spec.kind === 'level' && !spec.fixed && spec.clearLevel !== false
+                        && c.metric !== 'if_oper_status')) && ['>', '>=', '<', '<='].includes(c.operator)
+                      return (
                       <div key={i} className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
                         <div className="grid flex-1 grid-cols-3 gap-2">
                           <FormField label={i === 0 ? 'Field' : ' '}>
                             <Select value={c.metric} onValueChange={(v) => {
-                              if (v === REBOOT_METRIC) {
+                              const next = metricSpec(v)
+                              if (next?.single) {
+                                // Flapping, speed change and F5 certificates are rules of their own (the server refuses others).
+                                setS((st) => ({ ...st, condition_logic: 'AND', conditions: [newCondition(v)], target: INTERFACE_METRICS.has(v) ? st.target : '',
+                                  min_duration: v === 'if_speed_changed' ? 0 : st.min_duration }))
+                              } else if (v === REBOOT_METRIC) {
                                 // An event: the stored comparison is fixed and a breach hold would never be met.
                                 setS((st) => ({ ...st, min_duration: s.conditions.length === 1 ? 0 : st.min_duration,
                                   conditions: st.conditions.map((x, idx) => (idx === i ? { metric: v, operator: '==', threshold: 1, reset_threshold: null } : x)) }))
-                              } else {
+                              } else if (v === 'tpl_') {
                                 updateCond(i, { metric: v })
+                              } else {
+                                const ops = operatorsFor(v)
+                                const fromEvent = !!metricSpec(c.metric)?.fixed
+                                updateCond(i, ops.includes(c.operator) && !fromEvent
+                                  ? { metric: v }
+                                  : { metric: v, operator: next?.defaults?.operator ?? ops[0], threshold: next?.defaults?.threshold ?? c.threshold, reset_threshold: null })
                               }
                             }}>
                               <SelectTrigger><SelectValue /></SelectTrigger>
                               <SelectContent>
-                                <SelectItem value="ping_status">Ping status</SelectItem>
-                                <SelectItem value="rtt">RTT (ms)</SelectItem>
-                                <SelectItem value="packet_loss">Packet loss (%)</SelectItem>
-                                <SelectItem value="jitter">Jitter (ms)</SelectItem>
-                                {NETWORK_METRICS.map((m) => (
-                                  <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                                {metricsFor('device', c.metric).map((m) => (
+                                  <SelectItem key={m.key} value={m.key}>{m.label}{m.retired ? ' (retired)' : ''}</SelectItem>
                                 ))}
+                                {isTpl && (
+                                  <SelectItem value={c.metric}>Template: {tplNames[c.metric.slice(4)] || c.metric.slice(4)}</SelectItem>
+                                )}
+                                <SelectItem value="tpl_">Template metric…</SelectItem>
                               </SelectContent>
                             </Select>
                           </FormField>
-                          {c.metric === REBOOT_METRIC ? (
+                          {event ? (
                             <p className="col-span-2 self-center text-xs text-muted">
-                              Fires when the device&apos;s uptime goes back to zero (it restarted). There is no value to compare.
+                              {c.metric === REBOOT_METRIC
+                                ? <>Fires when the device&apos;s uptime goes back to zero (it restarted). There is no value to compare.</>
+                                : spec?.hint}
                             </p>
                           ) : (<>
                           <FormField label={i === 0 ? 'Operator' : ' '}>
                             <Select value={c.operator} onValueChange={(v) => updateCond(i, { operator: v })}>
-                              <SelectTrigger><SelectValue /></SelectTrigger>
+                              <SelectTrigger aria-label={`Operator of condition ${i + 1}`}><SelectValue /></SelectTrigger>
                               <SelectContent>
-                                {['>', '>=', '<', '<=', '==', '!='].map((op) => (
+                                {(isTpl || c.metric === 'tpl_' ? [...ALL_OPS] : operatorsFor(c.metric, c.operator)).map((op) => (
                                   <SelectItem key={op} value={op}>{op}</SelectItem>
                                 ))}
                               </SelectContent>
                             </Select>
                           </FormField>
-                          <FormField label={i === 0 ? 'Value' : ' '}>
-                            <Input type="number" step="any" value={c.threshold} onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })} />
+                          <FormField label={i === 0 ? `Value${spec?.unit ? ` (${spec.unit.trim()})` : ''}` : ' '}>
+                            <Input type="number" step="any" min={spec?.min} max={spec?.max} value={c.threshold} onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })} />
                           </FormField>
                           </>)}
-                          {NETWORK_METRICS.some(m => m.value === c.metric) && c.metric !== REBOOT_METRIC && ['>', '>=', '<', '<='].includes(c.operator) && (() => {
-                            const auto = autoResetThreshold(c)
-                            return (
-                              <FormField label="Reset value (optional)" hint={auto != null ? `Empty = auto: clears ${c.operator.startsWith('>') ? 'below' : 'above'} ${auto}%` : undefined}>
-                                <Input type="number" step="any" placeholder={auto != null ? `auto (${auto}%)` : 'Same as trigger'} value={c.reset_threshold ?? ''} onChange={e => updateCond(i, { reset_threshold: e.target.value === '' ? null : Number(e.target.value) })} />
-                              </FormField>
-                            )
-                          })()}
+                          {resettable && (
+                            <FormField label="Reset value (optional)" hint={fresh != null
+                              ? `Empty = ${fresh}${spec?.unit === '%' ? '%' : ''} for a new rule: clears 5 points on the healthy side of the limit.`
+                              : auto != null ? `Empty = auto: clears ${c.operator.startsWith('>') ? 'below' : 'above'} ${auto}%`
+                              : spec?.clearLevel ? `Empty = ${spec.clearLevel.auto}.` : undefined}>
+                              <Input type="number" step="any" placeholder={fresh != null ? `${fresh}` : auto != null ? `auto (${auto}%)` : spec?.clearLevel ? 'auto' : 'Same as trigger'} value={c.reset_threshold ?? ''} onChange={e => updateCond(i, { reset_threshold: e.target.value === '' ? null : Number(e.target.value) })} />
+                            </FormField>
+                          )}
+                        {c.metric.startsWith('tpl_') && (
+                          <TemplateMetricPicker className="col-span-3" metric={c.metric} templates={templates} scopeTemplateId={s.profile_id}
+                            onPick={(m, templateId) => pickTemplateMetric(i, m, templateId)} />
+                        )}
+                        {spec && (spec.retired || (spec.hint && !event)) && (
+                          <p className={cn('col-span-3 text-xs', spec.retired && isRetired(c.metric) ? 'text-warning' : 'text-muted')}>{spec.retired || spec.hint}</p>
+                        )}
                         </div>
                         <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-muted hover:text-danger" disabled={s.conditions.length === 1} onClick={() => removeCond(i)}>
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
-                    ))}
-                    <Button type="button" variant="outline" size="sm" onClick={addCond}><Plus className="h-3.5 w-3.5" />Add condition</Button>
+                      )
+                    })}
+                    {!stateInfo && !s.conditions.some((c) => metricSpec(c.metric)?.single) && (
+                      <Button type="button" variant="outline" size="sm" onClick={addCond}><Plus className="h-3.5 w-3.5" />Add condition</Button>
+                    )}
                     {s.conditions.some((c) => INTERFACE_METRICS.has(c.metric)) && (
-                      <FormField label="Interface filter" hint="Name substring or if_index. Empty = all interfaces.">
-                        <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder="GigabitEthernet0/1" />
-                      </FormField>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <FormField label="Interface filter" hint="Name substring or if_index. Empty = all interfaces.">
+                          <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder="GigabitEthernet0/1" />
+                        </FormField>
+                        {interfaceRoleApplies(s.conditions) && (
+                          <FormField label="Interface role" hint="Roles come from the device's template, or an operator's choice on the interface.">
+                            <Select value={s.if_role || '__any__'} onValueChange={(v) => setS({ ...s, if_role: v === '__any__' ? '' : v })}>
+                              <SelectTrigger><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__any__">Any role</SelectItem>
+                                {INTERFACE_ROLES.map((r) => <SelectItem key={r} value={r}>{ROLE_LABEL[r]}</SelectItem>)}
+                              </SelectContent>
+                            </Select>
+                          </FormField>
+                        )}
+                      </div>
                     )}
                   </>
                 )}
 
                 {isServer && (() => {
                   const c = s.conditions[0]
-                  const auto = serverKind === 'pct' ? serverAutoReset(c.operator, Number(c.threshold)) : null
+                  const spec = serverMetric(c.metric)
+                  const unit = spec?.unit ?? ''
+                  const auto = serverKind === 'pct' ? serverAutoReset(c.operator, Number(c.threshold), c.metric) : null
+                  // A new percent rule clears 5 points on the healthy side unless set (plan step 2.2).
+                  const freshServer = serverKind === 'pct' && !isEdit ? newPercentClearLevel(c) : null
                   return (
                     <div className="space-y-3 rounded-lg border border-border/60 bg-surface2/30 p-3">
                       <div className={cn('grid gap-2', serverKind === 'pct' ? 'grid-cols-3' : 'grid-cols-1')}>
@@ -1235,21 +1516,23 @@ export function AlertRuleWizardDialog({
                           <>
                             <FormField label="Operator">
                               <Select value={c.operator} onValueChange={(v) => updateCond(0, { operator: v })}>
-                                <SelectTrigger><SelectValue /></SelectTrigger>
+                                <SelectTrigger aria-label="Server rule operator"><SelectValue /></SelectTrigger>
                                 <SelectContent>
-                                  {['>', '>=', '<', '<=', '==', '!='].map((op) => <SelectItem key={op} value={op}>{op}</SelectItem>)}
+                                  {[...serverOperators(c.metric), ...(serverOperators(c.metric).includes(c.operator) ? [] : [c.operator])].map((op) => <SelectItem key={op} value={op}>{op}</SelectItem>)}
                                 </SelectContent>
                               </Select>
                             </FormField>
-                            <FormField label="Value (%)">
-                              <Input type="number" min={0} max={100} step="any" value={c.threshold} onChange={(e) => updateCond(0, { threshold: Number(e.target.value) })} />
+                            <FormField label={`Value${unit ? ` (${unit.trim()})` : ''}`}>
+                              <Input type="number" min={spec?.min} max={spec?.max} step="any" value={c.threshold} onChange={(e) => updateCond(0, { threshold: Number(e.target.value) })} />
                             </FormField>
                           </>
                         )}
                       </div>
                       {serverKind === 'pct' && (
-                        <FormField label="Reset value (optional)" hint={auto != null ? `Empty = auto: clears ${c.operator.startsWith('>') ? 'below' : 'above'} ${auto}%` : undefined}>
-                          <Input type="number" step="any" className="w-40" placeholder={auto != null ? `auto (${auto}%)` : 'Same as trigger'} value={c.reset_threshold ?? ''}
+                        <FormField label="Reset value (optional)" hint={freshServer != null
+                          ? `Empty = ${freshServer}% for a new rule: clears 5 points on the healthy side of the limit.`
+                          : auto != null ? `Empty = auto: clears ${c.operator.startsWith('>') ? 'below' : 'above'} ${auto}${unit}` : undefined}>
+                          <Input type="number" step="any" className="w-40" placeholder={freshServer != null ? String(freshServer) : auto != null ? `auto (${auto}${unit})` : 'Same as trigger'} value={c.reset_threshold ?? ''}
                             onChange={(e) => updateCond(0, { reset_threshold: e.target.value === '' ? null : Number(e.target.value) })} />
                         </FormField>
                       )}
@@ -1259,6 +1542,13 @@ export function AlertRuleWizardDialog({
                           <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder={serverKind === 'svc' ? 'e.g. MSSQLSERVER' : 'e.g. nginx.exe'} />
                         </FormField>
                       )}
+                      {serverKind === 'auto' && (
+                        <FormField label="Services to leave out (patterns)"
+                          hint="Optional. Service names or display names, comma separated, wildcards allowed, case-insensitive (e.g. gupdate*, edgeupdate*). A service left out resolves its open alert without a recovery notice.">
+                          <Input value={s.target} onChange={(e) => setS({ ...s, target: e.target.value })} placeholder="gupdate*, edgeupdate*" aria-label="Services to leave out" />
+                        </FormField>
+                      )}
+                      {spec?.hint && <p className="text-xs text-muted">{spec.hint}</p>}
                       {serverKind === 'event' && <p className="text-xs text-muted">Notifies when the agent reports a new OS boot, restart request or shutdown, with the time it happened. A further restart while the alert is open updates the same alert. Historical backfill does not page. Shutdown evidence may arrive after the next boot.</p>}
                       {serverKind === 'flag' && (
                         <p className="text-xs text-muted">
@@ -1317,7 +1607,8 @@ export function AlertRuleWizardDialog({
                   <NetflowConditionFields form={s.nf} errors={nfErrors} onChange={(nf) => setS((st) => ({ ...st, nf }))} />
                 )}
 
-                {!apmEvent && !rebootRule && s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && !(isServer && serverKind !== 'pct' && serverKind !== 'flag') && (
+                {!apmEvent && !eventAutoClear && s.source !== 'trap' && s.source !== 'syslog' && s.source !== 'netflow' && !(isServer && serverKind !== 'pct' && serverKind !== 'flag' && serverKind !== 'auto')
+                  && !(familySource && !timers.hold) && (
                   serverKind === 'flag' ? (
                     <FormField label="Agent silent for" hint={`How long the agent may miss its heartbeats (every 30 seconds) before the alert is raised. 0 = the default ${DEFAULT_SILENCE_SECONDS} seconds; never less than ${MIN_SILENCE_SECONDS}.`}>
                       <div className="flex items-center gap-3">
@@ -1325,9 +1616,25 @@ export function AlertRuleWizardDialog({
                         <span className="text-sm text-muted">seconds (0 = {DEFAULT_SILENCE_SECONDS})</span>
                       </div>
                     </FormField>
+                  ) : flapRule ? (
+                    <FormField label="Window" hint={`State changes are counted over this window; it takes the place of the breach hold. Empty or 0 = ${DEFAULT_FLAP_WINDOW_S / 60} minutes. An override's hold changes the window for its assets.`}>
+                      <div className="flex items-center gap-3">
+                        <Input type="number" min={0} placeholder={String(DEFAULT_FLAP_WINDOW_S)} value={s.min_duration || ''} onChange={(e) => setS({ ...s, min_duration: Math.max(0, Number(e.target.value) || 0) })} className="w-28" aria-label="Flapping window in seconds" />
+                        <span className="text-sm text-muted">seconds</span>
+                      </div>
+                    </FormField>
+                  ) : s.source === 'apm' ? (
+                    <FormField label="Averaging window" hint={`The metric is averaged over this window and judged every minute; never less than ${APM_MIN_WINDOW_S} seconds. APM rules have no separate breach or clear hold.`}>
+                      <div className="flex items-center gap-3">
+                        <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" aria-label="Averaging window in seconds" />
+                        <span className="text-sm text-muted">seconds (0 = {APM_MIN_WINDOW_S})</span>
+                      </div>
+                    </FormField>
                   ) : (
                     <FormField label="Condition must exist for" hint={statusRule
                       ? `Counted from the confirmed status change. Device status already needs several checks before it changes (Settings → Monitoring), so a hold here adds to that${flapHold ? '; while a device\'s up/down or latency/loss changes flap, its status alerts for that kind of change are also held automatically until a status lasts the flap stability time' : ''}.`
+                      : first0?.metric === 'service_response_ms'
+                      ? 'Hold time before firing; the response time is also averaged over this time (at least 5 minutes).'
                       : 'Hold time before firing: the condition must persist this long before the alert is raised.'}>
                       <div className="flex items-center gap-3">
                         <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
@@ -1336,35 +1643,58 @@ export function AlertRuleWizardDialog({
                     </FormField>
                   )
                 )}
-                {(rebootRule || isLifecycle) && (
-                  <FormField
-                    label="Auto-clear after"
-                    hint={`The ${rebootRule ? 'reboot' : isLifecycle && s.conditions[0]?.metric === 'host_shutdown' ? 'shutdown' : 'restart'} alert closes on its own once this long passes without another one; a further ${rebootRule ? 'reboot' : 'event'} in the meantime updates the same alert ("${rebootRule ? 'rebooted' : 'restarted'} again") and starts the time again. You can also resolve it by hand at any time. Empty = ${DEFAULT_EVENT_HOLD_SECONDS / 60} minutes.`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <Input
-                        type="number" min={0} className="w-28" placeholder={String(DEFAULT_EVENT_HOLD_SECONDS)}
-                        value={s.clear_duration ?? ''}
-                        onChange={(e) => setS({ ...s, clear_duration: e.target.value === '' ? null : Math.max(0, Number(e.target.value)) })}
-                      />
-                      <span className="text-sm text-muted">seconds after the last {rebootRule ? 'reboot' : 'event'}</span>
-                    </div>
-                  </FormField>
-                )}
-                {!rebootRule && (usesMetricLifecycle(s) || serverKind === 'pct') && (
-                  <FormField
-                    label="Clear after"
-                    hint={`The cleared condition must hold this long before the alert resolves; a breach in the meantime continues the same alert without a new notification. Missing data never counts as cleared. Empty = ${DEFAULT_CLEAR_SECONDS} seconds.`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <Input
-                        type="number" min={0} className="w-28" placeholder={String(DEFAULT_CLEAR_SECONDS)}
-                        value={s.clear_duration ?? ''}
-                        onChange={(e) => setS({ ...s, clear_duration: e.target.value === '' ? null : Math.max(0, Number(e.target.value)) })}
-                      />
-                      <span className="text-sm text-muted">seconds (0 = resolve on the first healthy reading)</span>
-                    </div>
-                  </FormField>
+                {(eventAutoClear || isLifecycle || first0?.metric === 'appliance_admin_changes') && (() => {
+                  const noun = rebootRule ? 'reboot' : speedRule ? 'speed change' : first0?.metric === 'appliance_admin_changes' ? 'administrative change'
+                    : s.conditions[0]?.metric === 'host_shutdown' ? 'shutdown' : 'restart'
+                  const again = rebootRule ? 'rebooted again' : speedRule ? 'changed speed again' : first0?.metric === 'appliance_admin_changes' ? 'one more change' : 'restarted again'
+                  return (
+                    <FormField
+                      label="Auto-clear after"
+                      hint={`The ${noun} alert closes on its own once this long passes without another one; a further ${noun} in the meantime updates the same alert ("${again}") and starts the time again. You can also resolve it by hand at any time. Empty = ${DEFAULT_EVENT_HOLD_SECONDS / 60} minutes.`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Input
+                          type="number" min={0} className="w-28" placeholder={String(DEFAULT_EVENT_HOLD_SECONDS)}
+                          value={s.clear_duration ?? ''}
+                          onChange={(e) => setS({ ...s, clear_duration: e.target.value === '' ? null : Math.max(0, Number(e.target.value)) })}
+                        />
+                        <span className="text-sm text-muted">seconds after the last {rebootRule ? 'reboot' : noun === 'shutdown' || noun === 'restart' ? 'event' : noun}</span>
+                      </div>
+                    </FormField>
+                  )
+                })()}
+                {!eventAutoClear && (usesMetricLifecycle(s) || serverKind === 'pct' || serverKind === 'auto' || (familySource && timers.clear === 'clear')) && (() => {
+                  // A new percent rule clears after 900 s unless set (plan step 2.2); existing rules keep the 300 s default.
+                  const freshPercent = !isEdit && s.conditions.some((c) => newPercentClearLevel({ ...c, reset_threshold: null }) != null)
+                  const fallback = freshPercent ? NEW_PERCENT_CLEAR_S : DEFAULT_CLEAR_SECONDS
+                  return (
+                    <FormField
+                      label={flapRule ? 'Extra clear hold' : 'Clear after'}
+                      hint={flapRule
+                        ? 'The alert clears once a whole window passes without a state change, plus this long when set. Missing polls never clear it.'
+                        : s.source === 'gap'
+                        ? `Clears once data is delivered again and keeps arriving this long. A gap that is still open but below the limit neither raises nor clears. Empty = ${fallback} seconds.`
+                        : `The cleared condition must hold this long before the alert resolves; a breach in the meantime continues the same alert without a new notification. Missing data never counts as cleared. Empty = ${fallback} seconds${freshPercent ? ' for a new percent rule' : ''}.`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Input
+                          type="number" min={0} className="w-28" placeholder={flapRule ? '0' : String(fallback)}
+                          value={s.clear_duration ?? ''}
+                          onChange={(e) => setS({ ...s, clear_duration: e.target.value === '' ? null : Math.max(0, Number(e.target.value)) })}
+                        />
+                        <span className="text-sm text-muted">seconds (0 = resolve on the first healthy reading)</span>
+                      </div>
+                    </FormField>
+                  )
+                })()}
+                {familySource && !timers.hold && !timers.clear && (
+                  <p className="text-xs text-muted">
+                    {timers.closes === 'expires'
+                      ? `Each event raises or updates an alert at once; there is no hold. ${expiryText}`
+                      : first0?.metric === 'netpath_path_change'
+                      ? 'Each route change raises an alert at once; repeats within the cooldown are not paged again.'
+                      : 'Judged on every evaluation (every 30 seconds) with no hold: raised on the first breach, resolved on the first healthy reading.'}
+                  </p>
                 )}
                 {flapHold && (
                   <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border px-3 py-2">
@@ -1381,15 +1711,21 @@ export function AlertRuleWizardDialog({
             {step === 'reset' && (
               <div className="space-y-4">
                 <SectionTitle title="Reset Conditions" hint="How the notice closes, and whether a closing notification is sent." />
-                {s.source !== 'syslog' && s.source !== 'trap' && (
+                {!eventOnly && (
                   <p className="text-sm text-muted">
                     {isLifecycle || rebootRule
                       ? `The alert closes on its own ${holdLabel(s.clear_duration)} after the last ${rebootRule ? 'reboot' : 'event'} (Auto-clear after), or when someone resolves it. The closing notice says what is known now: ${rebootRule ? 'how long the device has stayed up, or that it has no current uptime reading' : 'whether the server is reporting normally again, or that its agent is still silent'}. These options control the notification only.`
+                      : speedRule || first0?.metric === 'appliance_admin_changes'
+                      ? `The alert closes on its own ${holdLabel(s.clear_duration)} after the last ${speedRule ? 'speed change' : 'change'} (Auto-clear after), or when someone resolves it. These options control the notification only.`
+                      : timers.closes === 'status'
+                      ? 'The alert resolves when the confirmed status recovers, even when recovery notifications are off. These options control the notification only.'
                       : 'Alerts resolve according to their clear conditions, even when recovery notifications are off. These options control the notification only.'}
                   </p>
                 )}
                 <div className="space-y-2">
-                  {s.source === 'syslog' || s.source === 'trap' ? <p className="text-sm text-muted">Event alerts require manual resolution. No automatic recovery notification is sent.</p> : [
+                  {eventOnly ? <p className="text-sm text-muted">{first0?.metric === 'netpath_path_change'
+                    ? 'A route change is an event: its alert stays open until someone resolves it. No recovery notification is sent.'
+                    : `${expiryText} No recovery notification is sent.`}</p> : [
                     { id: 'auto' as const, title: isLifecycle || rebootRule ? 'Notify when the alert closes' : 'Send a recovery notification', desc: isLifecycle || rebootRule ? 'Notify the configured routes when the alert closes after the auto-clear time.' : 'Notify the configured routes after the alert condition clears.' },
                     { id: 'none' as const, title: isLifecycle || rebootRule ? 'No closing notification' : 'No recovery notification', desc: 'The alert still closes in the system; no closing notification is sent.' },
                   ].map((opt) => (
@@ -1444,15 +1780,61 @@ export function AlertRuleWizardDialog({
                   </FormField>
                 ) : isServer ? (
                   <>
-                    <FormField label="Apply to" hint="All servers covers every agent-monitored server, including servers added later.">
-                      <Select value={s.server_id ? 'one' : 'all'} onValueChange={(v) => setS({ ...s, server_id: v === 'one' ? '__pick__' : '' })}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
+                    <FormField label="Apply to" hint={serverScope === 'tag' || serverScope === 'group'
+                      ? 'Servers that get the tag or join the group later are covered automatically.'
+                      : 'All servers covers every agent-monitored server, including servers added later.'}>
+                      <Select value={serverScope} onValueChange={(v) => setS({ ...s, ...serverScopeChange(v as ServerScopeMode, s) })}>
+                        <SelectTrigger aria-label="Servers the rule applies to"><SelectValue /></SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="all">All servers</SelectItem>
-                          <SelectItem value="one">Specific server</SelectItem>
+                          {SERVER_SCOPE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
                         </SelectContent>
                       </Select>
                     </FormField>
+                    {(serverScope === 'tag' || serverScope === 'group') && (
+                      // Tag and group combine: a server must carry the tag and be in the group. The one the scope
+                      // is named after comes first; the other is optional.
+                      <div className={cn('flex gap-3', serverScope === 'group' ? 'flex-col-reverse' : 'flex-col')}>
+                        <FormField
+                          label={serverScope === 'tag' ? 'Tag' : 'And with tag (optional)'}
+                          hint="A user limited to tags can create rules for their own tags."
+                        >
+                          <TagPicker
+                            value={s.scope_tag ? [s.scope_tag] : []}
+                            // One tag: picking another replaces it.
+                            onChange={(next) => setS({ ...s, scope_tag: next.length ? next[next.length - 1] : '' })}
+                            placeholder={s.scope_tag ? 'Replace the tag…' : 'Choose a tag…'}
+                            allowCreate
+                          />
+                        </FormField>
+                        <FormField
+                          label={serverScope === 'group' ? 'Device group' : 'And in group (optional)'}
+                          hint="Static or dynamic; members of its subgroups are included."
+                        >
+                          <Select
+                            value={s.group_id || '__none__'}
+                            onValueChange={(v) => setS({ ...s, group_id: v === '__none__' ? '' : v })}
+                          >
+                            <SelectTrigger aria-label="Device group"><SelectValue placeholder="Select group" /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="__none__" disabled={serverScope === 'group'}>
+                                {serverScope === 'group' ? 'Select group' : 'Any group'}
+                              </SelectItem>
+                              {s.group_id && !deviceGroups.some(({ group: g }) => g.id === s.group_id) && (
+                                <SelectItem value={s.group_id}>Group {s.group_id.slice(0, 8)}</SelectItem>
+                              )}
+                              {deviceGroups.map(({ group: g, depth }) => (
+                                <SelectItem key={g.id} value={g.id}>
+                                  <span style={{ paddingLeft: `${depth * 0.75}rem` }}>{g.name}</span>
+                                  <span className="ml-1.5 text-2xs text-muted">
+                                    · {g.kind === 'dynamic' ? 'dynamic' : 'static'}{(g.asset_kinds || []).includes('server') ? '' : ', devices only'}
+                                  </span>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </FormField>
+                      </div>
+                    )}
                     {s.server_id && (
                       <FormField label="Server">
                         <Select value={s.server_id} onValueChange={(v) => setS({ ...s, server_id: v })}>
@@ -1471,6 +1853,10 @@ export function AlertRuleWizardDialog({
                       </FormField>
                     )}
                   </>
+                ) : familySource && (s.source !== 'gap' || first0?.metric === 'agent_no_metrics') ? (
+                  <FamilyScopeFields s={s} open={open} onChange={(patch) => setS((st) => ({ ...st, ...patch }))}
+                    devices={devices} serviceChecks={serviceChecks} serviceGroups={serviceGroups} channels={channels}
+                    deviceGroups={deviceGroups.map(({ group: g, depth }) => ({ id: g.id, name: `${'· '.repeat(depth)}${g.name}` }))} />
                 ) : s.source === 'service' ? (
                   <div className="grid grid-cols-2 gap-3">
                     <FormField label="Service check">
@@ -1506,7 +1892,8 @@ export function AlertRuleWizardDialog({
                           <SelectItem value="group">Device group</SelectItem>
                           <SelectItem value="type">Device type</SelectItem>
                           <SelectItem value="location">Location</SelectItem>
-                          <SelectItem value="tag">Tag</SelectItem>
+                          {/* Device Tracker rules match the reporting switch by device, group, type or location only. */}
+                          {s.source !== 'udt' && <SelectItem value="tag">Tag</SelectItem>}
                         </SelectContent>
                       </Select>
                     </FormField>
@@ -1542,9 +1929,7 @@ export function AlertRuleWizardDialog({
                         <Select value={s.device_type || '__pick__'} onValueChange={(v) => setS({ ...s, device_type: v === '__pick__' ? '' : v })}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
-                            {['router', 'switch', 'firewall', 'server', 'access_point', 'printer', 'other'].map((t) => (
-                              <SelectItem key={t} value={t}>{t.replace('_', ' ')}</SelectItem>
-                            ))}
+                            <DeviceTypeItems />
                           </SelectContent>
                         </Select>
                       </FormField>
@@ -1582,6 +1967,21 @@ export function AlertRuleWizardDialog({
                         </Select>
                       </FormField>
                     )}
+                    {s.source === 'device' && templateScopeApplies(s.conditions) && (
+                      <FormField label="Only devices on template"
+                        hint="Also covers templates customised from it. Combined with the scope above: a device must match both.">
+                        <Select value={s.profile_id || '__any__'} onValueChange={(v) => setS({ ...s, profile_id: v === '__any__' ? '' : v })}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__any__">Any template</SelectItem>
+                            {s.profile_id && !templates.some((t) => t.id === s.profile_id) && (
+                              <SelectItem value={s.profile_id}>Template {s.profile_id.slice(0, 8)}</SelectItem>
+                            )}
+                            {templates.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                    )}
                   </>
                 )}
               </div>
@@ -1604,10 +2004,23 @@ export function AlertRuleWizardDialog({
                     )
                   })}
                 </div>
+                {s.notify_channels.length === 0 && (
+                  <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                    No channel selected: this rule&apos;s alerts are only seen in ZenPlus unless an escalation policy routes them (Escalation step).
+                  </p>
+                )}
                 <div className="grid grid-cols-2 gap-3">
-                  <FormField label="Cooldown (seconds)" hint="Anti-flap: after a notification goes out, repeat triggers for the same object stay quiet this long">
-                    <Input type="number" min={0} value={s.cooldown} onChange={(e) => setS({ ...s, cooldown: Number(e.target.value) })} />
-                  </FormField>
+                  {timers.cooldown ? (
+                    <FormField label="Cooldown (seconds)" hint={eventOnly
+                      ? 'A repeat of the same event while its alert is open pages again only after this long (at least 60 seconds).'
+                      : 'Anti-flap: after a notification goes out, repeat triggers for the same object stay quiet this long'}>
+                      <Input type="number" min={0} value={s.cooldown} onChange={(e) => setS({ ...s, cooldown: Number(e.target.value) })} />
+                    </FormField>
+                  ) : (
+                    <p className="self-end rounded-lg border border-border bg-surface2/40 px-3 py-2 text-xs text-muted">
+                      This rule type has no cooldown: each incident is notified once, and repeat pages come only from escalation.
+                    </p>
+                  )}
                   {!isServer && (
                     <FormField label="Max escalation repeats" hint="Cap on repeat pages from an escalation level (0 = unlimited)">
                       <Input type="number" min={0} value={s.max_repeat} onChange={(e) => setS({ ...s, max_repeat: Number(e.target.value) })} />
@@ -1620,7 +2033,7 @@ export function AlertRuleWizardDialog({
                     condition. After saving, use <span className="text-text">Preview message</span> on the rule list to see it.
                   </p>
                 ) : (<>
-                <TemplateVars />
+                <TemplateVars vars={templateVars} />
                 <p className="text-xs text-muted">
                   This is the wording that will be sent. Edit any field to word it yourself; a field
                   left as the built-in text keeps tracking it, so improvements to the default wording
@@ -1810,7 +2223,7 @@ export function AlertRuleWizardDialog({
                   </p>
                 ) : (
                   <>
-                    <TemplateVars />
+                    <TemplateVars vars={templateVars} />
                     <p className="text-xs text-muted">
                       The wording sent when the condition clears. The built-in text states how long the
                       condition was active &mdash; <span className="text-text">{'{duration_sentence}'}</span>{' '}
@@ -1860,6 +2273,12 @@ export function AlertRuleWizardDialog({
                 <ReviewRow label="Name" value={s.name || '—'} />
                 <ReviewRow label="Severity" value={<Badge variant={s.severity === 'critical' ? 'danger' : s.severity === 'warning' ? 'warning' : 'info'}>{s.severity}</Badge>} />
                 <ReviewRow label="Trigger" value={summary.condText} />
+                {s.source === 'device' && templateScopeApplies(s.conditions) && s.profile_id && (
+                  <ReviewRow label="Template" value={templates.find((t) => t.id === s.profile_id)?.name || 'One template'} />
+                )}
+                {s.source === 'device' && interfaceRoleApplies(s.conditions) && s.if_role && (
+                  <ReviewRow label="Interface role" value={ROLE_LABEL[s.if_role] || s.if_role} />
+                )}
                 {s.source === 'netflow' ? (
                   <>
                     <ReviewRow label="Scope" value={describeScopeDraft(s.nf)} />
@@ -1867,21 +2286,25 @@ export function AlertRuleWizardDialog({
                   </>
                 ) : isServer ? (
                   <>
-                    <ReviewRow label="Scope" value={!s.server_id ? 'All servers'
-                      : (() => { const x = servers.find((v: any) => v.id === s.server_id); return x ? (x.display_name || x.hostname) : 'One server' })()} />
-                    {serverKind === 'pct' && <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />}
+                    <ReviewRow label="Scope" value={serverScopeLabel(s, {
+                      server: (() => { const x = servers.find((v: any) => v.id === s.server_id); return x ? (x.display_name || x.hostname) : null })(),
+                      group: deviceGroups.find(({ group: g }) => g.id === s.group_id)?.group.name,
+                    })} />
+                    {(serverKind === 'pct' || serverKind === 'auto') && <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />}
                   </>
-                ) : rebootRule ? null : (
-                  <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
+                ) : null}
+                {isServer && isLifecycle && (
+                  <ReviewRow label="Auto-clear after" value={`${holdLabel(s.clear_duration)} after the last event${s.clear_duration == null ? ' (default)' : ''}`} />
                 )}
-                {(rebootRule || isLifecycle) && (
-                  <ReviewRow label="Auto-clear after" value={`${holdLabel(s.clear_duration)} after the last ${rebootRule ? 'reboot' : 'event'}${s.clear_duration == null ? ' (default)' : ''}`} />
+                {isServer && (serverKind === 'pct' || serverKind === 'auto') && (
+                  <ReviewRow label="Clear after" value={s.clear_duration === 0 ? 'First healthy reading' : `${s.clear_duration ?? (isEdit ? DEFAULT_CLEAR_SECONDS : NEW_PERCENT_CLEAR_S)}s${s.clear_duration == null ? ' (default)' : ''}`} />
                 )}
-                {!rebootRule && (usesMetricLifecycle(s) || serverKind === 'pct') && (
-                  <ReviewRow label="Clear after" value={s.clear_duration === 0 ? 'First healthy reading' : `${s.clear_duration ?? DEFAULT_CLEAR_SECONDS}s${s.clear_duration == null ? ' (default)' : ''}`} />
+                {!isServer && s.source !== 'netflow' && (
+                  // What the evaluator honours for this rule, as the rule list shows it: hold, window, clear or auto-clear.
+                  <ReviewRow label="Timers" value={timersText(buildPayload(s))} />
                 )}
                 {flapHold && <ReviewRow label="While flapping" value={s.notify_while_flapping ? 'Notify immediately' : 'Held until a status lasts the flap stability time'} />}
-                <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution'
+                <ReviewRow label="Reset" value={eventOnly ? (first0?.metric === 'netpath_path_change' ? 'Resolved by hand' : expiry.enabled ? `Expires after ${expiryWindowLabel(expiry.hours)} without a new event` : 'Resolved by hand (event expiry is off)')
                   : isLifecycle || rebootRule ? `Auto-close ${holdLabel(s.clear_duration)} after the last ${rebootRule ? 'reboot' : 'event'}; ${s.reset_mode === 'auto' ? 'notify when it closes' : 'no closing notification'}`
                   : s.reset_mode === 'auto' ? 'Auto-resolve + recovery notification' : 'Auto-resolve without recovery notification'} />
                 <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None selected (escalation may still notify)'} />
@@ -2092,16 +2515,84 @@ function TemplateField({
   )
 }
 
-function TemplateVars() {
+/** The placeholders this rule's template kind accepts (anything else is refused on save). */
+function TemplateVars({ vars }: { vars: string[] }) {
   return (
     <div className="rounded-lg border border-primary/20 bg-primary/5 p-3">
-      <p className="text-2xs font-semibold uppercase tracking-wider text-primary">Template variables</p>
+      <p className="text-2xs font-semibold uppercase tracking-wider text-primary">Template variables for this rule</p>
       <div className="mt-2 flex flex-wrap gap-1">
-        {TEMPLATE_VARS.map((v) => (
+        {vars.map((v) => (
           <code key={v} className="cursor-pointer rounded bg-surface px-1.5 py-0.5 text-2xs text-muted hover:text-primary"
             onClick={() => { void copyText(v) }} title="Click to copy">{v}</code>
         ))}
       </div>
+    </div>
+  )
+}
+
+type WizardTemplateMetric = { key: string; name: string; unit?: string | null; type?: string | null; thresholds?: { warn?: number | null; crit?: number | null; op?: string } | null; labels?: Record<string, any> | null; value_map?: Record<string, any> | null }
+type WizardTemplate = { id: string; name: string; oid_groups?: { key: string; name: string; display?: string | null; metrics?: WizardTemplateMetric[] }[] }
+
+/** key -> metric name over every template, for template metric rules (tpl_<key>). */
+function templateMetricNames(templates: WizardTemplate[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const t of templates) for (const g of t.oid_groups || []) for (const m of g.metrics || []) if (!out[m.key]) out[m.key] = m.name
+  return out
+}
+
+/** Whether a template metric is a state (enum) metric with a value map, which a rule picks states of. */
+function isStateMetric(m: WizardTemplateMetric): boolean {
+  return m.type === 'enum' && (Object.keys(m.labels || {}).length > 0 || Object.keys(m.value_map || {}).length > 0)
+}
+
+/** A template's gauge metrics (compared with a threshold) and state metrics (alert on chosen states). */
+function gaugeMetrics(t: WizardTemplate | undefined): { group: string; metric: WizardTemplateMetric }[] {
+  const seen = new Set<string>()
+  return (t?.oid_groups || []).filter((g) => g.display !== 'children').flatMap((g) => (g.metrics || [])
+    .filter((m) => (!m.type || m.type === 'gauge' || isStateMetric(m)) && !seen.has(m.key) && !!seen.add(m.key))
+    .map((metric) => ({ group: g.name, metric })))
+}
+
+/** Template metric picker: a template, then one of its gauge metrics (the rule metric becomes tpl_<key>). */
+function TemplateMetricPicker({ metric, templates, scopeTemplateId, onPick, className }: {
+  metric: string
+  templates: WizardTemplate[]
+  scopeTemplateId: string
+  onPick: (m: WizardTemplateMetric, templateId: string) => void
+  className?: string
+}) {
+  const key = metric.startsWith('tpl_') ? metric.slice(4) : ''
+  const has = (t: WizardTemplate) => !!key && gaugeMetrics(t).some((x) => x.metric.key === key)
+  const initial = templates.find((t) => t.id === scopeTemplateId && (!key || has(t)))?.id
+    || templates.find(has)?.id || scopeTemplateId || ''
+  const [tplId, setTplId] = useState(initial)
+  // The template list may arrive after the picker opened (editing a saved rule).
+  useEffect(() => { if (!tplId && initial) setTplId(initial) }, [initial, tplId])
+  const chosen = templates.find((t) => t.id === tplId)
+  const options = gaugeMetrics(chosen)
+  return (
+    <div className={cn('grid gap-2 rounded-md border border-dashed border-border p-2 sm:grid-cols-2', className)}>
+      <FormField label="Template">
+        <Select value={tplId || '__none__'} onValueChange={(v) => setTplId(v === '__none__' ? '' : v)}>
+          <SelectTrigger><SelectValue placeholder="Choose a template" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__none__" disabled>Choose a template</SelectItem>
+            {templates.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </FormField>
+      <FormField label="Metric" hint={chosen && !options.length ? 'This template has no gauge or state metric.' : 'A gauge starts at the template’s critical level, when it has one; a state metric alerts on the states you tick.'}>
+        <Select value={key && options.some((x) => x.metric.key === key) ? key : '__none__'}
+          onValueChange={(v) => { const m = options.find((x) => x.metric.key === v)?.metric; if (m && chosen) onPick(m, chosen.id) }}>
+          <SelectTrigger><SelectValue placeholder="Choose a metric" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__none__" disabled>{key ? `${key} (not in this template)` : 'Choose a metric'}</SelectItem>
+            {options.map(({ group, metric: m }) => (
+              <SelectItem key={`${group}:${m.key}`} value={m.key}>{group}: {m.name}{isStateMetric(m) ? ' (state)' : m.unit ? ` (${m.unit})` : ''}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </FormField>
     </div>
   )
 }

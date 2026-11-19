@@ -35,7 +35,7 @@ def _get(rule: Any, key: str):
 
 def family(rule) -> str:
     metric = (_get(rule, "metric") or "").lower()
-    if metric.startswith("host_"):
+    if metric.startswith("host_") or metric == "agent_no_metrics":
         return "server"
     if metric.startswith("apm_"):
         return "apm"
@@ -45,8 +45,12 @@ def family(rule) -> str:
         return "udt"
     if metric.startswith("netflow_"):
         return "netflow"
+    if metric.startswith("appliance_"):
+        return "appliance"
+    if metric in ("vm_host_disconnected", "vm_datastore_pct", "vm_alarm"):
+        return "virtualization"
     if (_get(rule, "service_check_id") or _get(rule, "service_check_group_id")
-            or metric == "service_status"):
+            or metric in ("service_status", "service_tls_days", "service_response_ms")):
         return "service"
     return "device"
 
@@ -61,6 +65,14 @@ def describe_scope(rule, names: dict | None = None) -> dict:
         if _get(rule, "server_id"):
             return {"kind": "server", "label": f"Server {n.get('server') or ''}".strip(),
                     "target": target}
+        tag, group = _get(rule, "scope_tag"), _get(rule, "group_id")
+        if group or tag:
+            label = "Servers"
+            if group:
+                label += f" in {n.get('group') or 'a group'}"
+            if tag:
+                label += f" with tag {tag}"
+            return {"kind": "server_scope", "label": label, "target": target}
         return {"kind": "global", "label": "All monitored servers", "target": target}
     if fam == "apm":
         metric = _get(rule, 'metric')
@@ -74,9 +86,32 @@ def describe_scope(rule, names: dict | None = None) -> dict:
                 "target": target}
     if fam == "udt":
         return {"kind": "udt", "label": "User device tracking", "target": target}
+    if fam == "appliance":
+        metric = _get(rule, "metric")
+        if metric == "appliance_delivery_failures":
+            label = f"Notification channel {target}" if target else "Every notification channel"
+        elif metric == "appliance_sensor_offline":
+            label = f"Remote sensor {target}" if target else "Every remote sensor"
+        elif metric == "appliance_login_failures":
+            label = f"Account {target}" if target else "Every account and source address"
+        elif metric == "appliance_report_failed":
+            label = f"Report schedule {target}" if target else "Every report schedule"
+        else:
+            label = "ZenPlus appliance"
+        return {"kind": "appliance", "label": label, "target": target}
     if fam == "netflow":
         return {"kind": "netflow", "label": f"NetFlow — {_netflow_scope_label(rule)}", "target": target,
                 "flow_scope": _netflow_scope(rule)}
+    if fam == "virtualization":
+        if target:
+            label = f"Virtualisation source {n.get('virtualization_source') or ''}".strip()
+        elif _get(rule, "device_id"):
+            label = f"Virtualisation sources on device {n.get('device') or ''}".strip()
+        else:
+            label = "All virtualisation sources"
+        if _get(rule, "scope_tag"):
+            label += f", tagged {_get(rule, 'scope_tag')}"
+        return {"kind": "virtualization", "label": label, "target": target}
     if fam == "service":
         if _get(rule, "service_check_id"):
             return {"kind": "service_check",
@@ -95,9 +130,13 @@ def describe_scope(rule, names: dict | None = None) -> dict:
         return {"kind": "interface" if target else "device", "label": label, "target": target}
     parts = []
     kind = "global"
+    if _get(rule, "profile_id"):
+        # Template scope (migrate-193): the template and those customised from it.
+        parts.append(f"on template {n.get('template') or 'selected'}")
+        kind = "template"
     if _get(rule, "group_id"):
         parts.append(f"in group {n.get('group') or 'selected'}")
-        kind = "group"
+        kind = "group" if kind == "global" else kind
     if _get(rule, "device_type"):
         parts.append(f"of type {_get(rule, 'device_type')}")
         kind = "device_type" if kind == "global" else kind
@@ -112,6 +151,9 @@ def describe_scope(rule, names: dict | None = None) -> dict:
     from app.services.server_availability import is_down_rule
     noun = "All devices and servers" if is_down_rule(rule) else "All devices"
     label = noun + ((" " + ", ".join(parts)) if parts else "")
+    if _get(rule, "if_role"):
+        from app.services.interface_roles import ROLE_LABELS
+        label += f" — {ROLE_LABELS.get(_get(rule, 'if_role'), _get(rule, 'if_role')).lower()} interfaces"
     if target:
         label += f" — interface {target}"
     return {"kind": kind, "label": label, "target": target}
@@ -159,9 +201,17 @@ async def scope_names(db: AsyncSession, rule) -> dict:
         table = 'apm_synthetic_monitors' if _get(rule, 'metric') == 'apm_synthetic_down' else 'apm_slos'
         out['apm_entity'] = (await db.execute(text(f'SELECT name FROM {table} WHERE id::text=:id'),
                                             {'id': str(_get(rule, 'target'))})).scalar()
+    if family(rule) == "virtualization" and _get(rule, "target"):
+        try:
+            out["virtualization_source"] = (await db.execute(text(
+                "SELECT name FROM virtualization_connectors WHERE id::text = :id"),
+                {"id": str(_get(rule, "target"))})).scalar()
+        except Exception:
+            await db.rollback()
     queries = [
         ("device", "device_id", "SELECT hostname FROM devices WHERE id = :id"),
         ("group", "group_id", "SELECT name FROM device_groups WHERE id = :id"),
+        ("template", "profile_id", "SELECT name FROM device_profiles WHERE id = :id"),
         ("server", "server_id", "SELECT COALESCE(display_name, hostname) FROM servers WHERE id = :id"),
         ("service_check", "service_check_id", "SELECT name FROM service_checks WHERE id = :id"),
         ("service_group", "service_check_group_id", "SELECT name FROM service_check_groups WHERE id = :id"),
@@ -183,7 +233,17 @@ async def affected(db: AsyncSession, rule) -> dict:
         if fam == "server":
             if _get(rule, "server_id"):
                 return {"count": 1, "noun": "server", "shared": False}
-            n = (await db.execute(text("SELECT count(*) FROM servers"))).scalar() or 0
+            where, params = [], {}
+            if _get(rule, "scope_tag"):
+                where.append("EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(s.tags, '[]'::jsonb)) _t"
+                             " WHERE LOWER(_t) = LOWER(:tag))")
+                params["tag"] = str(_get(rule, "scope_tag")).strip()
+            if _get(rule, "group_id"):
+                where.append("EXISTS (SELECT 1 FROM device_group_member_closure c WHERE c.group_id = CAST(:g AS uuid)"
+                             " AND c.asset_kind = 'server' AND c.asset_id = s.id)")
+                params["g"] = str(_get(rule, "group_id"))
+            sql = "SELECT count(*) FROM servers s" + (" WHERE " + " AND ".join(where) if where else "")
+            n = (await db.execute(text(sql), params)).scalar() or 0
             return {"count": int(n), "noun": "servers", "shared": n != 1}
         if fam == "service":
             if _get(rule, "service_check_id"):
@@ -211,6 +271,25 @@ async def affected(db: AsyncSession, rule) -> dict:
             count = (await db.execute(text(f'SELECT count(*) FROM {table}{where}'),
                                      {'target': str(_get(rule, 'target'))})).scalar() or 0
             return {'count': count, 'noun': 'scenarios' if synthetic else 'SLOs', 'shared': count != 1}
+        if fam == "appliance":
+            metric = _get(rule, "metric")
+            if metric in ("appliance_delivery_failures", "appliance_sensor_offline") and not _get(rule, "target"):
+                table, noun = (("notification_channels", "notification channels")
+                               if metric == "appliance_delivery_failures" else ("sensors", "remote sensors"))
+                n = (await db.execute(text(f"SELECT count(*) FROM {table}"))).scalar() or 0
+                return {"count": int(n), "noun": noun, "shared": n != 1}
+            if metric == "appliance_report_failed" and not _get(rule, "target"):
+                n = (await db.execute(text(
+                    "SELECT count(*) FROM report_schedules WHERE enabled"))).scalar() or 0
+                return {"count": int(n), "noun": "report schedules", "shared": n != 1}
+            if metric == "appliance_login_failures" and not _get(rule, "target"):
+                return {"count": None, "noun": "accounts and source addresses", "shared": True}
+            return {"count": 1, "noun": "appliance", "shared": False}
+        if fam == "virtualization":
+            if _get(rule, "target"):
+                return {"count": 1, "noun": "virtualisation source", "shared": False}
+            n = (await db.execute(text("SELECT count(*) FROM virtualization_connectors"))).scalar() or 0
+            return {"count": int(n), "noun": "virtualisation sources", "shared": n != 1}
         if fam in ("apm", "udt"):
             return {"count": None, "noun": "APM services" if fam == "apm" else "tracked endpoints",
                     "shared": not bool(_get(rule, "target"))}
@@ -218,9 +297,16 @@ async def affected(db: AsyncSession, rule) -> dict:
         if _get(rule, "device_id"):
             return {"count": 1, "noun": "device", "shared": False}
         where, params = [], {}
+        if _get(rule, "profile_id"):
+            # The template and every template customised from it (migrate-193).
+            from app.services.device_templates.family import descendants
+            where.append("d.profile_id = ANY(CAST(:tpls AS uuid[]))")
+            params["tpls"] = await descendants(db, _get(rule, "profile_id"))
         if _get(rule, "group_id"):
-            where.append("d.group_id = :g")
-            params["g"] = _get(rule, "group_id")
+            # Group membership with subgroups (migrate-192), the same set the evaluators use.
+            where.append("(d.group_id = CAST(:g AS uuid) OR EXISTS (SELECT 1 FROM device_group_member_closure c "
+                         "WHERE c.group_id = CAST(:g AS uuid) AND c.asset_kind = 'device' AND c.asset_id = d.id))")
+            params["g"] = str(_get(rule, "group_id"))
         if _get(rule, "device_type"):
             where.append("d.device_type = :dt")
             params["dt"] = _get(rule, "device_type")
@@ -254,6 +340,11 @@ async def rule_in_user_scope(db: AsyncSession, rule, scope: list[str] | None) ->
     """Whether a tag-scoped user may create/change this rule."""
     if scope is None:
         return True
+    if family(rule) == "virtualization" and _get(rule, "target"):
+        # One virtualisation source: the same tag visibility as the connector API.
+        tags = (await db.execute(text("SELECT tags FROM virtualization_connectors WHERE id::text = :id"),
+                                 {"id": str(_get(rule, "target"))})).scalar()
+        return tags is not None and scoping.entity_visible(tags, scope)
     if _get(rule, "device_id"):
         tags = (await db.execute(text("SELECT tags FROM devices WHERE id = :id"),
                                  {"id": _get(rule, "device_id")})).scalar()
@@ -278,7 +369,7 @@ async def rule_in_user_scope(db: AsyncSession, rule, scope: list[str] | None) ->
         owner = (await resolve_exporter_owners(db, [ip])).get(ip) if ip else None
         return owner is not None and bool(set(owner.tags) & set(scope))
     tag = _get(rule, "scope_tag")
-    if tag and family(rule) == "device":
+    if tag and family(rule) in ("device", "server", "virtualization"):
         return bool(tag_set([tag]) & set(scope))
     return False
 
@@ -340,4 +431,12 @@ async def impact(db: AsyncSession, rule: dict) -> dict:
         "affected": await affected(db, rule),
         "open_alerts": int(open_alerts),
         "notify_channels": len(rule.get("notify_channels") or []),
+        # Assets this shared rule is disabled for (migrate-187).
+        "excluded_assets": (await rule_exclusion_counts(db)).get(str(rule["id"]), 0),
     }
+
+
+async def rule_exclusion_counts(db: AsyncSession) -> dict:
+    from app.services.alert_rule_exclusions import counts
+
+    return await counts(db)

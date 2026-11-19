@@ -1,9 +1,9 @@
 """NetFlow data-quality metadata (contract §11): ``/coverage`` and ``/retention``.
 
 ``/retention`` says how far back each flow table reaches — the TTL applied by
-Settings -> Storage and the oldest data actually present — so the UI can explain
+Settings -> System status and the oldest data actually present — so the UI can explain
 why a long range is answered from rollups or is partly unavailable (FE-11). It
-also carries the retention configured in Settings -> Storage and the state of
+also carries the retention configured in Settings -> System status and the state of
 the NetFlow v5 sampling repair (X-02).
 
 ``/coverage`` says, per exporter, how much of a window is backed by delivered
@@ -101,7 +101,7 @@ def _retention_payload(r: Retention) -> dict:
 
 
 async def _configured_days(db: AsyncSession) -> dict[str, int | None] | None:
-    """Retention configured in Settings -> Storage per flow table (table
+    """Retention configured in Settings -> System status per flow table (table
     override, else its category), None per key when nothing is configured
     (the table keeps its install-time TTL). The TTLs above are what is in
     force; a configured value that differs means applying it failed. None
@@ -123,7 +123,7 @@ async def _configured_days(db: AsyncSession) -> dict[str, int | None] | None:
 @router.get("/retention")
 async def netflow_retention(db: AsyncSession = Depends(get_db)):
     """How long each flow table keeps data and the oldest data present, what
-    Settings -> Storage has configured, and the state of the NetFlow v5
+    Settings -> System status has configured, and the state of the NetFlow v5
     sampling repair (X-02): rollup hours before ``verified_from`` could not be
     re-checked, ``unrecoverable_hours`` could not be corrected. ``sampling_repair``
     is null when its state cannot be read."""

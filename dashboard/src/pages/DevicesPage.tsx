@@ -1,4 +1,5 @@
 import { formatDeviceAvailability } from '@/components/devices/availability'
+import { DeviceTypeItems } from '@/components/forms/DeviceTypeItems'
 import { compareIpAddresses, compareListValues, isIpQuery, nextListSort, searchRank } from '@/lib/listOrdering'
 import { useStableListRows } from '@/hooks/useStableListRows'
 import { FLAP_HOLD_FLEET_TEXT, isFlapping, type DeviceFlapFields } from '@/components/devices/deviceStatus'
@@ -46,10 +47,14 @@ import {
   Upload,
   Waves,
   Wifi,
+  Wand2,
   X,
   XCircle,
   Database,
+  LayoutTemplate as TemplateIcon,
 } from 'lucide-react'
+import { useCan } from '@/stores/auth'
+import { AssignDialog as TemplateAssignDialog } from '@/pages/templates/TemplateDetailPage'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -263,6 +268,7 @@ function savePrefs(p: Prefs) {
 export function DevicesPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
+  const canRunRules = useCan()('discovery.manage_rules')
   const [params, setParams] = useSearchParams()
 
   // Global search uses search; keep older q bookmarks working as well.
@@ -321,6 +327,7 @@ export function DevicesPage() {
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [bulkTagOpen, setBulkTagOpen] = useState(false)
+  const [bulkTemplateOpen, setBulkTemplateOpen] = useState(false)
   const [columnsOpen, setColumnsOpen] = useState(false)
   // Arriving with a vendor / OS version in the address (a bookmark or a link) shows the panel that holds them.
   const [filtersOpen, setFiltersOpen] = useState(() => !!(params.get('vendor') || params.get('os_version')))
@@ -534,7 +541,22 @@ export function DevicesPage() {
   const pageStart = (currentPage - 1) * prefs.pageSize
   const pageRows = sorted.slice(pageStart, pageStart + prefs.pageSize)
   // Checkbox, name / IP, status and actions are pinned; the rest follow the Columns dialog.
-  const columnCount = 4 + HIDEABLE_COLUMNS.filter((c) => prefs.visible[c]).length
+  // Custom fields marked "show as a list column" (migrate-192).
+  const { data: cfColumns } = useQuery<{ fields: string[]; values: Record<string, Record<string, any>> }>({
+    queryKey: ['custom-field-list-values', 'device'],
+    queryFn: async () => (await api.get('/custom-fields/list-values', { params: { asset_kind: 'device' } })).data,
+    retry: false,
+    staleTime: 60_000,
+  })
+  const { data: cfDefs } = useQuery<Array<{ key: string; label: string; field_type: string }>>({
+    queryKey: ['custom-fields'],
+    queryFn: async () => (await api.get('/custom-fields')).data.data,
+    retry: false,
+    staleTime: 60_000,
+  })
+  const customColumns = (cfColumns?.fields || []).map((k) => ({ key: k, label: cfDefs?.find((f) => f.key === k)?.label || k,
+    boolean: cfDefs?.find((f) => f.key === k)?.field_type === 'boolean' }))
+  const columnCount = 4 + HIDEABLE_COLUMNS.filter((c) => prefs.visible[c]).length + customColumns.length
 
   useEffect(() => {
     // Reset to page 1 when filters/size cause overflow.
@@ -1055,13 +1077,26 @@ export function DevicesPage() {
                     Clear
                   </button>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Button variant="outline" size="sm" onClick={() => setBulkEditOpen(true)}>
                     <Pencil className="h-3.5 w-3.5" /> Edit
                   </Button>
                   <Button variant="outline" size="sm" onClick={() => setBulkTagOpen(true)}>
                     <Tags className="h-3.5 w-3.5" /> Tags
                   </Button>
+                  <Button variant="outline" size="sm" onClick={() => setBulkTemplateOpen(true)}>
+                    <TemplateIcon className="h-3.5 w-3.5" /> Template
+                  </Button>
+                  {canRunRules && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      title="Preview and apply the active discovery rules to the selected devices"
+                      onClick={() => navigate(`/discovery/rules/run?devices=${Array.from(selected).join(',')}`)}
+                    >
+                      <Wand2 className="h-3.5 w-3.5" /> Run discovery rules
+                    </Button>
+                  )}
                   <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
                     <Trash2 className="h-3.5 w-3.5" /> Delete
                   </Button>
@@ -1127,6 +1162,7 @@ export function DevicesPage() {
                     {prefs.visible.last_seen && (
                       <SortableTh label="Last Seen" col="last_seen" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
+                    {customColumns.map((c) => <Th key={c.key} className="whitespace-nowrap">{c.label}</Th>)}
                     <Th className="w-12 text-right">Actions</Th>
                   </Tr>
                 </THead>
@@ -1350,6 +1386,10 @@ export function DevicesPage() {
                             </span>
                           </Td>
                         )}
+                        {customColumns.map((c) => {
+                          const v = cfColumns?.values?.[d.id]?.[c.key]
+                          return <Td key={c.key} className="text-sm">{v === undefined || v === null ? <span className="text-muted">—</span> : c.boolean ? (v ? 'Yes' : 'No') : String(v)}</Td>
+                        })}
                         <Td className="text-right">
                           <RowMenu
                             onEdit={() => { setEditing(d); setFormOpen(true) }}
@@ -1493,6 +1533,13 @@ export function DevicesPage() {
         onDone={() => setSelected(new Set())}
       />
       <ManageTagsDialog open={manageTagsOpen} onOpenChange={setManageTagsOpen} />
+      {bulkTemplateOpen && (
+        <TemplateAssignDialog
+          presetIds={Array.from(selected)}
+          onClose={() => setBulkTemplateOpen(false)}
+          onDone={() => { setSelected(new Set()); qc.invalidateQueries({ queryKey: ['devices'] }) }}
+        />
+      )}
     </div>
   )
 }
@@ -2558,11 +2605,7 @@ function BulkEditDialog({
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__keep__">Keep existing</SelectItem>
-                    {DEVICE_TYPES.map((t) => (
-                      <SelectItem key={t} value={t}>
-                        <span className="capitalize">{t.replace('_', ' ')}</span>
-                      </SelectItem>
-                    ))}
+                    <DeviceTypeItems />
                   </SelectContent>
                 </Select>
               </FormField>
@@ -2572,7 +2615,7 @@ function BulkEditDialog({
                   <SelectContent>
                     <SelectItem value="__keep__">Keep existing</SelectItem>
                     <SelectItem value="__clear__"><span className="text-muted">Remove from group</span></SelectItem>
-                    {(groups || []).map((g) => (
+                    {(groups || []).filter((g: any) => (g.kind ?? 'static') === 'static').map((g) => (
                       <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
                     ))}
                   </SelectContent>

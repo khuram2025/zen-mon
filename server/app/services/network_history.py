@@ -13,6 +13,12 @@ A counter that went down is either a Counter32 wrap or a reset (reboot,
 counter clear, re-indexed interface). It is read as a wrap only when that is
 plausible for the elapsed time and the counter's recent rate; otherwise the
 delta is unknown (None), never a negative count or a 4-billion-error spike.
+
+The unicast packet counters get the same per-poll treatment so errors and
+discards can also be read as a share of traffic (``if_error_rate_pct``,
+``if_discard_rate_pct``, :func:`packet_rates`), and oper-status changes are
+flagged per poll for ``if_flaps`` (:func:`flap_series`); see
+docs/alert-notification-policy.md "Interface quality".
 """
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -35,6 +41,99 @@ COUNTER_DIRECTIONS = {
     'if_discards': ('if_in_discards', 'if_out_discards'),
 }
 COUNTER_INTERVAL = 'if_counter_interval_s'
+
+# Error and discard rates: the share of packets in the same poll interval
+# (if_error_rate_pct / if_discard_rate_pct), per direction, the worse one as
+# the rule metric. Packets are the unicast packet counters the poller already
+# collects (ifHCIn/OutUcastPkts, else ifIn/OutUcastPkts); ifInErrors and
+# ifInDiscards are not delivered, so they are added to the inbound packets,
+# while ifOutUcastPkts already counts the outbound ones. A direction with
+# fewer than MIN_RATE_PACKETS packets in the interval gives no reading: a
+# handful of errors on an idle port is not a 50 % error rate.
+MIN_RATE_PACKETS = 1000
+PACKET_DIRECTIONS = ('if_in_pkts', 'if_out_pkts')
+RATE_DIRECTIONS = {
+    'if_error_rate_pct': ('if_in_error_rate_pct', 'if_out_error_rate_pct'),
+    'if_discard_rate_pct': ('if_in_discard_rate_pct', 'if_out_discard_rate_pct'),
+}
+# Rate metric -> the per-poll counter its numerator comes from.
+RATE_COUNTERS = {'if_error_rate_pct': 'if_errors', 'if_discard_rate_pct': 'if_discards'}
+# 1 at a poll whose oper status went into or out of "up" against the previous
+# known poll, else 0 (None at an interface's first poll in the window).
+OPER_CHANGES = 'if_oper_changes'
+OPER_SEEN = 'if_oper_seen'
+DEFAULT_FLAP_WINDOW_S = 900
+
+
+def _direction_rate(bad, packets, *, inbound: bool):
+    """(percent or None, judged): judged is False for a quiet direction."""
+    if bad is None or packets is None:
+        return None, True
+    total = packets + bad if inbound else packets
+    if total < MIN_RATE_PACKETS:
+        return None, False
+    return min(100.0, bad * 100.0 / total), True
+
+
+def packet_rates(bad_in, bad_out, pkts_in, pkts_out):
+    """(inbound %, outbound %, worst %) for one poll interval's deltas.
+
+    A direction whose counters are unknown (reset, missing) makes the worst
+    unknown too: one healthy direction never stands in for an unmeasured
+    one. A quiet direction (under MIN_RATE_PACKETS) is left out; with both
+    quiet there is no reading. Never a breach from a tiny denominator.
+    """
+    rate_in, judged_in = _direction_rate(bad_in, pkts_in, inbound=True)
+    rate_out, judged_out = _direction_rate(bad_out, pkts_out, inbound=False)
+    if (judged_in and rate_in is None) or (judged_out and rate_out is None):
+        return rate_in, rate_out, None
+    known = [r for r in (rate_in, rate_out) if r is not None]
+    return rate_in, rate_out, (max(known) if known else None)
+
+
+def flap_series(changes, window_s: float = DEFAULT_FLAP_WINDOW_S):
+    """if_flaps: at each poll, the oper-status changes in the window ending there.
+
+    ``changes`` is an interface's OPER_CHANGES series. A count is given only
+    once the window is fully covered by polls of this fetch (the first poll
+    is at or before the window's start), so a short history never reads as
+    "stable". Changes shorter than one poll interval are not seen: the count
+    can be low, never high.
+    """
+    points = sorted((float(t), v) for t, v in changes or [])
+    if not points or not window_s or window_s <= 0:
+        return []
+    first = points[0][0]
+    flags = [t for t, v in points if v]
+    out = []
+    for t, _ in points:
+        if t - window_s < first:
+            continue
+        out.append((t, float(sum(1 for s in flags if t - window_s < s <= t))))
+    return out
+
+
+def rate_context(history: dict, metric: str, at: Optional[float] = None) -> Optional[dict]:
+    """``{'interval_s', 'in', 'out', 'in_packets', 'out_packets', 'in_count',
+    'out_count'}`` for the rate sample at ``at`` (as :func:`counter_context`):
+    per-direction percentages (None = unknown or too few packets), packets and
+    errors (or discards) counted in the interval."""
+    directions = RATE_DIRECTIONS.get(metric)
+    if not directions or not history:
+        return None
+    stamps = [t for t, _ in history.get(metric, []) if at is None or t <= at]
+    if not stamps:
+        return None
+    stamp = max(stamps)
+
+    def at_stamp(name):
+        return dict(history.get(name, [])).get(stamp)
+
+    count_in, count_out = COUNTER_DIRECTIONS[RATE_COUNTERS[metric]]
+    return {'interval_s': at_stamp(COUNTER_INTERVAL),
+            'in': at_stamp(directions[0]), 'out': at_stamp(directions[1]),
+            'in_packets': at_stamp(PACKET_DIRECTIONS[0]), 'out_packets': at_stamp(PACKET_DIRECTIONS[1]),
+            'in_count': at_stamp(count_in), 'out_count': at_stamp(count_out)}
 
 
 def counter32_delta(prev, cur, elapsed_s, *, recent_rate: Optional[float] = None,
@@ -131,7 +230,8 @@ def fetch_history(metrics, since, until):
     if set(metrics) & INTERFACE_METRICS:
         rows = client.query('''SELECT toString(device_id), if_index,
                 toUnixTimestamp64Milli(timestamp) / 1000,
-                in_bps, out_bps, in_errors, out_errors, in_discards, out_discards, oper_status, in_octets, out_octets
+                in_bps, out_bps, in_errors, out_errors, in_discards, out_discards, oper_status, in_octets, out_octets,
+                in_ucast_pkts, out_ucast_pkts
             FROM zenplus.snmp_if_metrics
             WHERE timestamp >= %(since)s AND timestamp <= %(until)s
             ORDER BY device_id, if_index, timestamp LIMIT 1000000''', parameters=params).result_rows
@@ -139,8 +239,11 @@ def fetch_history(metrics, since, until):
             raise RuntimeError('Network interface history limit reached')
         prior = {}
         prior_octets = {}
+        prior_oper = {}
         recent_rate = {}  # (interface, counter position) -> errors/s of its last known delta
-        for did, idx, stamp, ibps, obps, ie, oe, idisc, odisc, oper, in_octets, out_octets in rows:
+        for row in rows:
+            did, idx, stamp, ibps, obps, ie, oe, idisc, odisc, oper, in_octets, out_octets = row[:12]
+            in_pkts, out_pkts = (tuple(row[12:14]) + (None, None))[:2]
             key = (did, int(idx))
             series = interfaces[key]
             # The storage contract historically writes zero for a new/reset
@@ -157,17 +260,29 @@ def fetch_history(metrics, since, until):
             prior_octets[key] = (in_octets, out_octets)
             for metric, value in [('if_in_bps', ibps), ('if_out_bps', obps), ('if_oper_status', oper or None)]:
                 series[metric].append((float(stamp), value))
+            # Oper-status changes into or out of "up", one flag per known
+            # sample after the interface's first one (if_flaps counts them).
+            if oper:
+                # Kept even where entities() drops if_oper_status (admin-down,
+                # never-up ports): a flapping port an operator shut down still
+                # needs its changes counted down to zero.
+                series[OPER_SEEN].append((float(stamp), int(oper)))
+                if key in prior_oper:
+                    series[OPER_CHANGES].append((float(stamp), float((prior_oper[key] == 1) != (int(oper) == 1))))
+                else:
+                    series[OPER_CHANGES].append((float(stamp), None))
+                prior_oper[key] = int(oper)
             # Per-direction deltas over the poll interval: a plausible Counter32
             # wrap is counted, a reset is unknown — never negative errors or a
             # 4-billion-error spike. The rule metric stays in + out.
-            counts = (ie, oe, idisc, odisc)
+            counts = (ie, oe, idisc, odisc, in_pkts, out_pkts)
             octets = (in_octets, out_octets)
             if key in prior and stamp > prior[key][0]:
                 before_stamp, before, before_oct = prior[key]
                 elapsed = float(stamp) - float(before_stamp)
                 reset = _octets_reset(before_oct, octets)
                 deltas = []
-                for i in range(4):
+                for i in range(len(counts)):
                     d = None if reset else counter32_delta(
                         before[i], counts[i], elapsed, recent_rate=recent_rate.get((key, i)))
                     if d is not None and elapsed > 0:
@@ -183,8 +298,29 @@ def fetch_history(metrics, since, until):
                     series[name_in].append((at, d_in))
                     series[name_out].append((at, d_out))
                     series[metric].append((at, None if d_in is None or d_out is None else d_in + d_out))
+                series[PACKET_DIRECTIONS[0]].append((at, deltas[4]))
+                series[PACKET_DIRECTIONS[1]].append((at, deltas[5]))
+                for metric, (i_in, i_out) in (('if_error_rate_pct', (0, 1)), ('if_discard_rate_pct', (2, 3))):
+                    rate_in, rate_out, worst = packet_rates(deltas[i_in], deltas[i_out], deltas[4], deltas[5])
+                    name_in, name_out = RATE_DIRECTIONS[metric]
+                    series[name_in].append((at, rate_in))
+                    series[name_out].append((at, rate_out))
+                    series[metric].append((at, worst))
             prior[key] = (stamp, counts, octets)
     return scalar, interfaces
+
+
+# Device metrics written once per component as "<key>_<instance>": the
+# poller's ENTITY-SENSOR-MIB collector writes "temperature_<entPhysicalIndex>"
+# (Celsius sensors), never a bare "temperature".
+COMPONENT_SCALARS = frozenset({'temperature'})
+
+
+def is_component_root(metric) -> bool:
+    """Whether a condition metric is evaluated per component series
+    (template series ``tpl_<key>[_<row>]``, per-sensor temperature)."""
+    m = str(metric or '')
+    return m.startswith('tpl_') or m in COMPONENT_SCALARS
 
 
 def entities(conditions, device_series, interface_series, interfaces, target_matches):
@@ -209,7 +345,7 @@ def entities(conditions, device_series, interface_series, interfaces, target_mat
                 series.pop('if_oper_status', None)
             yield iface['if_index'], iface['if_name'] or iface['if_descr'], series, {'if_name': iface['if_name']}
         return
-    roots = [m for m in metrics if m.startswith('tpl_')]
+    roots = [m for m in metrics if is_component_root(m)]
     suffixes = {key[len(root):] for root in roots for key in device_series
                 if key == root or key.startswith(root + '_')}
     if not roots:

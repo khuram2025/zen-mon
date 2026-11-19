@@ -49,7 +49,8 @@ def test_set_interval_writes_only_the_fixed_template(helper, tmp_path):
     assert text == ("# Managed by zenplus-updater-timer-helper — do not edit by hand.\n"
                     "[Timer]\nOnUnitActiveSec=\nOnUnitActiveSec=6h\n")
     assert run.calls == [["/bin/systemctl", "daemon-reload"],
-                         ["/bin/systemctl", "restart", "zenplus-updater.timer"]]
+                         # try-restart: a timer stopped on purpose is never started by a settings save
+                         ["/bin/systemctl", "try-restart", "zenplus-updater.timer"]]
     assert (dropins / "override.conf").stat().st_mode & 0o777 == 0o644
 
 

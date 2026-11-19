@@ -7,7 +7,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CloudLightning, Info, Loader2, Save } from 'lucide-react'
+import { Activity, CloudLightning, Info, Loader2, Save } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
@@ -26,11 +26,14 @@ import {
   STORM_FAMILIES, STORM_SCOPES, stormExample, stormFromApi, stormPolicyFromApi, stormSentence,
   validateStormPolicy, type Storm, type StormPolicy,
 } from '@/features/escalation/storm'
+import { EventExpiryCard } from './EventExpiryCard'
 
 export function StormsTab({ canManage, focusId }: { canManage: boolean; focusId?: string | null }) {
   return (
     <div className="space-y-4">
       <StormPolicyCard canManage={canManage} />
+      <FlapNoticeCard canManage={canManage} />
+      <EventExpiryCard canManage={canManage} />
       <StormHistoryCard focusId={focusId ?? null} />
     </div>
   )
@@ -135,6 +138,49 @@ function StormPolicyCard({ canManage }: { canManage: boolean }) {
             </Button>
           </div>
         )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * "Flapping started / stopped" notices. They are always recorded in the
+ * alert list; sending them to channels is off by default (1.25.18), because
+ * the flap hold already protects people and the notices were a flood of their
+ * own. Logic: app.services.device_flap_notice_service.
+ */
+function FlapNoticeCard({ canManage }: { canManage: boolean }) {
+  const qc = useQueryClient()
+  const q = useQuery({
+    queryKey: ['alerts', 'flap-notices'],
+    queryFn: async () => (await api.get('/alerts/flap-notices')).data as { send: boolean },
+  })
+  const save = useMutation({
+    mutationFn: async (send: boolean) => (await api.put('/alerts/flap-notices', { send })).data,
+    onSuccess: (_d, send) => {
+      toast.success(send ? 'Flapping notices will be sent' : 'Flapping notices stay in the alert list')
+      qc.invalidateQueries({ queryKey: ['alerts', 'flap-notices'] })
+    },
+    onError: (e) => toast.error('Save failed', apiErrorMessage(e)),
+  })
+  if (q.isLoading) return <Skeleton className="h-20 w-full" />
+  if (q.isError && !q.data) return <QueryFailure error={q.error} what="flapping notice setting" onRetry={() => void q.refetch()} retrying={q.isFetching} />
+  const send = !!q.data?.send
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-2 p-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-primary" aria-hidden /> Flapping notices</h2>
+          <p className="text-xs text-muted">
+            {send
+              ? 'A device that starts or stops flapping is announced to the channels of the rules whose alerts are being held.'
+              : 'Recorded in the alert list only. Status alerts of a flapping device are still held until its status lasts, then sent.'}
+          </p>
+        </div>
+        <label className="flex shrink-0 items-center gap-2 text-sm">
+          <Switch checked={send} disabled={!canManage || save.isPending} onCheckedChange={(v) => save.mutate(v)} aria-label="Send flapping notices to channels" />
+          Send to channels
+        </label>
       </CardContent>
     </Card>
   )

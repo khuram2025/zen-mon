@@ -66,7 +66,7 @@ def test_default_texts_are_the_documented_ones():
         "notifications for this device are held: a status that lasts 10 minutes still "
         "notifies. Flapping ends after 10 minutes without a change. Other alerts "
         "(interfaces, services, metrics) are not affected.")
-    assert start["sms_template"] == ("ZenPlus — sw1 (10.0.0.1) is flapping: 5 status changes in "
+    assert start["sms_template"] == ("ZenPlus - sw1 (10.0.0.1) is flapping: 5 status changes in "
                                      "30 min. Up/down alerts held until a status lasts 10 min.")
     stop = fns._render("stop", {"hostname": "sw1", "ip": "10.0.0.1", "STATUS": "UP",
                                 "since": "2026-10-14 09:36 UTC",
@@ -87,7 +87,7 @@ def test_a_latency_loss_episode_never_says_down_alerts_are_held():
         "(latency/loss) notifications for this device are held: a status that lasts 10 minutes "
         "still notifies. Flapping ends after 10 minutes without a change. Down notifications "
         "and other alerts (interfaces, services, metrics) are not affected.")
-    assert start["sms_template"] == ("ZenPlus — sw1 (10.0.0.1) is flapping: 5 status changes in "
+    assert start["sms_template"] == ("ZenPlus - sw1 (10.0.0.1) is flapping: 5 status changes in "
                                      "30 min. Degraded alerts held until a status lasts 10 min.")
     assert "Up/down" not in start["email_body"] + start["sms_template"]
     assert ap.flap_held_notice("performance", 10) == (
@@ -119,7 +119,9 @@ def _rule(trigger_on="any", metric="ping_status", operator="eq", threshold=0, **
     # The seeded rules (trigger_on defaults to 'any').
     (_rule(), True, False),                                        # Device Down: ping_status == 0
     (_rule(metric="rtt", operator="gt", threshold=100), False, True),        # High Latency
-    (_rule(metric="packet_loss", operator="gt", threshold=5), True, True),   # Packet Loss
+    # Packet Loss: a move into down has no loss reading (audit N-01), so an
+    # up/down flap never holds it.
+    (_rule(metric="packet_loss", operator="gt", threshold=5), False, True),
     # The wizard's explicit triggers store ping_status == 0 whatever the trigger.
     (_rule(trigger_on="down"), True, False),
     (_rule(trigger_on="degraded"), False, True),
@@ -148,7 +150,7 @@ def test_only_rules_a_flap_holds_are_told(rule, reach, perf):
 
 @pytest.mark.parametrize("new_status,values", [
     # A move into down got no reply: no round-trip time (None), never 0 ms.
-    ("down", {"ping_status": 0.0, "rtt": None, "packet_loss": 100.0}),
+    ("down", {"ping_status": 0.0, "rtt": None, "packet_loss": None}),
     ("degraded", {"ping_status": 1.0, "rtt": 250.0, "packet_loss": 40.0}),
 ])
 def test_a_rule_the_status_path_fires_is_never_dropped_from_the_notices(new_status, values):
@@ -205,6 +207,10 @@ def world(pg_db, monkeypatch):
     monkeypatch.setattr(fns, "_SUPPORTED", False)
     monkeypatch.setattr(alert_engine, "_NOTIFY_WHILE_FLAPPING_SUPPORTED", False)
     pg_db.execute("DELETE FROM alerts; DELETE FROM alert_rules; DELETE FROM alert_silences")
+    # Sending notices to channels is off by default since 1.25.18; these tests
+    # cover the sending path, so they turn it on (see test_notices_off_*).
+    pg_db.execute("INSERT INTO system_settings (key, value) VALUES ('alert_flap_notices', '{\"send\": true}')"
+                  " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
     # The senders handle PagerDuty channels, but migrate-001's type CHECK does
     # not list the type yet; lift it here so a stateful channel can be modelled.
     pg_db.execute("ALTER TABLE notification_channels DROP CONSTRAINT notification_channels_type_check")
@@ -375,16 +381,17 @@ async def test_the_seeded_device_down_rule_still_hears_of_up_down_flapping(world
 
 @pytest.mark.asyncio
 async def test_seeded_metric_rules_hear_only_of_the_flapping_they_can_fire_on(world):
-    """High Latency (rtt > 100) never fires on a move into down (no answer, no
-    round-trip time); Packet Loss (> 5%) does (100% loss)."""
+    """Neither High Latency (rtt > 100) nor Packet Loss (> 5%) fires on a move
+    into down: an unanswered check has no round-trip time and no loss reading
+    (audit N-01). Only Device Down hears of up/down flapping."""
     w, ch = world, world.ch
     down, latency, loss = add_seeded_rules(w, down=[ch.mail], latency=[ch.hook], loss=[ch.chat])
     add_episode(w, kind="reachability")
     await sweep(w.db)
     [call] = w.calls
-    assert call["channels"] == [ch.mail, ch.chat]
+    assert call["channels"] == [ch.mail]
     [row] = notices(w)
-    assert sorted(row.meta["target_rule_ids"]) == sorted([down, loss])
+    assert sorted(row.meta["target_rule_ids"]) == [down]
 
     w.calls.clear()
     w.db.execute("DELETE FROM device_flap_episodes")
@@ -782,3 +789,29 @@ async def test_device_counts_ignore_notice_rows(world, monkeypatch):
     counts = out["devices"][str(w.device)]
     assert counts["total"] == 1 and counts["info"] == 0
     assert counts["active"] == 1 and counts["critical"] == 1
+
+
+@pytest.mark.asyncio
+async def test_notices_off_by_default_records_the_notice_and_sends_nothing(world):
+    """Audit N-03: flap notices were mailed like real alerts. With the setting
+    absent (the default) the start notice is recorded in-app, nobody is
+    messaged, and the stop ends silently."""
+    w, ch = world, world.ch
+    w.db.execute("DELETE FROM system_settings WHERE key = 'alert_flap_notices'")
+    add_seeded_rules(w, down=[ch.mail])
+    ep = add_episode(w, kind="reachability")
+    out = await sweep(w.db)
+    assert out["started"] == 0 and out["skipped"] == 1
+    assert w.calls == []
+    [row] = notices(w)
+    assert row.meta["notified"] is False and row.meta["notices_off"] is True
+    w.db.execute("UPDATE device_flap_episodes SET ended_at = now() WHERE id = $1", ep)
+    out = await sweep(w.db)
+    assert w.calls == [] and len(notices(w)) == 1
+
+
+def test_flap_notice_settings_clean():
+    assert fns.clean_settings(None) == {"send": False}
+    assert fns.clean_settings({"send": True}) == {"send": True}
+    assert fns.clean_settings('{"send": true}') == {"send": True}
+    assert fns.clean_settings({"send": "yes"}) == {"send": False}

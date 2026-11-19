@@ -1,4 +1,5 @@
 from uuid import UUID
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, text, cast, String, or_, and_, table, column
 from sqlalchemy.orm import selectinload
@@ -85,6 +86,7 @@ _SNMP_PLAIN_FIELDS = (
 # columns cannot give: the OS version of devices whose version only a monitoring template reports (PAN-OS, F5), and a
 # version without the vendor's decoration ("7.2.5", not "FortiOS v7.2.5,build1517").
 _IDENTITY = table("inventory_identity", column("asset_kind"), column("asset_id"), column("os_version"))
+_CLOSURE = table("device_group_member_closure", column("group_id"), column("asset_kind"), column("asset_id"))
 
 UNKNOWN = "unknown"
 FACET_LIMIT = 200
@@ -136,7 +138,9 @@ def _device_conditions(
     if managed_by:
         conds.append(Device.managed_by_device_id == managed_by)
     if group_id:
-        conds.append(Device.group_id == group_id)
+        # Members of the group and its subgroups, however they joined (migrate-192).
+        conds.append(or_(Device.group_id == group_id, Device.id.in_(
+            select(_CLOSURE.c.asset_id).where(_CLOSURE.c.group_id == group_id, _CLOSURE.c.asset_kind == "device"))))
     if device_type:
         conds.append(Device.device_type == device_type)
     if location:
@@ -365,6 +369,11 @@ async def create_device(db: AsyncSession, data: DeviceCreate, user_id: UUID | No
         device.snmp_priv_passphrase = crypto.encrypt(data.snmp_priv_passphrase)
     if data.snmp_credential_id:
         await apply_credential(db, device, data.snmp_credential_id)
+    if device.profile_id is not None:
+        device.profile_source = "manual"
+        device.profile_assigned_at = datetime.now(timezone.utc)
+    if data.device_type and data.device_type != "other":
+        device.device_type_source = "manual"
     db.add(device)
     await db.commit()
     await db.refresh(device)
@@ -399,6 +408,19 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
     # for credential-derived fields (version, port, community, v3 secrets).
     credential_id = update_data.pop("snmp_credential_id", "__missing__")
     stops_polling = update_data.get("ping_enabled") is False and bool(device.ping_enabled)
+
+    # Device Templates (migrate-189): an operator's template choice is recorded
+    # as manual (the classifier never overrides it), and the old template's
+    # readings go so they cannot linger on the device page.
+    if "profile_id" in update_data and update_data["profile_id"] != device.profile_id:
+        await db.execute(text("DELETE FROM device_template_values WHERE device_id = :id"), {"id": device.id})
+        chosen = update_data["profile_id"] is not None
+        device.profile_source = "manual" if chosen else None
+        device.profile_assigned_at = datetime.now(timezone.utc) if chosen else None
+        device.profile_suggested_id = None
+        device.profile_suggested_at = None
+    if "device_type" in update_data and update_data["device_type"] != device.device_type:
+        device.device_type_source = "manual"
 
     for key, value in update_data.items():
         setattr(device, key, value)
@@ -486,10 +508,15 @@ async def bulk_import_devices(
     errors = []
 
     # Pre-fetch group name -> id mapping
-    group_result = await db.execute(select(DeviceGroup.id, DeviceGroup.name))
+    group_result = await db.execute(select(DeviceGroup.id, DeviceGroup.name).where(DeviceGroup.kind == "static"))
     group_map = {row[1].lower(): row[0] for row in group_result.all()}
+    known_types = set((await db.execute(text("SELECT key FROM device_types"))).scalars().all())
 
     for i, item in enumerate(items):
+        if item.device_type and known_types and item.device_type not in known_types:
+            skipped += 1
+            errors.append(f"Row {i+1}: unknown device type '{item.device_type}' (skipped)")
+            continue
         try:
             # Resolve group name to ID
             group_id = None
@@ -584,5 +611,9 @@ async def get_device_groups(db: AsyncSession) -> list[dict]:
             "description": group.description,
             "color": group.color,
             "device_count": row[1],
+            # Device groups (migrate-192): only static groups can be a device's own group.
+            "kind": group.kind,
+            "parent_id": group.parent_id,
+            "member_count": group.member_count,
         })
     return groups

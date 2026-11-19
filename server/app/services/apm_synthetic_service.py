@@ -76,6 +76,17 @@ _OPS = {
 }
 
 
+# What an assertion wanted, in words: failures read "status 503, expected
+# 200", never the operator key "status 503 eq 200".
+_EXPECT = {"eq": "expected", "neq": "expected not", "lt": "expected below",
+           "lte": "expected at most", "gt": "expected above", "gte": "expected at least",
+           "contains": "expected to contain"}
+
+
+def _expected(op: str, want, unit: str = "") -> str:
+    return f"{_EXPECT.get(op, 'expected ' + str(op))} {want}{unit}"
+
+
 def _substitute(template: str, variables: dict[str, Any]) -> str:
     def repl(m: re.Match) -> str:
         return str(variables.get(m.group(1), m.group(0)))
@@ -109,10 +120,10 @@ def _check_assertion(a: dict, *, status_code: int, body: str,
     want = a.get("value")
     if typ == "status_code":
         ok = _OPS.get(op, _OPS["eq"])(status_code, int(want or 200))
-        return ok, f"status {status_code} {op} {want}"
+        return ok, f"status {status_code}, {_expected(op, want if want not in (None, '') else 200)}"
     if typ == "latency_ms":
         ok = _OPS.get(op, _OPS["lt"])(latency_ms, float(want or 0))
-        return ok, f"latency {latency_ms:.0f}ms {op} {want}ms"
+        return ok, f"latency {latency_ms:.0f} ms, {_expected(op, want, ' ms')}"
     if typ == "body_contains":
         ok = str(want or "") in body
         return ok, f"body contains {str(want)[:40]!r}"
@@ -131,8 +142,52 @@ def _check_assertion(a: dict, *, status_code: int, body: str,
         except (TypeError, ValueError):
             cmp_val = str(val)
         ok = _OPS.get(op, _OPS["eq"])(cmp_val, want)
-        return ok, f"json {a.get('path')}={str(val)[:40]} {op} {want}"
+        return ok, f"json {a.get('path')} is {str(val)[:40]}, {_expected(op, want)}"
     return False, f"unknown assertion type {typ!r}"
+
+
+_PHASES = {"connect_tcp": "connect_ms", "start_tls": "tls_ms", "send_request_headers": "send_ms",
+           "send_request_body": "send_ms", "receive_response_headers": "ttfb_ms",
+           "receive_response_body": "download_ms"}
+
+
+class _Timing:
+    """Collects connection/request phase durations from the HTTP client's
+    trace events (``connection.connect_tcp.started`` ... ``.complete``).
+    Phases repeat across redirects and add up; a reused connection has no
+    connect/TLS time."""
+
+    def __init__(self):
+        self.ms: dict[str, float] = {}
+        self.server_ip = ""
+        self._open: dict[str, float] = {}
+
+    async def __call__(self, event: str, info: dict) -> None:
+        self.record(event, info)
+
+    def record(self, event: str, info: dict | None = None) -> None:
+        parts = event.split(".")
+        if len(parts) < 3:
+            return
+        phase, edge = parts[-2], parts[-1]
+        key = _PHASES.get(phase)
+        if not key:
+            return
+        now = time.monotonic()
+        if edge == "started":
+            self._open[phase] = now
+        elif edge in ("complete", "failed") and phase in self._open:
+            self.ms[key] = self.ms.get(key, 0.0) + (now - self._open.pop(phase)) * 1000
+            if phase == "connect_tcp" and edge == "complete":
+                try:
+                    addr = (info or {}).get("return_value").get_extra_info("server_addr")
+                    self.server_ip = str(addr[0]) if addr else ""
+                except Exception:
+                    pass
+
+    def result(self) -> dict:
+        return {k: round(self.ms.get(k, 0.0), 1)
+                for k in ("connect_ms", "tls_ms", "send_ms", "ttfb_ms", "download_ms")}
 
 
 async def run_scenario(monitor: dict) -> dict:
@@ -167,9 +222,16 @@ async def run_scenario(monitor: dict) -> dict:
             s_start = time.monotonic()
             status_code, resp_body, body_json = 0, "", None
             step_error = ""
+            timing = _Timing()
+            resp_meta: dict = {}
             try:
-                resp = await client.request(method, url, headers=headers, content=body)
+                resp = await client.request(method, url, headers=headers, content=body,
+                                            extensions={"trace": timing})
                 status_code = resp.status_code
+                resp_meta = {"response_bytes": len(resp.content),
+                             "content_type": (resp.headers.get("content-type") or "")[:100],
+                             "redirects": len(resp.history),
+                             "http_version": resp.http_version}
                 resp_body = resp.text[:65536]
                 try:
                     body_json = resp.json()
@@ -222,6 +284,7 @@ async def run_scenario(monitor: dict) -> dict:
                 "status_code": status_code, "ms": round(latency_ms, 1),
                 "error": step_error, "asserts": asserts_out,
                 "body_snippet": "" if ok else resp_body[:MAX_BODY_CAPTURE],
+                "timing": timing.result(), "server_ip": timing.server_ip, **resp_meta,
             })
             if not ok:
                 failed_step = name

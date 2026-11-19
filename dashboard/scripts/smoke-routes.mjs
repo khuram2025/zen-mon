@@ -64,6 +64,14 @@ if (inventoryBlock) {
   }
 }
 
+// Same for /discovery: its children follow self-closing /services routes, so read its own block.
+const discoveryBlock = /<Route\s+path="discovery"[^>]*>([\s\S]*?)<\/Route>/.exec(app)
+if (discoveryBlock) {
+  for (const child of discoveryBlock[1].matchAll(/<Route\s+path="([^"]+)"/g)) {
+    routePaths.add(`/discovery/${child[1]}`)
+  }
+}
+
 const requiredRoutes = [
   '/',
   '/login',
@@ -80,6 +88,10 @@ const requiredRoutes = [
   '/maps',
   '/maps/manual',
   '/discovery',
+  '/discovery/rules',
+  '/discovery/rules/new',
+  '/discovery/rules/run',
+  '/discovery/rules/:id',
   '/mibs',
   '/alerts',
   '/alert-rules',
@@ -182,4 +194,15 @@ if (!/const \[scope, setScope\] = useState\('applications'\)/.test(networkCaptur
 
 if (!process.exitCode) {
   console.log(`route smoke passed: ${requiredRoutes.length} required routes and dashboard nav links verified`)
+}
+
+// A folder in public/ is served as-is by the appliance web server, so one
+// named like an app route (public/maps vs /maps) answers that address with
+// 403 on a direct load or refresh. Static folders must never shadow routes.
+{
+  const publicDir = path.join(root, "public")
+  const routeHeads = new Set([...routePaths].map((p) => p.split("/")[1]).filter(Boolean))
+  for (const entry of fs.readdirSync(publicDir, { withFileTypes: true })) {
+    if (entry.isDirectory() && routeHeads.has(entry.name)) fail(`public/${entry.name}/ shadows the /${entry.name} route; move it`)
+  }
 }

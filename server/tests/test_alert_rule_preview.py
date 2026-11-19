@@ -120,17 +120,18 @@ def test_preview_returns_rendered_email(preview_client):
     assert alert["email_html"].lstrip().startswith("<!DOCTYPE html>")
     assert "Core router down" in alert["email_html"]
     assert "core-router-01" in alert["email_text"]
-    assert alert["sms_body"].startswith("ZenPlus CRITICAL — Core router down:")
+    assert alert["sms_body"].startswith("ZenPlus CRITICAL - Core router down at Site Riyadh-HQ:")
 
     for message in (alert, body["recovery"]):
-        stamp = datetime.fromisoformat(message["iso_timestamp"]).strftime("%Y-%m-%d %H:%M UTC")
-        assert message["sms_body"].endswith("\n" + stamp)
+        # The sentence already states the event's time: no second stamp line.
+        at = datetime.fromisoformat(message["iso_timestamp"]).strftime("%H:%M")
+        assert f" at {at}" in message["sms_body"] and "\n" not in message["sms_body"]
 
     assert "100%" in alert["email_text"]
     assert "unavailable (no reply)" in alert["email_text"]
 
     # recovery_alert is on, so the resolved mail renders too.
-    assert body["recovery"]["subject"] == "[CRITICAL] Resolved: Core router down — core-router-01 (10.0.0.1)"
+    assert body["recovery"]["subject"] == "[RESOLVED] Core router down — core-router-01 (10.0.0.1)"
 
     # The editor needs both what is stored (all defaults here) and the text
     # those defaults resolve to.
@@ -161,7 +162,10 @@ def test_preview_endpoint_applies_configured_timezone(preview_client, monkeypatc
     assert response.status_code == 200, response.text
     for message in (response.json()['alert'], response.json()['recovery']):
         assert message['iso_timestamp'] == '2026-11-03T13:00:00+00:00'
-        assert message['sms_body'].endswith('\n' + expected)
+        # The SMS sentence states the local time ("went down at 16:00"), so
+        # no second date line is added (audit T-02).
+        assert f"at {expected.split(' ')[1]}" in message['sms_body']
+        assert '\n' not in message['sms_body']
         assert expected in message['email_html']
         assert expected in message['email_text']
     assert db.writes == []
@@ -237,7 +241,7 @@ def test_wizard_seeded_template_is_treated_as_no_template(preview_client):
     assert re.fullmatch(r"Router core-router-01 \(10\.0\.0\.1\) went down at \d\d:\d\d: "
                         r"it does not answer ping\.", alert["email_body"])
     assert "Metric: ping_status" not in alert["email_body"]
-    assert alert["sms_body"].startswith("ZenPlus CRITICAL — Core router down:")
+    assert alert["sms_body"].startswith("ZenPlus CRITICAL - Core router down at Site Riyadh-HQ:")
 
 
 def test_hand_written_template_is_left_alone(preview_client):

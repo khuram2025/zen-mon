@@ -22,6 +22,7 @@ from app.services import device_service, license_capacity, metric_service
 from app.services import controller_children as _children
 from app.services import device_status_explanation as explain
 from app.services import device_status_machine as dsm
+from app.services import maintenance_windows as _mw
 from app.services.audit_service import write_audit_log
 from app.api.v1.snmp import (
     _snmpget,
@@ -304,11 +305,12 @@ async def dashboard_uptime_stats(
             win_rows = (await db.execute(
                 text(f"""
                     SELECT d.id AS device_id,
-                           GREATEST(m.starts_at, :from_ts) AS s,
-                           LEAST(m.ends_at, :to_ts) AS e
+                           GREATEST(o.occ_start, :from_ts) AS s,
+                           LEAST(o.occ_end, :to_ts) AS e
                     FROM device_maintenance m
+                    {_mw.occurrences_join(":from_ts", ":to_ts")}
                     JOIN devices d ON {MAINT_COVERS_DEVICE_SQL}
-                    WHERE m.starts_at < :to_ts AND m.ends_at > :from_ts
+                    WHERE o.occ_start < :to_ts AND o.occ_end > :from_ts
                       {"AND d.id = CAST(:one_device AS uuid)" if device_id is not None else ""}
                     LIMIT 500
                 """),
@@ -412,9 +414,10 @@ async def _controller_availability(db: AsyncSession, since: datetime, until: dat
     buckets = await asyncio.to_thread(_children.availability_buckets, contexts, since, until, step)
     windows: dict[str, list[tuple[datetime, datetime]]] = {}
     for r in (await db.execute(text(f"""
-        SELECT d.id::text AS device_id, GREATEST(m.starts_at, :s) AS s, LEAST(m.ends_at, :e) AS e
-        FROM device_maintenance m JOIN devices d ON {MAINT_COVERS_DEVICE_SQL}
-        WHERE m.starts_at < :e AND m.ends_at > :s AND d.id = ANY(CAST(:ids AS uuid[]))
+        SELECT d.id::text AS device_id, GREATEST(o.occ_start, :s) AS s, LEAST(o.occ_end, :e) AS e
+        FROM device_maintenance m {_mw.occurrences_join(":s", ":e")}
+        JOIN devices d ON {MAINT_COVERS_DEVICE_SQL}
+        WHERE o.occ_start < :e AND o.occ_end > :s AND d.id = ANY(CAST(:ids AS uuid[]))
     """), {"s": since, "e": until, "ids": [str(c.child["id"]) for c in contexts]})).mappings().all():
         windows.setdefault(r["device_id"], []).append((r["s"], r["e"]))
     return {str(c.child["id"]): _children.availability_from_buckets(
@@ -638,12 +641,26 @@ async def bulk_tag_devices(
     return {"updated": updated}
 
 
+async def _check_device_type(db: AsyncSession, key) -> None:
+    """422 for a device type the catalogue (device_types) does not know."""
+    from app.schemas.snmp import BUILTIN_DEVICE_TYPES
+    if key is None or key in BUILTIN_DEVICE_TYPES:
+        return
+    known = (await db.execute(text("SELECT 1 FROM device_types WHERE key = :k"), {"k": key})).first()
+    if not known:
+        raise HTTPException(status_code=422, detail=f"Unknown device type '{key}'")
+
+
 @router.post("", response_model=DeviceResponse, status_code=201)
 async def create_device(
     data: DeviceCreate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("devices.manage")),
 ):
+    await _check_device_type(db, data.device_type)
+    if data.group_id is not None:
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, data.group_id)
     # A scoped operator may only create devices inside its own scope, and not
     # with a management address that is another team's (or an unowned) flow
     # exporter: ownership follows the management IP (NF-04).
@@ -883,6 +900,14 @@ async def update_device(
         raise HTTPException(status_code=404, detail="Device not found")
     if data.tags is not None:
         await scoping.assert_tags_assignable(db, user, data.tags, previous=current.tags)
+    await _check_device_type(db, data.device_type)
+    if "group_id" in data.model_fields_set and data.group_id is not None:
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, data.group_id)
+    if "profile_id" in data.model_fields_set and data.profile_id is not None and (
+            current.managed_by_device_id is not None or current.poll_mode == "via_controller"):
+        raise HTTPException(status_code=422, detail="A controller-managed device is read through its controller's "
+                                                    "template and cannot have a template of its own")
     if data.ip_address is not None and nf_access.canonical_ip(data.ip_address) != nf_access.canonical_ip(
             str(current.ip_address) if current.ip_address else None):
         await nf_access.authorize_device_address(db, user, data.ip_address)
@@ -1034,7 +1059,28 @@ async def get_device_interfaces(
         rows = (await db.execute(
             text(sql.format(last_up="NULL::timestamptz AS last_up_at, TRUE AS ever_up")), {"id": device_id},
         )).mappings().all()
-    return [dict(r) for r in rows]
+    return await _with_roles(db, device_id, [dict(r) for r in rows])
+
+
+async def _with_roles(db, device_id, rows: list[dict]) -> list[dict]:
+    """Each interface's role (migrate-193): the operator's (role_source "manual"), else
+    the one the device's template gives it ("template"), else none."""
+    from sqlalchemy import text
+    from app.services import interface_roles as roles_svc
+    from app.services.device_templates import family as tfamily
+    try:
+        async with db.begin_nested():
+            manual = {r[0]: r[1] for r in (await db.execute(text(
+                "SELECT if_index, role FROM device_interfaces WHERE device_id = :id"), {"id": device_id})).all()}
+            profile = (await db.execute(text("SELECT profile_id FROM devices WHERE id = :id"),
+                                        {"id": device_id})).scalar()
+    except Exception:
+        return rows
+    rules = (await tfamily.load(db)).roles(profile)
+    for r in rows:
+        r["role_manual"] = manual.get(r.get("if_index"))
+        r["role"], r["role_source"] = roles_svc.effective(rules, {**r, "role": r["role_manual"]})
+    return rows
 
 
 # Declared before every /{device_id}/interfaces/{if_index}... route so the
@@ -1158,6 +1204,41 @@ async def update_device_interface_speed(
     )
     await db.commit()
     return out
+
+
+class InterfaceRoleUpdate(BaseModel):
+    # None = the template's role.
+    role: Optional[str] = Field(default=None, pattern="^(uplink|access|wan|server|tunnel|vlan|loopback|management)$")
+
+
+@router.put("/{device_id}/interfaces/{if_index}/role", dependencies=[Depends(_device_in_scope)])
+async def set_device_interface_role(
+    device_id: UUID,
+    if_index: int,
+    payload: InterfaceRoleUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("devices.manage")),
+):
+    """Set (or with null clear) an operator's role for one interface. Roles select
+    interfaces for alert rules; they never change whether the interface is monitored."""
+    from sqlalchemy import text
+    row = (await db.execute(text("""
+        WITH prev AS (SELECT role FROM device_interfaces WHERE device_id = :d AND if_index = :i)
+        UPDATE device_interfaces SET role = :role WHERE device_id = :d AND if_index = :i
+        RETURNING (SELECT role FROM prev) AS previous
+    """), {"d": device_id, "i": if_index, "role": payload.role})).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Interface not found")
+    await write_audit_log(
+        db, actor=user, action="device_interface.role.update",
+        resource_type="device_interface", resource_id=f"{device_id}:{if_index}",
+        metadata={"device_id": str(device_id), "if_index": if_index, "role": {"old": row[0], "new": payload.role}},
+    )
+    await db.commit()
+    rows = (await db.execute(text(
+        "SELECT id, if_index, if_name, if_descr, if_alias, if_type, monitored FROM device_interfaces "
+        "WHERE device_id = :d AND if_index = :i"), {"d": device_id, "i": if_index})).mappings().all()
+    return (await _with_roles(db, device_id, [dict(r) for r in rows]))[0]
 
 
 @router.post("/{device_id}/interfaces/bulk-speed", dependencies=[Depends(_device_in_scope)])
@@ -2077,6 +2158,9 @@ async def device_template_insights(
         """),
         {"id": device_id, "hidden": _children.hidden_group_keys(oid_groups)},
     )).mappings().all()
+    # Colours follow accepted alert rules on the same metrics (migrate-193).
+    from app.services import effective_thresholds as _eff
+    oid_groups = _eff.apply_display(oid_groups, await _eff.display_thresholds(db, device_id))
     groups_out, latest_ts = _insights.shape_template_groups(oid_groups, vals, child_ids)
 
     return {
@@ -2180,6 +2264,8 @@ async def get_device_page_summary(
                    value_num, value_text, updated_at
             FROM device_template_values WHERE device_id = :id AND NOT (group_key = ANY(:hidden))
         """), {"id": device_id, "hidden": _children.hidden_group_keys(oid_groups)})).mappings().all()
+        from app.services import effective_thresholds as _eff
+        oid_groups = _eff.apply_display(oid_groups, await _eff.display_thresholds(db, device_id))
         groups, template_updated = _insights.shape_template_groups(oid_groups, vals)
     shown_groups = [g for g in groups if (g.get("rows") if g.get("kind") == "table"
                                           else any(m.get("has_data") for m in g.get("metrics") or []))]
@@ -2269,10 +2355,10 @@ async def get_device_page_summary(
         }
 
     maintenance_rows = (await db.execute(text(f"""
-        SELECT m.ends_at, m.reason FROM device_maintenance m
+        SELECT o.occ_end AS ends_at, m.reason FROM device_maintenance m
+        {_mw.occurrences_join("now()", "now()")}
         JOIN devices d ON d.id = :did AND {MAINT_COVERS_DEVICE_SQL}
-        WHERE m.starts_at <= now() AND m.ends_at >= now()
-        ORDER BY m.ends_at DESC LIMIT 1
+        ORDER BY o.occ_end DESC LIMIT 1
     """), {"did": str(device_id)})).mappings().all()
     maintenance = ({"active": True, "ends_at": _iso(maintenance_rows[0]["ends_at"]),
                     "reason": maintenance_rows[0]["reason"]} if maintenance_rows else {"active": False})
@@ -2412,6 +2498,8 @@ def _device_to_response(
         model=device.model,
         os_version=device.os_version,
         profile_id=device.profile_id,
+        profile_source=getattr(device, "profile_source", None),
+        profile_suggested_id=getattr(device, "profile_suggested_id", None),
         profile_name=(profile_names or {}).get(device.profile_id),
         snmp_credential_id=device.snmp_credential_id,
         snmp_auth_configured=device.snmp_auth_passphrase is not None,
@@ -2430,35 +2518,33 @@ def _device_to_response(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Device maintenance windows (planned downtime)
+# Maintenance windows (planned downtime): devices and servers, one-off or
+# recurring (migrate-053, migrate-207; docs/maintenance-windows.md)
 #
 # Mirrors the service-check maintenance feature (migrate-006): while a window
-# is active the poller keeps collecting metrics but suppresses status
+# is in force the poller keeps collecting metrics but suppresses status
 # transitions + alerting, the device shows status 'maintenance', and
-# SLA/uptime calculations exclude samples inside the window.
+# SLA/uptime calculations exclude samples inside the window. Server windows
+# pause the server evaluators. When a window is in force is decided by
+# app.services.maintenance_windows (the SQL function every evaluator and the
+# poller use).
 # ═══════════════════════════════════════════════════════════════════════════
 
 maintenance_router = APIRouter(prefix="/device-maintenance", tags=["Device Maintenance"])
 
-# "Window m covers device d" — shared by every maintenance query. devices.tags
-# is a JSONB string array, so tag scope uses jsonb_exists().
-MAINT_COVERS_DEVICE_SQL = """(
-       (m.scope_type = 'device' AND m.scope_device_id = d.id)
-    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
-    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
-    OR (m.scope_type = 'all')
-)"""
+# "Window m covers device d" — shared by every maintenance query (a group
+# window covers subgroups too). devices.tags is a JSONB string array, so tag
+# scope uses jsonb_exists().
+MAINT_COVERS_DEVICE_SQL = _mw.COVERS_DEVICE_SQL
 
 
 def _maint_response(m, label: str) -> DeviceMaintenanceResponse:
-    now = datetime.now(timezone.utc)
-    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
-    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
     return DeviceMaintenanceResponse(
         id=m.id,
         scope_type=m.scope_type,
         scope_device_id=m.scope_device_id,
         scope_group_id=m.scope_group_id,
+        scope_server_id=getattr(m, "scope_server_id", None),
         scope_tag=m.scope_tag,
         scope_label=label,
         starts_at=m.starts_at,
@@ -2466,17 +2552,18 @@ def _maint_response(m, label: str) -> DeviceMaintenanceResponse:
         reason=m.reason,
         created_by=m.created_by,
         created_at=m.created_at,
-        active=starts <= now <= ends,
+        **_mw.window_dict(m),
     )
 
 
 async def _maint_labels(db: AsyncSession, rows) -> dict:
     """id -> human label for a batch of maintenance rows."""
-    from app.models.device import Device as DeviceModel, DeviceGroup as GroupModel
     device_ids = [m.scope_device_id for m in rows if m.scope_device_id]
     group_ids = [m.scope_group_id for m in rows if m.scope_group_id]
+    server_ids = [m.scope_server_id for m in rows if getattr(m, "scope_server_id", None)]
     device_names: dict = {}
     group_names: dict = {}
+    server_names: dict = {}
     if device_ids:
         res = await db.execute(
             text("SELECT id, hostname FROM devices WHERE id = ANY(:ids)"), {"ids": device_ids}
@@ -2487,6 +2574,12 @@ async def _maint_labels(db: AsyncSession, rows) -> dict:
             text("SELECT id, name FROM device_groups WHERE id = ANY(:ids)"), {"ids": group_ids}
         )
         group_names = {r.id: r.name for r in res}
+    if server_ids:
+        res = await db.execute(
+            text("SELECT id, COALESCE(NULLIF(display_name, ''), hostname) AS name FROM servers"
+                 " WHERE id = ANY(:ids)"), {"ids": server_ids}
+        )
+        server_names = {r.id: r.name for r in res}
     labels = {}
     for m in rows:
         if m.scope_type == "device":
@@ -2495,13 +2588,21 @@ async def _maint_labels(db: AsyncSession, rows) -> dict:
             labels[m.id] = group_names.get(m.scope_group_id, "(deleted group)")
         elif m.scope_type == "tag":
             labels[m.id] = f"tag:{m.scope_tag}"
+        elif m.scope_type == "server":
+            labels[m.id] = server_names.get(m.scope_server_id, "(deleted server)")
+        elif m.scope_type == "server_group":
+            labels[m.id] = f"Servers in {group_names.get(m.scope_group_id, '(deleted group)')}"
+        elif m.scope_type == "server_tag":
+            labels[m.id] = f"server tag:{m.scope_tag}"
         else:
             labels[m.id] = "All devices"
     return labels
 
 
 async def _covered_device_ids(db: AsyncSession, m) -> list:
-    """Device ids covered by one maintenance window."""
+    """Device ids covered by one maintenance window (none for a server window)."""
+    if m.scope_type not in _mw.DEVICE_SCOPES:
+        return []
     res = await db.execute(
         text(f"""
             SELECT d.id FROM devices d
@@ -2511,6 +2612,38 @@ async def _covered_device_ids(db: AsyncSession, m) -> list:
         {"mid": str(m.id)},
     )
     return [r.id for r in res]
+
+
+async def _check_maintenance_scope(db: AsyncSession, user: User, scope_type: str, *,
+                                   group_id=None, server_id=None) -> None:
+    """A server window also needs servers.manage; its server or group must exist
+    (a server outside the caller's tag scope reads as missing)."""
+    if scope_type not in _mw.SERVER_SCOPES:
+        return
+    from app.core.security import user_has_permission
+    if not await user_has_permission(db, user, "servers.manage"):
+        raise HTTPException(status_code=403, detail="A server maintenance window needs servers.manage")
+    if scope_type == "server":
+        row = (await db.execute(text("SELECT tags FROM servers WHERE id = :id"),
+                                {"id": str(server_id)})).first()
+        if row is None or not scoping.entity_visible(row[0], await scoping.visible_tags(db, user)):
+            raise HTTPException(status_code=422, detail="Server not found")
+    if scope_type == "server_group":
+        row = (await db.execute(text("SELECT asset_kinds FROM device_groups WHERE id = :id"),
+                                {"id": str(group_id)})).first()
+        if row is None:
+            raise HTTPException(status_code=422, detail="Group not found")
+        if "server" not in (row[0] or []):
+            raise HTTPException(status_code=422, detail="This group does not hold servers")
+
+
+def _recurrence_audit(m) -> Optional[dict]:
+    rec = _mw.recurrence_of(m)
+    if rec is None:
+        return None
+    return {"days": list(rec.days), "start_time": rec.start_time.strftime("%H:%M"),
+            "duration_minutes": rec.duration_minutes, "timezone": rec.timezone,
+            "until": rec.until.isoformat() if rec.until else None}
 
 
 @maintenance_router.get("", response_model=list[DeviceMaintenanceResponse])
@@ -2533,30 +2666,58 @@ async def create_device_maintenance(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("devices.manage")),
 ):
+    from sqlalchemy.exc import DBAPIError
     from app.models.device import DeviceMaintenance
     from app.services.audit_service import write_audit_log
 
+    await _check_maintenance_scope(db, user, data.scope_type, group_id=data.scope_group_id,
+                                   server_id=data.scope_server_id)
+    now = datetime.now(timezone.utc)
+    recur: dict = {}
+    if data.recurrence is not None:
+        from app.services.alert_schedule import get_configured_timezone
+        tz = data.recurrence.timezone or await get_configured_timezone(db)
+        rec = _mw.Recurrence(days=tuple(data.recurrence.days), start_time=data.recurrence.start_time,
+                             duration_minutes=data.recurrence.duration_minutes, timezone=tz,
+                             until=data.recurrence.until)
+        first = _mw.first_occurrence(rec, data.starts_at or now)
+        if first is None:
+            raise HTTPException(status_code=422, detail=(
+                "The window never starts: no chosen weekday falls on or before the end date"))
+        starts_at, ends_at = first
+        recur = {"recur_days": list(rec.days), "recur_start_time": rec.start_time,
+                 "recur_duration_minutes": rec.duration_minutes, "recur_timezone": rec.timezone,
+                 "recur_until": rec.until}
+    else:
+        starts_at, ends_at = data.starts_at, data.ends_at
+
+    tagged = data.scope_type in ("tag", "server_tag")
     m = DeviceMaintenance(
         scope_type=data.scope_type,
         scope_device_id=data.scope_device_id if data.scope_type == "device" else None,
-        scope_group_id=data.scope_group_id if data.scope_type == "group" else None,
-        scope_tag=data.scope_tag.strip() if data.scope_type == "tag" and data.scope_tag else None,
-        starts_at=data.starts_at,
-        ends_at=data.ends_at,
+        scope_group_id=data.scope_group_id if data.scope_type in ("group", "server_group") else None,
+        scope_server_id=data.scope_server_id if data.scope_type == "server" else None,
+        scope_tag=data.scope_tag.strip() if tagged and data.scope_tag else None,
+        starts_at=starts_at,
+        ends_at=ends_at,
         reason=data.reason,
         created_by=user.id,
+        **recur,
     )
     db.add(m)
-    await db.flush()
+    try:
+        await db.flush()
+    except DBAPIError as exc:
+        await db.rollback()
+        if "time zone" in str(exc):
+            raise HTTPException(status_code=422, detail="Unknown time zone") from exc
+        raise
 
-    now = datetime.now(timezone.utc)
-    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
-    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
-    if starts <= now <= ends:
+    if _mw.active_at(m.starts_at, m.ends_at, _mw.recurrence_of(m), now):
         # Window is active right now: flip covered devices to 'maintenance'
         # immediately (the poller would do it within one poll anyway) and
         # auto-resolve their open alerts so the alert list reflects planned
-        # downtime, not an incident.
+        # downtime, not an incident. Server windows only pause evaluation.
         covered = await _covered_device_ids(db, m)
         if covered:
             await db.execute(
@@ -2582,8 +2743,11 @@ async def create_device_maintenance(
     await write_audit_log(
         db, actor=user, action="create", resource_type="device_maintenance",
         resource_id=str(m.id),
-        metadata={"scope_type": m.scope_type, "starts_at": str(m.starts_at),
-                  "ends_at": str(m.ends_at), "reason": m.reason},
+        metadata={"scope_type": m.scope_type, "scope_device_id": str(m.scope_device_id or "") or None,
+                  "scope_group_id": str(m.scope_group_id or "") or None,
+                  "scope_server_id": str(m.scope_server_id or "") or None, "scope_tag": m.scope_tag,
+                  "starts_at": str(m.starts_at), "ends_at": str(m.ends_at),
+                  "recurrence": _recurrence_audit(m), "reason": m.reason},
     )
     await db.commit()
     await db.refresh(m)
@@ -2606,11 +2770,11 @@ async def delete_device_maintenance(
     )).scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="Maintenance window not found")
+    await _check_maintenance_scope(db, user, m.scope_type, group_id=m.scope_group_id,
+                                   server_id=m.scope_server_id)
 
     now = datetime.now(timezone.utc)
-    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
-    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
-    was_active = starts <= now <= ends
+    was_active = _mw.active_at(m.starts_at, m.ends_at, _mw.recurrence_of(m), now)
     covered = await _covered_device_ids(db, m) if was_active else []
 
     await db.execute(
@@ -2628,7 +2792,7 @@ async def delete_device_maintenance(
                   AND NOT EXISTS (
                       SELECT 1 FROM device_maintenance m
                       JOIN devices d ON d.id = devices.id AND {MAINT_COVERS_DEVICE_SQL}
-                      WHERE m.starts_at <= now() AND m.ends_at >= now()
+                      WHERE {_mw.ACTIVE_NOW_SQL}
                   )
             """),
             {"ids": covered},
@@ -2637,9 +2801,41 @@ async def delete_device_maintenance(
     await write_audit_log(
         db, actor=user, action="delete", resource_type="device_maintenance",
         resource_id=str(maintenance_id),
-        metadata={"scope_type": m.scope_type, "was_active": was_active},
+        metadata={"scope_type": m.scope_type, "was_active": was_active,
+                  "recurrence": _recurrence_audit(m)},
     )
     await db.commit()
+
+
+async def _windows_in_force_or_ahead(db: AsyncSession, covers_sql: str, params: dict) -> dict:
+    """Active and upcoming windows (one-off, or recurring with an occurrence
+    left) among those ``covers_sql`` selects; recurring ones are ordered by
+    their current or next occurrence."""
+    from app.models.device import DeviceMaintenance
+    from sqlalchemy import select
+
+    res = await db.execute(
+        text(f"""
+            SELECT m.id FROM device_maintenance m
+            WHERE ({covers_sql}) AND (m.recur_days IS NOT NULL OR m.ends_at >= now())
+            ORDER BY m.starts_at ASC
+            LIMIT 100
+        """),
+        params,
+    )
+    ids = [r.id for r in res]
+    if not ids:
+        return {"active": [], "upcoming": []}
+    rows = (await db.execute(
+        select(DeviceMaintenance).where(DeviceMaintenance.id.in_(ids))
+    )).scalars().all()
+    labels = await _maint_labels(db, rows)
+    out = [_maint_response(m, labels[m.id]) for m in rows]
+    out = sorted((o for o in out if o.next_starts_at is not None), key=lambda o: o.next_starts_at)
+    return {
+        "active": [o for o in out if o.active],
+        "upcoming": [o for o in out if not o.active],
+    }
 
 
 @router.get("/{device_id}/maintenance", dependencies=[Depends(_device_in_scope)])
@@ -2649,32 +2845,31 @@ async def get_device_maintenance(
     user: User = Depends(get_current_user),
 ):
     """Active + upcoming maintenance windows covering one device."""
-    from app.models.device import DeviceMaintenance
-    from sqlalchemy import select
+    return await _windows_in_force_or_ahead(
+        db, f"EXISTS (SELECT 1 FROM devices d WHERE d.id = :did AND {MAINT_COVERS_DEVICE_SQL})",
+        {"did": str(device_id)})
 
-    res = await db.execute(
-        text(f"""
-            SELECT m.id FROM device_maintenance m
-            JOIN devices d ON d.id = :did AND {MAINT_COVERS_DEVICE_SQL}
-            WHERE m.ends_at >= now()
-            ORDER BY m.starts_at ASC
-            LIMIT 100
-        """),
-        {"did": str(device_id)},
-    )
-    ids = [r.id for r in res]
-    if not ids:
-        return {"active": [], "upcoming": []}
-    rows = (await db.execute(
-        select(DeviceMaintenance).where(DeviceMaintenance.id.in_(ids))
-        .order_by(DeviceMaintenance.starts_at.asc())
-    )).scalars().all()
-    labels = await _maint_labels(db, rows)
-    out = [_maint_response(m, labels[m.id]) for m in rows]
-    return {
-        "active": [o for o in out if o.active],
-        "upcoming": [o for o in out if not o.active],
-    }
+
+@maintenance_router.get("/servers/{server_id}")
+async def get_server_maintenance(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Active + upcoming maintenance windows covering one server: its own
+    (server, server group, server tag) and those of the device it is linked
+    to, which put the server in maintenance as well."""
+    row = (await db.execute(text("SELECT tags, device_id FROM servers WHERE id = :id"),
+                            {"id": str(server_id)})).first()
+    if row is None or not scoping.entity_visible(row[0], await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail="Server not found")
+    covers = (f"EXISTS (SELECT 1 FROM servers s WHERE s.id = :sid AND {_mw.COVERS_SERVER_SQL})"
+              f" OR EXISTS (SELECT 1 FROM devices d WHERE d.id = CAST(:did AS uuid)"
+              f" AND {MAINT_COVERS_DEVICE_SQL})")
+    out = await _windows_in_force_or_ahead(
+        db, covers, {"sid": str(server_id), "did": str(row[1]) if row[1] else None})
+    out["linked_device_id"] = str(row[1]) if row[1] else None
+    return out
 
 
 # ── Related panel (device page, Phase 3) ──────────────────────────────────

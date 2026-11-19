@@ -1,6 +1,6 @@
 /**
  * ISO 3166-1 alpha-2 → the region name used by the bundled world GeoJSON
- * (public/maps/world.json, the ECharts 4 world map) and a display label.
+ * (public/geo/world.json, the ECharts 4 world map) and a display label.
  * Codes not listed fall back to the code itself; they still appear in the
  * table but have no polygon on the map.
  */

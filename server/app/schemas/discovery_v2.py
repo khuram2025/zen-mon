@@ -233,6 +233,11 @@ class DiscoveryResultResponse(BaseModel):
 
     error_message: Optional[str] = None
     scanned_at: datetime
+    # Discovery rules (migrate-190): what the rules decided and why. None
+    # while the engine is off or before the scan was evaluated.
+    disposition: Optional[str] = None
+    rule_plan: Optional[dict[str, Any]] = None
+    matched_rule_ids: list[UUID] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

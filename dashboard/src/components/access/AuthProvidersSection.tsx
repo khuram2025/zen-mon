@@ -24,7 +24,7 @@ import { LdapDialog, OidcDialog, RadiusDialog, ldapConfigured, oidcConfigured, r
 
 type LastTest = { at: string; ok: boolean; message: string; server: string; by: string } | null
 type Counts = { accounts: number; active_accounts: number; open_sessions: number }
-type Providers = { ldap: LdapConfig & Counts & { last_test: LastTest }; radius: RadiusConfig & Counts & { last_test: LastTest }; oidc: OidcConfig & Counts & { last_test: LastTest } }
+type Providers = { ldap: LdapConfig & Counts & { last_test: LastTest }; radius: RadiusConfig & Counts & { last_test: LastTest }; oidc: OidcConfig & Counts & { last_test: LastTest }; local?: Counts }
 type Policy = {
   mfa_required: 'off' | 'admins' | 'all_local'; lockout_threshold: number; lockout_minutes: number; revision: number
   coverage: { admins: number; admins_with_mfa: number; local_accounts: number; local_with_mfa: number }
@@ -71,7 +71,7 @@ export function AuthProvidersSection() {
         {(data) => {
           const { ldap, radius, oidc } = data
           const externalEnabled = ldap.enabled || radius.enabled || oidc.enabled
-          const counts = { local: 0, ldap: ldap.accounts, radius: radius.accounts }
+          const counts = { local: data.local?.accounts ?? 0, ldap: ldap.accounts, radius: radius.accounts }
           return (
             <>
               {/* Sign-in order strip */}

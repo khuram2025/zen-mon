@@ -184,7 +184,10 @@ Alert row plus:
   "related": [ AlertRow & {"relation": "same_entity|same_rule_window|dependency_parent", "relation_label": "string"} ],
   "related_alerts": [...],          // legacy mirror (same_entity only)
   "events": [{"at","kind","label","actor": {"id","name"}|null,"source": "user|system|evaluator","reason","old_status","new_status","detail":{}}],
-  "deliveries": [{"at","channel_id","channel_name","channel_type","kind": "trigger|recovery|escalation|all_clear|reminder|closure","outcome": "accepted|failed|skipped","error": "string|null","latency_ms"}]
+  "deliveries": [{"at","channel_id","channel_name","channel_type","kind": "trigger|recovery|escalation|all_clear|reminder|closure","outcome": "accepted|failed|skipped","error": "string|null","latency_ms",
+                  "subject": "string|null", "recipients_count": n|null,
+                  "content": "string|null",       // alerts.manage only, else null
+                  "content_withheld": bool}]      // a text exists that this caller may not read
 }
 ```
 
@@ -214,6 +217,7 @@ record commit in one transaction.
 | `GET /alerts/assignees` | – | `{items: [{id, name, username}]}` active users |
 | `GET /alerts/channel-directory` | – | `alerts.manage`: `{data: [{id,name,type,enabled}]}` |
 | `GET /alerts/response-targets` / `PUT` | `{critical, warning, info}` minutes or null (PUT: `alerts.manage`) | |
+| `GET /alerts/delivery-content` / `PUT` | `{days: 1..365}` (default 30): how long the text of sent messages is kept (PUT: `alerts.manage`, audited) | out of range → 422 |
 
 ## Alert rules (`/alert-rules`)
 
@@ -224,3 +228,42 @@ record commit in one transaction.
 * `POST /alert-rules/{id}/toggle` accepts optional `{enabled: bool, reason?: string}`; without a body it flips.
 * `GET /alert-rules/{id}/impact` → `{scope, affected: {count, noun, shared}, open_alerts: n, enabled}`.
 * Create/update/delete/toggle write audit records with before/after of changed fields.
+* **Message templates** (`email_subject`, `email_body`, `sms_template` and the three `recovery_*`
+  fields): a `{placeholder}` no sender of the rule's template kind fills would be sent as typed, so
+  create/update refuse it with **422**
+  `{code: "unknown_template_placeholder", message, unknown: [names], fields: {field: [names]},
+  valid: [names], template_kind}`. The valid names are `alert_phrasing.template_variables(kind)`
+  (identity, phrasing, incident lifecycle, `site`/`group`/`site_suffix` and the family's own) plus
+  the NetFlow/appliance/APM-event extras of the rule's metric and, for device rules,
+  `custom.<key>` of a defined device custom field. Server-agent (`host_*`) rules send the built-in
+  wording and are not checked. NetPath, Device Tracker and APM threshold rules send their own
+  templates (device wording otherwise).
+
+## Webhook payload (generic webhook channels, PagerDuty `custom_details`)
+
+A generic webhook channel posts this JSON object (or its own `body_template` with these names as
+`{placeholders}`, values as text); PagerDuty puts the same object in `payload.custom_details`. It
+is an explicit field set (`notification_payload.WEBHOOK_FIELDS`): never recipient addresses or
+phone numbers, never the HTML mail, never other internal dispatch keys. Unknown values are `null`
+(text fields `""`).
+
+| Field | Meaning |
+|---|---|
+| `event` | `trigger`, `recovery`, `escalation`, `reminder`, `all_clear`, `closure`, `repeat` … (the delivery event, without its suffix) |
+| `event_type` | `trigger` or `recovery`, as before |
+| `title` | The event sentence: "Switch sw-1 (10.0.0.1) went down at 14:44: it does not answer ping." |
+| `subject`, `message`, `body` | The email subject, the SMS text and the plain-text mail body as rendered for this rule |
+| `severity`, `priority`, `status` | `critical`/`warning`/`info`; `P1`…`P4`; the status word (`DOWN`, `ALERT`, `RESOLVED`, `ESCALATION L2` …) |
+| `is_recovery`, `resolved` | Booleans (the same value) |
+| `rule_id`, `rule_name` | The rule that fired |
+| `alert_id`, `incident_ref`, `incident_url` | The incident, its `INC-…` reference and its dashboard link |
+| `hostname`, `ip_address`, `device_id`, `server_id`, `service_check_id` | The asset |
+| `site`, `group` | The asset's site (sensor/server site, else location) and device group |
+| `metric`, `value`, `threshold` | The headline reading as the mail shows it ("100%", "10%") |
+| `triggered_at`, `local_time` | Event time, ISO 8601 UTC and in the organisation's regional settings |
+| `first_seen`, `active_for`, `duration`, `lifecycle`, `escalation_level` | Incident lifecycle; `duration` only on a recovery |
+| `details` | `[{label, value}]`, the rows of the mail's details table |
+
+Slack, Teams, Discord and PagerDuty lead with `title` (the PagerDuty `summary`) and show the asset,
+site, severity and priority, value, local time, duration on recovery, rule, incident reference and
+a "View incident" link. The delivery log records the title and those facts.

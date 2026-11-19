@@ -23,7 +23,27 @@ function pagesOf(role: Role | null | undefined): Set<string> | null {
 }
 
 type Member = { id: string; username: string; full_name: string | null; email: string; is_active: boolean; auth_source: string; scope_tags: string[]; last_login: string | null; mfa_enabled: boolean }
-type HistoryRow = { revision: number; action: string; actor: string | null; at: string; added: string[]; removed: string[]; affected_users: number; reason: string | null }
+/** A revision's changes other than permissions (those are the +/− lines): rename, scope, page limit, description.
+ *  Without these a revision that changed only the scope or the page list showed as an empty entry. */
+const CHANGE_LABEL: Record<string, string> = {
+  name: 'Identifier', display_name: 'Name', description: 'Description', scope_tags: 'Visibility scope', page_access: 'Pages and maps',
+}
+function showValue(v: unknown): string {
+  if (v == null || v === '') return 'none'
+  if (Array.isArray(v)) return v.length ? v.join(', ') : 'none'
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+function otherChanges(r: { action: string; changes?: Record<string, unknown> | null }): [string, string][] {
+  if (r.action === 'create') return []
+  return Object.entries(r.changes || {}).flatMap(([k, v]): [string, string][] => {
+    if (!(k in CHANGE_LABEL) || !v || typeof v !== 'object' || !('to' in (v as object))) return []
+    const c = v as { from?: unknown; to?: unknown }
+    return [[CHANGE_LABEL[k], `${showValue(c.from)} → ${showValue(c.to)}`]]
+  })
+}
+
+type HistoryRow = { revision: number; action: string; actor: string | null; at: string; added: string[]; removed: string[]; affected_users: number; reason: string | null; changes?: Record<string, unknown> | null }
 
 const ACTION_LABEL: Record<string, string> = {
   create: 'Created', update: 'Updated', rename: 'Renamed', delete: 'Deleted', builtin_reconcile: 'Built-in definition updated',
@@ -163,6 +183,9 @@ export function RoleViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: 
                           {r.removed.length > 0 && <div className="text-danger">− {r.removed.join(', ')}</div>}
                         </div>
                       )}
+                      {otherChanges(r).map(([label, text]) => (
+                        <div key={label} className="mt-1 break-words"><span className="text-muted">{label}:</span> {text}</div>
+                      ))}
                       <div className="mt-1 text-muted">{r.affected_users} {r.affected_users === 1 ? 'account' : 'accounts'} affected{r.reason ? <> · “{r.reason}”</> : null}</div>
                     </li>
                   ))}

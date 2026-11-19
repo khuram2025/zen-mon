@@ -20,10 +20,19 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ("devices", "Devices & Monitoring", [
         ("devices.view", "View", "View devices, interfaces, and monitoring data"),
         ("devices.manage", "Manage", "Add, edit, and delete devices; manage monitoring"),
+        ("devices.manage_policies", "Manage groups and custom fields",
+         "Create, change and delete device groups (static and dynamic), their explicit members and custom "
+         "field definitions, and import custom field values (groups scope alert rules and maintenance)"),
+        ("devices.manage_templates", "Manage templates",
+         "Create, edit, publish and roll back device templates, and manage the device type catalogue "
+         "(templates apply to every device that uses them)"),
     ]),
     ("discovery", "Discovery", [
         ("discovery.view", "View", "View discovery results"),
         ("discovery.run", "Run", "Run network discovery scans"),
+        ("discovery.manage_rules", "Manage rules",
+         "Create, edit, order and activate discovery rules that auto-import, ignore and classify "
+         "scan results (activating a rule also needs the permissions its actions use)"),
     ]),
     ("alerts", "Alerting", [
         ("alerts.view", "View", "View alerts and alert history"),
@@ -155,7 +164,10 @@ ACCESS_CONTROL_PERMISSIONS = frozenset({"users.manage", "roles.manage", SUPERUSE
 # grants), so a role is always exactly what the administrator saved.
 PERMISSION_IMPLIES: dict[str, list[str]] = {
     "devices.manage": ["devices.view"],
+    "devices.manage_templates": ["devices.view"],
+    "devices.manage_policies": ["devices.view"],
     "discovery.run": ["discovery.view"],
+    "discovery.manage_rules": ["discovery.view"],
     "alerts.acknowledge": ["alerts.view"],
     "alerts.manage": ["alerts.view"],
     "service_checks.manage": ["service_checks.view"],
@@ -183,7 +195,8 @@ PERMISSION_IMPLIES: dict[str, list[str]] = {
 }
 
 _OPERATOR = [
-    "dashboard.view", "devices.view", "devices.manage", "discovery.view",
+    "dashboard.view", "devices.view", "devices.manage", "devices.manage_templates", "devices.manage_policies",
+    "discovery.view",
     "discovery.run", "alerts.view", "alerts.acknowledge", "alerts.manage",
     "service_checks.view", "service_checks.manage", "netflow.view",
     "netflow.manage", "netflow.manage_shared", "netflow.export",
@@ -212,7 +225,9 @@ _READ_ONLY = [
 # visibility scope (tags on a custom copy of the role, or on the user) to
 # limit it to that team's resources as well.
 _NETWORK_TEAM = [
-    "dashboard.view", "devices.view", "devices.manage", "discovery.view", "discovery.run",
+    "dashboard.view", "devices.view", "devices.manage", "devices.manage_templates", "devices.manage_policies",
+    "discovery.view",
+    "discovery.run", "discovery.manage_rules",
     "alerts.view", "alerts.acknowledge", "service_checks.view", "netflow.view",
     "udt.view", "netpath.view", "netpath.manage", "ncm.view", "ncm.manage", "ncm.baseline",
     "inventory.view", "reports.view", "reports.export", "maps.view", "maps.manage",
@@ -246,7 +261,15 @@ _SECURITY_TEAM = [
 #   6 - inventory.view added to network_team, systems_team and security_team (D9: view only,
 #       never export or manage); application_team gets no inventory.* because it sees
 #       applications, not the estate.
-BUILTIN_ROLE_DEFINITION_VERSION = 6
+#   8 - devices.manage_templates added (Device Templates, migrate-189): admin, operator and
+#       network_team. Template writes needed devices.manage before; operator and network_team
+#       keep that ability under the new permission. (7 was reserved for discovery.manage_rules.)
+#   9 - discovery.manage_rules added (discovery rules, migrate-190): admin and network_team.
+#       operator keeps discovery.run only; an administrator grants rules management to a
+#       custom role or to operator deliberately. (7 was reserved for it and never shipped.)
+#  10 - devices.manage_policies added (device groups and custom fields, migrate-192): admin,
+#       operator and network_team. Group management had no UI or API before.
+BUILTIN_ROLE_DEFINITION_VERSION = 10
 
 BUILTIN_ROLE_DEFINITIONS: dict[str, list[str]] = {
     "admin": list(ALL_PERMISSIONS),

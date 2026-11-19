@@ -37,6 +37,67 @@ closures are recorded as administrative with the reason on the incident timeline
 nothing is sent. Older alerts whose backups were already pruned cannot be verified
 and are left for an operator to close.
 
+## NCM alerts in the alert pipeline (migration 201)
+
+NCM alerts have no alert rule. They are notified to the device's NCM channels
+(`device_ncm.notify_channels`). `ncm_notification_outbox` is still the durable
+queue: the queue row is written in the same transaction as the alert, so a crash
+loses nothing. Each due row is now sent through
+`host_alert_service.dispatch_to_channels` (`app.services.ncm_alerts.send`) with:
+
+- the alert id and a delivery event: `trigger` for a new alert,
+  `trigger:repeat:<n>` for another change on an open configuration-change alert,
+  `recovery` when it closes. Delivery keys therefore stop a retried row from
+  reaching a recipient twice. A row on which a recipient definitely failed is
+  retried, and the retry skips the recipients who already received it.
+- the priority derived from the alert's severity (warning -> P3, info -> P4), so
+  warning triggers may be held in digests when grouping is on;
+- the event family `configuration`, which can be selected in the alert storm
+  policy ("Configuration alerts").
+
+Each row is leased for 10 minutes before it is sent, because the dispatcher
+commits. Rows queued before the upgrade carry no alert id; they are sent once,
+without keys. Webhook channels now receive the alert payload every other source
+sends; it still includes the NCM `event_id`, `event_type`, `device_id`,
+`metadata` and `timestamp`. The `X-ZenPlus-Event-ID` header is no longer sent.
+NCM alerts are not escalated, because escalation policies route rule alerts.
+
+### Compliance violations
+
+A compliance policy that fails on a device raises one alert per device and
+policy ("Configuration of Switch sw-01 (10.0.0.2) fails 2 checks of compliance
+policy Cisco IOS / IOS-XE hardening: No default SNMP communities (critical), VTY
+lines do not accept Telnet (high)."). The check runs after every evaluation: each
+captured running configuration and the daily pass.
+
+- Severity is the worst failing check: critical -> critical; high or medium ->
+  warning; low or info -> info. When checks start or stop failing, the open alert
+  is updated in place and no second notification is sent.
+- The alert resolves, with a recovery notice, once the policy has no failing
+  check and at least one check passed or is excepted. Checks that cannot be
+  assessed (`unknown`, for example no validated configuration) are missing data
+  and never resolve it.
+- A policy that no longer applies (disabled, platform changed) closes its alert
+  without a notice.
+- Violations that already failed when migration 201 ran are a baseline. Their
+  alerts open without a notification, and they close without one, so an upgrade
+  does not send a notice for old findings.
+
+### Running configuration not saved
+
+For devices whose captures include the startup configuration, the latest
+validated running and startup captures are compared after every capture. The
+pair is compared only if both were taken within 15 minutes of each other. The
+comparison ignores capture headers such as "Building configuration",
+"Current configuration : N bytes" and "Using N out of M bytes". If the
+difference persists for 4 hours across captures, an alert opens: "Running
+configuration of Switch sw-01 (10.0.0.2) has changes not saved to the startup
+configuration (5 lines differ); a reload would lose them." It resolves with a
+recovery notice once a capture pair matches again. A pair taken too far apart is
+missing data.
+
+State lives in `ncm_alert_state`.
+
 ## Large comparisons
 
 Comparing two versions (**Compare with previous**, **Show drift**, **Compare with

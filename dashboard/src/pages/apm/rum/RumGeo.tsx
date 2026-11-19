@@ -28,7 +28,7 @@ let worldRegistered: Promise<boolean> | null = null
 /** Registers the bundled world GeoJSON once per page load. */
 function ensureWorldMap(): Promise<boolean> {
   if (!worldRegistered) {
-    worldRegistered = fetch('/maps/world.json')
+    worldRegistered = fetch('/geo/world.json')
       .then((response) => response.json())
       .then((geo) => { echarts.registerMap('world', geo); return true })
       .catch(() => false)

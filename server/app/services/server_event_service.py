@@ -72,10 +72,23 @@ def insert_details(client, agent_id: str, server_id: str, rows: list[dict]) -> i
     return len(rows)
 
 
+# Lifecycle evidence the Linux agent records itself (ZenPlus_Agent
+# internal/collectors/lifecycle.go), with the Windows event IDs: 12 the OS
+# started, 13 the OS is shutting down, 41 the previous boot ended without a
+# clean shutdown.
+AGENT_LIFECYCLE_PROVIDER = "zenplus-agent"
+AGENT_LIFECYCLE_KINDS = {12: "restart", 13: "shutdown", 41: "unexpected_restart"}
+# Two reports of an OS start this close together are the same boot (the
+# inventory boot-time check uses the same tolerance).
+SAME_BOOT_S = 120
+
+
 def lifecycle_kind(e: dict) -> str | None:
     if e["log_name"].lower() != "system":
         return None
     provider, eid = e["provider"].lower(), e["event_id"]
+    if provider == AGENT_LIFECYCLE_PROVIDER:
+        return AGENT_LIFECYCLE_KINDS.get(eid)
     if provider == "microsoft-windows-kernel-general" and eid == 12:
         return "restart"
     if provider == "microsoft-windows-kernel-general" and eid == 13:
@@ -94,13 +107,32 @@ async def record_lifecycle(db, server_id: str, uid: str, kind: str, event_time: 
         {"sid": server_id, "uid": uid, "kind": kind, "stamp": event_time, "detail": json.dumps(detail, default=str)})
 
 
+async def record_boot(db, server_id: str, uid: str, boot_time: datetime, detail: dict) -> bool:
+    """Record an OS start unless one within SAME_BOOT_S is already recorded.
+
+    The agent's boot report and the inventory's changed boot time describe
+    the same restart; recording both would count it twice."""
+    boot_time = utc(boot_time)
+    known = (await db.execute(text("""SELECT 1 FROM server_lifecycle_events
+        WHERE server_id=:sid AND kind='restart' AND event_time BETWEEN :lo AND :hi LIMIT 1"""),
+        {"sid": server_id, "lo": boot_time - timedelta(seconds=SAME_BOOT_S),
+         "hi": boot_time + timedelta(seconds=SAME_BOOT_S)})).first()
+    if known:
+        return False
+    await record_lifecycle(db, server_id, uid, "restart", boot_time, detail)
+    return True
+
+
 async def ingest_state(db, server_id: str, agent_id: str, rows: list[dict], inventory: dict | None):
     for row in rows:
         e = normalize(row)
         kind = lifecycle_kind(e)
         if kind:
-            await record_lifecycle(db, server_id, e["event_uid"], kind, e["timestamp"],
-                                   {k: e[k] for k in ("provider", "event_id", "message", "fields")})
+            detail = {k: e[k] for k in ("provider", "event_id", "message", "fields")}
+            if kind == "restart" and e["provider"].lower() == AGENT_LIFECYCLE_PROVIDER:
+                await record_boot(db, server_id, e["event_uid"], e["timestamp"], detail)
+            else:
+                await record_lifecycle(db, server_id, e["event_uid"], kind, e["timestamp"], detail)
     status = (inventory or {}).get("event_collection")
     if isinstance(status, dict):
         queries = status.get("queries") or []

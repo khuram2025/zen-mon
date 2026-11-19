@@ -350,6 +350,45 @@
       ]
     },
     {
+      "key": "/device-templates",
+      "label": "Device Templates",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/device-groups",
+      "label": "Groups & Fields",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/dependencies",
+      "label": "Dependencies",
+      "group": "network",
+      "group_label": "Network",
+      "gates": [
+        {
+          "any": [
+            "devices.view"
+          ]
+        }
+      ]
+    },
+    {
       "key": "/discovery",
       "label": "Profiles",
       "group": "network",
@@ -408,6 +447,20 @@
     {
       "key": "/discovery/ignored",
       "label": "Ignored",
+      "group": "network",
+      "group_label": "Network",
+      "parent": "Discovery",
+      "gates": [
+        {
+          "any": [
+            "discovery.view"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "/discovery/rules",
+      "label": "Rules",
       "group": "network",
       "group_label": "Network",
       "parent": "Discovery",
@@ -1046,6 +1099,20 @@
       ]
     },
     {
+      "key": "/settings/general?tab=monitoring",
+      "label": "Monitoring",
+      "group": "administration",
+      "group_label": "Administration",
+      "parent": "Settings",
+      "gates": [
+        {
+          "any": [
+            "settings.manage"
+          ]
+        }
+      ]
+    },
+    {
       "key": "/settings/general?tab=smtp",
       "label": "SMTP / Email",
       "group": "administration",
@@ -1130,7 +1197,7 @@
     },
     {
       "key": "/settings/general?tab=storage",
-      "label": "Storage",
+      "label": "System status",
       "group": "administration",
       "group_label": "Administration",
       "parent": "Settings",
@@ -1145,20 +1212,6 @@
     {
       "key": "/settings/general?tab=sensors",
       "label": "Sensors",
-      "group": "administration",
-      "group_label": "Administration",
-      "parent": "Settings",
-      "gates": [
-        {
-          "any": [
-            "settings.manage"
-          ]
-        }
-      ]
-    },
-    {
-      "key": "/settings/general?tab=templates",
-      "label": "Monitoring Templates",
       "group": "administration",
       "group_label": "Administration",
       "parent": "Settings",
@@ -1190,8 +1243,13 @@
       "group": "administration",
       "group_label": "Administration",
       "parent": "Settings",
-      "gates": [],
-      "personal": true
+      "gates": [
+        {
+          "any": [
+            "system.admin"
+          ]
+        }
+      ]
     },
     {
       "key": "/settings/general?tab=profile",

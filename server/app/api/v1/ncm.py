@@ -882,6 +882,13 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
                                                      content=content, platform=platform)
         except Exception:
             pass  # Compliance evaluation never fails a successful backup.
+    from app.services import ncm_alerts
+    try:
+        async with db.begin_nested():
+            # Running configuration not saved to startup (both captured).
+            await ncm_alerts.check_unsaved(db, device_id)
+    except Exception:
+        ncm_alerts.logger.exception('Unsaved-configuration check failed for device %s', device_id)
     await db.commit()
     return {**result, 'platform': platform, 'run_id': str(run.id), 'host_key': host_key}
 

@@ -31,7 +31,9 @@ def test_catalog_is_the_navigation_tree():
                 "/settings/general?tab=users"):
         assert key in pages, key
     assert {k for k, p in pages.items() if p.personal} == {
-        "/settings/general?tab=appearance", "/settings/general?tab=support", "/settings/general?tab=profile"}
+        "/settings/general?tab=appearance", "/settings/general?tab=profile"}
+    # Monitoring is a Settings tab like the others, so a page-limited role can be given it.
+    assert "/settings/general?tab=monitoring" in pages
     known = set(ALL_PERMISSIONS)
     for p in pages.values():
         for any_of, all_of in p.gates:

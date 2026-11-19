@@ -28,6 +28,11 @@ import { ServiceIncidentsPage } from '@/pages/ServiceIncidentsPage'
 import { ServiceCheckGroupsPage } from '@/pages/ServiceCheckGroupsPage'
 import { ServiceMaintenancePage } from '@/pages/ServiceMaintenancePage'
 import { ServiceCheckTemplatesPage } from '@/pages/ServiceCheckTemplatesPage'
+import { DeviceTemplatesPage } from '@/pages/templates/DeviceTemplatesPage'
+import { TemplateDetailPage } from '@/pages/templates/TemplateDetailPage'
+import { DeviceGroupsPage } from '@/pages/groups/DeviceGroupsPage'
+import { GroupDetailPage } from '@/pages/groups/GroupDetailPage'
+import { DependenciesPage } from '@/pages/dependencies/DependenciesPage'
 import { DiscoveryLayout } from '@/pages/discovery/DiscoveryLayout'
 import { ProfilesPage as DiscoveryProfilesPage } from '@/pages/discovery/ProfilesPage'
 import { WizardPage as DiscoveryWizardPage } from '@/pages/discovery/WizardPage'
@@ -38,6 +43,9 @@ import { ReportsPage as DiscoveryReportsPage } from '@/pages/discovery/ReportsPa
 import { ImportsPage as DiscoveryImportsPage } from '@/pages/discovery/ImportsPage'
 import { IgnoredPage as DiscoveryIgnoredPage } from '@/pages/discovery/IgnoredPage'
 import { CredentialsPage as DiscoveryCredentialsPage } from '@/pages/discovery/CredentialsPage'
+import { RulesPage as DiscoveryRulesPage } from '@/pages/discovery/RulesPage'
+import { RuleEditorPage as DiscoveryRuleEditorPage } from '@/pages/discovery/RuleEditorPage'
+import { RuleRunPage as DiscoveryRuleRunPage } from '@/pages/discovery/RuleRunPage'
 import { UdtLayout } from '@/pages/udt/UdtLayout'
 import { EndpointSearchPage } from '@/pages/udt/EndpointSearchPage'
 import { EndpointDetailPage } from '@/pages/udt/EndpointDetailPage'
@@ -50,6 +58,7 @@ import { ClassificationPage as UdtClassificationPage } from '@/pages/udt/Classif
 import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
 import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
+import { MapsOverview } from '@/features/maps/MapsOverview'
 import { LegacyReportRedirect } from '@/features/reports/library/LegacyRedirect'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { SensorDetailPage } from '@/pages/SensorDetailPage'
@@ -66,6 +75,7 @@ import { ErrorsInboxPage } from '@/pages/apm/ErrorsInboxPage'
 import { SlosPage } from '@/pages/apm/SlosPage'
 import { SloDetailPage } from '@/pages/apm/SloDetailPage'
 import { SyntheticsPage } from '@/pages/apm/SyntheticsPage'
+import { SyntheticDetailPage } from '@/pages/apm/SyntheticDetailPage'
 import { RumPage } from '@/pages/apm/RumPage'
 import { UsagePage } from '@/pages/apm/UsagePage'
 import { ErrorIssueDetailPage } from '@/pages/apm/ErrorIssueDetailPage'
@@ -130,13 +140,18 @@ const tabRedirects: Record<string, string> = {
   sensors: '/sensors',
   snmp: '/credentials?tab=snmp',
   subscription: '/subscription',
-  appearance: '/settings/general',
-  profile: '/settings/general',
+  // Settings → System status (the tab that was Storage) keeps `storage` as its address.
+  'system-status': '/settings/general?tab=storage',
+  system: '/settings/general?tab=storage',
 }
+/** Old /settings/<tab> addresses of tabs that still exist under the same name on Settings → General.
+ *  They used to fall through to Company, so a bookmark for Security or a "profile" link opened the wrong tab. */
+const GENERAL_TABS = new Set(['monitoring', 'smtp', 'appearance', 'licenses', 'updates', 'storage', 'security', 'mibs', 'support', 'profile'])
 
 function SettingsRedirect() {
   const { tab } = useParams()
-  const target = tab ? tabRedirects[tab] || '/settings/general' : '/settings/general'
+  const target = !tab ? '/settings/general'
+    : tabRedirects[tab] || (GENERAL_TABS.has(tab) ? `/settings/general?tab=${tab}` : '/settings/general')
   return <Navigate to={target} replace />
 }
 
@@ -202,6 +217,10 @@ export default function App() {
           <Route path="imports" element={<DiscoveryImportsPage />} />
           <Route path="ignored" element={<DiscoveryIgnoredPage />} />
           <Route path="credentials" element={<DiscoveryCredentialsPage />} />
+          <Route path="rules" element={<DiscoveryRulesPage />} />
+          <Route path="rules/new" element={<DiscoveryRuleEditorPage />} />
+          <Route path="rules/run" element={<DiscoveryRuleRunPage />} />
+          <Route path="rules/:id" element={<DiscoveryRuleEditorPage />} />
           <Route path="profiles/:id" element={<DiscoveryProfileDetailPage />} />
           <Route path="profiles/:id/edit" element={<DiscoveryWizardPage />} />
           <Route path="runs/:id" element={<DiscoveryRunPage />} />
@@ -218,7 +237,7 @@ export default function App() {
         </Route>
         <Route path="netpath" element={<NetPathProbesPage />} />
         <Route path="netpath/probes/:id" element={<NetPathDetailPage />} />
-        <Route path="maps" element={<Navigate to="/maps/manual" replace />} />
+        <Route path="maps" element={<MapsOverview />} />
         <Route path="maps/manual" element={<ManualMapsEntry />} />
         {/* One access-denied state without netflow.view; empty-scope banner (NetflowAccess.tsx). */}
         <Route element={<NetflowAccessGate />}>
@@ -235,7 +254,12 @@ export default function App() {
           <Route path="netflow/:section" element={<NetflowSectionPage />} />
         </Route>
         <Route path="mibs" element={<Navigate to="/settings/general?tab=mibs" replace />} />
-        <Route path="templates" element={<Navigate to="/settings/general?tab=templates" replace />} />
+        <Route path="templates" element={<Navigate to="/device-templates" replace />} />
+        <Route path="device-templates" element={<DeviceTemplatesPage />} />
+        <Route path="device-templates/:id" element={<TemplateDetailPage />} />
+        <Route path="device-groups" element={<DeviceGroupsPage />} />
+        <Route path="device-groups/:id" element={<GroupDetailPage />} />
+        <Route path="dependencies" element={<DependenciesPage />} />
         <Route path="sensors" element={<SensorsPage />} />
         <Route path="sensors/:id" element={<SensorDetailPage />} />
         <Route path="apm" element={<ApmLayout />}>
@@ -246,6 +270,7 @@ export default function App() {
           <Route path="slos" element={<SlosPage />} />
           <Route path="slos/:id" element={<SloDetailPage />} />
           <Route path="synthetics" element={<SyntheticsPage />} />
+          <Route path="synthetics/:id" element={<SyntheticDetailPage />} />
           <Route path="rum" element={<RumPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="errors" element={<ErrorsInboxPage />} />

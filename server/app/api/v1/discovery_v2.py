@@ -6,7 +6,6 @@ actions are audit logged.
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -16,13 +15,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.snmp_oid import display_oid
 from app.core.security import get_current_user, require_permission
-from app.models.device import Device
 from app.models.discovery_v2 import (
     DiscoveryIgnoredDevice,
     DiscoveryImportBatch,
-    DiscoveryImportItem,
     DiscoveryProfile,
     DiscoveryResultV2,
     DiscoveryRun,
@@ -44,7 +40,7 @@ from app.schemas.discovery_v2 import (
     ImportRequest,
     ImportResponse,
 )
-from app.services import license_capacity
+from app.services import discovery_import, license_capacity
 from app.services.audit_service import write_audit_log
 from app.services.device_service import apply_credential
 from app.services.discovery_executor import (
@@ -165,6 +161,9 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("discovery.run")),
 ):
+    if payload.default_group_id:
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, payload.default_group_id, what="A discovery profile's group")
     existing = (
         await db.execute(select(DiscoveryProfile).where(DiscoveryProfile.name == payload.name))
     ).scalar_one_or_none()
@@ -262,6 +261,9 @@ async def update_profile(
     if not p:
         raise HTTPException(404, "Profile not found")
     fields = payload.model_dump(exclude_unset=True)
+    if fields.get("default_group_id"):
+        from app.services.device_groups.service import assert_static
+        await assert_static(db, fields["default_group_id"], what="A discovery profile's group")
     for k, v in fields.items():
         if k in ("snmp_credential_ids", "windows_credential_ids", "ssh_credential_ids") and v is not None:
             v = [str(x) for x in v]
@@ -681,6 +683,9 @@ async def list_results(
             ignored=r.ignored,
             error_message=r.error_message,
             scanned_at=r.scanned_at,
+            disposition=r.disposition,
+            rule_plan=r.rule_plan,
+            matched_rule_ids=list(r.matched_rule_ids or []),
         ))
     return out
 
@@ -688,119 +693,6 @@ async def list_results(
 # ───────────────────────────────────────────────────────────────────
 # Import
 # ───────────────────────────────────────────────────────────────────
-_SERVER_OS_HINTS = ("windows", "linux", "ubuntu", "debian", "centos", "rhel",
-                    "red hat", "suse", "fedora", "esxi", "macos")
-
-
-def _is_server_result(result: DiscoveryResultV2) -> bool:
-    """Server-class host (vs network gear) — drives auto routing."""
-    if (result.device_type or "").lower() == "server":
-        return True
-    os_l = (result.os or "").lower()
-    return any(h in os_l for h in _SERVER_OS_HINTS)
-
-
-def _server_os_type(result: DiscoveryResultV2) -> str:
-    os_l = (result.os or "").lower()
-    if "windows" in os_l:
-        return "windows"
-    if any(h in os_l for h in ("linux", "ubuntu", "debian", "centos", "rhel", "red hat", "suse", "fedora")):
-        return "linux"
-    if "macos" in os_l or "mac os" in os_l:
-        return "macos"
-    if "bsd" in os_l:
-        return "bsd"
-    if "esxi" in os_l:
-        return "other"
-    # No OS probe result — fall back to port heuristics.
-    ports = _result_ports(result)
-    if ports & {3389, 5985, 5986, 445}:
-        return "windows"
-    if 22 in ports:
-        return "linux"
-    return "unknown"
-
-
-def _result_ports(result: DiscoveryResultV2) -> set[int]:
-    out: set[int] = set()
-    for p in result.open_ports or []:
-        try:
-            out.add(int(p))
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
-def _server_collection_mode(result: DiscoveryResultV2) -> str:
-    """Best agentless mode the scan proved (or hinted) for this host."""
-    if result.windows_credential_used:
-        return "agentless_winrm"
-    if result.credential_used:
-        return "snmp"
-    ports = _result_ports(result)
-    if 5985 in ports or 5986 in ports:
-        return "agentless_winrm"
-    if 22 in ports:
-        return "ssh"
-    if 161 in ports:
-        return "snmp"
-    return "none"
-
-
-def _route_result(result: DiscoveryResultV2, payload: ImportRequest) -> tuple[bool, bool]:
-    """(create_device, create_server) for one result under the chosen mode."""
-    if payload.import_as == "device":
-        return True, False
-    if payload.import_as == "server":
-        return False, True
-    if payload.import_as == "both":
-        return True, True
-    # auto: server-class hosts become servers (+ a device for ping/SNMP
-    # monitoring when enabled); everything else stays a network device.
-    if _is_server_result(result):
-        return payload.enable_monitoring, True
-    return True, False
-
-
-async def _create_server_from_result(
-    db: AsyncSession,
-    result: DiscoveryResultV2,
-    payload: ImportRequest,
-    user: User,
-    device_id: uuid.UUID | None,
-) -> uuid.UUID:
-    display_name = (result.hostname or result.sys_name or result.fqdn
-                    or str(result.ip_address))
-    hw = " ".join(b for b in (result.vendor, result.model) if b)
-    description = f"Imported from network discovery{f' — {hw}' if hw else ''}"
-    row = (await db.execute(
-        text("""INSERT INTO servers
-                    (display_name, hostname, fqdn, primary_ip, device_id,
-                     os_type, os_name, os_version, collection_mode,
-                     environment, description, tags, status, created_by)
-                VALUES (:dn, :hn, :fqdn, :ip, :dev,
-                        :ost, :osn, :osv, :cm,
-                        :env, :desc, CAST(:tags AS jsonb), 'unknown', :cb)
-                RETURNING id"""),
-        {
-            "dn": display_name[:255],
-            "hn": (result.hostname or result.sys_name or None),
-            "fqdn": result.fqdn,
-            "ip": str(result.ip_address),
-            "dev": device_id,
-            "ost": _server_os_type(result),
-            "osn": result.os,
-            "osv": result.os_version,
-            "cm": _server_collection_mode(result),
-            "env": payload.environment,
-            "desc": description,
-            "tags": json.dumps(payload.tags or result.suggested_tags or []),
-            "cb": user.id,
-        },
-    )).first()
-    return row[0]
-
-
 @router.post("/runs/{run_id}/import", response_model=ImportResponse)
 async def import_results(
     run_id: uuid.UUID,
@@ -817,224 +709,35 @@ async def import_results(
     # A new device is one license node; a new server is one unless it is linked
     # to a device (the same machine). Imports stop at the license capacity.
     budget = await license_capacity.reserve(db)
-    profile = await db.get(DiscoveryProfile, run.profile_id) if run.profile_id else None
-    # The dialog leaves location blank by default; the profile's location is
-    # the operator's stated intent for everything this scan finds.
-    import_location = payload.location or (profile.default_location if profile else None)
-
-    batch = DiscoveryImportBatch(
-        run_id=run_id,
-        profile_id=run.profile_id,
-        group_id=payload.group_id,
-        template_id=payload.template_id,
-        snmp_credential_id=payload.snmp_credential_id,
-        tags=payload.tags,
-        enable_monitoring=payload.enable_monitoring,
-        started_by=user.id,
-        status="running",
-        total_items=len(payload.result_ids),
+    # The shared import path (rules that auto-import use it too). Settings:
+    # the dialog's choices, then discovery-rule values, then profile defaults.
+    out = await discovery_import.import_results(
+        db, run, payload, actor_id=user.id, budget=budget, apply_credential=apply_credential,
     )
-    db.add(batch)
-    await db.flush()
-
-    successful = 0
-    failed = 0
-    skipped = 0
-    conflicts = 0
-    devices_created = 0
-    servers_created = 0
-    item_reports: list[dict] = []
-
-    for rid in payload.result_ids:
-        result = await db.get(DiscoveryResultV2, rid)
-        if not result or result.run_id != run_id:
-            # A missing result cannot be referenced by the item foreign key.
-            # Report the failure without poisoning valid items in this batch.
-            failed += 1
-            item_reports.append({"result_id": rid, "status": "failed",
-                                 "error": "result not found"})
-            continue
-        if result.imported:
-            item = DiscoveryImportItem(batch_id=batch.id, result_id=rid, status="skipped",
-                                       error_message="Already imported")
-            db.add(item)
-            skipped += 1
-            item_reports.append({"result_id": rid, "status": "skipped",
-                                 "reason": "already imported"})
-            continue
-
-        want_device, want_server = _route_result(result, payload)
-        report: dict = {"result_id": rid, "ip": str(result.ip_address)}
-        conflict_types: list[str] = []
-        created_device_id: uuid.UUID | None = None
-        created_server_id: uuid.UUID | None = None
-        linked_device_id: uuid.UUID | None = None
-        error: str | None = None
-
-        # Device leg (network monitoring)
-        existing_dev = (
-            await db.execute(
-                text("SELECT id FROM devices WHERE ip_address = :ip"),
-                {"ip": str(result.ip_address)},
-            )
-        ).first()
-        if existing_dev:
-            linked_device_id = existing_dev[0]
-        if want_device:
-            if existing_dev and payload.conflict_strategy == "update":
-                # Rediscovery updates discovered identity, preserving operator
-                # monitoring, credentials, tags, groups and interface choices.
-                await db.execute(text('''UPDATE devices SET
-                    sys_object_id = COALESCE(:oid, sys_object_id),
-                    vendor = COALESCE(:vendor, vendor), model = COALESCE(:model, model),
-                    os_version = COALESCE(:os_version, os_version)
-                    WHERE id = :id'''), {'id': existing_dev[0], 'oid': display_oid(result.sys_object_id),
-                    'vendor': result.vendor, 'model': result.model, 'os_version': result.os_version})
-                created_device_id = existing_dev[0]  # links the import result; not counted as a new node
-                report['updated_existing'] = True
-            elif existing_dev:
-                conflict_types.append("ip_exists")
-            elif not budget.take(1):
-                error = budget.exhausted_message
-            else:
-                try:
-                    hostname = result.hostname or result.sys_name or str(result.ip_address)
-                    device = Device(
-                        hostname=hostname,
-                        ip_address=str(result.ip_address),
-                        device_type=result.device_type or "other",
-                        location=import_location,
-                        group_id=payload.group_id or result.suggested_group_id,
-                        tags=payload.tags or result.suggested_tags or [],
-                        ping_enabled=payload.enable_monitoring,
-                        ping_interval=payload.ping_interval,
-                        snmp_enabled=bool(payload.enable_monitoring and (payload.snmp_credential_id or result.credential_used)),
-                        snmp_credential_id=payload.snmp_credential_id or result.credential_used,
-                        sys_object_id=display_oid(result.sys_object_id),
-                        vendor=result.vendor,
-                        model=result.model,
-                        os_version=result.os_version,
-                        profile_id=payload.template_id or result.matched_template_id,
-                        status="unknown",
-                        created_by=user.id,
-                    )
-                    # Copy the credential onto the device row exactly like
-                    # Add Device does; the poller polls from these columns.
-                    if device.snmp_credential_id:
-                        await apply_credential(db, device, device.snmp_credential_id)
-                    async with db.begin_nested():
-                        db.add(device)
-                        await db.flush()
-                    created_device_id = device.id
-                    linked_device_id = device.id
-                    devices_created += 1
-                except Exception as e:
-                    error = f"device: {e}"
-
-        # Server leg (server-monitoring inventory)
-        if want_server and error is None:
-            hn = result.hostname or result.sys_name
-            existing_srv = (
-                await db.execute(
-                    text("""SELECT id FROM servers
-                            WHERE primary_ip = :ip
-                               OR (hostname IS NOT NULL AND CAST(:hn AS text) IS NOT NULL
-                                   AND lower(hostname) = lower(CAST(:hn AS text)))
-                            LIMIT 1"""),
-                    {"ip": str(result.ip_address), "hn": hn},
-                )
-            ).first()
-            if existing_srv and payload.conflict_strategy == "skip":
-                conflict_types.append("server_exists")
-            elif (await license_capacity.server_needs_node(db, linked_device_id)
-                  and not budget.take(1)):
-                error = budget.exhausted_message
-            else:
-                try:
-                    async with db.begin_nested():
-                        created_server_id = await _create_server_from_result(
-                            db, result, payload, user, linked_device_id,
-                        )
-                    servers_created += 1
-                except Exception as e:
-                    error = f"server: {e}"
-
-        # Record what was created even on partial failure so retries don't duplicate.
-        now = datetime.now(timezone.utc)
-        if created_device_id or created_server_id:
-            result.imported = True
-            result.imported_at = now
-            if created_device_id:
-                result.imported_device_id = created_device_id
-            if created_server_id:
-                result.imported_server_id = created_server_id
-            result.status = "imported"
-
-        if error is not None:
-            item = DiscoveryImportItem(batch_id=batch.id, result_id=rid, status="failed",
-                                       device_id=created_device_id,
-                                       server_id=created_server_id,
-                                       error_message=error)
-            db.add(item)
-            failed += 1
-            report.update(status="failed", error=error)
-        elif created_device_id or created_server_id:
-            item = DiscoveryImportItem(
-                batch_id=batch.id,
-                result_id=rid,
-                status="imported",
-                device_id=created_device_id,
-                server_id=created_server_id,
-                conflict_type=",".join(conflict_types)[:40] or None,
-                processed_at=now,
-            )
-            db.add(item)
-            successful += 1
-            report["status"] = "imported"
-            if created_device_id:
-                report["device_id"] = str(created_device_id)
-            if created_server_id:
-                report["server_id"] = str(created_server_id)
-            if conflict_types:
-                report["partial_conflicts"] = conflict_types
-        else:
-            item = DiscoveryImportItem(batch_id=batch.id, result_id=rid, status="conflict",
-                                       device_id=linked_device_id,
-                                       conflict_type=",".join(conflict_types)[:40] or "exists")
-            db.add(item)
-            conflicts += 1
-            report.update(status="conflict", conflicts=conflict_types or ["exists"])
-        item_reports.append(report)
-
-    batch.successful_items = successful
-    batch.failed_items = failed
-    batch.skipped_items = skipped
-    batch.status = "completed" if failed == 0 else "partial"
-    batch.completed_at = datetime.now(timezone.utc)
     await db.commit()
 
     await write_audit_log(
         db, actor=user, action="discovery.import.commit",
-        resource_type="discovery_import_batch", resource_id=str(batch.id),
+        resource_type="discovery_import_batch", resource_id=str(out.batch_id),
         metadata={
             "run_id": str(run_id), "total": len(payload.result_ids),
-            "successful": successful, "failed": failed, "skipped": skipped,
-            "conflicts": conflicts, "import_as": payload.import_as,
-            "devices_created": devices_created, "servers_created": servers_created,
+            "successful": out.successful, "failed": out.failed, "skipped": out.skipped,
+            "conflicts": out.conflicts, "import_as": payload.import_as,
+            "devices_created": out.devices_created, "servers_created": out.servers_created,
         },
     )
     await db.commit()
 
     return ImportResponse(
-        batch_id=batch.id,
-        total=len(payload.result_ids),
-        successful=successful,
-        failed=failed,
-        skipped=skipped,
-        conflicts=conflicts,
-        devices_created=devices_created,
-        servers_created=servers_created,
-        items=item_reports,
+        batch_id=out.batch_id,
+        total=out.total,
+        successful=out.successful,
+        failed=out.failed,
+        skipped=out.skipped,
+        conflicts=out.conflicts,
+        devices_created=out.devices_created,
+        servers_created=out.servers_created,
+        items=out.items,
     )
 
 

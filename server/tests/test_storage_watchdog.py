@@ -679,3 +679,89 @@ def test_small_appliance_resumes_without_impossible_five_gib_floor(env):
     current[:] = [fs(6, 94, total_gib=105)]
     clock["t"] += 31
     assert dog.tick()["filesystems"][0]["minimum_free_bytes"] == 5 * GIB
+
+
+# ─── Review 2026-11-19 ───────────────────────────────────────────────────────
+
+def test_pause_clears_between_cleanup_threshold_and_critical(env):
+    """Uploads paused at critical must resume once free space is back above the
+    minimum, even when usage stays above the cleanup threshold with nothing
+    left to purge (state "pressure"). They used to stay paused for ever."""
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = [p for p in ch.partitions if p["table"] == "error_log"]   # nothing eligible
+    disk.used, disk.avail = int(98.5 * GIB), int(1.5 * GIB)
+    dog = make()
+    assert dog.tick()["ingest_paused"] is True
+    # Other files were removed: 90% used, 10 GiB free. Still above the 85% threshold.
+    disk.used, disk.avail = int(90 * GIB), int(10 * GIB)
+    clock["t"] += 30
+    state = dog.tick()
+    assert state["filesystems"][0]["state"] == "pressure"
+    assert state["ingest_paused"] is False and not (tmp / "ingest-paused").exists()
+
+
+def test_pause_keeps_a_margin_below_the_critical_percentage(env):
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = [p for p in ch.partitions if p["table"] == "error_log"]
+    # A large disk: plenty of free bytes, but 97.5% used is critical by percentage.
+    disk.used, disk.avail = int(975 * GIB), int(25 * GIB)
+    dog = make()
+    assert dog.tick()["ingest_paused"] is True
+    disk.used, disk.avail = int(960 * GIB), int(40 * GIB)      # 96%: inside the margin
+    clock["t"] += 30
+    assert dog.tick()["ingest_paused"] is True
+    disk.used, disk.avail = int(940 * GIB), int(60 * GIB)      # 94%: clear of it
+    clock["t"] += 30
+    assert dog.tick()["ingest_paused"] is False
+
+
+def test_a_refused_removal_does_not_block_the_next_candidates(env):
+    """A DROP the server keeps refusing was planned first on every tick, so
+    nothing behind it was ever tried."""
+    W, make, clock, disk, ch, tmp = env
+    ch.partitions = [part("system", "text_log_0", "all", 30, TODAY - timedelta(days=40)),
+                     part("system", "trace_log", "20261001", 30, TODAY - timedelta(days=9))]
+    disk.used, disk.avail = int(92 * GIB), int(8 * GIB)
+    refused = ch.command
+
+    def command(sql):
+        if "text_log_0" in sql:
+            raise RuntimeError("Table or Partition was not dropped: size exceeds max_table_size_to_drop")
+        return refused(sql)
+    ch.command = command
+
+    dog = make()
+    first = dog.tick()
+    # Reported, not silent; and the candidate behind it was dropped in the same tick.
+    assert "text_log_0" in first["last_error"]["message"]
+    assert any("trace_log" in c for c in ch.commands)
+    stuck = P.Candidate("legacy", "system", "text_log_0", None, 1, None)
+    assert dog._without_failed([stuck], clock["t"]) == []
+    for _ in range(4):
+        clock["t"] += 30
+        dog.tick()
+    # Not retried (and not logged) on every tick.
+    purges = [a for a in audit(tmp) if a["type"] == "watchdog_purge"]
+    assert sum(len(p["details"]["errors"]) for p in purges) == 1
+    # After the cool-down it gets another chance.
+    clock["t"] += W.FAILED_ACTION_COOLDOWN_S
+    assert dog._without_failed([stuck], clock["t"]) == [stuck]
+
+
+def test_no_filesystem_reading_is_an_error_not_healthy(env):
+    W, make, clock, disk, ch, tmp = env
+    state = make(sampler=lambda: []).tick()
+    assert state["filesystems"] == []
+    assert state["last_error"]["message"] == "no filesystem could be measured"
+
+
+def test_policy_file_that_is_not_an_object_falls_back_to_defaults(env):
+    W, make, clock, disk, ch, tmp = env
+    (tmp / "policy.json").write_text("[1, 2]")
+    assert make().policy()["threshold_pct"] == P.DEFAULT_POLICY["threshold_pct"]
+
+
+def test_pause_marker_that_is_not_an_object_still_pauses(env):
+    W, make, clock, disk, ch, tmp = env
+    (tmp / "ingest-paused").write_text('"low"')
+    assert W.ingest_paused() == {"reason": "free space critically low"}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -104,6 +105,20 @@ func ResetSchedule() {
 	sentInventory.Unlock()
 }
 
+// logf receives the collectors' occasional notices. The agent installs its
+// log with SetLogger; tests and one-shot commands keep the silent default.
+var logf = func(string, ...any) {}
+
+// SetLogger directs collector notices to the agent log. Call it once, before
+// the first collection.
+func SetLogger(f func(string, ...any)) {
+	if f != nil {
+		logf = f
+	}
+}
+
+var noServiceManager sync.Once
+
 type serviceInfo struct {
 	ServiceName string `json:"service_name"`
 	DisplayName string `json:"display_name"`
@@ -169,6 +184,9 @@ func CollectWithEventCursors(ctx context.Context, cfg config.Config, cursors map
 	if cfg.Collectors.Inventory.Enabled && due("inventory", cfg.Collectors.Inventory.IntervalSeconds, now) {
 		collectInventory(ctx, &r)
 	}
+	// Restart evidence recorded by the agent itself (Linux), independent of
+	// the event-log policy; empty unless StartLifecycle found a new boot.
+	r.Metrics = append(r.Metrics, lifecycleMetrics()...)
 	omitUnchangedInventory(r.Inventory, now)
 	return r
 }
@@ -277,7 +295,25 @@ func collectCPU(ctx context.Context, add func(string, map[string]any), errs map[
 			}
 		}
 	}
+	if runtime.GOOS == "linux" {
+		addLoadAverage(data, errs)
+	}
 	add("cpu", data)
+}
+
+// addLoadAverage reports the kernel load average in the load_1/5/15 fields
+// the controller stores (where Windows reports its processor queue length).
+// The CPU count it is judged against already reaches the controller in the
+// hardware inventory (servers.cpu_cores).
+func addLoadAverage(data map[string]any, errs map[string]string) {
+	load, err := readLoadAverage()
+	if err != nil {
+		errs["load_average"] = err.Error()
+		return
+	}
+	data["load_1"] = load.One
+	data["load_5"] = load.Five
+	data["load_15"] = load.Fifteen
 }
 
 func readCPUTimes(ctx context.Context) ([]cpu.TimesStat, cpu.TimesStat, error) {
@@ -652,6 +688,11 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 
 func collectServices(ctx context.Context, watchlist []string, add func(string, map[string]any), errs map[string]string, inv map[string]any) {
 	services, err := listServices()
+	if errors.Is(err, errNoSystemd) {
+		// Nothing to read on a host without systemd: not a collector failure.
+		noServiceManager.Do(func() { logf("service collection skipped: %v", err) })
+		return
+	}
 	if err != nil {
 		errs["service_state"] = err.Error()
 		return

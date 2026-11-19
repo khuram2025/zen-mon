@@ -1,13 +1,19 @@
 import { regionalDate } from '@/lib/regionalTime'
 // Pure helpers for the Storage tab. Self-contained (no app imports) so
 // scripts/test-storage-ui.mjs can exercise them directly.
-import type { Consumer, Forecast, MountInfo, Severity, StorageEvent, StorageIssue, DiagnosticLog, Layout } from './types'
+import type { AutoPurge, Consumer, Forecast, MountInfo, Severity, StorageEvent, StorageIssue, DiagnosticLog, Layout } from './types'
 
 export const GIB = 1024 ** 3
+/** Purge previews, purges and appliance cleanup outlast the 30 s request default on a large history. */
+export const CLEANUP_TIMEOUT_MS = 10 * 60_000
 
-/** Binary units, labelled as such (GiB), everywhere on the Storage page. */
-export function bytes(n: number, decimals = 1): string {
-  if (!n || !Number.isFinite(n) || n <= 0) return '0 B'
+/**
+ * Binary units, labelled as such (GiB), everywhere on the Storage page.
+ * A missing reading is "—", never zero.
+ */
+export function bytes(n: number | null | undefined, decimals = 1): string {
+  if (n == null || !Number.isFinite(n)) return '—'
+  if (n <= 0) return '0 B'
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
   const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
   return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : decimals)} ${units[i]}`
@@ -39,6 +45,27 @@ export function allocationBytes(gibText: string, extentBytes: number, freeBytes:
   const wanted = Math.floor((gib * GIB) / extent) * extent
   if (wanted <= 0) return null
   return Math.min(wanted, Math.floor(freeBytes / extent) * extent)
+}
+
+/** The extend step after a claim: only what the claim added, in whole extents. */
+export function claimedAllocation(addedBytes: unknown, extentBytes: number): number | null {
+  if (typeof addedBytes !== 'number' || !Number.isFinite(addedBytes)) return null
+  const extent = extentBytes > 0 ? extentBytes : 4 * 1024 ** 2
+  const whole = Math.floor(addedBytes / extent) * extent
+  return whole > 0 ? whole : null
+}
+
+/**
+ * What "Add disk" sends as `allocate`. A new disk gives slightly less than its
+ * size to the pool, so a byte count at the maximum would be refused after the
+ * disk has already joined: at (or within one extent of) the maximum ask for all.
+ */
+export function addDiskAllocation(mode: 'all' | 'custom' | 'none', custom: number | null, extentBytes: number, maxBytes: number): string {
+  if (mode !== 'custom') return mode
+  if (custom == null) return 'none'
+  const extent = extentBytes > 0 ? extentBytes : 4 * 1024 ** 2
+  const max = Math.floor(maxBytes / extent) * extent
+  return custom >= max - extent ? 'all' : String(custom)
 }
 
 export interface SpaceSegment {
@@ -76,6 +103,11 @@ export function spaceSegments(mount: MountInfo, consumers: Consumer[], allMounts
   return segments.sort((a, b) => b.bytes - a.bytes)
 }
 
+function horizon(days: number): string {
+  const d = Math.floor(days)
+  return d <= 0 ? 'less than a day' : d > 365 ? 'more than a year' : `about ${d} day${d === 1 ? '' : 's'}`
+}
+
 export function forecastSummary(f: Forecast | undefined | null): { tone: 'ok' | 'warning' | 'critical'; text: string } | null {
   if (!f || f.current_bytes <= 0) return null
   const perDay = `~${bytes(f.daily_bytes)}/day`
@@ -84,7 +116,7 @@ export function forecastSummary(f: Forecast | undefined | null): { tone: 'ok' | 
     return {
       tone: days != null && days < 30 ? 'critical' : 'warning',
       text: `Historical metrics footprint averages ${perDay} and ${f.unbounded_categories.length} categor${f.unbounded_categories.length === 1 ? 'y has' : 'ies have'} no retention limit` +
-        (days != null ? ` — estimated free space lasts about ${days} days.` : '.'),
+        (days != null ? ` — estimated free space lasts ${horizon(days)}.` : '.'),
     }
   }
   if (f.fits) {
@@ -96,7 +128,7 @@ export function forecastSummary(f: Forecast | undefined | null): { tone: 'ok' | 
   return {
     tone: f.days_until_full != null && f.days_until_full < 30 ? 'critical' : 'warning',
     text: `Historical metrics footprint averages ${perDay} and need about ${bytes(f.growth_remaining_bytes)} more before retention levels them off` +
-      (f.days_until_full != null ? ` — estimated free space runs out in about ${f.days_until_full} days.` : '.'),
+      (f.days_until_full != null ? ` — estimated free space runs out in ${horizon(f.days_until_full)}.` : '.'),
   }
 }
 
@@ -129,6 +161,17 @@ export const EVENT_LABELS: Record<string, string> = {
   watchdog_error: 'Protection check failed',
 }
 
+/** A purge pass made under low-space pressure lists its triggers; the scheduled log sweep does not. */
+export function lowSpacePurge(e: StorageEvent): boolean {
+  const reason = e.details?.reason
+  return Array.isArray(reason) && reason.length > 0
+}
+
+export function eventLabel(e: StorageEvent): string {
+  if (e.event_type === 'watchdog_purge' && !lowSpacePurge(e)) return 'Log cleanup'
+  return EVENT_LABELS[e.event_type] || 'Storage operation'
+}
+
 /** Never render free-form service errors, commands, paths or table names. */
 export function eventSummary(e: StorageEvent): string {
   const d = e.details || {}
@@ -139,7 +182,7 @@ export function eventSummary(e: StorageEvent): string {
     case 'space_claimed': return `${amount(d.added_bytes)} ready to allocate`
     case 'disk_evacuation_started': return `${amount(d.bytes_to_move)} moving; keep the disk connected until complete`
     case 'disk_removed': return 'Disk removed from appliance storage'
-    case 'watchdog_purge': return `${amount(d.scheduled_bytes)} scheduled for deletion · ${d.reason === 'legacy_cleanup' ? 'Expired appliance logs' : 'Low-space protection'}`
+    case 'watchdog_purge': return `${amount(d.scheduled_bytes)} scheduled for deletion` + (lowSpacePurge(e) ? ' · Low-space protection' : d.reason === 'legacy_cleanup' ? ' · Expired appliance logs removed on schedule' : '')
     case 'watchdog_reclaim': return `${amount(d.scheduled_bytes)} scheduled` + (typeof d.measured_free_change_bytes === 'number' ? ` · free space ${d.measured_free_change_bytes >= 0 ? '+' : '−'}${amount(Math.abs(d.measured_free_change_bytes))} measured` : '')
     case 'watchdog_insufficient': return `${amount(d.planned_bytes)} eligible this pass; ${amount(d.need_bytes)} needed. Expand storage or review retention.`
     case 'watchdog_exhausted': return 'No more eligible data can be removed. Expand storage or review retention.'
@@ -152,17 +195,38 @@ export function eventSummary(e: StorageEvent): string {
     case 'auto_purge_skipped': return 'No eligible old history to remove within the current policy.'
     case 'auto_purge': return e.freed_bytes ? `${amount(e.freed_bytes)} reclaimed` : 'Retention checked; no space reclaimed.'
     case 'manual_purge': return `${amount(d.scheduled_bytes ?? e.freed_bytes)} scheduled for deletion`
-    case 'retention_applied': return 'Retention settings applied to monitoring history.'
+    case 'retention_applied': {
+      const changes: unknown[] = Array.isArray(d.changes) ? d.changes : []
+      const failed = changes.filter((c: any) => c && typeof c === 'object' && 'error' in c).length
+      if (!failed) return 'Retention settings applied to monitoring history.'
+      return `${failed === changes.length ? 'Retention not applied' : 'Retention applied'}; ${failed} table${failed === 1 ? '' : 's'} could not be updated`
+    }
     case 'backup_created': return `${d.kind === 'full' ? 'Full' : 'Configuration'} backup · ${amount(d.size_bytes)}`
     case 'os_cleanup': return `${amount(e.freed_bytes)} reclaimed from appliance logs and temporary files`
-    default: return 'Storage operation recorded.'
+    default: return e.freed_bytes > 0 ? `${amount(e.freed_bytes)} reclaimed` : 'Storage operation recorded.'
   }
+}
+
+const INTERNAL_WORDS = /clickhouse|postgres|lvm|traceback|errno|exception|sql|\b(?:table|pv|vg|lv)\b/i
+
+/** A server message is shown only as a short plain sentence: no paths, identifiers, lists or service names. */
+function plainSentence(detail: unknown): string | null {
+  if (typeof detail !== 'string') return null
+  const s = detail.trim()
+  if (s.length < 8 || s.length > 140) return null
+  if (!/^[A-Za-z][A-Za-z0-9 ,.:;'()%-]*$/.test(s) || INTERNAL_WORDS.test(s)) return null
+  return /[.!?]$/.test(s) ? s : `${s}.`
 }
 
 export function storageError(e?: any): string {
   const status = e?.response?.status
   if (status === 401) return 'Your session has expired. Sign in again.'
   if (status === 403) return 'Administrator access is required for this operation.'
+  // Backup routes answer 400/409/410 with a reason the operator can act on.
+  if ((status === 400 || status === 409 || status === 410) && /\/storage\/backups(?:\/|$)/.test(String(e?.config?.url || ''))) {
+    const said = plainSentence(e?.response?.data?.detail)
+    if (said) return said
+  }
   if (status === 409) return 'Storage changed or another operation is running. Refresh and review the current state.'
   if (status === 400 || status === 422) return 'The request could not be applied. Check the selected disk, capacity and settings, then refresh before retrying.'
   return 'The operation could not complete. Refresh to check its status before retrying; contact support if this continues.'
@@ -210,13 +274,83 @@ export function issueText(issue: StorageIssue): [string, string] {
     fast_growth: ['Storage is filling quickly', 'Automatic protection is removing eligible logs. Review capacity and retention.'],
     watchdog_error: ['Storage protection needs attention', 'A recent check failed. Contact support if this continues.'],
   }
-  return messages[issue.code] || ['Storage needs attention', 'Review capacity and retention; contact support if this continues.']
+  const text = messages[issue.code] || ['Storage needs attention', 'Review capacity and retention; contact support if this continues.']
+  // Separate volumes report one finding each; the server title is only read for which one, never shown.
+  const area = /^Data volume /.test(issue.title || '') ? 'Monitoring' : /^System volume /.test(issue.title || '') ? 'System' : null
+  if (area && issue.code === 'usage_critical') return [`${area} capacity is critically low`, text[1]]
+  if (area && issue.code === 'usage_high') return [`${area} capacity is running low`, text[1]]
+  if (area && issue.code === 'usage_elevated') return [`Plan for more ${area.toLowerCase()} capacity`, text[1]]
+  return text
+}
+
+/**
+ * The protection card's growth line. The rate is a 15-minute sample, so the
+ * hours it projects are only printed when they are close enough to act on.
+ */
+export function growthNote(growthBytesPerHour: number | null | undefined, runwayHours: number | null | undefined): string {
+  if (growthBytesPerHour == null || !Number.isFinite(growthBytesPerHour)) return 'Collecting a growth sample.'
+  if (growthBytesPerHour <= 0) return 'No net growth over the last 15 minutes.'
+  const rate = `Growth over the last 15 minutes: ${bytes(growthBytesPerHour)}/hour`
+  if (runwayHours != null && Number.isFinite(runwayHours) && runwayHours < 72) {
+    return `${rate}. Estimated remaining capacity: ${runwayHours.toFixed(1)} hours at this rate.`
+  }
+  return `${rate}; short samples swing with background maintenance.`
+}
+
+/** What a disk rescan found, from the counts in its response; null when the response has none. */
+export function rescanSummary(data: any): string | null {
+  const added = data?.available_disks
+  const claimable = data?.layout?.claimable
+  if (!Array.isArray(added) && !Array.isArray(claimable)) return null
+  const n = Array.isArray(added) ? added.length : 0
+  const c = Array.isArray(claimable) ? claimable.length : 0
+  const parts = [
+    n > 0 ? `${n} new disk${n === 1 ? '' : 's'} detected` : '',
+    c > 0 ? `${c} enlarged disk${c === 1 ? '' : 's'} with space to claim` : '',
+  ].filter(Boolean)
+  return parts.length ? `${parts.join(' · ')}.` : 'No new disks or size changes detected.'
+}
+
+/** Toast for a finished (non-preview) purge: removals that failed are counted, never reported as success. */
+export function purgeOutcome(data: any): { kind: 'success' | 'warning' | 'error'; title: string; detail: string } {
+  const failed = Array.isArray(data?.errors) ? data.errors.length : 0
+  const raw = data?.scheduled_bytes ?? data?.freed_bytes
+  const scheduled = typeof raw === 'number' && raw > 0 ? raw : 0
+  const later = 'capacity may take about 10 minutes to return'
+  if (!failed) return { kind: 'success', title: 'Purge scheduled', detail: `${bytes(scheduled)} scheduled; ${later}` }
+  const count = `${failed} removal${failed === 1 ? '' : 's'} failed`
+  if (!scheduled) return { kind: 'error', title: 'Purge failed', detail: `${count}; nothing was scheduled. Preview again before retrying.` }
+  return { kind: 'warning', title: 'Purge partly scheduled', detail: `${count}; ${bytes(scheduled)} scheduled, ${later}. Preview again before retrying.` }
+}
+
+/** First invalid low-space protection field, matching the server's ranges (whole numbers except the GiB reserve). */
+export function autoPurgeError(a: AutoPurge): { field: keyof AutoPurge; message: string } | null {
+  if (!a.enabled) return null
+  const whole = (n: number, min: number, max: number) => Number.isInteger(n) && n >= min && n <= max
+  if (!whole(a.threshold_pct, 50, 98)) return { field: 'threshold_pct', message: 'Threshold must be a whole number, 50–98%' }
+  if (!whole(a.target_pct, 40, 95)) return { field: 'target_pct', message: 'Target must be a whole number, 40–95%' }
+  if (a.target_pct >= a.threshold_pct) return { field: 'target_pct', message: 'Target must be below the threshold' }
+  if (!whole(a.min_keep_days, 1, 365)) return { field: 'min_keep_days', message: 'Minimum keep must be a whole number of days, 1–365' }
+  if (!(Number.isFinite(a.min_free_gib) && a.min_free_gib >= 0.5 && a.min_free_gib <= 1024)) return { field: 'min_free_gib', message: 'Minimum free space must be 0.5–1024 GiB' }
+  return null
+}
+
+/** Switched off, the hidden numeric fields go back as last saved, never blank or half-edited. */
+export function autoPurgePayload(edited: AutoPurge, saved: AutoPurge): AutoPurge {
+  return edited.enabled ? edited : { ...saved, enabled: false }
+}
+
+/** An hour-of-day in UTC dated today, so the local-time hint uses the offset in force now. */
+export function scheduleInstant(hourUtc: number, now: Date = new Date()): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hourUtc))
 }
 export function logGroups(logs: DiagnosticLog[]) {
   const groups = new Map<string, { label: string; bytes: number; policy: string }>()
   for (const l of logs) {
     if (!(l.bytes > 0)) continue
-    const label = l.evidence ? 'Recovery records' : l.legacy ? 'Retained appliance logs' : l.protected ? 'Incident logs' : 'Current appliance logs'
+    // Current logs come in two retention classes; the short one is the verbose trace class.
+    const label = l.evidence ? 'Recovery records' : l.legacy ? 'Retained appliance logs' : l.protected ? 'Incident logs'
+      : l.retention_days <= 3 ? 'Detailed trace logs' : 'Activity and query logs'
     const expiry = l.expires_after ? new Date(l.expires_after) : null
     const validExpiry = expiry && Number.isFinite(expiry.getTime())
     const policy = l.evidence ? 'Kept for support review'

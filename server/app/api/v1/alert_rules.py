@@ -7,7 +7,7 @@ from uuid import UUID
 from datetime import datetime, time, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,12 @@ from app.services import alert_phrasing as ap
 from app.services import alert_priority as prio
 from app.services import netflow_alert_service as nfa
 from app.services import apm_event_rules as aer
+from app.services import alert_rule_exclusions as rx
+from app.services import service_metric_alert_service as sma
+from app.services import appliance_alert_service as apl
+from app.services import virtualization_alert_service as vma
+from app.services import monitoring_gap_alert_service as gap
+from app.core import scoping
 
 
 def _validate_apm_event(rule):
@@ -46,16 +52,259 @@ async def _validate_apm_event_target(db, rule):
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
 
 
-def _validate_network_contract(metric, conditions):
-    from app.services.network_conditions import supported, UNMAPPED_METRICS, validate_conditions
+def _validate_network_contract(metric, conditions, existing=None):
+    """``existing`` is the stored rule on an update (None on create): metrics it
+    already uses stay allowed, so an old rule on a retired key remains editable."""
+    from app.services.network_conditions import (supported, UNMAPPED_METRICS, validate_conditions,
+                                                 refuse_new_metrics)
     items = conditions or [dict(metric=metric, operator='>', threshold=0)]
-    if any(c.get('reset_threshold') is not None and not supported(c.get('metric')) for c in items):
+    if any(apl.is_appliance_metric(c.get('metric')) for c in items) or apl.is_appliance_metric(metric):
+        _validate_appliance_conditions(metric, items if conditions else None)
+        return
+    try:
+        refuse_new_metrics(items, _rule_metrics(existing) if existing is not None else ())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if any(c.get('reset_threshold') is not None and not supported(c.get('metric'))
+           and c.get('metric') not in sma.METRICS and c.get('metric') not in vma.METRICS for c in items):
         raise HTTPException(status_code=422, detail='Reset thresholds require a network metric')
     if any(supported(c.get('metric')) or c.get('metric') in UNMAPPED_METRICS for c in items):
         try:
             validate_conditions(items)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+_SERVICE_METRIC_DEVICE_SCOPES = ("group_id", "device_type", "location", "profile_id", "if_role")
+_ORDER_OPERATORS = (">", ">=", "<", "<=", "gt", "gte", "lt", "lte")
+
+
+def _validate_service_metric(rule: dict) -> None:
+    """Certificate-expiry / response-time rules (migrate-199): one condition on
+    one of these metrics, an ordering operator, a sensible limit, a clear level
+    on the healthy side, and the scope the metric's asset has (service checks:
+    check, check group, linked device, tag; F5 certificates: the device scopes)."""
+    conditions = _json_value(rule.get("conditions")) or None
+    items = conditions or [dict(metric=rule.get("metric"), operator=rule.get("operator"),
+                                threshold=rule.get("threshold"))]
+    metrics = [c.get("metric") for c in items]
+    if not any(m in sma.METRICS for m in metrics):
+        return
+    if len(items) != 1:
+        raise HTTPException(status_code=422,
+                            detail="Certificate-expiry and response-time rules take a single condition")
+    c = items[0]
+    metric, op = c.get("metric"), (c.get("operator") or "").strip()
+    if op not in _ORDER_OPERATORS:
+        raise HTTPException(status_code=422, detail="Use <, <=, > or >= for this metric")
+    try:
+        threshold = float(c.get("threshold"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="A numeric limit is required") from None
+    if metric == sma.RESPONSE_MS and threshold <= 0:
+        raise HTTPException(status_code=422, detail="The response-time limit must be above 0 ms")
+    if metric in sma.DAYS_METRICS and not -3650 <= threshold <= 3650:
+        raise HTTPException(status_code=422, detail="The limit must be between -3650 and 3650 days")
+    reset = c.get("reset_threshold")
+    if reset is not None:
+        high = op in (">", ">=", "gt", "gte")
+        if (high and float(reset) > threshold) or (not high and float(reset) < threshold):
+            raise HTTPException(status_code=422,
+                                detail="The clear level must lie on the healthy side of the limit")
+    if metric in sma.SERVICE_METRICS:
+        if any(rule.get(k) for k in _SERVICE_METRIC_DEVICE_SCOPES):
+            raise HTTPException(status_code=422, detail=(
+                "Service check rules are scoped by service check, service check group, "
+                "linked device or tag"))
+    elif rule.get("service_check_id") or rule.get("service_check_group_id"):
+        raise HTTPException(status_code=422,
+                            detail="F5 certificate rules are scoped by device, not by service check")
+
+
+def _validate_appliance_conditions(metric, conditions):
+    """Appliance rules take one condition on one appliance metric; a reset
+    (clear) level, when given, lies on the healthy side of the trigger."""
+    items = conditions or []
+    if items and (len(items) != 1 or items[0].get('metric') != metric):
+        raise HTTPException(status_code=422,
+                            detail='Appliance health rules take a single condition on their own metric')
+    if not apl.is_appliance_metric(metric):
+        raise HTTPException(status_code=422,
+                            detail='Appliance health metrics cannot be combined with other metrics')
+    if items and items[0].get('reset_threshold') is not None:
+        op = ap.normalize_operator(items[0].get('operator'))
+        reset, thr = float(items[0]['reset_threshold']), float(items[0]['threshold'])
+        if not ((op in ('>', '>=') and reset <= thr) or (op in ('<', '<=') and reset >= thr)):
+            raise HTTPException(status_code=422,
+                                detail='Reset threshold must lie on the healthy side of the trigger')
+
+
+# Appliance rules are about the ZenPlus appliance itself: the device-family
+# scope columns mean nothing for them (and would confuse the tag-scope guard).
+_APPLIANCE_CLEARED = ("device_id", "group_id", "service_check_id", "service_check_group_id",
+                      "device_type", "location", "scope_tag", "trap_oid", "profile_id", "if_role")
+
+
+def _rule_metrics(rule) -> set:
+    """Every metric a stored rule uses (flat column and conditions)."""
+    out = {rule.get('metric')} if rule.get('metric') else set()
+    conds = rule.get('conditions')
+    if isinstance(conds, str):
+        try:
+            conds = json.loads(conds)
+        except ValueError:
+            conds = None
+    out.update(c.get('metric') for c in conds or [] if isinstance(c, dict))
+    return out
+
+
+async def _validate_template_states(db, conditions):
+    """A "==" / "!=" condition on a template state (enum) metric must name one of
+    the metric's codes in at least one template; 422 lists the known states."""
+    from app.services import template_states as ts
+    wanted = {c.get('metric')[4:] for c in conditions or []
+              if str(c.get('metric') or '').startswith('tpl_') and c.get('operator') in ('==', '!=', 'eq', 'neq')}
+    if not wanted:
+        return
+    rows = (await db.execute(text(
+        "SELECT g.value FROM device_profiles p, jsonb_array_elements(p.oid_groups) g "
+        "WHERE jsonb_typeof(p.oid_groups) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements("
+        "  CASE WHEN jsonb_typeof(g.value->'metrics') = 'array' THEN g.value->'metrics' ELSE '[]'::jsonb END) m "
+        "  WHERE m.value->>'key' = ANY(:keys))"), {"keys": sorted(wanted)})).all()
+    infos: dict[str, list] = {}
+    for (group,) in rows:
+        for key, info in ts.metric_index([group if isinstance(group, dict) else json.loads(group)]).items():
+            if key in wanted and info.is_state:
+                infos.setdefault(key, []).append(info)
+    for c in conditions or []:
+        key = str(c.get('metric') or '')[4:]
+        if key not in infos or c.get('operator') not in ('==', '!=', 'eq', 'neq'):
+            continue
+        code = c.get('threshold')
+        if any(info.label(code) is not None for info in infos[key]):
+            continue
+        info = infos[key][0]
+        known = ", ".join(f"{k} = {info.label(k)}" for k in info.known_codes())
+        raise HTTPException(status_code=422, detail=(
+            f"{info.group_name}: {info.name} has no state {float(code):g}; its states are {known}"))
+
+
+_VIRT_REJECTED_SCOPES = ("group_id", "device_type", "location", "profile_id", "if_role",
+                         "service_check_id", "service_check_group_id", "server_id")
+
+
+async def _validate_virtualization_metric(db: AsyncSession, rule: dict) -> None:
+    """Virtualisation rules (migrate-201): one condition on vm_host_disconnected,
+    vm_datastore_pct or vm_alarm. The state metrics must fire on their worst
+    value and never on 0; the percent metric takes an ordering operator, a
+    limit within 0-100 and a clear level on the healthy side. Scope: one
+    connector (target), the connector's linked device (device_id) or a
+    connector tag (scope_tag); status-style triggers do not apply."""
+    conditions = _json_value(rule.get("conditions")) or None
+    items = conditions or [dict(metric=rule.get("metric"), operator=rule.get("operator"),
+                                threshold=rule.get("threshold"))]
+    if not any(c.get("metric") in vma.METRICS for c in items):
+        return
+    if len(items) != 1:
+        raise HTTPException(status_code=422, detail="Virtualisation rules take a single condition")
+    c = items[0]
+    metric, op = c.get("metric"), (c.get("operator") or "").strip()
+    try:
+        threshold = float(c.get("threshold"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="A numeric limit is required") from None
+    reset = c.get("reset_threshold")
+    if metric in vma.STATE_METRICS:
+        values = vma.STATE_VALUES[metric]
+        if op not in ("==", ">", ">=", "eq", "gt", "gte") or sma.cmp(0, op, threshold) \
+                or not sma.cmp(values[-1], op, threshold):
+            raise HTTPException(status_code=422, detail=(
+                "Use == 1 or >= 1 for a host disconnection; >= 1 (red or yellow) or >= 2 (red) for an alarm"))
+        if reset is not None:
+            raise HTTPException(status_code=422, detail="This metric clears when the state clears; "
+                                                        "it takes no clear level")
+    else:
+        if op not in _ORDER_OPERATORS:
+            raise HTTPException(status_code=422, detail="Use <, <=, > or >= for this metric")
+        if not 0 <= threshold <= 100:
+            raise HTTPException(status_code=422, detail="The limit must be between 0 and 100 %")
+        if reset is not None:
+            high = op in (">", ">=", "gt", "gte")
+            if (high and float(reset) > threshold) or (not high and float(reset) < threshold):
+                raise HTTPException(status_code=422,
+                                    detail="The clear level must lie on the healthy side of the limit")
+    if any(rule.get(k) for k in _VIRT_REJECTED_SCOPES):
+        raise HTTPException(status_code=422, detail=(
+            "Virtualisation rules are scoped by virtualisation source, its linked device or a source tag"))
+    if (rule.get("trigger_on") or "any") != "any":
+        raise HTTPException(status_code=422, detail="Virtualisation rules do not take a status trigger")
+    target = (rule.get("target") or "").strip()
+    if target:
+        try:
+            UUID(target)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Virtualisation source not found") from None
+        found = (await db.execute(text("SELECT 1 FROM virtualization_connectors WHERE id = CAST(:id AS uuid)"),
+                                  {"id": target})).first()
+        if not found:
+            raise HTTPException(status_code=422, detail="Virtualisation source not found")
+
+
+_GAP_SERVER_FORBIDDEN = ("device_id", "device_type", "location", "profile_id", "if_role",
+                         "service_check_id", "service_check_group_id", "target")
+_GAP_DEVICE_FORBIDDEN = ("server_id", "service_check_id", "service_check_group_id", "if_role", "target")
+
+
+def _validate_monitoring_gap(rule: dict) -> None:
+    """Monitoring gap rules (migrate-202, docs/monitoring-gap-alerts.md): one
+    condition ``> N`` or ``>= N`` minutes, 1..10080, any status trigger, and
+    the scope the asset has (SNMP: the device scopes; agents: group and tag)."""
+    conditions = _json_value(rule.get("conditions")) or None
+    items = conditions or [dict(metric=rule.get("metric"), operator=rule.get("operator"),
+                                threshold=rule.get("threshold"))]
+    metrics = [c.get("metric") for c in items]
+    if not any(m in gap.METRICS for m in metrics) and rule.get("metric") not in gap.METRICS:
+        return
+    if len(items) != 1 or items[0].get("metric") != rule.get("metric", items[0].get("metric")):
+        raise HTTPException(status_code=422, detail="Monitoring gap rules take a single condition")
+    c = items[0]
+    if (c.get("operator") or "").strip() not in gap.OPERATORS:
+        raise HTTPException(status_code=422, detail="Use > or >= minutes for a monitoring gap")
+    try:
+        minutes = float(c.get("threshold"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="The gap in minutes is required") from None
+    if not 1 <= minutes <= gap.MAX_MINUTES:
+        raise HTTPException(status_code=422,
+                            detail=f"The gap must be between 1 and {gap.MAX_MINUTES} minutes")
+    if c.get("reset_threshold") is not None:
+        raise HTTPException(status_code=422,
+                            detail="A monitoring gap clears when data returns; it takes no clear level")
+    if (rule.get("trigger_on") or "any") != "any":
+        raise HTTPException(status_code=422, detail="Monitoring gap rules use the trigger 'any'")
+    forbidden = _GAP_SERVER_FORBIDDEN if c.get("metric") in gap.SERVER_METRICS else _GAP_DEVICE_FORBIDDEN
+    if any(rule.get(k) for k in forbidden):
+        raise HTTPException(status_code=422, detail=(
+            "Agent metric gap rules are scoped by group or tag" if c.get("metric") in gap.SERVER_METRICS
+            else "SNMP unreachable rules are scoped by device, group, type, location or tag"))
+
+
+async def _validate_template_scope(db, metric, conditions, profile_id, if_role):
+    """Template scope and interface roles (migrate-193) belong to SNMP and template
+    metric rules, the ones network_alert_service evaluates; roles to interface metrics."""
+    from app.services.network_alert_service import INTERFACE_METRICS, NETWORK_METRICS
+    metrics = [c.get("metric") for c in (conditions or [])] or [metric]
+    network = all(m in NETWORK_METRICS or str(m or "").startswith("tpl_") for m in metrics)
+    if profile_id:
+        if not network:
+            raise HTTPException(status_code=422,
+                                detail="A template scope applies to SNMP interface, device and template metric rules")
+        exists = (await db.execute(text("SELECT 1 FROM device_profiles WHERE id = CAST(:id AS uuid)"),
+                                   {"id": str(profile_id)})).first()
+        if not exists:
+            raise HTTPException(status_code=422, detail="The template does not exist")
+    if if_role and not all(m in INTERFACE_METRICS for m in metrics):
+        raise HTTPException(status_code=422, detail="An interface role applies to interface metrics only")
 
 
 def _merge_condition_update(current, fields):
@@ -73,7 +322,7 @@ def _merge_condition_update(current, fields):
         merged.update({key: conditions[0][key] for key in ('metric', 'operator', 'threshold')})
         merged['conditions'] = conditions
     metric = merged.get('metric', current.get('metric'))
-    _validate_network_contract(metric, conditions)
+    _validate_network_contract(metric, conditions, existing=current)
     if metric == 'syslog':
         threshold = merged.get('threshold', current.get('threshold', 0))
         if threshold is None or not 0 <= threshold <= 7 or int(threshold) != threshold:
@@ -124,6 +373,9 @@ def _json_value(value):
 _NETWORK_METRICS = (
     "cpu|memory|uptime_reset|temperature|fan_state|psu_state|"
     "if_in_bps|if_out_bps|if_util_pct|if_errors|if_discards|if_oper_status|"
+    # Interface quality (migrate-205): error/discard share of packets,
+    # oper-status changes in the rule's window, a link speed change.
+    "if_error_rate_pct|if_discard_rate_pct|if_flaps|if_speed_changed|"
     "session_count|vpn_tunnel_state|ha_state|bgp_neighbor_down"
 )
 # APM and browser-RUM metric keys. Server RED keys are scoped by service; RUM
@@ -161,7 +413,25 @@ _TPL_METRICS = r"tpl_[a-z0-9_]{1,60}"
 # (window, band, hold/clear evaluations, flap suppression, per-metric options)
 # = alert_rules.flow_params. One condition per rule (no compound conditions).
 _NETFLOW_METRICS = nfa.METRIC_PATTERN
-_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}|{_NETPATH_METRICS}|{_TPL_METRICS}|{_NETFLOW_METRICS}"
+# Certificate-expiry and response-time keys (migrate-199), evaluated by
+# service_metric_alert_service: days until a service check's certificate
+# expires, a service check's average response time (ms) and days until an F5
+# inventory certificate expires. One condition per rule.
+_SERVICE_LEVEL_METRICS = "service_tls_days|service_response_ms|f5_cert_days"
+# ZenPlus appliance health (migrate-198 CHECK), evaluated by
+# appliance_alert_service. Not tied to a device or server: one incident per
+# rule + dimension (channel for delivery failures, sensor for sensor offline,
+# database for db_down); `target` optionally narrows to one channel or sensor.
+_APPLIANCE_METRICS = "|".join(apl.APPLIANCE_METRICS)
+# Virtualisation keys (migrate-201), evaluated by virtualization_alert_service:
+# an ESXi host disconnected (1/0), datastore used %, an active platform alarm
+# (2 red, 1 yellow). One condition per rule.
+_VIRT_METRICS = "vm_host_disconnected|vm_datastore_pct|vm_alarm"
+# Monitoring gaps (migrate-202), evaluated by monitoring_gap_alert_service:
+# minutes a device's SNMP polls have gone unanswered while it answers ping, and
+# minutes an agent has sent no host metrics while it heartbeats.
+_GAP_METRICS = "snmp_unreachable|agent_no_metrics"
+_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}|{_NETPATH_METRICS}|{_TPL_METRICS}|{_NETFLOW_METRICS}|{_SERVICE_LEVEL_METRICS}|{_APPLIANCE_METRICS}|{_VIRT_METRICS}|{_GAP_METRICS}"
 
 
 class ConditionItem(BaseModel):
@@ -245,6 +515,11 @@ class AlertRuleCreate(BaseModel):
     device_type: Optional[str] = None
     location: Optional[str] = None
     scope_tag: Optional[str] = Field(default=None, max_length=120)
+    # Device Templates phase 3 (migrate-193): devices on this template or one
+    # customised from it (SNMP/template metric rules), and for interface
+    # metrics only interfaces with this role.
+    profile_id: Optional[UUID] = None
+    if_role: Optional[str] = Field(default=None, pattern="^(uplink|access|wan|server|tunnel|vlan|loopback|management)$")
 
     severity: str = Field(default="warning", pattern="^(info|warning|critical)$")
     notify_channels: list[str] = Field(default_factory=list)
@@ -308,6 +583,8 @@ class AlertRuleUpdate(BaseModel):
     device_type: Optional[str] = None
     location: Optional[str] = None
     scope_tag: Optional[str] = Field(default=None, max_length=120)
+    profile_id: Optional[UUID] = None
+    if_role: Optional[str] = Field(default=None, pattern="^(uplink|access|wan|server|tunnel|vlan|loopback|management)$")
 
     severity: Optional[str] = Field(None, pattern="^(info|warning|critical)$")
     notify_channels: Optional[list[str]] = None
@@ -413,7 +690,8 @@ _RULE_COLUMNS = (
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
     "conditions, condition_logic, trap_oid, target, flow_scope, flow_params, "
-    "server_id, created_at, updated_at, created_by"
+    "server_id, created_at, updated_at, created_by, "
+    "profile_id, pack_key, pack_accepted, if_role"
 )
 
 
@@ -466,6 +744,10 @@ def _row_to_dict(row) -> dict:
         "recovery_sms_template": row.recovery_sms_template,
         "conditions": getattr(row, "conditions", None) or None,
         "condition_logic": getattr(row, "condition_logic", None) or "AND",
+        "profile_id": str(row.profile_id) if getattr(row, "profile_id", None) else None,
+        "pack_key": getattr(row, "pack_key", None),
+        "pack_accepted": getattr(row, "pack_accepted", None),
+        "if_role": getattr(row, "if_role", None),
         "trap_oid": getattr(row, "trap_oid", None),
         "target": getattr(row, "target", None),
         "flow_scope": getattr(row, "flow_scope", None),
@@ -493,6 +775,81 @@ def _clock(value) -> Optional[time]:
         raise HTTPException(status_code=422, detail="Schedule times are HH:MM (00:00-23:59)")
 
 
+_TEMPLATE_FIELD_LABELS = {
+    "email_subject": "email subject", "email_body": "email body", "sms_template": "SMS",
+    "recovery_email_subject": "recovery email subject", "recovery_email_body": "recovery email body",
+    "recovery_sms_template": "recovery SMS",
+}
+
+
+def _family_placeholders(rule: dict) -> set[str]:
+    """Placeholders a NetFlow, appliance or APM event rule's own sender adds
+    to the device wording (the ones its preview shows)."""
+    out: set[str] = set()
+    for build in (lambda: nfa.preview_phrasing(rule, is_recovery=False),
+                  lambda: apl.preview_variables(rule, is_recovery=False),
+                  # The event's own facts are variables too (failed step, error, burn rates).
+                  lambda: (aer.phrasing(rule.get("metric"), "sample", {
+                      "failed_step": "", "error": "", "service": "", "tier": "", "long_burn": 0,
+                      "short_burn": 0, "factor": 0}, recovery=False)
+                           if rule.get("metric") in aer.EVENT_METRICS else None)):
+        try:
+            out.update((build() or {}).keys())
+        except Exception:
+            continue
+    return out
+
+
+async def _custom_field_keys(db: AsyncSession) -> set[str] | None:
+    """Defined device custom field keys ({custom.<key>}); None when unknown."""
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text(
+                "SELECT key FROM custom_field_defs WHERE 'device' = ANY(asset_kinds)"))).scalars().all()
+        return {str(k) for k in rows}
+    except Exception:
+        return None
+
+
+async def _validate_template_placeholders(db: AsyncSession, templates: dict, rule: dict) -> None:
+    """422 when a submitted template uses a {placeholder} that no sender of
+    this rule fills (it would be sent verbatim). Lists the unknown names and
+    every valid one for the rule's template kind."""
+    present = {k: v for k, v in templates.items()
+               if isinstance(v, str) and v.strip() and not ap.is_default_template(v)}
+    # Server-agent rules always send the built-in wording (templates_editable).
+    if not present or str(rule.get("metric") or "").startswith("host_"):
+        return
+    kind = ap.template_kind(rule)
+    extra = _family_placeholders(rule)
+    custom_keys = await _custom_field_keys(db)
+    problems = {}
+    for name in _TEMPLATE_FIELDS:
+        if name in present:
+            unknown = ap.unknown_placeholders(present[name], kind, extra=extra, custom_keys=custom_keys)
+            if unknown:
+                problems[name] = unknown
+    if not problems:
+        return
+    names = list(dict.fromkeys(n for field in _TEMPLATE_FIELDS for n in problems.get(field, [])))
+    valid = sorted(ap.template_variables(kind) | extra)
+    if kind == "device" and custom_keys:
+        valid += sorted(f"{ap.CUSTOM_PLACEHOLDER_PREFIX}{k}" for k in custom_keys)
+    where = ", ".join(_TEMPLATE_FIELD_LABELS.get(f, f) for f in _TEMPLATE_FIELDS if f in problems)
+    braces = ", ".join("{" + n + "}" for n in names)
+    raise HTTPException(status_code=422, detail={
+        "code": "unknown_template_placeholder",
+        "message": (f"Unknown placeholder{'s' if len(names) > 1 else ''} {braces} in the {where}: "
+                    f"nothing fills {'them' if len(names) > 1 else 'it'}, so it would be sent as "
+                    f"typed. Valid placeholders for this rule: "
+                    + ", ".join("{" + v + "}" for v in valid) + "."),
+        "unknown": names,
+        "fields": problems,
+        "valid": valid,
+        "template_kind": kind,
+    })
+
+
 def _normalized_templates(submitted: dict, kind: str) -> dict:
     """Submitted template fields, with "same as the default" reduced to NULL."""
     defaults = ap.default_templates(kind)
@@ -518,6 +875,8 @@ def _with_templates(rule: dict) -> dict:
     rule["default_templates"] = ap.default_templates(kind)
     rule["effective_templates"] = ap.effective_templates(rule, kind)
     rule["templates_editable"] = not str(rule.get("metric") or "").startswith("host_")
+    # The {placeholders} a save accepts for this kind (see _validate_template_placeholders).
+    rule["template_variables"] = sorted(ap.template_variables(kind))
     return rule
 
 
@@ -535,7 +894,301 @@ async def get_template_defaults(user: User = Depends(get_current_user)):
     the client is what stops the editor advertising device wording on a
     service-check rule.
     """
-    return {kind: ap.default_templates(kind) for kind in ("device", "service", "trap", "syslog")}
+    kinds = ("device", "service", "trap", "syslog")
+    out: dict = {kind: ap.default_templates(kind) for kind in kinds}
+    # The {placeholders} a save accepts per kind (_validate_template_placeholders), and
+    # the extra ones a family's own sender adds (APM events, appliance, NetFlow), so the
+    # editor never offers a placeholder that a save would refuse.
+    out["variables"] = {kind: sorted(ap.template_variables(kind)) for kind in kinds}
+    extras = {}
+    for metric in (*sorted(aer.EVENT_METRICS), *apl.APPLIANCE_METRICS, *nfa.METRICS):
+        names = sorted(_family_placeholders({"metric": metric, "operator": ">", "threshold": 1}))
+        if names:
+            extras[metric] = names
+    out["extras"] = extras
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Per-asset exclusions (migrate-187, docs/alert-rule-exclusions.md)
+# ---------------------------------------------------------------------------
+
+class ExclusionBody(BaseModel):
+    """Turn a shared rule off for one device or server only."""
+    asset_kind: str = Field(..., pattern="^(device|server)$")
+    asset_id: UUID
+    reason: Optional[str] = Field(default=None, max_length=rx.REASON_MAX)
+
+
+def _exclusion_http(exc: "rx.ExclusionError") -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@router.get("/for-asset")
+async def rules_for_asset(
+    asset_kind: str = Query(..., pattern="^(device|server)$"),
+    asset_id: UUID = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The alert rules that apply to one device or server: shared rules (with
+    whether they are disabled for this asset, by whom and when) and the
+    asset's own rules. ``active`` is the rule's effect on this asset."""
+    asset = await rx.asset_row(db, asset_kind, asset_id)
+    if asset is None or not scoping.entity_visible(asset.get("tags"), await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail=f"{asset_kind.capitalize()} not found")
+    return {"asset": {"kind": asset_kind, "id": str(asset["id"]), "name": asset.get("name")},
+            "items": await rx.rules_for_asset(db, asset_kind, asset)}
+
+
+# ── Overrides and effective thresholds (migrate-193) ───────────────────────
+
+@router.get("/effective")
+async def effective_thresholds_for_asset(
+    asset_kind: str = Query(..., pattern="^(device|server)$"),
+    asset_id: UUID = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Every rule covering one device or server with the values in force for it and
+    their source: the rule, an override (which row), an exclusion or the rule being off."""
+    from app.services import effective_thresholds as eff
+    asset = await rx.asset_row(db, asset_kind, asset_id)
+    if asset is None or not scoping.entity_visible(asset.get("tags"), await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail=f"{asset_kind.capitalize()} not found")
+    return {"asset": {"kind": asset_kind, "id": str(asset["id"]), "name": asset.get("name")},
+            "items": await eff.for_asset(db, asset_kind, asset)}
+
+
+class OverrideBody(BaseModel):
+    device_id: Optional[UUID] = None
+    server_id: Optional[UUID] = None
+    group_id: Optional[UUID] = None
+    instance_pattern: Optional[str] = Field(default=None, max_length=200)
+    metric: Optional[str] = Field(default=None, max_length=80)
+    threshold: Optional[float] = Field(default=None, allow_inf_nan=False)
+    reset_threshold: Optional[float] = Field(default=None, allow_inf_nan=False)
+    min_duration: Optional[int] = Field(default=None, ge=0, le=86400)
+    clear_duration: Optional[int] = Field(default=None, ge=0, le=86400)
+    priority: Optional[str] = Field(default=None, pattern="^P[1-4]$")
+    reason: str = Field(..., min_length=1, max_length=500)
+    expires_at: Optional[datetime] = None
+    position: Optional[int] = Field(default=None, ge=0, le=100000)
+
+
+class OverrideOrder(BaseModel):
+    ids: list[UUID] = Field(..., max_length=500)
+
+
+def _overridable(rule: dict) -> None:
+    from app.services.host_alert_service import THRESHOLD_METRICS
+    from app.services.network_alert_service import NETWORK_METRICS
+    conds = _json_value(rule.get("conditions")) or [{"metric": rule.get("metric")}]
+    metrics = {c.get("metric") for c in conds}
+    if metrics == {"uptime_reset"}:
+        raise HTTPException(status_code=422, detail="A restart rule has no threshold to override")
+    if all(m in NETWORK_METRICS or str(m or "").startswith("tpl_") for m in metrics):
+        return
+    if metrics <= set(THRESHOLD_METRICS):
+        return
+    raise HTTPException(status_code=422, detail="Overrides apply to SNMP, template and server metric rules")
+
+
+async def _override_rule(db: AsyncSession, user: User, rule_id: UUID) -> dict:
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    await rs.guard_rule_change(db, user, rule)
+    _overridable(rule)
+    return rule
+
+
+async def _check_override_target(db: AsyncSession, user: User, rule: dict, fields: dict) -> None:
+    """The target exists, fits the rule's kind and is visible; a group row needs an unscoped user."""
+    from app.services.host_alert_service import THRESHOLD_METRICS
+    server_rule = rule.get("metric") in THRESHOLD_METRICS
+    scope = await scoping.visible_tags(db, user)
+    if fields.get("group_id"):
+        if scope is not None:
+            raise HTTPException(status_code=403, detail="A group override needs a user without a tag scope")
+        if not (await db.execute(text("SELECT 1 FROM device_groups WHERE id = CAST(:id AS uuid)"),
+                                 {"id": fields["group_id"]})).first():
+            raise HTTPException(status_code=422, detail="The group does not exist")
+        return
+    kind = "device" if fields.get("device_id") else "server"
+    if (kind == "server") != server_rule:
+        raise HTTPException(status_code=422, detail=f"This rule evaluates {'servers' if server_rule else 'devices'}")
+    asset = await rx.asset_row(db, kind, fields[f"{kind}_id"])
+    if asset is None or not scoping.entity_visible(asset.get("tags"), scope):
+        raise HTTPException(status_code=404, detail=f"{kind.capitalize()} not found")
+
+
+@router.get("/{rule_id}/overrides")
+async def list_rule_overrides(rule_id: UUID, db: AsyncSession = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    from app.services import alert_rule_overrides as ovr
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    scope = await scoping.visible_tags(db, user)
+    items, hidden = [], 0
+    for it, tags in await ovr.list_for_rule(db, rule_id):
+        if it["group_id"] is None and not scoping.entity_visible(tags, scope):
+            hidden += 1
+            continue
+        items.append(it)
+    return {"items": items, "hidden": hidden}
+
+
+async def _save_override(db: AsyncSession, user: User, rule_id: UUID, data: OverrideBody,
+                         override_id: Optional[UUID] = None) -> dict:
+    from app.services import alert_rule_overrides as ovr
+    rule = await _override_rule(db, user, rule_id)
+    try:
+        fields = ovr.validate(data.model_dump(), rule)
+    except ovr.OverrideError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    await _check_override_target(db, user, rule, fields)
+    params = {**fields, "rule_id": str(rule_id), "uid": user.id, "uname": getattr(user, "username", None)}
+    if override_id is None:
+        row = (await db.execute(text("""
+            INSERT INTO alert_rule_overrides (rule_id, position, device_id, server_id, group_id, instance_pattern,
+                   metric, threshold, reset_threshold, min_duration, clear_duration, priority, reason, expires_at,
+                   created_by, created_by_name)
+            VALUES (CAST(:rule_id AS uuid), :position, CAST(:device_id AS uuid), CAST(:server_id AS uuid),
+                    CAST(:group_id AS uuid), :instance_pattern, :metric, :threshold, :reset_threshold,
+                    :min_duration, :clear_duration, :priority, :reason, :expires_at,
+                    (SELECT id FROM users WHERE id = :uid), :uname)
+            RETURNING id::text
+        """), params)).first()
+        oid, action = row[0], "alert_rule.override_create"
+    else:
+        before = (await db.execute(text("SELECT 1 FROM alert_rule_overrides WHERE id = :id AND rule_id = :rid"),
+                                   {"id": override_id, "rid": rule_id})).first()
+        if not before:
+            raise HTTPException(status_code=404, detail="Override not found")
+        await db.execute(text("""
+            UPDATE alert_rule_overrides SET position = :position, device_id = CAST(:device_id AS uuid),
+                   server_id = CAST(:server_id AS uuid), group_id = CAST(:group_id AS uuid),
+                   instance_pattern = :instance_pattern, metric = :metric, threshold = :threshold,
+                   reset_threshold = :reset_threshold, min_duration = :min_duration,
+                   clear_duration = :clear_duration, priority = :priority, reason = :reason,
+                   expires_at = :expires_at, updated_at = now()
+             WHERE id = :id
+        """), {**params, "id": override_id})
+        oid, action = str(override_id), "alert_rule.override_update"
+    await write_audit_log(db, actor=user, action=action, resource_type="alert_rule", resource_id=str(rule_id),
+                          metadata={"name": rule.get("name"), "override_id": oid,
+                                    **{k: (v.isoformat() if isinstance(v, datetime) else v)
+                                       for k, v in fields.items()}})
+    await db.commit()
+    rows = await ovr.list_for_rule(db, rule_id)
+    return next(it for it, _ in rows if it["id"] == oid)
+
+
+@router.post("/{rule_id}/overrides", status_code=201)
+async def create_rule_override(rule_id: UUID, data: OverrideBody, db: AsyncSession = Depends(get_db),
+                               user: User = Depends(require_rule_manager)):
+    return await _save_override(db, user, rule_id, data)
+
+
+@router.put("/{rule_id}/overrides/{override_id}")
+async def update_rule_override(rule_id: UUID, override_id: UUID, data: OverrideBody,
+                               db: AsyncSession = Depends(get_db), user: User = Depends(require_rule_manager)):
+    return await _save_override(db, user, rule_id, data, override_id)
+
+
+@router.delete("/{rule_id}/overrides/{override_id}", status_code=204)
+async def delete_rule_override(rule_id: UUID, override_id: UUID, db: AsyncSession = Depends(get_db),
+                               user: User = Depends(require_rule_manager)):
+    rule = await _override_rule(db, user, rule_id)
+    row = (await db.execute(text(
+        "SELECT device_id::text, server_id::text, group_id::text FROM alert_rule_overrides "
+        "WHERE id = :id AND rule_id = :rid"), {"id": override_id, "rid": rule_id})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Override not found")
+    await _check_override_target(db, user, rule, dict(row))
+    await db.execute(text("DELETE FROM alert_rule_overrides WHERE id = :id"), {"id": override_id})
+    await write_audit_log(db, actor=user, action="alert_rule.override_delete", resource_type="alert_rule",
+                          resource_id=str(rule_id), metadata={"name": rule.get("name"), "override_id": str(override_id)})
+    await db.commit()
+
+
+@router.post("/{rule_id}/overrides/reorder")
+async def reorder_rule_overrides(rule_id: UUID, data: OverrideOrder, db: AsyncSession = Depends(get_db),
+                                 user: User = Depends(require_rule_manager)):
+    """Positions follow the given order (device/server rows are still tried before group rows)."""
+    from app.services import alert_rule_overrides as ovr
+    rule = await _override_rule(db, user, rule_id)
+    if await scoping.visible_tags(db, user) is not None:
+        raise HTTPException(status_code=403, detail="Reordering overrides needs a user without a tag scope")
+    existing = {r[0] for r in (await db.execute(text(
+        "SELECT id::text FROM alert_rule_overrides WHERE rule_id = :rid FOR UPDATE"), {"rid": rule_id})).all()}
+    ids = [str(i) for i in data.ids]
+    if set(ids) != existing or len(ids) != len(existing):
+        raise HTTPException(status_code=409, detail="The overrides changed; reload and try again")
+    for n, oid in enumerate(ids):
+        await db.execute(text("UPDATE alert_rule_overrides SET position = :p, updated_at = now() WHERE id = :id"),
+                         {"p": (n + 1) * 10, "id": oid})
+    await write_audit_log(db, actor=user, action="alert_rule.override_reorder", resource_type="alert_rule",
+                          resource_id=str(rule_id), metadata={"name": rule.get("name"), "order": ids})
+    await db.commit()
+    return {"items": [it for it, _ in await ovr.list_for_rule(db, rule_id)]}
+
+
+@router.get("/{rule_id}/exclusions")
+async def list_rule_exclusions(
+    rule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The devices and servers this rule is disabled for (those the caller can
+    see; ``hidden`` counts the others)."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    out = await rx.for_rule(db, rule_id, await scoping.visible_tags(db, user))
+    return {"rule_id": str(rule_id), "kinds": sorted(rx.kinds_for_rule(rule)), **out}
+
+
+@router.post("/{rule_id}/exclusions")
+async def create_rule_exclusion(
+    rule_id: UUID,
+    body: ExclusionBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_rule_manager),
+):
+    """Disable a shared rule for one device or server. The rule keeps running
+    for every other asset; its open incidents on this one are resolved."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    try:
+        out = await rx.exclude(db, user, rule, body.asset_kind, body.asset_id, body.reason)
+    except rx.ExclusionError as exc:
+        raise _exclusion_http(exc)
+    await db.commit()
+    return out
+
+
+@router.delete("/{rule_id}/exclusions/{asset_kind}/{asset_id}")
+async def delete_rule_exclusion(
+    rule_id: UUID,
+    asset_kind: str,
+    asset_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_rule_manager),
+):
+    """Re-enable a shared rule for one device or server."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    try:
+        removed = await rx.include(db, user, rule, asset_kind, asset_id)
+    except rx.ExclusionError as exc:
+        raise _exclusion_http(exc)
+    await db.commit()
+    return {"removed": removed}
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +1277,27 @@ async def list_alert_rules(
         text(f"SELECT {_RULE_COLUMNS} FROM alert_rules ORDER BY created_at DESC")
     )
     rows = result.fetchall()
-    return {"data": [_with_templates(_row_to_dict(r)) for r in rows]}
+    excluded = await rx.counts(db)
+    fired = await _last_triggered(db)
+    return {"data": [{**_with_templates(_row_to_dict(r)), "exclusion_count": excluded.get(str(r.id), 0),
+                      "last_triggered_at": fired.get(str(r.id))}
+                     for r in rows]}
+
+
+async def _last_triggered(db: AsyncSession) -> dict[str, str]:
+    """{rule id: ISO time of its newest alert} for the rule list's "Last fired".
+
+    One index probe per rule (idx_alerts_rule_any, then the newest row of that
+    rule) rather than a scan of the whole alerts table. Rules that never fired
+    are absent. A failure leaves the column empty instead of failing the list."""
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(text(
+                "SELECT r.id::text, (SELECT max(a.triggered_at) FROM alerts a WHERE a.rule_id = r.id) "
+                "FROM alert_rules r"))).all()
+    except Exception:
+        return {}
+    return {str(rid): at.isoformat() for rid, at in rows if at is not None}
 
 
 @router.post("", status_code=201)
@@ -647,11 +1320,23 @@ async def create_alert_rule(
         threshold = conditions[0]["threshold"]
 
     _validate_network_contract(metric, conditions)
+    _validate_service_metric({**data.model_dump(), "metric": metric, "operator": operator,
+                              "threshold": threshold, "conditions": conditions})
+    await _validate_virtualization_metric(db, {**data.model_dump(), "metric": metric, "operator": operator,
+                                               "threshold": threshold, "conditions": conditions})
+    _validate_monitoring_gap({**data.model_dump(), "metric": metric, "operator": operator,
+                              "threshold": threshold, "conditions": conditions})
+    await _validate_template_scope(db, metric, conditions, data.profile_id, data.if_role)
+    await _validate_template_states(db, conditions or [dict(metric=metric, operator=operator, threshold=threshold)])
     if metric == 'syslog':
         _merge_condition_update({'metric': metric, 'threshold': threshold}, {})
     _validate_apm_event({**data.model_dump(), 'metric': metric, 'operator': operator,
                          'threshold': threshold, 'conditions': conditions})
     await _validate_apm_event_target(db, {**data.model_dump(), 'metric': metric})
+    await _validate_template_placeholders(
+        db, {f: getattr(data, f, None) for f in _TEMPLATE_FIELDS},
+        {**data.model_dump(), "metric": metric, "operator": operator, "threshold": threshold,
+         "conditions": conditions})
 
     flow_scope = flow_params = None
     cleared: set[str] = set()
@@ -664,6 +1349,8 @@ async def create_alert_rule(
         cleared = set(_NETFLOW_CLEARED)
     elif data.flow_scope or data.flow_params:
         raise HTTPException(status_code=422, detail="flow_scope and flow_params only apply to NetFlow metrics")
+    if apl.is_appliance_metric(metric):
+        cleared = set(_APPLIANCE_CLEARED)
 
     params: dict = {
         "name": data.name,
@@ -689,6 +1376,8 @@ async def create_alert_rule(
         "device_type": data.device_type,
         "location": data.location,
         "scope_tag": (data.scope_tag or "").strip() or None,
+        "profile_id": data.profile_id,
+        "if_role": data.if_role,
         "trigger_on": data.trigger_on,
         "recovery_alert": False if metric == 'syslog' else data.recovery_alert,
         "min_duration": 0 if metric == 'syslog' else data.min_duration,
@@ -733,7 +1422,7 @@ async def create_alert_rule(
             "schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
             "recovery_email_subject, recovery_email_body, recovery_sms_template, "
-            "created_at, updated_at, created_by) "
+            "created_at, updated_at, created_by, profile_id, if_role) "
             "VALUES "
             "(:name, :description, :enabled, :metric, :operator, :threshold, :duration, "
             "CAST(:conditions AS jsonb), :condition_logic, :trap_oid, :target, "
@@ -747,7 +1436,7 @@ async def create_alert_rule(
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
             ":recovery_email_subject, :recovery_email_body, :recovery_sms_template, "
-            ":created_at, :updated_at, :created_by) "
+            ":created_at, :updated_at, :created_by, :profile_id, :if_role) "
             f"RETURNING {_RULE_COLUMNS}"
         ),
         params,
@@ -817,6 +1506,17 @@ async def update_alert_rule(
 
     _validate_apm_event({**before, **fields})
     await _validate_apm_event_target(db, {**before, **fields})
+    _validate_service_metric({**before, **fields})
+    await _validate_virtualization_metric(db, {**before, **fields})
+    _validate_monitoring_gap({**before, **fields})
+    if any(k in fields for k in ("profile_id", "if_role", "metric", "conditions")):
+        merged = {**before, **fields}
+        await _validate_template_scope(db, merged.get("metric"), _json_value(merged.get("conditions")),
+                                       merged.get("profile_id"), merged.get("if_role"))
+    if any(k in fields for k in ("metric", "operator", "threshold", "conditions")):
+        merged = {**before, **fields}
+        await _validate_template_states(db, _json_value(merged.get("conditions")) or [dict(
+            metric=merged.get("metric"), operator=merged.get("operator"), threshold=merged.get("threshold"))])
 
     # NetFlow rules: validate the merged definition; a changed definition
     # makes the old subjects meaningless, so their state and open alerts go.
@@ -854,6 +1554,11 @@ async def update_alert_rule(
             fields["flow_scope"] = None
             fields["flow_params"] = None
             netflow_reset = True
+    if apl.is_appliance_metric(merged_metric):
+        for key in _APPLIANCE_CLEARED:
+            if before.get(key) is not None or key in fields:
+                fields[key] = None
+        fields["trigger_on"] = "any"
 
     # Templates equal to the built-in default are stored as NULL, so a rule
     # keeps tracking the wording rather than freezing a copy the editor merely
@@ -873,6 +1578,12 @@ async def update_alert_rule(
             "service_check_group_id": fields.get(
                 "service_check_group_id", current.service_check_group_id),
         })
+        await _validate_template_placeholders(
+            db, {n: fields[n] for n in _TEMPLATE_FIELDS if n in fields},
+            {**before, **fields, "metric": fields.get("metric", current.metric),
+             "service_check_id": fields.get("service_check_id", current.service_check_id),
+             "service_check_group_id": fields.get("service_check_group_id",
+                                                  current.service_check_group_id)})
         defaults = ap.default_templates(kind)
         for name in _TEMPLATE_FIELDS:
             if name in fields:
@@ -1063,6 +1774,14 @@ def _render_template(template: str, variables: dict) -> str:
     return result
 
 
+def _condition_text(rule: dict) -> str:
+    """The rule's condition label, as alert mails show it."""
+    try:
+        return ap.rule_phrasing(rule).get("condition_label") or ""
+    except Exception:
+        return ap.metric_noun(rule.get("metric"))
+
+
 def _build_alert_message(rule_dict: dict, is_recovery: bool = False, branding=None) -> dict:
     """Build a preview/simulation alert message from a rule.
 
@@ -1121,6 +1840,10 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False, branding=No
         "status_intro": status_intro,
         "device_type": rule_dict.get("device_type") or "router",
         "group": "Core Network",
+        # A sample site; NetPath, APM and appliance alerts have no site.
+        **{k: v for k, v in ap.place_variables(
+            "" if metric.startswith(("apm_", "netpath_")) or apl.is_appliance_metric(metric)
+            else "Riyadh-HQ").items() if k != "group"},
         "location": rule_dict.get("location") or "DC-1 Rack A1",
         # "Now" rather than a frozen date: a preview/test mail stamped months in
         # the past reads as stale data rather than as a sample.
@@ -1132,6 +1855,8 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False, branding=No
         "target": "https://service.example.com",
         "error": "" if is_recovery else "connection timed out after 5s",
         "trap_message": "Link state changed on the monitored interface.",
+        **ap.trap_variables("linkDown", "1.3.6.1.6.3.1.1.5.3",
+                            "Link state changed on the monitored interface."),
         **ap.service_check_variables(device_status, "" if is_recovery else "Connection timed out after 5 seconds"),
         **ap.rule_phrasing(rule_dict, hostname=ap.host_label(hostname, "10.0.0.1")
                            if kind == "device" and not metric.startswith("apm_") else hostname,
@@ -1163,9 +1888,15 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False, branding=No
     if nf_vars:
         variables.update(nf_vars)
 
+    # Appliance health rules are about the ZenPlus appliance, never a router.
+    apl_vars = apl.preview_variables(rule_dict, is_recovery=is_recovery, branding=branding)
+    if apl_vars:
+        variables.update(apl_vars, host_suffix=f" — {apl_vars['hostname']}", asset=apl_vars["hostname"])
+
     if metric == 'syslog':
         variables.update(event_message='Interface uplink changed state', syslog_severity=int(threshold or 0),
-                         event_sentence=f'{hostname} sent a matching syslog event.', status='SYSLOG')
+                         event_sentence=f'{hostname} sent a matching syslog event.', status='SYSLOG',
+                         **ap.syslog_variables(int(threshold or 0), 'Interface uplink changed state'))
         device_status = 'SYSLOG'
 
     # `effective_template` also treats the wizard's old pre-filled templates as
@@ -1228,6 +1959,7 @@ def _preview_email_ctx(rule_dict: dict, msg: dict, is_recovery: bool,
                   "values. No alert has been raised and nothing was sent.",
         "details": _clean_details([
             ("Alert rule", rule_dict.get("name")),
+            ("Site", variables.get("site")),
             ("Condition", variables.get("condition_label")),
             ("Active for", variables.get("duration") if is_recovery else None),
             ("Round-trip time", variables.get("rtt") if is_ping else None),
@@ -1437,7 +2169,8 @@ async def simulate_alert_rule(
 
                 if gw_cfg.get("provider") == "custom_http" and gw_cfg.get("api_url"):
                     resp = await send_sms_request(gw_cfg, {
-                        'recipients': phones, 'message': alert_msg['sms_body'],
+                        # Marked as a test: a phone shows no "[TEST]" subject.
+                        'recipients': phones, 'message': f"TEST: {alert_msg['sms_body']}",
                         'sender': gw_cfg.get('sender_name') or 'ZenPlus',
                         'hostname': alert_msg['sim_hostname'], 'ip_address': alert_msg['sim_ip'],
                         'status': alert_msg['device_status'],
@@ -1496,8 +2229,9 @@ async def simulate_alert_rule(
                               "The device and readings below are sample values; no alert has been raised or resolved.",
                     "details": [
                         ("Alert rule", rule.get("name")),
-                        ("Condition", " ".join(str(x) for x in (
-                            rule.get("metric"), rule.get("operator"), rule.get("threshold")) if x not in (None, ""))),
+                        # The condition as a person reads it ("Host CPU above
+                        # 90%"), never the storage form "host_cpu_pct > 90.0".
+                        ("Condition", _condition_text(rule)),
                         ("Sample device", f"{alert_msg['sim_hostname']} ({alert_msg['sim_ip']})"),
                     ],
                     "timestamp": alert_msg["iso_timestamp"],

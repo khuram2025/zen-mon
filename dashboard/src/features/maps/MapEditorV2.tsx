@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { ReactFlowProvider } from '@xyflow/react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, AlertTriangle, Check, ChevronDown, Copy, FileUp, History, Keyboard, Loader2, Map as MapIcon, Maximize2, Minimize2,
-  MoreHorizontal, Pencil, Play, Plus, Radio, Rows3, Settings2, ShieldCheck, Tag, Trash2, Wand2,
+  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, Copy, FileUp, History, Image as ImageIcon, Keyboard, LayoutGrid, Loader2, Map as MapIcon,
+  MonitorPlay, MoreHorizontal, Pencil, Play, Plus, Radio, Rows3, Settings2, ShieldCheck, Tag, Trash2, Wand2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { toast } from '@/components/ui/Toast'
 import { useAuth } from '@/stores/auth'
+import { useDisplay } from '@/stores/display'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -21,8 +22,10 @@ import { parseMapJson, pickTextFile, toBulkPayload, type MapBackup } from './exp
 import { DevicePalette } from './canvas/DevicePalette'
 import { ContextMenu, type ContextMenuState, type MenuItem } from './canvas/ContextMenu'
 import type { ShapeSpec } from './canvas/Annotations'
-import { fetchMapServers, fetchMapServiceChecks, useDevices, useLiveLinks, useManualMap, useManualMaps, useNodesLive } from './useMapData'
-import type { ManualMapDetail, ManualMapListItem } from './core'
+import { fetchMapServers, fetchMapServiceChecks, useDevices, useLiveLinks, useManualMap, useManualMaps, useNodesLive, useSitesLive } from './useMapData'
+import { backgroundImageOf, type MapBackgroundImage, type ManualMapDetail, type ManualMapListItem } from './core'
+import { MapWall } from './MapWall'
+import { BackgroundDialog } from './canvas/BackgroundDialog'
 
 type Mode = 'design' | 'live'
 
@@ -64,8 +67,10 @@ export function MapEditorV2() {
   const [nameDialog, setNameDialog] = useState<{ kind: 'new' | 'duplicate' | 'rename'; name: string; description: string } | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
-  const [isFullscreen, setIsFullscreen] = useState(false)
-  const rootRef = useRef<HTMLDivElement>(null)
+  const [bgOpen, setBgOpen] = useState(false)
+  const wall = params.get('wall') === '1'
+  // Site drill-down trail (parent map ids, outermost first) for the breadcrumb.
+  const trail = useMemo(() => (params.get('trail') || '').split(',').filter(Boolean), [params])
   const insertRef = useRef<((spec: ShapeSpec) => void) | null>(null)
   const canvasRef = useRef<MapCanvasActions | null>(null)
   const [versionsOpen, setVersionsOpen] = useState(false)
@@ -108,18 +113,15 @@ export function MapEditorV2() {
     try { localStorage.setItem(LIVE_PREFS_KEY, JSON.stringify(livePrefs)) } catch { /* best effort */ }
   }, [livePrefs])
 
-  useEffect(() => {
-    const onFs = () => setIsFullscreen(!!document.fullscreenElement)
-    document.addEventListener('fullscreenchange', onFs)
-    return () => document.removeEventListener('fullscreenchange', onFs)
-  }, [])
-
   const mapQuery = useManualMap(selectedMapId, mode === 'live')
   const detail = mapQuery.data
   const liveLinksQuery = useLiveLinks(selectedMapId, mode === 'live')
   const liveData = liveLinksQuery.data?.data || EMPTY_LIVE
   const nodesLiveQuery = useNodesLive(selectedMapId, mode === 'live')
   const nodesLive = nodesLiveQuery.data?.data || EMPTY_LIVE
+  const hasSites = !!detail?.shapes?.some((sh) => sh.metadata?.widget === 'site')
+  const sitesLiveQuery = useSitesLive(selectedMapId, mode === 'live', hasSites && !wall)
+  const sitesLive = sitesLiveQuery.data?.data || EMPTY_LIVE
   const current = maps.find((m) => m.id === selectedMapId)
 
   const counts = useMemo(() => {
@@ -130,12 +132,57 @@ export function MapEditorV2() {
     return { devices: nodes.length - servers - checks, servers, checks, links: (detail?.links.length || 0) + ann, shapes: detail?.shapes?.length || 0 }
   }, [detail])
 
-  const goToMap = (id: string, nextMode: Mode = 'design') => {
+  const goToMap = (id: string, nextMode: Mode = 'design', nextTrail: string[] = []) => {
     const next = new URLSearchParams(params)
     next.set('map', id)
+    if (nextTrail.length) next.set('trail', nextTrail.join(',')); else next.delete('trail')
     if (nextMode === 'live') next.set('mode', 'live'); else next.delete('mode')
     setParams(next, { replace: false })
     setMode(nextMode)
+  }
+
+  /** Site drill-down: open the site's map and remember the way back. */
+  const openSubMap = useCallback((id: string) => {
+    if (!selectedMapId || id === selectedMapId) return
+    const next = new URLSearchParams(params)
+    next.set('map', id)
+    next.set('trail', [...trail, selectedMapId].join(','))
+    setParams(next, { replace: false })
+  }, [params, setParams, selectedMapId, trail])
+
+  const enterWall = () => {
+    const next = new URLSearchParams(params)
+    next.set('wall', '1')
+    next.set('mode', 'live')
+    setParams(next, { replace: false })
+    setMode('live')
+    // Full screen is best effort: some browsers and wall PCs refuse it, and the wall works without it.
+    try { if (!document.fullscreenElement) void document.documentElement.requestFullscreen?.().catch(() => {}) } catch { /* unsupported */ }
+  }
+  const exitWall = useCallback(() => {
+    const next = new URLSearchParams(params)
+    for (const k of ['wall', 'maps', 'rotate', 'attention', 'scale', 'kiosk']) next.delete(k)
+    setParams(next, { replace: false })
+    // Leaves full screen too, and a kiosk mode a wall link (?kiosk=1) turned on.
+    if (useDisplay.getState().kiosk) useDisplay.getState().setKiosk(false)
+    else try { if (document.fullscreenElement) void document.exitFullscreen?.().catch(() => {}) } catch { /* unsupported */ }
+  }, [params, setParams])
+
+  const saveBackground = async (bg: MapBackgroundImage | null) => {
+    if (!selectedMapId || !detail) return
+    setBusy(true)
+    try {
+      const { annotation_links: _drop, ...rest } = (detail.metadata || {}) as Record<string, unknown>
+      const metadata = { ...rest } as Record<string, unknown>
+      if (bg) metadata.background_image = bg
+      else delete metadata.background_image
+      await api.put(`/maps/${selectedMapId}`, { metadata })
+      await qc.invalidateQueries({ queryKey: ['manual-map', selectedMapId] })
+      setBgOpen(false)
+      toast.success(bg ? 'Background saved' : 'Background removed')
+    } catch (e: any) {
+      toast.error('Could not save the background', e?.response?.status === 413 ? 'The image is too large' : undefined)
+    } finally { setBusy(false) }
   }
 
   const switchMode = (m: Mode) => {
@@ -268,7 +315,10 @@ export function MapEditorV2() {
       { type: 'item', label: 'Build from site / subnet…', icon: <Wand2 className="h-4 w-4" />, disabled: !detail, onClick: () => setBuildOpen(true) },
       { type: 'item', label: 'Verify topology', icon: <ShieldCheck className="h-4 w-4" />, disabled: !detail || mode !== 'design', onClick: () => canvasRef.current?.openVerify() },
       { type: 'item', label: 'Version history…', icon: <History className="h-4 w-4" />, disabled: !detail, onClick: () => setVersionsOpen(true) },
+      { type: 'item', label: 'Background image…', icon: <ImageIcon className="h-4 w-4" />, disabled: !detail, onClick: () => setBgOpen(true) },
+      { type: 'divider' },
       { type: 'item', label: 'Open live view in new tab', icon: <Play className="h-4 w-4" />, disabled: !selectedMapId, onClick: () => window.open(`/maps/manual?map=${selectedMapId}&mode=live`, '_blank') },
+      { type: 'item', label: 'Open NOC wall in new tab', icon: <MonitorPlay className="h-4 w-4" />, disabled: !selectedMapId, onClick: () => window.open(`/maps/manual?map=${selectedMapId}&mode=live&wall=1`, '_blank') },
       { type: 'divider' },
       ...exportMenuItems({
         detail,
@@ -285,25 +335,54 @@ export function MapEditorV2() {
     setMapMenu({ x: r.right - 240, y: Math.max(8, Math.min(r.bottom + 4, window.innerHeight - 40 - items.length * 30)), items })
   }
 
-  const toggleFullscreen = useCallback(() => {
-    const el = rootRef.current
-    if (!el) return
-    if (document.fullscreenElement) void document.exitFullscreen()
-    else void el.requestFullscreen().catch(() => toast.error('Fullscreen is not available in this browser'))
-  }, [])
-
   // Placed entity ids (device, server or check) — the palette marks them "on map".
   const usedIds = useMemo(() => new Set((detail?.nodes || []).map((n) => n.device_id || n.server_id || n.service_check_id || '').filter(Boolean)), [detail])
   const noMaps = !mapsQuery.isLoading && maps.length === 0
 
+  if (wall && selectedMapId) {
+    const rotateIds = (params.get('maps') || '').split(',').filter((id) => maps.some((m) => m.id === id))
+    const rotateSec = Math.max(15, Math.min(3600, Number(params.get('rotate')) || 60))
+    const scale = Number(params.get('scale'))
+    return (
+      <MapWall
+        maps={maps}
+        startId={selectedMapId}
+        rotateIds={rotateIds}
+        rotateSec={rotateSec}
+        onExit={exitWall}
+        showAttention={params.get('attention') !== '0'}
+        scaleOverride={Number.isFinite(scale) && scale >= 0.5 && scale <= 4 ? scale : null}
+      />
+    )
+  }
+
   return (
-    <div ref={rootRef} className="-m-5 flex h-[calc(100vh-2.75rem)] flex-col bg-bg" style={isFullscreen ? { margin: 0, height: '100vh' } : undefined}>
+    <div className="-m-4 flex h-[calc(100vh-2.75rem)] flex-col bg-bg xl:-m-5 2xl:-m-6">
       {/* Top bar */}
       <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface/60 px-4 py-2">
+        <Link to="/maps" className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-muted transition hover:bg-primary/10 hover:text-text" title="All maps">
+          <LayoutGrid className="h-4 w-4" />
+          <span className="hidden text-xs font-medium sm:inline">All maps</span>
+        </Link>
+        <div className="h-5 w-px bg-border" />
         <div className="flex items-center gap-2">
           <Rows3 className="h-4 w-4 text-primary" />
           <span className="text-sm font-semibold text-text">Network Studio</span>
         </div>
+
+        {/* Site drill-down breadcrumb */}
+        {trail.length > 0 && (
+          <div className="flex items-center gap-1 text-xs text-muted">
+            {trail.map((id, i) => (
+              <span key={`${id}-${i}`} className="flex items-center gap-1">
+                <button type="button" className="max-w-[10rem] truncate hover:text-text hover:underline" onClick={() => goToMap(id, mode, trail.slice(0, i))}>
+                  {maps.find((m) => m.id === id)?.name || 'Map'}
+                </button>
+                <ChevronRight className="h-3 w-3" />
+              </span>
+            ))}
+          </div>
+        )}
 
         {/* Map switcher */}
         <button
@@ -375,11 +454,12 @@ export function MapEditorV2() {
 
         <button
           type="button"
-          onClick={toggleFullscreen}
-          className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-muted transition hover:border-primary/50 hover:text-text"
-          title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen (NOC wall)'}
+          onClick={enterWall}
+          disabled={!selectedMapId}
+          className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted transition hover:border-primary/50 hover:text-text disabled:opacity-50"
+          title="NOC wall — dark full-screen live view without menus (Esc to leave)"
         >
-          {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+          <MonitorPlay className="h-3.5 w-3.5" /> Wall
         </button>
         <button
           type="button"
@@ -427,6 +507,9 @@ export function MapEditorV2() {
                 insertRef={insertRef}
                 focusDeviceId={params.get('focus')}
                 actionsRef={canvasRef}
+                sitesLive={sitesLive}
+                onOpenMap={openSubMap}
+                maps={maps}
               />
             </ReactFlowProvider>
           ) : mapQuery.isError ? (
@@ -484,6 +567,10 @@ export function MapEditorV2() {
       />
 
       {helpOpen && <ShortcutsDialog onClose={() => setHelpOpen(false)} />}
+
+      {bgOpen && detail && (
+        <BackgroundDialog initial={backgroundImageOf(detail.metadata)} saving={busy} onCancel={() => setBgOpen(false)} onSave={(bg) => void saveBackground(bg)} />
+      )}
 
       {versionsOpen && selectedMapId && (
         <VersionsDialog mapId={selectedMapId} onClose={() => setVersionsOpen(false)} onRestored={() => { setVersionsOpen(false); canvasRef.current?.resetHistory(); void qc.invalidateQueries({ queryKey: ['manual-maps'] }) }} />

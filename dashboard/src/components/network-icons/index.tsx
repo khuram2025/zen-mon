@@ -489,8 +489,19 @@ export const iconLabel: Record<IconKey, string> = {
   nvr: 'NVR',
 }
 
+export const iconKeys = Object.keys(networkIcons) as IconKey[]
+
+/** Device type keys of the catalogue (migrate-189) whose icon has another name. */
+const TYPE_ICON_ALIASES: Record<string, IconKey> = {
+  ip_camera: 'camera',
+  voip: 'phone',
+  pdu: 'ups',
+  sdwan_edge: 'router',
+}
+
 export function NetworkIcon({ name, ...rest }: { name: string } & Props) {
-  const key = (networkIcons[name as IconKey] ? name : 'other') as IconKey
+  const alias = TYPE_ICON_ALIASES[name]
+  const key = (alias || (networkIcons[name as IconKey] ? name : 'other')) as IconKey
   const Component = networkIcons[key]
   return <Component {...rest} />
 }

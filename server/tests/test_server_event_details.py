@@ -187,7 +187,7 @@ async def test_lifecycle_closing_notice_reports_a_server_that_is_back(world, met
         await events.ingest_state(db, sid, aid, [event(provider='Microsoft-Windows-Kernel-General', event_id=event_id)], None)
         await db.commit()
     await run(world, now + 1)
-    assert world.sent[0]['message'].startswith(f"ZenPlus CRITICAL — {metric}: Server back-up (192.0.2.31) ")
+    assert world.sent[0]['message'].startswith(f"ZenPlus CRITICAL - {metric}: Server back-up (192.0.2.31) ")
     beat(world, sid, now + 990)
     await run(world, now + 1000)
     assert incidents(world, sid)[0].status == 'resolved'
@@ -323,3 +323,110 @@ def test_config_negotiates_details_and_role_filters_without_breaking_old_agents(
         if capable and platform=="windows":assert any(f["channel"]=="Security" and f["levels"]==["audit"] for f in data["event_log_filters"])
         else:assert not any("audit" in f["levels"] for f in data["event_log_filters"])
         if platform=="linux":assert data["feature_flags"]["event_log"] is False
+
+
+# ── Linux agent lifecycle evidence (ZenPlus_Agent internal/collectors/lifecycle.go) ──
+
+def linux(event_id, at, record=None, **changes):
+    """An event_detail row as the Linux agent builds it."""
+    stamp = at.astimezone(timezone.utc).replace(microsecond=0)
+    return {"event_time": stamp.isoformat().replace("+00:00", "Z"),
+            "record_id": record or int(stamp.timestamp()) * 100 + event_id,
+            "log_name": "System", "provider": "zenplus-agent", "event_id": event_id,
+            "level": "critical" if event_id == 41 else "information",
+            "message": f"agent lifecycle {event_id}", "fields": {"boot_time": stamp.isoformat()}, **changes}
+
+
+def test_linux_agent_lifecycle_events_use_the_windows_event_ids():
+    now = datetime.now(timezone.utc)
+    kinds = {eid: events.lifecycle_kind(events.normalize(linux(eid, now))) for eid in (12, 13, 41, 1074, 6008)}
+    assert kinds == {12: "restart", 13: "shutdown", 41: "unexpected_restart", 1074: None, 6008: None}
+    assert events.lifecycle_kind(events.normalize(linux(12, now, log_name="Application"))) is None
+    # Validated like any detail before the batch is claimed.
+    MetricSample(kind="event_detail", timestamp=now, data=linux(41, now))
+
+
+@pytest.mark.asyncio
+async def test_linux_unexpected_shutdown_pages_one_unexpected_restart(world):
+    now = datetime.now(timezone.utc).timestamp()
+    boot = datetime.fromtimestamp(now - 90, timezone.utc)
+    sid = add_server(world, "linux-01", heartbeat=now)
+    aid = str(world.db.scalar("SELECT id FROM agents WHERE server_id=$1", sid))
+    add_rule(world, "host_restart", recovery=False)
+    async with session(world.db) as db:
+        await events.ingest_state(db, sid, aid, [linux(12, boot), linux(41, boot)], None)
+        await db.commit()
+    await run(world, now + 1)
+    [row] = incidents(world, sid)
+    assert len(world.sent) == 1
+    assert row.message.startswith("Server linux-01 restarted at ") and "unexpected" in row.message
+    assert "again" not in row.message
+
+
+@pytest.mark.asyncio
+async def test_linux_shutdown_marker_fires_host_shutdown_only(world):
+    now = datetime.now(timezone.utc).timestamp()
+    sid = add_server(world, "linux-02", heartbeat=now)
+    aid = str(world.db.scalar("SELECT id FROM agents WHERE server_id=$1", sid))
+    add_rule(world, "host_shutdown", recovery=False)
+    add_rule(world, "host_restart", recovery=False)
+    async with session(world.db) as db:
+        await events.ingest_state(db, sid, aid, [linux(13, datetime.fromtimestamp(now - 5, timezone.utc))], None)
+        await db.commit()
+    await run(world, now + 1)
+    assert [s["rule_name"] for s in world.sent] == ["host_shutdown"]
+    assert "began shutting down" in incidents(world, sid)[0].message
+
+
+@pytest.mark.parametrize("agent_first", [True, False])
+@pytest.mark.asyncio
+async def test_agent_boot_report_and_inventory_boot_time_are_one_restart(world, agent_first):
+    from app.services import host_metric_service as metrics
+    now = datetime.now(timezone.utc).timestamp()
+    boot = datetime.fromtimestamp(now - 60, timezone.utc).replace(microsecond=0)
+    sid = add_server(world, f"linux-boot-{agent_first}", heartbeat=now)
+    aid = str(world.db.scalar("SELECT id FROM agents WHERE server_id=$1", sid))
+    world.db.execute("UPDATE servers SET boot_time = now() - interval '30 days' WHERE id=$1", sid)
+    add_rule(world, "host_restart", recovery=False)
+    # /proc/stat btime and the inventory's boot time may differ by a second.
+    inventory = {"os": {"name": "ubuntu", "boot_time": (boot + timedelta(seconds=1)).isoformat()}}
+
+    async def agent():
+        async with session(world.db) as db:
+            await events.ingest_state(db, sid, aid, [linux(12, boot)], None)
+            await db.commit()
+
+    async def inventory_snapshot():
+        async with session(world.db) as db:
+            await metrics._upsert_inventory(sid, inventory, db)
+            await db.commit()
+
+    for step in ((agent, inventory_snapshot) if agent_first else (inventory_snapshot, agent)):
+        await step()
+    assert world.db.scalar("SELECT count(*) FROM server_lifecycle_events WHERE server_id=$1 AND kind='restart'", sid) == 1
+    await run(world, now + 1)
+    [row] = incidents(world, sid)
+    assert "restarted at" in row.message and "again" not in row.message and "2 restarts" not in row.message
+    assert len(world.sent) == 1
+
+
+@pytest.mark.parametrize("platform,caps,policy_flags,expected", [
+    ("linux", ["systemd_services_v1"], {}, True),
+    ("linux", ["systemd_services_v1"], {"service_state": False}, False),
+    ("linux", [], {}, None),
+    ("windows", ["systemd_services_v1"], {}, None),
+])
+def test_config_turns_on_services_for_linux_agents_that_read_systemd(world, monkeypatch, platform, caps, policy_flags, expected):
+    from app.api.v1 import agents
+    name = "Linux Baseline" if platform == "linux" else "Windows Baseline"
+    pid = str(world.db.scalar("SELECT id FROM agent_policies WHERE name=$1", name))
+    world.db.execute("UPDATE agent_policies SET feature_flags=$2::jsonb WHERE id=$1", pid, policy_flags)
+
+    async def authenticate(*args):
+        return {"id": str(uuid4()), "platform": platform, "policy_id": pid, "update_ring": "stable",
+                "capabilities": caps}
+    monkeypatch.setattr(agents, "_authenticate", authenticate)
+    with api_client(world.db, role="admin") as client:
+        r = client.get("/api/v1/agents/config", headers={"X-Agent-Id": "test", "Authorization": "Bearer test"})
+        assert r.status_code == 200, r.text
+        assert r.json()["feature_flags"].get("service_state") is expected

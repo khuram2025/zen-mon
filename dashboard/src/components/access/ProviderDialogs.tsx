@@ -55,6 +55,8 @@ type TestResult = {
   groups?: string[]; mapped_role?: string | null
   matched_rule?: { kind: 'mapping' | 'default'; index?: number; match?: string; attribute?: string | null } | null
   would_sign_in?: boolean; admission_reasons?: { code: string; message: string }[]
+  /** The existing account's role was set by hand in Users, so sign-in keeps it instead of the mapped role. */
+  account_role_manual?: boolean; account_role?: string | null
   mapped_role_privileged?: boolean
   reply_values?: string[]; reply_attributes?: { attribute: string; value: string }[]
   steps?: { name: string; ok: boolean; message?: string }[]
@@ -301,6 +303,11 @@ function TestPanel({ kind, payload, requireCreds, roleLabel }: {
               <dd className="font-medium">
                 {mapped || <span className="text-muted">none</span>}
                 {result.mapped_role_privileged && <span className="ml-2 inline-flex items-center gap-1 text-warning"><ShieldAlert className="h-3 w-3" aria-hidden /> privileged</span>}
+                {result.account_role_manual && (
+                  <div className="font-normal text-muted">
+                    Not applied: an administrator set this account’s role to {roleLabel[result.account_role || ''] || result.account_role} in Users. Sign-in keeps that role until the account is handed back to the directory there.
+                  </div>
+                )}
               </dd>
               <dt className="text-muted">Matched rule</dt>
               <dd>{rule ? (rule.kind === 'default' ? 'No rule matched — the default role applies' : `Rule ${(rule.index ?? 0) + 1}: ${rule.match}${rule.attribute ? ` (${rule.attribute})` : ''}`) : <span className="text-muted">none</span>}</dd>

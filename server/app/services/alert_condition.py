@@ -21,6 +21,7 @@ limits"); then the title says so instead of quoting a reading that was fine.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from app.services import device_status_machine as dsm
@@ -75,3 +76,63 @@ def alert_message(condition_title: str, hostname: str, ip_address: str | None) -
     """The stored alert message: the condition first, then the device."""
     where = f"{hostname} ({ip_address})" if ip_address else hostname
     return f"{condition_title} — {where}"
+
+
+# ── Rules on the device's own latency / packet loss ──────────────────────────
+#
+# A rule on rtt or packet_loss fired because of its own reading against its
+# own limit; the status policy's cause may be something else (a "High
+# latency" rule on a device the policy degraded for packet loss). Its message
+# leads with the rule's reading and adds the status cause only when it
+# differs (audit T-04):
+#
+#     Round-trip time 150 ms (limit 100 ms) — fw-01 (10.0.0.1); status degraded: packet loss 33% (limit 10%)
+
+RULE_READING_METRICS = frozenset({"rtt", "packet_loss"})
+_PART_METRIC = re.compile(r"^(packet loss|latency) [0-9]", re.IGNORECASE)
+
+
+def _part_metric(part: str) -> str | None:
+    m = _PART_METRIC.match(part.strip())
+    if not m:
+        return None
+    return "packet_loss" if m.group(1).lower() == "packet loss" else "rtt"
+
+
+def status_cause(rule_metric: str | None, new_status: str | None, title: str | None) -> str:
+    """"status degraded: packet loss 33% (limit 10%)" — the parts of the
+    status condition ``title`` that are not the rule's own metric; "" when
+    there are none, or the rule is not an rtt/packet-loss rule."""
+    if rule_metric not in RULE_READING_METRICS or not title:
+        return ""
+    new = (new_status or "").lower()
+    # Down is "no response": a loss rule at 100% already says that.
+    if new != "degraded":
+        return ""
+    parts = [p.strip() for p in str(title).split(" · ") if p.strip()]
+    others = [p for p in parts if _part_metric(p) != rule_metric]
+    if not others:
+        return ""
+    text_ = " and ".join(p[:1].lower() + p[1:] for p in others)
+    return f"status {new}: {text_}"
+
+
+def rule_reading_title(rule_metric: str, value, operator, threshold) -> str:
+    """"Round-trip time 150 ms (limit 100 ms)" — the rule's own reading."""
+    from app.services import alert_phrasing as ap
+
+    noun = ap.metric_noun(rule_metric)
+    if value is None:
+        reading = "unavailable (no reply)" if rule_metric == "rtt" else ap.UNAVAILABLE
+    else:
+        reading = ap.format_reading(rule_metric, value, operator, threshold)
+    limit = ap.format_threshold(rule_metric, threshold, operator) if threshold is not None else ""
+    return f"{noun} {reading}" + (f" (limit {limit})" if limit else "")
+
+
+def rule_alert_message(rule_metric: str, value, operator, threshold, hostname: str,
+                       ip_address: str | None, cause: str = "") -> str:
+    """The stored message of an rtt/packet-loss rule's alert."""
+    msg = alert_message(rule_reading_title(rule_metric, value, operator, threshold),
+                        hostname, ip_address)
+    return f"{msg}; {cause}" if cause else msg

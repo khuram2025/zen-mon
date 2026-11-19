@@ -15,6 +15,10 @@ write('/etc/systemd/system/zenplus-netflow-collector.service.d/security.conf', '
 known=Path('/etc/zenplus/known_hosts')
 if not known.exists():write(known, '# Add device SSH host keys after independently verifying fingerprints.\n')
 write('/etc/ssh/sshd_config.d/00-zenplus-security.conf', 'PermitRootLogin no\nX11Forwarding no\nAllowTcpForwarding no\nAllowAgentForwarding no\nPermitTunnel no\nMaxAuthTries 3\nLoginGraceTime 30\nMaxStartups 10:30:30\n')
+# sshd refuses even a syntax check without its privilege separation directory. systemd creates /run/sshd
+# only while ssh.service runs (RuntimeDirectory=sshd), so a socket-activated appliance nobody has logged in
+# to since boot does not have it, and the check would fail the whole update on a valid configuration.
+Path('/run/sshd').mkdir(mode=0o755,exist_ok=True)
 subprocess.run(['/usr/sbin/sshd','-t'],check=True)
 p=Path('/etc/nginx/nginx.conf');config=p.read_text()
 if 'log_format zenplus_safe ' not in config:

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import Literal, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field, field_serializer, model_validator
@@ -149,6 +149,8 @@ class DeviceResponse(BaseModel):
     os_version: Optional[str] = None
     profile_id: Optional[UUID] = None
     profile_name: Optional[str] = None
+    profile_source: Optional[str] = None
+    profile_suggested_id: Optional[UUID] = None
     snmp_credential_id: Optional[UUID] = None
     snmp_auth_configured: bool = False
     snmp_priv_configured: bool = False
@@ -227,26 +229,71 @@ class DeviceExportItem(BaseModel):
     description: Optional[str]
 
 
+class MaintenanceRecurrence(BaseModel):
+    """A weekly recurrence (migrate-207): an occurrence starts on each chosen
+    weekday (ISO 1 = Monday .. 7 = Sunday) at ``start_time`` local time in
+    ``timezone`` (default: the organisation's) and lasts ``duration_minutes``
+    (1 minute to 7 days); ``until`` is the last local date one may start."""
+    days: list[int] = Field(min_length=1, max_length=7)
+    start_time: time
+    duration_minutes: int = Field(ge=1, le=7 * 24 * 60)
+    timezone: Optional[str] = Field(default=None, max_length=64)
+    until: Optional[date] = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "MaintenanceRecurrence":
+        if any(d < 1 or d > 7 for d in self.days):
+            raise ValueError("days must be ISO weekdays 1 (Monday) to 7 (Sunday)")
+        self.days = sorted(set(self.days))
+        self.start_time = self.start_time.replace(second=0, microsecond=0, tzinfo=None)
+        if self.timezone is not None:
+            from app.services.maintenance_windows import valid_timezone
+            self.timezone = self.timezone.strip() or None
+            if self.timezone is not None and not valid_timezone(self.timezone):
+                raise ValueError(f"unknown time zone {self.timezone!r}")
+        return self
+
+
 class DeviceMaintenanceCreate(BaseModel):
-    scope_type: Literal["device", "group", "tag", "all"]
+    """A one-off window (``starts_at`` + ``ends_at``, unchanged) or a
+    recurring one (``recurrence``; ``starts_at`` then optionally says from when
+    occurrences count, default now, and ``ends_at`` is not given)."""
+    scope_type: Literal["device", "group", "tag", "all", "server", "server_group", "server_tag"]
     scope_device_id: Optional[UUID] = None
     scope_group_id: Optional[UUID] = None
+    scope_server_id: Optional[UUID] = None
     scope_tag: Optional[str] = Field(default=None, max_length=120)
-    starts_at: datetime
-    ends_at: datetime
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    recurrence: Optional[MaintenanceRecurrence] = None
     reason: Optional[str] = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _validate(self) -> "DeviceMaintenanceCreate":
-        if self.ends_at <= self.starts_at:
-            raise ValueError("ends_at must be after starts_at")
+        if self.recurrence is None:
+            if self.starts_at is None or self.ends_at is None:
+                raise ValueError("starts_at and ends_at are required for a one-off window")
+            if self.ends_at <= self.starts_at:
+                raise ValueError("ends_at must be after starts_at")
+        elif self.ends_at is not None:
+            raise ValueError("a recurring window takes recurrence, not ends_at")
         if self.scope_type == "device" and not self.scope_device_id:
             raise ValueError("scope_device_id is required for scope_type=device")
-        if self.scope_type == "group" and not self.scope_group_id:
-            raise ValueError("scope_group_id is required for scope_type=group")
-        if self.scope_type == "tag" and not (self.scope_tag or "").strip():
-            raise ValueError("scope_tag is required for scope_type=tag")
+        if self.scope_type in ("group", "server_group") and not self.scope_group_id:
+            raise ValueError(f"scope_group_id is required for scope_type={self.scope_type}")
+        if self.scope_type == "server" and not self.scope_server_id:
+            raise ValueError("scope_server_id is required for scope_type=server")
+        if self.scope_type in ("tag", "server_tag") and not (self.scope_tag or "").strip():
+            raise ValueError(f"scope_tag is required for scope_type={self.scope_type}")
         return self
+
+
+class MaintenanceRecurrenceResponse(BaseModel):
+    days: list[int]
+    start_time: str
+    duration_minutes: int
+    timezone: str
+    until: Optional[str] = None
 
 
 class DeviceMaintenanceResponse(BaseModel):
@@ -254,11 +301,19 @@ class DeviceMaintenanceResponse(BaseModel):
     scope_type: str
     scope_device_id: Optional[UUID] = None
     scope_group_id: Optional[UUID] = None
+    scope_server_id: Optional[UUID] = None
     scope_tag: Optional[str] = None
     scope_label: str
+    # One-off: the window. Recurring: its first occurrence.
     starts_at: datetime
     ends_at: datetime
     reason: Optional[str] = None
     created_by: Optional[UUID] = None
     created_at: datetime
     active: bool
+    recurring: bool = False
+    recurrence: Optional[MaintenanceRecurrenceResponse] = None
+    schedule: str = "One-off"
+    # The occurrence in force now, else the next one; None when it is over.
+    next_starts_at: Optional[datetime] = None
+    next_ends_at: Optional[datetime] = None

@@ -14,8 +14,11 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
+import { INTERFACE_ROLES, roleLabel } from '@/components/alerts/thresholdModel'
+import { useCan } from '@/stores/auth'
 import { Legend, Panel, SERIES_COLORS, Sparkline, TimeSeriesPanel } from './charts'
 import { formatAbsolute, formatBitRate, formatBitRateAxis, formatLinkSpeed, formatRelative, formatUsagePct, MISSING } from './format'
 import { UsageBar } from './KpiTile'
@@ -63,7 +66,7 @@ const SPEED_PRESETS_MBPS = [
   { label: '100 Gbps', mbps: 100000 },
 ] as const
 
-const COLUMNS = 12
+const COLUMNS = 13
 
 function mbpsToBps(mbps: number): number {
   return Math.round(mbps * 1_000_000)
@@ -88,6 +91,7 @@ export function InterfacesTab({ device, range }: { device: DeviceRecord; range: 
   const [speedDialog, setSpeedDialog] = useState<{ mode: 'single' | 'bulk'; rows: Row[] } | null>(null)
 
   const qc = useQueryClient()
+  const canSetRole = useCan()('devices.manage')
 
   const ifsQ = useQuery<InterfaceRecord[]>({
     queryKey: ['device', deviceId, 'interfaces'],
@@ -264,6 +268,19 @@ export function InterfacesTab({ device, range }: { device: DeviceRecord; range: 
     onError: (e) => toast.error('Failed to update speed', apiErrorMessage(e)),
   })
 
+  // Interface roles select interfaces for alert rules (alert_rules.if_role); they never change monitoring.
+  const roleMutation = useMutation({
+    mutationFn: async ({ ifIndex, role }: { ifIndex: number; role: string | null }) =>
+      (await api.put(`/devices/${deviceId}/interfaces/${ifIndex}/role`, { role })).data,
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ['device', deviceId, 'interfaces'] })
+      qc.invalidateQueries({ queryKey: ['alert-rules', 'effective'] })
+      toast.success(vars.role ? `Role set to ${roleLabel(vars.role)}` : 'Role follows the template again', 'Only alert rules on roles see this; monitoring is unchanged.')
+    },
+    onError: (e) => toast.error('Could not set the role', apiErrorMessage(e)),
+  })
+  const anyRole = allRows.some((r) => r.role)
+
   const notes: ReactNode[] = []
   if (endsInPast) notes.push(<span key="window">Interface data covers the last {hours} h up to now; earlier windows are not kept per interface here.</span>)
   if (errorsQ.isError) notes.push(<span key="errors" className="inline-flex items-center gap-1"><AlertTriangle className="h-3.5 w-3.5 text-warning" aria-hidden />Error counts unavailable: the metrics store did not answer.</span>)
@@ -339,6 +356,7 @@ export function InterfacesTab({ device, range }: { device: DeviceRecord; range: 
                 <Th><SortHeader k="status" current={sortKey} dir={sortDir} onClick={toggleSort}>Status</SortHeader></Th>
                 <Th><SortHeader k="name" current={sortKey} dir={sortDir} onClick={toggleSort}>Interface</SortHeader></Th>
                 <Th>Description</Th>
+                <Th>Role</Th>
                 <Th><SortHeader k="speed" current={sortKey} dir={sortDir} onClick={toggleSort}>Speed</SortHeader></Th>
                 <Th className="text-right">
                   <SortHeader k="in" current={sortKey} dir={sortDir} onClick={toggleSort}><ArrowDown className="inline h-3 w-3" aria-hidden />In</SortHeader>
@@ -372,6 +390,10 @@ export function InterfacesTab({ device, range }: { device: DeviceRecord; range: 
                         <div className="text-xs text-muted">{typeGroupLabel(r.group)}</div>
                       </Td>
                       <Td className="max-w-[220px] truncate text-muted">{r.description ?? MISSING}</Td>
+                      <Td onClick={(e) => e.stopPropagation()}>
+                        <RoleCell row={r} canSet={canSetRole} busy={roleMutation.isPending && roleMutation.variables?.ifIndex === r.if_index}
+                          onSet={(role) => roleMutation.mutate({ ifIndex: r.if_index, role })} />
+                      </Td>
                       <Td onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center gap-1.5 whitespace-nowrap">
                           <span className="tabular-nums">{formatLinkSpeed(r.speed)}</span>
@@ -423,6 +445,12 @@ export function InterfacesTab({ device, range }: { device: DeviceRecord; range: 
           </Table>
         )}
       </div>
+      {(anyRole || canSetRole) && (
+        <p className="text-xs text-muted">
+          Roles pick interfaces for alert rules on a role (for example uplinks); an operator&apos;s role on an interface wins
+          over the template&apos;s. Nothing else changes: whether an interface is monitored stays as it is.
+        </p>
+      )}
     </div>
   )
 
@@ -520,6 +548,40 @@ function StatusCell({ row }: { row: Row }) {
           <div className="text-xs text-muted" title={formatAbsolute(row.last_up_at)}>last up {formatRelative(row.last_up_at)}</div>
         )}
       </div>
+    </div>
+  )
+}
+
+const ROLE_TEMPLATE = '__template__'
+
+/** The interface's role: the template's (muted) or an operator's, with a select for devices.manage. */
+function RoleCell({ row, canSet, busy, onSet }: { row: Row; canSet: boolean; busy: boolean; onSet: (role: string | null) => void }) {
+  const badge = row.role ? (
+    <Badge variant={row.role_source === 'manual' ? 'default' : 'outline'} className="px-1.5 py-0"
+      title={row.role_source === 'manual' ? 'Set by an operator on this interface; wins over the template' : 'From the device template'}>
+      {roleLabel(row.role)}
+    </Badge>
+  ) : null
+  if (!canSet) {
+    return badge ? (
+      <div className="whitespace-nowrap">{badge}{row.role_source === 'manual' && <div className="text-xs text-muted">set by an operator</div>}</div>
+    ) : <span className="text-muted">{MISSING}</span>
+  }
+  const value = row.role_source === 'manual' && row.role_manual ? row.role_manual : ROLE_TEMPLATE
+  return (
+    <div className="flex items-center gap-1">
+      <Select value={value} disabled={busy} onValueChange={(v) => onSet(v === ROLE_TEMPLATE ? null : v)}>
+        <SelectTrigger className={cn('h-7 w-44 whitespace-nowrap px-2 text-xs', row.role_source !== 'manual' && 'text-muted')} aria-label={`Role of ${row.name}`}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={ROLE_TEMPLATE}>
+            {row.role_source === 'template' && row.role ? `${roleLabel(row.role)} (template)` : 'Template default'}
+          </SelectItem>
+          {INTERFACE_ROLES.map((role) => <SelectItem key={role} value={role}>{roleLabel(role)} (manual)</SelectItem>)}
+        </SelectContent>
+      </Select>
+      {busy && <Loader2 className="h-3 w-3 animate-spin text-muted" aria-hidden />}
     </div>
   )
 }

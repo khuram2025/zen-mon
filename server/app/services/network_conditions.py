@@ -21,11 +21,55 @@ import math
 import operator
 
 INTERFACE_METRICS = {'if_in_bps', 'if_out_bps', 'if_util_pct', 'if_errors',
-                     'if_discards', 'if_oper_status'}
+                     'if_discards', 'if_oper_status', 'if_error_rate_pct',
+                     'if_discard_rate_pct', 'if_flaps', 'if_speed_changed'}
+# Interface metrics that are counted over a window rather than read as a level
+# (docs/alert-notification-policy.md "Interface quality"): if_flaps counts
+# oper-status changes in the rule's window, if_speed_changed is 1 while a
+# negotiated speed change is recent. Each is the only condition of its rule.
+WINDOW_METRICS = frozenset({'if_flaps'})
+EVENT_METRICS = frozenset({'if_speed_changed'})
 SCALAR_METRICS = {'cpu', 'memory', 'temperature', 'session_count', 'uptime_reset'}
 # Agent host metrics evaluated through the same contract (host_alert_service).
-HOST_METRICS = {'host_cpu_pct', 'host_memory_pct', 'host_filesystem_pct', 'host_disk_util_pct'}
-UNMAPPED_METRICS = {'fan_state', 'psu_state', 'vpn_tunnel_state', 'ha_state', 'bgp_neighbor_down'}
+HOST_METRICS = {'host_cpu_pct', 'host_memory_pct', 'host_filesystem_pct', 'host_disk_util_pct',
+                # Server depth metrics (alerting plan G-9, migrate-208).
+                'host_swap_pct', 'host_disk_latency_ms', 'host_nic_errors', 'host_clock_skew_s',
+                'host_fs_days_left'}
+# Canonical hardware/protocol state keys no collector writes. Device templates
+# collect these states per component; a rule names the template state metric
+# instead (docs/alert-rule-overrides.md "State rules"). Refused at authoring,
+# and an old rule on one is skipped by the evaluator with this reason.
+UNMAPPED_METRICS = {
+    'fan_state': "Fan state is collected by device templates, per fan: use the template state metric "
+                 "Fans: State (tpl_cisco_fan_state), Chassis Fans: Status (tpl_f5_fan_status), "
+                 "Fans: Status (tpl_aruba_fan_status) or Hardware Sensors: Alarm (tpl_fgt_sensor_alarm), "
+                 "or accept the template's recommended state rule",
+    'psu_state': "Power supply state is collected by device templates, per power supply: use the template "
+                 "state metric Power Supplies: State (tpl_cisco_psu_state), Power Supplies: Status "
+                 "(tpl_f5_psu_status or tpl_aruba_psu_status) or Hardware Sensors: Alarm (tpl_fgt_sensor_alarm), "
+                 "or accept the template's recommended state rule",
+    'vpn_tunnel_state': "VPN tunnel state is collected by device templates, per tunnel: use the template state "
+                        "metric IPsec Tunnels: Status (tpl_fgt_tun_status), or accept the template's "
+                        "recommended state rule",
+    'ha_state': "HA state is collected by device templates: use the template state metric HA Members: Sync "
+                "Status (tpl_fgt_ha_sync), HA & Config Sync: Failover State or Sync Status (tpl_f5_failover, "
+                "tpl_f5_sync), High Availability: Local State (tpl_pan_ha_state) or Failover: Primary/Secondary "
+                "Unit (tpl_asa_fo_primary, tpl_asa_fo_secondary), or accept the template's recommended state rule",
+    'bgp_neighbor_down': "BGP peer state is collected by device templates, per peer: use the template state "
+                         "metric BGP Peers: State (tpl_jnx_bgp_state), or accept the template's recommended "
+                         "state rule",
+}
+# Keys that existing rules may keep but new rules may not use: no collector
+# supplies them (session_count; the poller writes the FortiGate-only
+# "sessions" series) or the device status path never measures them (jitter).
+RETIRED_METRICS = {
+    'session_count': "Session count is not collected under this name: use the template metric for the "
+                     "device's session table instead: Active Sessions (tpl_fgt_sessions, tpl_pan_sess_active, "
+                     "tpl_jnx_sessions), Session Utilization (tpl_pan_sess_util) or Current Connections "
+                     "(tpl_asa_conns)",
+    'jitter': "Device status checks do not measure jitter, so a jitter rule would never fire: use a "
+              "NetPath rule or the template metric SD-WAN Health: Jitter (tpl_fgt_sdwan_jitter)",
+}
 OPS = {'>': operator.gt, '>=': operator.ge, '<': operator.lt, '<=': operator.le,
        '==': operator.eq, '!=': operator.ne}
 OPS.update(dict(zip(('gt', 'gte', 'lt', 'lte', 'eq', 'neq'), OPS.values())))
@@ -38,7 +82,7 @@ DEFAULT_CLEAR_S = 300
 # Percent metrics whose incidents clear this many points on the healthy side
 # of the trigger when the rule has no explicit reset_threshold.
 AUTO_CLEAR_METRICS = frozenset({'cpu', 'memory', 'host_cpu_pct', 'host_memory_pct',
-                                'host_filesystem_pct', 'host_disk_util_pct'})
+                                'host_filesystem_pct', 'host_disk_util_pct', 'host_swap_pct'})
 AUTO_CLEAR_POINTS = 2.0
 
 
@@ -63,6 +107,9 @@ def auto_reset_threshold(condition):
     """
     if condition.get('reset_threshold') is not None:
         return None
+    if condition.get('metric') in WINDOW_METRICS:
+        # A flapping interface clears once its window holds no change at all.
+        return {'>': 0.0, 'gt': 0.0, '>=': 1.0, 'gte': 1.0}.get(condition.get('operator'))
     if condition.get('metric') not in AUTO_CLEAR_METRICS:
         return None
     op = condition.get('operator')
@@ -87,8 +134,25 @@ def effective_reset_threshold(condition):
     return auto if auto is not None else condition['threshold']
 
 
+def refuse_new_metrics(conditions, existing=()):
+    """Raise ValueError for retired or unmapped keys a rule newly uses.
+
+    ``existing`` are the metrics the rule already had: an old rule keeps
+    loading and stays editable with them; only introducing one is refused.
+    """
+    kept = set(existing or ())
+    for c in conditions:
+        m = c.get('metric')
+        if m in UNMAPPED_METRICS:
+            raise ValueError(UNMAPPED_METRICS[m])
+        if m in RETIRED_METRICS and m not in kept:
+            raise ValueError(RETIRED_METRICS[m])
+
+
 def validate_conditions(conditions):
     for c in conditions:
+        if c.get('metric') in UNMAPPED_METRICS:
+            raise ValueError(UNMAPPED_METRICS[c['metric']])
         if not supported(c.get('metric')):
             raise ValueError(f"No network evaluator for {c.get('metric')}; select a collected template metric")
         if c.get('operator') not in OPS or not math.isfinite(float(c.get('threshold', float('nan')))):
@@ -105,8 +169,18 @@ def validate_conditions(conditions):
             else:
                 raise ValueError('Reset threshold must lie on the healthy side of a numeric trigger')
     metrics = [c['metric'] for c in conditions]
-    if any(m in INTERFACE_METRICS for m in metrics) and any(m.startswith('tpl_') for m in metrics):
-        raise ValueError('Interface and template-table conditions require separate rules (different entity identities)')
+    special = [m for m in metrics if m in WINDOW_METRICS | EVENT_METRICS]
+    if special and len(conditions) > 1:
+        raise ValueError('Interface flapping and speed change conditions need a rule of their own')
+    for c in conditions:
+        if c['metric'] in WINDOW_METRICS and c['operator'] not in _HIGH_OPS:
+            raise ValueError('An interface flapping rule fires on at least a number of state changes: use > or >=')
+        if c['metric'] in EVENT_METRICS and not (OPS[c['operator']](1, float(c['threshold']))
+                                                 and not OPS[c['operator']](0, float(c['threshold']))):
+            raise ValueError('A speed change rule fires when the speed changes: use == 1')
+    if any(m in INTERFACE_METRICS for m in metrics) and any(m.startswith('tpl_') or m == 'temperature'
+                                                            for m in metrics):
+        raise ValueError('Interface and per-component (template or temperature sensor) conditions require separate rules (different entity identities)')
 
 
 def combine(values, logic):

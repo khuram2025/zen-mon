@@ -477,7 +477,7 @@ def _maint_db():
     s2, e2 = datetime(2026, 9, 30, 12, tzinfo=utc), datetime(2026, 9, 30, 13, tzinfo=utc)
     return FakeDB([
         ("COUNT(DISTINCT d.id)", [w2, w1]),
-        ("GREATEST(m.starts_at", [(A, s1, e1), (B, s1, e1), (A, s2, e2), (B, s2, e2), (C, s2, e2)]),
+        ("GREATEST(o.occ_start", [(A, s1, e1), (B, s1, e1), (A, s2, e2), (B, s2, e2), (C, s2, e2)]),
     ])
 
 

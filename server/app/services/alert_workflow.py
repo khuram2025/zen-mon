@@ -15,7 +15,9 @@ A06/A07/A23):
   recovery and let the escalation sweeper announce an all-clear.
 * ``closure`` explains how a resolved row was closed. Only ``recovered`` is a
   genuine recovery; manual/suppressed/superseded/administrative closures are
-  kept out of time-to-recover metrics.
+  kept out of time-to-recover metrics, and so are ``expired`` event alerts
+  (a trap, syslog, Device Tracker or configuration-change row that saw no new
+  event within the expiry window, app.services.alert_expiry).
 
 Notice rows (recovery notices, dependency-suppressed downstream records, hold
 cancellations, device flapping start/stop notices) are stored as resolved
@@ -59,6 +61,7 @@ CLOSURE_LABELS = {
     "dependency": "Suppressed by upstream dependency",
     "notice": "Recovery notice",
     "flapping": "Flapping notice",
+    "expired": "Expired — no new event within the window",
 }
 
 
@@ -114,6 +117,7 @@ def closure_reason_sql(a: str = "a") -> str:
         f" WHEN {a}.metadata->>'resolved_by' = 'snooze' THEN 'suppressed'"
         f" WHEN {a}.metadata->>'resolved_by' = 'status_transition' THEN 'superseded'"
         f" WHEN {a}.metadata->>'resolved_by' = 'migration' THEN 'administrative'"
+        f" WHEN {a}.metadata->>'resolved_by' = 'expired' THEN 'expired'"
         f" ELSE 'recovered' END"
     )
 
@@ -151,6 +155,8 @@ def closure_reason(status: str | None, meta: dict | None) -> str | None:
         return "superseded"
     if by == "migration":
         return "administrative"
+    if by == "expired":
+        return "expired"
     return "recovered"
 
 
@@ -713,11 +719,13 @@ async def _remind(db: AsyncSession, row) -> int:
     ), {"id": row.id})).scalar() or "monitored object"
     sev = (row.severity or rule.severity or "warning")
     duration = ap.duration_between(row.triggered_at, datetime.now(timezone.utc))
+    # A finished sentence, so the next one does not run on.
+    said = (row.message or "").strip().rstrip(".") + "."
     return await dispatch_to_channels(db, rule.notify_channels, {
         "subject": f"[{sev.upper()}] Snooze ended, still active: {rule.name} — {subject}",
-        "body": (f"{row.message} The snooze on this condition has expired and the alert is "
+        "body": (f"{said} The snooze on this condition has expired and the alert is "
                  f"still open (active for {duration})."),
-        "message": f"ZenPlus {sev.upper()} snooze ended — {row.message} Still active ({duration}).",
+        "message": f"ZenPlus {sev.upper()} snooze ended - {said} Still active ({duration}).",
         "hostname": subject, "ip_address": "",
         "status": "STILL ACTIVE", "severity": sev, "resolved": False,
         "rule_name": rule.name, "rule_id": str(rule.id),

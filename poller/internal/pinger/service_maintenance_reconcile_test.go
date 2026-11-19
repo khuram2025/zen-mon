@@ -23,8 +23,11 @@ func statusLogRows(w *fakeServiceMetricWriter) []*checker.ServiceStatusChange {
 	return append([]*checker.ServiceStatusChange(nil), w.statusChanges...)
 }
 
+type sentServiceAlert struct{ old, new string }
+
 func reconcileEngine(status string) (*Engine, uuid.UUID, *fakeServiceMetricWriter) {
 	e := testEngine()
+	e.serviceAlertFn = func(context.Context, *checker.ServiceCheck, string, string, *checker.ServiceCheckResult) {}
 	id := uuid.New()
 	e.serviceChecks[id] = &checker.ServiceCheck{ID: id, Name: "Website", CheckType: "http", Status: status, RetryCount: 1, Enabled: true}
 	return e, id, e.svcWriter.(*fakeServiceMetricWriter)
@@ -106,5 +109,43 @@ func TestMaintenanceEndWithUnknownLastLoggedStatusWritesNothing(t *testing.T) {
 
 	if rows := statusLogRows(writer); len(rows) != 0 {
 		t.Fatalf("expected no rows without a known last logged status, got %d", len(rows))
+	}
+}
+
+
+func TestMaintenanceEndSendsTheStillFailingCheckToTheAlertEngine(t *testing.T) {
+	e, id, _ := reconcileEngine("up")
+	ctx := context.Background()
+	sent := make(chan sentServiceAlert, 4)
+	e.serviceAlertFn = func(_ context.Context, sc *checker.ServiceCheck, old, new string, r *checker.ServiceCheckResult) {
+		if sc.ID != id || r.IsUp {
+			t.Errorf("unexpected alert call: %+v %+v", sc, r)
+		}
+		sent <- sentServiceAlert{old, new}
+	}
+
+	e.reconcileServiceMaintenance(ctx, id, maintSet())
+	e.reconcileServiceMaintenance(ctx, id, maintSet(id))
+	failInMaintenance(e, id)
+	e.reconcileServiceMaintenance(ctx, id, maintSet(id))
+	select {
+	case got := <-sent:
+		t.Fatalf("nothing may be sent inside the window, got %+v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	e.reconcileServiceMaintenance(ctx, id, maintSet())
+	select {
+	case got := <-sent:
+		if got.old != "up" || got.new != "down" {
+			t.Fatalf("unexpected transition sent: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the still-failing check was never sent to the alert engine")
+	}
+	e.reconcileServiceMaintenance(ctx, id, maintSet())
+	select {
+	case got := <-sent:
+		t.Fatalf("sent twice: %+v", got)
+	case <-time.After(50 * time.Millisecond):
 	}
 }

@@ -11,6 +11,7 @@ import {
   Copy,
   Download,
   Eye,
+  ListChecks,
   Loader2,
   Network,
   Radar,
@@ -21,8 +22,11 @@ import {
   Upload,
   XCircle,
 } from 'lucide-react'
-import { discoveryApi } from './api'
-import { DiscoveryResult, DiscoveryRun, ResultStatus } from './types'
+import { discoveryApi, rulesApi } from './api'
+import { DiscoveryResult, DiscoveryRun, EvaluateScanCounts, ResultStatus } from './types'
+import { useCan } from '@/stores/auth'
+import { summarizeCounts } from './ruleModel'
+import { DispositionBadge, PlanWhy, useRuleCatalog, useRuleLookups } from './ruleUi'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -76,6 +80,9 @@ export function RunPage() {
   const [search, setSearch] = useState('')
   const [importOpen, setImportOpen] = useState(false)
   const [cancelOpen, setCancelOpen] = useState(false)
+  const [evaluateOpen, setEvaluateOpen] = useState(false)
+  const can = useCan()
+  const canRun = can('discovery.run')
 
   useEffect(() => {
     setFilter(parseResultFilter(searchParams.get('filter')) ?? 'new')
@@ -118,6 +125,11 @@ export function RunPage() {
     // then back off once it's complete.
     refetchInterval: isRunning ? 2500 : 12_000,
   })
+
+  // Rule and Decision columns appear once discovery rules have run on this scan.
+  const hasRules = useMemo(() => results.some((r) => r.rule_plan), [results])
+  const { data: ruleCatalog } = useRuleCatalog(hasRules)
+  const { lookups: ruleLookups } = useRuleLookups(hasRules)
 
   const cancelMutation = useMutation({
     mutationFn: () => discoveryApi.cancelRun(id!),
@@ -193,6 +205,7 @@ export function RunPage() {
       'open_ports',
       'protocols_detected',
       'status',
+      'disposition',
       'credential_status',
       'confidence_score',
     ]
@@ -270,6 +283,11 @@ export function RunPage() {
             </Button>
           ) : (
             <>
+              {canRun && (
+                <Button variant="outline" onClick={() => setEvaluateOpen(true)} disabled={results.length === 0}>
+                  <ListChecks className="h-4 w-4" /> Re-evaluate rules
+                </Button>
+              )}
               <Button variant="outline" onClick={exportCSV} disabled={results.length === 0}>
                 <Download className="h-4 w-4" /> Export CSV
               </Button>
@@ -431,6 +449,8 @@ export function RunPage() {
                         />
                       </Th>
                       <Th>Status</Th>
+                      {hasRules && <Th>Rule</Th>}
+                      {hasRules && <Th>Decision</Th>}
                       <Th>Device</Th>
                       <Th>IP</Th>
                       <Th>MAC</Th>
@@ -459,6 +479,37 @@ export function RunPage() {
                             <div className="text-2xs text-warning">{r.conflict_type}</div>
                           )}
                         </Td>
+                        {hasRules && (
+                          <Td className="max-w-[14rem] text-xs">
+                            {r.rule_plan?.matched?.length ? (
+                              <>
+                                <div className="truncate" title={r.rule_plan.matched.map((m) => m.rule_name).join(', ')}>
+                                  {r.rule_plan.matched[0].rule_name}
+                                  {r.rule_plan.matched.length > 1 && (
+                                    <span className="text-muted"> +{r.rule_plan.matched.length - 1}</span>
+                                  )}
+                                </div>
+                                <PlanWhy plan={r.rule_plan} catalog={ruleCatalog} lookups={ruleLookups} />
+                              </>
+                            ) : r.rule_plan ? (
+                              <>
+                                <div className="text-muted">No rule matched</div>
+                                <PlanWhy plan={r.rule_plan} catalog={ruleCatalog} lookups={ruleLookups} />
+                              </>
+                            ) : (
+                              <span className="text-muted">—</span>
+                            )}
+                          </Td>
+                        )}
+                        {hasRules && (
+                          <Td>
+                            {r.rule_plan || r.disposition ? (
+                              <DispositionBadge disposition={r.disposition} reason={r.rule_plan?.reason} />
+                            ) : (
+                              <span className="text-muted">—</span>
+                            )}
+                          </Td>
+                        )}
                         <Td>
                           <div className="font-medium">{r.hostname || r.sys_name || '—'}</div>
                           {r.fqdn && r.fqdn !== r.hostname && (
@@ -543,6 +594,16 @@ export function RunPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Re-evaluate rules */}
+      {id && (
+        <EvaluateRulesDialog
+          open={evaluateOpen}
+          onOpenChange={setEvaluateOpen}
+          runId={id}
+          profileImportMode={profile?.import_mode}
+        />
+      )}
 
       {/* Import drawer */}
       <ImportDrawer
@@ -1051,5 +1112,106 @@ function Tile({
         {value}
       </div>
     </div>
+  )
+}
+
+const IMPORT_MODE_SHORT: Record<string, string> = {
+  review: 'only lets rules annotate, so nothing is imported or ignored',
+  auto_match: 'lets rules auto-import and ignore',
+  ignore_match: 'only lets rules ignore',
+}
+
+function EvaluateRulesDialog({
+  open,
+  onOpenChange,
+  runId,
+  profileImportMode,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  runId: string
+  profileImportMode?: string
+}) {
+  const qc = useQueryClient()
+  const [apply, setApply] = useState(false)
+  const [counts, setCounts] = useState<EvaluateScanCounts | null>(null)
+  useEffect(() => {
+    if (open) setCounts(null)
+  }, [open])
+
+  const evaluate = useMutation({
+    mutationFn: () => rulesApi.evaluateScan(runId, apply),
+    onSuccess: (c) => {
+      setCounts(c)
+      qc.invalidateQueries({ queryKey: ['discovery', 'run', runId] })
+      qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'history'] })
+      qc.invalidateQueries({ queryKey: ['discovery', 'rules', 'list'] })
+      if (apply) {
+        qc.invalidateQueries({ queryKey: ['discovery', 'ignored'] })
+        qc.invalidateQueries({ queryKey: ['devices'] })
+        qc.invalidateQueries({ queryKey: ['servers'] })
+        invalidateLicenseCapacity(qc)
+      }
+      toast.success('Rules evaluated', summarizeCounts(c))
+    },
+    onError: (e: any) => toast.error('Could not evaluate rules', apiErrorMessage(e)),
+  })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ListChecks className="h-5 w-5 text-primary" />
+            Re-evaluate discovery rules
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          <p className="text-muted">
+            Runs the active rules on this scan's results again and stores what each rule decided (the Rule and Decision
+            columns). Results already imported are left alone.
+          </p>
+          {(
+            [
+              [false, 'Annotate only', 'Show what the rules decide; import and ignore nothing.'],
+              [
+                true,
+                'Apply (auto-import / ignore as the profile allows)',
+                `This scan's profile ${IMPORT_MODE_SHORT[profileImportMode || 'review'] ?? `uses import mode ${profileImportMode}`}. License capacity and the per-scan auto-import limit still apply.`,
+              ],
+            ] as const
+          ).map(([value, label, desc]) => (
+            <label
+              key={label}
+              className={cn(
+                'flex cursor-pointer items-start gap-3 rounded-md border p-3',
+                apply === value ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/40',
+              )}
+            >
+              <input type="radio" className="mt-1" checked={apply === value} onChange={() => setApply(value)} />
+              <span>
+                <span className="block font-medium">{label}</span>
+                <span className="block text-xs text-muted">{desc}</span>
+              </span>
+            </label>
+          ))}
+          {counts && (
+            <div className="rounded-md border border-border bg-surface2/40 px-3 py-2 text-xs">
+              <div className="font-medium">Done ({counts.status})</div>
+              <div className="mt-0.5 text-muted">{summarizeCounts(counts)}</div>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            {counts ? 'Close' : 'Cancel'}
+          </Button>
+          <Button onClick={() => evaluate.mutate()} disabled={evaluate.isPending}>
+            {evaluate.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+            {apply ? 'Evaluate and apply' : 'Evaluate'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

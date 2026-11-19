@@ -50,6 +50,32 @@ func TestCounterWidthChangeStartsNewBaseline(t *testing.T) {
 	}
 }
 
+func TestPacketCountersUseOneWidthForBothDirections(t *testing.T) {
+	c64 := func(v uint64) *g.SnmpPDU { return &g.SnmpPDU{Type: g.Counter64, Value: v} }
+	c32 := func(v uint) *g.SnmpPDU { return &g.SnmpPDU{Type: g.Counter32, Value: v} }
+	for _, test := range []struct {
+		name                     string
+		hcIn, hcOut, in32, out32 *g.SnmpPDU
+		wantIn, wantOut          uint64
+	}{
+		{"hc_pair", c64(5_000_000_000), c64(7), c32(10), c32(20), 5_000_000_000, 7},
+		// An idle port's HC counter at zero is still the HC counter: the width
+		// must not flip to 32-bit and back as traffic starts.
+		{"hc_zero_is_valid", c64(0), c64(0), c32(10), c32(20), 0, 0},
+		{"one_direction_hc_uses_32bit_pair", c64(5_000_000_000), nil, c32(10), c32(20), 10, 20},
+		{"hc_not_counter64_uses_32bit_pair", c32(3), c32(4), c32(10), c32(20), 10, 20},
+		{"no_hc", nil, nil, c32(10), c32(20), 10, 20},
+		{"nothing", nil, nil, nil, nil, 0, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			in, out := packetCounters(test.hcIn, test.hcOut, test.in32, test.out32)
+			if in != test.wantIn || out != test.wantOut {
+				t.Fatalf("packets (%d, %d), want (%d, %d)", in, out, test.wantIn, test.wantOut)
+			}
+		})
+	}
+}
+
 func TestSessionRejectsPartialV3Security(t *testing.T) {
 	_, err := NewSession(&Device{IPAddress: net.ParseIP("2001:db8::1"), Version: "3", V3Username: "fixture", PrivProtocol: "AES", PrivPassphrase: "test-only-passphrase"})
 	if err == nil {
